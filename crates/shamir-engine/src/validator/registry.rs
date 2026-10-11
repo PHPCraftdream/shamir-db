@@ -1,17 +1,14 @@
-//! Lock-free validator registry.
+//! Atomic validator lifecycle with lock-free snapshot reads.
 //!
-//! `scc::HashMap` (CAS-based) per the engine's concurrency invariants — no
-//! `RwLock`. Validators are keyed by `RecordId` (stable catalogue identity);
-//! a secondary `name → id` index enforces unique names and supports
-//! human-friendly lookups. A per-validator `bound_in` set tracks which
-//! tables reference the validator so `drop` can refuse when bindings exist.
+//! DDL writers clone one immutable state and publish it once. Each read loads
+//! one snapshot; separate read calls may observe different committed versions.
 
 use super::record_validator::RecordValidator;
-use shamir_types::types::common::THasher;
+use arc_swap::ArcSwap;
+use shamir_collections::TFxMap;
 use shamir_types::types::record_id::RecordId;
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Error type for validator registry operations.
 #[derive(Debug, thiserror::Error)]
@@ -27,42 +24,78 @@ pub enum ValidatorRegistryError {
     StillBound(Vec<String>),
 }
 
-/// Lock-free registry of compiled validators, keyed by `RecordId`.
-///
-/// Mirrors [`FunctionRegistry`](crate::function::FunctionRegistry) but
-/// adds `name_to_id` (validators are resolved by id on the write path)
-/// and `bound_in` (referential integrity — `drop` refuses while bound).
+#[derive(Clone)]
+struct Entry {
+    name: String,
+    artifact: Arc<dyn RecordValidator>,
+    bound_in: BTreeSet<String>,
+}
+
+#[derive(Clone, Default)]
+struct RegistryState {
+    by_id: TFxMap<RecordId, Entry>,
+    name_to_id: TFxMap<String, RecordId>,
+    // add_binding historically accepts absent ids (e.g. pending native artifacts).
+    // Keep those bindings without advertising a live validator in list/lookups.
+    pending_bindings: TFxMap<RecordId, BTreeSet<String>>,
+}
+
+#[cfg(test)]
+type MutationHook = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// Registry of compiled validators with lock-free reads and serialized DDL.
+/// Ids are stable across rename/replacement; replacement preserves bindings.
 pub struct ValidatorRegistry {
-    /// Compiled validator artifact, keyed by catalogue `_id`.
-    by_id: scc::HashMap<RecordId, Arc<dyn RecordValidator>, THasher>,
-    /// Unique-name → id reverse index.
-    name_to_id: scc::HashMap<String, RecordId, THasher>,
-    /// Id → name reverse index (mirror of `name_to_id`), kept in lock-step so
-    /// `remove`/`name_for_id` are O(1) instead of scanning `name_to_id`.
-    id_to_name: scc::HashMap<RecordId, String, THasher>,
-    /// Tables each validator is bound to (canonical `"db/repo/table"` keys).
-    bound_in: scc::HashMap<RecordId, BTreeSet<String>, THasher>,
-    /// O(1) cardinality mirror of `by_id`, updated at every `register`/
-    /// `remove` (see CLAUDE.md's `Drainer::window_depth` pattern — scc's
-    /// `len()`/`is_empty()` are O(N) bucket walks, banned on hot paths).
-    count: AtomicUsize,
+    state: ArcSwap<RegistryState>,
+    // DDL op, contention is nil; sync mutations only, never held across .await.
+    writer: Mutex<()>,
+    #[cfg(test)]
+    mutation_hook: Mutex<Option<MutationHook>>,
 }
 
 impl ValidatorRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {
         Self {
-            by_id: scc::HashMap::with_hasher(THasher::default()),
-            name_to_id: scc::HashMap::with_hasher(THasher::default()),
-            id_to_name: scc::HashMap::with_hasher(THasher::default()),
-            bound_in: scc::HashMap::with_hasher(THasher::default()),
-            count: AtomicUsize::new(0),
+            state: ArcSwap::from_pointee(RegistryState::default()),
+            writer: Mutex::new(()),
+            #[cfg(test)]
+            mutation_hook: Mutex::new(None),
+        }
+    }
+
+    fn lock_writer(&self) -> MutexGuard<'_, ()> {
+        #[cfg(test)]
+        self.run_hook("before_lock");
+        self.writer.lock().unwrap_or_else(|poisoned| {
+            // A panic discards the unpublished clone; the published snapshot
+            // is always complete, so recovery needs no repair of shared data.
+            self.writer.clear_poison();
+            poisoned.into_inner()
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_mutation_hook(&self, hook: Option<MutationHook>) {
+        *self.mutation_hook.lock().expect("test hook mutex poisoned") = hook;
+    }
+
+    #[cfg(test)]
+    fn run_hook(&self, point: &str) {
+        // Never invoke a callback under the hook mutex. Test callbacks must not
+        // re-enter a mutation while the DDL writer is parked.
+        let hook = self
+            .mutation_hook
+            .lock()
+            .expect("test hook mutex poisoned")
+            .clone();
+        if let Some(hook) = hook {
+            hook(point);
         }
     }
 
     /// Register a compiled validator under `(id, name)`.
-    ///
-    /// Errors if a validator with the same name already exists.
+    /// Errors if the name or id is already registered, without changing state.
     pub fn register(
         &self,
         id: RecordId,
@@ -70,189 +103,228 @@ impl ValidatorRegistry {
         compiled: Arc<dyn RecordValidator>,
     ) -> Result<(), ValidatorRegistryError> {
         let name = name.into();
-        // Check name uniqueness first.
-        if self.name_to_id.contains_sync(&name) {
+        let _writer = self.lock_writer();
+        let mut next = (**self.state.load()).clone();
+        if next.name_to_id.contains_key(&name) || next.by_id.contains_key(&id) {
             return Err(ValidatorRegistryError::AlreadyExists(name));
         }
-        // Insert name → id; if a racing register grabbed the name, report.
-        self.name_to_id
-            .insert_sync(name.clone(), id)
-            .map_err(|_| ValidatorRegistryError::AlreadyExists(name.clone()))?;
-        // Insert the compiled artifact. If the id already exists (shouldn't
-        // happen in normal operation), remove the name mapping and report.
-        if self.by_id.insert_sync(id, compiled).is_err() {
-            let _ = self.name_to_id.remove_sync(&name);
-            return Err(ValidatorRegistryError::AlreadyExists(name));
-        }
-        // Keep the id→name reverse index in lock-step with name_to_id/by_id.
-        // The id was absent from by_id an instant ago (insert_sync above just
-        // succeeded), so id_to_name cannot already hold it.
-        let inserted = self.id_to_name.insert_sync(id, name);
-        debug_assert!(
-            inserted.is_ok(),
-            "id_to_name invariant violated: id already reverse-mapped"
+        next.name_to_id.insert(name.clone(), id);
+        #[cfg(test)]
+        self.run_hook("register_name_staged");
+        let bound_in = next.pending_bindings.remove(&id).unwrap_or_default();
+        next.by_id.insert(
+            id,
+            Entry {
+                name,
+                artifact: compiled,
+                bound_in,
+            },
         );
-        self.count.fetch_add(1, Ordering::Relaxed);
+        self.state.store(Arc::new(next));
         Ok(())
     }
 
     /// Look up a compiled validator by id.
     pub fn get_by_id(&self, id: &RecordId) -> Option<Arc<dyn RecordValidator>> {
-        self.by_id.read_sync(id, |_, v| v.clone())
+        self.state
+            .load()
+            .by_id
+            .get(id)
+            .map(|entry| entry.artifact.clone())
     }
 
-    /// Swap the compiled artifact for an already-registered `id` in place,
-    /// preserving its name and table bindings. In-flight invocations keep the
-    /// `Arc` they captured (RCU). Returns `true` if the id existed.
-    ///
-    /// This is the validator counterpart of
-    /// [`FunctionRegistry::replace`](crate::function::FunctionRegistry::replace)
-    /// — used to substitute a live artifact (e.g. a native validator) for the
-    /// one materialised from the catalogue, without disturbing bindings.
+    /// Atomically insert or replace `(id, name, artifact)`, keeping bindings.
+    /// A name owned by another id is rejected without changing state.
+    /// In-flight invocations retain their previously captured artifact (RCU).
+    pub fn replace(
+        &self,
+        id: RecordId,
+        name: impl Into<String>,
+        compiled: Arc<dyn RecordValidator>,
+    ) -> Result<(), ValidatorRegistryError> {
+        let name = name.into();
+        let _writer = self.lock_writer();
+        let mut next = (**self.state.load()).clone();
+        if next.name_to_id.get(&name).is_some_and(|owner| *owner != id) {
+            return Err(ValidatorRegistryError::AlreadyExists(name));
+        }
+        let bound_in = if let Some(old) = next.by_id.remove(&id) {
+            next.name_to_id.remove(&old.name);
+            old.bound_in
+        } else {
+            next.pending_bindings.remove(&id).unwrap_or_default()
+        };
+        #[cfg(test)]
+        self.run_hook("replace_staged");
+        next.name_to_id.insert(name.clone(), id);
+        next.by_id.insert(
+            id,
+            Entry {
+                name,
+                artifact: compiled,
+                bound_in,
+            },
+        );
+        self.state.store(Arc::new(next));
+        Ok(())
+    }
+
+    /// Swap only the artifact, preserving name and bindings. Returns whether
+    /// the id existed. In-flight invocations keep their captured Arc (RCU).
     pub fn replace_artifact(&self, id: &RecordId, compiled: Arc<dyn RecordValidator>) -> bool {
-        self.by_id
-            .update_sync(id, |_, v| *v = compiled.clone())
-            .is_some()
+        let _writer = self.lock_writer();
+        let mut next = (**self.state.load()).clone();
+        let Some(entry) = next.by_id.get_mut(id) else {
+            return false;
+        };
+        entry.artifact = compiled;
+        self.state.store(Arc::new(next));
+        true
     }
 
     /// Resolve a name to its `RecordId`.
     pub fn id_for_name(&self, name: &str) -> Option<RecordId> {
-        self.name_to_id.read_sync(name, |_, v| *v)
+        self.state.load().name_to_id.get(name).copied()
     }
 
-    /// Rename a validator (`from` → `to`). The id and bindings are unchanged.
-    ///
+    /// Rename a validator (`from` → `to`). Id and bindings are unchanged.
     /// Errors if `from` is missing or `to` is already taken.
     pub fn rename(&self, from: &str, to: &str) -> Result<(), ValidatorRegistryError> {
-        if self.name_to_id.contains_sync(to) {
+        let _writer = self.lock_writer();
+        let mut next = (**self.state.load()).clone();
+        if next.name_to_id.contains_key(to) {
             return Err(ValidatorRegistryError::AlreadyExists(to.to_string()));
         }
-        let (_, id) = self
+        let id = next
             .name_to_id
-            .remove_sync(from)
+            .remove(from)
             .ok_or_else(|| ValidatorRegistryError::NotFound(from.to_string()))?;
-        // Insert the new name. If a racing rename grabbed `to`, put `from` back.
-        self.name_to_id
-            .insert_sync(to.to_string(), id)
-            .map_err(|(_, id)| {
-                let _ = self.name_to_id.insert_sync(from.to_string(), id);
-                ValidatorRegistryError::AlreadyExists(to.to_string())
-            })?;
-        // Keep id_to_name in lock-step with the now-committed rename.
-        let _ = self.id_to_name.update_sync(&id, |_, v| *v = to.to_string());
+        #[cfg(test)]
+        self.run_hook("rename_from_removed");
+        next.name_to_id.insert(to.to_string(), id);
+        next.by_id
+            .get_mut(&id)
+            .expect("live name must have an entry")
+            .name = to.to_string();
+        self.state.store(Arc::new(next));
         Ok(())
     }
 
-    /// Remove a validator by id. The caller must check `is_bound` beforehand;
-    /// this method does NOT enforce bound-refusal (the facade does).
-    ///
-    /// Returns `true` if the validator existed.
+    /// Remove by id. The caller must check `is_bound` beforehand; this method
+    /// does NOT enforce bound-refusal (the facade does).
+    /// Returns whether a live validator existed; pending bindings are cleared.
     pub fn remove(&self, id: &RecordId) -> bool {
-        let existed = self.by_id.remove_sync(id).is_some();
-        // O(1) via the id→name reverse index instead of scanning name_to_id.
-        if let Some((_, name)) = self.id_to_name.remove_sync(id) {
-            let _ = self.name_to_id.remove_sync(&name);
+        let _writer = self.lock_writer();
+        let mut next = (**self.state.load()).clone();
+        let old = next.by_id.remove(id);
+        #[cfg(test)]
+        self.run_hook("remove_artifact_staged");
+        let existed = old.is_some();
+        if let Some(old) = old {
+            next.name_to_id.remove(&old.name);
         }
-        let _ = self.bound_in.remove_sync(id);
-        if existed {
-            self.count.fetch_sub(1, Ordering::Relaxed);
-        }
+        next.pending_bindings.remove(id);
+        self.state.store(Arc::new(next));
         existed
     }
 
     /// Whether the validator is bound to at least one table.
     pub fn is_bound(&self, id: &RecordId) -> bool {
-        self.bound_in
-            .read_sync(id, |_, set| !set.is_empty())
-            .unwrap_or(false)
+        let state = self.state.load();
+        state
+            .by_id
+            .get(id)
+            .map(|entry| &entry.bound_in)
+            .or_else(|| state.pending_bindings.get(id))
+            .is_some_and(|set| !set.is_empty())
     }
 
-    /// Return the list of tables the validator is bound to.
+    /// Return the list of bound tables, including pending artifacts.
     pub fn bound_tables(&self, id: &RecordId) -> Vec<String> {
-        self.bound_in
-            .read_sync(id, |_, set| set.iter().cloned().collect())
+        let state = self.state.load();
+        state
+            .by_id
+            .get(id)
+            .map(|entry| &entry.bound_in)
+            .or_else(|| state.pending_bindings.get(id))
+            .map(|set| set.iter().cloned().collect())
             .unwrap_or_default()
     }
 
-    /// Record a binding between a validator and a table.
-    ///
-    /// `entry_sync(..).or_default()` is a single scc critical section: it
-    /// atomically fetches the existing entry or creates one, returning a
-    /// live handle we mutate in place — unlike a separate
-    /// check-then-insert-else pair, no other caller can observe (or race)
-    /// the vacant→occupied transition between the lookup and the mutation.
+    /// Record a binding, retaining it even if the artifact is not yet live.
     pub fn add_binding(&self, id: &RecordId, table: impl Into<String>) {
         let table = table.into();
-        // `OccupiedEntry` has its own inherent `insert` (replaces the whole
-        // entry value) that shadows `BTreeSet::insert` via method
-        // resolution — `get_mut()` forces the borrow so `.insert(table)`
-        // resolves to the set, not the entry.
-        self.bound_in
-            .entry_sync(*id)
-            .or_default()
-            .get_mut()
-            .insert(table);
+        let _writer = self.lock_writer();
+        let mut next = (**self.state.load()).clone();
+        if let Some(entry) = next.by_id.get_mut(id) {
+            entry.bound_in.insert(table);
+        } else {
+            next.pending_bindings.entry(*id).or_default().insert(table);
+        }
+        self.state.store(Arc::new(next));
     }
 
     /// Remove a binding between a validator and a table.
     pub fn remove_binding(&self, id: &RecordId, table: &str) {
-        let _ = self.bound_in.entry_sync(*id).and_modify(|set| {
+        let _writer = self.lock_writer();
+        let mut next = (**self.state.load()).clone();
+        if let Some(entry) = next.by_id.get_mut(id) {
+            entry.bound_in.remove(table);
+        } else if let Some(set) = next.pending_bindings.get_mut(id) {
             set.remove(table);
-        });
+            if set.is_empty() {
+                next.pending_bindings.remove(id);
+            }
+        }
+        self.state.store(Arc::new(next));
     }
 
-    /// Remove a table reference from **every** validator's `bound_in` set.
-    ///
-    /// Returns `(id, name)` pairs for each validator whose bound_in set was
-    /// non-trivially modified (i.e. the table was actually present). The
-    /// caller should persist the updated `bound_in` for those validators.
+    /// Remove a table reference from every binding set in one publication.
+    /// Returns live `(id, name)` pairs whose updated bindings need persistence.
     pub fn unbind_all_for_table(&self, table_ref: &str) -> Vec<(RecordId, String)> {
-        // Step 1: collect ids that contain this table_ref.
-        let mut candidate_ids = Vec::new();
-        self.bound_in.iter_sync(|id, set| {
-            if set.contains(table_ref) {
-                candidate_ids.push(*id);
-            }
-            true
-        });
-
-        // Step 2: remove the table_ref from each candidate (entry gives &mut).
+        let _writer = self.lock_writer();
+        let mut next = (**self.state.load()).clone();
         let mut affected = Vec::new();
-        for id in candidate_ids {
-            let _ = self.bound_in.entry_sync(id).and_modify(|set| {
-                if set.remove(table_ref) {
-                    if let Some(name) = self.name_for_id(&id) {
-                        affected.push((id, name));
-                    }
-                }
-            });
+        for (id, entry) in &mut next.by_id {
+            if entry.bound_in.remove(table_ref) {
+                affected.push((*id, entry.name.clone()));
+            }
         }
+        next.pending_bindings.retain(|_, set| {
+            set.remove(table_ref);
+            !set.is_empty()
+        });
+        self.state.store(Arc::new(next));
         affected
     }
 
-    /// Resolve a `RecordId` back to its name (reverse of `id_for_name`).
+    /// Resolve an id back to its live name.
     pub fn name_for_id(&self, id: &RecordId) -> Option<String> {
-        self.id_to_name.read_sync(id, |_, v| v.clone())
+        self.state
+            .load()
+            .by_id
+            .get(id)
+            .map(|entry| entry.name.clone())
     }
 
-    /// Snapshot of all registered validators as `(id, name)` pairs.
+    /// One snapshot of all live validators as `(id, name)` pairs.
     pub fn list(&self) -> Vec<(RecordId, String)> {
-        let mut out = Vec::new();
-        self.name_to_id.iter_sync(|name, id| {
-            out.push((*id, name.clone()));
-            true
-        });
-        out
+        self.state
+            .load()
+            .by_id
+            .iter()
+            .map(|(id, entry)| (*id, entry.name.clone()))
+            .collect()
     }
 
-    /// Number of registered validators. O(1) via the `count` mirror.
+    /// Number of live validators. O(1) from the same snapshot as the entries.
     pub fn len(&self) -> usize {
-        self.count.load(Ordering::Relaxed)
+        self.state.load().by_id.len()
     }
 
-    /// Whether the registry is empty. O(1) via the `count` mirror.
+    /// Whether there are no live validators. O(1).
     pub fn is_empty(&self) -> bool {
-        self.count.load(Ordering::Relaxed) == 0
+        self.state.load().by_id.is_empty()
     }
 }
 
