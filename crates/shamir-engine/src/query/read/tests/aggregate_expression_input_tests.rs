@@ -163,7 +163,7 @@ fn conditional_scalar_inputs_evaluate_only_the_selected_branch() {
     let select = selection([select::sum_of(
         val::cond(
             filter::eq("v", -3),
-            val::func("abs", [val::col("v")]),
+            val::func("cast/to_int", [val::func("math/abs", [val::col("v")])]),
             val::cond(filter::eq("v", 2), val::col("v"), val::param("missing")),
         ),
         "sum",
@@ -172,8 +172,9 @@ fn conditional_scalar_inputs_evaluate_only_the_selected_branch() {
     assert_eq!(result[0].get("sum"), Some(&QueryValue::Int(5)));
 }
 
-/// Expression accumulation retains the existing exact integer/Big/Dec lanes
-/// and promotes to f64 only when a genuinely fractional value enters SUM.
+/// Stored Int/F64 inputs agree with field SUM; typed Big/Dec parameters
+/// retain exact lanes and promote only for genuinely fractional values.
+/// Big/Dec row fixtures are invalid here: to_bytes encodes them as strings.
 #[test]
 fn expression_sum_preserves_numeric_accumulator_lanes() {
     let interner = Interner::default();
@@ -187,18 +188,64 @@ fn expression_sum_preserves_numeric_accumulator_lanes() {
         ),
         (
             vec![
-                QueryValue::Big(BigInt::from(i64::MAX)),
-                QueryValue::Dec(Decimal::new(2, 0)),
+                QueryValue::Int(i64::MAX),
+                QueryValue::Int(2),
                 QueryValue::Int(1),
             ],
             QueryValue::Big(BigInt::from(i64::MAX) + 3),
         ),
         (
-            vec![QueryValue::Int(2), QueryValue::Dec(Decimal::new(15, 1))],
+            vec![QueryValue::Int(2), QueryValue::F64(1.5)],
             QueryValue::F64(3.5),
         ),
     ] {
         let records = rows(&interner, &values);
+        let result = apply_aggregate_all_with_context(&records, &select, &interner, &ctx).unwrap();
+        assert_eq!(result[0].get("sum"), Some(&expected));
+        let field_select = selection([select::sum("v", "sum")]);
+        let field_result =
+            apply_aggregate_all_with_context(&records, &field_select, &interner, &ctx).unwrap();
+        assert_eq!(field_result[0].get("sum"), Some(&expected));
+        assert_eq!(result, field_result);
+    }
+
+    // Parameters bypass the lossy storage encoding, so these exercise the
+    // actual typed Big/Dec accumulator arms, not numeric-looking strings.
+    let records = rows(
+        &interner,
+        &[QueryValue::Int(0), QueryValue::Int(1), QueryValue::Int(2)],
+    );
+    for (first, second, third, expected) in [
+        (
+            QueryValue::Big(BigInt::from(i64::MAX)),
+            QueryValue::Dec(Decimal::new(2, 0)),
+            QueryValue::Int(1),
+            QueryValue::Big(BigInt::from(i64::MAX) + 3),
+        ),
+        (
+            QueryValue::Int(2),
+            QueryValue::Dec(Decimal::new(15, 1)),
+            QueryValue::Null,
+            QueryValue::F64(3.5),
+        ),
+    ] {
+        let mut params = new_map_wc(3);
+        params.insert("first".to_string(), first);
+        params.insert("second".to_string(), second);
+        params.insert("third".to_string(), third);
+        let ctx = FilterContext::new(&interner, &refs).with_params(&params);
+        let select = selection([select::sum_of(
+            val::cond(
+                filter::eq("v", 0),
+                val::param("first"),
+                val::cond(
+                    filter::eq("v", 1),
+                    val::param("second"),
+                    val::param("third"),
+                ),
+            ),
+            "sum",
+        )]);
         let result = apply_aggregate_all_with_context(&records, &select, &interner, &ctx).unwrap();
         assert_eq!(result[0].get("sum"), Some(&expected));
     }
