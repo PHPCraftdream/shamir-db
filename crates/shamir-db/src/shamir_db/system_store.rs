@@ -4,6 +4,8 @@
 //! Uses a TableManager backed by any storage engine (fjall for production,
 //! in_memory for tests).
 
+use std::time::Duration;
+
 use shamir_types::access::{Actor, ResourceMeta};
 use shamir_types::codecs::interned::query_value_to_inner;
 use shamir_types::types::common::new_map;
@@ -126,8 +128,19 @@ impl SystemStore {
     /// Drain the system repo's inflight WAL tail into `history` and flush its
     /// buffers (graceful-stop counterpart of the per-repo flush in
     /// [`ShamirDb::flush_all`](crate::ShamirDb::flush_all)).
-    pub(crate) async fn flush_buffers(&self) -> DbResult<()> {
-        self.system_repo()?.flush_buffers().await
+    pub(crate) async fn flush_buffers_with_quiesce_timeout(
+        &self,
+        timeout: Duration,
+    ) -> DbResult<()> {
+        let repo = self.system_repo()?;
+        if let Err(e) = repo.quiesce_commits(timeout).await {
+            log::warn!(
+                "flush_all: system store/{}: {}; continuing with best-effort flush",
+                SYSTEM_REPO,
+                e
+            );
+        }
+        repo.flush_buffers().await
     }
 
     /// Get the table manager for a system table.
