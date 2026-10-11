@@ -192,9 +192,9 @@ pub struct RepoTxGate {
     /// GC will use it as the lower drain bound.
     durable_completion: Arc<CompletionTracker>,
 
-    orphaned_post_wal: Arc<scc::TreeIndex<u64, ()>>,
+    orphaned_post_wal: Arc<scc::HashMap<u64, (), THasher>>,
     orphan_max: Arc<AtomicU64>,
-    active_post_wal: Arc<scc::TreeIndex<u64, ()>>,
+    active_post_wal: Arc<scc::HashMap<u64, (), THasher>>,
 
     /// D2 P1e — durable-progress signal. Notified by
     /// [`mark_durable`](Self::mark_durable) every time a version is marked
@@ -313,9 +313,9 @@ impl RepoTxGate {
             // current inline path the durable watermark is kept in lock-step
             // with the visibility watermark by `mark_durable` on each commit.
             durable_completion: Arc::new(CompletionTracker::with_watermark(last_committed)),
-            orphaned_post_wal: Arc::new(scc::TreeIndex::new()),
+            orphaned_post_wal: Arc::new(scc::HashMap::with_hasher(THasher::default())),
             orphan_max: Arc::new(AtomicU64::new(0)),
-            active_post_wal: Arc::new(scc::TreeIndex::new()),
+            active_post_wal: Arc::new(scc::HashMap::with_hasher(THasher::default())),
             durable_progress: Arc::new(tokio::sync::Notify::new()),
         }
     }
@@ -589,16 +589,12 @@ impl RepoTxGate {
     /// Whether a live commit owns this WAL-accepted version's materialization.
     /// The drainer must stop at it rather than replaying concurrently.
     pub fn is_active_post_wal(&self, version: u64) -> bool {
-        self.active_post_wal
-            .peek_with(&version, |_, _| ())
-            .is_some()
+        self.active_post_wal.contains_sync(&version)
     }
 
     /// Whether a dropped post-WAL guard transferred this version to replay.
     pub fn is_orphaned_post_wal(&self, version: u64) -> bool {
-        self.orphaned_post_wal
-            .peek_with(&version, |_, _| ())
-            .is_some()
+        self.orphaned_post_wal.contains_sync(&version)
     }
 
     /// Mark a registered orphan Materialized and advance visibility after

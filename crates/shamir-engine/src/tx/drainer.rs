@@ -87,7 +87,7 @@ use std::time::Duration;
 const DEFAULT_WINDOW_HIGH_WATERMARK: usize = 64 * 1024;
 
 use scc::TreeIndex;
-use shamir_collections::TFxMap;
+use shamir_collections::{TFxMap, THasher};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{KvOp, RecordKey};
 use shamir_wal::{WalEntryV2, WalOpV2};
@@ -194,7 +194,7 @@ pub struct Drainer {
     /// null — CI flake, ~12% under load). Cold recovery and the async-index
     /// tail leave this empty and replay everything, as before.
     index_applied: TreeIndex<(u64, u64), ()>,
-    counter_applied: TreeIndex<(u64, u64), ()>,
+    counter_applied: scc::HashMap<(u64, u64), (), THasher>,
     // Sanctioned async mutex: bounded contention between the background pass
     // and explicit drains; the guard must span awaited replay/history I/O.
     // Lock order: replay -> per-table drain/marker locks. No callee re-enters
@@ -221,7 +221,7 @@ impl Drainer {
             window_depth: AtomicUsize::new(0),
             pending_unsafe: TreeIndex::new(),
             index_applied: TreeIndex::new(),
-            counter_applied: TreeIndex::new(),
+            counter_applied: scc::HashMap::with_hasher(THasher::default()),
             replaying: Mutex::new(()),
         }
     }
@@ -260,9 +260,7 @@ impl Drainer {
     }
 
     fn counter_applied(&self, version: u64, table: u64) -> bool {
-        self.counter_applied
-            .peek_with(&(version, table), |_, _| ())
-            .is_some()
+        self.counter_applied.contains_sync(&(version, table))
     }
 
     /// Total `wal.recover()` reseed calls fired from `drain_step`.

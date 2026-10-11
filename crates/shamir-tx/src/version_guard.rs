@@ -12,6 +12,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use shamir_collections::THasher;
+
 use crate::completion_tracker::{CompletionTracker, State};
 
 /// RAII owner of one allocated MVCC version's terminal-mark obligation.
@@ -45,9 +47,9 @@ pub struct VersionGuard {
     armed: bool,
     /// Set by wal_accepted; armed Drop transfers completion to the drainer.
     post_wal: bool,
-    orphaned_post_wal: Arc<scc::TreeIndex<u64, ()>>,
+    orphaned_post_wal: Arc<scc::HashMap<u64, (), THasher>>,
     orphan_max: Arc<AtomicU64>,
-    active_post_wal: Arc<scc::TreeIndex<u64, ()>>,
+    active_post_wal: Arc<scc::HashMap<u64, (), THasher>>,
 }
 
 impl VersionGuard {
@@ -61,9 +63,9 @@ impl VersionGuard {
         completion: Arc<CompletionTracker>,
         durable_completion: Arc<CompletionTracker>,
         last_committed: Arc<AtomicU64>,
-        orphaned_post_wal: Arc<scc::TreeIndex<u64, ()>>,
+        orphaned_post_wal: Arc<scc::HashMap<u64, (), THasher>>,
         orphan_max: Arc<AtomicU64>,
-        active_post_wal: Arc<scc::TreeIndex<u64, ()>>,
+        active_post_wal: Arc<scc::HashMap<u64, (), THasher>>,
     ) -> Self {
         Self {
             version,
