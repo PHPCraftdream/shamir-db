@@ -25,10 +25,14 @@ artifact).
   table reads, not explicit temporal reads or EXPLAIN. Sources:
   `crates/shamir-engine/src/table/read_exec.rs:341-365`,
   `crates/shamir-engine/src/table/table_manager_streaming.rs:375-401,651-735`.
-- **B04b: vector similarity in Snapshot/Serializable still uses the latest
-  committed index plus the staged overlay, not a snapshot-consistent index.**
-  (`crates/shamir-engine/src/table/read_exec.rs:344-355`; the vector path is
-  explicitly excluded from the snapshot-scan routing.)
+- **Snapshot/Serializable vector similarity trades ANN for exact ranking.**
+  Bare vector similarity and a single vector conjunct with residual predicates
+  rank over the pinned snapshot plus staged overlay, not the latest ANN graph:
+  O(N*d) distance work plus sorting. `_id` ordering and keyset pagination also
+  use the snapshot-aware scan. Sources:
+  `crates/shamir-engine/src/table/filtered_vector.rs:101-121`,
+  `crates/shamir-engine/src/table/read_exec.rs:344-379,1965-2012,947-967,1021-1025,1053-1074`,
+  `crates/shamir-engine/src/table/table_manager_streaming.rs:357-402`.
 - **Index-only transactions are outside the writer-drain protocol.** Commit
   enters table drain guards by iterating `tx.write_set.keys()`, not
   `index_write_set`; an index-only transaction therefore does not participate
@@ -62,13 +66,13 @@ artifact).
   (`crates/shamir-engine/src/query/batch/query_runner.rs:1193-1196`,
   `crates/shamir-engine/src/query/read/aggregate.rs:936-1008`,
   `crates/shamir-server/src/db_handler/tx_handlers.rs:211-218`).
-- **Literal NULL aggregate input cannot round-trip as an explicit input on
-  the wire.** Both aggregate variants use `Option<FilterValue>`: missing/null
-  selects legacy `field`/All input, rather than a per-row literal NULL.
-  In-memory `Some(FilterValue::Null)` is a different case; this limitation is
-  the optional wire field, not aggregate NULL handling generally
-  (`crates/shamir-query-types/src/read/select.rs:66-70,94-98`,
-  `crates/shamir-query-types/src/filter/filter_value.rs:9-12`).
+- **Explicit NULL aggregate input is distinct from absent input on the wire.**
+  For both aggregate variants, present JSON null / MessagePack nil becomes
+  `Some(FilterValue::Null)` and is evaluated as a per-row literal NULL;
+  absence retains the legacy `field`/All source. Literal-NULL SUM returns NULL,
+  without changing the legacy field-input SUM identity. Sources:
+  `crates/shamir-query-types/src/read/select.rs:8-16,76-85,109-118`,
+  `crates/shamir-engine/src/query/read/aggregate.rs:1382-1408,1414-1424`.
 
 - **One repository per transaction.** A transactional batch (or an
   interactive/open transaction) whose queries span more than one repo is
@@ -546,19 +550,56 @@ artifact).
   (`crates/shamir-server/src/replication/follower_loop.rs:198-210`), but an
   event for a missing table is skipped with a warning and the bookmark still
   advances, losing that table's writes.
-- **Journal holes can be silent; gap detection is incomplete.** Events are
-  queued after version publication, outside the commit lock: concurrent
-  leader writes can journal version 11 before 10, and a follower that has
-  applied 11 never asks for 10. A journal-record persistence failure is only
-  logged; a corrupt record is silently skipped. The in-memory gap marker is
-  forgotten on leader restart, and a crash can lose the unflushed journal
-  tail. **A follower can silently miss an event under concurrent leader
-  writes today.**
+- **Journal pulls preserve settled version order; crash-gap detection remains
+  incomplete.** Local commits and the follower's downstream feed enqueue the
+  event (or mark a gap) immediately before version publication
+  (`crates/shamir-engine/src/tx/publish_journaled.rs:16-29`,
+  `crates/shamir-engine/src/tx/commit.rs:962-981`,
+  `crates/shamir-engine/src/tx/apply_replicated.rs:496-518,541-544`). Pulls
+  capture the contiguous completion watermark W, the highest version through
+  which every version is settled (published or aborted), and confirm a writer
+  barrier before returning ascending events `<= W`. Earlier queued events have
+  been written or marked as gaps; a still-committing version pauses the prefix
+  instead of being skipped. The one-second confirmation budget can return an
+  older safe prefix if the writer stalls
+  (`crates/shamir-engine/src/repo/repo_instance.rs:28,1534-1544`,
+  `crates/shamir-tx/src/completion_tracker.rs:131-163`,
+  `crates/shamir-engine/src/repo/changelog_store.rs:45-87`,
+  `crates/shamir-tx/src/changefeed.rs:382-411,487-530,847-860`).
+  Queue overflow/closure, persistence failures and corrupt records are reported
+  as `gap_at`, not silently omitted
+  (`crates/shamir-tx/src/changefeed.rs:344-369,515-530,875-894`). A replayed
+  post-WAL orphan marks a gap before completion
+  (`crates/shamir-engine/src/tx/drainer.rs:1166-1211`); changefeed initialization
+  failure records a pending gap when the version publishes, transferred to the
+  feed on successful initialization
+  (`crates/shamir-engine/src/tx/publish_journaled.rs:21-28`,
+  `crates/shamir-engine/src/repo/repo_instance.rs:1402-1447,1461-1487`).
+  **Persisted gap metadata survives restart:** marker writes cross an explicit
+  flush boundary and initialization restores the marker. Persistence is
+  asynchronous; failed marker writes remain dirty for retry
+  (`crates/shamir-tx/src/changefeed.rs:563-577`,
+  `crates/shamir-engine/src/repo/changelog_store.rs:28-42`,
+  `crates/shamir-engine/src/repo/repo_instance.rs:1382-1427`).
+  **A crash can still lose the unflushed journal tail with NO gap marker.**
+  Cold WAL recovery replays data and advances completion without checking or
+  repairing the journal; crash-tail reconciliation is planned
+  (`crates/shamir-tx/src/changefeed.rs:710-711`,
+  `crates/shamir-engine/src/tx/recovery.rs:329-459`).
+  **Live subscriptions can still skip events:** broadcast follows
+  commit-completion order, and the bridge discards versions `<=` its per-repo
+  processed-version watermark, advanced before filtering or delivery. Use
+  journal pulls for gap-free ordered history while handling reported gaps and
+  the crash-tail caveat above; live ordering repair is planned
+  (`crates/shamir-engine/src/tx/commit.rs:962-981`,
+  `crates/shamir-server/src/subscriptions/bridge.rs:408-415`).
 - **Detected gaps stop replication, but `Resume` does not repair data.**
-  When the leader reports a `gap_at` past the requested `from_version`, the
-  loop stops with `ReplError::JournalGap` and marks the subscription
+  When the leader reports a `gap_at` at or after the requested `from_version`,
+  the loop stops before applying the response's events with
+  `ReplError::JournalGap`; the supervisor marks the subscription
   `resync_required`, visible via `ReplicationStatus`/`ListSubscriptions`.
-  See `crates/shamir-server/src/replication/error.rs:38-57` and
+  See `crates/shamir-server/src/replication/follower_loop.rs:305-325`,
+  `crates/shamir-server/src/replication/supervisor.rs:307-335` and
   `crates/shamir-db/src/shamir_db/execute/admin_replication.rs:563-594`.
   There is **no snapshot/reseed and no journal retention**. If behind a gap,
   recreate the follower from scratch with bookmark 0 and full replay; this
