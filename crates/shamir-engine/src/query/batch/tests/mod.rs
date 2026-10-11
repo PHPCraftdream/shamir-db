@@ -22,6 +22,7 @@ pub mod pagination_bounds_tests;
 pub mod planner_tests;
 pub mod query_value_serializer_tests;
 pub mod reference_tests;
+pub mod runtime_byte_budget_tests;
 pub mod runtime_work_counter_tests;
 pub mod sub_batch_tests;
 pub mod subscribe_guard_tests;
