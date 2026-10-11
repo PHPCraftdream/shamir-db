@@ -2,6 +2,7 @@ pub mod authorized_tests;
 pub mod call_tx_tests;
 pub mod cross_repo_guard_tests;
 pub mod dos_gate_tests;
+pub mod exec_scope_tests;
 pub mod executor_tests;
 pub mod filter_guard_tests;
 pub mod fk_actions_tests;

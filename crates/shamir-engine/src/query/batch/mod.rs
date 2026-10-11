@@ -140,6 +140,7 @@
 mod authorized;
 mod batch_execute;
 mod batch_validate;
+mod exec_scope;
 mod execution_deadline;
 mod executor_traits;
 mod fk_actions;
@@ -157,6 +158,7 @@ mod query_value_serializer;
 // here so callers keep using `shamir_db::query::batch::*` paths.
 pub use authorized::{AccessGate, Authorized};
 pub use batch_execute::execute_batch;
+pub use exec_scope::ExecScope;
 pub use execution_deadline::ExecutionDeadline;
 pub use executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
 pub use interactive_tx::{commit_interactive_tx, execute_in_open_tx, open_interactive_tx};

@@ -21,8 +21,7 @@ use shamir_types::mpack;
 use shamir_types::types::common::new_map;
 
 use crate::query::batch::{
-    execute_in_open_tx_unchecked as execute_in_open_tx, open_interactive_tx, ExecutionDeadline,
-    QueryRunner,
+    execute_in_open_tx_unchecked as execute_in_open_tx, open_interactive_tx, ExecScope, QueryRunner,
 };
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
@@ -282,7 +281,7 @@ async fn query_runner_call_with_tx_none_passes_guard() {
         depth: 0,
         params: &empty_params,
         result_encoding: ResultEncoding::Name,
-        deadline: ExecutionDeadline::unbounded(),
+        scope: &ExecScope::from_duration(&BatchLimits::default(), std::time::Duration::MAX),
     };
     let result = runner.run("c", &entry, &new_map()).await;
 

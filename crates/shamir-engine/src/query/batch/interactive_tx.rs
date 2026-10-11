@@ -5,7 +5,7 @@ use crate::query::batch::batch_execute::{execute_plan_tx, filter_results};
 use crate::query::batch::batch_validate::{
     validate_filter_depth, validate_filter_patterns, validate_tables,
 };
-use crate::query::batch::execution_deadline::ExecutionDeadline;
+use crate::query::batch::exec_scope::ExecScope;
 use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
 #[cfg(test)]
 use crate::query::batch::BatchRequest;
@@ -81,22 +81,22 @@ pub async fn execute_in_open_tx(
     invoker: Option<&dyn FunctionInvoker>,
     tx: &mut shamir_tx::TxContext,
 ) -> Result<BatchResponse, BatchError> {
-    let deadline =
-        ExecutionDeadline::from_budget_secs(auth.request().limits.max_execution_time_secs);
-    execute_in_open_tx_with_deadline(auth, resolver, admin, invoker, tx, deadline).await
+    let scope = auth.root_scope();
+    execute_in_open_tx_with_scope(auth, resolver, admin, invoker, tx, &scope).await
 }
 
 // Share the entire entry implementation so tests can inject an already-expired
 // deadline without sleeps or a global clock mock. Production always constructs
-// it from request.limits above; validation, planning and execution stay shared.
+// it from policy-clamped request limits above; validation, planning and
+// execution stay shared.
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn execute_in_open_tx_with_deadline(
+pub(super) async fn execute_in_open_tx_with_scope(
     auth: Authorized<'_>,
     resolver: &dyn TableResolver,
     admin: Option<&dyn AdminExecutor>,
     invoker: Option<&dyn FunctionInvoker>,
     tx: &mut shamir_tx::TxContext,
-    deadline: ExecutionDeadline,
+    scope: &ExecScope,
 ) -> Result<BatchResponse, BatchError> {
     let (request, actor, db_name) = auth.into_parts();
     let actor = &actor;
@@ -129,7 +129,7 @@ pub(super) async fn execute_in_open_tx_with_deadline(
         actor,
         db_name,
         tx,
-        deadline,
+        scope,
     )
     .await?;
 

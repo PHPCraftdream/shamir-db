@@ -4,7 +4,7 @@ use crate::query::batch::authorized::Authorized;
 use crate::query::batch::batch_validate::{
     validate_filter_depth, validate_filter_patterns, validate_tables,
 };
-use crate::query::batch::execution_deadline::ExecutionDeadline;
+use crate::query::batch::exec_scope::ExecScope;
 use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
 use crate::query::batch::op_watchdog::register_op_watchdog;
 use crate::query::batch::query_runner::{
@@ -53,7 +53,7 @@ fn warn_if_op_slow(alias: &str, elapsed: std::time::Duration) {
 /// **#666 (redesigned): wall-clock enforcement of
 /// `BatchLimits.max_execution_time_secs` via COOPERATIVE deadline
 /// checkpoints.** This SINGLE top-level entry point computes an
-/// [`ExecutionDeadline`] once and threads it through the whole recursive
+/// [`ExecScope`] once and threads it through the whole recursive
 /// execution (`execute_batch_impl`, and transitively any nested
 /// `Batch`/`ForEach` bodies — nested re-entrant calls inherit the outer
 /// call's deadline, so the whole tree shares one budget). At each safe
@@ -74,13 +74,12 @@ fn warn_if_op_slow(alias: &str, elapsed: std::time::Duration) {
 /// externally cancelled, so both hazards are structurally impossible. See
 /// `execution_deadline.rs` for the full rationale.
 ///
-/// `execute_in_open_tx` (interactive, multi-call transactions) remains
-/// deliberately un-budgeted — see its doc comment for why that lifecycle
-/// is out of scope for a single-call wall-clock budget.
+/// `execute_in_open_tx` shares the same per-call root construction; the
+/// interactive transaction lifetime remains a separate caller-owned budget.
 ///
 /// A client-supplied `max_execution_time_secs: 0` is treated as the
 /// smallest valid budget (1 second), NOT as "no timeout" — see
-/// [`ExecutionDeadline::from_budget_secs`].
+/// [`super::ExecutionDeadline::from_budget_secs`].
 ///
 /// Takes an [`Authorized`] token, not a raw `&BatchRequest` + `Actor` pair
 /// (#1199) — the token can only be minted by [`Authorized::authorize`],
@@ -92,8 +91,8 @@ pub async fn execute_batch(
     admin: Option<&dyn AdminExecutor>,
     invoker: Option<&dyn FunctionInvoker>,
 ) -> Result<BatchResponse, BatchError> {
+    let scope = auth.root_scope();
     let (request, actor, db_name) = auth.into_parts();
-    let deadline = ExecutionDeadline::from_budget_secs(request.limits.max_execution_time_secs);
     execute_batch_impl(
         request,
         resolver,
@@ -103,7 +102,7 @@ pub async fn execute_batch(
         db_name,
         0,
         &new_map(),
-        deadline,
+        &scope,
     )
     .await
 }
@@ -226,7 +225,7 @@ async fn flush_if_synced_durability(
 /// - `depth` — current nesting level (0 at the public entry).
 /// - `params` — injected `$param` bindings from the outer batch's
 ///   `BatchOp::Batch.bind` map, resolved to concrete `InnerValue`s.
-/// - `deadline` — the #666 cooperative wall-clock budget, computed once in
+/// - `scope` — the shared execution budget, computed once in
 ///   [`execute_batch`] and INHERITED unchanged by nested `Batch`/`ForEach`
 ///   bodies (a nested body's own `limits.max_execution_time_secs` is not
 ///   consulted — the outer call owns the budget, matching the original
@@ -250,7 +249,7 @@ pub(super) fn execute_batch_impl<'a>(
     db_name: &'a str,
     depth: usize,
     params: &'a TMap<String, QueryValue>,
-    deadline: ExecutionDeadline,
+    scope: &'a ExecScope,
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<BatchResponse, BatchError>> + Send + 'a>,
 > {
@@ -262,7 +261,7 @@ pub(super) fn execute_batch_impl<'a>(
         // Free at the top-level call (the deadline was minted microseconds
         // ago); decisive for a recursion that starts after the budget
         // already elapsed.
-        deadline.check()?;
+        scope.check()?;
 
         let mut plan = plan_and_validate_batch(request, resolver).await?;
 
@@ -279,7 +278,7 @@ pub(super) fn execute_batch_impl<'a>(
                 depth,
                 params,
                 request.result_encoding,
-                deadline,
+                scope,
             )
             .await?
         } else {
@@ -294,7 +293,7 @@ pub(super) fn execute_batch_impl<'a>(
                 depth,
                 params,
                 request.result_encoding,
-                deadline,
+                scope,
             )
             .await?;
             (r, None)
@@ -357,14 +356,14 @@ pub(super) fn execute_planned_batch_impl<'a>(
     db_name: &'a str,
     depth: usize,
     params: &'a TMap<String, QueryValue>,
-    deadline: ExecutionDeadline,
+    scope: &'a ExecScope,
 ) -> PlannedBatchResultFuture<'a> {
     Box::pin(async move {
         // #666 checkpoint — mirrors `execute_batch_impl`'s pre-plan check.
         // The plan/validation itself already ran once, before the loop;
         // the deadline still gets a fresh look before this iteration's
         // real execution work.
-        deadline.check()?;
+        scope.check()?;
 
         // 3. Execute — branch on transactional.
         let (all_results, _tx_info) = if request.transactional {
@@ -379,7 +378,7 @@ pub(super) fn execute_planned_batch_impl<'a>(
                 depth,
                 params,
                 request.result_encoding,
-                deadline,
+                scope,
             )
             .await?
         } else {
@@ -394,7 +393,7 @@ pub(super) fn execute_planned_batch_impl<'a>(
                 depth,
                 params,
                 request.result_encoding,
-                deadline,
+                scope,
             )
             .await?;
             (r, None)
@@ -515,7 +514,7 @@ pub(super) async fn execute_plan_impl(
     depth: usize,
     params: &TMap<String, QueryValue>,
     result_encoding: ResultEncoding,
-    deadline: ExecutionDeadline,
+    scope: &ExecScope,
 ) -> Result<TMap<String, QueryResult>, BatchError> {
     let mut all_results: TMap<String, QueryResult> = new_map_wc(queries.len());
 
@@ -525,7 +524,7 @@ pub(super) async fn execute_plan_impl(
             // op. An expired budget stops the batch from starting any
             // further unit of work; the error propagates through the normal
             // `?` return path like any other op failure.
-            deadline.check()?;
+            scope.check()?;
 
             let entry = queries.get(alias).ok_or_else(|| BatchError::QueryError {
                 alias: alias.clone(),
@@ -565,7 +564,7 @@ pub(super) async fn execute_plan_impl(
                 depth,
                 params,
                 result_encoding,
-                deadline,
+                scope,
             )
             .await?;
             warn_if_op_slow(alias, op_started.elapsed());
@@ -597,7 +596,7 @@ pub(super) async fn execute_plan_tx(
     actor: &Actor,
     db_name: &str,
     tx: &mut shamir_tx::TxContext,
-    deadline: ExecutionDeadline,
+    scope: &ExecScope,
 ) -> Result<TMap<String, QueryResult>, BatchError> {
     execute_plan_tx_impl(
         plan,
@@ -611,7 +610,7 @@ pub(super) async fn execute_plan_tx(
         0,
         &new_map(),
         ResultEncoding::Name,
-        deadline,
+        scope,
     )
     .await
 }
@@ -629,7 +628,7 @@ pub(super) async fn execute_plan_tx_impl(
     depth: usize,
     params: &TMap<String, QueryValue>,
     result_encoding: ResultEncoding,
-    deadline: ExecutionDeadline,
+    scope: &ExecScope,
 ) -> Result<TMap<String, QueryResult>, BatchError> {
     let mut all_results: TMap<String, QueryResult> = new_map_wc(queries.len());
 
@@ -641,7 +640,7 @@ pub(super) async fn execute_plan_tx_impl(
             // one that releases pessimistic locks and never calls
             // `commit_tx` — so timeout cleanup is byte-identical to any
             // other op failure's cleanup.
-            deadline.check()?;
+            scope.check()?;
 
             let entry = queries.get(alias).ok_or_else(|| BatchError::QueryError {
                 alias: alias.clone(),
@@ -676,7 +675,7 @@ pub(super) async fn execute_plan_tx_impl(
                 depth,
                 params,
                 result_encoding,
-                deadline,
+                scope,
             };
             let op_started = Instant::now();
             let _guard = register_op_watchdog(alias);
@@ -705,7 +704,7 @@ pub(super) async fn execute_transactional_impl(
     depth: usize,
     params: &TMap<String, QueryValue>,
     result_encoding: ResultEncoding,
-    deadline: ExecutionDeadline,
+    scope: &ExecScope,
 ) -> Result<
     (
         TMap<String, QueryResult>,
@@ -773,7 +772,7 @@ pub(super) async fn execute_transactional_impl(
         depth,
         params,
         result_encoding,
-        deadline,
+        scope,
     )
     .await;
 
@@ -787,7 +786,7 @@ pub(super) async fn execute_transactional_impl(
     // uncancelled, and its outcome is always observed and reported
     // truthfully (its doc comment forbids racing it under
     // `tokio::select!`/`tokio::time::timeout`).
-    let plan_result = plan_result.and_then(|results| deadline.check().map(|()| results));
+    let plan_result = plan_result.and_then(|results| scope.check().map(|()| results));
 
     match plan_result {
         Err(plan_err) => {

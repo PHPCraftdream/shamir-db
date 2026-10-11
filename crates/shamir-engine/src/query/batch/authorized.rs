@@ -38,9 +38,10 @@
 //! the code (e.g. bench/test harnesses do exactly this), not a silent
 //! omission.
 
+use super::ExecScope;
 use async_trait::async_trait;
 use shamir_collections::TFxSet;
-use shamir_query_types::batch::{collect_required_access, BatchError, BatchRequest};
+use shamir_query_types::batch::{collect_required_access, BatchError, BatchRequest, ExecPolicy};
 use shamir_types::access::{AccessError, Action, Actor, ResourcePath};
 
 /// Capability to check whether `actor` may perform `action` on `path`.
@@ -70,6 +71,7 @@ pub struct Authorized<'a> {
     request: &'a BatchRequest,
     actor: Actor,
     db_name: &'a str,
+    policy: ExecPolicy,
 }
 
 impl<'a> Authorized<'a> {
@@ -113,6 +115,7 @@ impl<'a> Authorized<'a> {
             request,
             actor,
             db_name,
+            policy: ExecPolicy::EMBEDDED,
         })
     }
 
@@ -130,7 +133,24 @@ impl<'a> Authorized<'a> {
             request,
             actor,
             db_name,
+            policy: ExecPolicy::EMBEDDED,
         }
+    }
+
+    /// Attach a server-owned policy independently of the request DTO.
+    pub fn with_policy(mut self, policy: ExecPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    /// Borrow the server-owned execution policy.
+    pub fn policy(&self) -> &ExecPolicy {
+        &self.policy
+    }
+
+    /// Shared root construction used by both execution entry points.
+    pub(super) fn root_scope(&self) -> ExecScope {
+        ExecScope::root(&self.request.limits.clamped_to(&self.policy().caps))
     }
 
     /// The authorized request.

@@ -8,10 +8,10 @@ use shamir_query_builder::Query;
 use shamir_query_types::batch::BatchLimits;
 use shamir_types::access::Actor;
 
-use crate::query::batch::interactive_tx::execute_in_open_tx_with_deadline;
+use crate::query::batch::interactive_tx::execute_in_open_tx_with_scope;
 use crate::query::batch::{
     execute_in_open_tx_unchecked as execute_in_open_tx, open_interactive_tx, Authorized,
-    BatchError, ExecutionDeadline, TableResolver,
+    BatchError, ExecScope, ExecutionDeadline, TableResolver,
 };
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
@@ -171,13 +171,13 @@ async fn expired_interactive_deadline_returns_timeout_and_allows_caller_rollback
     let request = batch.build();
     // std::Instant is not Tokio's paused clock. Zero Duration guarantees
     // expiration without sleeping, preemption or process-global clock state.
-    let err = execute_in_open_tx_with_deadline(
+    let err = execute_in_open_tx_with_scope(
         Authorized::unchecked(&request, Actor::System, "test"),
         &resolver,
         None,
         None,
         &mut tx,
-        ExecutionDeadline::from_duration(Duration::ZERO),
+        &ExecScope::from_duration(&request.limits, Duration::ZERO),
     )
     .await
     .expect_err("an expired per-call deadline must reject interactive execution");
