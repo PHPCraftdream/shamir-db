@@ -105,15 +105,6 @@ impl BatchPlanner {
         queries: &TMap<String, QueryEntry>,
         limits: &BatchLimits,
     ) -> Result<BatchPlan, BatchError> {
-        // #666 finding 3 (documented, NOT fixed here): each nested
-        // Batch/ForEach body is independently re-planned at execution time
-        // with its OWN (independently client-supplied) `limits`, so
-        // `max_queries` is enforced per-level, not as a global cumulative
-        // budget across the whole recursive tree. Worst-case total op count
-        // is bounded by roughly `max_queries_per_level ^ max_nesting_depth`
-        // — large but finite, not literally unbounded, since
-        // `max_nesting_depth` IS composed globally. A true cross-level
-        // cumulative counter is a separate, larger task.
         // Check query count
         if queries.len() > limits.max_queries {
             return Err(BatchError::TooManyQueries {
@@ -156,6 +147,27 @@ impl BatchPlanner {
                     }
                 }
             }
+        }
+
+        let mut total_queries = 0u64;
+        let mut total_work = 0u64;
+        for visit in BatchTreeVisitor::new(queries) {
+            total_queries = total_queries.saturating_add(1);
+            total_work = total_work.saturating_add(visit.multiplier);
+        }
+        if total_queries > limits.max_total_queries as u64 {
+            return Err(BatchError::LimitExceeded {
+                kind: crate::batch::LimitKind::TotalQueries,
+                actual: total_queries,
+                max: limits.max_total_queries as u64,
+            });
+        }
+        if total_work > limits.max_total_work {
+            return Err(BatchError::LimitExceeded {
+                kind: crate::batch::LimitKind::Work,
+                actual: total_work,
+                max: limits.max_total_work,
+            });
         }
 
         // Aliases are keys in the map (no duplicates possible)
