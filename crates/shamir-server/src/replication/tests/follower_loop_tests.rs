@@ -381,12 +381,11 @@ impl ReplSource for GapReplSource {
     }
 }
 
-/// A gap reply (`gap_at > from_version`) terminates the loop with
-/// [`ReplError::JournalGap`] and does NOT apply any event in that same
-/// reply — the follower's bookmark stays at its pre-call value (0, since
-/// nothing was ever applied).
-#[tokio::test]
-async fn journal_gap_terminates_loop_without_applying_events() {
+/// Drive the follower loop against a source that reports `gap_at` together
+/// with a real event, and assert the loop stops with
+/// [`ReplError::JournalGap`] without applying that event: the bookmark stays
+/// at 0 (nothing was ever applied) and the follower's own journal is empty.
+async fn assert_gap_stops_loop(gap_at: u64) {
     let leader = build_db("alice").await;
     // One real event, so decoding would succeed if the loop incorrectly
     // reached the decode/apply step before the gap check.
@@ -399,11 +398,10 @@ async fn journal_gap_terminates_loop_without_applying_events() {
     assert!(!events_bytes.is_empty(), "fixture must carry an event");
 
     let follower = build_db("follower").await;
-    // gap_at (100) > from_version (bookmark(0) + 1 = 1) — the follower has
-    // never applied anything, so a `from_version` of 1 is guaranteed to be
-    // less than the gap.
+    // The follower has never applied anything, so its first `from_version`
+    // is bookmark(0) + 1 = 1.
     let source = Arc::new(GapReplSource {
-        gap_at: 100,
+        gap_at,
         events_bytes,
     });
 
@@ -415,17 +413,15 @@ async fn journal_gap_terminates_loop_without_applying_events() {
 
     match result {
         Err(ReplError::JournalGap {
-            gap_at,
+            gap_at: reported,
             from_version,
         }) => {
-            assert_eq!(gap_at, 100);
+            assert_eq!(reported, gap_at);
             assert_eq!(from_version, 1);
         }
         other => panic!("expected JournalGap, got {other:?}"),
     }
 
-    // No event was applied: the bookmark is unchanged (still at its initial
-    // value) and the follower's own changefeed is empty.
     let repo = follower
         .get_db("app")
         .and_then(|d| d.get_repo("main"))
@@ -441,4 +437,20 @@ async fn journal_gap_terminates_loop_without_applying_events() {
         follower_jr.events.is_empty(),
         "no event should have been applied when a gap is reported"
     );
+}
+
+/// A gap reply strictly ahead of `from_version` (the follower is missing
+/// `[from_version, gap_at)`) terminates the loop and applies nothing.
+#[tokio::test]
+async fn journal_gap_terminates_loop_without_applying_events() {
+    assert_gap_stops_loop(100).await;
+}
+
+/// `gap_at == from_version` means the very first requested version is the
+/// lost one (#1210): the changefeed contract is `gap_at = Some(v)` for a lost
+/// `v >= from_version`. The follower must stop here too instead of treating
+/// the gap as "behind us" and applying later events across the hole.
+#[tokio::test]
+async fn journal_gap_at_from_version_terminates_loop_without_applying_events() {
+    assert_gap_stops_loop(1).await;
 }
