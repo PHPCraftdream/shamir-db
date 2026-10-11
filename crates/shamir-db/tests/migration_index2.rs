@@ -14,6 +14,10 @@
 //! All batches (read/write AND DDL/migration ops) are constructed with
 //! `shamir_query_builder` and round-tripped through MessagePack.
 
+use futures::StreamExt;
+use std::sync::Arc;
+
+use shamir_db::engine::migration::{MigrationCoordinator, MigrationShadowLog};
 use shamir_types::mpack;
 
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
@@ -349,4 +353,119 @@ async fn migration_preserves_vector_index() {
         dst_labels[0], "x",
         "exact match ranks first after migration -- the vector index was preserved"
     );
+}
+
+// Red before #1219: persisted Committed is not recoverable by CommitMigration.
+async fn assert_committed_crash_retry(seed_marker: bool) {
+    let shamir = setup().await;
+    let mut batch = Batch::new();
+    batch.create_index(
+        "index",
+        ddl::create_index("body_fts", "docs")
+            .repo("src_repo")
+            .field("body")
+            .index_type("fts")
+            .fts_tokenizer("whitespace"),
+    );
+    batch.insert(
+        "row",
+        Insert::with_repo("src_repo", "docs").row(doc! { "body" => "hello rust" }),
+    );
+    exec_built(&shamir, batch.to_request_via_msgpack()).await;
+    let mut batch = Batch::new();
+    batch.start_migration(
+        "migration",
+        ddl::start_migration("docs", "dst_repo", "in_memory").repo("src_repo"),
+    );
+    let response = exec_built(&shamir, batch.to_request_via_msgpack()).await;
+    let id = response.results["migration"].records[0]
+        .get_value_str("migration_id")
+        .unwrap()
+        .to_string();
+    let db = shamir.get_db("testdb").unwrap();
+    let src = db.get_table("src_repo", "docs").await.unwrap();
+    let dst = db.get_table("dst_repo", "docs").await.unwrap();
+    let coord = shamir.active_migrations().get(&id).unwrap().value().clone();
+    coord.final_drain_and_commit().await.unwrap();
+    // Crash after seed but before its stage marker: retry must derive that
+    // rows already have current versions instead of allocating new versions.
+    dst.seed_log_from_data_store().await.unwrap();
+    let mvcc = dst.mvcc_store().unwrap();
+    mvcc.flush_history().await.unwrap();
+    if seed_marker {
+        coord.complete_finalisation_step(1).await.unwrap();
+    }
+    let mut records = dst.table().data_store().iter_stream(256);
+    let key = records.next().await.unwrap().unwrap()[0].0.clone();
+    let version = mvcc.version_of(key.as_ref());
+    // Crash after population but before the index marker: its BM25 bumps
+    // must be reset rather than added again on retry.
+    dst.bulk_populate_index2().await.unwrap();
+    shamir.active_migrations().remove(&id);
+    drop(coord);
+    let state = MigrationCoordinator::load_state(src.info_store(), &id)
+        .await
+        .unwrap()
+        .unwrap();
+    let shadow = Arc::new(
+        MigrationShadowLog::recover(id.clone(), Arc::clone(src.info_store()))
+            .await
+            .unwrap(),
+    );
+    let rebuilt = Arc::new(MigrationCoordinator::new(
+        state,
+        shadow,
+        Arc::clone(src.table().data_store()),
+        Arc::clone(dst.table().data_store()),
+        src.mvcc_store(),
+    ));
+    shamir
+        .active_migrations()
+        .insert(id.clone(), rebuilt.clone());
+    let mut batch = Batch::new();
+    batch.commit_migration("commit", ddl::commit_migration(&id));
+    exec_built(&shamir, batch.to_request_via_msgpack()).await;
+    assert_eq!(rebuilt.finalisation_progress().await.unwrap(), 2);
+    assert!(shamir.active_migrations().is_empty());
+    assert_eq!(mvcc.version_of(key.as_ref()), version);
+    assert!(dst.index2_registry().reader_gate().enter().is_some());
+    let backend = dst.index2_registry().all_backends().await.pop().unwrap();
+    let ranked = backend
+        .as_any()
+        .downcast_ref::<shamir_db::engine::index2::fts_ranked_backend::FtsRankedBackend>()
+        .unwrap();
+    assert_eq!(ranked.doc_count(), 1);
+    assert_eq!(ranked.sum_doc_len(), 2);
+    // Crash after both markers, before cleanup (empty active map); retry
+    // must recover the receipt and skip both completed collaborators.
+    exec_built(&shamir, batch.to_request_via_msgpack()).await;
+    assert!(shamir.active_migrations().is_empty());
+    assert_eq!(ranked.doc_count(), 1);
+    assert_eq!(mvcc.version_of(key.as_ref()), version);
+    let mut query = Batch::new();
+    query.query(
+        "rows",
+        Query::with_repo("dst_repo", "docs").fts("body", "rust", "and"),
+    );
+    let response = exec_built(&shamir, query.to_request_via_msgpack()).await;
+    assert_eq!(response.results["rows"].records.len(), 1);
+    assert_eq!(
+        response.results["rows"]
+            .stats
+            .as_ref()
+            .unwrap()
+            .index_used
+            .as_deref(),
+        Some("index2_ranked"),
+    );
+}
+
+#[tokio::test]
+async fn committed_crash_retry_without_seed_marker_reconciles_once() {
+    assert_committed_crash_retry(false).await;
+}
+
+#[tokio::test]
+async fn committed_crash_retry_with_seed_marker_finishes_remaining_steps_once() {
+    assert_committed_crash_retry(true).await;
 }

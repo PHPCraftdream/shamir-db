@@ -2,8 +2,12 @@
 
 use std::sync::Arc;
 
+use futures::StreamExt;
+
 use crate::access::{Action, ResourcePath};
-use crate::engine::migration::{MigrationCoordinator, MigrationShadowLog, MigrationState};
+use crate::engine::migration::{
+    MigrationCoordinator, MigrationPhase, MigrationShadowLog, MigrationState,
+};
 use crate::engine::repo::repo_types::BoxRepoFactory;
 use crate::engine::repo::RepoConfig;
 use crate::engine::table::TableConfig;
@@ -175,8 +179,15 @@ impl ShamirAdminExecutor {
             ));
 
             coord.run_snapshot().await?;
-            coord.drain_until_caught_up(0).await?;
-            coord.mark_cutover_ready().await?;
+            let caught_up = coord.drain_until_caught_up(0).await?;
+            // Keep a lagging coordinator registered and Draining, not rolled back.
+            if caught_up.residual_lag == 0 {
+                match coord.mark_cutover_ready().await {
+                    Ok(()) | Err(shamir_storage::error::DbError::Conflict(_)) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            coord.persist_state().await?;
             Ok::<_, shamir_storage::error::DbError>(coord)
         }
         .await;
@@ -190,13 +201,20 @@ impl ShamirAdminExecutor {
             }
         };
 
+        let phase = coord.phase().await.to_string();
         self.shamir
             .active_migrations()
             .insert(migration_id.clone(), coord);
+        if phase == "draining" {
+            return Err(err_code(
+                "migration_residual_lag",
+                format!("migration '{migration_id}' is still draining; retry CommitMigration"),
+            ));
+        }
 
         Ok(admin_result(mpack!({
             "migration_id": @(QueryValue::Str(migration_id)),
-            "phase": "cutover_ready",
+            "phase": @(QueryValue::Str(phase)),
             "table": @(QueryValue::Str(table_name.clone())),
             "src_repo": @(QueryValue::Str(op.repo.clone())),
             "dst_repo": @(QueryValue::Str(op.dst_repo.clone())),
@@ -233,21 +251,110 @@ impl ShamirAdminExecutor {
             )
             .await
             .map_err(err_access)?;
-        let coord = self
+        let db = self
+            .shamir
+            .get_db(&self.db_name)
+            .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
+        let active = self
             .shamir
             .active_migrations()
             .get(&op.commit_migration)
-            .ok_or_else(|| {
+            .map(|entry| Arc::clone(entry.value()));
+        let coord = if let Some(coord) = active {
+            coord
+        } else {
+            // Retry after restart: state keys live in the source table's info store.
+            let mut recovered = None;
+            'repos: for repo in db.list_repos() {
+                for table in db.list_tables(&repo).map_err(|e| err(e.to_string()))? {
+                    let src = db
+                        .get_table(&repo, &table)
+                        .await
+                        .map_err(|e| err(e.to_string()))?;
+                    if let Some(state) =
+                        MigrationCoordinator::load_state(src.info_store(), &op.commit_migration)
+                            .await
+                            .map_err(|e| err(e.to_string()))?
+                    {
+                        let src = db
+                            .get_table(&state.src_repo, &state.table_name)
+                            .await
+                            .map_err(|e| err(e.to_string()))?;
+                        let dst = db
+                            .get_table(&state.dst_repo, &state.table_name)
+                            .await
+                            .map_err(|e| err(e.to_string()))?;
+                        let shadow = Arc::new(
+                            MigrationShadowLog::recover(
+                                state.id.clone(),
+                                Arc::clone(src.info_store()),
+                            )
+                            .await
+                            .map_err(|e| err(e.to_string()))?,
+                        );
+                        recovered = Some(Arc::new(MigrationCoordinator::new(
+                            state,
+                            shadow,
+                            Arc::clone(src.table().data_store()),
+                            Arc::clone(dst.table().data_store()),
+                            src.mvcc_store(),
+                        )));
+                        break 'repos;
+                    }
+                }
+            }
+            let recovered = recovered.ok_or_else(|| {
                 err_code(
                     "not_found",
                     format!("migration '{}' not found", op.commit_migration),
                 )
-            })?
-            .clone();
+            })?;
+            // Concurrent recovery attempts must share the same finalisation lock.
+            Arc::clone(
+                self.shamir
+                    .active_migrations()
+                    .entry(op.commit_migration.clone())
+                    .or_insert(recovered)
+                    .value(),
+            )
+        };
+        let _finalisation = coord.lock_finalisation().await;
+        if coord.phase().await == MigrationPhase::Draining {
+            let result = coord
+                .drain_until_caught_up(0)
+                .await
+                .map_err(|e| err(e.to_string()))?;
+            if result.residual_lag != 0 {
+                coord
+                    .persist_state()
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                return Err(err_code(
+                    "migration_residual_lag",
+                    format!(
+                        "{} shadow entries remain; retry CommitMigration",
+                        result.residual_lag,
+                    ),
+                ));
+            }
+            coord.mark_cutover_ready().await.map_err(|e| {
+                err_code(e.code().unwrap_or("migration_cutover_error"), e.to_string())
+            })?;
+        }
+        let cutover_state = coord.state().await;
+        let src_table = db
+            .get_table(&cutover_state.src_repo, &cutover_state.table_name)
+            .await
+            .map_err(|e| err(e.to_string()))?;
+        let (src_barrier, src_write_lock) = src_table
+            .begin_write_barrier(crate::engine::index::write_barrier_flags::INDEX2_CREATE)
+            .await;
         let tail = coord
             .final_drain_and_commit()
             .await
             .map_err(|e| err(e.to_string()))?;
+        drop(src_write_lock);
+        drop(src_barrier);
         let (src_count, dst_count) = coord
             .verify_record_count()
             .await
@@ -267,10 +374,6 @@ impl ShamirAdminExecutor {
         //
         // After this point the migration is committed. New writes
         // go through `insert()` → `index2_on_insert` automatically.
-        let db = self
-            .shamir
-            .get_db(&self.db_name)
-            .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
         let dst_table = db
             .get_table(&state.dst_repo, &state.table_name)
             .await
@@ -283,21 +386,105 @@ impl ShamirAdminExecutor {
         // versions in the log (visible to reads AND to the log-backed
         // `bulk_populate_index2` seam). The coordinator will write the log
         // directly in a later slice (C5); this bridges it at cutover.
-        dst_table
-            .seed_log_from_data_store()
+        let (barrier, write_lock) = dst_table
+            .begin_write_barrier(crate::engine::index::write_barrier_flags::INDEX2_CREATE)
+            .await;
+        let progress = coord
+            .finalisation_progress()
             .await
             .map_err(|e| err(e.to_string()))?;
+        if progress < 1 {
+            // Seed only absent current versions. A crash between a row write and
+            // the stage marker must not allocate a second version for that row.
+            if let Some(mvcc) = dst_table.mvcc_store() {
+                let mut stream = dst_table.table().data_store().iter_stream(256);
+                while let Some(batch) = stream.next().await {
+                    for (key, value) in batch.map_err(|e| err(e.to_string()))? {
+                        if mvcc
+                            .get_current(key.clone())
+                            .await
+                            .map_err(|e| err(e.to_string()))?
+                            .is_none()
+                        {
+                            mvcc.set_versioned_many(vec![(key, value)])
+                                .await
+                                .map_err(|e| err(e.to_string()))?;
+                        }
+                    }
+                }
+                mvcc.flush_history().await.map_err(|e| err(e.to_string()))?;
+            } else {
+                dst_table
+                    .seed_log_from_data_store()
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+            }
+            coord
+                .complete_finalisation_step(1)
+                .await
+                .map_err(|e| err(e.to_string()))?;
+        }
+        if progress < 2 {
+            // plan_insert includes non-idempotent BM25 bumps. Reset derived
+            // in-memory backends on EVERY incomplete attempt, not just restart.
+            // Posting writes are overwrite-by-key; the migrated data is fixed.
+            // Construct fresh backends; FtsRankedBackend::rebuild adds counts
+            // and would NOT reset an already populated instance. Constructors
+            // do not restore persisted state, so counts start at zero even
+            // when table-open recovery populated the previous instance.
+            let registry = dst_table.index2_registry();
+            let readers = registry.reader_gate().begin_drop();
+            readers.wait_for_drain().await;
+            let resolver =
+                shamir_funclib::scalar_resolver::ScalarResolver::new(Arc::clone(db.scalars()));
+            for mut descriptor in registry.all_descriptors().await {
+                // Cancellation releases the reader gate via RAII. Keep an
+                // incomplete replacement planner-invisible until full replay.
+                descriptor.state = crate::engine::index2::IndexState::Building;
+                let backend = crate::engine::index2::build_index2_backend_with_resolver(
+                    descriptor.clone(),
+                    dst_table.info_store(),
+                    Some(resolver.clone()),
+                );
+                registry.remove_by_id(descriptor.id).await;
+                registry
+                    .insert(backend)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+            }
+            if let Err(e) = dst_table.bulk_populate_index2().await {
+                for backend in registry.all_backends().await {
+                    registry
+                        .set_failed(backend.descriptor().id, e.to_string())
+                        .await;
+                }
+                return Err(err(e.to_string()));
+            }
+            // Recovered Failed entries become usable only after complete replay.
+            for backend in registry.all_backends().await {
+                registry
+                    .set_state(
+                        backend.descriptor().id,
+                        crate::engine::index2::IndexState::Ready,
+                    )
+                    .await;
+            }
+            dst_table
+                .info_store()
+                .flush()
+                .await
+                .map_err(|e| err(e.to_string()))?;
+            coord
+                .complete_finalisation_step(2)
+                .await
+                .map_err(|e| err(e.to_string()))?;
+            drop(readers);
+        }
+        drop(write_lock);
+        drop(barrier);
 
-        dst_table
-            .bulk_populate_index2()
-            .await
-            .map_err(|e| err(e.to_string()))?;
-
-        // Remove from active map — committed migrations are
-        // terminal, no further state changes possible. Status
-        // queries on a committed id will now return 404, which
-        // is the correct semantics (migration is done; query the
-        // dst table directly).
+        // Keep the durable completed marker as an idempotent retry receipt;
+        // only the transient active-map entry is cleaned up.
         self.shamir.active_migrations().remove(&op.commit_migration);
 
         Ok(admin_result(mpack!({
@@ -350,6 +537,7 @@ impl ShamirAdminExecutor {
                 )
             })?
             .clone();
+        let _finalisation = coord.lock_finalisation().await;
         coord.rollback().await.map_err(|e| err(e.to_string()))?;
         self.shamir
             .active_migrations()

@@ -111,6 +111,10 @@ impl MigrationShadowLog {
         })
     }
 
+    pub(crate) fn store(&self) -> &Arc<dyn Store> {
+        &self.store
+    }
+
     pub fn current_lsn(&self) -> u64 {
         self.next_lsn.load(Ordering::Relaxed).saturating_sub(1)
     }

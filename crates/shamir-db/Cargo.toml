@@ -33,6 +33,9 @@ bench-sefer-tuned = ["dep:sefer-alloc"]
 bench-mimalloc    = ["dep:mimalloc"]
 
 [dependencies]
+# StreamExt for the migration finalisation scan (admin_migration.rs); already in the
+# lockfile as a dependency of other workspace crates, no new version.
+futures = "0.3"
 # Foundation crates re-exported under `shamir_db::*` so callers stay
 # stable. The split is purely organisational; nothing about the public
 # surface changed when these moved out.
@@ -87,7 +90,6 @@ serial_test = "3.3.1"
 # nextest's captured stdout on a hang. Dev-only — no production/library
 # code depends on this.
 env_logger  = "0.11.10"
-futures     = "0.3"            # audit #540 fault-injecting Store test double (iter_stream/scan_prefix_stream Stream impl)
 # Unifies in the `test-util` feature so `RepoInstance::install_table_for_test`
 # (audit #540 fault-injection seam) exists when shamir-db's own tests compile.
 shamir-engine = { path = "../shamir-engine", default-features = false, features = ["test-util"] }
