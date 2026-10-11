@@ -144,6 +144,8 @@ pub(crate) struct PostWalPrePublishHook {
     pub(crate) pre_wal: std::sync::atomic::AtomicBool,
     pub(crate) after_counter: std::sync::atomic::AtomicBool,
     pub(crate) fail_orphan_markers: std::sync::atomic::AtomicBool,
+    pub(crate) panic_after_resume: std::sync::atomic::AtomicBool,
+    pub(crate) panic_resume: tokio::sync::Notify,
     pub(crate) reached: tokio::sync::Notify,
     pub(crate) resume: tokio::sync::Notify,
     pub(crate) armed: std::sync::atomic::AtomicBool,
@@ -174,11 +176,49 @@ async fn fire_cancel_test_hook(repo: &RepoInstance, pre_wal: bool) {
             && hook.pre_wal.load(std::sync::atomic::Ordering::Acquire) == pre_wal
             && hook.armed.swap(false, std::sync::atomic::Ordering::AcqRel)
         {
+            // Capture the one-shot panic mode before announcing the seam. A
+            // separate wake targets the orphan while B1 keeps another ACTIVE
+            // committer parked on the ordinary resume queue.
+            let panic_after_resume = hook
+                .panic_after_resume
+                .swap(false, std::sync::atomic::Ordering::AcqRel);
             hook.reached.notify_one();
+            if panic_after_resume {
+                hook.panic_resume.notified().await;
+                panic!("injected commit-tail panic");
+            }
             hook.resume.notified().await;
         }
     }
     let _ = (repo, pre_wal);
+}
+
+/// Test-only one-shot pause for AsyncIndex's independently spawned tail.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct AsyncIndexTailHook {
+    pub(crate) repo_name: String,
+    pub(crate) reached: tokio::sync::Notify,
+    pub(crate) resume: tokio::sync::Notify,
+    pub(crate) armed: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(test)]
+pub(crate) static TEST_ASYNC_INDEX_TAIL_HOOK: std::sync::OnceLock<
+    std::sync::Arc<AsyncIndexTailHook>,
+> = std::sync::OnceLock::new();
+
+async fn fire_async_index_tail_test_hook(repo: &RepoInstance) {
+    #[cfg(test)]
+    if let Some(hook) = TEST_ASYNC_INDEX_TAIL_HOOK.get() {
+        if hook.repo_name == repo.name()
+            && hook.armed.swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            hook.reached.notify_one();
+            hook.resume.notified().await;
+        }
+    }
+    let _ = repo;
 }
 
 /// Test-only crash-injection seam for the real crash-recovery harness
@@ -413,18 +453,15 @@ pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
     ops
 }
 
-/// cancel-safe: partial — the commit point is a *successful* Phase 4
-/// `wal.begin`. Before that, cancellation is a CLEAN ABORT (nothing
-/// durable: staging dropped, WAL not written, locks released by RAII).
-/// AFTER that, the tx is COMMITTED: the WAL entry is durable and is the
-/// single source of truth. Cancellation between Phase 4 and Phase 7
-/// leaves an inflight WAL marker that recovery replays idempotently on
-/// the next open (Put/Delete/IndexPut/IndexDel are last-write-wins;
-/// counter replay is intentionally skipped; HNSW is rebuilt on open) —
-/// the caller simply does not observe the `Ok` outcome, but the data is
-/// not lost and the tx is not half-aborted. Treat as non-cancel-safe at
-/// the API boundary: do not race under `tokio::select!` /
-/// `tokio::time::timeout` if you need to observe the outcome.
+/// cancel-safe: partial — cancellation during prelock (including unique-lock
+/// waits) still aborts. AFTER prelock, cancellation only stops waiting: the
+/// exact suspended commit future runs to completion on the captured runtime,
+/// even before WAL acceptance. Do not blindly retry an unobserved outcome.
+/// Inline panics propagate without restarting the future; detached panics
+/// are logged and existing VersionGuard orphan recovery remains the fallback.
+/// Shutdown must stop admission and quiesce commits before stopping Tokio.
+/// AsyncIndex retains its separately spawned materialization tail, counted
+/// through completion by the same quiescence barrier.
 ///
 /// Thin metrics-only wrapper around [`commit_tx_inner`]: it records the
 /// `on_tx_aborted_storage` metric on a PRE-commit storage abort and is
@@ -671,44 +708,51 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
         }
     };
 
-    // AsyncIndex txs bypass group-commit: their post-commit tail is spawned
-    // as a background task, which is incompatible with the leader processing
-    // another tx's materialization. They always wait for the lock.
-    if tx.visibility == shamir_tx::CommitVisibility::AsyncIndex {
-        return commit_tx_inner_legacy_async(
-            tx,
-            uwl_guards,
-            drain_guards,
-            repo,
-            gate.as_ref(),
-            wal.as_ref(),
-        )
-        .await;
-    }
-
-    // === P2c: LOCKFREE COMMIT PATH ===
-    //
-    // Disjoint-table commits run fully in parallel — no global
-    // `commit_mutex`. Correctness relies on per-table uwl_guards:
-    // same-table committers serialize at uwl acquisition (pre-lock);
-    // disjoint-table committers never conflict in SSI predicates.
-    //
-    // Sequence (all lock-free or per-table-locked):
-    //   1. validate (atomic version + lock-free TreeIndex scan)
-    //   2. WAL begin (unique key per txn_id — concurrent-safe)
-    //   3. record_commit_writes (lock-free TreeIndex insert)
-    //   4. materialize (gated by uwl_guards, not commit_mutex)
-    //
-    // Group-commit WAL batching is sacrificed for parallelism; the
-    // WAL backend's internal batching (if any) still amortizes fsync.
-    commit_tx_lockfree(
-        tx,
-        uwl_guards,
-        drain_guards,
-        repo,
-        gate.as_ref(),
-        wal.as_ref(),
-    )
+    // Own the foreground clone, tx and prelock guards before either downstream
+    // body takes commit_lock / the serializable guard. No spawn or yield on
+    // the happy path; backpressure remains in the caller-only wrapper.
+    crate::tx::CommitDriver::new(tx, repo, move |tx, repo| async move {
+        let _tail = repo.commit_tail().enter();
+        // AsyncIndex txs bypass group-commit: their post-commit tail is spawned
+        // as a background task, which is incompatible with the leader processing
+        // another tx's materialization. They always wait for the lock.
+        if tx.visibility == shamir_tx::CommitVisibility::AsyncIndex {
+            commit_tx_inner_legacy_async(
+                tx,
+                uwl_guards,
+                drain_guards,
+                &repo,
+                gate.as_ref(),
+                wal.as_ref(),
+            )
+            .await
+        } else {
+            // === P2c: LOCKFREE COMMIT PATH ===
+            //
+            // Disjoint-table commits run fully in parallel — no global
+            // `commit_mutex`. Correctness relies on per-table uwl_guards:
+            // same-table committers serialize at uwl acquisition (pre-lock);
+            // disjoint-table committers never conflict in SSI predicates.
+            //
+            // Sequence (all lock-free or per-table-locked):
+            //   1. validate (atomic version + lock-free TreeIndex scan)
+            //   2. WAL begin (unique key per txn_id — concurrent-safe)
+            //   3. record_commit_writes (lock-free TreeIndex insert)
+            //   4. materialize (gated by uwl_guards, not commit_mutex)
+            //
+            // Group-commit WAL batching is sacrificed for parallelism; the
+            // WAL backend's internal batching (if any) still amortizes fsync.
+            commit_tx_lockfree(
+                tx,
+                uwl_guards,
+                drain_guards,
+                &repo,
+                gate.as_ref(),
+                wal.as_ref(),
+            )
+            .await
+        }
+    })
     .await
 }
 
@@ -751,6 +795,7 @@ async fn commit_tx_inner_legacy_async(
             return Err(e);
         }
     };
+    version_guard.attach_metrics(repo.tx_metrics().clone());
     version_guard.wal_accepted();
     gate.record_commit_writes(shamir_tx::build_footprint_from_tx(&tx, commit_version));
     // Op #2 Stage 2: offer the persisted WAL entry to the drainer window.
@@ -822,7 +867,11 @@ async fn commit_tx_inner_legacy_async(
 
     let repo_clone = repo.clone();
     let metrics = repo.tx_metrics().clone();
+    // Enter before spawn while the inline driver is still counted: no zero-count gap.
+    let tail_guard = repo.commit_tail().enter();
     let join = tokio::spawn(async move {
+        let _tail_guard = tail_guard;
+        fire_async_index_tail_test_hook(&repo_clone).await;
         let state = materialize_async_tail(
             &mut tx,
             &repo_clone,
@@ -985,6 +1034,7 @@ async fn commit_tx_lockfree(
 
     let commit_version = validated.commit_version;
     let mut version_guard = validated.version_guard;
+    version_guard.attach_metrics(repo.tx_metrics().clone());
     // SSI fix S2 — the still-armed cell-reservation guards. Held across Phase 4
     // and `materialize`; `disarm`ed after publish (Phase 5a `finalize_reservation`
     // already cleared each `reserved_by`). On the WAL-begin abort below they drop
