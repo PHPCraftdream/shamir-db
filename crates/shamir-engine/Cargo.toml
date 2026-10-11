@@ -101,6 +101,7 @@ loom = []
 dhat = "0.3"
 
 [dev-dependencies]
+tokio = { version = "1.49.0", features = ["test-util"] }
 bench-scale-tool = { workspace = true, features = ["async"] }
 tempfile = "3.10.1"
 serial_test = "3.3.1"
