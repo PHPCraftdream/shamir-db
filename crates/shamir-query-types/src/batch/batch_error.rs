@@ -1,8 +1,17 @@
 //! [`BatchError`] — errors that can occur during batch processing.
 
+use super::limit_kind::LimitKind;
+
 /// Errors during batch processing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BatchError {
+    /// An effective resource limit was exceeded.
+    LimitExceeded {
+        kind: LimitKind,
+        actual: u64,
+        max: u64,
+    },
+
     /// Too many queries in batch.
     ///
     /// Check `BatchLimits::max_queries`.
@@ -245,6 +254,13 @@ pub enum BatchError {
 impl std::fmt::Display for BatchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            BatchError::LimitExceeded { kind, actual, max } => {
+                write!(
+                    f,
+                    "Limit exceeded: {:?}, actual: {} (max: {})",
+                    kind, actual, max
+                )
+            }
             BatchError::TooManyQueries { count, max } => {
                 write!(f, "Too many queries: {} (max: {})", count, max)
             }
