@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Serialize;
 use shamir_connect::common::push_envelope::{PushEnvelope, PushKind};
@@ -72,51 +73,71 @@ pub(super) async fn make_deliver_data(
     }
 }
 
-/// Serialize and push an Event envelope. Returns `false` when the slow-consumer
-/// threshold is hit and the bridge should shut down.
-///
-/// Seq is only advanced on successful delivery so the client never observes
-/// a seq hole from transient backpressure drops.
-pub(super) fn try_push_event(
+// 100 attempts with 99 delays: at most 495 ms of scheduled retry sleep per
+// required frame (executor scheduling can add latency). No commit-path wait.
+const PUSH_RETRY_DELAY: Duration = Duration::from_millis(5);
+
+/// Retain a serialized required frame until accepted, or close on exhaustion.
+/// The caller must stop delivery on `false`; terminal notifications are best-effort.
+/// cancel-safe: NO - cancellation discards the retained frame; only cancel when
+/// terminating the subscription, never cancel and resume ordinary delivery.
+pub(super) async fn push_required(
+    push: &Arc<dyn PushSink>,
+    sub_id: u64,
+    seq: &AtomicU64,
+    frame: Vec<u8>,
+) -> bool {
+    for attempt in 0..SLOW_CONSUMER_THRESHOLD {
+        // PushSink consumes the Vec even on rejection and returns no payload.
+        // Keep the original serialized bytes; do not rebuild reactive delivery.
+        if push.try_push(frame.clone()).is_ok() {
+            seq.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+        if attempt + 1 < SLOW_CONSUMER_THRESHOLD {
+            tokio::time::sleep(PUSH_RETRY_DELAY).await;
+        }
+    }
+
+    let sc = PushEnvelope {
+        push: PushKind::SlowConsumer,
+        sub: sub_id,
+        seq: seq.load(Ordering::Relaxed),
+        data: None,
+        gap_at: None,
+    };
+    if let Ok(sc_frame) = rmp_serde::to_vec_named(&sc) {
+        // Terminal notification only: rejection cannot keep the bridge alive.
+        if push.try_push(sc_frame).is_ok() {
+            seq.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    tracing::warn!(sub_id, "slow consumer - closing subscription");
+    false
+}
+
+/// Serialize an Event once and retry its frame; `false` terminates the bridge.
+/// Seq advances only after acceptance, never for a rejected event.
+/// cancel-safe: NO - cancellation must terminate the subscription, not resume it.
+pub(super) async fn try_push_event(
     push: &Arc<dyn PushSink>,
     sub_id: u64,
     seq: &AtomicU64,
     data: &[u8],
-    consecutive_push_failures: &mut u32,
 ) -> bool {
-    let s = seq.load(Ordering::Relaxed);
     let envelope = PushEnvelopeRef {
         push: PushKind::Event,
         sub: sub_id,
-        seq: s,
+        seq: seq.load(Ordering::Relaxed),
         data: Some(data),
         gap_at: None,
     };
     let frame = match rmp_serde::to_vec_named(&envelope) {
-        Ok(b) => b,
-        Err(_) => return true, // serialization error — skip, not fatal
-    };
-    if push.try_push(frame).is_err() {
-        *consecutive_push_failures += 1;
-        if *consecutive_push_failures >= SLOW_CONSUMER_THRESHOLD {
-            let sc_seq = seq.fetch_add(1, Ordering::Relaxed);
-            let sc = PushEnvelope {
-                push: PushKind::SlowConsumer,
-                sub: sub_id,
-                seq: sc_seq,
-                data: None,
-                gap_at: None,
-            };
-            if let Ok(sc_frame) = rmp_serde::to_vec_named(&sc) {
-                let _ = push.try_push(sc_frame);
-            }
-            tracing::warn!(sub_id, "slow consumer — closing subscription");
+        Ok(frame) => frame,
+        Err(error) => {
+            tracing::warn!(sub_id, %error, "event serialization failed - closing subscription");
             return false;
         }
-        tracing::debug!(sub_id, "push rejected, event dropped");
-    } else {
-        *consecutive_push_failures = 0;
-        seq.fetch_add(1, Ordering::Relaxed);
-    }
-    true
+    };
+    push_required(push, sub_id, seq, frame).await
 }
