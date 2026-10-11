@@ -61,8 +61,10 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     within("drain_all@54", repo.drainer().drain_all(&repo))
         .await
         .unwrap();
+    // Snapshot isolation: a Serializable committer parked after WAL accept still
+    // holds the repo commit_lock, so a concurrent Serializable commit would wait on it.
     hook.armed.store(true, Ordering::Release);
-    let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
+    let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     let active_rid = tbl
         .insert_tx(&InnerValue::Str("active".into()), Some(&mut tx))
         .await
@@ -72,7 +74,7 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     within("reached@63", hook.reached.notified()).await;
     let active_version = *repo.drainer().window_keys().last().unwrap();
     assert!(gate.is_active_post_wal(active_version));
-    let (mut tx, later_snapshot) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
+    let (mut tx, later_snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     let later_rid = tbl
         .insert_tx(&InnerValue::Str("later".into()), Some(&mut tx))
         .await
@@ -85,7 +87,7 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     assert_eq!(gate.orphan_max(), 0);
 
     hook.armed.store(true, Ordering::Release);
-    let (mut tx, orphan_snapshot) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
+    let (mut tx, orphan_snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     let scan_orphan_rid = tbl
         .insert_tx(&InnerValue::Str("scan-orphan".into()), Some(&mut tx))
         .await
