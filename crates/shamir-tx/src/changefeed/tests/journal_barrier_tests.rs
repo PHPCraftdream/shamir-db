@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use futures::poll;
 use shamir_types::access::Actor;
@@ -67,8 +68,8 @@ fn fixture(capacity: usize) -> (RepoChangefeed, mpsc::Receiver<JournalMsg>) {
     let (journal_tx, journal_rx) = mpsc::channel(capacity);
     let notify = Arc::new(Notify::new());
     let gap = Arc::new(GapMarker {
-        first: AtomicU64::new(0),
-        persisted: AtomicU64::new(0),
+        current: ArcSwap::from_pointee(None),
+        persisted: ArcSwap::from_pointee(None),
         notify: notify.clone(),
     });
     (
