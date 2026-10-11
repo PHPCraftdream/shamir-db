@@ -10,3 +10,4 @@ pub mod repl_bookmark_tests;
 pub mod repo_config_tests;
 pub mod repo_instance_tests;
 pub mod repo_tx_accessors_tests;
+pub mod table_init_retry_tests;

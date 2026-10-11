@@ -113,6 +113,9 @@ pub struct RepoInstance {
     /// `ShamirDb::compile_table_schema`). Shared across clones (one cache
     /// per underlying repo, not per handle).
     fk_reverse_cache: Arc<FkReverseCache>,
+    #[cfg(test)]
+    pub(crate) table_init_hook:
+        Arc<arc_swap::ArcSwapOption<super::tests::table_init_retry_tests::TableInitHook>>,
 }
 
 /// Bundle of the per-repo changefeed and the store it journals into.
@@ -147,6 +150,8 @@ impl Clone for RepoInstance {
             live: self.live.clone(),
             marker_write_mutex: Arc::clone(&self.marker_write_mutex),
             fk_reverse_cache: Arc::clone(&self.fk_reverse_cache),
+            #[cfg(test)]
+            table_init_hook: Arc::clone(&self.table_init_hook),
         }
     }
 }
@@ -199,6 +204,8 @@ impl RepoInstance {
             live: Some(Arc::new(())),
             marker_write_mutex: Arc::new(tokio::sync::Mutex::new(())),
             fk_reverse_cache: Arc::new(FkReverseCache::new()),
+            #[cfg(test)]
+            table_init_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
         }
     }
 
@@ -333,17 +340,39 @@ impl RepoInstance {
         // install (two independent DashMaps). On a removed table the
         // init returns Err and `OnceCell::get_or_try_init` leaves the
         // cell empty so subsequent calls retry.
-        cell.get_or_try_init(|| async move {
-            if !self.configs.contains_key(table_name) {
-                return Err(DbError::NotFound(format!(
-                    "Table '{}' is not configured in this repository",
-                    table_name
-                )));
+        let tbl = cell
+            .get_or_try_init(|| async {
+                if !self.configs.contains_key(table_name) {
+                    return Err(DbError::NotFound(format!(
+                        "Table '{}' is not configured in this repository",
+                        table_name
+                    )));
+                }
+                self.create_table_context(table_name, &cell).await
+            })
+            .await?
+            .clone();
+
+        // Close the insertion-to-OnceCell-completion window against DROP.
+        // No map guard survives an await; rollback can only evict our Arc.
+        let current = self.tables.get(table_name);
+        if !self.configs.contains_key(table_name)
+            || !current
+                .as_ref()
+                .is_some_and(|entry| Arc::ptr_eq(entry.value(), &cell))
+        {
+            if let Some(mvcc) = tbl.mvcc_store() {
+                let _ = self
+                    .per_table_mvcc
+                    .remove_if_sync(&table_token_for(table_name), |existing| {
+                        Arc::ptr_eq(existing, &mvcc)
+                    });
             }
-            self.create_table_context(table_name).await
-        })
-        .await
-        .cloned()
+            return Err(DbError::NotFound(format!(
+                "Table '{table_name}' was removed during initialization"
+            )));
+        }
+        Ok(tbl)
     }
 
     /// Test-only fault-injection seam: force-overwrite the cached
@@ -379,7 +408,13 @@ impl RepoInstance {
         );
     }
 
-    async fn create_table_context(&self, table_name: &str) -> DbResult<TableManager> {
+    /// cancel-safe: yes — all awaits precede MVCC publication. After insert,
+    /// only synchronous ownership checks and builders remain.
+    async fn create_table_context(
+        &self,
+        table_name: &str,
+        cell: &Arc<OnceCell<TableManager>>,
+    ) -> DbResult<TableManager> {
         let data_store: Arc<dyn Store> = self
             .repo
             .store_get(format!("__data__{}", table_name))
@@ -394,6 +429,19 @@ impl RepoInstance {
             .await?;
 
         let gate = self.tx_gate().await?;
+
+        // This seam models a failure/cancellation in setup that used to run
+        // AFTER registration. It is per-repo and consumed once, never global.
+        #[cfg(test)]
+        if let Some(hook) = self.table_init_hook.swap(None) {
+            hook.run().await?;
+        }
+
+        // Complete ALL asynchronous/fallible setup before publication.
+        // __data__ is inert under MVCC; __info__ keeps its wrappers.
+        let data_store = fully_unwrap_store(&data_store).await;
+        let tbl = TableManager::create(table_name.to_string(), data_store, info_store).await?;
+        let repo_interner = self.repo_interner().await?;
         let mvcc = Arc::new(shamir_tx::MvccStore::new(history_store, Arc::clone(&gate)));
 
         let token = table_token_for(table_name);
@@ -428,23 +476,21 @@ impl RepoInstance {
             )));
         }
 
-        // L14: when an MvccStore is attached, ALL data reads and writes are
-        // routed through the version log (`history`), never through `__data__`.
-        // The MemBuffer wrapper inherited from the repo-level BoxRepo::MemBuffer
-        // is dead weight on `__data__` — it caches entries that are never read
-        // and drains dirty slots that are never written. Unwrap to the raw
-        // backend so the TableManager holds an inert store reference (used only
-        // by the non-MVCC fallback branches, which are unreachable when MVCC is
-        // attached). `__info__` (indexes, counter) stays wrapped — it IS
-        // actively read/written.
-        let data_store = fully_unwrap_store(&data_store).await;
-
-        let tbl = TableManager::create(table_name.to_string(), data_store, info_store).await?;
-        // Stage I: every table in this repo SHARES the one repo-level
-        // interner (built lazily against the `"__interner__"` store) so a
-        // field name resolves to a single id across tables and V2 WAL
-        // recovery resolves one interner instead of a per-table one.
-        let repo_interner = self.repo_interner().await?;
+        // DROP may have removed/replaced our OnceCell while setup awaited.
+        // Existence alone is insufficient after DROP + CREATE of the same name.
+        let current = self.tables.get(table_name);
+        if !self.configs.contains_key(table_name)
+            || !current
+                .as_ref()
+                .is_some_and(|entry| Arc::ptr_eq(entry.value(), cell))
+        {
+            let _ = self
+                .per_table_mvcc
+                .remove_if_sync(&token, |existing| Arc::ptr_eq(existing, &mvcc));
+            return Err(DbError::NotFound(format!(
+                "Table '{table_name}' was removed during initialization"
+            )));
+        }
         let tbl = tbl.with_mvcc_store(mvcc).with_interner(repo_interner);
 
         // Wire the non-tx write path to the per-repo gate so that
@@ -499,6 +545,9 @@ impl RepoInstance {
     /// `discover_restrict_refs`/`discover_action_refs` scan when rebuilding
     /// the cache.
     pub fn add_table(&self, config: TableConfig) {
+        // Same synchronous DDL lock order as remove_table. This closes the
+        // config/reverse-token re-add window without holding guards over await.
+        let _entry = self.tables.entry(config.name.clone());
         register_token(&self.token_names, &config.name);
         self.configs.insert(config.name.clone(), config);
         self.fk_reverse_cache.invalidate();
@@ -511,33 +560,29 @@ impl RepoInstance {
     /// actual removal — same rationale as `add_table` (table membership
     /// changed).
     pub fn remove_table(&self, table_name: &str) -> bool {
+        // DDL-only synchronous critical section: tables -> configs -> scc.
+        // Keep the table shard exclusive until owned MVCC cleanup completes,
+        // so a replacement initializer cannot publish in the removal window.
+        let entry = self.tables.entry(table_name.to_string());
         let removed = self.configs.remove(table_name).is_some();
         if removed {
-            self.tables.remove(table_name);
             self.fk_reverse_cache.invalidate();
-            // Drop the reverse-index entry only if it still points at the
-            // table we removed. A (astronomically unlikely) token collision
-            // could have left another name's mapping in place; never evict
-            // someone else's mapping.
             let token = table_token_for(table_name);
             let _ = self
                 .token_names
                 .remove_if_sync(&token, |existing| existing.as_str() == table_name);
-            // A13: evict the per_table_mvcc registration too. The token is
-            // a deterministic hash of the name, so a DROP followed by a
-            // CREATE of the SAME name reuses it — if this entry leaked,
-            // `create_table_context`'s `per_table_mvcc.insert(token, ..)`
-            // would silently no-op (scc::HashMap::insert returns Err when
-            // the key already exists) and the commit pipeline / SSI
-            // provider / drainer — which all resolve the MvccStore BY
-            // TOKEN through this map — would keep writing through the
-            // STALE old store while the new `TableManager` reads through
-            // its own freshly-held store: a split-brain where committed
-            // transactions silently vanish. `Arc::clone` reference
-            // counting means any in-flight handle that already captured
-            // the old store keeps working against it; this only stops
-            // NEW lookups from finding the stale entry.
-            let _ = self.per_table_mvcc.remove_sync(&token);
+            if let dashmap::mapref::entry::Entry::Occupied(entry) = &entry {
+                if let Some(mvcc) = entry.get().get().and_then(TableManager::mvcc_store) {
+                    let _ = self
+                        .per_table_mvcc
+                        .remove_if_sync(&token, |existing| Arc::ptr_eq(existing, &mvcc));
+                }
+            }
+            // An empty/in-flight cell owns no published MVCC. Its initializer
+            // must detect retirement and roll back only its own registration.
+            if let dashmap::mapref::entry::Entry::Occupied(entry) = entry {
+                entry.remove();
+            }
         }
         removed
     }
