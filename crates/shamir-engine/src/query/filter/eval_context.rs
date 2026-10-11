@@ -11,6 +11,7 @@ use shamir_types::types::value::QueryValue;
 use super::cond_cache::{new_local_cond_cache, CondCache, LocalCondCache};
 use super::field_path_cache::FieldPathCache;
 use super::query_ref_cache::QueryRefCache;
+use crate::query::batch::exec_scope::RowByteMeter;
 use crate::query::read::QueryResult;
 
 /// Context passed to filter callbacks during evaluation.
@@ -38,6 +39,7 @@ use crate::query::read::QueryResult;
 /// top level it is an empty shared map (zero allocation on the common
 /// path). Used to resolve `FilterValue::Param { name }` references.
 pub struct FilterContext<'a> {
+    pub(crate) row_byte_meter: Option<&'a RowByteMeter<'a>>,
     max_accumulator_bytes: Option<usize>,
     pub interner: &'a Interner,
     pub resolved_refs: &'a TMap<String, QueryResult>,
@@ -121,6 +123,7 @@ fn builtins_only_resolver() -> ScalarResolver {
 impl<'a> FilterContext<'a> {
     pub fn new(interner: &'a Interner, resolved_refs: &'a TMap<String, QueryResult>) -> Self {
         Self {
+            row_byte_meter: None,
             max_accumulator_bytes: None,
             interner,
             resolved_refs,
@@ -131,6 +134,11 @@ impl<'a> FilterContext<'a> {
             query_ref_cache: None,
             local_cond_cache: new_local_cond_cache(),
         }
+    }
+
+    pub(crate) fn with_row_byte_meter(mut self, meter: Option<&'a RowByteMeter<'a>>) -> Self {
+        self.row_byte_meter = meter;
+        self
     }
 
     pub fn with_max_accumulator_bytes(mut self, max: usize) -> Self {

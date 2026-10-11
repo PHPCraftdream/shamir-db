@@ -1258,16 +1258,33 @@ impl TableManager {
                                 // heap's K-row window).
                                 topk_total += 1;
                                 let qv = proj.as_ref().unwrap().project_value(&view, interner);
+                                if let Some(meter) = ctx.row_byte_meter {
+                                    meter.charge(
+                                        crate::query::batch::exec_scope::RowByteMeter::value_size(
+                                            &qv,
+                                        ),
+                                    )?;
+                                }
                                 heap.push(qv, tracking_versions.then_some(id));
                             } else if needs_raw {
                                 // S4: push raw bytes; the aggregate pipeline
                                 // builds a RecordView per row. No InnerValue
                                 // decode here.
+                                // Meter the retained raw intermediate: 16-byte
+                                // list entry + 16-byte id + 24-byte byte slot
+                                // + encoded length. It grants no output credit.
+                                if let Some(meter) = ctx.row_byte_meter {
+                                    meter.charge(56u64.saturating_add(b.len() as u64))?;
+                                }
                                 raw_acc.push((id, b));
                             } else {
-                                rec_acc.push(crate::query::read::QueryRecord::Direct(
+                                let row = QueryRecord::Direct(
                                     proj.as_ref().unwrap().project_value(&view, interner),
-                                ));
+                                );
+                                if let Some(meter) = ctx.row_byte_meter {
+                                    meter.charge_record(&row)?;
+                                }
+                                rec_acc.push(row);
                                 if tracking_versions {
                                     id_acc.push(id);
                                 }
@@ -1285,6 +1302,13 @@ impl TableManager {
                                 // — already-decoded InnerValue, e.g. from MVCC).
                                 topk_total += 1;
                                 let qv = proj.as_ref().unwrap().project_value(&record, interner);
+                                if let Some(meter) = ctx.row_byte_meter {
+                                    meter.charge(
+                                        crate::query::batch::exec_scope::RowByteMeter::value_size(
+                                            &qv,
+                                        ),
+                                    )?;
+                                }
                                 heap.push(qv, tracking_versions.then_some(id));
                             } else if needs_raw {
                                 // S4: the Owned arm carries an already-decoded
@@ -1293,7 +1317,13 @@ impl TableManager {
                                 // it. This is the cold path (the hot Borrowed
                                 // arm avoids the re-encode).
                                 match record.to_bytes() {
-                                    Ok(bytes) => raw_acc.push((id, bytes)),
+                                    Ok(bytes) => {
+                                        if let Some(meter) = ctx.row_byte_meter {
+                                            meter
+                                                .charge(56u64.saturating_add(bytes.len() as u64))?;
+                                        }
+                                        raw_acc.push((id, bytes));
+                                    }
                                     // Malformed tree — skip defensively, but report it.
                                     Err(_) => {
                                         corrupt.push(CorruptRecordRef {
@@ -1304,9 +1334,13 @@ impl TableManager {
                                     }
                                 }
                             } else {
-                                rec_acc.push(crate::query::read::QueryRecord::Direct(
+                                let row = QueryRecord::Direct(
                                     proj.as_ref().unwrap().project_value(&record, interner),
-                                ));
+                                );
+                                if let Some(meter) = ctx.row_byte_meter {
+                                    meter.charge_record(&row)?;
+                                }
+                                rec_acc.push(row);
                                 if tracking_versions {
                                     id_acc.push(id);
                                 }
@@ -1406,6 +1440,11 @@ impl TableManager {
             .map(crate::query::read::QueryRecord::Direct)
             .collect();
 
+        if !needs_raw {
+            if let Some(meter) = ctx.row_byte_meter {
+                meter.credit_survivors(&final_records);
+            }
+        }
         let elapsed = start.elapsed();
         let records_returned = final_records.len() as u64;
         let records = final_records;
@@ -1504,20 +1543,25 @@ impl TableManager {
                         if idx >= skip {
                             if let Some(lim) = limit {
                                 if idx < skip + lim {
+                                    let row =
+                                        QueryRecord::Direct(proj.project_value($rec, interner));
+                                    if let Some(meter) = ctx.row_byte_meter {
+                                        meter.charge_record(&row)?;
+                                    }
                                     if tracking_versions {
                                         version_ids.push(*id);
                                     }
-                                    result.push(crate::query::read::QueryRecord::Direct(
-                                        proj.project_value($rec, interner),
-                                    ));
+                                    result.push(row);
                                 }
                             } else {
+                                let row = QueryRecord::Direct(proj.project_value($rec, interner));
+                                if let Some(meter) = ctx.row_byte_meter {
+                                    meter.charge_record(&row)?;
+                                }
                                 if tracking_versions {
                                     version_ids.push(*id);
                                 }
-                                result.push(crate::query::read::QueryRecord::Direct(
-                                    proj.project_value($rec, interner),
-                                ));
+                                result.push(row);
                             }
                         }
                     }};
@@ -1707,6 +1751,9 @@ impl TableManager {
                                     }
                                 }
                             };
+                            if let Some(meter) = ctx.row_byte_meter {
+                                meter.charge_record(&record)?;
+                            }
                             if tracking_versions {
                                 version_ids.push(*id);
                             }
@@ -1751,6 +1798,9 @@ impl TableManager {
                                     Err(_) => QueryRecord::Direct(proj.project_value(iv, interner)),
                                 }
                             };
+                            if let Some(meter) = ctx.row_byte_meter {
+                                meter.charge_record(&record)?;
+                            }
                             if tracking_versions {
                                 version_ids.push(*id);
                             }
@@ -1781,10 +1831,14 @@ impl TableManager {
                                 break;
                             }
                         }
+                        let row = QueryRecord::Direct(proj.project_value($rec, interner));
+                        if let Some(meter) = ctx.row_byte_meter {
+                            meter.charge_record(&row)?;
+                        }
                         if tracking_versions {
                             version_ids.push(*id);
                         }
-                        result.push(QueryRecord::Direct(proj.project_value($rec, interner)));
+                        result.push(row);
                     }};
                 }
 
