@@ -639,7 +639,7 @@ async fn matrix_preinterned_field_leader_names() {
         "items",
         Read::PointGet,
         &ids,
-        &[expected.clone()],
+        std::slice::from_ref(&expected),
         None,
     )
     .await;
