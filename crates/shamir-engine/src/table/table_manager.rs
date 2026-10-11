@@ -1569,9 +1569,9 @@ impl TableManager {
     ///
     /// **Contract:** The caller MUST ensure the guard outlives the scan it
     /// protects. Acquire the guard FIRST, then use `guard.version()` as the
-    /// pin version — this is the version provably protected from GC. Do not
-    /// read `current_committed_version()` separately; that could race with
-    /// concurrent commits and pin a version the guard does not protect.
+    /// pin version — this is the version provably protected from GC. The
+    /// caller must hold the writer-drain barrier, after draining this table's
+    /// writers, before opening the allocation-high-water snapshot.
     ///
     /// Returns an async `SnapshotGuard` — `await` is required.
     ///
@@ -1580,7 +1580,10 @@ impl TableManager {
     #[allow(dead_code)]
     pub(crate) async fn open_index_build_snapshot(&self) -> Option<shamir_tx::SnapshotGuard> {
         match self.changefeed.as_ref() {
-            Some(cf) => Some(cf.gate.open_snapshot().await),
+            Some(cf) => {
+                let pin = cf.gate.version_allocation_high_water_mark();
+                Some(cf.gate.open_snapshot_at(pin).await)
+            }
             None => None,
         }
     }

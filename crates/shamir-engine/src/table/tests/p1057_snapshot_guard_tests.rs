@@ -69,11 +69,9 @@ async fn collect_stream_sorted(
 async fn anti_gc_snapshot_guard_pins_min_alive() {
     let (tbl, _mvcc, gate) = make_table_with_mvcc_and_changefeed().await;
 
-    // Write some data to advance last_committed.
-    for i in 0..3 {
-        let version = i as u64 + 1;
-        gate.completion().mark(version, State::Materialized);
-        gate.publish_committed_max(version);
+    // Allocate and complete versions so the DDL allocation high water is 3.
+    for _ in 0..3 {
+        gate.assign_next_version_guarded().commit();
     }
 
     // No guard held: min_alive() tracks last_committed().

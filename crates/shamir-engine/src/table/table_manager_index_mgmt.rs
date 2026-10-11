@@ -2703,9 +2703,12 @@ impl TableManager {
             )));
         }
 
-        // Under the barrier, open the snapshot. If changefeed is not wired,
-        // online build is unavailable for this table — return None signal
-        // for the caller (#1089) to fall back to the old path.
+        // Read the allocation high water only AFTER raise → drain → lock.
+        // It is an exact cut for this table: pre-barrier writers have drained,
+        // slow-path writers are excluded by the lock, and later writes enter
+        // the dirty-set before the barrier is released. Versions parked on
+        // other tables can hold W back without hiding this table's rows.
+        // If changefeed is absent, return the fallback signal.
         let Some(guard) = self.open_index_build_snapshot().await else {
             // Barrier guard drops here (RAII), releasing bit+lock.
             return Ok(None);
