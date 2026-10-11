@@ -1,13 +1,6 @@
-//! Unit tests for `TableManager::bindings_len` AtomicUsize mirror (perf-③.289).
-//!
-//! Covers:
-//! - Mirror == bindings.len() after add/remove (single thread).
-//! - Fast-skip: `run_validators_qv` returns early on empty bindings
-//!   without touching the ArcSwap (verified via mirror staying 0).
-//! - Concurrent add: multiple tasks bind distinct validators → mirror
-//!   converges to actual bindings count.
+//! Legacy binding-count regressions, now reading the authoritative snapshot.
+//! Covers sequential mutations, empty-binding fast-skip and concurrent adds.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -58,16 +51,16 @@ fn make_binding(id: RecordId) -> ValidatorBinding {
 
 // ── Tests ────────────────────────────────────────────────────────────────
 
-/// Fresh TableManager (no persisted bindings) → mirror == 0.
+/// Fresh TableManager (no persisted bindings) → snapshot_count == 0.
 #[tokio::test]
-async fn initial_mirror_is_zero() {
+async fn initial_snapshot_count_is_zero() {
     let tm = empty_table_manager().await;
-    assert_eq!(tm.bindings_len.load(Ordering::Acquire), 0);
+    assert_eq!(tm.validator_bindings.load().len(), 0);
 }
 
-/// After one add_validator_binding → mirror == 1.
+/// After one add_validator_binding → snapshot_count == 1.
 #[tokio::test]
-async fn mirror_increments_after_add() {
+async fn snapshot_count_increments_after_add() {
     let tm = empty_table_manager().await;
 
     let reg = Arc::new(ValidatorRegistry::new());
@@ -77,14 +70,14 @@ async fn mirror_increments_after_add() {
 
     tm.add_validator_binding(make_binding(id)).await.unwrap();
 
-    assert_eq!(tm.bindings_len.load(Ordering::Acquire), 1);
+    assert_eq!(tm.validator_bindings.load().len(), 1);
     // ArcSwap must also be consistent.
     assert_eq!(tm.validator_bindings().len(), 1);
 }
 
-/// add then remove → mirror back to 0.
+/// add then remove → snapshot_count back to 0.
 #[tokio::test]
-async fn mirror_decrements_after_remove() {
+async fn snapshot_count_decrements_after_remove() {
     let tm = empty_table_manager().await;
 
     let reg = Arc::new(ValidatorRegistry::new());
@@ -93,15 +86,15 @@ async fn mirror_decrements_after_remove() {
         .unwrap();
 
     tm.add_validator_binding(make_binding(id)).await.unwrap();
-    assert_eq!(tm.bindings_len.load(Ordering::Acquire), 1);
+    assert_eq!(tm.validator_bindings.load().len(), 1);
 
     let removed = tm.remove_validator_binding(&id).await.unwrap();
     assert!(removed);
-    assert_eq!(tm.bindings_len.load(Ordering::Acquire), 0);
+    assert_eq!(tm.validator_bindings.load().len(), 0);
     assert_eq!(tm.validator_bindings().len(), 0);
 }
 
-/// Idempotent add (same validator_id twice) keeps mirror at 1.
+/// Idempotent add (same validator_id twice) keeps snapshot_count at 1.
 #[tokio::test]
 async fn idempotent_add_does_not_double_count() {
     let tm = empty_table_manager().await;
@@ -114,24 +107,24 @@ async fn idempotent_add_does_not_double_count() {
     tm.add_validator_binding(make_binding(id)).await.unwrap();
     tm.add_validator_binding(make_binding(id)).await.unwrap();
 
-    assert_eq!(tm.bindings_len.load(Ordering::Acquire), 1);
+    assert_eq!(tm.validator_bindings.load().len(), 1);
     assert_eq!(tm.validator_bindings().len(), 1);
 }
 
-/// Remove of non-existent id leaves mirror unchanged.
+/// Remove of non-existent id leaves snapshot_count unchanged.
 #[tokio::test]
-async fn remove_nonexistent_leaves_mirror_unchanged() {
+async fn remove_nonexistent_leaves_snapshot_count_unchanged() {
     let tm = empty_table_manager().await;
     let phantom = RecordId::system("phantom");
 
     let removed = tm.remove_validator_binding(&phantom).await.unwrap();
     assert!(!removed);
-    assert_eq!(tm.bindings_len.load(Ordering::Acquire), 0);
+    assert_eq!(tm.validator_bindings.load().len(), 0);
 }
 
-/// Mirror == bindings.len() for multiple sequential adds and removes.
+/// Snapshot count == bindings.len() for multiple sequential adds and removes.
 #[tokio::test]
-async fn mirror_tracks_bindings_length_through_mutations() {
+async fn snapshot_count_tracks_bindings_length_through_mutations() {
     let tm = empty_table_manager().await;
 
     let ids: Vec<RecordId> = (0..5)
@@ -141,40 +134,39 @@ async fn mirror_tracks_bindings_length_through_mutations() {
     for &id in &ids {
         tm.add_validator_binding(make_binding(id)).await.unwrap();
     }
-    assert_eq!(tm.bindings_len.load(Ordering::Acquire), 5);
+    assert_eq!(tm.validator_bindings.load().len(), 5);
     assert_eq!(tm.validator_bindings().len(), 5);
 
     // Remove two of them.
     tm.remove_validator_binding(&ids[1]).await.unwrap();
     tm.remove_validator_binding(&ids[3]).await.unwrap();
 
-    assert_eq!(tm.bindings_len.load(Ordering::Acquire), 3);
+    assert_eq!(tm.validator_bindings.load().len(), 3);
     assert_eq!(tm.validator_bindings().len(), 3);
 }
 
 /// Fast-skip: run_validators_qv on a table with a registry but 0 bindings
-/// returns Ok immediately. Verified indirectly: mirror stays 0, which is
-/// the guard that causes early return before any load_full() call.
+/// returns Ok immediately; the authoritative snapshot stays empty.
 #[tokio::test]
 async fn fast_skip_fires_on_empty_bindings() {
     let tm_base = empty_table_manager().await;
 
     // Wire in a registry — without this the first check (None registry)
-    // would short-circuit and we'd never reach the bindings_len check.
+    // would short-circuit before the bindings snapshot check.
     let reg = Arc::new(ValidatorRegistry::new());
     let mut tm = tm_base;
     tm.set_validator_registry(reg);
 
-    // bindings_len == 0 → fast-skip → Ok(()) without touching ArcSwap.
-    assert_eq!(tm.bindings_len.load(Ordering::Acquire), 0);
+    // Empty snapshot: fast-skip without cloning an Arc.
+    assert_eq!(tm.validator_bindings.load().len(), 0);
 
     let result = tm
         .run_validators_qv(WriteOp::Insert, None, None, &Actor::System, None, None)
         .await;
     assert!(result.is_ok(), "empty bindings must fast-skip to Ok(())");
 
-    // Mirror is still 0 — no mutation happened.
-    assert_eq!(tm.bindings_len.load(Ordering::Acquire), 0);
+    // Snapshot count is still 0 — no mutation happened.
+    assert_eq!(tm.validator_bindings.load().len(), 0);
 }
 
 /// After add_validator_binding the fast-skip no longer fires.
@@ -195,7 +187,7 @@ async fn fast_skip_disabled_after_add() {
     tm.set_validator_registry(Arc::clone(&reg));
     tm.add_validator_binding(make_binding(id)).await.unwrap();
 
-    assert_eq!(tm.bindings_len.load(Ordering::Acquire), 1);
+    assert_eq!(tm.validator_bindings.load().len(), 1);
 
     // With a live binding, run_validators_qv goes past the fast-skip.
     // AcceptAll → Ok(()).
@@ -206,9 +198,9 @@ async fn fast_skip_disabled_after_add() {
 }
 
 /// Concurrent add: N tasks each bind a distinct validator_id on a shared
-/// TableManager → mirror == N after all tasks complete.
+/// TableManager → snapshot_count == N after all tasks complete.
 #[tokio::test]
-async fn concurrent_adds_mirror_converges_to_n() {
+async fn concurrent_adds_snapshot_count_converges_to_n() {
     const N: usize = 20;
 
     let tm = Arc::new(empty_table_manager().await);
@@ -229,11 +221,11 @@ async fn concurrent_adds_mirror_converges_to_n() {
         h.await.unwrap();
     }
 
-    let mirror = tm.bindings_len.load(Ordering::Acquire);
+    let snapshot_count = tm.validator_bindings.load().len();
     let actual = tm.validator_bindings().len();
     assert_eq!(
-        mirror, actual,
-        "mirror must match actual bindings count after concurrent adds"
+        snapshot_count, actual,
+        "snapshot_count must match actual bindings count after concurrent adds"
     );
     assert_eq!(
         actual, N,
