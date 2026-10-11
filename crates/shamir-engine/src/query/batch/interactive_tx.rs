@@ -111,9 +111,9 @@ pub(super) async fn execute_in_open_tx_with_scope(
         return Err(BatchError::CrossRepoNotSupported { repos });
     }
 
-    let mut plan =
-        shamir_query_types::batch::BatchPlanner::plan(&request.queries, &request.limits)?;
-    validate_tables(&request.queries, resolver).await?;
+    let effective = request.limits.clamped_to(scope.limits());
+    let mut plan = shamir_query_types::batch::BatchPlanner::plan(&request.queries, &effective)?;
+    validate_tables(&request.queries, resolver, &effective, scope.limits()).await?;
     // #670: mirrors execute_batch_impl / run_nested_body_in_outer_tx — this
     // path previously skipped the filter-nesting-depth DoS guard, letting an
     // interactive-tx client submit arbitrarily deeply nested filters.
