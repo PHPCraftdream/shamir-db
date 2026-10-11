@@ -451,9 +451,10 @@ impl TableManager {
         // through to the legacy paths when the shape doesn't match.
         if let Some(ref filter) = query.r#where {
             if let Some(fvq) = super::filtered_vector::try_extract_filtered_vector_query(filter) {
-                return self
-                    .read_filtered_vector_scan(query, ctx, interner, &fvq, tx, start)
-                    .await;
+                return Box::pin(
+                    self.read_filtered_vector_scan(query, ctx, interner, &fvq, tx, start),
+                )
+                .await;
             }
         }
 
@@ -487,9 +488,16 @@ impl TableManager {
                     .zip(raw)
                     .filter_map(|(id, bytes)| bytes.map(|b| (id, b)))
                     .collect();
-                return self
-                    .postprocess_candidates(query, ctx, interner, rows, tag, start, Vec::new())
-                    .await;
+                return Box::pin(self.postprocess_candidates(
+                    query,
+                    ctx,
+                    interner,
+                    rows,
+                    tag,
+                    start,
+                    Vec::new(),
+                ))
+                .await;
             }
         }
 
@@ -885,8 +893,7 @@ impl TableManager {
             Box::pin(self.list_stream(batch_size))
         };
 
-        self.read_collecting_from(query, ctx, interner, filter_cb, stream, start)
-            .await
+        Box::pin(self.read_collecting_from(query, ctx, interner, filter_cb, stream, start)).await
     }
 
     async fn read_collecting_from(
@@ -1779,18 +1786,17 @@ impl TableManager {
                                     &mut corrupt,
                                 )
                                 .await;
-                            return self
-                                .build_filtered_vector_result(
-                                    query,
-                                    interner,
-                                    ctx,
-                                    tx,
-                                    start,
-                                    &ranked,
-                                    "pre_filter",
-                                    corrupt,
-                                )
-                                .await;
+                            return Box::pin(self.build_filtered_vector_result(
+                                query,
+                                interner,
+                                ctx,
+                                tx,
+                                start,
+                                &ranked,
+                                "pre_filter",
+                                corrupt,
+                            ))
+                            .await;
                         } else if selectivity <= CO_FILTER_MAX_SELECTIVITY {
                             // CO-FILTER: HNSW search_filter with allow-set.
                             let ranked = hnsw
@@ -1814,18 +1820,17 @@ impl TableManager {
                                     &mut corrupt,
                                 )
                                 .await;
-                            return self
-                                .build_filtered_vector_result(
-                                    query,
-                                    interner,
-                                    ctx,
-                                    tx,
-                                    start,
-                                    &ranked,
-                                    "co_filter",
-                                    corrupt,
-                                )
-                                .await;
+                            return Box::pin(self.build_filtered_vector_result(
+                                query,
+                                interner,
+                                ctx,
+                                tx,
+                                start,
+                                &ranked,
+                                "co_filter",
+                                corrupt,
+                            ))
+                            .await;
                         }
                         // else: selectivity too high → fall through to post-filter
                     }
@@ -1837,7 +1842,6 @@ impl TableManager {
         let mut k_prime = (((k as f32) * oversample).ceil() as u32)
             .max(k) // never below k
             .min(MAX_TOPK);
-        let mut last_ranked: Vec<(RecordId, f32)>;
         // Survivors carry their already-resolved record bytes (plus the
         // originating RecordId, for F-10 corrupt-record reporting below) so
         // the projection loop reuses them instead of re-fetching — the
@@ -1868,7 +1872,7 @@ impl TableManager {
                 .await
                 .map_err(|e| DbError::Internal(e.to_string()))?;
 
-            last_ranked = match result {
+            let last_ranked = match result {
                 IndexResult::Ranked(r) => r,
                 IndexResult::Set(_) => {
                     // Vector backend returns Ranked; a Set is a contract
@@ -1941,7 +1945,7 @@ impl TableManager {
             k_prime = k_prime.saturating_mul(2).min(MAX_TOPK);
         }
 
-        self.postprocess_candidates(
+        Box::pin(self.postprocess_candidates(
             query,
             ctx,
             interner,
@@ -1949,7 +1953,7 @@ impl TableManager {
             "filtered_vector_scan",
             start,
             corrupt,
-        )
+        ))
         .await
     }
 
@@ -2186,7 +2190,7 @@ impl TableManager {
             .zip(raw)
             .filter_map(|(id, bytes)| bytes.map(|b| (id, b)))
             .collect();
-        self.postprocess_candidates(query, ctx, interner, rows, index_tag, start, corrupt)
+        Box::pin(self.postprocess_candidates(query, ctx, interner, rows, index_tag, start, corrupt))
             .await
     }
 
@@ -2246,9 +2250,9 @@ impl TableManager {
         } else {
             query
         };
-        let mut result = self
-            .read_collecting_from(effective, ctx, interner, None, stream, start)
-            .await?;
+        let mut result =
+            Box::pin(self.read_collecting_from(effective, ctx, interner, None, stream, start))
+                .await?;
         if eligible {
             result.pagination = pagination;
         }
