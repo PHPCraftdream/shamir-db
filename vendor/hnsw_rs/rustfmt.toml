@@ -1,0 +1,3 @@
+# Third-party source: keep it byte-identical to upstream except for the
+# documented patches (VENDORED.md), so the workspace fmt gate must not touch it.
+disable_all_formatting = true

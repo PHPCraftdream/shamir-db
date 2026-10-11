@@ -48,7 +48,9 @@ shamir-numa = { path = "../shamir-numa" }
 # stability across patches, and phase P2 (snapshots) round-trips dumps
 # through this exact version (`HNSW_RS_VERSION` in `vector/snapshot.rs` must
 # move together with this pin). 0.3.5 carries the reverse-edge layer fix that
-# 0.3.4 lacked (#1232).
+# 0.3.4 lacked (#1232). The workspace root `[patch.crates-io]` replaces it with
+# `vendor/hnsw_rs` (still version 0.3.5), which also fixes the concurrent-insert
+# lock-order deadlock (#1262); see vendor/hnsw_rs/VENDORED.md.
 hnsw_rs = "=0.3.5"
 # CRC32 for snapshot integrity (phase P2). Same version the WAL crate uses.
 crc32fast = "1"

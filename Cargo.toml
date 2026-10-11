@@ -1,5 +1,7 @@
 [workspace]
-members = ["crates/*"]
+# `vendor/hnsw_rs` is a patched copy of the crates.io crate (see its VENDORED.md);
+# it is a member so its own unit tests (incl. the lock-order regression) run in CI.
+members = ["crates/*", "vendor/hnsw_rs"]
 resolver = "2"
 
 # napi-rs cdylib needs the MSVC toolchain on Windows (it delay-loads
@@ -123,3 +125,13 @@ incremental = false
 # For "final" / publishable absolute numbers, run explicitly with the
 # release profile: cargo bench -p <crate> --bench <name> --profile=release
 opt-level = 1
+
+# hnsw_rs 0.3.5 deadlocks under concurrent inserts: `reverse_update_neighborhood_simple`
+# holds a read lock on the new point's neighbour list while taking write locks on its
+# neighbours (lock-order inversion). The vendored copy releases the read lock first; see
+# vendor/hnsw_rs/VENDORED.md. The version stays 0.3.5, so the exact pin in
+# crates/shamir-index/Cargo.toml and the dump-format guard HNSW_RS_VERSION are unchanged.
+# Drop this entry (and the member + directory) once an upstream release has the fix and
+# has passed the 30-day cooldown.
+[patch.crates-io]
+hnsw_rs = { path = "vendor/hnsw_rs" }
