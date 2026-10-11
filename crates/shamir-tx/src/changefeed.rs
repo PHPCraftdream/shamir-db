@@ -41,11 +41,13 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use shamir_types::access::Actor;
 use tokio::sync::{broadcast, mpsc, Notify};
+use tokio::time::{sleep_until, timeout_at, Instant};
 
 /// One record-level change inside a committed transaction.
 ///
@@ -158,6 +160,13 @@ pub trait ChangelogStore: Send + Sync {
     async fn range_from(&self, from_key: Bytes, limit: usize) -> Result<Vec<Bytes>, String>;
 }
 
+/// Barriers share the bounded channel's 4096 slots with events.
+#[derive(Debug)]
+enum JournalMsg {
+    Event(Arc<ChangelogEvent>),
+    Barrier(u64),
+}
+
 /// Per-repo changefeed: live broadcast + durable journal writer.
 ///
 /// Constructed lazily by the engine's `RepoInstance` on first use (so a
@@ -170,7 +179,7 @@ pub struct RepoChangefeed {
     live: broadcast::Sender<Arc<ChangelogEvent>>,
     /// Sender side of the journal-writer channel. `try_send` from the
     /// commit-path; the background task owns the receiver.
-    journal_tx: mpsc::Sender<Arc<ChangelogEvent>>,
+    journal_tx: mpsc::Sender<JournalMsg>,
     /// Wakes the writer for shutdown-drain.
     notify: Arc<Notify>,
     /// Set to stop the writer after it drains the channel.
@@ -186,6 +195,9 @@ pub struct RepoChangefeed {
     last_persisted_version: Arc<AtomicU64>,
     /// CF-1: shared minimum known hole and writer wakeup.
     gap: Arc<GapMarker>,
+    confirmed_through: Arc<AtomicU64>,
+    barrier_notify: Arc<Notify>,
+    confirm_timeouts: AtomicU64,
 }
 
 /// Result of a [`RepoChangefeed::read_from`] call.
@@ -238,6 +250,8 @@ impl RepoChangefeed {
         let notify = Arc::new(Notify::new());
         let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let last_persisted_version = Arc::new(AtomicU64::new(0));
+        let confirmed_through = Arc::new(AtomicU64::new(0));
+        let barrier_notify = Arc::new(Notify::new());
         let gap = Arc::new(GapMarker {
             first: AtomicU64::new(restored_gap),
             persisted: AtomicU64::new(restored_gap),
@@ -252,8 +266,12 @@ impl RepoChangefeed {
             journal_dropped: AtomicU64::new(0),
             last_persisted_version: Arc::clone(&last_persisted_version),
             gap: Arc::clone(&gap),
+            confirmed_through: Arc::clone(&confirmed_through),
+            barrier_notify: Arc::clone(&barrier_notify),
+            confirm_timeouts: AtomicU64::new(0),
         });
 
+        // fire-and-forget: detached by design; owns no feed and drains on shutdown.
         tokio::spawn(journal_writer_loop(
             journal_rx,
             store,
@@ -261,6 +279,8 @@ impl RepoChangefeed {
             shutdown,
             last_persisted_version,
             gap,
+            confirmed_through,
+            barrier_notify,
         ));
         me
     }
@@ -295,11 +315,8 @@ impl RepoChangefeed {
     pub fn emit(&self, event: ChangelogEvent) {
         let event = Arc::new(event);
 
-        // Track 1: live push (does not wait for receivers).
-        let _ = self.live.send(Arc::clone(&event));
-
-        // Track 2: durable journal (does not block the commit-path).
-        self.journal_send(event);
+        self.journal_enqueue(&event);
+        self.broadcast(event);
     }
 
     /// L10(a) journal-safe: emit ONLY to the durable journal, skipping the
@@ -308,14 +325,17 @@ impl RepoChangefeed {
     /// `changes_since` / late subscribers always see every committed event.
     pub fn emit_journal_only(&self, event: ChangelogEvent) {
         let event = Arc::new(event);
-        self.journal_send(event);
+        self.journal_enqueue(&event);
     }
 
-    /// Shared journal-write logic for [`emit`] and [`emit_journal_only`].
-    fn journal_send(&self, event: Arc<ChangelogEvent>) {
-        if let Err(e) = self.journal_tx.try_send(event) {
+    /// Enqueue without awaiting. Full drops are counted; Full and Closed mark a gap.
+    pub fn journal_enqueue(&self, event: &Arc<ChangelogEvent>) {
+        if let Err(e) = self
+            .journal_tx
+            .try_send(JournalMsg::Event(Arc::clone(event)))
+        {
             match e {
-                mpsc::error::TrySendError::Full(ev) => {
+                mpsc::error::TrySendError::Full(JournalMsg::Event(ev)) => {
                     let n = self.journal_dropped.fetch_add(1, Ordering::Relaxed) + 1;
                     self.mark_gap(ev.commit_version);
                     log::warn!(
@@ -325,11 +345,63 @@ impl RepoChangefeed {
                         ev.commit_version
                     );
                 }
-                mpsc::error::TrySendError::Closed(_) => {
-                    // Writer task gone (shutdown). Nothing durable to do.
+                mpsc::error::TrySendError::Closed(JournalMsg::Event(ev)) => {
+                    self.mark_gap(ev.commit_version);
+                }
+                mpsc::error::TrySendError::Full(JournalMsg::Barrier(_))
+                | mpsc::error::TrySendError::Closed(JournalMsg::Barrier(_)) => {
+                    unreachable!("journal_enqueue only sends events");
                 }
             }
         }
+    }
+
+    /// Broadcast only, without enqueueing or waiting for subscribers.
+    pub fn broadcast(&self, event: Arc<ChangelogEvent>) {
+        let _ = self.live.send(event);
+    }
+
+    /// Confirm the channel prefix preceding a barrier for completion watermark `w`.
+    /// Callers must enqueue every published event (or mark its gap) before `w`
+    /// advances; a persistence maximum or an event counter is not a safe bound.
+    /// The single budget covers channel admission and confirmation together.
+    /// cancel-safe: yes — an unsent barrier may be discarded; a sent barrier
+    /// only monotonically confirms a prefix, and notification waits mutate no data.
+    pub async fn confirm_through(&self, w: u64, budget: Duration) -> u64 {
+        if self.confirmed_through.load(Ordering::Acquire) >= w {
+            return w;
+        }
+        let deadline = Instant::now() + budget;
+        match timeout_at(deadline, self.journal_tx.send(JournalMsg::Barrier(w))).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => return self.confirmed_through.load(Ordering::Acquire),
+            Err(_) => return self.confirm_timeout(w),
+        }
+        loop {
+            let notified = self.barrier_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.confirmed_through.load(Ordering::Acquire) >= w {
+                return w;
+            }
+            tokio::select! {
+                biased;
+                () = sleep_until(deadline) => return self.confirm_timeout(w),
+                () = &mut notified => {}
+            }
+        }
+    }
+
+    fn confirm_timeout(&self, w: u64) -> u64 {
+        self.confirm_timeouts.fetch_add(1, Ordering::Relaxed);
+        let bound = self.confirmed_through.load(Ordering::Acquire);
+        log::warn!("changefeed journal confirmation timed out at {w}; safe bound {bound}");
+        bound
+    }
+
+    /// Total confirmation timeouts, including channel admission timeouts.
+    pub fn confirm_timeouts(&self) -> u64 {
+        self.confirm_timeouts.load(Ordering::Relaxed)
     }
 
     /// Total number of journal events dropped due to channel overflow.
@@ -394,6 +466,19 @@ impl RepoChangefeed {
         from_version: u64,
         limit: usize,
     ) -> JournalRead {
+        self.read_from_bounded(store, from_version, limit, u64::MAX)
+            .await
+    }
+
+    /// Read the ascending prefix at or below `bound`, obtained by confirming
+    /// the caller's completion watermark first. Gap inspection follows that barrier.
+    pub async fn read_from_bounded(
+        &self,
+        store: &Arc<dyn ChangelogStore>,
+        from_version: u64,
+        limit: usize,
+        bound: u64,
+    ) -> JournalRead {
         let from_key = Bytes::copy_from_slice(&from_version.to_be_bytes());
         let raw = match store.range_from(from_key, limit).await {
             Ok(v) => v,
@@ -409,7 +494,12 @@ impl RepoChangefeed {
         let mut corrupt_gap = None;
         for bytes in raw {
             match rmp_serde::from_slice::<ChangelogEvent>(&bytes) {
-                Ok(ev) => events.push(ev),
+                Ok(ev) => {
+                    if ev.commit_version > bound {
+                        break;
+                    }
+                    events.push(ev);
+                }
                 Err(e) => {
                     self.mark_gap(from_version);
                     corrupt_gap = Some(from_version.max(1));
@@ -607,13 +697,16 @@ fn serialize_event(ev: &ChangelogEvent) -> Result<Bytes, String> {
 ///
 /// Crash-window: an event acked into the channel but not yet persisted when
 /// the process dies is lost — by design (see module docs).
+#[allow(clippy::too_many_arguments)]
 async fn journal_writer_loop(
-    mut rx: mpsc::Receiver<Arc<ChangelogEvent>>,
+    mut rx: mpsc::Receiver<JournalMsg>,
     store: Arc<dyn ChangelogStore>,
     notify: Arc<Notify>,
     shutdown: Arc<std::sync::atomic::AtomicBool>,
     last_persisted_version: Arc<AtomicU64>,
     gap: Arc<GapMarker>,
+    confirmed_through: Arc<AtomicU64>,
+    barrier_notify: Arc<Notify>,
 ) {
     loop {
         gap.persist(&store).await;
@@ -622,7 +715,15 @@ async fn journal_writer_loop(
         // freshly-armed `notified()` missing an already-consumed permit —
         // §B15e). On shutdown, drain whatever is buffered and exit.
         if shutdown.load(Ordering::SeqCst) {
-            drain_and_persist(&mut rx, &store, &last_persisted_version, &gap).await;
+            drain_and_persist(
+                &mut rx,
+                &store,
+                &last_persisted_version,
+                &gap,
+                &confirmed_through,
+                &barrier_notify,
+            )
+            .await;
             break;
         }
 
@@ -633,7 +734,15 @@ async fn journal_writer_loop(
             ev = rx.recv() => ev,
             () = notify.notified() => {
                 // A hint — drain whatever is buffered, then decide on exit.
-                drain_and_persist(&mut rx, &store, &last_persisted_version, &gap).await;
+                drain_and_persist(
+                    &mut rx,
+                    &store,
+                    &last_persisted_version,
+                    &gap,
+                    &confirmed_through,
+                    &barrier_notify,
+                )
+                .await;
                 if shutdown.load(Ordering::SeqCst) {
                     break;
                 }
@@ -644,17 +753,41 @@ async fn journal_writer_loop(
         let Some(first) = first else {
             // Channel closed: senders gone. Final drain (nothing left, but
             // defensive) and exit.
-            drain_and_persist(&mut rx, &store, &last_persisted_version, &gap).await;
+            drain_and_persist(
+                &mut rx,
+                &store,
+                &last_persisted_version,
+                &gap,
+                &confirmed_through,
+                &barrier_notify,
+            )
+            .await;
             break;
         };
 
-        persist_one(&store, &first, &last_persisted_version, &gap).await;
+        process_journal_msg(
+            &store,
+            first,
+            &last_persisted_version,
+            &gap,
+            &confirmed_through,
+            &barrier_notify,
+        )
+        .await;
         // Opportunistically batch any already-queued events.
         let mut batched = 0usize;
         while batched < WRITER_BATCH {
             match rx.try_recv() {
                 Ok(ev) => {
-                    persist_one(&store, &ev, &last_persisted_version, &gap).await;
+                    process_journal_msg(
+                        &store,
+                        ev,
+                        &last_persisted_version,
+                        &gap,
+                        &confirmed_through,
+                        &barrier_notify,
+                    )
+                    .await;
                     batched += 1;
                 }
                 Err(_) => break,
@@ -662,7 +795,15 @@ async fn journal_writer_loop(
         }
 
         if shutdown.load(Ordering::SeqCst) {
-            drain_and_persist(&mut rx, &store, &last_persisted_version, &gap).await;
+            drain_and_persist(
+                &mut rx,
+                &store,
+                &last_persisted_version,
+                &gap,
+                &confirmed_through,
+                &barrier_notify,
+            )
+            .await;
             break;
         }
     }
@@ -670,15 +811,42 @@ async fn journal_writer_loop(
 
 /// Drain every currently-queued event and persist it.
 async fn drain_and_persist(
-    rx: &mut mpsc::Receiver<Arc<ChangelogEvent>>,
+    rx: &mut mpsc::Receiver<JournalMsg>,
     store: &Arc<dyn ChangelogStore>,
     last_persisted_version: &Arc<AtomicU64>,
     gap: &GapMarker,
+    confirmed_through: &AtomicU64,
+    barrier_notify: &Notify,
 ) {
     while let Ok(ev) = rx.try_recv() {
-        persist_one(store, &ev, last_persisted_version, gap).await;
+        process_journal_msg(
+            store,
+            ev,
+            last_persisted_version,
+            gap,
+            confirmed_through,
+            barrier_notify,
+        )
+        .await;
     }
     gap.persist(store).await;
+}
+
+async fn process_journal_msg(
+    store: &Arc<dyn ChangelogStore>,
+    msg: JournalMsg,
+    last_persisted_version: &Arc<AtomicU64>,
+    gap: &GapMarker,
+    confirmed_through: &AtomicU64,
+    barrier_notify: &Notify,
+) {
+    match msg {
+        JournalMsg::Event(ev) => persist_one(store, &ev, last_persisted_version, gap).await,
+        JournalMsg::Barrier(w) => {
+            confirmed_through.fetch_max(w, Ordering::Release);
+            barrier_notify.notify_waiters();
+        }
+    }
 }
 
 /// Persist a single event. Failures are logged, never propagated — the
