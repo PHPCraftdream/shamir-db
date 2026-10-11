@@ -155,6 +155,35 @@ fn tx_committed_response_carries_transaction_info() {
 }
 
 #[test]
+fn tx_committed_with_error_response_roundtrip() {
+    let info = TransactionInfo::committed_with_error(5, 100, 107, false, "wal_durability");
+    let resp = DbResponse::TxCommitted {
+        transaction: info.clone(),
+    };
+    let v = to_qv(&resp);
+    assert_eq!(
+        v.get("kind").and_then(QueryValue::as_str),
+        Some("tx_committed"),
+    );
+    let tx = v.get("transaction").expect("transaction key");
+    assert_eq!(
+        tx.get("status").and_then(QueryValue::as_str),
+        Some("committed"),
+    );
+    assert_eq!(
+        tx.get("error").and_then(QueryValue::as_str),
+        Some("wal_durability"),
+    );
+    assert_eq!(
+        tx.get("commit_version").and_then(QueryValue::as_i64),
+        Some(107),
+    );
+    assert!(tx.get("reason").is_none());
+    let back: DbResponse = from_qv(v);
+    assert!(matches!(back, DbResponse::TxCommitted { transaction } if transaction == info));
+}
+
+#[test]
 fn tx_rolled_back_response_tag() {
     let v = to_qv(&DbResponse::TxRolledBack { tx_handle: 3 });
     assert_eq!(

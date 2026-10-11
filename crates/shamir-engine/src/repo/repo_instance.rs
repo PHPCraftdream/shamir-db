@@ -1308,6 +1308,13 @@ impl RepoInstance {
                     | crate::tx::CommitError::SsiConflict { .. } => {
                         (commit_err.to_string(), Some("tx_conflict".to_string()))
                     }
+                    crate::tx::CommitError::WalRequiresReopen => (
+                        commit_err.to_string(),
+                        Some("wal_requires_reopen".to_string()),
+                    ),
+                    crate::tx::CommitError::WalDurability { .. } => {
+                        (commit_err.to_string(), Some("wal_durability".to_string()))
+                    }
                     other => (other.to_string(), None),
                 };
                 Err(BatchError::QueryError {
@@ -1317,6 +1324,11 @@ impl RepoInstance {
                 })
             }
         }
+    }
+
+    pub(crate) async fn mark_changefeed_gap(&self, version: u64) -> DbResult<()> {
+        self.changefeed().await?.feed.mark_gap(version);
+        Ok(())
     }
 
     // ============================================================================

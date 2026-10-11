@@ -77,6 +77,11 @@ impl WalTicket {
         }
     }
 
+    #[doc(hidden)]
+    pub fn complete_detached_for_test(&self, state: WalTicketState) {
+        self.complete(state);
+    }
+
     pub fn state(&self) -> WalTicketState {
         match self.state.load(Ordering::Acquire) {
             0 => WalTicketState::Pending,

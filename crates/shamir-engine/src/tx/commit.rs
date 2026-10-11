@@ -1,9 +1,10 @@
 use shamir_collections::TFxMap;
+use shamir_query_types::batch::TransactionInfo;
 use shamir_storage::error::DbError;
 use shamir_tunables::instance_defaults::MAX_UNDRAINED_VERSIONS;
 use shamir_tx::{IsolationLevel, TxContext};
 use shamir_types::types::common::THasher;
-use shamir_wal::WalOpV2;
+use shamir_wal::{WalAppendError, WalOpV2};
 
 use crate::repo::RepoInstance;
 use crate::tx::commit_phases::{
@@ -311,6 +312,13 @@ pub(super) async fn maybe_crash(_phase: &str, _repo: &RepoInstance) {}
 
 #[derive(Debug, thiserror::Error)]
 pub enum TxError {
+    #[error("WAL outcome indeterminate; repository must be reopened")]
+    WalRequiresReopen,
+    #[error("commit {commit_version} published but WAL durability failed")]
+    WalDurability {
+        commit_version: u64,
+        materialization: MaterializationState,
+    },
     #[error("table '{table}' is frozen for migration")]
     MigrationFrozen { table: String },
     #[error("storage: {0}")]
@@ -351,9 +359,49 @@ pub enum TxError {
     },
 }
 
+impl TxError {
+    /// Map commit errors without turning a published version into an abort.
+    pub fn into_transaction_info(
+        self,
+        tx_id: u64,
+        snapshot_version: u64,
+    ) -> shamir_query_types::batch::TransactionInfo {
+        let reason = match self {
+            Self::WalDurability {
+                commit_version,
+                materialization,
+            } => {
+                return TransactionInfo::committed_with_error(
+                    tx_id,
+                    snapshot_version,
+                    commit_version,
+                    materialization == MaterializationState::Complete,
+                    "wal_durability",
+                );
+            }
+            Self::MigrationFrozen { .. } => "table_migrating".to_string(),
+            Self::SsiConflict { .. } | Self::PhantomConflict { .. } | Self::Wounded { .. } => {
+                "tx_conflict".to_string()
+            }
+            Self::UniqueViolation { .. } => "unique_violation".to_string(),
+            // FG-7: commit-time CAS failures retain the staging-time code.
+            Self::CasConflict { .. } => "version_conflict".to_string(),
+            Self::WalRequiresReopen => "wal_requires_reopen".to_string(),
+            Self::Storage(e) => format!("storage: {}", e),
+            Self::Expired { elapsed, max } => {
+                format!("tx expired: elapsed {:?} > max {:?}", elapsed, max)
+            }
+        };
+        TransactionInfo::aborted(tx_id, reason)
+    }
+}
+
 impl From<TxError> for DbError {
     fn from(error: TxError) -> Self {
         match error {
+            error @ (TxError::WalRequiresReopen | TxError::WalDurability { .. }) => {
+                DbError::Storage(error.to_string())
+            }
             TxError::Storage(error) => error,
             TxError::MigrationFrozen { table } => DbError::MigrationFrozen { table },
             error @ (TxError::SsiConflict { .. }
@@ -364,6 +412,40 @@ impl From<TxError> for DbError {
             // DbError has no expiry category; retain the diagnostic without
             // misclassifying expiry as a retryable transaction conflict.
             error @ TxError::Expired { .. } => DbError::Internal(error.to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) static TEST_SYNCED_WAL_REPO: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub(super) fn commit_wal_durability(repo: &RepoInstance) -> shamir_wal::WalDurability {
+    #[cfg(test)]
+    if TEST_SYNCED_WAL_REPO
+        .get()
+        .is_some_and(|name| name == repo.name())
+    {
+        return shamir_wal::WalDurability::Synced;
+    }
+    let _ = repo;
+    shamir_wal::WalDurability::Buffered
+}
+
+pub(super) fn wal_completion(
+    gate: &shamir_tx::RepoTxGate,
+    result: Result<(), WalAppendError>,
+) -> Result<bool, TxError> {
+    match result {
+        Ok(()) => Ok(false),
+        Err(WalAppendError::WrittenNotDurable) => Ok(true),
+        Err(WalAppendError::NotWritten) => Err(TxError::Storage(WalAppendError::NotWritten.into())),
+        Err(WalAppendError::Unknown | WalAppendError::Indeterminate) => {
+            gate.set_requires_reopen();
+            Err(TxError::WalRequiresReopen)
+        }
+        Err(_) => {
+            gate.set_requires_reopen();
+            Err(TxError::WalRequiresReopen)
         }
     }
 }
@@ -700,6 +782,10 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
             return Err(e.into());
         }
     };
+    if gate.requires_reopen() {
+        release_pessimistic_locks(&tx, repo).await;
+        return Err(TxError::WalRequiresReopen);
+    }
     let wal = match repo.repo_wal().await {
         Ok(w) => w,
         Err(e) => {
@@ -707,6 +793,12 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
             return Err(e.into());
         }
     };
+
+    if wal.requires_reopen() {
+        gate.set_requires_reopen();
+        release_pessimistic_locks(&tx, repo).await;
+        return Err(TxError::WalRequiresReopen);
+    }
 
     // === PRE-LOCK SECTION (concurrent across committers) ===
     //
@@ -792,9 +884,10 @@ async fn commit_tx_inner_legacy_async(
         commit_version,
         uwl_guards,
         drain_guards,
-        mut version_guard,
+        version_guard,
         cell_guards,
         wal_entry_arc,
+        durability_failed,
     } = match pre_commit_locked(&mut tx, repo, gate, wal, uwl_guards, drain_guards).await {
         Ok(Some(pc)) => pc,
         Ok(None) => {
@@ -814,9 +907,6 @@ async fn commit_tx_inner_legacy_async(
             return Err(e);
         }
     };
-    version_guard.attach_metrics(repo.tx_metrics().clone());
-    version_guard.wal_accepted();
-    gate.record_commit_writes(shamir_tx::build_footprint_from_tx(&tx, commit_version));
     // Op #2 Stage 2: offer the persisted WAL entry to the drainer window.
     repo.drainer().offer(wal_entry_arc);
     // SSI fix S2 — still-armed cell-reservation guards from pre_commit_locked
@@ -926,6 +1016,18 @@ async fn commit_tx_inner_legacy_async(
         MaterializationState::Complete
     };
 
+    if durability_failed {
+        let tail = join.await.unwrap_or(MaterializationState::Deferred);
+        let materialization = if delta_deferred || tail == MaterializationState::Deferred {
+            MaterializationState::Deferred
+        } else {
+            MaterializationState::Complete
+        };
+        return Err(TxError::WalDurability {
+            commit_version,
+            materialization,
+        });
+    }
     Ok(TxOutcome {
         tx_id: tx_id_u64,
         snapshot_version,
@@ -1070,24 +1172,27 @@ async fn commit_tx_lockfree(
 
     // Phase 4: WAL begin — THE COMMIT POINT.
     // Concurrent-safe: each tx writes a unique WAL key (txn_id).
-    if let Err(e) = wal
-        .begin_grouped(
-            &validated.wal_entry_arc,
-            shamir_wal::WalDurability::Buffered,
-        )
-        .await
-    {
-        // version_guard drops here → mark(Aborted): WAL begin failed, the
-        // tx is a pre-commit abort and nothing durable exists. Drop the
-        // cell_guards too → release the claimed cells.
-        drop(version_guard);
-        drop(cell_guards);
-        release_pessimistic_locks(&tx, repo).await;
-        return Err(TxError::Storage(e));
-    }
-
-    version_guard.wal_accepted();
+    // Record before queueing: an unwritten abort may cause spurious SSI
+    // conflicts, but a written orphan must never expose a missed conflict.
     gate.record_commit_writes(shamir_tx::build_footprint_from_tx(&tx, commit_version));
+    let queued = wal.begin_grouped_ticketed(&validated.wal_entry_arc, commit_wal_durability(repo));
+    let (ticket, completion) = match queued {
+        Ok(queued) => queued,
+        Err(e) => {
+            release_pessimistic_locks(&tx, repo).await;
+            return Err(e.into());
+        }
+    };
+    version_guard.wal_queued(ticket, validated.wal_entry_arc.clone());
+    let durability_failed = match wal_completion(gate, completion.await) {
+        Ok(failed) => failed,
+        Err(e) => {
+            drop(version_guard);
+            drop(cell_guards);
+            release_pessimistic_locks(&tx, repo).await;
+            return Err(e);
+        }
+    };
 
     // Op #2 Stage 2: offer the persisted WAL entry to the drainer window.
     repo.drainer().offer(validated.wal_entry_arc);
@@ -1151,6 +1256,12 @@ async fn commit_tx_lockfree(
     )
     .await;
 
+    if durability_failed {
+        return Err(TxError::WalDurability {
+            commit_version,
+            materialization,
+        });
+    }
     Ok(TxOutcome {
         tx_id: tx_id_u64,
         snapshot_version,

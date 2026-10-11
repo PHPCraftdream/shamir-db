@@ -34,6 +34,15 @@ impl RepoWalManager {
         }
     }
 
+    #[doc(hidden)]
+    pub fn arm_fail_next_sync_for_test(&self) {
+        self.group.arm_fail_next_sync_for_test();
+    }
+
+    pub fn requires_reopen(&self) -> bool {
+        self.group.requires_reopen()
+    }
+
     /// Allocate the next monotonic txn_id.
     pub fn fresh_txn_id(&self) -> u64 {
         self.next_txn_id.fetch_add(1, Ordering::Relaxed)

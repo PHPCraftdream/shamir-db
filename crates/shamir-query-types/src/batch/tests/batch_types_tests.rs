@@ -181,6 +181,20 @@ fn transaction_info_committed_roundtrip() {
         Some(true)
     );
     assert!(qv.get("reason").is_none()); // skip_serializing_if
+    assert!(qv.get("error").is_none());
+    // Wire-format subject: exact pre-extension payload must remain unchanged.
+    assert_eq!(
+        rmp_serde::to_vec_named(&info).unwrap(),
+        rmp_serde::to_vec_named(&mpack!({
+            "tx_id": 42_i64,
+            "status": "committed",
+            "snapshot_version": 100_i64,
+            "commit_version": 105_i64,
+            "materialized": true
+        }))
+        .unwrap(),
+    );
+    assert_eq!(from_qv::<TransactionInfo>(qv), info);
 }
 
 #[test]
@@ -198,6 +212,29 @@ fn transaction_info_aborted_roundtrip() {
         qv.get("reason").and_then(QueryValue::as_str),
         Some("tx_conflict")
     );
+    assert!(info.error.is_none());
+    assert!(qv.get("error").is_none());
+    assert_eq!(from_qv::<TransactionInfo>(qv), info);
+}
+
+#[test]
+fn transaction_info_committed_with_error_roundtrip() {
+    for materialized in [true, false] {
+        let info =
+            TransactionInfo::committed_with_error(9, 200, 207, materialized, "wal_durability");
+        let qv = to_qv(&info);
+        assert_eq!(
+            qv.get("error").and_then(QueryValue::as_str),
+            Some("wal_durability"),
+        );
+        assert!(qv.get("reason").is_none());
+        let back: TransactionInfo = from_qv(qv);
+        assert_eq!(back, info);
+        assert!(back.is_committed());
+        assert_eq!(back.snapshot_version, Some(200));
+        assert_eq!(back.commit_version, Some(207));
+        assert_eq!(back.materialized, materialized);
+    }
 }
 
 #[test]
@@ -235,6 +272,7 @@ fn transaction_info_missing_materialized_defaults_true() {
         "commit_version": 105_i64
     });
     let info: TransactionInfo = from_qv(qv);
+    assert_eq!(info.error, None);
     assert!(info.is_committed());
     assert!(
         info.materialized,

@@ -162,6 +162,9 @@ impl Drop for VersionGuard {
                         // unprotected gap during ownership transfer.
                         let _ = self.orphan_entries.insert_sync(self.version, entry);
                         let _ = self.orphaned_post_wal.insert_sync(self.version, ());
+                        if let Some(metrics) = &self.metrics {
+                            metrics.on_post_wal_orphan();
+                        }
                         self.orphan_max.fetch_max(self.version, Ordering::AcqRel);
                         let _ = self.active_post_wal.remove_sync(&self.version);
                         return;

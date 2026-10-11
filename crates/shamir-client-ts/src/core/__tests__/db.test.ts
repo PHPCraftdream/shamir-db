@@ -570,6 +570,37 @@ describe('Db.tx() (unit)', () => {
     });
   });
 
+  it.each([true, false])('published durability error preserves metadata (materialized=%s)', async (materialized) => {
+    const calls: TxCall[] = [];
+    const info: import('../types/batch.js').TransactionInfo = {
+      tx_id: 17,
+      status: 'committed',
+      snapshot_version: 10,
+      commit_version: 47,
+      materialized,
+      error: 'wal_durability',
+    };
+    const fc = fakeTxClient(calls, { commitResponse: info });
+    const db = new Db(asClient(fc), 'test_db');
+    let callbacks = 0;
+    const result = db.tx(async (t) => {
+      callbacks += 1;
+      await t.run(write.insert('x', [{ a: 1 }]));
+      return 'callback-result';
+    });
+    await expect(result).rejects.toThrow('transaction committed with error: wal_durability');
+    await expect(result).rejects.toMatchObject({
+      transaction: info,
+      commit_version: 47,
+    });
+    const error = await result.catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error & { transaction: typeof info }).transaction).toBe(info);
+    expect(info.reason).toBeUndefined();
+    expect(callbacks).toBe(1);
+    expect(calls.map((c) => c.method)).toEqual(['txBegin', 'txExecute', 'txCommit']);
+  });
+
   it('aborted commit rejects with reason', async () => {
     const calls: TxCall[] = [];
     const fc = fakeTxClient(calls, {

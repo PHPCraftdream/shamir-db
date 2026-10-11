@@ -90,7 +90,7 @@ use scc::TreeIndex;
 use shamir_collections::{TFxMap, THasher};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{KvOp, RecordKey};
-use shamir_wal::{WalEntryV2, WalOpV2};
+use shamir_wal::{WalEntryV2, WalOpV2, WalTicketState};
 use tokio::sync::{Mutex, Notify};
 
 use crate::repo::RepoInstance;
@@ -464,8 +464,62 @@ impl Drainer {
     pub async fn drain_step(&self, repo: &RepoInstance) -> DbResult<usize> {
         let _replay_guard = self.replaying.lock().await;
         let gate = repo.tx_gate().await?;
+        let mut unresolved_ceiling = u64::MAX;
+        let mut blocked_by_unresolved = false;
+        for version in gate.unresolved_wal_versions() {
+            let Some((ticket, entry)) = gate.unresolved_wal(version) else {
+                continue;
+            };
+            match ticket.state() {
+                WalTicketState::Written | WalTicketState::Acked => {
+                    gate.register_written_orphan(version, entry.clone());
+                    self.offer(entry);
+                    gate.take_unresolved(version);
+                }
+                WalTicketState::Failed => {
+                    if gate.take_unresolved(version).is_some() {
+                        gate.abort_unwritten(version);
+                    }
+                }
+                WalTicketState::Pending => {
+                    blocked_by_unresolved = true;
+                    unresolved_ceiling = version.saturating_sub(1);
+                    break;
+                }
+                WalTicketState::Unknown => {
+                    gate.set_requires_reopen();
+                    log::error!(
+                        "drain_step: WAL outcome UNKNOWN at version {version}; \
+                         halting at {}; repository requires reopen",
+                        version.saturating_sub(1),
+                    );
+                    blocked_by_unresolved = true;
+                    unresolved_ceiling = version.saturating_sub(1);
+                    break;
+                }
+                _ => {
+                    gate.set_requires_reopen();
+                    log::error!("drain_step: unsupported WAL fate at {version}; reopen required");
+                    blocked_by_unresolved = true;
+                    unresolved_ceiling = version.saturating_sub(1);
+                    break;
+                }
+            }
+        }
+        for version in gate.orphaned_post_wal_versions() {
+            if version > unresolved_ceiling {
+                break;
+            }
+            if let Some(entry) = gate.orphan_entry(version) {
+                self.offer(entry.clone());
+                // Retained entries must not depend on recover or the soft offer cap.
+                if self.window.insert_sync(version, entry).is_ok() {
+                    self.window_depth.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
         let visible = gate.last_committed();
-        let vis = visible.max(gate.orphan_max());
+        let vis = visible.max(gate.orphan_max()).min(unresolved_ceiling);
         let dur = gate.durable_watermark();
         // Also clean up late async-index markers on otherwise idle passes.
         self.prune_index_applied(dur);
@@ -512,7 +566,10 @@ impl Drainer {
         // not fill — aborted versions have no WAL entry.
         // A present in-flight entry is not a gap: wait for a later pass rather
         // than decoding WAL segments that cannot make the entry complete.
-        if window_entries.is_empty() && !blocked_by_inflight {
+        // An unresolved fate also forbids a full WAL decode, even when an
+        // earlier published offer is missing. Already-retained RAM prefixes
+        // below its ceiling can still replay without guessing the frame fate.
+        if window_entries.is_empty() && !blocked_by_inflight && !blocked_by_unresolved {
             let wal = repo.repo_wal().await?;
             let recovered = wal.recover().await?;
             self.recover_calls.fetch_add(1, Ordering::Relaxed);
@@ -1150,6 +1207,7 @@ impl Drainer {
                         }
                     }
                 }
+                repo.mark_changefeed_gap(*v).await?;
                 gate.complete_orphaned_post_wal(*v);
                 #[cfg(test)]
                 let inject_marker_failure = crate::tx::commit::TEST_POST_WAL_PRE_PUBLISH_HOOK

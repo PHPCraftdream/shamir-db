@@ -1,6 +1,4 @@
-#[cfg(test)]
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use shamir_storage::error::DbResult;
@@ -45,7 +43,7 @@ pub struct MemSink {
     /// untouched — it stays an enum, no dyn dispatch).
     #[cfg(test)]
     fail_next_append: AtomicBool,
-    #[cfg(test)]
+    // No crate test-util feature: cross-crate sync-fault seam remains in production Mem sinks.
     fail_next_sync: AtomicBool,
     #[cfg(test)]
     pause_next_append: AtomicBool,
@@ -69,7 +67,6 @@ impl MemSink {
             max_committed: AtomicU64::new(0),
             #[cfg(test)]
             fail_next_append: AtomicBool::new(false),
-            #[cfg(test)]
             fail_next_sync: AtomicBool::new(false),
             #[cfg(test)]
             pause_next_append: AtomicBool::new(false),
@@ -180,11 +177,12 @@ impl WalSink {
         self.mem_for_test().sync_resume.notify_one();
     }
 
-    #[cfg(test)]
-    pub(crate) fn arm_fail_next_sync(&self) {
-        self.mem_for_test()
-            .fail_next_sync
-            .store(true, Ordering::Release);
+    #[doc(hidden)]
+    pub fn arm_fail_next_sync(&self) {
+        match self {
+            Self::Mem(mem) => mem.fail_next_sync.store(true, Ordering::Release),
+            Self::File(_) => panic!("arm_fail_next_sync is Mem-only"),
+        }
     }
 
     pub async fn append_batch(&self, payloads: Vec<Vec<u8>>, max_version: u64) -> DbResult<u64> {
@@ -235,11 +233,11 @@ impl WalSink {
                         _m.sync_paused.notify_one();
                         _m.sync_resume.notified().await;
                     }
-                    if _m.fail_next_sync.swap(false, Ordering::AcqRel) {
-                        return Err(shamir_storage::error::DbError::Storage(
-                            "MemSink injected sync failure".into(),
-                        ));
-                    }
+                }
+                if _m.fail_next_sync.swap(false, Ordering::AcqRel) {
+                    return Err(shamir_storage::error::DbError::Storage(
+                        "MemSink injected sync failure".into(),
+                    ));
                 }
                 Ok(())
             }
