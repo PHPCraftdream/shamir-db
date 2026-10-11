@@ -77,6 +77,27 @@ fn nested(inner: BatchRequest, levels: usize) -> BatchRequest {
     inner
 }
 
+/// Executing nested Batch/ForEach levels builds deep async frames that exceed the 2 MiB
+/// test-thread stack in debug builds, so every test body runs on a roomy thread.
+fn on_big_stack<F, Fut>(body: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime")
+                .block_on(body())
+        })
+        .expect("spawn big-stack test thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+}
+
 async fn execute(handler: &ShamirDbHandler, session: &Session, batch: BatchRequest) -> DbResponse {
     handler
         .execute(
@@ -139,8 +160,7 @@ fn accepted(response: DbResponse, alias: &str, leaves: &[&str]) {
     }
 }
 
-#[tokio::test]
-async fn non_superuser_nested_admin_rejected_at_one_and_three_levels() {
+async fn non_superuser_nested_admin_rejected_at_one_and_three_levels_body() {
     let (db, handler) = fixture(NodeMode::ReadWrite).await;
     let session = session(false);
     for levels in [1, 3] {
@@ -153,8 +173,7 @@ async fn non_superuser_nested_admin_rejected_at_one_and_three_levels() {
     }
 }
 
-#[tokio::test]
-async fn tx_execute_rejects_nested_admin_before_execution() {
+async fn tx_execute_rejects_nested_admin_before_execution_body() {
     let (db, handler) = fixture(NodeMode::ReadWrite).await;
     let session = session(false);
     let handle = match handler
@@ -188,8 +207,7 @@ async fn tx_execute_rejects_nested_admin_before_execution() {
     );
 }
 
-#[tokio::test]
-async fn superuser_nested_drop_requires_correct_hmac_and_executes() {
+async fn superuser_nested_drop_requires_correct_hmac_and_executes_body() {
     let (db, handler) = fixture(NodeMode::ReadWrite).await;
     let session = session(true);
     error(
@@ -225,8 +243,7 @@ async fn superuser_nested_drop_requires_correct_hmac_and_executes() {
     );
 }
 
-#[tokio::test]
-async fn non_superuser_data_only_sub_batch_executes_write() {
+async fn non_superuser_data_only_sub_batch_executes_write_body() {
     let (_, handler) = fixture(NodeMode::ReadWrite).await;
     let session = session(false);
     let mut inner = Batch::new();
@@ -246,8 +263,7 @@ async fn non_superuser_data_only_sub_batch_executes_write() {
     }
 }
 
-#[tokio::test]
-async fn readonly_nested_reads_and_exempt_admin_leaf_are_accepted() {
+async fn readonly_nested_reads_and_exempt_admin_leaf_are_accepted_body() {
     let (_, handler) = fixture(NodeMode::ReadOnly).await;
     let session = session(false);
     let mut inner = Batch::new();
@@ -260,8 +276,7 @@ async fn readonly_nested_reads_and_exempt_admin_leaf_are_accepted() {
     );
 }
 
-#[tokio::test]
-async fn readonly_nested_write_reports_leaf_alias() {
+async fn readonly_nested_write_reports_leaf_alias_body() {
     let (_, handler) = fixture(NodeMode::ReadOnly).await;
     let session = session(false);
     let mut inner = Batch::new();
@@ -277,4 +292,34 @@ async fn readonly_nested_write_reports_leaf_alias() {
         DbResponse::Batch { response } => assert!(response.results["read"].records.is_empty()),
         other => panic!("expected unchanged table after rejection, got {other:?}"),
     }
+}
+
+#[test]
+fn non_superuser_nested_admin_rejected_at_one_and_three_levels() {
+    on_big_stack(non_superuser_nested_admin_rejected_at_one_and_three_levels_body);
+}
+
+#[test]
+fn tx_execute_rejects_nested_admin_before_execution() {
+    on_big_stack(tx_execute_rejects_nested_admin_before_execution_body);
+}
+
+#[test]
+fn superuser_nested_drop_requires_correct_hmac_and_executes() {
+    on_big_stack(superuser_nested_drop_requires_correct_hmac_and_executes_body);
+}
+
+#[test]
+fn non_superuser_data_only_sub_batch_executes_write() {
+    on_big_stack(non_superuser_data_only_sub_batch_executes_write_body);
+}
+
+#[test]
+fn readonly_nested_reads_and_exempt_admin_leaf_are_accepted() {
+    on_big_stack(readonly_nested_reads_and_exempt_admin_leaf_are_accepted_body);
+}
+
+#[test]
+fn readonly_nested_write_reports_leaf_alias() {
+    on_big_stack(readonly_nested_write_reports_leaf_alias_body);
 }
