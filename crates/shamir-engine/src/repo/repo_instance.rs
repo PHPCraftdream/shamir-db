@@ -311,6 +311,48 @@ impl RepoInstance {
         &self.tx_metrics
     }
 
+    /// Read the unchanged journal, attaching name bindings only for Pull.
+    /// The tuple retains the journal's gap metadata; translation errors propagate.
+    pub async fn read_changelog_for_replication(
+        &self,
+        from_version: u64,
+        limit: usize,
+    ) -> DbResult<(Vec<crate::tx::ReplicatedEvent>, Option<u64>)> {
+        let journal = self.read_changelog_from(from_version, limit).await?;
+        let manager = self.repo_interner().await?;
+        let interner = manager.get().await?;
+        let mut events = Vec::with_capacity(journal.events.len());
+        for event in journal.events {
+            let mut ids = shamir_collections::TFxMap::default();
+            for change in &event.changes {
+                if change.op == shamir_tx::ChangeOp::Put {
+                    let bytes = change
+                        .value
+                        .as_ref()
+                        .ok_or_else(|| DbError::Codec("replication Put has no value".into()))?;
+                    let value = shamir_types::types::value::InnerValue::from_bytes(bytes)
+                        .map_err(|error| DbError::Codec(error.to_string()))?;
+                    shamir_tx::collect_referenced_ids(&value, &mut ids);
+                }
+            }
+            let mut field_bindings = Vec::with_capacity(ids.len());
+            for id in ids.keys() {
+                let name = interner
+                    .get_str(&shamir_types::core::interner::InternerKey::new(*id))
+                    .ok_or_else(|| {
+                        DbError::Codec(format!("replication field id {id} has no name"))
+                    })?;
+                field_bindings.push((*id, name.to_string()));
+            }
+            field_bindings.sort_unstable_by_key(|(id, _)| *id);
+            events.push(crate::tx::ReplicatedEvent {
+                event,
+                field_bindings,
+            });
+        }
+        Ok((events, journal.gap_at))
+    }
+
     /// cancel-safe: yes — uses `OnceCell::get_or_try_init`. On cancel
     /// inside the init closure, the cell remains empty so subsequent
     /// calls retry; no partial table is exposed. The clone of the cell
@@ -697,6 +739,16 @@ impl RepoInstance {
         self.repo.store_get("__tx__").await
     }
 
+    /// Install a fault-injecting manager before any repo/table interner access.
+    /// Never replace an initialized manager (including one shared by clones).
+    #[cfg(test)]
+    pub(crate) fn install_repo_interner_for_test(&self, manager: InternerManager) {
+        assert!(
+            self.repo_interner.set(manager).is_ok(),
+            "repo interner must be uninitialized before test injection",
+        );
+    }
+
     /// cancel-safe: yes — `OnceCell::get_or_try_init` semantics. If
     /// cancellation occurs during init the cell stays empty and the next
     /// caller retries. Returned manager is a cheap clone (all internal Arcs
@@ -1009,10 +1061,11 @@ impl RepoInstance {
     pub async fn apply_replicated(
         &self,
         event: &shamir_tx::ChangelogEvent,
+        field_bindings: &[(u64, String)],
         applied_watermark: u64,
         policy: crate::tx::ApplyPolicy,
     ) -> DbResult<crate::tx::ApplyOutcome> {
-        crate::tx::apply_replicated(self, event, applied_watermark, policy).await
+        crate::tx::apply_replicated(self, event, field_bindings, applied_watermark, policy).await
     }
 
     /// R1-b — read the durable per-(db,repo) follower replication bookmark.
@@ -1206,6 +1259,9 @@ impl RepoInstance {
             Ok(_outcome) => Ok(()),
             Err(commit_err) => {
                 let (message, code) = match commit_err {
+                    crate::tx::CommitError::MigrationFrozen { .. } => {
+                        (commit_err.to_string(), Some("table_migrating".to_string()))
+                    }
                     crate::tx::CommitError::UniqueViolation { .. } => {
                         (commit_err.to_string(), Some("unique_violation".to_string()))
                     }
@@ -1257,9 +1313,26 @@ impl RepoInstance {
         self.changefeed
             .get_or_try_init(|| async {
                 let store: Arc<dyn Store> = self.repo.store_get("__changelog__").await?;
+                let marker = match store
+                    .get(shamir_tx::changefeed::gap_marker_key().into())
+                    .await
+                {
+                    Ok(bytes) => match <[u8; 8]>::try_from(bytes.as_ref()) {
+                        Ok(raw) if u64::from_be_bytes(raw) != 0 => u64::from_be_bytes(raw),
+                        _ => {
+                            log::warn!(
+                                "invalid changefeed gap marker for repo {}; restoring gap at 1",
+                                self.name()
+                            );
+                            1
+                        }
+                    },
+                    Err(DbError::NotFound(_)) => 0,
+                    Err(e) => return Err(e),
+                };
                 let cl_store: Arc<dyn shamir_tx::ChangelogStore> =
                     Arc::new(crate::repo::changelog_store::StoreChangelog::new(store));
-                let feed = shamir_tx::RepoChangefeed::new(Arc::clone(&cl_store));
+                let feed = shamir_tx::RepoChangefeed::new_with_gap(Arc::clone(&cl_store), marker);
                 Ok::<ChangefeedHandle, DbError>(ChangefeedHandle {
                     feed,
                     store: cl_store,

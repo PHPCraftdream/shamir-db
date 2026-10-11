@@ -271,6 +271,8 @@ pub(super) async fn maybe_crash(_phase: &str, _repo: &RepoInstance) {}
 
 #[derive(Debug, thiserror::Error)]
 pub enum TxError {
+    #[error("table '{table}' is frozen for migration")]
+    MigrationFrozen { table: String },
     #[error("storage: {0}")]
     Storage(#[from] DbError),
     #[error("ssi conflict on key {key:?}")]
@@ -307,6 +309,23 @@ pub enum TxError {
         expected: u64,
         found: u64,
     },
+}
+
+impl From<TxError> for DbError {
+    fn from(error: TxError) -> Self {
+        match error {
+            TxError::Storage(error) => error,
+            TxError::MigrationFrozen { table } => DbError::MigrationFrozen { table },
+            error @ (TxError::SsiConflict { .. }
+            | TxError::PhantomConflict { .. }
+            | TxError::Wounded { .. }) => DbError::Conflict(error.to_string()),
+            error @ TxError::UniqueViolation { .. } => DbError::DuplicateKey(error.to_string()),
+            error @ TxError::CasConflict { .. } => DbError::VersionConflict(error.to_string()),
+            // DbError has no expiry category; retain the diagnostic without
+            // misclassifying expiry as a retryable transaction conflict.
+            error @ TxError::Expired { .. } => DbError::Internal(error.to_string()),
+        }
+    }
 }
 
 /// cancel-safe: yes — read-only over `&TxContext`. The only `.await`

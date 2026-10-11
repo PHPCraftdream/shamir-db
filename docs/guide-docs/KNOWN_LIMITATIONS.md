@@ -280,25 +280,33 @@ artifact).
   `security.enable_experimental_migration_api: true` in the config (F-15,
   #808 — default `false`, and no shipped `deploy/*.ktav` profile sets it),
   so no regular client can trigger a migration against a default
-  deployment. This gate exists because the feature has several known,
-  unfixed correctness gaps (all tracked as future work):
-  - **No write interception.** `MigrationShadowLog` is constructed at
-    `StartMigration` time, but nothing in production code ever appends
-    to it — a write landing on the source table between the initial
-    snapshot copy and the final commit is silently lost from the
-    destination. `CommitMigration` only compares record COUNTS, so an
-    in-place field edit (no row-count change) is not even detected as a
-    discrepancy.
-  - **Only `dst_engine: "in_memory"` is supported** — not useful for a
-    real durability-preserving migration.
-  - **Non-durable coordinator state.** `MigrationCoordinator` lives
-    only in the in-memory `ShamirDb::active_migrations` map — a server
-    restart mid-migration loses all state, with no recovery path.
-  - **`try_lock`-based duplicate-start guard.** Lock contention (a
-    legitimately concurrent, in-progress operation) is indistinguishable
-    from "no migration running," so a second `StartMigration` can race
-    in.
-  - **No post-commit history / list-all-migrations capability.**
+  deployment. The source is **frozen for writes** from snapshot preparation
+  until migration completion: inserts, updates, deletes and pre-start staged
+  transactions committing during the freeze are rejected with
+  `table_migrating`. Rollback, failed Start and Commit exits release the
+  freeze. This replaces write interception, not the remaining limitations:
+  - **Only `dst_engine: "in_memory"` is supported.** Destination data does
+    not survive restart; this is not a durability-preserving migration.
+  - **Limited restart recovery, not absent persisted state.** The coordinator
+    uses `persist_state` / `load_state` in the source info store, whose
+    durability depends on its backend. Commit retries recover persisted
+    state and finalisation markers when the destination is still available.
+    The active map and freeze guard remain process-local; metadata alone
+    cannot reconstruct a lost in-memory destination or guarantee crash-safe
+    resumption of an in-flight migration. Commit rejects an uncommitted
+    coordinator without its original freeze (`migration_restart_required`),
+    rather than refreezing and silently omitting newly admitted source writes.
+    Committed retries finalise the fixed destination only. After restart,
+    Rollback cannot recover a missing active-map entry; orphan cleanup and a
+    fresh migration remain operator work.
+  - **Migration on a replication follower is unsupported.** Replicated apply
+    bypasses ordinary write admission and therefore bypasses the source freeze;
+    there is no reliable follower-role check at this admin entry point.
+  - **FK cascades into a frozen table abort the parent write.**
+  - **DDL on the frozen source is not blocked.**
+  - **No list-all-migrations / user-facing post-commit history API.**
+    Persisted completion receipts support idempotent Commit retries, not
+    a migration-history listing.
   See `crates/shamir-db/src/shamir_db/shamir_db/core.rs`
   (`enable_experimental_migration_api` / `experimental_migration_enabled`)
   for the gate and `crates/shamir-db/src/shamir_db/execute/admin_migration.rs`
