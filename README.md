@@ -67,7 +67,7 @@ S.H.A.M.I.R. — однонодовая база данных на Rust в ст�
 - ✅ Offline `backup` / `restore` CLI (sha256 manifest, server must be stopped) and `doctor` integrity check
 
 **Experimental (may change incompatibly or be removed):**
-- 🧪 Leader→follower async read replicas — schema is not replicated, no automatic reseed, no failover
+- 🧪 Leader→follower async replication — not for production data; schema is not replicated, no reseed or failover; see [KNOWN_LIMITATIONS](docs/guide-docs/KNOWN_LIMITATIONS.md#5-replication)
 - 🧪 Storage-engine migration API — disabled by default, known data-loss gaps
 - 🧪 Server-side Rust→WASM compilation — development only (needs a toolchain and a repository checkout on the host)
 
