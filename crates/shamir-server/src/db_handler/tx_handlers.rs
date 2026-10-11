@@ -77,7 +77,7 @@ impl ShamirDbHandler {
         query_version: u32,
         db_name: &str,
         tx_handle: u64,
-        mut batch: BatchRequest,
+        batch: BatchRequest,
     ) -> DbResponse {
         if let Err(e) = crate::version::check_query_lang(query_version) {
             return DbResponse::Error {
@@ -141,14 +141,8 @@ impl ShamirDbHandler {
                 message: "interactive transaction exceeded its absolute lifetime".into(),
             };
         }
-        // The call may not outlive the transaction: bound its budget by the
-        // remaining lifetime. The engine budget is in whole seconds, so the
-        // remainder rounds UP (at most one second past the lifetime; the
-        // call is never cancelled mid-flight).
-        let remaining = it.remaining_lifetime();
-        let remaining_secs = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
-        batch.limits.max_execution_time_secs =
-            batch.limits.max_execution_time_secs.min(remaining_secs);
+        // Preserve wire limits: the exact remaining lifetime is passed below,
+        // after acquiring the context lock, so lock contention cannot renew it.
 
         // The handle is pinned to one (db, repo); every TxExecute must match.
         if it.db() != db_name {
@@ -177,12 +171,13 @@ impl ShamirDbHandler {
                 Some(tx) => {
                     let r = self
                         .db
-                        .tx_execute_with_policy(
+                        .tx_execute_with_policy_and_budget(
                             actor,
                             db_name,
                             &batch,
                             tx,
                             self.query_limits.policy(),
+                            Some(it.remaining_lifetime()),
                         )
                         .await;
                     // Measure staged size INSIDE the same lock as the engine call.

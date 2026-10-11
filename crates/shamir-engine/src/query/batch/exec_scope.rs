@@ -1,8 +1,7 @@
 //! Shared per-execution budget for the recursive executor chain.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(test)]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::{BatchError, BatchLimits, ExecutionDeadline};
 
@@ -12,6 +11,7 @@ use super::{BatchError, BatchLimits, ExecutionDeadline};
 pub struct ExecScope {
     limits: BatchLimits,
     deadline: ExecutionDeadline,
+    deadline_cap: Option<(Instant, Duration)>,
     work: AtomicU64,
     bytes: AtomicU64,
     enforce_result_size: bool,
@@ -28,10 +28,33 @@ impl ExecScope {
         Self {
             limits: limits.clone(),
             deadline: ExecutionDeadline::from_budget_secs(limits.max_execution_time_secs),
+            deadline_cap: None,
             work: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             enforce_result_size,
         }
+    }
+
+    /// Tighten the cooperative deadline without changing whole-second wire limits.
+    pub(super) fn with_deadline_cap(mut self, deadline: Instant, cap: Duration) -> Self {
+        let budget = cap.min(Duration::from_secs(
+            self.limits.max_execution_time_secs.max(1),
+        ));
+        // Preserve the attachment instant's deadline through synchronous setup.
+        self.deadline_cap = Some((deadline, budget));
+        self
+    }
+
+    /// Inspect the actual caller-cap deadline consulted by `check`.
+    #[cfg(test)]
+    pub(super) fn cap_deadline(&self) -> Option<Instant> {
+        self.deadline_cap.map(|(deadline, _)| deadline)
+    }
+
+    /// Inspect budget metadata; request/policy time is enforced independently.
+    #[cfg(test)]
+    pub(super) fn capped_budget(&self) -> Option<Duration> {
+        self.deadline_cap.map(|(_, budget)| budget)
     }
 
     /// Test-only duration injection with the deadline's exact zero/overflow semantics.
@@ -40,6 +63,7 @@ impl ExecScope {
         Self {
             limits: limits.clone(),
             deadline: ExecutionDeadline::from_duration(duration),
+            deadline_cap: None,
             work: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             enforce_result_size: false,
@@ -124,8 +148,16 @@ impl ExecScope {
         self.bytes.load(Ordering::Relaxed)
     }
 
-    /// Delegate the existing cooperative checkpoint without changing its errors.
+    /// Check the legacy deadline and any exact caller-owned cap cooperatively.
     pub fn check(&self) -> Result<(), BatchError> {
-        self.deadline.check()
+        self.deadline.check()?;
+        if let Some((deadline, budget)) = self.deadline_cap {
+            if Instant::now() >= deadline {
+                return Err(BatchError::ExecutionTimedOut {
+                    budget_secs: budget.as_secs(),
+                });
+            }
+        }
+        Ok(())
     }
 }
