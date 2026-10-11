@@ -557,6 +557,15 @@ pub(super) async fn pre_commit_prelock(
                  table_token={token}"
             );
             let guard = tbl.unique_write_lock().lock_owned().await;
+            if tbl
+                .index_manager_ref()
+                .write_barrier_flags()
+                .is_set(crate::index::write_barrier_flags::MIGRATION_FREEZE)
+            {
+                return Err(TxError::MigrationFrozen {
+                    table: tbl.name().to_string(),
+                });
+            }
             let uwl_wait_elapsed = uwl_wait_started.elapsed();
             if uwl_wait_elapsed >= std::time::Duration::from_secs(1) {
                 log::warn!(

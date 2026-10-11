@@ -527,30 +527,32 @@ impl ShamirDb {
     /// (`StartMigration` / `CommitMigration` / `RollbackMigration` /
     /// `MigrationStatus`).
     ///
-    /// ⚠️ **This API is UNSAFE for production use today.** It is disabled
-    /// by default; no client can begin a migration until an operator
-    /// explicitly calls this method, and the live `shamir-server` never
-    /// calls it. The known, unfixed correctness gaps (tracked as future
-    /// work) are:
+    /// ⚠️ **This API remains experimental and unsuitable for production.**
+    /// It is disabled by default; the live server enables it only through
+    /// `security.enable_experimental_migration_api` (default `false`).
     ///
-    /// - **No write interception.** The `MigrationShadowLog` constructed
-    ///   at `StartMigration` time is never appended to by production
-    ///   write paths — writes landing on the source table between the
-    ///   initial snapshot copy and the final commit are silently lost
-    ///   from the destination. `CommitMigration` only compares record
-    ///   COUNTS, so an in-place field edit (no row-count change) isn't
-    ///   even detected as a discrepancy.
-    /// - **`dst_engine: "in_memory"` only.** Not useful for a real
-    ///   durability-preserving migration.
-    /// - **Non-durable coordinator state.** `MigrationCoordinator`
-    ///   state lives only in the in-memory `active_migrations` map — a
-    ///   server restart mid-migration loses all state with no recovery
-    ///   path.
-    /// - **`try_lock`-based duplicate-start guard.** Lock contention
-    ///   (a legitimately concurrent, in-progress operation) is
-    ///   indistinguishable from "no migration running," so a second
-    ///   `StartMigration` can race in.
-    /// - **No list-all-migrations / post-commit history** capability.
+    /// - **Source frozen for writes.** From snapshot preparation through
+    ///   migration completion, source writes are rejected with
+    ///   `table_migrating`, including transactions staged before Start.
+    ///   Rollback, failed Start and Commit exits release the freeze.
+    ///   No write interception is installed.
+    /// - **`dst_engine: "in_memory"` only.** Destination data does not
+    ///   survive restart; this is not a durability-preserving migration.
+    /// - **Limited restart recovery.** The coordinator uses `persist_state`
+    ///   / `load_state` in the source info store, with durability determined
+    ///   by that store's backend. Commit retries can recover persisted state
+    ///   and finalisation markers, but the active map and freeze guard are
+    ///   process-local, and persisted metadata cannot restore a lost
+    ///   in-memory destination. This is not end-to-end crash-safe resumption.
+    ///   Uncommitted retries without the original freeze are rejected with
+    ///   `migration_restart_required`; committed retries finalise only the
+    ///   fixed destination, not source writes admitted after freeze release.
+    /// - **Replication followers unsupported.** Replicated apply bypasses
+    ///   the freeze; this admin API has no reliable follower-role check.
+    /// - **FK / DDL caveats.** A parent write cascading into a frozen table
+    ///   aborts. DDL on the frozen source is not blocked.
+    /// - **No list-all-migrations API.** Persisted completion receipts used
+    ///   by Commit retries are not a user-facing migration history API.
     ///
     /// Calling this flips the gate to "enabled" for the remainder of the
     /// process lifetime (there is intentionally no `disable` counterpart).

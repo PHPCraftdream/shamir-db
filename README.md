@@ -68,7 +68,7 @@ S.H.A.M.I.R. — однонодовая база данных на Rust в ст�
 
 **Experimental (may change incompatibly or be removed):**
 - 🧪 Leader→follower async replication — not for production data; schema is not replicated, no reseed or failover; see [KNOWN_LIMITATIONS](docs/guide-docs/KNOWN_LIMITATIONS.md#5-replication)
-- 🧪 Storage-engine migration API — disabled by default, known data-loss gaps
+- 🧪 Storage-engine migration API — disabled by default; source frozen for writes (`table_migrating`), `in_memory` destination only; not crash-safe
 - 🧪 Server-side Rust→WASM compilation — development only (needs a toolchain and a repository checkout on the host)
 
 **Not available yet:** online backup, point-in-time recovery, in-place upgrades between alpha versions, published binaries/packages, comparative benchmarks.

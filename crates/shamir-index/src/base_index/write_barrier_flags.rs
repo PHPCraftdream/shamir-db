@@ -144,6 +144,10 @@ pub const SORTED_INDEX_CREATE: u8 = 1 << 5;
 /// created regular index.
 pub const REGULAR_INDEX_EXISTS: u8 = 1 << 6;
 
+/// Bit 7 — source writes are frozen for an online migration.
+/// This fills the u8 selector namespace; the backing atomic remains AtomicU16.
+pub const MIGRATION_FREEZE: u8 = 1 << 7;
+
 /// Every bit this word packs — used only for `debug_assert!`-style sanity
 /// checks (no production code should need to mask against this directly).
 #[cfg(test)]
@@ -153,7 +157,8 @@ pub const ALL_BITS: u16 = (UNIQUE_INDEX_EXISTS
     | REGULAR_INDEX_CREATE
     | UNIQUE_INDEX_CREATE
     | SORTED_INDEX_CREATE
-    | REGULAR_INDEX_EXISTS) as u16;
+    | REGULAR_INDEX_EXISTS
+    | MIGRATION_FREEZE) as u16;
 
 /// Only the bits that participate in `needs_write_barrier()`'s predicate.
 /// Excludes [`REGULAR_INDEX_EXISTS`] (bit 6) because it is a steady-state
@@ -165,7 +170,8 @@ pub const BARRIER_BITS: u16 = (UNIQUE_INDEX_EXISTS
     | SCHEMA_ACTIVATION
     | REGULAR_INDEX_CREATE
     | UNIQUE_INDEX_CREATE
-    | SORTED_INDEX_CREATE) as u16;
+    | SORTED_INDEX_CREATE
+    | MIGRATION_FREEZE) as u16;
 
 /// The single packed atomic backing the whole write-barrier predicate.
 ///
@@ -225,6 +231,14 @@ impl WriteBarrierFlags {
     #[inline]
     pub fn set(&self, bit: u8) {
         self.bits.fetch_or(bit as u16, Ordering::SeqCst);
+    }
+
+    /// Set one bit and report whether this call newly set it.
+    /// SeqCst preserves the writer-drain protocol's cross-atomic total order.
+    #[inline]
+    pub fn try_set(&self, bit: u8) -> bool {
+        let bit = u16::from(bit);
+        self.bits.fetch_or(bit, Ordering::SeqCst) & bit == 0
     }
 
     /// Clear `bit`. `SeqCst` `fetch_and` with the bit's complement — a

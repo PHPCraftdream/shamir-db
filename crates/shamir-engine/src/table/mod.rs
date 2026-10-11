@@ -8,6 +8,7 @@ pub mod in_flight_create_guard;
 #[cfg(test)]
 pub mod index2_backfill_hook;
 pub mod interner_manager;
+mod migration_freeze_guard;
 pub mod persistable;
 mod read_asof_seek;
 mod read_exec;
@@ -42,6 +43,7 @@ pub mod writer_drain_barrier;
 pub mod tests;
 
 pub use interner_manager::InternerManager;
+pub use migration_freeze_guard::MigrationFreezeGuard;
 pub use persistable::{PersistRegistry, Persistable};
 pub use record_counter::RecordCounter;
 pub use table_config::TableConfig;

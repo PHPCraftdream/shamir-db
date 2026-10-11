@@ -185,7 +185,16 @@ impl TableManager {
         let needs_barrier = self.needs_write_barrier();
         let _guard = if needs_barrier {
             drop(drain_guard);
-            Some(self.unique_write_lock.lock().await)
+            let guard = self.unique_write_lock.lock().await;
+            if self
+                .write_barrier_flags
+                .is_set(crate::index::write_barrier_flags::MIGRATION_FREEZE)
+            {
+                return Err(DbError::MigrationFrozen {
+                    table: self.name.clone(),
+                });
+            }
+            Some(guard)
         } else {
             None
             // drain_guard stays alive for the whole fast-path sequence.
@@ -286,7 +295,16 @@ impl TableManager {
         let needs_barrier = self.needs_write_barrier();
         let _guard = if needs_barrier {
             drop(drain_guard);
-            Some(self.unique_write_lock.lock().await)
+            let guard = self.unique_write_lock.lock().await;
+            if self
+                .write_barrier_flags
+                .is_set(crate::index::write_barrier_flags::MIGRATION_FREEZE)
+            {
+                return Err(DbError::MigrationFrozen {
+                    table: self.name.clone(),
+                });
+            }
+            Some(guard)
         } else {
             None
         };
@@ -446,7 +464,16 @@ impl TableManager {
         let needs_barrier = self.needs_write_barrier();
         let _guard = if needs_barrier {
             drop(drain_guard);
-            Some(self.unique_write_lock.lock().await)
+            let guard = self.unique_write_lock.lock().await;
+            if self
+                .write_barrier_flags
+                .is_set(crate::index::write_barrier_flags::MIGRATION_FREEZE)
+            {
+                return Err(DbError::MigrationFrozen {
+                    table: self.name.clone(),
+                });
+            }
+            Some(guard)
         } else {
             None
         };
@@ -524,7 +551,16 @@ impl TableManager {
         let needs_barrier = self.needs_write_barrier();
         let _guard = if needs_barrier {
             drop(drain_guard);
-            Some(self.unique_write_lock.lock().await)
+            let guard = self.unique_write_lock.lock().await;
+            if self
+                .write_barrier_flags
+                .is_set(crate::index::write_barrier_flags::MIGRATION_FREEZE)
+            {
+                return Err(DbError::MigrationFrozen {
+                    table: self.name.clone(),
+                });
+            }
+            Some(guard)
         } else {
             None
         };

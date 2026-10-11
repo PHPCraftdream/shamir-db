@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use super::shadow_log::{MigrationShadowLog, ShadowEntry, ShadowOp};
+use crate::table::MigrationFreezeGuard;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MigrationPhase {
@@ -92,6 +93,9 @@ pub struct MigrationCoordinator {
     state: Mutex<MigrationState>,
     // Rare admin finalisation only; never taken by record reads/writes.
     finalisation: Mutex<()>,
+    // Rare admin ownership transfers only; held for Option::take, never across
+    // await. Poison recovery still permits synchronous freeze cleanup.
+    source_freeze: std::sync::Mutex<Option<MigrationFreezeGuard>>,
     shadow_log: Arc<MigrationShadowLog>,
     src_data: Arc<dyn Store>,
     dst_data: Arc<dyn Store>,
@@ -137,11 +141,33 @@ impl MigrationCoordinator {
         Self {
             state: Mutex::new(state),
             finalisation: Mutex::new(()),
+            source_freeze: std::sync::Mutex::new(None),
             shadow_log,
             src_data,
             dst_data,
             src_mvcc,
         }
+    }
+
+    /// Transfer Start's guard without an await or an unowned freeze window.
+    pub fn with_migration_freeze(mut self, guard: MigrationFreezeGuard) -> Self {
+        *self
+            .source_freeze
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner()) = Some(guard);
+        self
+    }
+
+    /// Move cleanup into the admin future immediately AFTER it acquires the
+    /// finalisation lock, with no intervening await. Waiters must not take the
+    /// active finaliser's freeze. Body cancellation/errors then drop the guard
+    /// even if this coordinator is retained in the map or by another Arc.
+    /// An uncommitted retry without a guard cannot safely resume its snapshot.
+    pub fn take_migration_freeze(&self) -> Option<MigrationFreezeGuard> {
+        self.source_freeze
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     }
 
     /// Serialize admin retries without holding a map or state guard over I/O.
@@ -471,6 +497,18 @@ impl MigrationCoordinator {
         self.state.lock().await.phase = MigrationPhase::RolledBack;
         self.persist_state().await?;
         Ok(())
+    }
+
+    /// A committed retry finalises the fixed destination, not the source's
+    /// newly admitted writes. The original snapshot count is its baseline.
+    pub async fn verify_committed_record_count(&self) -> DbResult<(u64, u64)> {
+        let expected = self.state().await.records_copied;
+        let mut count = 0u64;
+        let mut stream = self.dst_data.iter_stream(MAINT_SCAN_BATCH);
+        while let Some(batch) = stream.next().await {
+            count += batch?.len() as u64;
+        }
+        Ok((expected, count))
     }
 
     pub async fn verify_record_count(&self) -> DbResult<(u64, u64)> {
