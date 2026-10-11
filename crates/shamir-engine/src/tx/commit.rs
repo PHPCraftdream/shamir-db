@@ -919,6 +919,8 @@ async fn commit_tx_inner_legacy_async(
     let changefeed_event = shamir_tx::project_event(&tx, repo.name(), commit_version);
 
     apply_data_phase(&mut tx, repo, commit_version).await;
+    #[cfg(test)]
+    fire_post_wal_pre_publish_test_hook(repo, false).await;
     // SSI fix S2 — Phase 5a (`apply_data_phase` → `apply_committed_visible`)
     // finalized every claimed cell (version published, `reserved_by` cleared).
     // Disarm so the guards' `Drop` is a no-op.

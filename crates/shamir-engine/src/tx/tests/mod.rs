@@ -20,6 +20,7 @@ pub mod f74_bump_apply_ordering_tests;
 pub mod gc_tests;
 pub mod index_rollback_tests;
 pub mod interner_checkpoint_tests;
+pub mod journal_order_tests;
 pub mod non_tx_mvcc_routing_tests;
 pub mod oracle_stress_tests;
 pub mod p1096_tx_aware_unique_check_tests;
