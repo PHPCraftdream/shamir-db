@@ -11,6 +11,10 @@ use crate::tx::commit_phases::{
 };
 use crate::tx::tx_outcome::MaterializationState;
 
+#[cfg(test)]
+pub(super) static TEST_PRE_MATERIALIZE_REPO: std::sync::OnceLock<String> =
+    std::sync::OnceLock::new();
+
 /// Phases 5a–6 of the commit pipeline, run OUTSIDE `commit_lock` (P2b).
 ///
 /// Gated by per-table `uwl_guards` (unique_write_lock) already held since
@@ -66,6 +70,15 @@ pub(super) async fn materialize(
     let tx_id = tx.tx_id.0;
     let commit_version = version_guard.version();
     let mut ok = true;
+
+    // The existing hook follows 5a; this opt-in must park before any data is visible.
+    #[cfg(test)]
+    if TEST_PRE_MATERIALIZE_REPO
+        .get()
+        .is_some_and(|name| name == repo.name())
+    {
+        super::commit::fire_post_wal_pre_publish_test_hook(repo, false).await;
+    }
 
     // Phase 5a: physical data writes per table.
     //
