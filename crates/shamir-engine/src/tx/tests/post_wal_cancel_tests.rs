@@ -14,6 +14,28 @@ use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
 use crate::tx::commit::{PostWalPrePublishHook, TEST_POST_WAL_PRE_PUBLISH_HOOK};
 
+/// The embedded store releases its directory lock when its background workers
+/// notice the drop, so a reopen right after `drop` may briefly see `Locked`.
+async fn reopen_after_drop(path: &Path) -> RepoInstance {
+    let mut last_err = None;
+    for _ in 0..100 {
+        match RepoInstance::from_factory(
+            "post_wal_cancel".into(),
+            BoxRepoFactory::fjall_raw(path.to_path_buf()),
+            vec![TableConfig::new("t")],
+        )
+        .await
+        {
+            Ok(repo) => return repo,
+            Err(e) => {
+                last_err = Some(e);
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+    }
+    panic!("post_wal_cancel reopen still failing after 5 s: {last_err:?}");
+}
+
 /// Names the stuck phase instead of leaving the runner to kill the test after minutes.
 async fn within<T>(phase: &str, fut: impl std::future::Future<Output = T>) -> T {
     tokio::time::timeout(std::time::Duration::from_secs(45), fut)
@@ -375,15 +397,10 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     drop(wal);
     drop(gate);
     drop(tbl);
+    drop(drainer);
     drop(repo);
 
-    let reopened = RepoInstance::from_factory(
-        "post_wal_cancel".into(),
-        BoxRepoFactory::fjall_raw(path),
-        vec![TableConfig::new("t")],
-    )
-    .await
-    .unwrap();
+    let reopened = reopen_after_drop(&path).await;
     let tbl = reopened.get_table("t").await.unwrap();
     assert_eq!(
         tbl.get(counter_failed_rid).await.unwrap(),
