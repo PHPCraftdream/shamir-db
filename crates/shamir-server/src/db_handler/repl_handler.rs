@@ -31,6 +31,8 @@ use shamir_query_types::wire::repl::{
     ReplRepoInfo, ReplRequest, ReplResponse, CURRENT_REPL_PROTO_VER,
 };
 
+use crate::replication::in_process::MAX_PULL_EVENTS;
+
 use super::handler::{session_actor, ShamirDbHandler};
 
 /// Long-poll re-read step. Short enough that the handler stays responsive
@@ -162,7 +164,6 @@ impl ShamirDbHandler {
         // treated as "give me what you can" — we use 1 as the effective
         // floor. (The wire layer allows 0 as "no events requested"; we
         // interpret it as the minimum useful batch.)
-        const MAX_PULL_EVENTS: u32 = 1024;
         let effective_limit = limit.clamp(1, MAX_PULL_EVENTS) as usize;
 
         // First read — if we get events or the caller didn't ask to wait,

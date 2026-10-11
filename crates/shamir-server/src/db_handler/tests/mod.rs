@@ -5,6 +5,7 @@ pub mod cursor_byte_budget_tests;
 pub mod cursor_handler_tests;
 pub mod node_mode_tests;
 pub mod p1064_ddl_op_status_acl_tests;
+pub mod pull_cap_tests;
 pub mod repl_handler_tests;
 pub mod session_actor_tests;
 pub mod subscribe_handler_tests;
