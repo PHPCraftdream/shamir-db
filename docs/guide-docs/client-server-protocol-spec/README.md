@@ -36,6 +36,7 @@
 - **[CURSORS.md](CURSORS.md)** — server-side result cursors v1: CreateCursor/FetchNext/CancelCursor, CursorPage/CursorClosed, error codes. Backed by real MVCC-snapshot-pinned engine/session state (not wire-only scaffolding).
 
 ### Reference (informative)
+- **[TRANSACTION_OUTCOMES.md](TRANSACTION_OUTCOMES.md)** — transaction status/reason/error, WAL durability warnings, materialization, batch error codes, interactive handle cleanup and retry decisions.
 - **[SECURITY_MODEL.md](SECURITY_MODEL.md)** — adversary model, threat coverage, non-guarantees.
 - **[IMPLEMENTATION_GUIDE.md](IMPLEMENTATION_GUIDE.md)** — operational details (storage, observability, audit, recovery runbooks).
 
