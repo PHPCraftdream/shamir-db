@@ -5,6 +5,7 @@ use crate::query::batch::batch_execute::{execute_plan_tx, filter_results};
 use crate::query::batch::batch_validate::{
     validate_filter_depth, validate_filter_patterns, validate_tables,
 };
+use crate::query::batch::execution_deadline::ExecutionDeadline;
 use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
 #[cfg(test)]
 use crate::query::batch::BatchRequest;
@@ -60,18 +61,16 @@ pub async fn open_interactive_tx(
 /// the caller additionally asserts that the batch targets the SAME repo the
 /// handle is pinned to (the engine tx is committed against one repo).
 ///
-/// **#666: no wall-clock budget here, by design.** `execute_batch`'s
-/// `max_execution_time_secs` enforcement (cooperative deadline checkpoints
-/// threaded through the whole single-call execution — see
-/// `execution_deadline.rs`) applies ONLY to that single-call entry
-/// point; this path runs with `ExecutionDeadline::unbounded()` (via
-/// `execute_plan_tx`). An interactive transaction spans MULTIPLE separate
-/// `execute_in_open_tx` calls before an eventual `commit_interactive_tx` —
-/// the caller owns `tx: &mut TxContext` across all of them, so there is no
-/// single call whose wall-clock duration corresponds to "the whole
-/// transaction's lifetime". A per-session idle/total-duration timeout for
-/// interactive transactions, if ever needed, is a separate, larger feature
-/// (different lifecycle contract, out of scope for this fix).
+/// Each call has a cooperative `max_execution_time_secs` budget, just like
+/// `execute_batch` (30 seconds by default). This replaces the former
+/// multi-roundtrip rationale for unbounded execution: a per-call bound is
+/// safe because execution returns an ordinary `ExecutionTimedOut` error,
+/// without cancelling a future or committing the transaction. The tx stays
+/// open; the caller must roll it back/drop it on timeout, including any
+/// writes staged by earlier calls. Existing safe execution checkpoints
+/// enforce the bound; they do not preempt a stalled operation.
+/// The transaction's lifetime across calls is a different budget, owned by
+/// the caller, not this per-call deadline. Commit/WAL are not timed here.
 ///
 /// Takes an [`Authorized`] token, not a raw `&BatchRequest` + `Actor` pair
 /// (#1199) — see [`execute_batch`]'s doc and `authorized.rs`'s module doc.
@@ -81,6 +80,23 @@ pub async fn execute_in_open_tx(
     admin: Option<&dyn AdminExecutor>,
     invoker: Option<&dyn FunctionInvoker>,
     tx: &mut shamir_tx::TxContext,
+) -> Result<BatchResponse, BatchError> {
+    let deadline =
+        ExecutionDeadline::from_budget_secs(auth.request().limits.max_execution_time_secs);
+    execute_in_open_tx_with_deadline(auth, resolver, admin, invoker, tx, deadline).await
+}
+
+// Share the entire entry implementation so tests can inject an already-expired
+// deadline without sleeps or a global clock mock. Production always constructs
+// it from request.limits above; validation, planning and execution stay shared.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn execute_in_open_tx_with_deadline(
+    auth: Authorized<'_>,
+    resolver: &dyn TableResolver,
+    admin: Option<&dyn AdminExecutor>,
+    invoker: Option<&dyn FunctionInvoker>,
+    tx: &mut shamir_tx::TxContext,
+    deadline: ExecutionDeadline,
 ) -> Result<BatchResponse, BatchError> {
     let (request, actor, db_name) = auth.into_parts();
     let actor = &actor;
@@ -113,6 +129,7 @@ pub async fn execute_in_open_tx(
         actor,
         db_name,
         tx,
+        deadline,
     )
     .await?;
 

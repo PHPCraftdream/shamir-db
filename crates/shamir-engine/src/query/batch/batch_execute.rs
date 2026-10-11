@@ -584,9 +584,9 @@ pub(super) async fn execute_plan_impl(
 /// SELECT populates the read-set and SSI write-skew detection is live
 /// end-to-end through this wire path.
 ///
-/// Passes an [`ExecutionDeadline::unbounded`] deadline: this entry serves
-/// the interactive-tx path (`execute_in_open_tx`), which #666 deliberately
-/// keeps outside the single-call wall-clock budget (see its doc comment).
+/// Uses the per-call deadline derived from the interactive request's limits.
+/// Nested execution inherits it; no commit or transaction-lifetime bound is
+/// introduced by this entry.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_plan_tx(
     plan: &mut BatchPlan,
@@ -597,6 +597,7 @@ pub(super) async fn execute_plan_tx(
     actor: &Actor,
     db_name: &str,
     tx: &mut shamir_tx::TxContext,
+    deadline: ExecutionDeadline,
 ) -> Result<TMap<String, QueryResult>, BatchError> {
     execute_plan_tx_impl(
         plan,
@@ -610,7 +611,7 @@ pub(super) async fn execute_plan_tx(
         0,
         &new_map(),
         ResultEncoding::Name,
-        ExecutionDeadline::unbounded(),
+        deadline,
     )
     .await
 }
