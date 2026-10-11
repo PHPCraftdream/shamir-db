@@ -341,27 +341,44 @@ impl TableManager {
         // Latest-state counters/indexes cannot answer a snapshot + staged overlay.
         // Snapshot/Serializable reads pay O(N) scans (and sorting when needed);
         // Pessimistic and non-tx reads retain the latest-committed shortcuts.
-        // Vector similarity keeps its own path (ANN + staged overlay merge): the
-        // row-level scan predicate cannot rank, so it is not routed here. Its
-        // candidates are not snapshot-filtered yet (tracked as B04b).
         if tx.is_some_and(|t| {
             matches!(
                 t.isolation,
                 shamir_tx::IsolationLevel::Snapshot | shamir_tx::IsolationLevel::Serializable
             )
-        }) && !query
-            .r#where
-            .as_ref()
-            .is_some_and(contains_vector_similarity)
-        {
-            if query.pagination.keyset().is_some() {
-                return self
-                    .read_snapshot_keyset(query, ctx, interner, tx, start)
+        }) {
+            if let Some(fvq) = query
+                .r#where
+                .as_ref()
+                .and_then(super::filtered_vector::snapshot_vector_query)
+            {
+                // The live ANN graph cannot be certified complete at a snapshot (graph
+                // promotion follows publication and direct writes update the graph after
+                // MVCC), so snapshot vector reads rank exactly: O(N*d) over the snapshot.
+                return Box::pin(self.read_snapshot_vector(query, ctx, interner, &fvq, tx, start))
                     .await;
             }
-            return self
-                .read_scan(query, ctx, interner, tx, encoding, batch_size, start)
-                .await;
+            if !query
+                .r#where
+                .as_ref()
+                .is_some_and(contains_vector_similarity)
+            {
+                if query.pagination.keyset().is_some()
+                    || query.order_by.as_ref().is_some_and(|order| {
+                        order
+                            .items
+                            .iter()
+                            .any(|item| item.field.len() == 1 && item.field[0] == "_id")
+                    })
+                {
+                    return self
+                        .read_snapshot_keyset(query, ctx, interner, tx, start)
+                        .await;
+                }
+                return self
+                    .read_scan(query, ctx, interner, tx, encoding, batch_size, start)
+                    .await;
+            }
         }
 
         // Opt #2 (1000×-class): `SELECT count(*) FROM table` (no WHERE,
@@ -914,9 +931,10 @@ impl TableManager {
         let order = query.order_by.as_ref().ok_or_else(|| {
             DbError::Validation("keyset pagination requires ORDER BY".to_string())
         })?;
-        let (key, _) = query.pagination.keyset().expect("keyset dispatch");
-        if key.len() != order.items.len()
-            || key.is_empty()
+        let keyset = query.pagination.keyset();
+        let key = keyset.map(|(key, _)| key);
+        if key.is_some_and(|key| key.len() != order.items.len() || key.is_empty())
+            || order.items.is_empty()
             || query.group_by.is_some()
             || exec::has_aggregates(&query.select)
             || query.select.distinct
@@ -926,22 +944,22 @@ impl TableManager {
                     .to_string(),
             ));
         }
-        if order
-            .items
-            .iter()
-            .any(|item| item.field.len() == 1 && item.field[0] == "_id")
-        {
-            // resolve_field only walks stored maps; it cannot resolve the
-            // synthetic RecordId. Do not silently return an empty page.
-            return Err(DbError::Validation(
-                "snapshot keyset does not support synthetic _id ordering; use after_id \
-                 as the stored-field tie-breaker"
-                    .to_string(),
-            ));
-        }
         let seek: Vec<Vec<u8>> = key
-            .iter()
-            .map(|value| {
+            .into_iter()
+            .flatten()
+            .zip(&order.items)
+            .map(|(value, item)| {
+                if item.field.len() == 1 && item.field[0] == "_id" {
+                    let id = match value {
+                        QueryValue::Str(value) => value.parse::<RecordId>().ok(),
+                        QueryValue::Bin(value) => RecordId::try_from_bytes(value),
+                        _ => None,
+                    }
+                    .ok_or_else(|| {
+                        DbError::Validation("_id keyset cursor must be a valid RecordId".into())
+                    })?;
+                    return Ok(id.as_bytes().to_vec());
+                }
                 super::read_planner::encode_query_value_for_sort(value).ok_or_else(|| {
                     DbError::Validation("keyset values must be indexable scalars".to_string())
                 })
@@ -999,7 +1017,13 @@ impl TableManager {
                     continue;
                 }
                 let mut values = Vec::with_capacity(paths.len());
-                for path in &paths {
+                for (path, item) in paths.iter().zip(&order.items) {
+                    if item.field.len() == 1 && item.field[0] == "_id" {
+                        // RecordId's total order is its raw 16-byte order, not
+                        // the lexicographic order of its Base58 display string.
+                        values.push(id.as_bytes().to_vec());
+                        continue;
+                    }
                     let Some(value) = path
                         .as_ref()
                         .and_then(|p| crate::query::filter::eval::resolve_field(&record, p))
@@ -1027,7 +1051,8 @@ impl TableManager {
                     values.push(encoded);
                 }
                 let cmp = compare(&values, &seek);
-                if cmp.is_gt()
+                if keyset.is_none()
+                    || cmp.is_gt()
                     || (cmp.is_eq()
                         && query
                             .pagination
@@ -1835,6 +1860,123 @@ impl TableManager {
             &version_ids,
         ))
         .with_corrupt_records(corrupt))
+    }
+
+    /// Exact snapshot + overlay ranking when the live graph cannot be trusted.
+    #[allow(clippy::too_many_arguments)]
+    async fn read_snapshot_vector(
+        &self,
+        query: &ReadQuery,
+        ctx: &FilterContext<'_>,
+        interner: &Interner,
+        fvq: &super::filtered_vector::FilteredVectorQuery,
+        tx: Option<&shamir_tx::TxContext>,
+        start: Instant,
+    ) -> DbResult<QueryResult> {
+        let path = intern_field_path(&fvq.field, interner);
+        let lease = match path {
+            Some(path) => {
+                self.index2_registry()
+                    .lease_by_field_and_kind(&path, "vector")
+                    .await?
+            }
+            None => None,
+        };
+        let Some(lease) = lease else {
+            return self
+                .read_fallback_no_vector_index(query, ctx, interner, tx, start)
+                .await;
+        };
+        let vb = lease
+            .backend
+            .as_any()
+            .downcast_ref::<VectorBackend>()
+            .ok_or_else(|| DbError::Internal("vector backend type mismatch".into()))?;
+        let adapter = vb.adapter_arc();
+        let expected_dim = adapter.dim();
+        if fvq.query.len() != expected_dim as usize {
+            return Err(DbError::Internal(format!(
+                "dimension mismatch: expected {expected_dim}, got {}",
+                fvq.query.len(),
+            )));
+        }
+        let hnsw = adapter.as_hnsw_adapter().ok_or_else(|| {
+            DbError::Internal("snapshot vector scoring requires HNSW adapter".into())
+        })?;
+        let residual = fvq.residual.as_ref().map(|f| compile_filter(f, interner));
+        let k = fvq.k.min(MAX_TOPK) as usize;
+        let mut ranked: Vec<(RecordId, f32, Bytes)> = Vec::new();
+        let mut scanned = 0;
+        let mut corrupt = Vec::new();
+        // O(N*d) distance work plus batch/top-k sorting; keep only a batch
+        // plus k winners and reuse the index's extraction and ShamirDist kernel.
+        let stream = self
+            .list_stream_tx_after_predicate(tx, shamir_tunables::store_defaults::FULL_SCAN_BATCH);
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            let mut vectors = Vec::new();
+            let mut bytes_by_id = shamir_collections::TMap::default();
+            for (id, cow) in batch? {
+                scanned += 1;
+                let record = match cow.into_inner() {
+                    Ok(record) => record,
+                    Err(_) => {
+                        corrupt.push(CorruptRecordRef {
+                            table: self.name().to_string(),
+                            id,
+                        });
+                        continue;
+                    }
+                };
+                if residual.as_ref().is_some_and(|f| !f.matches(&record, ctx)) {
+                    continue;
+                }
+                if let Some(vector) = lease.backend.staged_vector(id, &record).await {
+                    let bytes = record
+                        .to_bytes()
+                        .map_err(|e| DbError::Codec(format!("Failed to encode record: {e}")))?;
+                    vectors.push((id, vector));
+                    bytes_by_id.insert(id, bytes);
+                }
+            }
+            // The adapter sorts with partial_cmp before truncation. Request
+            // every candidate in bounded chunks so no nonfinite distance or
+            // equal-distance id tie is lost before our total-order ranking.
+            for chunk in vectors.chunks(MAX_TOPK as usize) {
+                let chunk_len =
+                    u32::try_from(chunk.len()).expect("scoring chunks are bounded by MAX_TOPK");
+                let scores = hnsw
+                    .score_staged_candidates(&fvq.query, chunk_len, chunk)
+                    .await
+                    .map_err(|e| DbError::Internal(e.to_string()))?;
+                for (id, distance) in scores {
+                    if let Some(bytes) = bytes_by_id.swap_remove(&id) {
+                        ranked.push((id, distance, bytes));
+                    }
+                }
+                ranked.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+                ranked.truncate(k);
+            }
+        }
+        let rows = ranked
+            .into_iter()
+            .map(|(id, _, bytes)| (id, bytes))
+            .collect();
+        let mut result = Box::pin(self.postprocess_candidates(
+            query,
+            ctx,
+            interner,
+            rows,
+            "snapshot_vector_exact",
+            start,
+            corrupt,
+        ))
+        .await?;
+        if let Some(stats) = result.stats.as_mut() {
+            stats.index_used = None;
+            stats.records_scanned = scanned;
+        }
+        Ok(result)
     }
 
     /// V3.1 / P3 leaf 3.1 — filtered ANN execution path.

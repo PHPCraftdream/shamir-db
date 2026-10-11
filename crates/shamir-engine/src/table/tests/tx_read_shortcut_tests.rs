@@ -553,7 +553,7 @@ async fn tx_read_shortcut_filter_stream_decodable_nonmap_fallback() {
 }
 
 #[tokio::test]
-async fn tx_read_shortcut_snapshot_keyset_synthetic_id_rejected() {
+async fn tx_read_shortcut_snapshot_keyset_invalid_id_rejected() {
     let (repo, table, _) = fixture(true).await;
     let interner = table.interner().get().await.unwrap();
     let refs = new_map();
@@ -566,7 +566,7 @@ async fn tx_read_shortcut_snapshot_keyset_synthetic_id_rejected() {
         let (tx, _guard) = repo.begin_tx(isolation).await.unwrap();
         assert!(matches!(
             table.read_tx(&q, &ctx, Some(&tx)).await,
-            Err(DbError::Validation(message)) if message.contains("synthetic _id")
+            Err(DbError::Validation(message)) if message.contains("valid RecordId")
         ));
     }
 }
