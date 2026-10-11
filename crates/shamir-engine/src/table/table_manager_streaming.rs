@@ -119,6 +119,11 @@ impl ReadOneTxBytesFailHook {
     }
 }
 
+/// Boxed committed-row batch stream (snapshot or latest source).
+type CommittedScan<'a> = std::pin::Pin<
+    Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + Send + 'a>,
+>;
+
 impl TableManager {
     /// Stream records in batches, returning InnerValues
     ///
@@ -358,9 +363,7 @@ impl TableManager {
         &'a self,
         tx: Option<&'a shamir_tx::TxContext>,
         batch_size: usize,
-    ) -> std::pin::Pin<
-        Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + Send + 'a>,
-    > {
+    ) -> CommittedScan<'a> {
         match (self.mvcc_store_ref(), tx) {
             (Some(mvcc), Some(t))
                 if matches!(
