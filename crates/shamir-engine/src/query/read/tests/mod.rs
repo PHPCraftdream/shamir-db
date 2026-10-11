@@ -1,5 +1,7 @@
 //! Tests for read query types
 
+pub mod aggregate_expression_execution_tests;
+pub mod aggregate_expression_input_tests;
 pub mod exec_tests;
 pub mod hashable_query_value_tests;
 pub mod pagination_tests;

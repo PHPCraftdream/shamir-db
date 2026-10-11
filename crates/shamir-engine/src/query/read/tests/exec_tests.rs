@@ -963,6 +963,7 @@ fn validate_rejects_dynamic_arg_to_percentile() {
         items: vec![SelectItem::AggregateFn {
             name: "percentile".into(),
             field: AggregateField::Field(vec!["score".into()]),
+            input: None,
             args: vec![FilterValue::field_ref("some_field")],
             alias: Some("p".into()),
             distinct: false,
@@ -1035,6 +1036,7 @@ fn aggregate_fn_distinct_string_agg_deduplicates() {
         items: vec![SelectItem::AggregateFn {
             name: "string_agg".into(),
             field: AggregateField::Field(vec!["name".into()]),
+            input: None,
             args: vec![],
             alias: Some("joined".into()),
             distinct: true,
@@ -1063,6 +1065,7 @@ fn aggregate_fn_non_distinct_keeps_duplicates() {
         items: vec![SelectItem::AggregateFn {
             name: "string_agg".into(),
             field: AggregateField::Field(vec!["name".into()]),
+            input: None,
             args: vec![],
             alias: Some("joined".into()),
             distinct: false,
@@ -1089,6 +1092,7 @@ fn validate_rejects_distinct_sum() {
         items: vec![SelectItem::Aggregate {
             func: AggFunc::Sum,
             field: AggregateField::Field(vec!["age".into()]),
+            input: None,
             alias: Some("total".into()),
             distinct: true,
         }],
@@ -1112,6 +1116,7 @@ fn validate_rejects_distinct_avg() {
         items: vec![SelectItem::Aggregate {
             func: AggFunc::Avg,
             field: AggregateField::Field(vec!["age".into()]),
+            input: None,
             alias: Some("mean".into()),
             distinct: true,
         }],
@@ -1126,6 +1131,7 @@ fn validate_rejects_distinct_count() {
         items: vec![SelectItem::Aggregate {
             func: AggFunc::Count,
             field: AggregateField::Field(vec!["age".into()]),
+            input: None,
             alias: Some("cnt".into()),
             distinct: true,
         }],
@@ -1142,6 +1148,7 @@ fn validate_allows_distinct_min_and_max() {
             items: vec![SelectItem::Aggregate {
                 func,
                 field: AggregateField::Field(vec!["age".into()]),
+                input: None,
                 alias: Some("extreme".into()),
                 distinct: true,
             }],
@@ -1164,6 +1171,7 @@ fn distinct_min_succeeds_and_produces_correct_result() {
             SelectItem::Aggregate {
                 func: AggFunc::Min,
                 field: AggregateField::Field(vec!["age".into()]),
+                input: None,
                 alias: Some("min_age".into()),
                 distinct: true,
             },

@@ -291,10 +291,22 @@ impl BatchPlanner {
                 }
                 for item in &query.select.items {
                     match item {
-                        crate::read::SelectItem::Function { args, .. }
-                        | crate::read::SelectItem::AggregateFn { args, .. } => {
+                        crate::read::SelectItem::Function { args, .. } => {
                             for arg in args {
                                 Self::extract_deps_from_filter_value(arg, &mut deps);
+                            }
+                        }
+                        crate::read::SelectItem::AggregateFn { args, input, .. } => {
+                            for arg in args {
+                                Self::extract_deps_from_filter_value(arg, &mut deps);
+                            }
+                            if let Some(input) = input {
+                                Self::extract_deps_from_filter_value(input, &mut deps);
+                            }
+                        }
+                        crate::read::SelectItem::Aggregate { input, .. } => {
+                            if let Some(input) = input {
+                                Self::extract_deps_from_filter_value(input, &mut deps);
                             }
                         }
                         crate::read::SelectItem::Expression { expr, .. } => {
@@ -305,7 +317,6 @@ impl BatchPlanner {
                         }
                         crate::read::SelectItem::All
                         | crate::read::SelectItem::Field { .. }
-                        | crate::read::SelectItem::Aggregate { .. }
                         | crate::read::SelectItem::CountAll { .. } => {}
                     }
                 }

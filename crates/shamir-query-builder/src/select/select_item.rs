@@ -93,6 +93,7 @@ pub fn agg(func: AggFunc, field: impl IntoFieldPath, alias: impl Into<String>) -
     SelectItem::Aggregate {
         func,
         field: AggregateField::Field(field.into_field_path()),
+        input: None,
         alias: Some(alias.into()),
         distinct: false,
     }
@@ -107,9 +108,58 @@ pub fn agg_distinct(
     SelectItem::Aggregate {
         func,
         field: AggregateField::Field(field.into_field_path()),
+        input: None,
         alias: Some(alias.into()),
         distinct: true,
     }
+}
+
+/// Generic built-in aggregate over a per-row expression.
+/// `field: All` is a placeholder; `input` takes precedence at execution time.
+pub fn agg_of(func: AggFunc, input: FilterValue, alias: impl Into<String>) -> SelectItem {
+    SelectItem::Aggregate {
+        func,
+        field: AggregateField::All,
+        input: Some(input),
+        alias: Some(alias.into()),
+        distinct: false,
+    }
+}
+
+/// Generic built-in aggregate over expression results with a DISTINCT flag.
+/// SUM/AVG/COUNT DISTINCT are rejected by fast-path validation; MIN/MAX
+/// DISTINCT are accepted because deduplication cannot change extrema.
+pub fn agg_distinct_of(func: AggFunc, input: FilterValue, alias: impl Into<String>) -> SelectItem {
+    let mut item = agg_of(func, input, alias);
+    if let SelectItem::Aggregate { distinct, .. } = &mut item {
+        *distinct = true;
+    }
+    item
+}
+
+/// `SUM(input)` over a per-row expression.
+pub fn sum_of(input: FilterValue, alias: impl Into<String>) -> SelectItem {
+    agg_of(AggFunc::Sum, input, alias)
+}
+
+/// `AVG(input)` over a per-row expression.
+pub fn avg_of(input: FilterValue, alias: impl Into<String>) -> SelectItem {
+    agg_of(AggFunc::Avg, input, alias)
+}
+
+/// `MIN(input)` over a per-row expression.
+pub fn min_of(input: FilterValue, alias: impl Into<String>) -> SelectItem {
+    agg_of(AggFunc::Min, input, alias)
+}
+
+/// `MAX(input)` over a per-row expression.
+pub fn max_of(input: FilterValue, alias: impl Into<String>) -> SelectItem {
+    agg_of(AggFunc::Max, input, alias)
+}
+
+/// `COUNT(input)` over a per-row expression (not `COUNT(*)`).
+pub fn count_of(input: FilterValue, alias: impl Into<String>) -> SelectItem {
+    agg_of(AggFunc::Count, input, alias)
 }
 
 // ── convenience wrappers ────────────────────────────────────────────
@@ -139,6 +189,45 @@ pub fn max(field: impl IntoFieldPath, alias: impl Into<String>) -> SelectItem {
 /// For `COUNT(*)` use [`count_all`].
 pub fn count(field: impl IntoFieldPath, alias: impl Into<String>) -> SelectItem {
     agg(AggFunc::Count, field, alias)
+}
+
+/// Funclib aggregate over a per-row expression, without factory arguments.
+pub fn agg_fn_of(
+    name: impl Into<String>,
+    input: FilterValue,
+    alias: impl Into<String>,
+) -> SelectItem {
+    agg_fn_with_args_of(name, input, alias, [])
+}
+
+/// Funclib aggregate over distinct expression results.
+pub fn agg_fn_distinct_of(
+    name: impl Into<String>,
+    input: FilterValue,
+    alias: impl Into<String>,
+) -> SelectItem {
+    let mut item = agg_fn_of(name, input, alias);
+    if let SelectItem::AggregateFn { distinct, .. } = &mut item {
+        *distinct = true;
+    }
+    item
+}
+
+/// Funclib aggregate with separate per-row input and factory configuration.
+pub fn agg_fn_with_args_of(
+    name: impl Into<String>,
+    input: FilterValue,
+    alias: impl Into<String>,
+    args: impl IntoIterator<Item = FilterValue>,
+) -> SelectItem {
+    SelectItem::AggregateFn {
+        name: name.into(),
+        field: AggregateField::All,
+        input: Some(input),
+        args: args.into_iter().collect(),
+        alias: Some(alias.into()),
+        distinct: false,
+    }
 }
 
 // ── funclib aggregates (AggregateFn) ────────────────────────────────
@@ -181,6 +270,7 @@ pub fn agg_fn_with_args(
     SelectItem::AggregateFn {
         name: name.into(),
         field: AggregateField::Field(field.into_field_path()),
+        input: None,
         args: args.into_iter().collect(),
         alias: Some(alias.into()),
         distinct: false,

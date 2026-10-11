@@ -303,6 +303,7 @@ async fn s_read_aggregate_falls_back_to_name() {
         items: vec![SelectItem::Aggregate {
             func: AggFunc::Sum,
             field: AggregateField::Field(vec!["age".to_string()]),
+            input: None,
             alias: Some("total_age".to_string()),
             distinct: false,
         }],

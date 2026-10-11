@@ -480,12 +480,14 @@ async fn parity_group_by_agg() {
                 SelectItem::Aggregate {
                     func: AggFunc::Count,
                     field: AggregateField::All,
+                    input: None,
                     alias: Some("cnt".into()),
                     distinct: false,
                 },
                 SelectItem::Aggregate {
                     func: AggFunc::Sum,
                     field: AggregateField::Field(vec!["age".into()]),
+                    input: None,
                     alias: Some("total_age".into()),
                     distinct: false,
                 },

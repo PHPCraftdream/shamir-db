@@ -241,6 +241,7 @@ async fn group_by_with_version_is_rejected() {
             SelectItem::Aggregate {
                 func: AggFunc::Count,
                 field: AggregateField::All,
+                input: None,
                 alias: Some("cnt".into()),
                 distinct: false,
             },
@@ -286,6 +287,7 @@ async fn aggregate_with_version_is_rejected() {
         items: vec![SelectItem::Aggregate {
             func: AggFunc::Sum,
             field: AggregateField::Field(vec!["score".into()]),
+            input: None,
             alias: Some("total".into()),
             distinct: false,
         }],
