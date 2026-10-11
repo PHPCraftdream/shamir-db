@@ -150,7 +150,9 @@ fn finite_ceiling_and_embedded_policy() {
         BatchLimits::default()
     );
     assert_eq!(ExecPolicy::EMBEDDED.caps, expected);
-    assert!(!ExecPolicy::EMBEDDED.enforce_result_size);
+    const {
+        assert!(!ExecPolicy::EMBEDDED.enforce_result_size);
+    }
 }
 
 #[test]
