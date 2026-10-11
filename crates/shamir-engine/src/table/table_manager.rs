@@ -6,12 +6,14 @@ use futures::FutureExt;
 
 use super::buffer_config;
 use super::interner_manager::InternerManager;
+use super::migration_freeze_guard::MigrationFreezeGuard;
 use super::persistable::PersistRegistry;
 use super::record_counter::RecordCounter;
 use super::table::Table;
 use crate::index::index_manager::IndexManager;
 use crate::index::sorted_index_manager::SortedIndexManager;
 use crate::index2::kind::{StemLanguage, TokenizerKind};
+use crate::tx::CommitError;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::Store;
 
@@ -1305,6 +1307,29 @@ impl TableManager {
         // this order (not the reverse) is what closes the F-70 cycle.
         let lock_guard = self.unique_write_lock.clone().lock_owned().await;
         (guard, lock_guard)
+    }
+
+    /// Freeze source writes until the returned guard is dropped.
+    /// Preparation order: ddl_admission → raise bit → drain → lock fence.
+    /// Admission is released before returning; DDL remains allowed during
+    /// the migration, and the unique write lock is only a preparation fence.
+    ///
+    /// cancel-safe: yes — admission acquisition has no side effect; after
+    /// the bit is claimed its owner exists before drain or lock can suspend.
+    /// Cancelling either wait drops that owner and clears only the freeze bit.
+    pub async fn begin_migration_freeze(&self) -> Result<MigrationFreezeGuard, CommitError> {
+        let admission = self.ddl_admission.lock().await;
+        let guard =
+            MigrationFreezeGuard::try_set(self.write_barrier_flags.clone()).ok_or_else(|| {
+                CommitError::MigrationFrozen {
+                    table: self.name.clone(),
+                }
+            })?;
+        self.drain_writers().await;
+        let fence = self.unique_write_lock.lock().await;
+        drop(fence);
+        drop(admission);
+        Ok(guard)
     }
 
     /// F-37 (#845) — drive the schema-activation write barrier from outside

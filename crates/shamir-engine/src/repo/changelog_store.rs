@@ -26,11 +26,20 @@ impl StoreChangelog {
 #[async_trait::async_trait]
 impl shamir_tx::ChangelogStore for StoreChangelog {
     async fn put(&self, key: Bytes, value: Bytes) -> Result<(), String> {
+        let is_marker = key == shamir_tx::changefeed::gap_marker_key();
         self.store
             .set(key.into(), value)
             .await
-            .map(|_created| ())
-            .map_err(|e| format!("changelog store set: {e}"))
+            .map_err(|e| format!("changelog store set: {e}"))?;
+        if is_marker {
+            // Store::set is only eventually durable. Marker success means
+            // the backend's explicit durability boundary has completed.
+            self.store
+                .flush()
+                .await
+                .map_err(|e| format!("changelog marker flush: {e}"))?;
+        }
+        Ok(())
     }
 
     async fn range_from(&self, from_key: Bytes, limit: usize) -> Result<Vec<Bytes>, String> {
@@ -58,7 +67,10 @@ impl shamir_tx::ChangelogStore for StoreChangelog {
                 break;
             };
             let chunk = chunk.map_err(|e| format!("changelog store range: {e}"))?;
-            for (_, v) in chunk {
+            for (key, v) in chunk {
+                if key.as_ref() == shamir_tx::changefeed::gap_marker_key().as_ref() {
+                    continue;
+                }
                 if v.len() > remaining_bytes {
                     if values.is_empty() {
                         return Err(format!("changelog event exceeds {max_bytes} byte budget"));
