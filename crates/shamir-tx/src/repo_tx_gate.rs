@@ -300,6 +300,13 @@ impl<'a> Drop for OpeningBarrier<'a> {
     }
 }
 
+/// Result of waiting for the contiguous visibility prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisibleOutcome {
+    Visible,
+    ReopenRequired,
+}
+
 impl RepoTxGate {
     /// Create a new gate, optionally seeded from durable markers read
     /// on repo open.
@@ -750,8 +757,11 @@ impl RepoTxGate {
         self.publish_committed_max(wm);
     }
 
-    /// Minimum alive snapshot version — for GC. Returns
-    /// `last_committed()` if no snapshots are open.
+    /// Minimum GC floor: `min(active snapshots U {completion watermark})`.
+    /// The contiguous completion watermark W is an always-live snapshot, even
+    /// when no snapshots are registered or all explicit pins are above W.
+    /// `last_committed` is eager and non-contiguous: pruning to it could lose
+    /// history needed at W and the commit-log window `(W, last]` needed by SSI.
     ///
     /// A10 in-flight barrier awareness: while any `open_snapshot` call is
     /// mid-registration (`active_snapshots_opening > 0`), this function
@@ -775,18 +785,14 @@ impl RepoTxGate {
         if self.active_snapshots_opening.load(Ordering::Acquire) > 0 {
             return 0;
         }
-        let mut min = u64::MAX;
+        let mut min = self.completion().watermark();
         self.active_snapshots.iter_sync(|k, _| {
             if *k < min {
                 min = *k;
             }
             true
         });
-        if min == u64::MAX {
-            self.last_committed()
-        } else {
-            min
-        }
+        min
     }
 
     /// True if no transaction has an open snapshot.
@@ -1024,6 +1030,67 @@ impl RepoTxGate {
     pub fn commit_log_len(&self) -> usize {
         let guard = scc::Guard::new();
         self.commit_write_log.range::<u64, _>(.., &guard).count()
+    }
+
+    /// Highest contiguous fully settled version (Acquire), not the eager
+    /// latest-state publication floor.
+    pub fn visible_floor(&self) -> u64 {
+        self.completion().watermark()
+    }
+
+    /// Wait until every version through `v` is materialized or aborted.
+    ///
+    /// A 50 ms park slice detects reopen even without completion progress.
+    /// After 5 s, warn and count once per wait, but NEVER give up on visibility.
+    /// If both conditions hold, visibility takes precedence.
+    ///
+    /// cancel-safe: yes — the only suspension is a notification under a
+    /// bounded timeout; dropping it releases the notification registration,
+    /// and the RAII guard restores the waiter count. No version state is
+    /// modified by this future.
+    pub async fn await_visible(&self, v: u64) -> VisibleOutcome {
+        const PARK_SLICE: std::time::Duration = std::time::Duration::from_millis(50);
+        const SLOW_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+        // Already-visible calls touch only an Acquire load: no RMW, allocation,
+        // notification registration, or timer construction.
+        if self.visible_floor() >= v {
+            return VisibleOutcome::Visible;
+        }
+        if self.requires_reopen() {
+            return VisibleOutcome::ReopenRequired;
+        }
+
+        let tracker = self.completion();
+        let _registration = tracker.register_waiter();
+        let started = tokio::time::Instant::now();
+        let mut warned = false;
+        loop {
+            let notified = tracker.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            // SeqCst is required here, not just Acquire: together with the
+            // publisher's CAS/load and registration RMW it rules out BOTH
+            // the publisher seeing zero and this recheck seeing the old floor.
+            if tracker.registered_watermark() >= v {
+                return VisibleOutcome::Visible;
+            }
+            if self.requires_reopen() {
+                return VisibleOutcome::ReopenRequired;
+            }
+            if !warned && started.elapsed() >= SLOW_WAIT {
+                warned = true;
+                tracker.record_slow_visible_wait();
+                log::warn!(
+                    "visibility wait exceeded 5 s: target={v}, floor={}",
+                    self.visible_floor(),
+                );
+            }
+            // Expiry only triggers a predicate recheck, never a failed wait.
+            let _ = tokio::time::timeout(PARK_SLICE, notified.as_mut()).await;
+            // Each iteration creates and enables a fresh Notified, including
+            // after a timer wake; a completed notification is never re-polled.
+        }
     }
 
     /// Access the completion tracker (P1a scaffolding; abort-path wired in P1b).

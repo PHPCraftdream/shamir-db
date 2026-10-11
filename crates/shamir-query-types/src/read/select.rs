@@ -5,6 +5,16 @@ use serde::{Deserialize, Serialize};
 use super::{AggFunc, AggregateField, SelectExpr};
 use crate::filter::{FieldPath, FilterValue};
 
+/// Called only for a present field; `serde(default)` handles absence as None.
+/// Deserialize FilterValue directly so JSON null / MessagePack nil become
+/// Some(Null), without Option's present-null-to-None normalization.
+fn deserialize_aggregate_input<'de, D>(deserializer: D) -> Result<Option<FilterValue>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    FilterValue::deserialize(deserializer).map(Some)
+}
+
 /// What to select/return from a query
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Select {
@@ -65,8 +75,13 @@ pub enum SelectItem {
         field: AggregateField,
         /// Per-row input; when present, replaces `field` as the value source.
         /// Uses the projection evaluator's FilterValue model to support refs and params.
-        /// Missing or null means the legacy field/All input; omitted on serialization.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// Missing input uses the legacy field/All source and is omitted on serialization.
+        /// Present null is a literal NULL expression, not a missing input.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_aggregate_input",
+            skip_serializing_if = "Option::is_none"
+        )]
         input: Option<FilterValue>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         alias: Option<String>,
@@ -93,8 +108,13 @@ pub enum SelectItem {
         field: AggregateField,
         /// Per-row input; when present, replaces `field` as the value source.
         /// Uses the projection evaluator's FilterValue model to support refs and params.
-        /// Missing or null means the legacy field/All input; omitted on serialization.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// Missing input uses the legacy field/All source and is omitted on serialization.
+        /// Present null is a literal NULL expression, not a missing input.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_aggregate_input",
+            skip_serializing_if = "Option::is_none"
+        )]
         input: Option<FilterValue>,
         /// Static parameters for parameterised aggregates (e.g. `percentile`'s
         /// `p`, `string_agg`'s `sep`). Must be literal `FilterValue`s —

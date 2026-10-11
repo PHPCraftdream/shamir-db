@@ -577,9 +577,13 @@ pub(super) async fn execute_plan_impl(
             .await?;
             warn_if_op_slow(alias, op_started.elapsed());
             if scope.enforce_result_size() {
-                // Containers pay incrementally in QueryRunner; their inner
-                // payloads have already paid at their own all_results insert.
-                if !matches!(&entry.op, BatchOp::Batch(_) | BatchOp::ForEach(_)) {
+                // Reads finish their own per-read meter in QueryRunner;
+                // containers pay incrementally there as well. Their payloads
+                // must not pay a second time at all_results insertion.
+                if !matches!(
+                    &entry.op,
+                    BatchOp::Read(_) | BatchOp::Batch(_) | BatchOp::ForEach(_)
+                ) {
                     scope.charge_bytes(ResultSize::result(&result))?;
                 }
             }
@@ -702,9 +706,13 @@ pub(super) async fn execute_plan_tx_impl(
             let result = runner.run(alias, entry, &resolved_refs).await?;
             warn_if_op_slow(alias, op_started.elapsed());
             if scope.enforce_result_size() {
-                // Containers pay incrementally in QueryRunner; their inner
-                // payloads have already paid at their own all_results insert.
-                if !matches!(&entry.op, BatchOp::Batch(_) | BatchOp::ForEach(_)) {
+                // Reads finish their own per-read meter in QueryRunner;
+                // containers pay incrementally there as well. Their payloads
+                // must not pay a second time at all_results insertion.
+                if !matches!(
+                    &entry.op,
+                    BatchOp::Read(_) | BatchOp::Batch(_) | BatchOp::ForEach(_)
+                ) {
                     scope.charge_bytes(ResultSize::result(&result))?;
                 }
             }
