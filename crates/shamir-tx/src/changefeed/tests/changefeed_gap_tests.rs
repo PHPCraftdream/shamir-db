@@ -242,7 +242,9 @@ async fn failed_marker_put_retains_gap_and_retries_on_next_hint() {
     feed.mark_gap(8);
     // Exhaust the initial hint BEFORE injecting the failure. Otherwise the
     // stored permit can retry automatically after the first top-of-loop put.
-    assert_eq!(poll!(feed.notify.notified()), Poll::Ready(()));
+    let hint = feed.notify.notified();
+    tokio::pin!(hint);
+    assert_eq!(poll!(hint.as_mut()), Poll::Ready(()));
     assert_eq!(fake.marker_attempts.load(Ordering::SeqCst), 0);
     fake.fail_marker.store(true, Ordering::SeqCst);
     assert!(poll!(writer.as_mut()).is_pending());
