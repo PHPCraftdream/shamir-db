@@ -381,3 +381,71 @@ async fn concurrent_increment_during_persist_write_is_not_lost() {
          stay stuck at the pre-race value of 15"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Boundary arithmetic (#1223): no silent wrap past u64::MAX, no panic or wrap
+// at i64::MIN, and a refused call leaves the counter untouched.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn increment_past_u64_max_fails_instead_of_wrapping() {
+    let c = create_counter().await;
+    c.set(u64::MAX).await.unwrap();
+    let err = c
+        .increment(1)
+        .await
+        .expect_err("an overflowing increment must be refused");
+    assert!(matches!(err, DbError::Internal(_)), "got {err:?}");
+    assert_eq!(c.get().await.unwrap(), u64::MAX);
+}
+
+#[tokio::test]
+async fn increment_up_to_exactly_u64_max_is_allowed() {
+    let c = create_counter().await;
+    c.set(u64::MAX - 5).await.unwrap();
+    c.increment(5).await.unwrap();
+    assert_eq!(c.get().await.unwrap(), u64::MAX);
+}
+
+#[tokio::test]
+async fn decrement_by_i64_min_is_refused_on_a_small_counter_without_panicking() {
+    let c = create_counter().await;
+    c.set(10).await.unwrap();
+    let err = c
+        .increment(i64::MIN)
+        .await
+        .expect_err("decrementing below zero must be refused");
+    assert!(matches!(err, DbError::Internal(_)), "got {err:?}");
+    assert_eq!(c.get().await.unwrap(), 10);
+}
+
+#[tokio::test]
+async fn decrement_by_i64_min_is_exact_on_a_large_counter() {
+    let c = create_counter().await;
+    c.set(u64::MAX).await.unwrap();
+    c.increment(i64::MIN).await.unwrap();
+    // u64::MAX - 2^63 == 2^63 - 1 == i64::MAX
+    assert_eq!(c.get().await.unwrap(), i64::MAX as u64);
+}
+
+#[tokio::test]
+async fn concurrent_increments_at_the_boundary_never_exceed_u64_max() {
+    let c = Arc::new(create_counter().await);
+    c.set(u64::MAX - 10).await.unwrap();
+    let mut handles = Vec::new();
+    for _ in 0..32 {
+        let c = Arc::clone(&c);
+        handles.push(tokio::spawn(async move { c.increment(1).await.is_ok() }));
+    }
+    let mut accepted = 0usize;
+    for h in handles {
+        if h.await.unwrap() {
+            accepted += 1;
+        }
+    }
+    assert_eq!(
+        accepted, 10,
+        "exactly the 10 increments that fit are accepted"
+    );
+    assert_eq!(c.get().await.unwrap(), u64::MAX);
+}
