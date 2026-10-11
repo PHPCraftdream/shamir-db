@@ -91,6 +91,37 @@ fn map_outcome_to_info(
 }
 
 #[test]
+fn published_durability_error_maps_to_committed_metadata() {
+    for materialization in [
+        crate::tx::tx_outcome::MaterializationState::Complete,
+        crate::tx::tx_outcome::MaterializationState::Deferred,
+    ] {
+        let error = crate::tx::CommitError::WalDurability {
+            commit_version: 107,
+            materialization,
+        };
+        // This production helper is shared by batch execution and the DB facade.
+        let info = error.into_transaction_info(11, 100);
+        assert_eq!(info.status, "committed");
+        assert_eq!(info.tx_id, 11);
+        assert_eq!(info.snapshot_version, Some(100));
+        assert_eq!(info.commit_version, Some(107));
+        assert_eq!(info.reason, None);
+        assert_eq!(info.error.as_deref(), Some("wal_durability"));
+        assert_eq!(
+            info.materialized,
+            materialization == crate::tx::tx_outcome::MaterializationState::Complete,
+        );
+    }
+    let info = crate::tx::CommitError::WalRequiresReopen.into_transaction_info(12, 100);
+    assert_eq!(info.status, "aborted");
+    assert_eq!(info.reason.as_deref(), Some("wal_requires_reopen"));
+    assert_eq!(info.error, None);
+    assert_eq!(info.commit_version, None);
+    assert_eq!(info.snapshot_version, None);
+}
+
+#[test]
 fn deferred_outcome_maps_to_materialized_false() {
     use crate::tx::tx_outcome::MaterializationState;
 

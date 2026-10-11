@@ -207,6 +207,7 @@ impl ShamirDb {
                 code: None,
             })?;
         let tx_id = tx.tx_id.0;
+        let snapshot_version = tx.snapshot_version;
         match commit_interactive_tx(&repo, tx).await {
             Ok(outcome) => Ok(TransactionInfo::committed(
                 outcome.tx_id,
@@ -214,33 +215,7 @@ impl ShamirDb {
                 outcome.commit_version,
                 outcome.materialized(),
             )),
-            Err(commit_err) => {
-                let reason = match commit_err {
-                    crate::engine::tx::CommitError::MigrationFrozen { .. } => {
-                        "table_migrating".to_string()
-                    }
-                    crate::engine::tx::CommitError::SsiConflict { .. } => "tx_conflict".to_string(),
-                    crate::engine::tx::CommitError::PhantomConflict { .. } => {
-                        "tx_conflict".to_string()
-                    }
-                    crate::engine::tx::CommitError::Wounded { .. } => "tx_conflict".to_string(),
-                    crate::engine::tx::CommitError::UniqueViolation { .. } => {
-                        "unique_violation".to_string()
-                    }
-                    // FG-7: a commit-time CAS failure maps to the SAME
-                    // "version_conflict" code as the immediate staging-time
-                    // check, so client retry logic keyed on that code
-                    // handles both failure timings identically.
-                    crate::engine::tx::CommitError::CasConflict { .. } => {
-                        "version_conflict".to_string()
-                    }
-                    crate::engine::tx::CommitError::Storage(e) => format!("storage: {}", e),
-                    crate::engine::tx::CommitError::Expired { elapsed, max } => {
-                        format!("tx expired: elapsed {:?} > max {:?}", elapsed, max)
-                    }
-                };
-                Ok(TransactionInfo::aborted(tx_id, reason))
-            }
+            Err(commit_err) => Ok(commit_err.into_transaction_info(tx_id, snapshot_version)),
         }
     }
 }

@@ -315,6 +315,7 @@ fn is_committed_true_when_tx_committed() {
         snapshot_version: Some(100),
         commit_version: Some(101),
         reason: None,
+        error: None,
         materialized: true,
     };
     let resp = batch_resp(TMap::default(), vec![], Some(tx));
@@ -334,6 +335,7 @@ fn is_committed_false_when_tx_aborted() {
         snapshot_version: None,
         commit_version: None,
         reason: Some("tx_conflict".to_owned()),
+        error: None,
         materialized: true,
     };
     let resp = batch_resp(TMap::default(), vec![], Some(tx));

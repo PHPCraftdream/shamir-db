@@ -287,6 +287,8 @@ export interface TransactionInfo {
   tx_id: number;
   status: 'committed' | 'aborted';
   reason?: string;
+  /** Published commit error; status remains committed, never retry the writes. */
+  error?: string;
   snapshot_version?: number;
   commit_version?: number;
   materialized: boolean;

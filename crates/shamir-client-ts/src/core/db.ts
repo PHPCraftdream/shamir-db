@@ -145,8 +145,10 @@ export class Db {
    * Execute an auto-managed interactive transaction. The callback receives
    * a `Tx` handle whose operations route through `txExecute`. If the
    * callback resolves, the transaction is committed; if it throws (or the
-   * commit reports `status === 'aborted'`), the transaction is rolled back
-   * and the error rethrown.
+   * commit reports `status === 'aborted'`), the error is rethrown. Rollback
+   * is only attempted before a finalizing commit response. A committed
+   * response carrying `error` throws an Error with `transaction` and
+   * `commit_version` metadata; its writes must not be retried.
    */
   async tx<T>(
     fn: (t: Tx) => Promise<T>,
@@ -157,21 +159,28 @@ export class Db {
       opts?.repo ?? 'main',
       opts?.isolation,
     );
-    let committed = false;
+    let finalized = false;
     try {
       const out = await fn(new Tx(this.client, this.name, opened.tx_handle));
       const info = await this.client.txCommit(this.name, opened.tx_handle);
       // The commit attempt FINALISES the tx server-side (committed OR aborted) —
       // either way the handle is gone, so no rollback is needed past this point.
-      committed = true;
+      finalized = true;
       if (info.status === 'aborted') {
         throw new Error(`transaction aborted: ${info.reason ?? 'unknown'}`);
+      }
+      if (info.error !== undefined) {
+        // Published, not aborted: retain the exact metadata for reconciliation.
+        throw Object.assign(new Error(`transaction committed with error: ${info.error}`), {
+          transaction: info,
+          commit_version: info.commit_version,
+        });
       }
       return out;
     } finally {
       // Rollback only when we never reached a finalising commit — i.e. `fn`
       // threw, or `txCommit` itself failed (transport error, tx may still be open).
-      if (!committed) {
+      if (!finalized) {
         await this.client.txRollback(this.name, opened.tx_handle).catch(() => {});
       }
     }
