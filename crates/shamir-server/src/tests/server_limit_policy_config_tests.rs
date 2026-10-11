@@ -2,7 +2,7 @@
 //! fields absent from older configs. No filesystem or wall-clock oracle.
 
 use crate::config::{Config, ConfigError, QueryLimitsConfig};
-use crate::db_handler::config::QueryLimitsCap;
+use crate::db_handler::QueryLimitsCap;
 use shamir_query_types::batch::BatchLimits;
 
 fn config() -> Config {
