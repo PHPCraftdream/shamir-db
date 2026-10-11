@@ -4,7 +4,7 @@
 
 S.H.A.M.I.R. Database Architecture Overview
 
-**S.H.A.M.I.R.** is a production-level, standalone binary, decentralized database written in Rust.
+**S.H.A.M.I.R.** is an alpha-stage, single-node database server written in Rust (decentralised operation is a long-term goal, not implemented).
 
 **Acronym Meaning:**
 - S: Secure (Rust)
@@ -54,14 +54,9 @@ Repo trait (manages multiple stores):
 - stores_list() -> Vec<String>
 
 **Supported Backends:**
-1. InMemory: DashMap-based for testing/caching
-2. Cached: Wrapper with Sync/Async write modes
-3. Sled: Pure Rust B-tree, battle-tested
-4. Redb: Modern MVCC B-tree with ACID transactions
-5. Fjall: LSM-tree for high write throughput
-6. Nebari: B-tree (BlueDB successor)
-7. Persy: B-tree with indexes and ACID transactions
-8. Canopy: B-tree with LZ4 compression
+1. InMemory: scc-based, tests/scratch
+2. Cached and MemBuffer wrappers
+3. Fjall: LSM tree — the only durable backend
 
 ## arch-003-interner
 
@@ -94,7 +89,7 @@ Interning System - String to u64 Compression
 4. Rebuild with new InternedKey instances using updated byte size
 
 **Benefits:**
-- ~70% memory reduction for string-heavy data
+- Smaller records (field names stored as ids); reduction not yet measured
 - Faster serialization (fixed-size keys)
 - Smaller storage footprint
 
@@ -172,19 +167,10 @@ All backends implement iter_stream() using async_stream::stream! macro.
 
 **Key Features:**
 - Clean generator syntax: stream! { yield Ok(batch); }
-- Memory-efficient: Constant memory regardless of dataset size
+- Bounded per-batch memory for unsorted scans; ORDER BY / GROUP BY / DISTINCT and result sets still materialize (KNOWN_LIMITATIONS §6)
 - Concurrent: Uses spawn_blocking for CPU-intensive work
 - Lazy: Only fetches when consumer calls .next().await
 - Batch processing: Tunable batch size (100-1000 typical)
-
-**Cursor Management:**
-Each backend manages cursors differently:
-- Sled: range(cursor..) includes cursor, need skip_first
-- Redb: range((Excluded(cursor), Unbounded))
-- Fjall: Manual iterator skip
-- Nebari: Scan with skip flag
-- Persy: Collect all, then slice (no range support)
-- Canopy: range(cursor..)
 
 ## arch-007-codecs
 

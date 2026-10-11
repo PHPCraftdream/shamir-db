@@ -108,7 +108,7 @@ pub async fn require_name(record: Value, _old: Option<Value>, _ctx: Ctx) -> Vali
 ||---|---|---|
 || `ctx.db()` | `Db` | Чтение/запись таблиц: `db.table("users").query(None)`, `.get(key)`, `.insert(doc)` |
 || `ctx.call("fn", params)` | `Value` | Вызов другой зарегистрированной функции (function-calls-function) |
-|| `ctx.http_fetch(req)` | `HttpResponse` | HTTP-эгресс (GET/POST, subject to allowlist) |
+|| `ctx.http_fetch(req)` | `HttpResponse` | HTTP-эгресс (GET/POST, allowlist; выполняется через системный `curl`, он должен быть установлен на хосте) |
 || `ctx.http_get(url)` | `HttpResponse` | Удобная обёртка для GET |
 || `ctx.http_post(url, body)` | `HttpResponse` | Удобная обёртка для POST |
 || `ctx.global_get("key")` | `Option<Value>` | Процесс-level глобальная переменная |
@@ -120,6 +120,13 @@ pub async fn require_name(record: Value, _old: Option<Value>, _ctx: Ctx) -> Vali
 ## 3. Компиляция и деплой
 
 ### Из исходника (Rust → WASM)
+
+> ⚠ **Experimental, только для разработки.** Компиляция запускает `cargo` на
+> хосте сервера и подключает `shamir-sdk` по абсолютному пути, с которым
+> собран бинарник, — поэтому в релизных архивах и Docker-образе она не
+> работает. По умолчанию доступна любому аутентифицированному пользователю
+> (ресурс `compiler://`, mode `0o755`) — ограничь его в любой общей
+> инсталляции. В проде загружай готовый `.wasm`.
 
 ShamirDB умеет компилировать Rust-исходник в WASM на сервере:
 
@@ -289,7 +296,7 @@ await Batch.create('drop-val')
 import { admin, Batch } from '@shamir/client';
 
 await Batch.create('chmod-fn')
-  .add('cm', admin.chmod(admin.refFunction('get_secrets'), 0o4750))
+  .add('cm', admin.chmod(client, admin.refFunction('get_secrets'), 0o4750))
   .execute(client, 'mydb');
 ```
 
@@ -366,8 +373,9 @@ ddl.createValidator →  ddl.bindValidator → (validates inserts) → ddl.unbin
 
 * **WASM — sandboxed.** Функция не может выйти за пределы хост-импортов.
   Побочные эффекты — только через `ctx`: БД, HTTP-эгресс, globals.
-* **Toolchain на сервере — опционален.** Компиляция из исходника удобна
-  для dev; в проде отправляй pre-compiled `.wasm`.
+* **Toolchain на сервере — опционален.** Компиляция из исходника —
+  experimental и работает только на dev-машине с checkout репозитория; в
+  проде отправляй pre-compiled `.wasm`.
 * **Функция — ресурс Shomer.** На неё действуют `chmod`/`chown`/`chgrp`
   (этаж 4). Setuid — это setuid-бит в mode.
 * **Валидатор — fail-closed.** Если bound-валидатор не найден в registry,

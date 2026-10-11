@@ -56,63 +56,32 @@ const alice = await connect({
 });
 ```
 
-### Роли и разрешения (RBAC-основа)
+### Роли
 
-Роль — именованный набор разрешений:
-
-```ts
-import { admin, Batch } from '@shamir/client';
-
-await Batch.create('mk-role')
-  .add('r', admin.createRole('analyst', [
-    admin.permission('allow', ['read'], admin.scopeDatabase('analytics')),
-  ]))
-  .execute(client, 'default');
-```
-
-Каждое разрешение:
-
-|| Поле | Описание |
-|---|---|---|
-| `effect` | `"allow"` или `"deny"` |
-| `actions` | массив: `"read"`, `"insert"`, `"update"`, `"delete"`, `"create"`, `"drop"`, `"alter"`, `"manage_users"`, `"manage_roles"`, `"all"` |
-| `resource` | область действия: `admin.scopeGlobal()` / `admin.scopeDatabase(db)` / `admin.scopeRepo(db, repo)` / `admin.scopeTable(db, repo, table)` |
-
-Чем выше `specificity` (table > repo > database > global), тем приоритетнее.
-Разрешение на `database` покрывает все repo и table внутри.
-
-Назначение роли пользователю:
+Роль — строковая метка на пользователе; объекта «роль» с набором разрешений
+нет (`CreateRole`/`DropRole` удалены). Метки задаются при создании
+пользователя (`roles`) и через `grantRole`/`revokeRole` (HMAC-gated — первым
+аргументом передаётся подключённый `client`):
 
 ```ts
+import { admin, ddl, Batch } from '@shamir/client';
+
 await Batch.create('grant')
-  .add('g', admin.grantRole('analyst', 'alice'))
+  .add('g', admin.grantRole(client, 'analyst', 'alice'))
   .execute(client, 'default');
-```
 
-Отзыв:
-
-```ts
 await Batch.create('revoke')
-  .add('r', admin.revokeRole('analyst', 'alice'))
+  .add('r', admin.revokeRole(client, 'analyst', 'alice'))
   .execute(client, 'default');
 ```
 
-Удаление роли (HMAC-gated):
-
-```ts
-await Batch.create('drop-role')
-  .add('d', admin.dropRole(client, 'analyst'))
-  .execute(client, 'default');
-```
+Права на ресурсы задаются не ролями, а Shomer (owner/group/mode, §2–§5).
 
 ### Интроспекция
 
 ```ts
-import { ddl } from '@shamir/client';
-
 const resp = await Batch.create('ls')
   .add('u', ddl.listUsers())
-  .add('r', ddl.listRoles())
   .execute(client, 'default');
 ```
 
@@ -141,7 +110,7 @@ const resp = await Batch.create('ls')
 import { admin, Batch } from '@shamir/client';
 
 await Batch.create('chmod-tbl')
-  .add('cm', admin.chmod(admin.refTable('ptest', 'main', 'secret'), 0o700))
+  .add('cm', admin.chmod(client, admin.refTable('ptest', 'main', 'secret'), 0o700))
   .execute(client, 'ptest');
 ```
 
@@ -149,7 +118,7 @@ await Batch.create('chmod-tbl')
 
 || Примеры mode | Октал | Смысл |
 |---|---|---|---|
-| `rwxrwxrwx` | `0o777` (493) | полный доступ всем (дефолт) |
+| `rwxrwxrwx` | `0o777` (511) | полный доступ всем (дефолт) |
 | `rwx------` | `0o700` (448) | только владелец |
 | `rwxr-x---` | `0o750` (488) | владелец — всё, группа — чтение и traversal |
 | `r--r--r--` | `0o444` (292) | все только читают |
@@ -158,22 +127,22 @@ await Batch.create('chmod-tbl')
 
 ```ts
 await Batch.create('chown-db')
-  .add('co', admin.chown(admin.refDatabase('analytics'), 7))
+  .add('co', admin.chown(client, admin.refDatabase('analytics'), ownerId))
   .execute(client, 'default');
 ```
 
-`owner` — числовой ID пользователя.
+`owner` — `principal64` пользователя (`await client.resolvePrincipal(name)`).
 
 ### chgrp — назначить группу
 
 ```ts
 await Batch.create('chgrp-tbl')
-  .add('cg', admin.chgrp(admin.refTable('gtest', 'main', 'shared'), 3))
+  .add('cg', admin.chgrp(client, admin.refTable('gtest', 'main', 'shared'), 3))
   .execute(client, 'gtest');
 
 // null — снять группу:
 await Batch.create('chgrp-remove')
-  .add('cg', admin.chgrp(admin.refDatabase('mydb'), null))
+  .add('cg', admin.chgrp(client, admin.refDatabase('mydb'), null))
   .execute(client, 'default');
 ```
 
@@ -185,7 +154,7 @@ await Batch.create('chgrp-remove')
 
 ```ts
 const resp = await Batch.create('mkgrp')
-  .add('mk', admin.createGroup('devs'))
+  .add('mk', admin.createGroup(client, 'devs'))
   .execute(client, 'gtest');
 
 const groupId = resp.results.mk.records[0].group_id;
@@ -195,11 +164,11 @@ const groupId = resp.results.mk.records[0].group_id;
 
 ```ts
 await Batch.create('add-bob')
-  .add('am', admin.addGroupMember(admin.groupName('devs'), bobPrincipalId))
+  .add('am', admin.addGroupMember(client, admin.groupName('devs'), bobPrincipalId))
   .execute(client, 'gtest');
 
 await Batch.create('rm-bob')
-  .add('rm', admin.removeGroupMember(admin.groupId(1), bobPrincipalId))
+  .add('rm', admin.removeGroupMember(client, admin.groupId(1), bobPrincipalId))
   .execute(client, 'gtest');
 ```
 
@@ -214,7 +183,7 @@ await Batch.create('rm-bob')
 
 ```ts
 await Batch.create('dropgrp')
-  .add('dg', admin.dropGroup(admin.groupName('devs')))
+  .add('dg', admin.dropGroup(client, admin.groupName('devs')))
   .execute(client, 'gtest');
 ```
 
@@ -237,23 +206,23 @@ await gtest.run(ddl.createTable('shared', { repo: 'main' }));
 
 // 2. Создать группу
 const grpResp = await Batch.create('mkgrp')
-  .add('mk', admin.createGroup('devs'))
+  .add('mk', admin.createGroup(client, 'devs'))
   .execute(client, 'gtest');
 const groupId = grpResp.results.mk.records[0].group_id as number;
 
-// 3. Добавить bob в группу (bob's principal_id = hash(username))
+// 3. Добавить bob в группу (bobPrincipalId = await client.resolvePrincipal('bob'))
 await Batch.create('add-bob')
-  .add('am', admin.addGroupMember(admin.groupName('devs'), bobPrincipalId))
+  .add('am', admin.addGroupMember(client, admin.groupName('devs'), bobPrincipalId))
   .execute(client, 'gtest');
 
 // 4. Назначить группе таблицу
 await Batch.create('chgrp')
-  .add('cg', admin.chgrp(admin.refTable('gtest', 'main', 'shared'), groupId))
+  .add('cg', admin.chgrp(client, admin.refTable('gtest', 'main', 'shared'), groupId))
   .execute(client, 'gtest');
 
 // 5. Установить режим 0o750: owner rwx + group r-x + other ---
 await Batch.create('chmod')
-  .add('cm', admin.chmod(admin.refTable('gtest', 'main', 'shared'), 0o750))
+  .add('cm', admin.chmod(client, admin.refTable('gtest', 'main', 'shared'), 0o750))
   .execute(client, 'gtest');
 ```
 
@@ -269,7 +238,8 @@ await Batch.create('chmod')
 
 Новые ресурсы получают `mode: 0o777` (полный доступ всем). Пока не
 выполнишь `chmod` — доступ есть у любого аутентифицированного
-пользователя. Это позволяет постепенно ограничивать: сначала работает
+пользователя. **В многопользовательской инсталляции закрывай ресурсы
+сразу после создания.** Это позволяет постепенно ограничивать: сначала работает
 всё, потом точечно закрываем.
 
 ## 5. Иерархия и traversal
@@ -310,11 +280,9 @@ await Batch.create('chmod')
 
 ## Что важно знать уже сейчас (дозированно)
 
-* **Shomer — DAC, не RBAC.** Нет графа grant'ов — есть owner/group/mode
-  на ресурсах. Для «дать доступ нескольким людям» — группы, не роли.
-* **Роли — для разрешений (permissions).** Группы — для POSIX-прав.
-  Это две ортогональные оси: роль описывает *что* можно делать
-  (`read`, `insert`…), группа — *с кем* делится доступ к ресурсу.
+* **Shomer — DAC.** Доступ определяется owner/group/mode на ресурсах; для
+  «дать доступ нескольким людям» — группы. Роли — строковые метки на
+  пользователях; объекта «роль» с разрешениями нет.
 * **Admin обходит все проверки.** Bootstrap-админ (и любой
   `Actor::System`) минует gate Shomer.
 * **`admin.accessTree()` — read-only.** Не меняет права, только показывает.

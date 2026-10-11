@@ -1,6 +1,8 @@
 # S.H.A.M.I.R. Database — Crate Audit Report
 
-All findings below are adversarially verified true-positives. Grouped by crate, then severity. Format: `file:line` — title — why it matters — fix.
+> ⚠ Historical audit (undated; pre-extraction paths and removed backends sled/redb/nebari/persy/canopy). No per-finding fix status is tracked here — not a current defect list.
+
+All findings below were adversarially verified true-positives at the time. Grouped by crate, then severity. Format: `file:line` — title — why it matters — fix.
 
 ---
 

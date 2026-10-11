@@ -41,7 +41,7 @@ await Batch.create('mk-fts')
 || **Whitespace** | `'whitespace'` | Разбивает по пробелам → lowercase. Быстро, просто. |
 || **Unicode** | `'unicode'` | Unicode-aware границы слов (буквы/цифры vs punctuation). |
 || **Ngram** | `'ngram2'` … `'ngram9'` | Скользящее окно по символам. Для CJK-языков и substring-search. |
-|| **Full (stemming)** | `'stemmed_en'`, `'stemmed_ru'`, … | Полный pipeline: whitespace → lowercase → **stopwords** → **Snowball stemming**. 17 языков. |
+|| **Full (stemming)** | `'stemmed_en'`, `'stemmed_ru'`, … | Полный pipeline: whitespace → lowercase → **stopwords** → **Snowball stemming**. 18 языков. |
 
 Пример stemmed-индекса:
 
@@ -321,7 +321,7 @@ expect(resp.results.r.stats?.index_used).toBe('filtered_vector_scan');
 * `stats.index_used == 'filtered_vector_scan'` (в отличие от
   `'index2_ranked'` у bare vector).
 
-### Cost-based выбор пути (V3.2)
+### Выбор пути по статическим порогам (V3.2)
 
 Движок сам выбирает один из трёх внутренних путей в зависимости от
 селективности residual-предиката (см. `docs/dev-artifacts/design/vector-compaction.md`,
@@ -335,8 +335,9 @@ expect(resp.results.r.stats?.index_used).toBe('filtered_vector_scan');
 
 Эмпирические кроссоверы (n=10K, dim=128, из бенчмарка): pre-filter
 выигрывает до ~5–10% селективности, post-filter — на 10–25%, co-filter
-конкурентен только на ≥25–50%. Пороги в коде консервативны (безопаснее
-направить в более дешёвый путь). **Клиенту выбирать путь не нужно** —
+конкурентен только на ≥25–50%. Пороги статичны и подобраны на одном
+датасете (n=10K, dim=128); на нём co-filter в своей зоне (≤20%) был самым
+медленным путём — пороги требуют перекалибровки на больших n. **Клиенту выбирать путь не нужно** —
 планировщик делает это автоматически.
 
 ### Oversample для filtered ANN
@@ -592,19 +593,22 @@ const rows = await db.query('users')
   `.github/workflows/hnsw-recall-matrix.yml` запуск 38074322496; тест —
   `recall_at_10_on_1k_vectors`, один запрос). Для exact KNN
   на малых данных (≤256) — автоматический brute-force.
-* **SQ8-квантование** (`vector_quantization: 'sq8'`) экономит ~3–4× RAM
-  при <3% loss recall@10 — включай, если индекс в RAM и память важнее
+* **SQ8-квантование** (`vector_quantization: 'sq8'`) занимает 25–44% RAM от
+  f32 (измерено на n=1200) при ~2% loss recall@10 — включай, если индекс в
+  RAM и память важнее
   пиковой QPS (см. §8).
 * **Per-query `efSearch` / `oversample`** — точка управления recall /
   latency без перестройки индекса (см. §6). `efSearch` clamp'ится до
   `MAX_EF_SEARCH` (10 000).
-* **Filtered ANN** (`and(vectorSimilarity, предикат)`) — cost-based
-  выбор pre/post/co-filter автоматически (см. §7).
+* **Filtered ANN** (`and(vectorSimilarity, предикат)`) — автоматический
+  выбор pre/post/co-filter по статическим порогам (см. §7).
 * **Размерность — fixed.** `vector_dim` задаётся при создании индекса и
   не меняется. Все записи должны иметь вектор той же размерности.
-* **FTS и vector — durable.** Переживают crash через snapshot v2 +
-  delta-log + rebuild-fallback (см. §9). Компакция tombstone (§11)
-  предотвращает деградацию recall от накопленных удалений.
+* **Vector-индекс** переживает crash через snapshot v2 + delta-log +
+  rebuild-fallback (§9). **У FTS- и functional-индексов снапшотов нет** —
+  они перестраиваются из данных при каждом открытии таблицы (рестарт стоит
+  O(rows × индексов)). Компакция tombstone (§11) предотвращает деградацию
+  recall от накопленных удалений.
 * **`$score` — не persist.** Это runtime-оценка, вычисленная при запросе.
   Не хранится в записи.
 
