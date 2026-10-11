@@ -463,9 +463,16 @@ artifact).
   leader's interner ids; journal events carry no id-to-name bindings. A
   follower may fail to decode records or read them under wrong field names.
   Per-event field-name translation is planned.
-- **Secondary indexes and `COUNT(*)` are not maintained.** Index lookups
-  miss replicated rows. `SELECT COUNT(*)` reads a table counter that
-  replication does not update (0 for a table populated only by replication).
+- **Follower secondary indexes are unsupported and fail closed.** An event
+  touching a table with any index (hash, unique, sorted, FTS, functional or
+  vector) is rejected before any data or version is applied; the typed
+  rejection names the table and index. Index maintenance is a later project.
+  **`COUNT(*)` is maintained best effort:** each table's final operation per
+  key is compared with its current pre-image, data is applied, then the row
+  counter is incremented before the next table. Raw replay and retries after
+  an earlier table succeeded do not double-count. Counter increment failures
+  are logged, not rolled back or repaired by replay; persistence/crash repair
+  and failures after MVCC overlay publication are not atomic with the counter.
 - **DDL, schema and metadata are not replicated; only transaction data
   writes are.** Create the same databases, repos and tables on the follower
   first; **do not create secondary indexes there**. A missing follower repo
