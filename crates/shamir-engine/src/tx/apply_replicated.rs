@@ -11,7 +11,8 @@
 //! ## Trust precondition (#1199)
 //!
 //! This module performs **no validator/schema/DAC/integrity check** on
-//! `event.changes` — the raw bytes are trusted verbatim. The entire
+//! `event.changes` beyond optional payload validation and the mandatory
+//! decoding needed to translate field ids by name. The entire
 //! security of this path rests on the replication TRANSPORT already
 //! having authenticated the sender as a legitimate leader/upstream before
 //! this function is ever called — a precondition owned by sibling crates
@@ -89,24 +90,27 @@
 //!  - SKIPPED: `drainer().wake()` (no local WAL entry was offered — the
 //!    follower wrote history directly via `apply_committed_ops`; the
 //!    drainer has nothing to drain for this version).
-//!  - SKIPPED: A5 interner checkpoint (no interner delta in a record-level
-//!    event; the follower's interner is populated by its own local writes
-//!    and by decode-on-read, NOT by replication).
+//!  - Interner mappings are translated by name and persisted before allocation.
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::KvOp;
-use shamir_tx::{ChangeOp, ChangelogEvent, MvccStore};
+use shamir_tx::{
+    collect_referenced_ids, remap_inner_value_bytes, ChangeOp, ChangelogEvent, MvccStore,
+};
+use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::RecordView;
 use shamir_types::types::value::InnerValue;
 
 use crate::repo::RepoInstance;
 use crate::table::table_manager::table_token_for;
+use crate::table::RecordCounter;
 use crate::tx::commit_phases::persist_markers;
 
 /// The local outcome of applying one replicated [`ChangelogEvent`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ApplyOutcome {
     /// The event was applied to the local repo. Carries the follower-local
     /// commit version allocated for it (NOT the leader's `commit_version`).
@@ -121,13 +125,15 @@ pub enum ApplyOutcome {
 }
 
 /// Permanent incompatibilities detected before allocating a local version.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ApplyRejectReason {
     UnknownTable,
     NoMvccStore,
-    IndexedTable,
+    IndexedTable { table: String, index: String },
     MissingValue,
     UndecodablePayload,
+    MissingFieldBinding,
+    ConflictingFieldBinding,
 }
 
 /// Follower-side trust policy for [`apply_replicated`] (#1199). See
@@ -135,9 +141,8 @@ pub enum ApplyRejectReason {
 /// model this addresses — and does NOT address.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ApplyPolicy {
-    /// Trust `event.changes` verbatim — no decode check. Byte-identical to
-    /// pre-#1199 behavior; the default, so every existing caller is
-    /// unaffected.
+    /// Trust the leader's decisions, skipping optional payload validation.
+    /// Decoding required for field-id translation is never skipped.
     #[default]
     Trusted,
     /// Decode-validate every `Put`'s record bytes BEFORE allocating a
@@ -159,6 +164,14 @@ pub enum ApplyPolicy {
     ValidatePayload,
 }
 
+struct PreparedTable {
+    name: String,
+    token: u64,
+    mvcc: Arc<MvccStore>,
+    counter: Arc<RecordCounter>,
+    ops: Vec<KvOp>,
+}
+
 /// Idempotently apply one leader-originated [`ChangelogEvent`] to the
 /// follower's local repo as a trusted raw write.
 ///
@@ -172,7 +185,7 @@ pub enum ApplyPolicy {
 /// touching the store.
 ///
 /// `policy` selects the trust model — see [`ApplyPolicy`]'s doc. Passing
-/// [`ApplyPolicy::Trusted`] skips payload decoding, but not table preflight.
+/// [`ApplyPolicy::Trusted`] skips optional validation, not translation decoding.
 ///
 /// Returns [`ApplyOutcome::Applied`] with the follower-local commit
 /// version on success. A `Skipped` outcome is returned BEFORE any version
@@ -183,6 +196,7 @@ pub enum ApplyPolicy {
 pub async fn apply_replicated(
     repo: &RepoInstance,
     event: &ChangelogEvent,
+    field_bindings: &[(u64, String)],
     applied_watermark: u64,
     policy: ApplyPolicy,
 ) -> DbResult<ApplyOutcome> {
@@ -194,6 +208,28 @@ pub async fn apply_replicated(
         return Ok(ApplyOutcome::Skipped);
     }
 
+    if event
+        .changes
+        .iter()
+        .any(|change| !repo.has_table(&change.table))
+    {
+        return Ok(ApplyOutcome::Rejected {
+            reason: ApplyRejectReason::UnknownTable,
+        });
+    }
+
+    let mut bindings = shamir_collections::TFxMap::default();
+    let mut names = shamir_collections::TFxMap::default();
+    for (id, name) in field_bindings {
+        if bindings.insert(*id, name).is_some_and(|old| old != name)
+            || names.insert(name, *id).is_some_and(|old| old != *id)
+        {
+            return Ok(ApplyOutcome::Rejected {
+                reason: ApplyRejectReason::ConflictingFieldBinding,
+            });
+        }
+    }
+    let mut referenced = shamir_collections::TFxMap::default();
     let mut by_table: shamir_collections::TFxMap<String, Vec<KvOp>> =
         shamir_collections::TFxMap::default();
     for change in &event.changes {
@@ -212,6 +248,15 @@ pub async fn apply_replicated(
                         reason: ApplyRejectReason::UndecodablePayload,
                     });
                 }
+                let decoded = match InnerValue::from_bytes(value) {
+                    Ok(decoded) => decoded,
+                    Err(_) => {
+                        return Ok(ApplyOutcome::Rejected {
+                            reason: ApplyRejectReason::UndecodablePayload,
+                        });
+                    }
+                };
+                collect_referenced_ids(&decoded, &mut referenced);
                 KvOp::Set(change.key.clone().into(), value.clone())
             }
             ChangeOp::Delete => KvOp::Remove(change.key.clone().into()),
@@ -219,7 +264,13 @@ pub async fn apply_replicated(
         by_table.entry(change.table.clone()).or_default().push(op);
     }
 
-    let mut prepared: Vec<(u64, Arc<MvccStore>, Vec<KvOp>)> = Vec::with_capacity(by_table.len());
+    if referenced.keys().any(|id| !bindings.contains_key(id)) {
+        return Ok(ApplyOutcome::Rejected {
+            reason: ApplyRejectReason::MissingFieldBinding,
+        });
+    }
+
+    let mut prepared: Vec<PreparedTable> = Vec::with_capacity(by_table.len());
     for (table_name, ops) in by_table {
         let table = match repo.get_table(&table_name).await {
             Ok(table) => table,
@@ -230,17 +281,41 @@ pub async fn apply_replicated(
             }
             Err(error) => return Err(error),
         };
-        if table.index_manager_ref().iter_indexes().next().is_some()
-            || table
-                .index_manager_ref()
-                .iter_unique_indexes()
-                .next()
-                .is_some()
-            || !table.sorted_indexes().iter_indexes().is_empty()
-            || !table.index2_registry().is_empty()
-        {
+        let legacy_index = table
+            .index_manager_ref()
+            .iter_indexes()
+            .chain(table.index_manager_ref().iter_unique_indexes())
+            .map(|index| index.name_interned)
+            .next()
+            .or_else(|| {
+                table
+                    .sorted_indexes()
+                    .iter_indexes()
+                    .first()
+                    .map(|index| index.name_interned)
+            });
+        let index_name = if let Some(id) = legacy_index {
+            let interner = table.interner().get().await?;
+            Some(
+                interner
+                    .get_str(&InternerKey::new(id))
+                    .ok_or_else(|| DbError::Codec("missing follower index name".into()))?
+                    .to_string(),
+            )
+        } else {
+            table
+                .index2_registry()
+                .all_descriptors()
+                .await
+                .first()
+                .map(|descriptor| descriptor.name.clone())
+        };
+        if let Some(index) = index_name {
             return Ok(ApplyOutcome::Rejected {
-                reason: ApplyRejectReason::IndexedTable,
+                reason: ApplyRejectReason::IndexedTable {
+                    table: table_name,
+                    index,
+                },
             });
         }
         let token = table_token_for(&table_name);
@@ -252,7 +327,61 @@ pub async fn apply_replicated(
                 reason: ApplyRejectReason::NoMvccStore,
             });
         };
-        prepared.push((token, mvcc, ops));
+        prepared.push(PreparedTable {
+            name: table_name,
+            token,
+            mvcc,
+            counter: Arc::clone(table.counter()),
+            ops,
+        });
+    }
+
+    // All payloads, bindings, and tables passed preflight before first-touch.
+    let interner_manager = repo.repo_interner().await?;
+    let interner = interner_manager.get().await?;
+    let mut remap = shamir_collections::TFxMap::default();
+    for (id, name) in bindings {
+        let local = interner
+            .touch_ind(name)
+            .map_err(|error| DbError::Codec(error.into()))?
+            .into_key()
+            .id();
+        remap.insert(id, local);
+    }
+    // Required even on retry: an earlier persist may have failed after touch.
+    interner_manager.persist().await?;
+
+    let mut rewritten_event = event.clone();
+    for change in &mut rewritten_event.changes {
+        if change.op == ChangeOp::Put {
+            let value = change
+                .value
+                .take()
+                .ok_or_else(|| DbError::Codec("preflighted Put has no value".into()))?;
+            change.value = Some(remap_inner_value_bytes(value, &remap).map_err(|error| {
+                DbError::Codec(format!("replication translation failed: {error}"))
+            })?);
+        }
+    }
+    let mut rewritten_by_table: shamir_collections::TFxMap<String, Vec<KvOp>> =
+        shamir_collections::TFxMap::default();
+    for change in &rewritten_event.changes {
+        let op = match &change.value {
+            Some(value) if change.op == ChangeOp::Put => {
+                KvOp::Set(change.key.clone().into(), value.clone())
+            }
+            _ => KvOp::Remove(change.key.clone().into()),
+        };
+        rewritten_by_table
+            .entry(change.table.clone())
+            .or_default()
+            .push(op);
+    }
+    for PreparedTable { name, ops, .. } in &mut prepared {
+        // Preserve per-table ordering while replacing every Put's bytes.
+        *ops = rewritten_by_table
+            .remove(name)
+            .ok_or_else(|| DbError::Codec("missing preflighted table".into()))?;
     }
 
     let gate = repo.tx_gate().await?;
@@ -278,10 +407,58 @@ pub async fn apply_replicated(
     let local_version = version_guard.version();
 
     let mut any_failed: Option<(u64, DbError)> = None;
-    for (token, mvcc, ops) in prepared {
+    for PreparedTable {
+        name,
+        token,
+        mvcc,
+        counter,
+        ops,
+    } in prepared
+    {
+        // Count only the final operation for each key against ACTUAL current
+        // state, not a leader footprint or a snapshot captured for all tables.
+        // A successfully applied earlier table therefore contributes zero on retry.
+        let mut final_ops = shamir_collections::TFxMap::default();
+        for op in &ops {
+            match op {
+                KvOp::Set(key, _) | KvOp::Remove(key) => {
+                    final_ops.insert(key.clone(), op.clone());
+                }
+            }
+        }
+        let keys: Vec<Bytes> = final_ops
+            .keys()
+            .map(|key| Bytes::copy_from_slice(key.as_ref()))
+            .collect();
+        let delta = match mvcc.get_current_many(&keys).await {
+            Ok(pre_images) => {
+                let mut delta = 0i64;
+                for (op, old) in final_ops.values().zip(pre_images) {
+                    // Bounded by the number of distinct keys in this allocated batch.
+                    delta += match (op, old.is_some()) {
+                        (KvOp::Set(_, _), false) => 1,
+                        (KvOp::Remove(_), true) => -1,
+                        (KvOp::Set(_, _), true) | (KvOp::Remove(_), false) => 0,
+                    };
+                }
+                delta
+            }
+            Err(error) => {
+                any_failed = Some((token, error));
+                break;
+            }
+        };
+        // The overlay is first-writer-wins at (key, version). Collapse the
+        // data batch too, so repeated keys actually expose the final op.
+        let ops = final_ops.into_values().collect();
         if let Err(error) = mvcc.apply_committed_ops(ops, local_version).await {
             any_failed = Some((token, error));
             break;
+        }
+        // Best effort, like the leader: never turn a counter failure into a
+        // retryable data error after successful apply. Finish before next table.
+        if let Err(error) = counter.increment(delta).await {
+            log::warn!("apply_replicated: counter for table {name}: {error}");
         }
     }
 
@@ -355,10 +532,9 @@ pub async fn apply_replicated(
     // with the follower-local version (the leader's commit_version is
     // meaningless downstream — the downstream keys its idempotency on the
     // monotonic sequence of its upstream, which is THIS follower). The
-    // re-emitted event carries the same actor, timestamp, and record
-    // changes as the leader's; only the commit_version and repo name
-    // change.
-    let downstream_event = reproject_for_downstream(event, repo.name(), local_version);
+    // re-emitted event preserves the actor and timestamp, with translated
+    // record bytes and the follower-local commit version and repo name.
+    let downstream_event = reproject_for_downstream(&rewritten_event, repo.name(), local_version);
     repo.emit_changefeed_event(Some(downstream_event)).await;
 
     Ok(ApplyOutcome::Applied { local_version })

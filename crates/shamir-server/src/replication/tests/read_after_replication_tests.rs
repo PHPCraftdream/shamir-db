@@ -3,6 +3,7 @@ use std::sync::Arc;
 use shamir_db::access::{principal64_from_username, Actor};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
+use shamir_db::engine::tx::apply_replicated::ApplyRejectReason;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl::create_index;
@@ -12,12 +13,13 @@ use shamir_query_builder::response::BatchResponseExt;
 use shamir_query_builder::select::count_all;
 use shamir_query_builder::write::{delete, doc, insert, update};
 use shamir_query_types::batch::BatchResponse;
-use shamir_query_types::read::{PlanType, QueryRecord, QueryResult};
+use shamir_query_types::read::{QueryRecord, QueryResult};
 use shamir_types::codecs::interned::inner_value_to_query_value;
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::{InnerValue, QueryValue};
+use shamir_types::types::value::QueryValue;
 use tokio_util::sync::CancellationToken;
 
+use crate::replication::error::ReplError;
 use crate::replication::follower_loop::{run_follower_loop, FollowerLoopConfig};
 use crate::replication::in_process::InProcessReplSource;
 
@@ -113,6 +115,12 @@ async fn journal_version(leader: &ShamirDb, events: usize) -> u64 {
 }
 
 async fn pull_once(leader: &ShamirDb, follower: &ShamirDb) {
+    pull_once_result(leader, follower)
+        .await
+        .expect("bounded follower loop");
+}
+
+async fn pull_once_result(leader: &ShamirDb, follower: &ShamirDb) -> Result<(), ReplError> {
     let config = FollowerLoopConfig::new("matrix-follower", "app", "main")
         .with_poll_wait_ms(0)
         .with_max_iterations(1);
@@ -123,7 +131,6 @@ async fn pull_once(leader: &ShamirDb, follower: &ShamirDb) {
         CancellationToken::new(),
     )
     .await
-    .expect("bounded follower loop");
 }
 
 async fn bookmark(db: &ShamirDb) -> u64 {
@@ -372,164 +379,154 @@ async fn matrix(write: Write, read: Read) {
 }
 
 #[tokio::test]
-#[ignore = "#1211"]
 async fn matrix_insert_one_point_get() {
     matrix(Write::InsertOne, Read::PointGet).await;
 }
 
 #[tokio::test]
-#[ignore = "#1211"]
 async fn matrix_insert_one_full_scan() {
     matrix(Write::InsertOne, Read::FullScan).await;
 }
 
 #[tokio::test]
-#[ignore = "#1211"]
 async fn matrix_insert_one_filter() {
     matrix(Write::InsertOne, Read::Filter).await;
 }
 
 #[tokio::test]
-#[ignore = "#1211"]
 async fn matrix_insert_one_projection() {
     matrix(Write::InsertOne, Read::Projection).await;
 }
 
 #[tokio::test]
-#[ignore = "#1212"]
 async fn matrix_insert_one_count() {
     matrix(Write::InsertOne, Read::Count).await;
 }
 
 #[tokio::test]
-#[ignore = "#1211"]
 async fn matrix_insert_multi_point_get() {
     matrix(Write::InsertMulti, Read::PointGet).await;
 }
 
 #[tokio::test]
-#[ignore = "#1211"]
 async fn matrix_insert_multi_full_scan() {
     matrix(Write::InsertMulti, Read::FullScan).await;
 }
 
 #[tokio::test]
-#[ignore = "#1211"]
 async fn matrix_insert_multi_filter() {
     matrix(Write::InsertMulti, Read::Filter).await;
 }
 
 #[tokio::test]
-#[ignore = "#1211"]
 async fn matrix_insert_multi_projection() {
     matrix(Write::InsertMulti, Read::Projection).await;
 }
 
 #[tokio::test]
-#[ignore = "#1212"]
 async fn matrix_insert_multi_count() {
     matrix(Write::InsertMulti, Read::Count).await;
 }
 
 #[tokio::test]
-#[ignore = "#1211"]
 async fn matrix_update_point_get() {
     matrix(Write::Update, Read::PointGet).await;
 }
 
 #[tokio::test]
-#[ignore = "#1211"]
 async fn matrix_update_full_scan() {
     matrix(Write::Update, Read::FullScan).await;
 }
 
 #[tokio::test]
-#[ignore = "#1211"]
 async fn matrix_update_filter() {
     matrix(Write::Update, Read::Filter).await;
 }
 
 #[tokio::test]
-#[ignore = "#1211"]
 async fn matrix_update_projection() {
     matrix(Write::Update, Read::Projection).await;
 }
 
 #[tokio::test]
-#[ignore = "#1212"]
 async fn matrix_update_count() {
     matrix(Write::Update, Read::Count).await;
 }
 
 #[tokio::test]
-#[ignore = "#1211"]
 async fn matrix_delete_point_get() {
     matrix(Write::Delete, Read::PointGet).await;
 }
 
 #[tokio::test]
-#[ignore = "#1211"]
 async fn matrix_delete_full_scan() {
     matrix(Write::Delete, Read::FullScan).await;
 }
 
 #[tokio::test]
-#[ignore = "#1211"]
 async fn matrix_delete_filter() {
     matrix(Write::Delete, Read::Filter).await;
 }
 
 #[tokio::test]
-#[ignore = "#1211"]
 async fn matrix_delete_projection() {
     matrix(Write::Delete, Read::Projection).await;
 }
 
 #[tokio::test]
-#[ignore = "#1212"]
 async fn matrix_delete_count() {
     matrix(Write::Delete, Read::Count).await;
 }
 
 #[tokio::test]
-#[ignore = "#1211"]
 async fn matrix_two_tables_point_get() {
     matrix(Write::TwoTables, Read::PointGet).await;
 }
 
 #[tokio::test]
-#[ignore = "#1211"]
 async fn matrix_two_tables_full_scan() {
     matrix(Write::TwoTables, Read::FullScan).await;
 }
 
 #[tokio::test]
-#[ignore = "#1211"]
 async fn matrix_two_tables_filter() {
     matrix(Write::TwoTables, Read::Filter).await;
 }
 
 #[tokio::test]
-#[ignore = "#1211"]
 async fn matrix_two_tables_projection() {
     matrix(Write::TwoTables, Read::Projection).await;
 }
 
 #[tokio::test]
-#[ignore = "#1212"]
 async fn matrix_two_tables_count() {
     matrix(Write::TwoTables, Read::Count).await;
 }
 
 #[tokio::test(start_paused = true)]
-#[ignore = "#1213"]
 async fn matrix_unknown_table_bookmark() {
     let leader = build_db(&["items", "unknown"], false).await;
     let follower = build_db(&["items"], false).await;
     insert_rows(&leader, "unknown", vec![row("unknown", 20)]).await;
+    let rejected_version = leader
+        .current_commit_version("app", "main")
+        .await
+        .expect("unknown table commit version");
     insert_rows(&leader, "items", vec![row("later", 20)]).await;
     journal_version(&leader, 2).await;
-    pull_once(&leader, &follower).await;
+    let error = pull_once_result(&leader, &follower)
+        .await
+        .expect_err("unknown table must stop replication");
+    assert!(
+        matches!(
+            error,
+            ReplError::ApplyRejected {
+                leader_version,
+                reason: ApplyRejectReason::UnknownTable,
+            } if leader_version == rejected_version
+        ),
+        "unexpected error: {error:?}"
+    );
     assert_eq!(bookmark(&follower).await, 0);
     let repo = follower
         .get_db("app")
@@ -547,7 +544,6 @@ async fn matrix_unknown_table_bookmark() {
 }
 
 #[tokio::test(start_paused = true)]
-#[ignore = "#1213"]
 async fn matrix_secondary_index_lookup() {
     let leader = build_db(&["items"], true).await;
     let follower = build_db(&["items"], true).await;
@@ -586,43 +582,35 @@ async fn matrix_secondary_index_lookup() {
     let expected = row("indexed", 20);
     let ids = insert_rows(&leader, "items", vec![expected.clone()]).await;
     let target = journal_version(&leader, 1).await;
-    pull_once(&leader, &follower).await;
+    let error = pull_once_result(&leader, &follower)
+        .await
+        .expect_err("indexed table must stop replication");
+    assert!(
+        matches!(
+            error,
+            ReplError::ApplyRejected {
+                leader_version,
+                reason: ApplyRejectReason::IndexedTable { .. },
+            } if leader_version == target
+        ),
+        "unexpected error: {error:?}"
+    );
     let applied = bookmark(&follower).await;
+    assert_eq!(applied, 0);
     let repo = follower
         .get_db("app")
         .expect("database")
         .get_repo("main")
         .expect("repo");
     let table = repo.get_table("items").await.expect("table");
-    if applied == 0 {
-        assert_eq!(table.get_bytes(ids[0]).await.expect("refused row"), None);
-        assert_rows(
-            &read_query(&follower, Query::with_repo("main", "items")).await,
-            &[],
-        );
-    } else {
-        assert_eq!(applied, target);
-        let interner = table.interner().get().await.expect("interner");
-        let index = interner.get_ind("by_v").expect("index name").id();
-        let postings = table
-            .index_manager_ref()
-            .lookup_by_index(index, &[InnerValue::Int(20)])
-            .await
-            .expect("index lookup")
-            .expect("index available");
-        assert_eq!(postings.as_ref(), ids.as_slice());
-        let query = Query::with_repo("main", "items").where_eq("v", 20_i64);
-        let plan = read_query(&follower, query.clone().explain()).await;
-        assert_eq!(
-            plan.explain.expect("index plan").plan_type,
-            PlanType::IndexScan,
-        );
-        assert_rows(&read_query(&follower, query).await, &[expected]);
-    }
+    assert_eq!(table.get_bytes(ids[0]).await.expect("refused row"), None);
+    assert_rows(
+        &read_query(&follower, Query::with_repo("main", "items")).await,
+        &[],
+    );
 }
 
 #[tokio::test]
-#[ignore = "#1211"]
 async fn matrix_preinterned_field_leader_names() {
     let leader = build_db(&["items"], false).await;
     let follower = build_db(&["items"], false).await;

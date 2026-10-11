@@ -1,4 +1,8 @@
+use std::num::NonZeroU32;
 use std::sync::Arc;
+
+use shamir_query_builder::ddl::{create_index, Metric, Quantization, Tokenizer};
+use shamir_query_types::batch::BatchOp;
 
 use shamir_storage::error::DbError;
 use shamir_storage::storage_in_memory::InMemoryRepo;
@@ -45,7 +49,7 @@ async fn assert_refused(repo: &RepoInstance, event: &ChangelogEvent, reason: App
     let committed = gate.last_committed();
     let durable = gate.durable_watermark();
     let mut downstream = repo.subscribe_changelog().await.unwrap();
-    let outcome = apply_replicated(repo, event, 0, ApplyPolicy::Trusted)
+    let outcome = apply_replicated(repo, event, &[], 0, ApplyPolicy::Trusted)
         .await
         .unwrap();
     assert_eq!(outcome, ApplyOutcome::Rejected { reason });
@@ -57,6 +61,7 @@ async fn assert_refused(repo: &RepoInstance, event: &ChangelogEvent, reason: App
         Err(tokio::sync::broadcast::error::TryRecvError::Empty)
     ));
     let table = repo.get_table("items").await.unwrap();
+    assert_eq!(table.counter().get().await.unwrap(), 0);
     assert!(matches!(
         table.get(RecordId([1; 16])).await,
         Err(DbError::NotFound(_))
@@ -89,7 +94,73 @@ async fn hash_index_is_incompatible_with_raw_replication() {
     repo.create_index("items", "by_name", &["name"])
         .await
         .unwrap();
-    assert_refused(&repo, &event(&["items"]), ApplyRejectReason::IndexedTable).await;
+    assert_refused(
+        &repo,
+        &event(&["items"]),
+        ApplyRejectReason::IndexedTable {
+            table: "items".into(),
+            index: "by_name".into(),
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn every_index_family_is_named_and_rejects_the_entire_event() {
+    for family in ["hash", "unique", "sorted", "fts", "functional", "vector"] {
+        let repo = RepoInstance::new(
+            "follower".into(),
+            BoxRepo::InMemory(Arc::new(InMemoryRepo::new())),
+            vec![TableConfig::new("items"), TableConfig::new("indexed")],
+        );
+        let table = repo.get_table("indexed").await.unwrap();
+        match family {
+            "hash" => table.create_index("by_name", &["name"]).await.unwrap(),
+            "unique" => table
+                .create_unique_index("by_name", &["name"])
+                .await
+                .unwrap(),
+            "sorted" => table
+                .create_sorted_index("by_name", &["name"])
+                .await
+                .unwrap(),
+            _ => {
+                let builder = create_index("by_name", "indexed");
+                let op = match family {
+                    "fts" => builder
+                        .fts(vec!["name".into()], Tokenizer::Whitespace)
+                        .unwrap(),
+                    "functional" => builder.functional(vec!["name".into()], "lower").unwrap(),
+                    "vector" => builder
+                        .vector(
+                            vec!["name".into()],
+                            NonZeroU32::new(2).unwrap(),
+                            Metric::Cosine,
+                            Quantization::Off,
+                        )
+                        .unwrap(),
+                    _ => unreachable!("fixture family"),
+                };
+                let BatchOp::CreateIndex(op) = op else {
+                    panic!("index builder")
+                };
+                table.create_index_v2(&op).await.unwrap();
+            }
+        }
+        // Red before S4: rejection lacked both names. The no-write portion
+        // already passed; it also catches accidental index-maintenance bypass.
+        assert_refused(
+            &repo,
+            &event(&["items", "indexed"]),
+            ApplyRejectReason::IndexedTable {
+                table: "indexed".into(),
+                index: "by_name".into(),
+            },
+        )
+        .await;
+        assert_eq!(table.get_bytes(RecordId([1; 16])).await.unwrap(), None);
+        assert_eq!(table.counter().get().await.unwrap(), 0);
+    }
 }
 
 #[tokio::test]

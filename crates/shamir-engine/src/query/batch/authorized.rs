@@ -41,7 +41,9 @@
 use super::ExecScope;
 use async_trait::async_trait;
 use shamir_collections::TFxSet;
-use shamir_query_types::batch::{collect_required_access, BatchError, BatchRequest, ExecPolicy};
+use shamir_query_types::batch::{
+    collect_required_access, BatchError, BatchLimits, BatchRequest, ExecPolicy,
+};
 use shamir_types::access::{AccessError, Action, Actor, ResourcePath};
 
 /// Capability to check whether `actor` may perform `action` on `path`.
@@ -150,7 +152,13 @@ impl<'a> Authorized<'a> {
 
     /// Shared root construction used by both execution entry points.
     pub(super) fn root_scope(&self) -> ExecScope {
-        ExecScope::root(&self.request.limits.clamped_to(&self.policy().caps))
+        ExecScope::root(
+            &self
+                .request
+                .limits
+                .clamped_to(&self.policy().caps)
+                .clamped_to(&BatchLimits::CEILING),
+        )
     }
 
     /// The authorized request.
