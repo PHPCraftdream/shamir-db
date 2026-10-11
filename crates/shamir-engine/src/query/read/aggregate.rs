@@ -34,6 +34,7 @@ use crate::query::filter::{
 use crate::query::read::exec::pre_intern_select_keys;
 use crate::query::read::{AggFunc, AggregateField, GroupBy, QueryResult, Select, SelectItem};
 use shamir_funclib::agg::{Aggregator, DistinctWrapper};
+use shamir_funclib::registry::ScalarError;
 use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_types::codecs::interned::{inner_value_to_query_value, query_value_to_inner};
@@ -932,6 +933,81 @@ pub fn validate_aggregate_select(select: &Select) -> shamir_storage::error::DbRe
     Ok(())
 }
 
+const MAX_STRING_AGG_SEPARATOR_BYTES: usize = 1024;
+
+struct CappedStringAgg {
+    separator: String,
+    value: String,
+    has_value: bool,
+    max: usize,
+}
+
+impl CappedStringAgg {
+    fn new(separator: String, max: usize) -> DbResult<Self> {
+        if separator.len() > MAX_STRING_AGG_SEPARATOR_BYTES {
+            return Err(DbError::Validation(format!(
+                "string_agg separator exceeds {MAX_STRING_AGG_SEPARATOR_BYTES} bytes"
+            )));
+        }
+        Ok(Self {
+            separator,
+            value: String::new(),
+            has_value: false,
+            max,
+        })
+    }
+}
+
+impl Aggregator for CappedStringAgg {
+    fn accumulate(&mut self, value: &QueryValue) -> Result<(), ScalarError> {
+        let text = match value {
+            QueryValue::Null => return Ok(()),
+            QueryValue::Str(text) => text,
+            _ => return Err(ScalarError::new("type_mismatch")),
+        };
+        let separator_bytes = if self.has_value {
+            self.separator.len()
+        } else {
+            0
+        };
+        let actual = self
+            .value
+            .len()
+            .saturating_add(separator_bytes)
+            .saturating_add(text.len());
+        if actual > self.max {
+            return Err(ScalarError::new(format!(
+                "result_too_large: ResultBytes actual={actual} max={}",
+                self.max
+            )));
+        }
+        if actual > self.value.capacity() {
+            let capacity = actual
+                .max(self.value.capacity().saturating_mul(2))
+                .min(self.max);
+            self.value.reserve_exact(capacity - self.value.len());
+        }
+        if self.has_value {
+            self.value.push_str(&self.separator);
+        }
+        self.value.push_str(text);
+        self.has_value = true;
+        Ok(())
+    }
+
+    fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
+        Ok(QueryValue::Str(self.value))
+    }
+}
+
+fn aggregate_accumulation_error(error: ScalarError) -> DbError {
+    if error.code.starts_with("result_too_large: ResultBytes ") {
+        DbError::Validation(error.code)
+    } else {
+        DbError::Function(error.to_string())
+    }
+}
+
 /// Construct factory configuration from the current execution, not a row.
 fn make_aggregate_fn(
     name: &str,
@@ -939,6 +1015,12 @@ fn make_aggregate_fn(
     ctx: &FilterContext<'_>,
 ) -> DbResult<Option<Box<dyn Aggregator>>> {
     if args.is_empty() {
+        if name == "string_agg" {
+            return Ok(Some(Box::new(CappedStringAgg::new(
+                ",".into(),
+                ctx.max_accumulator_bytes(),
+            )?)));
+        }
         return Ok(builtin_aggs().make(name));
     }
     if args.len() != 1 {
@@ -964,7 +1046,10 @@ fn make_aggregate_fn(
             let QueryValue::Str(separator) = value else {
                 return Err(DbError::Validation("type_mismatch".into()));
             };
-            Ok(Some(shamir_funclib::agg::string_agg(separator)()))
+            Ok(Some(Box::new(CappedStringAgg::new(
+                separator,
+                ctx.max_accumulator_bytes(),
+            )?)))
         }
         _ => Err(DbError::Validation(format!(
             "agg_params_not_supported: {name}"
@@ -1308,13 +1393,17 @@ pub(super) fn build_aggregate_object(
                             view.with_ref(|r| resolve_aggregate_input(input, r, &input_ctx))?;
                         if !matches!(value, QueryValue::Null) {
                             agg.accumulate(&value)
-                                .map_err(|error| DbError::Function(error.to_string()))?;
+                                .map_err(aggregate_accumulation_error)?;
                         }
                     } else if let Some(value) =
                         view.with_ref(|r| fn_value_for_aggregator(r, path, *all_field, interner))
                     {
                         // Preserve legacy field-input error handling.
-                        let _ = agg.accumulate(&value);
+                        if let Err(error) = agg.accumulate(&value) {
+                            if error.code.starts_with("result_too_large: ResultBytes ") {
+                                return Err(aggregate_accumulation_error(error));
+                            }
+                        }
                     }
                 }
             }
