@@ -12,7 +12,7 @@
 //! (Category 3 — recovery anchors).
 //!
 //! A8 fix: [`collect_referenced_ids`] walks the SAME `InnerValue` shape as
-//! [`remap_value`] (Map keys + List elements) but COLLECTS the referenced
+//! [`remap_value`] (Map keys + List/Set elements) but COLLECTS the referenced
 //! `InternerKey` ids instead of rewriting them. `pre_commit_prelock` uses
 //! it (after the remap pass) to find every base id referenced by this tx's
 //! staged bytes that sits above `persisted_high_water()` and ensure each
@@ -51,7 +51,13 @@ pub fn remap_value<S: BuildHasher>(value: &mut InnerValue, remap: &HashMap<u64, 
                 remap_value(elem, remap);
             }
         }
-        InnerValue::Set(_) => {}
+        InnerValue::Set(s) => {
+            let entries: Vec<InnerValue> = s.drain(..).collect();
+            for mut elem in entries {
+                remap_value(&mut elem, remap);
+                s.insert(elem);
+            }
+        }
         InnerValue::Null
         | InnerValue::Bool(_)
         | InnerValue::Int(_)
@@ -81,7 +87,7 @@ pub fn remap_inner_value_bytes<S: BuildHasher>(
 }
 
 /// Recursively walk `value` and collect every `InternerKey` id used as a
-/// `Map` key (descending into nested `Map`s and `List` elements — the
+/// `Map` key (descending into nested `Map`s and `List`/`Set` elements — the
 /// SAME traversal shape as [`remap_value`]).
 ///
 /// A8 fix: `pre_commit_prelock` calls this (after the overlay→base remap
@@ -109,7 +115,11 @@ pub fn collect_referenced_ids<S: BuildHasher>(value: &InnerValue, out: &mut Hash
                 collect_referenced_ids(elem, out);
             }
         }
-        InnerValue::Set(_) => {}
+        InnerValue::Set(s) => {
+            for elem in s {
+                collect_referenced_ids(elem, out);
+            }
+        }
         InnerValue::Null
         | InnerValue::Bool(_)
         | InnerValue::Int(_)

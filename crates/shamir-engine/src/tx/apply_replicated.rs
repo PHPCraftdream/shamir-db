@@ -11,7 +11,8 @@
 //! ## Trust precondition (#1199)
 //!
 //! This module performs **no validator/schema/DAC/integrity check** on
-//! `event.changes` — the raw bytes are trusted verbatim. The entire
+//! `event.changes` beyond optional payload validation and the mandatory
+//! decoding needed to translate field ids by name. The entire
 //! security of this path rests on the replication TRANSPORT already
 //! having authenticated the sender as a legitimate leader/upstream before
 //! this function is ever called — a precondition owned by sibling crates
@@ -89,15 +90,15 @@
 //!  - SKIPPED: `drainer().wake()` (no local WAL entry was offered — the
 //!    follower wrote history directly via `apply_committed_ops`; the
 //!    drainer has nothing to drain for this version).
-//!  - SKIPPED: A5 interner checkpoint (no interner delta in a record-level
-//!    event; the follower's interner is populated by its own local writes
-//!    and by decode-on-read, NOT by replication).
+//!  - Interner mappings are translated by name and persisted before allocation.
 
 use std::sync::Arc;
 
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::KvOp;
-use shamir_tx::{ChangeOp, ChangelogEvent, MvccStore};
+use shamir_tx::{
+    collect_referenced_ids, remap_inner_value_bytes, ChangeOp, ChangelogEvent, MvccStore,
+};
 use shamir_types::record_view::RecordView;
 use shamir_types::types::value::InnerValue;
 
@@ -128,6 +129,8 @@ pub enum ApplyRejectReason {
     IndexedTable,
     MissingValue,
     UndecodablePayload,
+    MissingFieldBinding,
+    ConflictingFieldBinding,
 }
 
 /// Follower-side trust policy for [`apply_replicated`] (#1199). See
@@ -135,9 +138,8 @@ pub enum ApplyRejectReason {
 /// model this addresses — and does NOT address.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ApplyPolicy {
-    /// Trust `event.changes` verbatim — no decode check. Byte-identical to
-    /// pre-#1199 behavior; the default, so every existing caller is
-    /// unaffected.
+    /// Trust the leader's decisions, skipping optional payload validation.
+    /// Decoding required for field-id translation is never skipped.
     #[default]
     Trusted,
     /// Decode-validate every `Put`'s record bytes BEFORE allocating a
@@ -172,7 +174,7 @@ pub enum ApplyPolicy {
 /// touching the store.
 ///
 /// `policy` selects the trust model — see [`ApplyPolicy`]'s doc. Passing
-/// [`ApplyPolicy::Trusted`] skips payload decoding, but not table preflight.
+/// [`ApplyPolicy::Trusted`] skips optional validation, not translation decoding.
 ///
 /// Returns [`ApplyOutcome::Applied`] with the follower-local commit
 /// version on success. A `Skipped` outcome is returned BEFORE any version
@@ -183,6 +185,7 @@ pub enum ApplyPolicy {
 pub async fn apply_replicated(
     repo: &RepoInstance,
     event: &ChangelogEvent,
+    field_bindings: &[(u64, String)],
     applied_watermark: u64,
     policy: ApplyPolicy,
 ) -> DbResult<ApplyOutcome> {
@@ -194,6 +197,28 @@ pub async fn apply_replicated(
         return Ok(ApplyOutcome::Skipped);
     }
 
+    if event
+        .changes
+        .iter()
+        .any(|change| !repo.has_table(&change.table))
+    {
+        return Ok(ApplyOutcome::Rejected {
+            reason: ApplyRejectReason::UnknownTable,
+        });
+    }
+
+    let mut bindings = shamir_collections::TFxMap::default();
+    let mut names = shamir_collections::TFxMap::default();
+    for (id, name) in field_bindings {
+        if bindings.insert(*id, name).is_some_and(|old| old != name)
+            || names.insert(name, *id).is_some_and(|old| old != *id)
+        {
+            return Ok(ApplyOutcome::Rejected {
+                reason: ApplyRejectReason::ConflictingFieldBinding,
+            });
+        }
+    }
+    let mut referenced = shamir_collections::TFxMap::default();
     let mut by_table: shamir_collections::TFxMap<String, Vec<KvOp>> =
         shamir_collections::TFxMap::default();
     for change in &event.changes {
@@ -212,6 +237,15 @@ pub async fn apply_replicated(
                         reason: ApplyRejectReason::UndecodablePayload,
                     });
                 }
+                let decoded = match InnerValue::from_bytes(value) {
+                    Ok(decoded) => decoded,
+                    Err(_) => {
+                        return Ok(ApplyOutcome::Rejected {
+                            reason: ApplyRejectReason::UndecodablePayload,
+                        });
+                    }
+                };
+                collect_referenced_ids(&decoded, &mut referenced);
                 KvOp::Set(change.key.clone().into(), value.clone())
             }
             ChangeOp::Delete => KvOp::Remove(change.key.clone().into()),
@@ -219,7 +253,14 @@ pub async fn apply_replicated(
         by_table.entry(change.table.clone()).or_default().push(op);
     }
 
-    let mut prepared: Vec<(u64, Arc<MvccStore>, Vec<KvOp>)> = Vec::with_capacity(by_table.len());
+    if referenced.keys().any(|id| !bindings.contains_key(id)) {
+        return Ok(ApplyOutcome::Rejected {
+            reason: ApplyRejectReason::MissingFieldBinding,
+        });
+    }
+
+    let mut prepared: Vec<(String, u64, Arc<MvccStore>, Vec<KvOp>)> =
+        Vec::with_capacity(by_table.len());
     for (table_name, ops) in by_table {
         let table = match repo.get_table(&table_name).await {
             Ok(table) => table,
@@ -252,7 +293,55 @@ pub async fn apply_replicated(
                 reason: ApplyRejectReason::NoMvccStore,
             });
         };
-        prepared.push((token, mvcc, ops));
+        prepared.push((table_name, token, mvcc, ops));
+    }
+
+    // All payloads, bindings, and tables passed preflight before first-touch.
+    let interner_manager = repo.repo_interner().await?;
+    let interner = interner_manager.get().await?;
+    let mut remap = shamir_collections::TFxMap::default();
+    for (id, name) in bindings {
+        let local = interner
+            .touch_ind(name)
+            .map_err(|error| DbError::Codec(error.into()))?
+            .into_key()
+            .id();
+        remap.insert(id, local);
+    }
+    // Required even on retry: an earlier persist may have failed after touch.
+    interner_manager.persist().await?;
+
+    let mut rewritten_event = event.clone();
+    for change in &mut rewritten_event.changes {
+        if change.op == ChangeOp::Put {
+            let value = change
+                .value
+                .take()
+                .ok_or_else(|| DbError::Codec("preflighted Put has no value".into()))?;
+            change.value = Some(remap_inner_value_bytes(value, &remap).map_err(|error| {
+                DbError::Codec(format!("replication translation failed: {error}"))
+            })?);
+        }
+    }
+    let mut rewritten_by_table: shamir_collections::TFxMap<String, Vec<KvOp>> =
+        shamir_collections::TFxMap::default();
+    for change in &rewritten_event.changes {
+        let op = match &change.value {
+            Some(value) if change.op == ChangeOp::Put => {
+                KvOp::Set(change.key.clone().into(), value.clone())
+            }
+            _ => KvOp::Remove(change.key.clone().into()),
+        };
+        rewritten_by_table
+            .entry(change.table.clone())
+            .or_default()
+            .push(op);
+    }
+    for (name, _, _, ops) in &mut prepared {
+        // Preserve per-table ordering while replacing every Put's bytes.
+        *ops = rewritten_by_table
+            .remove(name)
+            .ok_or_else(|| DbError::Codec("missing preflighted table".into()))?;
     }
 
     let gate = repo.tx_gate().await?;
@@ -278,7 +367,7 @@ pub async fn apply_replicated(
     let local_version = version_guard.version();
 
     let mut any_failed: Option<(u64, DbError)> = None;
-    for (token, mvcc, ops) in prepared {
+    for (_, token, mvcc, ops) in prepared {
         if let Err(error) = mvcc.apply_committed_ops(ops, local_version).await {
             any_failed = Some((token, error));
             break;
@@ -355,10 +444,9 @@ pub async fn apply_replicated(
     // with the follower-local version (the leader's commit_version is
     // meaningless downstream — the downstream keys its idempotency on the
     // monotonic sequence of its upstream, which is THIS follower). The
-    // re-emitted event carries the same actor, timestamp, and record
-    // changes as the leader's; only the commit_version and repo name
-    // change.
-    let downstream_event = reproject_for_downstream(event, repo.name(), local_version);
+    // re-emitted event preserves the actor and timestamp, with translated
+    // record bytes and the follower-local commit version and repo name.
+    let downstream_event = reproject_for_downstream(&rewritten_event, repo.name(), local_version);
     repo.emit_changefeed_event(Some(downstream_event)).await;
 
     Ok(ApplyOutcome::Applied { local_version })

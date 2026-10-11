@@ -98,11 +98,18 @@ impl ReplSource for InProcessReplSource {
         let effective_limit = limit.clamp(1, MAX_PULL_EVENTS) as usize;
         let mut jr = match self
             .leader
-            .read_changelog_from_journal(db, repo, from_version, effective_limit)
+            .read_changelog_for_replication(db, repo, from_version, effective_limit)
             .await
         {
-            Some(jr) => jr,
-            None => {
+            Ok(Some(jr)) => jr,
+            Err(error) => {
+                return Ok(ReplResponse::Error {
+                    leader_epoch: self.epoch(),
+                    code: "replication_read_error".into(),
+                    message: error.to_string(),
+                });
+            }
+            Ok(None) => {
                 return Ok(ReplResponse::Error {
                     leader_epoch: self.epoch(),
                     code: "unknown_repo".into(),
@@ -114,12 +121,12 @@ impl ReplSource for InProcessReplSource {
         // Optional long-poll: if the first read was empty and the caller
         // supplied a positive wait budget, poll until events land or the
         // budget expires. Mirrors `handle_pull`'s behaviour.
-        if jr.events.is_empty() {
+        if jr.0.is_empty() {
             if let Some(ms) = wait_ms.map(|ms| ms.min(30_000)) {
                 if ms > 0 {
                     let deadline =
                         std::time::Instant::now() + std::time::Duration::from_millis(u64::from(ms));
-                    while jr.events.is_empty() {
+                    while jr.0.is_empty() {
                         let now = std::time::Instant::now();
                         if now >= deadline {
                             break;
@@ -129,18 +136,25 @@ impl ReplSource for InProcessReplSource {
                         tokio::time::sleep(step).await;
                         match self
                             .leader
-                            .read_changelog_from_journal(db, repo, from_version, effective_limit)
+                            .read_changelog_for_replication(db, repo, from_version, effective_limit)
                             .await
                         {
-                            Some(fresh) => jr = fresh,
-                            None => break,
+                            Ok(Some(fresh)) => jr = fresh,
+                            Ok(None) => break,
+                            Err(error) => {
+                                return Ok(ReplResponse::Error {
+                                    leader_epoch: self.epoch(),
+                                    code: "replication_read_error".into(),
+                                    message: error.to_string(),
+                                });
+                            }
                         }
                     }
                 }
             }
         }
 
-        let events_bytes = rmp_serde::to_vec_named(&jr.events)
+        let events_bytes = rmp_serde::to_vec_named(&jr.0)
             .map_err(|e| ReplError::Transport(format!("encode events: {e}")))?;
 
         let current_version = self
@@ -152,7 +166,7 @@ impl ReplSource for InProcessReplSource {
         Ok(ReplResponse::Pull {
             leader_epoch: self.epoch(),
             events: events_bytes,
-            gap_at: jr.gap_at,
+            gap_at: jr.1,
             current_version,
         })
     }

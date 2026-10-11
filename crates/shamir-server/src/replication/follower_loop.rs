@@ -17,7 +17,7 @@
 //!        and terminate with [`ReplError::JournalGap`] WITHOUT applying any
 //!        events in that same reply (the supervisor marks the subscription
 //!        `resync_required`; full automated snapshot reseed is R2);
-//!      - decode the events payload (`Vec<ChangelogEvent>`);
+//!      - decode the events payload (`Vec<ReplicatedEvent>`);
 //!      - for each event in order: `apply_replicated(event, bookmark)` →
 //!        on `Applied`, `advance_replication_bookmark(event.commit_version)`
 //!        (the LEADER version, not the follower-local one); on `Skipped`,
@@ -33,8 +33,8 @@
 use std::sync::Arc;
 
 use shamir_db::engine::{
+    tx::ReplicatedEvent,
     tx::{ApplyOutcome, ApplyPolicy},
-    ChangelogEvent,
 };
 use shamir_db::ShamirDb;
 use shamir_query_types::wire::repl::ReplResponse;
@@ -328,7 +328,7 @@ pub async fn run_follower_loop(
         }
 
         // 7. decode + apply each event in order.
-        let events: Vec<ChangelogEvent> = match rmp_serde::from_slice(&events_bytes) {
+        let events: Vec<ReplicatedEvent> = match rmp_serde::from_slice(&events_bytes) {
             Ok(v) => v,
             Err(e) => {
                 let re = ReplError::Decode(e.to_string());
@@ -350,7 +350,7 @@ pub async fn run_follower_loop(
 
         for ev in &events {
             match repo_instance
-                .apply_replicated(ev, bookmark, apply_policy)
+                .apply_replicated(&ev.event, &ev.field_bindings, bookmark, apply_policy)
                 .await
             {
                 Ok(ApplyOutcome::Applied { .. }) => {
@@ -358,7 +358,7 @@ pub async fn run_follower_loop(
                     // version (not the follower-local version). This is the
                     // idempotency key for re-delivery.
                     if let Err(e) = repo_instance
-                        .advance_replication_bookmark(ev.commit_version)
+                        .advance_replication_bookmark(ev.event.commit_version)
                         .await
                     {
                         // Bookmark persist failed — log and stop advancing
@@ -368,7 +368,7 @@ pub async fn run_follower_loop(
                         // in-memory `bookmark` cursor past the failure.
                         warn!(
                             node_id = %node_id,
-                            leader_version = ev.commit_version,
+                            leader_version = ev.event.commit_version,
                             error = %e,
                             "follower_loop: advance_replication_bookmark failed; \
                              will retry on next iteration (idempotent)"
@@ -382,19 +382,19 @@ pub async fn run_follower_loop(
                     // current bookmark by construction).
                     debug!(
                         node_id = %node_id,
-                        leader_version = ev.commit_version,
+                        leader_version = ev.event.commit_version,
                         "follower_loop: event skipped (already applied)"
                     );
                 }
                 Ok(ApplyOutcome::Rejected { reason }) => {
                     return Err(ReplError::ApplyRejected {
-                        leader_version: ev.commit_version,
+                        leader_version: ev.event.commit_version,
                         reason,
                     });
                 }
                 Err(e) => {
                     let re = ReplError::Apply {
-                        leader_version: ev.commit_version,
+                        leader_version: ev.event.commit_version,
                         source: e,
                     };
                     warn!(node_id = %node_id, error = %re, "follower_loop: apply failed, backing off");

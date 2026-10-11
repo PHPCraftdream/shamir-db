@@ -170,11 +170,18 @@ impl ShamirDbHandler {
         // return immediately.
         let mut jr = match self
             .db
-            .read_changelog_from_journal(db, repo, from_version, effective_limit)
+            .read_changelog_for_replication(db, repo, from_version, effective_limit)
             .await
         {
-            Some(jr) => jr,
-            None => {
+            Ok(Some(jr)) => jr,
+            Err(error) => {
+                return ReplResponse::Error {
+                    leader_epoch: self.leader_epoch,
+                    code: "replication_read_error".into(),
+                    message: error.to_string(),
+                };
+            }
+            Ok(None) => {
                 // db/repo does not exist (shouldn't happen after the auth
                 // gate above, but the journal may not be initialised yet).
                 return ReplResponse::Error {
@@ -188,11 +195,11 @@ impl ShamirDbHandler {
         // Long-poll loop (§5.1): only when the first read was empty AND the
         // caller supplied a positive wait budget. Deadline-bounded so the
         // handler never hangs.
-        if jr.events.is_empty() {
+        if jr.0.is_empty() {
             if let Some(ms) = wait_ms.map(|ms| ms.min(30_000)) {
                 if ms > 0 {
                     let deadline = Instant::now() + Duration::from_millis(u64::from(ms));
-                    while jr.events.is_empty() {
+                    while jr.0.is_empty() {
                         // Sleep first, then re-read: the initial read was
                         // already empty, and this avoids a redundant
                         // immediate re-read of the same empty tail.
@@ -206,11 +213,18 @@ impl ShamirDbHandler {
 
                         match self
                             .db
-                            .read_changelog_from_journal(db, repo, from_version, effective_limit)
+                            .read_changelog_for_replication(db, repo, from_version, effective_limit)
                             .await
                         {
-                            Some(fresh) => jr = fresh,
-                            None => break,
+                            Ok(Some(fresh)) => jr = fresh,
+                            Ok(None) => break,
+                            Err(error) => {
+                                return ReplResponse::Error {
+                                    leader_epoch: self.leader_epoch,
+                                    code: "replication_read_error".into(),
+                                    message: error.to_string(),
+                                };
+                            }
                         }
                     }
                 }
@@ -219,7 +233,7 @@ impl ShamirDbHandler {
 
         // Encode the events. `to_vec_named` produces a canonical map-style
         // msgpack so the follower can decode field-by-field.
-        let events_bytes = match rmp_serde::to_vec_named(&jr.events) {
+        let events_bytes = match rmp_serde::to_vec_named(&jr.0) {
             Ok(b) => b,
             Err(e) => {
                 return ReplResponse::Error {
@@ -239,7 +253,7 @@ impl ShamirDbHandler {
         ReplResponse::Pull {
             leader_epoch: self.leader_epoch,
             events: events_bytes,
-            gap_at: jr.gap_at,
+            gap_at: jr.1,
             current_version,
         }
     }

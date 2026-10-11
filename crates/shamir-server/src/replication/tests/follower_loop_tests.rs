@@ -28,7 +28,7 @@ use shamir_db::access::Actor;
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
 use shamir_db::engine::tx::apply_replicated::ApplyRejectReason;
-use shamir_db::engine::ChangelogEvent;
+use shamir_db::engine::tx::ReplicatedEvent;
 use shamir_db::query::filter::FilterContext;
 use shamir_db::types::common::new_map;
 use shamir_db::ShamirDb;
@@ -364,7 +364,7 @@ async fn epoch_regression_terminate_loop() {
 struct GapReplSource {
     gap_at: u64,
     /// Events to include alongside the gap (msgpack-encoded
-    /// `Vec<ChangelogEvent>`). Non-empty, so an incorrect implementation
+    /// `Vec<ReplicatedEvent>`). Non-empty, so an incorrect implementation
     /// that applies-before-checking would visibly advance the bookmark.
     events_bytes: Vec<u8>,
 }
@@ -401,14 +401,60 @@ impl ReplSource for GapReplSource {
 /// at 0 (nothing was ever applied) and the follower's own journal is empty.
 async fn assert_gap_stops_loop(gap_at: u64) {
     let leader = build_db("alice").await;
-    // One real event, so decoding would succeed if the loop incorrectly
-    // reached the decode/apply step before the gap check.
-    write_rows(&leader, 1).await;
-    let jr = leader
-        .read_changelog_from_journal("app", "main", 0, 10)
+    // Subscribe before the insert: committed emission is synchronous, unlike
+    // the asynchronous journal writer, so no polling is needed.
+    let leader_repo = leader
+        .get_db("app")
+        .and_then(|db| db.get_repo("main"))
+        .expect("leader repo");
+    let mut committed = leader_repo
+        .subscribe_changelog()
         .await
-        .expect("leader journal");
-    let events_bytes = rmp_serde::to_vec_named(&jr.events).expect("encode events");
+        .expect("leader changefeed");
+    write_rows_without_journal_wait(&leader, 1).await;
+    let event = committed.recv().await.expect("committed Put");
+    assert!(committed.try_recv().is_err(), "exactly one committed event");
+    assert!(event.commit_version > 0);
+    assert_eq!(event.changes.len(), 1);
+    let manager = leader_repo.repo_interner().await.expect("leader interner");
+    let interner = manager.get().await.expect("leader dictionary");
+    let mut referenced = shamir_collections::TFxMap::default();
+    for change in &event.changes {
+        let bytes = change.value.as_ref().expect("fixture Put value");
+        let value =
+            shamir_db::types::value::InnerValue::from_bytes(bytes).expect("decode committed Put");
+        shamir_tx::collect_referenced_ids(&value, &mut referenced);
+    }
+    assert!(!referenced.is_empty(), "fixture must reference field ids");
+    let field_bindings: Vec<_> = referenced
+        .keys()
+        .map(|id| {
+            let key = shamir_db::core::interner::InternerKey::new(*id);
+            let name = interner.get_str(&key).expect("referenced field name");
+            (*id, name.to_string())
+        })
+        .collect();
+    let events = vec![ReplicatedEvent {
+        event: (*event).clone(),
+        field_bindings,
+    }];
+    assert_eq!(events.len(), 1, "fixture must carry exactly one event");
+    assert_eq!(events[0].field_bindings.len(), referenced.len());
+    assert!(
+        referenced.keys().all(|id| {
+            let key = shamir_db::core::interner::InternerKey::new(*id);
+            let name = interner.get_str(&key).expect("referenced field name");
+            events[0]
+                .field_bindings
+                .iter()
+                .any(|(bound_id, bound_name)| bound_id == id && bound_name == name.as_ref())
+        }),
+        "fixture bindings must cover every referenced id with its real name"
+    );
+    let events_bytes = rmp_serde::to_vec_named(&events).expect("encode events");
+    let decoded: Vec<ReplicatedEvent> =
+        rmp_serde::from_slice(&events_bytes).expect("decode fixture events");
+    assert_eq!(decoded, events);
     assert!(!events_bytes.is_empty(), "fixture must carry an event");
 
     let follower = build_db("follower").await;
@@ -471,7 +517,7 @@ async fn journal_gap_at_from_version_terminates_loop_without_applying_events() {
 
 struct MalformedPutSource {
     inner: InProcessReplSource,
-    events: Vec<ChangelogEvent>,
+    events: Vec<ReplicatedEvent>,
     pulls: Mutex<Vec<u64>>,
 }
 
@@ -501,17 +547,22 @@ impl ReplSource for MalformedPutSource {
             ..
         } = &mut response
         {
-            let mut decoded: Vec<ChangelogEvent> = self
+            let mut decoded: Vec<ReplicatedEvent> = self
                 .events
                 .iter()
-                .filter(|event| event.commit_version >= from_version)
+                .filter(|event| event.event.commit_version >= from_version)
                 .take(limit as usize)
                 .cloned()
                 .collect();
             *gap_at = None;
-            *current_version = self.events.last().expect("fixture events").commit_version;
+            *current_version = self
+                .events
+                .last()
+                .expect("fixture events")
+                .event
+                .commit_version;
             if let Some(first) = decoded.first_mut() {
-                let change = first.changes.first_mut().expect("fixture Put");
+                let change = first.event.changes.first_mut().expect("fixture Put");
                 assert!(change.value.is_some());
                 change.value = Some(vec![0xC1].into());
             }
@@ -530,9 +581,32 @@ async fn malformed_put_fixture() -> (ShamirDb, Arc<MalformedPutSource>, u64) {
     let second = committed.recv().await.expect("second committed Put");
     assert!(first.commit_version < second.commit_version);
     let leader_version = second.commit_version;
+    let manager = repo.repo_interner().await.unwrap();
+    let interner = manager.get().await.unwrap();
+    let mut events = Vec::new();
+    for event in [(*first).clone(), (*second).clone()] {
+        let mut ids = shamir_collections::TFxMap::default();
+        for change in &event.changes {
+            if let Some(value) = &change.value {
+                let value = shamir_db::types::value::InnerValue::from_bytes(value).unwrap();
+                shamir_tx::collect_referenced_ids(&value, &mut ids);
+            }
+        }
+        let field_bindings = ids
+            .keys()
+            .map(|id| {
+                let key = shamir_db::core::interner::InternerKey::new(*id);
+                (*id, interner.get_str(&key).unwrap().to_string())
+            })
+            .collect();
+        events.push(ReplicatedEvent {
+            event,
+            field_bindings,
+        });
+    }
     let source = Arc::new(MalformedPutSource {
         inner: InProcessReplSource::new(leader),
-        events: vec![(*first).clone(), (*second).clone()],
+        events,
         pulls: Mutex::new(Vec::new()),
     });
     (build_db("follower").await, source, leader_version)
@@ -582,8 +656,8 @@ async fn validate_payload_rejection_is_terminal_without_bookmark_or_version() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn trusted_default_applies_malformed_put_and_continues_batch() {
-    let (follower, source, leader_version) = malformed_put_fixture().await;
+async fn trusted_default_rejects_malformed_put_without_continuing_batch() {
+    let (follower, source, _) = malformed_put_fixture().await;
     let repo = follower.get_db("app").unwrap().get_repo("main").unwrap();
     let gate = repo.tx_gate().await.expect("follower gate");
     let allocated_before = gate.version_allocation_high_water_mark();
@@ -591,31 +665,34 @@ async fn trusted_default_applies_malformed_put_and_continues_batch() {
         .with_poll_wait_ms(0)
         .with_max_iterations(2);
     assert!(!cfg.validate_replicated_payload);
-    run_follower_loop(
+    // Trusted skips optional validation, not decoding required for translation.
+    let error = run_follower_loop(
         Arc::new(follower.clone()),
         source.clone(),
         cfg,
         CancellationToken::new(),
     )
     .await
-    .expect("Trusted loop");
-    assert_eq!(repo.replication_bookmark().await.unwrap(), leader_version);
-    assert_eq!(
-        gate.version_allocation_high_water_mark(),
-        allocated_before + 2
-    );
-    assert_eq!(gate.completion().watermark(), allocated_before + 2);
+    .expect_err("Trusted must reject undecodable translation payloads");
+    assert!(matches!(
+        error,
+        ReplError::ApplyRejected {
+            leader_version: 1,
+            reason: ApplyRejectReason::UndecodablePayload,
+        }
+    ));
+    assert_eq!(repo.replication_bookmark().await.unwrap(), 0);
+    assert_eq!(gate.version_allocation_high_water_mark(), allocated_before);
+    assert_eq!(gate.completion().watermark(), allocated_before);
     let pulls = source.pulls.lock().await;
-    assert_eq!(pulls.len(), 2);
-    assert_eq!(pulls[0], 1);
-    assert_eq!(pulls[1], leader_version + 1);
+    assert_eq!(*pulls, vec![1]);
 }
 
 async fn assert_supervisor_rejection_marks_resync(unknown_table: bool) {
     let (follower, mut source, _) = malformed_put_fixture().await;
     if unknown_table {
         for event in &mut Arc::get_mut(&mut source).expect("unshared source").events {
-            for change in &mut event.changes {
+            for change in &mut event.event.changes {
                 change.table = "missing".into();
             }
         }
@@ -697,7 +774,7 @@ async fn unknown_table_rejection_stops_follower_without_bookmark() {
     let (follower, mut source, _) = malformed_put_fixture().await;
     let source_mut = Arc::get_mut(&mut source).expect("unshared source");
     for event in &mut source_mut.events {
-        for change in &mut event.changes {
+        for change in &mut event.event.changes {
             change.table = "missing".into();
         }
     }
