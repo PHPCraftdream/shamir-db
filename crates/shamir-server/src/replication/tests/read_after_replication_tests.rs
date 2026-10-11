@@ -578,7 +578,7 @@ async fn matrix_secondary_index_lookup() {
         let interner = table.interner().get().await.expect("interner");
         let index = interner.get_ind("by_v").expect("index name").id();
         let postings = table
-            .index_manager()
+            .index_manager_ref()
             .lookup_by_index(index, &[InnerValue::Int(20)])
             .await
             .expect("index lookup")
