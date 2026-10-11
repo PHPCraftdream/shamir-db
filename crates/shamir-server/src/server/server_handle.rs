@@ -1,7 +1,9 @@
 //! Runtime handle for a launched server instance.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use shamir_db::ShamirDb;
 use shamir_tunables::runtime::RuntimeTunables;
@@ -9,7 +11,17 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit_appender::FjallAuditAppender;
+use crate::conn_limiter::ConnLimiter;
 use crate::scheduler::Scheduler;
+use crate::server::store_release_barrier::wait_stores_released;
+
+/// Upper bound for [`ServerHandle::shutdown`] to wait for connection tasks to
+/// end once they were told to.
+const CONN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Upper bound for [`ServerHandle::shutdown`] to wait for the stores to drop
+/// their directory locks (a client that stays connected can hold one).
+const STORE_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Handle for the periodic meta-snapshot task. Just the `JoinHandle` — the
 /// stop signal is the shared root `shutdown_token` (cancelled by
@@ -86,6 +98,13 @@ pub struct ServerHandle {
     /// MemBuffers to durable backing, closing the ~500 ms buffered-
     /// commit loss window on graceful stop.
     pub(super) shamir: Arc<ShamirDb>,
+    /// Data dir the stores live under — scanned by the shutdown barrier that
+    /// waits for their directory locks to be released.
+    pub(super) data_dir: PathBuf,
+    /// Live-connection tracker: shutdown waits on it until every connection
+    /// task (told to end through `shutdown_token`) has dropped its handler
+    /// context and, with it, its references to the stores.
+    pub(super) conn_limiter: ConnLimiter,
     /// RAII single-instance guard: an advisory OS file lock on
     /// `<data_dir>/.shamir.lock`. The kernel releases it automatically
     /// when this `File` is dropped (or the process crashes), so a second
@@ -113,6 +132,19 @@ impl ServerHandle {
         // 2. Wait for accept loops to finish.
         for task in self.listener_tasks {
             let _ = task.await;
+        }
+        // 2a. Connection tasks watch the same token (see
+        //     `run_until_cancelled`); wait until the last one dropped its
+        //     handler context, which holds references to the stores.
+        if tokio::time::timeout(CONN_DRAIN_TIMEOUT, self.conn_limiter.wait_idle())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                live = self.conn_limiter.live(),
+                timeout = ?CONN_DRAIN_TIMEOUT,
+                "shutdown: connections still alive after the drain timeout",
+            );
         }
         // 2b. Stop the follower-replication supervisor: cancel every running
         //     follower loop, then join the reconcile-tick task (already told
@@ -158,6 +190,23 @@ impl ServerHandle {
         //    lingering open cursors release their pinned SnapshotGuards.
         if let Some(reaper) = self.cursor_reaper {
             let _ = reaper.handle.await;
+        }
+        // 9. Release the stores: drop this handle's own references, then wait
+        //    until fjall has dropped every directory lock. Detached tasks
+        //    (buffered-store flushers, connection tasks) can outlive the
+        //    steps above; returning before they finish made an immediate
+        //    relaunch of the same data dir fail with `Locked`. The
+        //    single-instance `_data_dir_lock` is released last, on return.
+        let data_dir = self.data_dir;
+        drop(self.shamir);
+        drop(self.audit_appender);
+        drop(self.repl_supervisor);
+        if let Err(still_locked) = wait_stores_released(&data_dir, STORE_RELEASE_TIMEOUT).await {
+            tracing::warn!(
+                ?still_locked,
+                timeout = ?STORE_RELEASE_TIMEOUT,
+                "shutdown: stores still held after the release timeout",
+            );
         }
     }
 

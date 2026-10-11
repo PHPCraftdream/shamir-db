@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use shamir_collections::THasher;
+use tokio::sync::Notify;
 
 /// Cap-tracker. Cheaply cloneable — wraps an `Arc<AtomicUsize>` and a
 /// fixed maximum.
@@ -28,6 +29,17 @@ use shamir_collections::THasher;
 pub struct ConnLimiter {
     active: Arc<AtomicUsize>,
     cap: usize,
+    /// Every connection that holds a guard, counted even when `cap == 0`
+    /// (unlimited), so shutdown can wait for the last connection to end.
+    live: Arc<LiveConnections>,
+}
+
+/// Always-on count of live connections plus the wake-up for
+/// [`ConnLimiter::wait_idle`].
+#[derive(Debug, Default)]
+struct LiveConnections {
+    count: AtomicUsize,
+    idle: Notify,
 }
 
 impl ConnLimiter {
@@ -37,6 +49,7 @@ impl ConnLimiter {
         Self {
             active: Arc::new(AtomicUsize::new(0)),
             cap,
+            live: Arc::new(LiveConnections::default()),
         }
     }
 
@@ -51,8 +64,9 @@ impl ConnLimiter {
     /// is a coarse DoS shield, not a precise resource accountant.
     pub fn try_acquire(&self) -> Option<ConnGuard> {
         if self.cap == 0 {
-            // No cap configured — return a no-op guard so callers can
-            // pretend the limiter is always "on".
+            // No cap configured — return a guard that only tracks liveness
+            // so callers can pretend the limiter is always "on".
+            self.live.count.fetch_add(1, Ordering::AcqRel);
             return Some(ConnGuard {
                 limiter: self.clone(),
                 active: false,
@@ -63,6 +77,7 @@ impl ConnLimiter {
             self.active.fetch_sub(1, Ordering::Relaxed);
             None
         } else {
+            self.live.count.fetch_add(1, Ordering::AcqRel);
             Some(ConnGuard {
                 limiter: self.clone(),
                 active: true,
@@ -79,6 +94,27 @@ impl ConnLimiter {
     pub fn cap(&self) -> usize {
         self.cap
     }
+
+    /// Connections currently holding a guard, regardless of the cap.
+    pub fn live(&self) -> usize {
+        self.live.count.load(Ordering::Acquire)
+    }
+
+    /// Resolve once no connection holds a guard. Used by shutdown, after the
+    /// accept loops stopped and the connection tasks were told to end.
+    pub async fn wait_idle(&self) {
+        loop {
+            let notified = self.live.idle.notified();
+            tokio::pin!(notified);
+            // Register for the wake-up BEFORE the check, so a guard dropped in
+            // between cannot be missed.
+            notified.as_mut().enable();
+            if self.live.count.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
 }
 
 /// RAII guard for one occupied connection slot. `Drop` decrements the
@@ -92,6 +128,9 @@ impl Drop for ConnGuard {
     fn drop(&mut self) {
         if self.active {
             self.limiter.active.fetch_sub(1, Ordering::Relaxed);
+        }
+        if self.limiter.live.count.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.limiter.live.idle.notify_waiters();
         }
     }
 }
