@@ -172,18 +172,22 @@ engine caps: `crates/shamir-query-types/src/batch/batch_limits.rs:109-120`.
 (потолок движка) отвергается при старте; large-профиль использует ровно
 100 MiB.
 
-**На текущей базе server policy задаёт `enforce_result_size: false`.**
-Embedded `ExecPolicy::EMBEDDED` и WASM `FacadeDbGateway` → `execute_as` тоже
-оставляют его OFF. Поэтому `max_result_size_bytes` для обычного серверного
-батча — upfront-оценка резерва RI-15, **не** гарантированный cap ответа.
-Механизм runtime byte enforcement в движке уже существует, но этот
-серверный policy его не включает; флага включения в `query_limits` нет
-(`crates/shamir-server/src/db_handler/config.rs`,
+Для батчей `security.query_limits.enforce_result_size` по умолчанию `true`:
+движок консервативно оценивает накопленные материализованные байты и
+проверяет `max_result_size_bytes` до commit, включая промежуточные результаты
+с `return_result: false`, ForEach и вложенные контейнеры, без возврата бюджета
+при фильтрации или удалении результатов. Это не cap сериализованного ответа
+и не live RSS. Явное `false` отключает runtime-проверку батчей; оценка
+upfront-резерва RI-15 сохраняется. Embedded API остаётся OFF по умолчанию.
+Страницы курсоров сохраняют жёсткий байтовый cap `max_result_size_bytes`
+на сериализованный ответ.
+Embedded `ExecPolicy::EMBEDDED` и WASM `FacadeDbGateway` → `execute_as`
+оставляют enforcement OFF (флаг серверный:
+`crates/shamir-server/src/db_handler/config.rs`,
 `crates/shamir-query-types/src/batch/exec_policy.rs`,
 `crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs`).
-Страницы курсоров сохраняют отдельный жёсткий cap на сериализованный ответ.
 
-При caller-owned `ExecPolicy { enforce_result_size: true, … }` общий root
+При включённом enforcement (`ExecPolicy { enforce_result_size: true, … }`) общий root
 budget означает **«bytes materialized by this execution»**, а не длину
 MessagePack, allocator capacity или live RSS. `ResultSize` детерминированно
 оценивает payload и контейнеры: промежуточные результаты, даже не возвращаемые
@@ -256,8 +260,9 @@ browser-профиля, `plain` — только loopback); лимиты кур�
 должен быть `>= max_result_size_bytes`: иначе ни один максимально большой
 батч-ответ не смог бы пройти глобальный бюджет памяти. Если бюджет не задан,
 он не ограничивает суммарный размер одновременно висящих в памяти ответов;
-`max_result_size_bytes` остаётся оценкой резерва для батчей и жёстким
-байтовым cap для страниц курсоров.
+`max_result_size_bytes` остаётся оценкой резерва для батчей, при
+`enforce_result_size: true` также ограничивает накопленные материализованные
+байты до commit, и сохраняет жёсткий байтовый cap для страниц курсоров.
 
 Важная деталь для планирования ёмкости: с CR-B2 резервирование из
 `max_inflight_response_bytes` происходит ЗАРАНЕЕ (upfront) и ПЕССИМИСТИЧНО —
