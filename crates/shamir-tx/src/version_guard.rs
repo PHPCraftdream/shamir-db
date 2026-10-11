@@ -17,6 +17,7 @@ use shamir_collections::THasher;
 use shamir_wal::{WalEntryV2, WalTicket, WalTicketState};
 
 use crate::completion_tracker::{CompletionTracker, State};
+use crate::metrics::TxMetrics;
 use crate::repo_tx_gate::Unresolved;
 
 /// RAII owner of one allocated MVCC version's terminal-mark obligation.
@@ -58,6 +59,7 @@ pub struct VersionGuard {
     orphaned_post_wal: Arc<scc::HashMap<u64, (), THasher>>,
     orphan_max: Arc<AtomicU64>,
     active_post_wal: Arc<scc::HashMap<u64, (), THasher>>,
+    metrics: Option<Arc<TxMetrics>>,
 }
 
 impl VersionGuard {
@@ -93,7 +95,15 @@ impl VersionGuard {
             orphaned_post_wal,
             orphan_max,
             active_post_wal,
+            metrics: None,
         }
+    }
+
+    /// Attach shared repository telemetry before calling `wal_accepted`.
+    /// Standalone gate guards without attachment do not emit orphan metrics.
+    /// This does not change the guard's completion or orphan obligations.
+    pub fn attach_metrics(&mut self, metrics: Arc<TxMetrics>) {
+        self.metrics = Some(metrics);
     }
 
     /// The MVCC version this guard owns.
@@ -190,6 +200,9 @@ impl Drop for VersionGuard {
         }
         if self.armed && self.post_wal {
             let _ = self.orphaned_post_wal.insert_sync(self.version, ());
+            if let Some(metrics) = &self.metrics {
+                metrics.on_post_wal_orphan();
+            }
             self.orphan_max.fetch_max(self.version, Ordering::AcqRel);
             let _ = self.active_post_wal.remove_sync(&self.version);
             return;

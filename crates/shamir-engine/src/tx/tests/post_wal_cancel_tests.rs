@@ -52,6 +52,8 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         pre_wal: AtomicBool::new(false),
         after_counter: AtomicBool::new(false),
         fail_orphan_markers: AtomicBool::new(false),
+        panic_after_resume: AtomicBool::new(false),
+        panic_resume: Notify::new(),
         reached: Notify::new(),
         resume: Notify::new(),
         armed: AtomicBool::new(false),
@@ -77,6 +79,8 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     within("commit_tx@48", repo.commit_tx(tx)).await.unwrap();
     drop(snapshot);
 
+    // Orphans below are injected panics, not caller cancellation: the driver
+    // detaches on cancellation, while panic must preserve B1/B2/B3 recovery.
     // B1: a present but ACTIVE WAL entry is not a missing-key gap. A later
     // orphan raises the scan bound: the completed "later" commit alone cannot
     // advance contiguous visibility past the still-active version.
@@ -118,10 +122,11 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         .await
         .unwrap();
     let owned = repo.clone();
+    hook.panic_after_resume.store(true, Ordering::Release);
     let orphan_task = tokio::spawn(async move { owned.commit_tx(tx).await });
     within("reached@86", hook.reached.notified()).await;
-    orphan_task.abort();
-    assert!(orphan_task.await.unwrap_err().is_cancelled());
+    hook.panic_resume.notify_one();
+    assert!(orphan_task.await.unwrap_err().is_panic());
     drop(orphan_snapshot);
     let scan_orphan_version = gate.orphan_max();
     assert_eq!(scan_orphan_version, later_outcome.commit_version + 1);
@@ -227,10 +232,11 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         },
     ));
     let owned = repo.clone();
+    hook.panic_after_resume.store(true, Ordering::Release);
     let task = tokio::spawn(async move { owned.commit_tx(tx).await });
     within("reached@188", hook.reached.notified()).await;
-    task.abort();
-    assert!(task.await.unwrap_err().is_cancelled());
+    hook.panic_resume.notify_one();
+    assert!(task.await.unwrap_err().is_panic());
     drop(snapshot);
 
     let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
@@ -267,10 +273,11 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         .await
         .unwrap();
     let owned = repo.clone();
+    hook.panic_after_resume.store(true, Ordering::Release);
     let task = tokio::spawn(async move { owned.commit_tx(tx).await });
     within("reached@224", hook.reached.notified()).await;
-    task.abort();
-    assert!(task.await.unwrap_err().is_cancelled());
+    hook.panic_resume.notify_one();
+    assert!(task.await.unwrap_err().is_panic());
     drop(snapshot);
     let orphan_version = gate.orphan_max();
     hook.fail_orphan_markers.store(true, Ordering::Release);
@@ -306,10 +313,11 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         .unwrap();
     tx.counter_deltas.insert(table_token_for("t"), -1);
     let owned = repo.clone();
+    hook.panic_after_resume.store(true, Ordering::Release);
     let task = tokio::spawn(async move { owned.commit_tx(tx).await });
     within("reached@256", hook.reached.notified()).await;
-    task.abort();
-    assert!(task.await.unwrap_err().is_cancelled());
+    hook.panic_resume.notify_one();
+    assert!(task.await.unwrap_err().is_panic());
     drop(snapshot);
     let counter_failed_version = gate.orphan_max();
     tbl.counter().set_to(0).await.unwrap();
@@ -351,7 +359,18 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
     drop(snapshot);
-    assert_eq!(tbl.get(a).await.unwrap(), InnerValue::Str("A".into()));
+    // This pre-WAL seam is AFTER prelock: cancellation detaches the driver.
+    hook.resume.notify_one();
+    within(
+        "pre-WAL detached completion",
+        repo.quiesce_commits(std::time::Duration::from_secs(45)),
+    )
+    .await
+    .unwrap();
+    within("pre-WAL detached drain", repo.drainer().drain_all(&repo))
+        .await
+        .unwrap();
+    assert_eq!(tbl.get(a).await.unwrap(), InnerValue::Str("pre-WAL".into()));
     assert_eq!(gate.durable_watermark(), gate.completion().watermark());
 
     let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
