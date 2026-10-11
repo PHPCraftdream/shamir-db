@@ -757,7 +757,7 @@ impl TableManager {
                             fallback_keys.into_iter().map(Into::into).collect();
                         self.table.data_store().get_many(keys).await?
                     };
-                    for (slot, bytes) in fallback_idxs.into_iter().zip(committed.into_iter()) {
+                    for (slot, bytes) in fallback_idxs.into_iter().zip(committed) {
                         out[slot] = bytes;
                     }
                 }

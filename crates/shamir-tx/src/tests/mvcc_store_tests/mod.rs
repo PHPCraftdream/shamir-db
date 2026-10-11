@@ -11,6 +11,7 @@ pub mod error_tests;
 pub mod gc_tests;
 pub mod get_at_many_tests;
 pub mod get_current_many_tests;
+pub mod history_overlay_tests;
 pub mod history_tests;
 pub mod lock_tests;
 pub mod locks_deadlock_tests;

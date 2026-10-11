@@ -809,6 +809,9 @@ pub(crate) async fn apply_index_batch(
             tbl.index_manager_ref()
                 .invalidate_posting_cache_for_ops(ops);
         }
+        // The postings are applied and visible: tell the drainer not to replay
+        // this entry's index ops for the table (see `Drainer::index_applied`).
+        repo.drainer().mark_index_applied(commit_version, token);
     }
     Ok(())
 }

@@ -1079,8 +1079,11 @@ pub(crate) async fn release_pessimistic_locks(tx: &TxContext, repo: &RepoInstanc
     });
     let mvcc_map = repo.per_table_mvcc();
     for (token, keys) in by_table {
-        if let Some(e) = mvcc_map.get_sync(&token) {
-            e.get().release_locks(tx.tx_id.0, &keys).await;
+        // Clone the Arc out: a `get_sync` entry guard would hold the bucket
+        // lock across the `.await` (#589 class).
+        let mvcc = mvcc_map.read_sync(&token, |_, mvcc| std::sync::Arc::clone(mvcc));
+        if let Some(mvcc) = mvcc {
+            mvcc.release_locks(tx.tx_id.0, &keys).await;
         }
     }
 }

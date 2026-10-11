@@ -206,9 +206,11 @@ pub struct MvccStore {
     /// duration (a one-shot admin op, low frequency, `tokio::sync::Mutex`
     /// is the sanctioned exception for "guard held across `.await`,
     /// bounded contention" per CLAUDE.md); `write_committed_batch_to_history`
-    /// (the Drainer's periodic path) only `try_lock`s — on contention it
-    /// defers this table to the next tick rather than blocking the
-    /// Drainer's whole loop on one table.
+    /// (the Drainer's periodic path) takes it for the duration of its batch
+    /// write too. It must WAIT (#1234): an earlier `try_lock` deferral
+    /// returned `Ok(())` without writing, and `Drainer::drain_step` then
+    /// finalized the entries (durable mark, WAL commit, overlay GC) as if
+    /// they had landed.
     drain_exclusive: tokio::sync::Mutex<()>,
 }
 

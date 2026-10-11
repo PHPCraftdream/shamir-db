@@ -12,7 +12,7 @@
 #             -p 7331:7331 -p 9090:9090 \
 #             shamir-db:dev
 
-FROM rust:1.93-bookworm AS builder
+FROM rust:1.95-bookworm AS builder
 WORKDIR /build
 # Copy the workspace metadata first so layer caching kicks in even when
 # only crate sources change (not Cargo.lock / Cargo.toml).

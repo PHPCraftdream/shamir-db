@@ -71,7 +71,7 @@ tokio-tungstenite = "0.24"
 fjall = "3.0.1"
 
 # Config (Ktav per user request)
-ktav = "0.6"
+ktav = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11"
 

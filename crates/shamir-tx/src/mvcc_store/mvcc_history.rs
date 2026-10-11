@@ -146,28 +146,38 @@ impl MvccStore {
 
     /// T4-history: one key's full version timeline, ascending by version.
     ///
-    /// Reads from a single source: the `history` version-log.
+    /// Two sources, merged and de-duplicated by version:
+    /// 1. the `history` version-log — drained versions;
+    /// 2. the in-memory overlay — versions acked on the commit path
+    ///    (`apply_committed_visible`) that the background drainer has not
+    ///    landed in `history` yet. Without it a read right after a write
+    ///    misses the newest versions.
     ///
-    /// Every version (current and prior) lives under
-    /// `encode_version_key(key, version)` (`<key> || 0xFF || version_be`).
-    /// The range scan `[encode_version_key(key, 0), +∞)` yields all versioned
-    /// entries for this key. ts-keys (`[TS_TAG][version_be]`, 9 bytes,
-    /// `TS_TAG = 0x00`) are out of this key's range and are additionally
-    /// rejected by `decode_version_key` (which returns `None` when the
-    /// separator byte is not `VERSION_SEP`), so they can never be mistaken
-    /// for a version entry.
+    /// Every drained version lives under `encode_version_key(key, version)`
+    /// (`<key> || 0xFF || version_be`). The range scan
+    /// `[encode_version_key(key, 0), +∞)` yields all of this key's entries.
+    /// ts-keys (`[TS_TAG][version_be]`, 9 bytes, `TS_TAG = 0x00`) are out of
+    /// this key's range and are additionally rejected by `decode_version_key`
+    /// (which returns `None` when the separator byte is not `VERSION_SEP`), so
+    /// they can never be mistaken for a version entry.
     ///
-    /// The current version is already in the log (written by
-    /// `set_versioned`/`apply_committed_ops`), so the single scan covers
-    /// the full timeline. A key that is currently DELETED contributes a
-    /// tombstone; its prior versions still appear from the log.
+    /// A key that is currently DELETED contributes a tombstone; its prior
+    /// versions still appear.
     ///
-    /// Each entry's commit timestamp is resolved via [`Self::lookup_ts`]
-    /// (T1c). Entries with no recorded ts carry `ts_millis = None`.
+    /// Each entry's commit timestamp comes from the pending commit-time stamp
+    /// while the version is undrained, else from [`Self::lookup_ts`] (T1c).
+    /// Entries with no recorded ts carry `ts_millis = None`.
     ///
     /// Read-only, no cell mutation, no locking. Allocation is bounded by
     /// the key's version count (one `VersionEntry` per archived version).
     pub async fn history_of(&self, key: &[u8]) -> DbResult<Vec<VersionEntry>> {
+        // Phase 0: snapshot the overlay BEFORE scanning `history`. A version
+        // is dropped from the overlay only after it is durable in `history`,
+        // so one missing from this snapshot is either not committed yet or
+        // already visible to the scan below; the reverse order could lose a
+        // version drained+GC'd between the two reads.
+        let overlay_entries = self.overlay.versions_of(key);
+
         // Phase 1: scan this key's version range in `history`.
         // `encode_version_key(key, 0)` is the lexically smallest key in
         // this key's version namespace; an open upper bound (`None`) walks
@@ -201,15 +211,23 @@ impl MvccStore {
             }
         }
 
-        // Phase 2: no additional read needed. The current version is already
-        // in the log (written by set_versioned/apply_committed_ops), so the
-        // Phase-1 scan above already covers the full timeline.
+        // Phase 2: merge the undrained overlay versions. A version present in
+        // both carries the identical payload (the drainer copies the overlay
+        // value verbatim), so the stable sort + dedup keeps either.
+        entries.extend(overlay_entries);
 
         // Phase 3: ascending by version, resolve ts per version.
         entries.sort_by_key(|(v, _)| *v);
+        entries.dedup_by_key(|(v, _)| *v);
         let mut out = Vec::with_capacity(entries.len());
         for (version, value) in entries {
-            let ts_millis = self.lookup_ts(version).await;
+            // The commit-time stamp lives in `pending_ts` until the version is
+            // durable (reclaimed by `gc_overlay_to` after the history write),
+            // so a miss there means the ts is already in `history`.
+            let ts_millis = match self.pending_ts.get_sync(&version).map(|e| *e.get()) {
+                Some(ts) => Some(ts),
+                None => self.lookup_ts(version).await,
+            };
             out.push(VersionEntry {
                 version,
                 value,
@@ -300,20 +318,14 @@ impl MvccStore {
             return Ok(());
         }
 
-        // #1032: back off (not block) if a forced `drain_to_history` (table
-        // RENAME's Phase F.2) is currently draining this table — see
-        // `drain_exclusive`'s field doc (`mvcc_store/mod.rs`). Deferring is
-        // safe: this pass's entries stay un-drained in the WAL/overlay and
-        // are picked up by the next tick, same as any other tick that finds
-        // nothing new to drain.
-        let Ok(_drain_guard) = self.drain_exclusive.try_lock() else {
-            log::debug!(
-                "write_committed_batch_to_history: drain_exclusive held by a \
-                 forced drain_to_history — deferring {} version(s) to the next tick",
-                pass.len()
-            );
-            return Ok(());
-        };
+        // #1032/#1234: serialize against any other history writer for this
+        // table (a forced `drain_to_history`, or a concurrent drain pass) — see
+        // `drain_exclusive`'s field doc (`mvcc_store/mod.rs`). WAIT, never
+        // skip: `Drainer::drain_step` reads `Ok` as "landed in history" and
+        // goes on to `mark_durable`, commit the WAL marker and GC the overlay,
+        // so an `Ok` without a write leaves the commit in neither overlay nor
+        // history until (and unless) the other writer lands it.
+        let _drain_guard = self.drain_exclusive.lock().await;
 
         // Pre-size: each (v, ops) contributes ops.len() data entries + 1 ts entry.
         let total_ops: usize = pass.iter().map(|(_, ops)| ops.len()).sum();

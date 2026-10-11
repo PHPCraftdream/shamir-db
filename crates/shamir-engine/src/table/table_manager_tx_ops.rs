@@ -863,7 +863,7 @@ impl TableManager {
         staging.set_many(
             id_bytes
                 .into_iter()
-                .zip(staged_bytes.into_iter())
+                .zip(staged_bytes)
                 .map(|(k, v)| (k.into(), v)),
         );
 

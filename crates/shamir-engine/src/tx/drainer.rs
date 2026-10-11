@@ -184,6 +184,17 @@ pub struct Drainer {
     /// exhaustive (every unsafe entry is tracked, not just the first) and
     /// always current (no per-call snapshot to go stale).
     pending_unsafe: TreeIndex<u64, u64>,
+    /// `(commit_version, table_token)` pairs whose WAL index ops (`IndexPut` /
+    /// `IndexDel`) the commit path ALREADY applied inline (Phase 5c) before the
+    /// version became visible. The drain must not replay those: replaying an
+    /// older entry's `Set` posting after a newer inline commit removed it
+    /// resurrects the posting until the newer entry is replayed too, and the
+    /// raw `info_store` write never invalidated the posting cache, so a read
+    /// that cached the resurrected list kept serving it after the removal
+    /// (SET NULL left `dept_id = 100` matching a row whose FK was already
+    /// null — CI flake, ~12% under load). Cold recovery and the async-index
+    /// tail leave this empty and replay everything, as before.
+    index_applied: TreeIndex<(u64, u64), ()>,
 }
 
 impl Default for Drainer {
@@ -204,6 +215,36 @@ impl Drainer {
             recover_calls: AtomicU64::new(0),
             window_depth: AtomicUsize::new(0),
             pending_unsafe: TreeIndex::new(),
+            index_applied: TreeIndex::new(),
+        }
+    }
+
+    /// Record that the commit path applied `(commit_version, table_token)`'s
+    /// index postings inline, so [`drain_step`](Self::drain_step) skips that
+    /// entry's `IndexPut` / `IndexDel` ops for the table. Must be called
+    /// before the version is published (the drain only sees published ones).
+    pub(crate) fn mark_index_applied(&self, commit_version: u64, table_token: u64) {
+        let _ = self
+            .index_applied
+            .insert_sync((commit_version, table_token), ());
+    }
+
+    fn index_applied_inline(&self, commit_version: u64, table_token: u64) -> bool {
+        let guard = scc::Guard::new();
+        let key = (commit_version, table_token);
+        self.index_applied.range(key..=key, &guard).next().is_some()
+    }
+
+    fn clear_index_applied(&self, commit_version: u64) {
+        let keys: Vec<(u64, u64)> = {
+            let guard = scc::Guard::new();
+            self.index_applied
+                .range((commit_version, 0)..=(commit_version, u64::MAX), &guard)
+                .map(|(k, _)| *k)
+                .collect()
+        };
+        for key in keys {
+            let _ = self.index_applied.remove_sync(&key);
         }
     }
 
@@ -343,13 +384,11 @@ impl Drainer {
         let mut window_entries: Vec<Arc<WalEntryV2>> = Vec::new();
         {
             let guard = scc::Guard::new();
-            let mut expected = dur + 1;
-            for (k, v) in self.window.range(expected..=vis, &guard) {
+            for (expected, (k, v)) in (dur + 1..).zip(self.window.range(dur + 1..=vis, &guard)) {
                 if *k != expected {
                     break; // gap — reseed below
                 }
                 window_entries.push(Arc::clone(v));
-                expected += 1;
             }
         }
 
@@ -379,13 +418,11 @@ impl Drainer {
             // Retry the window scan once.
             window_entries.clear();
             let guard2 = scc::Guard::new();
-            let mut expected2 = dur + 1;
-            for (k, v) in self.window.range(expected2..=vis, &guard2) {
+            for (expected2, (k, v)) in (dur + 1..).zip(self.window.range(dur + 1..=vis, &guard2)) {
                 if *k != expected2 {
                     break;
                 }
                 window_entries.push(Arc::clone(v));
-                expected2 += 1;
             }
         }
 
@@ -462,6 +499,9 @@ impl Drainer {
                         value,
                         ..
                     } if *table_id_interned != 0 => {
+                        if self.index_applied_inline(v, *table_id_interned) {
+                            continue;
+                        }
                         this_entry_index_tables.push(*table_id_interned);
                         index_batches
                             .entry(*table_id_interned)
@@ -473,6 +513,9 @@ impl Drainer {
                         key,
                         ..
                     } if *table_id_interned != 0 => {
+                        if self.index_applied_inline(v, *table_id_interned) {
+                            continue;
+                        }
                         this_entry_index_tables.push(*table_id_interned);
                         index_batches
                             .entry(*table_id_interned)
@@ -689,6 +732,19 @@ impl Drainer {
                     #[cfg(not(debug_assertions))]
                     let inject_fail = false;
 
+                    // The replay writes postings straight onto `info_store`,
+                    // bypassing `IndexManager::apply_ops` and its posting-cache
+                    // invalidation: remember the keys and drop their cached
+                    // lists AFTER the write lands.
+                    let touched_keys: Vec<bytes::Bytes> = ops
+                        .iter()
+                        .map(|op| match op {
+                            KvOp::Set(k, _) | KvOp::Remove(k) => {
+                                bytes::Bytes::copy_from_slice(k.as_ref())
+                            }
+                        })
+                        .collect();
+
                     let write_result = if inject_fail {
                         Err(DbError::Internal(format!(
                             "injected index-batch failure for table {table_id} \
@@ -697,6 +753,10 @@ impl Drainer {
                     } else {
                         tbl.info_store().transact(ops).await
                     };
+                    if write_result.is_ok() {
+                        tbl.index_manager_ref()
+                            .invalidate_posting_cache_for_keys(touched_keys.iter().map(|k| &k[..]));
+                    }
 
                     if let Err(e) = write_result {
                         log::warn!(
@@ -838,6 +898,7 @@ impl Drainer {
             if self.window.remove_sync(v) {
                 self.window_depth.fetch_sub(1, Ordering::Relaxed);
             }
+            self.clear_index_applied(*v);
         }
 
         if drained > 0 {

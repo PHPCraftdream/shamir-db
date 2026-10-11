@@ -126,7 +126,7 @@ impl LogMask {
             self.overrides.push((target.to_owned(), level));
         }
         // Keep longest-prefix first so the scan short-circuits.
-        self.overrides.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        self.overrides.sort_by_key(|b| std::cmp::Reverse(b.0.len()));
         self
     }
 

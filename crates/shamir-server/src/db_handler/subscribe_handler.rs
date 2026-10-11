@@ -112,7 +112,8 @@ pub(super) fn activate_subscriptions(
                 tracing::info!(sub_id, "subscription activated");
             }
             BatchOp::Unsubscribe(op) => {
-                if registry.remove(op.unsubscribe) {
+                let removed = registry.remove(op.unsubscribe);
+                if removed {
                     tracing::info!(sub_id = op.unsubscribe, "subscription deactivated");
                 }
             }

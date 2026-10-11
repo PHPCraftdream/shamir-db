@@ -2901,6 +2901,19 @@ impl IndexManager {
         }
     }
 
+    /// Invalidate posting cache entries for raw posting keys written
+    /// straight onto `info_store` (the drainer's WAL index replay), which
+    /// bypasses [`apply_ops`](Self::apply_ops) and its invalidation. Call it
+    /// AFTER the write lands so no reader can re-cache the old state between
+    /// the two. Keys shorter than the 25-byte index prefix are ignored.
+    pub fn invalidate_posting_cache_for_keys<'a>(&self, keys: impl IntoIterator<Item = &'a [u8]>) {
+        for key in keys {
+            if key.len() >= 25 {
+                self.posting_cache.remove(&key[..25]);
+            }
+        }
+    }
+
     /// Count entries for one regular or unique index — used by the
     /// doctor's verify pass.
     pub async fn entry_count(&self, name_interned: u64, unique: bool) -> DbResult<u64> {
