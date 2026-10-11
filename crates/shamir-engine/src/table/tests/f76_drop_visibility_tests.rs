@@ -230,7 +230,7 @@ async fn f76_index2_drop_invisible_during_sweep() {
     // Sanity: before the drop, the planner DOES find the backend.
     {
         let interner = tbl.interner().get().await.unwrap();
-        let plan = tbl.try_plan_index2(&filter, interner).await;
+        let plan = tbl.try_plan_index2(&filter, interner).await.unwrap();
         assert!(
             plan.is_some(),
             "sanity: the functional backend must be plannable before the drop"
@@ -253,7 +253,7 @@ async fn f76_index2_drop_invisible_during_sweep() {
     // THE PROOF: the planner must NOT find the backend (it was retired from
     // the registry before the sweep).
     let interner = tbl.interner().get().await.unwrap();
-    let plan = tbl.try_plan_index2(&filter, interner).await;
+    let plan = tbl.try_plan_index2(&filter, interner).await.unwrap();
     assert!(
         plan.is_none(),
         "F-76: a dropped (registry-retired) index2 backend must be invisible \
@@ -278,7 +278,7 @@ async fn f76_index2_drop_invisible_during_sweep() {
 
     // Post-drop: the planner still returns None.
     let interner = tbl.interner().get().await.unwrap();
-    let plan_after = tbl.try_plan_index2(&filter, interner).await;
+    let plan_after = tbl.try_plan_index2(&filter, interner).await.unwrap();
     assert!(
         plan_after.is_none(),
         "after the drop completes, the backend must remain invisible"

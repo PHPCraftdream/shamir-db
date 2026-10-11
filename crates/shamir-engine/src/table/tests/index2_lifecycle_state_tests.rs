@@ -270,7 +270,7 @@ async fn planner_ready_gate_hides_building_backend() {
         value: FilterValue::String("alice".into()),
     };
     let interner = mgr.interner().get().await.unwrap();
-    let plan = mgr.try_plan_index2(&filter, interner).await;
+    let plan = mgr.try_plan_index2(&filter, interner).await.unwrap();
     assert!(
         plan.is_none(),
         "a Building backend must be invisible to the planner (got {:?})",
@@ -279,7 +279,7 @@ async fn planner_ready_gate_hides_building_backend() {
 
     // Flip to Ready and verify the planner NOW finds it.
     mgr.index2_registry().set_state(1, IndexState::Ready).await;
-    let plan_ready = mgr.try_plan_index2(&filter, interner).await;
+    let plan_ready = mgr.try_plan_index2(&filter, interner).await.unwrap();
     assert!(
         plan_ready.is_some(),
         "after flipping to Ready, the planner must find the backend"
