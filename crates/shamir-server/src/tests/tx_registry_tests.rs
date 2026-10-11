@@ -37,6 +37,28 @@ async fn make_tx(sid: [u8; 32], max_lifetime: Duration, seed: u64) -> (u64, Inte
     (tx_id.0, it)
 }
 
+#[tokio::test(start_paused = true)]
+async fn remaining_lifetime_tracks_absolute_deadline_without_activity_extension() {
+    let (_, it) = make_tx(SID_A, Duration::from_secs(60), 1).await;
+    assert_eq!(it.remaining_lifetime(), Duration::from_secs(60));
+    tokio::time::advance(Duration::from_secs(17)).await;
+    assert_eq!(it.remaining_lifetime(), Duration::from_secs(43));
+    it.bump_activity();
+    assert_eq!(it.remaining_lifetime(), Duration::from_secs(43));
+    tokio::time::advance(Duration::from_secs(43)).await;
+    assert_eq!(it.remaining_lifetime(), Duration::ZERO);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(it.remaining_lifetime(), Duration::ZERO);
+}
+
+#[tokio::test(start_paused = true)]
+async fn remaining_lifetime_zero_at_creation_and_after_expiry() {
+    let (_, it) = make_tx(SID_A, Duration::ZERO, 1).await;
+    assert_eq!(it.remaining_lifetime(), Duration::ZERO);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(it.remaining_lifetime(), Duration::ZERO);
+}
+
 #[tokio::test]
 async fn register_then_get_owned_roundtrip() {
     let reg = TxRegistry::new();
