@@ -758,7 +758,7 @@ pub(super) async fn execute_transactional_impl(
     if request.durability.as_deref() == Some("async_index") {
         tx.set_visibility(CommitVisibility::AsyncIndex);
     }
-    let _snapshot_version = tx.snapshot_version;
+    let snapshot_version = tx.snapshot_version;
     let tx_id = tx.tx_id.0;
 
     // Execute plan in tx mode.
@@ -841,30 +841,12 @@ pub(super) async fn execute_transactional_impl(
                     Ok((results, Some(info)))
                 }
                 Err(commit_err) => {
-                    let reason = match commit_err {
-                        crate::tx::CommitError::MigrationFrozen { .. } => {
-                            "table_migrating".to_string()
-                        }
-                        crate::tx::CommitError::SsiConflict { .. } => "tx_conflict".to_string(),
-                        crate::tx::CommitError::PhantomConflict { .. } => "tx_conflict".to_string(),
-                        crate::tx::CommitError::Wounded { .. } => "tx_conflict".to_string(),
-                        crate::tx::CommitError::UniqueViolation { .. } => {
-                            "unique_violation".to_string()
-                        }
-                        // FG-7: a commit-time CAS failure maps to the SAME
-                        // "version_conflict" code as the immediate staging-time
-                        // check, so client retry logic keyed on that code
-                        // handles both failure timings identically.
-                        crate::tx::CommitError::CasConflict { .. } => {
-                            "version_conflict".to_string()
-                        }
-                        crate::tx::CommitError::Storage(e) => format!("storage: {}", e),
-                        crate::tx::CommitError::Expired { elapsed, max } => {
-                            format!("tx expired: elapsed {:?} > max {:?}", elapsed, max)
-                        }
-                    };
-                    let info = shamir_query_types::batch::TransactionInfo::aborted(tx_id, reason);
-                    Ok((new_map(), Some(info)))
+                    let info = commit_err.into_transaction_info(tx_id, snapshot_version);
+                    if info.is_committed() {
+                        Ok((results, Some(info)))
+                    } else {
+                        Ok((new_map(), Some(info)))
+                    }
                 }
             }
         }

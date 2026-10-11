@@ -229,6 +229,7 @@ pub(super) struct PreCommit {
     /// `begin_grouped`, wrapped in `Arc` so the caller can `offer` it to
     /// the drainer window without cloning the payload again.
     pub(super) wal_entry_arc: Arc<WalEntryV2>,
+    pub(super) durability_failed: bool,
 }
 
 /// Outcome of [`pre_commit_prelock`]: per-table uwl_guards acquired in
@@ -2730,7 +2731,7 @@ pub(super) async fn pre_commit_locked(
     // RAII VersionGuard. Deferred to this point so SSI/phantom/empty-tx
     // aborts never allocate a version slot. Pure atomic fetch_add —
     // lock-free, safe without commit_mutex.
-    let version_guard = gate.assign_next_version_guarded();
+    let mut version_guard = gate.assign_next_version_guarded();
     let commit_version = version_guard.version();
 
     // Phase 4: write WAL entry — THE COMMIT POINT.
@@ -2773,22 +2774,14 @@ pub(super) async fn pre_commit_locked(
     // `begin_grouped` borrows the entry, so we serialize from the Arc borrow
     // — no clone on the commit hot path.
     let entry_arc = Arc::new(entry);
-    if let Err(e) = wal
-        .begin_grouped(&entry_arc, shamir_wal::WalDurability::Buffered)
-        .await
-    {
-        // version_guard drops here → mark(Aborted): WAL begin failed.
-        // See the Phase 4 note above for the precise durability state
-        // after a failed `wal.begin` (nothing durable in the common case;
-        // a partial frame may survive the rare rollback-failure window,
-        // discarded by `repair_torn_tail` / replay CRC). This is a
-        // pre-commit abort. SSI fix S2: drop the cell_guards too →
-        // release every claimed cell (the publish that would have
-        // finalized them never runs).
-        drop(version_guard);
-        drop(cell_guards);
-        return Err(TxError::Storage(e));
-    }
+    // Record before queueing: an unwritten abort may cause spurious SSI
+    // conflicts, but a written orphan must never expose a missed conflict.
+    gate.record_commit_writes(shamir_tx::build_footprint_from_tx(tx, commit_version));
+    let (ticket, completion) =
+        wal.begin_grouped_ticketed(&entry_arc, super::commit::commit_wal_durability(repo))?;
+    version_guard.attach_metrics(repo.tx_metrics().clone());
+    version_guard.wal_queued(ticket, entry_arc.clone());
+    let durability_failed = super::commit::wal_completion(gate, completion.await)?;
     // SSI fix S2: WAL begin succeeded — the tx is COMMITTED. The claims stay
     // armed and are handed to the caller via `PreCommit`; the caller `disarm`s
     // them once the publisher has finalized every claim (`finalize_reservation`
@@ -2807,5 +2800,6 @@ pub(super) async fn pre_commit_locked(
         version_guard,
         cell_guards,
         wal_entry_arc: entry_arc,
+        durability_failed,
     }))
 }

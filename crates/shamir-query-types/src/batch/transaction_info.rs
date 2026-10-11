@@ -16,6 +16,10 @@ pub struct TransactionInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 
+    /// Published commit error; does not change committed status or abort reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+
     /// MVCC snapshot version the tx read from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_version: Option<u64>,
@@ -30,7 +34,7 @@ pub struct TransactionInfo {
     ///
     /// - `true` (the common case): every projection landed before the
     ///   response — the committed version is fully observable now.
-    /// - `false`: the commit is durable (its WAL entry IS the commit),
+    /// - `false`: the commit is published (its WAL entry IS the commit),
     ///   but at least one projection was deferred to crash-recovery,
     ///   which re-applies it idempotently on the next open. The data
     ///   WILL appear — this is restart-bounded eventual consistency, not
@@ -58,10 +62,23 @@ impl TransactionInfo {
             tx_id,
             status: "committed".into(),
             reason: None,
+            error: None,
             snapshot_version: Some(snapshot_version),
             commit_version: Some(commit_version),
             materialized,
         }
+    }
+
+    pub fn committed_with_error(
+        tx_id: u64,
+        snapshot_version: u64,
+        commit_version: u64,
+        materialized: bool,
+        error: impl Into<String>,
+    ) -> Self {
+        let mut info = Self::committed(tx_id, snapshot_version, commit_version, materialized);
+        info.error = Some(error.into());
+        info
     }
 
     pub fn aborted(tx_id: u64, reason: impl Into<String>) -> Self {
@@ -69,6 +86,7 @@ impl TransactionInfo {
             tx_id,
             status: "aborted".into(),
             reason: Some(reason.into()),
+            error: None,
             snapshot_version: None,
             commit_version: None,
             // Aborted txs never materialize; default is irrelevant to the

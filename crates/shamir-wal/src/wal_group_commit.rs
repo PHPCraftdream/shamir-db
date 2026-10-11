@@ -146,6 +146,15 @@ impl WalGroupCommit {
         }
     }
 
+    #[doc(hidden)]
+    pub fn arm_fail_next_sync_for_test(&self) {
+        self.sink.arm_fail_next_sync();
+    }
+
+    pub fn requires_reopen(&self) -> bool {
+        self.indeterminate.load(Ordering::Acquire)
+    }
+
     /// Append one encoded payload at the given tier; returns once the
     /// entry has reached the requested durability level. `commit_version`
     /// is the MVCC version stamped on the entry — the leader folds the

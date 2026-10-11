@@ -4,7 +4,7 @@ use shamir_wal::{
     WalDurability, WalEntryV2, WalGroupCommit, WalOpV2, WalSink, WalTicket, WalTicketState,
 };
 
-use crate::{RepoTxGate, RepoWalManager};
+use crate::{RepoTxGate, RepoWalManager, TxMetrics};
 
 fn entry(version: u64) -> Arc<WalEntryV2> {
     Arc::new(WalEntryV2 {
@@ -36,7 +36,9 @@ fn assert_watermarks(gate: &RepoTxGate, visible: u64, durable: u64) {
 fn written_and_acked_drops_handover_entry_without_completing_either_tracker() {
     for state in [WalTicketState::Written, WalTicketState::Acked] {
         let gate = RepoTxGate::fresh();
+        let metrics = Arc::new(TxMetrics::new());
         let mut guard = gate.assign_next_version_guarded();
+        guard.attach_metrics(Arc::clone(&metrics));
         let version = guard.version();
         let replay = entry(version);
         guard.wal_queued(ticket(state), Arc::clone(&replay));
@@ -47,7 +49,9 @@ fn written_and_acked_drops_handover_entry_without_completing_either_tracker() {
         assert!(gate.orphan_entry(version).is_none());
         assert_eq!(gate.version_allocation_high_water_mark(), version);
         assert_watermarks(&gate, 0, 0);
+        assert_eq!(metrics.snapshot().post_wal_orphans_total, 0);
         drop(guard);
+        assert_eq!(metrics.snapshot().post_wal_orphans_total, 1);
 
         assert!(!gate.is_active_post_wal(version));
         assert!(gate.is_orphaned_post_wal(version));
@@ -71,6 +75,34 @@ fn written_and_acked_drops_handover_entry_without_completing_either_tracker() {
         assert!(!gate.is_orphaned_post_wal(version));
         assert!(gate.orphan_entry(version).is_none());
         assert_eq!(gate.orphan_max(), version);
+        assert_eq!(metrics.snapshot().post_wal_orphans_total, 1);
+    }
+}
+
+// Only an armed written Drop counts; queued ambiguity, absence and commit do not.
+#[test]
+fn queued_non_orphan_transitions_do_not_increment_attached_metric() {
+    for state in [
+        WalTicketState::Failed,
+        WalTicketState::Pending,
+        WalTicketState::Unknown,
+        WalTicketState::Written,
+        WalTicketState::Acked,
+    ] {
+        let gate = RepoTxGate::fresh();
+        let metrics = Arc::new(TxMetrics::new());
+        let mut guard = gate.assign_next_version_guarded();
+        guard.attach_metrics(Arc::clone(&metrics));
+        let version = guard.version();
+        guard.wal_queued(ticket(state), entry(version));
+        if matches!(state, WalTicketState::Written | WalTicketState::Acked) {
+            guard.commit();
+            assert_watermarks(&gate, version, 0);
+        } else {
+            drop(guard);
+        }
+        assert!(!gate.is_orphaned_post_wal(version));
+        assert_eq!(metrics.snapshot().post_wal_orphans_total, 0);
     }
 }
 

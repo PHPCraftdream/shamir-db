@@ -594,6 +594,16 @@ impl RepoTxGate {
         )
     }
 
+    pub fn orphaned_post_wal_versions(&self) -> Vec<u64> {
+        let mut versions = Vec::new();
+        self.orphaned_post_wal.iter_sync(|version, _| {
+            versions.push(*version);
+            true
+        });
+        versions.sort_unstable();
+        versions
+    }
+
     /// Retained replay entry, including frames outside the drainer's window.
     pub fn orphan_entry(&self, version: u64) -> Option<Arc<WalEntryV2>> {
         self.orphan_entries
@@ -609,6 +619,17 @@ impl RepoTxGate {
         });
         versions.sort_unstable();
         versions
+    }
+
+    pub fn unresolved_wal(&self, version: u64) -> Option<Unresolved> {
+        self.wal_unresolved
+            .read_sync(&version, |_, value| value.clone())
+    }
+
+    pub fn register_written_orphan(&self, version: u64, entry: Arc<WalEntryV2>) {
+        let _ = self.orphan_entries.insert_sync(version, entry);
+        let _ = self.orphaned_post_wal.insert_sync(version, ());
+        self.orphan_max.fetch_max(version, Ordering::AcqRel);
     }
 
     /// Transfer resolution ownership without settling either tracker.
