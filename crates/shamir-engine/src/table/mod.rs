@@ -1,6 +1,7 @@
 pub mod buffer_config;
 // Re-export ddl_op_log from shamir-index for inline terminal status writes
 pub use shamir_index::base_index::ddl_op_log;
+mod candidate_set;
 pub mod degraded_index_count;
 pub mod doctor;
 mod filtered_vector;

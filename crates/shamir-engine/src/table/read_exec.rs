@@ -473,120 +473,24 @@ impl TableManager {
         //     a full-scan fall-through returns EVERY row in the table
         //     instead of zero — a correctness bug.
         if let Some(ref filter) = query.r#where {
-            if let Some(result) = self.try_plan_index2(filter, interner).await {
-                let (rids_vec, index_tag) = match result {
-                    crate::index2::backend::IndexResult::Set(rids) => {
-                        (rids.into_iter().collect::<Vec<_>>(), "index2")
-                    }
-                    crate::index2::backend::IndexResult::Ranked(ranked) => (
-                        ranked.into_iter().map(|(r, _)| r).collect::<Vec<_>>(),
-                        "index2_ranked",
-                    ),
-                };
-                // Preserve full match count for pagination metadata BEFORE
-                // any page slice — clients rely on count_total for UI.
-                let count_total = rids_vec.len() as u64;
-
-                // Opt #5 (1000×-class): push pagination into index2 path.
-                // index2 returns a pre-filtered, pre-ranked RID list with no
-                // residual predicate, so it is safe to slice [skip..skip+take]
-                // before calling get_many. Gate: finite LIMIT must be present.
-                // Note: an empty `rids_vec` slices down to `&[]`, and
-                // `get_many_bytes(&[])` short-circuits without a storage
-                // round-trip — so the empty case is O(1).
-                let (skip_u64, take_opt) = query.pagination.resolve();
-                let rids_slice: &[RecordId] = if let Some(take_u64) = take_opt {
-                    let skip = skip_u64 as usize;
-                    let take = take_u64 as usize;
-                    let lo = skip.min(rids_vec.len());
-                    let hi = lo.saturating_add(take).min(rids_vec.len());
-                    &rids_vec[lo..hi]
+            if let Some(candidates) = self.try_plan_index2(filter, interner).await? {
+                let tag = if candidates.ranked {
+                    "index2_ranked"
                 } else {
-                    &rids_vec
+                    "index2"
                 };
-
-                // S3: zero-copy bytes path — index2 is plain SELECT only.
-                let raw_records = self.get_many_bytes(rids_slice).await?;
-                let mut records = Vec::with_capacity(raw_records.len());
-                // FG-2: when `with_version`, track which RecordId survived the
-                // (post-filter-on-bytes) materialisation loop, so we can build
-                // a parallel `versions` array via `version_of`. Iterate zip
-                // with `rids_slice` to keep rid↔record alignment.
-                let tracking_versions = query.with_version && self.mvcc_store_ref().is_some();
-                let mut survivor_ids: Vec<RecordId> = if tracking_versions {
-                    Vec::with_capacity(raw_records.len())
-                } else {
-                    Vec::new()
-                };
-                // F-10 (#800): rows that fail to decode are still skipped from
-                // `records` (unchanged behaviour) but reported here instead of
-                // silently vanishing from the result set.
-                let mut corrupt: Vec<CorruptRecordRef> = Vec::new();
-                for (maybe_bytes, rid) in raw_records.into_iter().zip(rids_slice.iter()) {
-                    let bytes = match maybe_bytes {
-                        Some(b) => b,
-                        None => continue,
-                    };
-                    let qv = match shamir_types::record_view::RecordView::new(&bytes) {
-                        Ok(view) => view.to_query_value(interner),
-                        Err(_) => match InnerValue::from_bytes(bytes) {
-                            Ok(iv) => {
-                                match shamir_types::codecs::interned::inner_value_to_query_value(
-                                    &iv, interner,
-                                ) {
-                                    Ok(q) => q,
-                                    Err(_) => {
-                                        corrupt.push(CorruptRecordRef {
-                                            table: self.name().to_string(),
-                                            id: *rid,
-                                        });
-                                        continue;
-                                    }
-                                }
-                            }
-                            Err(_) => {
-                                corrupt.push(CorruptRecordRef {
-                                    table: self.name().to_string(),
-                                    id: *rid,
-                                });
-                                continue;
-                            }
-                        },
-                    };
-                    if tracking_versions {
-                        survivor_ids.push(*rid);
-                    }
-                    records.push(crate::query::read::QueryRecord::Direct(qv));
-                }
-                let returned = records.len() as u64;
-                let pagination = if query.pagination.is_none() {
-                    None
-                } else {
-                    Some(PaginationInfo::compute(
-                        &query.pagination,
-                        Some(count_total),
-                    ))
-                };
-                return Ok(crate::query::read::QueryResult {
-                    records,
-                    stats: Some(crate::query::read::QueryStats {
-                        index_used: Some(index_tag.into()),
-                        records_scanned: count_total,
-                        records_returned: returned,
-                        execution_time_us: start.elapsed().as_micros() as u64,
-                    }),
-                    pagination,
-                    value: None,
-                    explain: None,
-                    skipped: false,
-                    versions: collect_versions(
-                        query.with_version,
-                        self.mvcc_store_ref(),
-                        &survivor_ids,
-                    ),
-                    corrupt_records: corrupt,
-                    ..Default::default()
-                });
+                // Bare index2 planning is committed-only; keep materialisation
+                // committed-only too. Tx-aware candidate planning is out of scope.
+                let raw = self.get_many_bytes(&candidates.rids).await?;
+                let rows = candidates
+                    .rids
+                    .into_iter()
+                    .zip(raw)
+                    .filter_map(|(id, bytes)| bytes.map(|b| (id, b)))
+                    .collect();
+                return self
+                    .postprocess_candidates(query, ctx, interner, rows, tag, start, Vec::new())
+                    .await;
             }
         }
 
@@ -965,6 +869,36 @@ impl TableManager {
         start: Instant,
         tx: Option<&shamir_tx::TxContext>,
     ) -> DbResult<QueryResult> {
+        // Use bytes-level pre-filter when a compiled filter is present: rows
+        // that definitely don't match are skipped before full InnerValue decode.
+        // Both arms are boxed to unify the two opaque `impl Stream` types.
+        // When a tx context is present, use tx-aware list_stream_tx so SSI
+        // read-set recording is fused into this single scan. The bytes-level
+        // pre-filter is skipped in that case — SSI correctness requires
+        // recording every candidate row (not just pre-filter survivors), and
+        // the compiled filter_cb in the loop below is the authoritative gate.
+
+        let stream: DynBatchStream<'_> = if tx.is_some() {
+            Box::pin(self.list_stream_tx(tx, batch_size))
+        } else if let Some(pf) = pre_filter {
+            Box::pin(self.list_stream_filtered(batch_size, pf))
+        } else {
+            Box::pin(self.list_stream(batch_size))
+        };
+
+        self.read_collecting_from(query, ctx, interner, filter_cb, stream, start)
+            .await
+    }
+
+    async fn read_collecting_from(
+        &self,
+        query: &ReadQuery,
+        ctx: &FilterContext<'_>,
+        interner: &Interner,
+        filter_cb: Option<&FilterNode>,
+        mut stream: DynBatchStream<'_>,
+        start: Instant,
+    ) -> DbResult<QueryResult> {
         let has_group_by = query.group_by.is_some();
         let has_agg = exec::has_aggregates(&query.select);
         let needs_raw = has_group_by || has_agg;
@@ -985,22 +919,6 @@ impl TableManager {
         // The AGG #54 prune_ids/prune_to_inner decode-prune is obsolete (the
         // lens already reads only referenced fields, skipping unreferenced
         // ones with O(1) skips, no tree decode).
-
-        // Use bytes-level pre-filter when a compiled filter is present: rows
-        // that definitely don't match are skipped before full InnerValue decode.
-        // Both arms are boxed to unify the two opaque `impl Stream` types.
-        // When a tx context is present, use tx-aware list_stream_tx so SSI
-        // read-set recording is fused into this single scan. The bytes-level
-        // pre-filter is skipped in that case — SSI correctness requires
-        // recording every candidate row (not just pre-filter survivors), and
-        // the compiled filter_cb in the loop below is the authoritative gate.
-        let mut stream: DynBatchStream<'_> = if tx.is_some() {
-            Box::pin(self.list_stream_tx(tx, batch_size))
-        } else if let Some(pf) = pre_filter {
-            Box::pin(self.list_stream_filtered(batch_size, pf))
-        } else {
-            Box::pin(self.list_stream(batch_size))
-        };
 
         let mut records_scanned: u64 = 0;
 
@@ -1708,13 +1626,8 @@ impl TableManager {
     /// The result preserves ANN ranking order (nearest-first) among the
     /// survivors, which matches the bare-VectorSimilarity path's contract.
     ///
-    /// Gate: this is a plain-SELECT path only (no GROUP BY / aggregates /
-    /// DISTINCT / ORDER BY). Those clauses would require in-memory
-    /// post-processing over the full survivor set and are left to the
-    /// legacy paths — if a query carries them, the planner does NOT
-    /// recognise the filtered-vector shape (the caller checks `fvq` shape
-    /// but this method further gates on the query structure and falls
-    /// through to `read_collecting` when needed).
+    /// Survivors feed the shared candidate postprocessor for projection,
+    /// GROUP BY, aggregates, DISTINCT, ORDER BY, and pagination.
     #[allow(clippy::too_many_arguments)]
     async fn read_filtered_vector_scan(
         &self,
@@ -1736,14 +1649,6 @@ impl TableManager {
             None => Ok(None),
         };
         let backend = match lease_result {
-            Err(DbError::IndexDrainInProgress(_)) => {
-                // P0-3a (#1038): Index is in drain window — fall back to full scan.
-                // This degrades to the documented "unranked residual filter" behavior,
-                // which is correct-but-slower (not silently wrong).
-                return self
-                    .read_fallback_no_vector_index(query, ctx, interner, tx, start)
-                    .await;
-            }
             Err(e) => return Err(e),
             Ok(Some(lease)) => lease.backend,
             Ok(None) => {
@@ -1787,9 +1692,9 @@ impl TableManager {
                 // `try_plan_index2` only matches single-predicate shapes (Eq on
                 // functional, FTS, bare Vector) — never multi-conjunct And. So a
                 // successful Set result implies full coverage of the residual.
-                let idx2_result = self.try_plan_index2(residual, interner).await;
+                let idx2_result = self.try_plan_index2(residual, interner).await?;
                 match idx2_result {
-                    Some(IndexResult::Set(set)) => Some(set.into_iter().collect()),
+                    Some(set) if !set.ranked => Some(set.rids),
                     _ => {
                         // Try base_index btree index scan. Only use when the index
                         // FULLY covers the residual (no leftover predicate).
@@ -2037,63 +1942,16 @@ impl TableManager {
             k_prime = k_prime.saturating_mul(2).min(MAX_TOPK);
         }
 
-        // Project survivors into query records — bytes already resolved in the
-        // loop, so no second round-trip to the store/staging.
-        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?
-            .with_context(ctx);
-        let mut records: Vec<QueryRecord> = Vec::with_capacity(last_survivors.len());
-        for (rid, bytes) in &last_survivors {
-            let qv = match shamir_types::record_view::RecordView::new(bytes) {
-                Ok(view) => proj.project_value(&view, interner),
-                Err(_) => match InnerValue::from_bytes(bytes.clone()) {
-                    Ok(iv) => match shamir_types::codecs::interned::inner_value_to_query_value(
-                        &iv, interner,
-                    ) {
-                        Ok(q) => q,
-                        Err(_) => {
-                            corrupt.push(CorruptRecordRef {
-                                table: self.name().to_string(),
-                                id: *rid,
-                            });
-                            continue;
-                        }
-                    },
-                    Err(_) => {
-                        corrupt.push(CorruptRecordRef {
-                            table: self.name().to_string(),
-                            id: *rid,
-                        });
-                        continue;
-                    }
-                },
-            };
-            records.push(QueryRecord::Direct(qv));
-        }
-
-        let returned = records.len() as u64;
-        let scanned = last_ranked.len() as u64;
-        let elapsed = start.elapsed();
-
-        Ok(QueryResult {
-            records,
-            stats: Some(QueryStats {
-                index_used: Some("filtered_vector_scan".into()),
-                records_scanned: scanned,
-                records_returned: returned,
-                execution_time_us: elapsed.as_micros() as u64,
-            }),
-            pagination: if query.pagination.is_none() {
-                None
-            } else {
-                Some(PaginationInfo::compute(&query.pagination, Some(returned)))
-            },
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: corrupt,
-            ..Default::default()
-        })
+        self.postprocess_candidates(
+            query,
+            ctx,
+            interner,
+            last_survivors,
+            "filtered_vector_scan",
+            start,
+            corrupt,
+        )
+        .await
     }
 
     /// Fallback for a filtered-vector query that has NO vector index on the
@@ -2320,69 +2178,88 @@ impl TableManager {
         start: Instant,
         ranked: &[(RecordId, f32)],
         index_tag: &str,
-        mut corrupt: Vec<CorruptRecordRef>,
+        corrupt: Vec<CorruptRecordRef>,
     ) -> DbResult<QueryResult> {
         let rids: Vec<RecordId> = ranked.iter().map(|(r, _)| *r).collect();
-        let raw_records = self.get_many_bytes_tx(&rids, tx).await?;
-        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?
-            .with_context(ctx);
-        let mut records: Vec<QueryRecord> = Vec::with_capacity(ranked.len());
-        for (maybe_bytes, rid) in raw_records.iter().zip(rids.iter()) {
-            let bytes = match maybe_bytes {
-                Some(b) => b,
-                None => continue,
-            };
-            let qv = match shamir_types::record_view::RecordView::new(bytes) {
-                Ok(view) => proj.project_value(&view, interner),
-                Err(_) => match InnerValue::from_bytes(bytes.clone()) {
-                    Ok(iv) => {
-                        match shamir_types::codecs::interned::inner_value_to_query_value(
-                            &iv, interner,
-                        ) {
-                            Ok(q) => q,
-                            Err(_) => {
-                                corrupt.push(CorruptRecordRef {
-                                    table: self.name().to_string(),
-                                    id: *rid,
-                                });
-                                continue;
-                            }
-                        }
-                    }
-                    Err(_) => {
+        let raw = self.get_many_bytes_tx(&rids, tx).await?;
+        let rows = rids
+            .into_iter()
+            .zip(raw)
+            .filter_map(|(id, bytes)| bytes.map(|b| (id, b)))
+            .collect();
+        self.postprocess_candidates(query, ctx, interner, rows, index_tag, start, corrupt)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn postprocess_candidates(
+        &self,
+        query: &ReadQuery,
+        ctx: &FilterContext<'_>,
+        interner: &Interner,
+        rows: Vec<(RecordId, Bytes)>,
+        index_tag: &str,
+        start: Instant,
+        mut corrupt: Vec<CorruptRecordRef>,
+    ) -> DbResult<QueryResult> {
+        let total = rows.len() as u64;
+        let eligible = super::candidate_set::index2_shortcut_eligible(query);
+        let (rows, pagination) = if eligible {
+            // Validate ALL candidate bytes before slicing, using the same gate
+            // as read_collecting_from. Corrupt rows neither consume the page
+            // nor contribute to total_count, even outside the requested page.
+            let rows: Vec<_> = rows
+                .into_iter()
+                .filter(|(id, bytes)| {
+                    if shamir_types::record_view::RecordView::new(bytes).is_ok() {
+                        true
+                    } else {
                         corrupt.push(CorruptRecordRef {
                             table: self.name().to_string(),
-                            id: *rid,
+                            id: *id,
                         });
-                        continue;
+                        false
                     }
-                },
-            };
-            records.push(QueryRecord::Direct(qv));
+                })
+                .collect();
+            let valid_total = rows.len() as u64;
+            let (skip, take) = query.pagination.resolve();
+            let has_next = take.is_some_and(|take| skip.saturating_add(take) < valid_total);
+            let (rows, pagination) =
+                exec::apply_pagination(rows, &query.pagination, query.count_total);
+            let pagination = pagination.map(|info| info.with_has_next(has_next));
+            (rows, pagination)
+        } else {
+            (rows, None)
+        };
+        let batch = rows
+            .into_iter()
+            .map(|(id, b)| (id, RecordCow::Borrowed(b)))
+            .collect();
+        let stream: DynBatchStream<'_> = Box::pin(futures::stream::once(async move { Ok(batch) }));
+        // Eligible candidates were paged before projection. Use the SAME
+        // collecting projection/corruption/version pipeline without paging twice.
+        let mut unpaged;
+        let effective = if eligible {
+            unpaged = query.clone();
+            unpaged.pagination = shamir_query_types::read::Pagination::None;
+            &unpaged
+        } else {
+            query
+        };
+        let mut result = self
+            .read_collecting_from(effective, ctx, interner, None, stream, start)
+            .await?;
+        if eligible {
+            result.pagination = pagination;
         }
-        let returned = records.len() as u64;
-        let scanned = ranked.len() as u64;
-        let elapsed = start.elapsed();
-        Ok(QueryResult {
-            records,
-            stats: Some(QueryStats {
-                index_used: Some(index_tag.into()),
-                records_scanned: scanned,
-                records_returned: returned,
-                execution_time_us: elapsed.as_micros() as u64,
-            }),
-            pagination: if query.pagination.is_none() {
-                None
-            } else {
-                Some(PaginationInfo::compute(&query.pagination, Some(returned)))
-            },
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: corrupt,
-            ..Default::default()
-        })
+        if let Some(stats) = result.stats.as_mut() {
+            stats.index_used = Some(index_tag.into());
+            stats.records_scanned = total;
+        }
+        corrupt.append(&mut result.corrupt_records);
+        result.corrupt_records = corrupt;
+        Ok(result)
     }
 
     /// Build an [`ExplainPlan`] by running only the planner decision tree
