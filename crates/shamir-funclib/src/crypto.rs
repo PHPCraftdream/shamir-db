@@ -36,7 +36,8 @@ use crate::registry::{arg_bytes, arg_i64, v_bool, v_bytes, FnEntry, ScalarError,
 use argon2::{Algorithm, Argon2, Params as Argon2Params, Version};
 use hmac::{Mac, SimpleHmac};
 use sha2::{Digest, Sha256, Sha512};
-use sha3::Sha3_256;
+// sha3 0.12 sits on digest 0.11; the sha2 0.10 `Digest` above is digest 0.10.
+use sha3::{Digest as Sha3Digest, Sha3_256};
 use shamir_types::types::value::QueryValue;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::{Condvar, LazyLock, Mutex};
