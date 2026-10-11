@@ -152,15 +152,45 @@ async fn select_nested_batch_and_foreach_have_exact_composed_totals() {
     body.query("r", Query::from("rows"));
     let mut loop_batch = Batch::new();
     let source = loop_batch.query("source", Query::from("rows"));
-    loop_batch.for_each("loop", source.all(), "row", body.build());
-    for (request, expected) in [
-        (plain, 10_691),
-        (nested.build(), 10_920),
-        (loop_batch.build(), 21_651),
+    // A Read's all() is not a list; column("pad") resolves one item per row.
+    loop_batch.for_each("loop", source.column("pad"), "row", body.build());
+    // Row: 48 + map (24 + 16 + 3 + string 24 + 10_240) = 10_355.
+    // SELECT: row 10_355 + result base 80 + stats 256 = 10_691.
+    // Assembled envelope: 24 + (16 + 1) + 24 + (16 + 7)
+    //                     + (24 + 16) + (16 + 5) = 149.
+    // Nested: SELECT 10_691 + result base 80 + assembled 149 = 10_920.
+    // ForEach: source 10_691 + loop shell (80 + 24) + body 10_691
+    //          + iteration envelope (ENTRY 16 + assembled 149) = 21_651.
+    for (request, alias, expected) in [
+        (plain, "r", 10_691),
+        (nested.build(), "n", 10_920),
+        (loop_batch.build(), "loop", 21_651),
     ] {
         let scope = ExecScope::root_with_result_size(&request.limits, true);
         let response = run(&request, &resolver, &scope).await.unwrap();
-        assert!(!response.results.is_empty());
+        let result = &response.results[alias];
+        if alias == "loop" {
+            assert_eq!(response.results["source"].records.len(), 1);
+            let Some(QueryValue::List(iterations)) = &result.value else {
+                panic!("expected iteration list, got {result:?}");
+            };
+            assert_eq!(iterations.len(), 1, "one iteration per source row");
+            let QueryValue::Map(iteration) = &iterations[0] else {
+                panic!("expected body result map, got {iterations:?}");
+            };
+            let QueryValue::Map(body_result) = &iteration["r"] else {
+                panic!("expected SELECT result envelope, got {iteration:?}");
+            };
+            let QueryValue::List(records) = &body_result["records"] else {
+                panic!("expected body records, got {body_result:?}");
+            };
+            assert_eq!(records.len(), 1);
+            let QueryValue::Map(fields) = &records[0] else {
+                panic!("expected body field map, got {records:?}");
+            };
+            assert_eq!(fields.len(), 1);
+            assert_eq!(fields["pad"], QueryValue::Str("x".repeat(10_240).into()));
+        }
         assert_eq!(scope.bytes(), expected);
     }
 }
