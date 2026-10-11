@@ -240,6 +240,7 @@ impl RecordValidator for FinalStateFkValidator {
 
 #[tokio::test]
 async fn fk_final_staged_state_matrix() {
+    let mut accepted_wrongly: Vec<String> = Vec::new();
     for indexed in [false, true] {
         for isolation in [IsolationLevel::Snapshot, IsolationLevel::Serializable] {
             for scenario in ["delete", "update_old", "update_new", "insert"] {
@@ -344,14 +345,25 @@ async fn fk_final_staged_state_matrix() {
                     )
                     .await;
                 if scenario == "delete" || scenario == "update_old" {
-                    let err = result.expect_err(&format!(
-                        "indexed={indexed}, isolation={isolation:?}, scenario={scenario}:                          a removed or replaced parent cannot satisfy the FK"
-                    ));
-                    assert!(
-                        matches!(&err, DbError::ValidatorRejected(code) if code.contains("fk_violation")),
-                        "indexed={indexed}, isolation={isolation:?}, scenario={scenario}: {err:?}"
-                    );
-                    assert!(!tx.write_set.contains_key(&child.table_token()));
+                    // Collect every wrong cell instead of stopping at the first one.
+                    let cell =
+                        format!("indexed={indexed}, isolation={isolation:?}, scenario={scenario}");
+                    match result {
+                        Ok(written) => accepted_wrongly.push(format!(
+                            "{cell}: a removed or replaced parent satisfied the FK \
+                             (parent_id={parent_id:?}, staged parent ops={:?}, written={written:?})",
+                            tx.write_set
+                                .get(&parent.table_token())
+                                .map(|staging| staging.iter_ops().count())
+                        )),
+                        Err(err) => {
+                            assert!(
+                                matches!(&err, DbError::ValidatorRejected(code) if code.contains("fk_violation")),
+                                "{cell}: {err:?}"
+                            );
+                            assert!(!tx.write_set.contains_key(&child.table_token()));
+                        }
+                    }
                     drop(tx);
                     drop(guard);
                     continue;
@@ -386,6 +398,11 @@ async fn fk_final_staged_state_matrix() {
             }
         }
     }
+    assert!(
+        accepted_wrongly.is_empty(),
+        "final-state FK violations were accepted:\n{}",
+        accepted_wrongly.join("\n")
+    );
 }
 
 #[tokio::test]
