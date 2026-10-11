@@ -48,6 +48,10 @@ pub struct VersionGuard {
     durable_completion: Arc<CompletionTracker>,
     last_committed: Arc<AtomicU64>,
     armed: bool,
+    post_wal: bool,
+    orphaned_post_wal: Arc<scc::TreeIndex<u64, ()>>,
+    orphan_max: Arc<AtomicU64>,
+    active_post_wal: Arc<scc::TreeIndex<u64, ()>>,
 }
 
 impl VersionGuard {
@@ -61,6 +65,9 @@ impl VersionGuard {
         completion: Arc<CompletionTracker>,
         durable_completion: Arc<CompletionTracker>,
         last_committed: Arc<AtomicU64>,
+        orphaned_post_wal: Arc<scc::TreeIndex<u64, ()>>,
+        orphan_max: Arc<AtomicU64>,
+        active_post_wal: Arc<scc::TreeIndex<u64, ()>>,
     ) -> Self {
         Self {
             version,
@@ -68,12 +75,21 @@ impl VersionGuard {
             durable_completion,
             last_committed,
             armed: true,
+            post_wal: false,
+            orphaned_post_wal,
+            orphan_max,
+            active_post_wal,
         }
     }
 
     /// The MVCC version this guard owns.
     pub fn version(&self) -> u64 {
         self.version
+    }
+
+    pub fn wal_accepted(&mut self) {
+        let _ = self.active_post_wal.insert_sync(self.version, ());
+        self.post_wal = true;
     }
 
     /// Mark the version `Materialized` and advance `last_committed_version`
@@ -84,6 +100,7 @@ impl VersionGuard {
         self.completion.mark(self.version, State::Materialized);
         self.advance_last_committed();
         self.armed = false;
+        let _ = self.active_post_wal.remove_sync(&self.version);
     }
 
     /// Advance `last_committed_version` to the tracker's current watermark
@@ -99,6 +116,12 @@ impl VersionGuard {
 
 impl Drop for VersionGuard {
     fn drop(&mut self) {
+        if self.armed && self.post_wal {
+            let _ = self.orphaned_post_wal.insert_sync(self.version, ());
+            self.orphan_max.fetch_max(self.version, Ordering::AcqRel);
+            let _ = self.active_post_wal.remove_sync(&self.version);
+            return;
+        }
         if self.armed {
             // No prior `commit()` reached this scope — the version was
             // allocated but never materialized (SSI/phantom/empty-tx abort,

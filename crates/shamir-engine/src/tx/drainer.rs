@@ -77,7 +77,7 @@
 //! review of task #571's crash_recovery.rs fix, where a test using a tiny
 //! non-default segment cap hit exactly this window.)
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -195,6 +195,16 @@ pub struct Drainer {
     /// null — CI flake, ~12% under load). Cold recovery and the async-index
     /// tail leave this empty and replay everything, as before.
     index_applied: TreeIndex<(u64, u64), ()>,
+    counter_applied: TreeIndex<(u64, u64), ()>,
+    replaying: AtomicBool,
+}
+
+struct ReplayGuard<'a>(&'a AtomicBool);
+
+impl Drop for ReplayGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl Default for Drainer {
@@ -216,6 +226,8 @@ impl Drainer {
             window_depth: AtomicUsize::new(0),
             pending_unsafe: TreeIndex::new(),
             index_applied: TreeIndex::new(),
+            counter_applied: TreeIndex::new(),
+            replaying: AtomicBool::new(false),
         }
     }
 
@@ -246,6 +258,16 @@ impl Drainer {
         for key in keys {
             let _ = self.index_applied.remove_sync(&key);
         }
+    }
+
+    pub(crate) fn mark_counter_applied(&self, version: u64, table: u64) {
+        let _ = self.counter_applied.insert_sync((version, table), ());
+    }
+
+    fn counter_applied(&self, version: u64, table: u64) -> bool {
+        self.counter_applied
+            .peek_with(&(version, table), |_, _| ())
+            .is_some()
     }
 
     /// Total `wal.recover()` reseed calls fired from `drain_step`.
@@ -366,8 +388,17 @@ impl Drainer {
     /// succeeded: `mark_durable(v)` -> A5 gate -> `wal.commit` -> crash seams.
     /// Stop at the first entry with a failed table (contiguity).
     pub async fn drain_step(&self, repo: &RepoInstance) -> DbResult<usize> {
+        if self
+            .replaying
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Ok(0);
+        }
+        let _replay_guard = ReplayGuard(&self.replaying);
         let gate = repo.tx_gate().await?;
-        let vis = gate.last_committed();
+        let visible = gate.last_committed();
+        let vis = visible.max(gate.orphan_max());
         let dur = gate.durable_watermark();
         // Nothing visible is un-durable → nothing new to REPLAY. But CRIT-2
         // (#436): truncation may still be pending on an entry whose A5 gate
@@ -385,10 +416,16 @@ impl Drainer {
         {
             let guard = scc::Guard::new();
             for (expected, (k, v)) in (dur + 1..).zip(self.window.range(dur + 1..=vis, &guard)) {
-                if *k != expected {
+                if *k != expected
+                    || gate.is_active_post_wal(*k)
+                    || (*k > visible && !gate.is_orphaned_post_wal(*k))
+                {
                     break; // gap — reseed below
                 }
                 window_entries.push(Arc::clone(v));
+                if gate.is_orphaned_post_wal(*k) {
+                    break;
+                }
             }
         }
 
@@ -419,10 +456,16 @@ impl Drainer {
             window_entries.clear();
             let guard2 = scc::Guard::new();
             for (expected2, (k, v)) in (dur + 1..).zip(self.window.range(dur + 1..=vis, &guard2)) {
-                if *k != expected2 {
+                if *k != expected2
+                    || gate.is_active_post_wal(*k)
+                    || (*k > visible && !gate.is_orphaned_post_wal(*k))
+                {
                     break;
                 }
                 window_entries.push(Arc::clone(v));
+                if gate.is_orphaned_post_wal(*k) {
+                    break;
+                }
             }
         }
 
@@ -522,6 +565,19 @@ impl Drainer {
                             .or_default()
                             .push(KvOp::Remove(key.clone().into()));
                     }
+                    WalOpV2::CounterDelta {
+                        table_id_interned,
+                        delta,
+                    } => {
+                        if gate.is_orphaned_post_wal(v)
+                            && !self.counter_applied(v, *table_id_interned)
+                        {
+                            if let Some(tbl) = repo.table_by_token(*table_id_interned).await? {
+                                tbl.counter().increment(*delta).await?;
+                                self.mark_counter_applied(v, *table_id_interned);
+                            }
+                        }
+                    }
                     _ => {
                         if let Err(e) = crate::tx::recovery::replay_v2_op(op, repo).await {
                             log::warn!(
@@ -586,6 +642,10 @@ impl Drainer {
             shamir_collections::TFxSet::default();
 
         for (table_id, pass) in &table_batches {
+            let published_pass = pass
+                .last()
+                .filter(|(version, _)| gate.is_orphaned_post_wal(*version))
+                .map_or(pass.as_slice(), |_| &pass[..pass.len() - 1]);
             // DEADLOCK FIX (same class as #589 / `cells` map commit `7a4abf62`,
             // H1+H2 commit `621776bd`): `read_sync`, NOT `read_async`. The
             // `per_table_mvcc` map is also touched SYNCHRONOUSLY — `read_sync`
@@ -606,7 +666,7 @@ impl Drainer {
                 .per_table_mvcc()
                 .read_sync(table_id, |_, m| std::sync::Arc::clone(m))
             {
-                if let Err(e) = mvcc.write_committed_batch_to_history(pass).await {
+                if let Err(e) = mvcc.write_committed_batch_to_history(published_pass).await {
                     log::warn!(
                         "drain_step: batch history write for table {} failed: {e}; \
                          entries touching this table will not be finalized",
@@ -646,7 +706,8 @@ impl Drainer {
                         // between the read_sync above and this lookup. Route
                         // through the same history write as the primary
                         // branch above.
-                        if let Err(e) = mvcc.write_committed_batch_to_history(pass).await {
+                        if let Err(e) = mvcc.write_committed_batch_to_history(published_pass).await
+                        {
                             log::warn!(
                                 "drain_step: batch history write for table {} \
                                  (resolved via table_by_token) failed: {e}; \
@@ -872,6 +933,34 @@ impl Drainer {
             // gate above (and `pending_unsafe`, populated before this call)
             // decides that. F6b uses `settle_and_truncate`'s ceiling, not
             // `durable_watermark` directly.
+            if gate.is_orphaned_post_wal(*v) {
+                for (table_id, pass) in &table_batches {
+                    let Some(orphan_pass) = pass.last().filter(|(version, _)| version == v) else {
+                        continue;
+                    };
+                    if let Some(tbl) = repo.table_by_token(*table_id).await? {
+                        if let Some(mvcc) = tbl.mvcc_store() {
+                            mvcc.write_committed_batch_to_history(std::slice::from_ref(
+                                orphan_pass,
+                            ))
+                            .await?;
+                        }
+                    }
+                }
+                gate.complete_orphaned_post_wal(*v);
+                #[cfg(test)]
+                if crate::tx::commit::TEST_POST_WAL_PRE_PUBLISH_HOOK
+                    .get()
+                    .is_some_and(|hook| {
+                        hook.repo_name == repo.name()
+                            && hook.fail_orphan_markers.swap(false, Ordering::AcqRel)
+                    })
+                {
+                    return Err(DbError::Internal("injected orphan marker failure".into()));
+                }
+                crate::tx::commit_phases::persist_markers(repo, &gate, *v).await?;
+                gate.forget_orphaned_post_wal(*v);
+            }
             gate.mark_durable(*v);
             drained += 1;
 
@@ -899,6 +988,14 @@ impl Drainer {
                 self.window_depth.fetch_sub(1, Ordering::Relaxed);
             }
             self.clear_index_applied(*v);
+            for op in &entry.ops {
+                if let WalOpV2::CounterDelta {
+                    table_id_interned, ..
+                } = op
+                {
+                    let _ = self.counter_applied.remove_sync(&(*v, *table_id_interned));
+                }
+            }
         }
 
         if drained > 0 {
@@ -1076,6 +1173,13 @@ impl Drainer {
     /// contract (exactly one task per repo) is the caller's responsibility
     /// (spawn once behind the repo's `OnceCell<Arc<Drainer>>`).
     pub fn spawn(self: &Arc<Self>, repo: RepoInstance, live: Weak<()>, interval: Duration) {
+        #[cfg(test)]
+        if crate::tx::commit::TEST_POST_WAL_PRE_PUBLISH_HOOK
+            .get()
+            .is_some_and(|hook| hook.repo_name == repo.name())
+        {
+            return;
+        }
         let drainer = Arc::downgrade(self);
         tokio::spawn(async move {
             // Op #2 Stage 1: seed the drainer window from WAL recovery on

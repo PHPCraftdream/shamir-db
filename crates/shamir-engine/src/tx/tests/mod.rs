@@ -25,6 +25,7 @@ pub mod p1100_stale_snapshot_delete_posting_tests;
 pub mod p1101_released_skip_durable_check_tests;
 pub mod pessimistic_lock_tests;
 pub mod pessimistic_lost_update_tests;
+pub mod post_wal_cancel_tests;
 pub mod predicate_range_tests;
 pub mod read_your_own_writes_tests;
 pub mod recovery_gate_tests;
