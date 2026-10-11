@@ -94,20 +94,23 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::KvOp;
 use shamir_tx::{
     collect_referenced_ids, remap_inner_value_bytes, ChangeOp, ChangelogEvent, MvccStore,
 };
+use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::RecordView;
 use shamir_types::types::value::InnerValue;
 
 use crate::repo::RepoInstance;
 use crate::table::table_manager::table_token_for;
+use crate::table::RecordCounter;
 use crate::tx::commit_phases::persist_markers;
 
 /// The local outcome of applying one replicated [`ChangelogEvent`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ApplyOutcome {
     /// The event was applied to the local repo. Carries the follower-local
     /// commit version allocated for it (NOT the leader's `commit_version`).
@@ -122,11 +125,11 @@ pub enum ApplyOutcome {
 }
 
 /// Permanent incompatibilities detected before allocating a local version.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ApplyRejectReason {
     UnknownTable,
     NoMvccStore,
-    IndexedTable,
+    IndexedTable { table: String, index: String },
     MissingValue,
     UndecodablePayload,
     MissingFieldBinding,
@@ -159,6 +162,14 @@ pub enum ApplyPolicy {
     /// unrelated future read, or propagate silently to a downstream
     /// chain-replica via `reproject_for_downstream`.
     ValidatePayload,
+}
+
+struct PreparedTable {
+    name: String,
+    token: u64,
+    mvcc: Arc<MvccStore>,
+    counter: Arc<RecordCounter>,
+    ops: Vec<KvOp>,
 }
 
 /// Idempotently apply one leader-originated [`ChangelogEvent`] to the
@@ -259,8 +270,7 @@ pub async fn apply_replicated(
         });
     }
 
-    let mut prepared: Vec<(String, u64, Arc<MvccStore>, Vec<KvOp>)> =
-        Vec::with_capacity(by_table.len());
+    let mut prepared: Vec<PreparedTable> = Vec::with_capacity(by_table.len());
     for (table_name, ops) in by_table {
         let table = match repo.get_table(&table_name).await {
             Ok(table) => table,
@@ -271,17 +281,41 @@ pub async fn apply_replicated(
             }
             Err(error) => return Err(error),
         };
-        if table.index_manager_ref().iter_indexes().next().is_some()
-            || table
-                .index_manager_ref()
-                .iter_unique_indexes()
-                .next()
-                .is_some()
-            || !table.sorted_indexes().iter_indexes().is_empty()
-            || !table.index2_registry().is_empty()
-        {
+        let legacy_index = table
+            .index_manager_ref()
+            .iter_indexes()
+            .chain(table.index_manager_ref().iter_unique_indexes())
+            .map(|index| index.name_interned)
+            .next()
+            .or_else(|| {
+                table
+                    .sorted_indexes()
+                    .iter_indexes()
+                    .first()
+                    .map(|index| index.name_interned)
+            });
+        let index_name = if let Some(id) = legacy_index {
+            let interner = table.interner().get().await?;
+            Some(
+                interner
+                    .get_str(&InternerKey::new(id))
+                    .ok_or_else(|| DbError::Codec("missing follower index name".into()))?
+                    .to_string(),
+            )
+        } else {
+            table
+                .index2_registry()
+                .all_descriptors()
+                .await
+                .first()
+                .map(|descriptor| descriptor.name.clone())
+        };
+        if let Some(index) = index_name {
             return Ok(ApplyOutcome::Rejected {
-                reason: ApplyRejectReason::IndexedTable,
+                reason: ApplyRejectReason::IndexedTable {
+                    table: table_name,
+                    index,
+                },
             });
         }
         let token = table_token_for(&table_name);
@@ -293,7 +327,13 @@ pub async fn apply_replicated(
                 reason: ApplyRejectReason::NoMvccStore,
             });
         };
-        prepared.push((table_name, token, mvcc, ops));
+        prepared.push(PreparedTable {
+            name: table_name,
+            token,
+            mvcc,
+            counter: Arc::clone(table.counter()),
+            ops,
+        });
     }
 
     // All payloads, bindings, and tables passed preflight before first-touch.
@@ -337,7 +377,7 @@ pub async fn apply_replicated(
             .or_default()
             .push(op);
     }
-    for (name, _, _, ops) in &mut prepared {
+    for PreparedTable { name, ops, .. } in &mut prepared {
         // Preserve per-table ordering while replacing every Put's bytes.
         *ops = rewritten_by_table
             .remove(name)
@@ -367,10 +407,58 @@ pub async fn apply_replicated(
     let local_version = version_guard.version();
 
     let mut any_failed: Option<(u64, DbError)> = None;
-    for (_, token, mvcc, ops) in prepared {
+    for PreparedTable {
+        name,
+        token,
+        mvcc,
+        counter,
+        ops,
+    } in prepared
+    {
+        // Count only the final operation for each key against ACTUAL current
+        // state, not a leader footprint or a snapshot captured for all tables.
+        // A successfully applied earlier table therefore contributes zero on retry.
+        let mut final_ops = shamir_collections::TFxMap::default();
+        for op in &ops {
+            match op {
+                KvOp::Set(key, _) | KvOp::Remove(key) => {
+                    final_ops.insert(key.clone(), op.clone());
+                }
+            }
+        }
+        let keys: Vec<Bytes> = final_ops
+            .keys()
+            .map(|key| Bytes::copy_from_slice(key.as_ref()))
+            .collect();
+        let delta = match mvcc.get_current_many(&keys).await {
+            Ok(pre_images) => {
+                let mut delta = 0i64;
+                for (op, old) in final_ops.values().zip(pre_images) {
+                    // Bounded by the number of distinct keys in this allocated batch.
+                    delta += match (op, old.is_some()) {
+                        (KvOp::Set(_, _), false) => 1,
+                        (KvOp::Remove(_), true) => -1,
+                        (KvOp::Set(_, _), true) | (KvOp::Remove(_), false) => 0,
+                    };
+                }
+                delta
+            }
+            Err(error) => {
+                any_failed = Some((token, error));
+                break;
+            }
+        };
+        // The overlay is first-writer-wins at (key, version). Collapse the
+        // data batch too, so repeated keys actually expose the final op.
+        let ops = final_ops.into_values().collect();
         if let Err(error) = mvcc.apply_committed_ops(ops, local_version).await {
             any_failed = Some((token, error));
             break;
+        }
+        // Best effort, like the leader: never turn a counter failure into a
+        // retryable data error after successful apply. Finish before next table.
+        if let Err(error) = counter.increment(delta).await {
+            log::warn!("apply_replicated: counter for table {name}: {error}");
         }
     }
 
