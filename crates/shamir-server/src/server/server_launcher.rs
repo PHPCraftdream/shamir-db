@@ -981,6 +981,7 @@ impl ServerLauncher {
             repl_supervisor: supervisor,
             repl_supervisor_task: Some(repl_supervisor_task),
             shamir,
+            data_dir: config.data_dir.clone(),
             _data_dir_lock: data_dir_lock,
             tunables: Arc::new(RuntimeTunables::new()),
         })

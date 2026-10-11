@@ -1,7 +1,9 @@
 //! Runtime handle for a launched server instance.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use shamir_db::ShamirDb;
 use shamir_tunables::runtime::RuntimeTunables;
@@ -10,6 +12,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::audit_appender::FjallAuditAppender;
 use crate::scheduler::Scheduler;
+use crate::server::store_release_barrier::wait_stores_released;
+
+/// Upper bound for [`ServerHandle::shutdown`] to wait for the stores to drop
+/// their directory locks (a client that stays connected can hold one).
+const STORE_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Handle for the periodic meta-snapshot task. Just the `JoinHandle` — the
 /// stop signal is the shared root `shutdown_token` (cancelled by
@@ -86,6 +93,9 @@ pub struct ServerHandle {
     /// MemBuffers to durable backing, closing the ~500 ms buffered-
     /// commit loss window on graceful stop.
     pub(super) shamir: Arc<ShamirDb>,
+    /// Data dir the stores live under — scanned by the shutdown barrier that
+    /// waits for their directory locks to be released.
+    pub(super) data_dir: PathBuf,
     /// RAII single-instance guard: an advisory OS file lock on
     /// `<data_dir>/.shamir.lock`. The kernel releases it automatically
     /// when this `File` is dropped (or the process crashes), so a second
@@ -158,6 +168,23 @@ impl ServerHandle {
         //    lingering open cursors release their pinned SnapshotGuards.
         if let Some(reaper) = self.cursor_reaper {
             let _ = reaper.handle.await;
+        }
+        // 9. Release the stores: drop this handle's own references, then wait
+        //    until fjall has dropped every directory lock. Detached tasks
+        //    (buffered-store flushers, connection tasks) can outlive the
+        //    steps above; returning before they finish made an immediate
+        //    relaunch of the same data dir fail with `Locked`. The
+        //    single-instance `_data_dir_lock` is released last, on return.
+        let data_dir = self.data_dir;
+        drop(self.shamir);
+        drop(self.audit_appender);
+        drop(self.repl_supervisor);
+        if let Err(still_locked) = wait_stores_released(&data_dir, STORE_RELEASE_TIMEOUT).await {
+            tracing::warn!(
+                ?still_locked,
+                timeout = ?STORE_RELEASE_TIMEOUT,
+                "shutdown: stores still held after the release timeout",
+            );
         }
     }
 
