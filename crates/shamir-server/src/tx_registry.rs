@@ -169,6 +169,19 @@ impl InteractiveTx {
         &self.repo
     }
 
+    /// Remaining absolute lifetime on the registry's monotonic clock.
+    /// Activity refreshes do not extend it; an expired budget saturates to zero.
+    pub fn remaining_lifetime(&self) -> Duration {
+        let elapsed = tokio::time::Instant::now()
+            .into_std()
+            .saturating_duration_since(self.created_at)
+            .as_nanos();
+        let remaining = u128::from(self.deadline_nanos).saturating_sub(elapsed);
+        Duration::from_nanos(
+            u64::try_from(remaining).expect("remaining lifetime cannot exceed deadline_nanos"),
+        )
+    }
+
     /// Mark activity without allowing concurrent refreshes to regress time.
     pub fn bump_activity(&self) {
         let elapsed = tokio::time::Instant::now()

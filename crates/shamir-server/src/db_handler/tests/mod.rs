@@ -9,3 +9,4 @@ pub mod pull_cap_tests;
 pub mod repl_handler_tests;
 pub mod session_actor_tests;
 pub mod subscribe_handler_tests;
+pub mod tx_execute_lifecycle_tests;

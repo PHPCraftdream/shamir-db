@@ -1,6 +1,6 @@
 use shamir_connect::server::session::Session;
 use shamir_db::query::batch::{BatchError, BatchRequest};
-use shamir_query_types::batch::BatchTreeVisitor;
+use shamir_query_types::batch::{BatchLimits, BatchTreeVisitor};
 
 use crate::tx_registry::{InteractiveTx, TxRegistryError};
 
@@ -87,18 +87,13 @@ impl ShamirDbHandler {
         }
 
         // Server-side cap on per-batch resources (mirror `execute`).
-        batch.limits.max_result_size = batch
-            .limits
-            .max_result_size
-            .min(self.query_limits.max_result_size_bytes);
-        batch.limits.max_execution_time_secs = batch
-            .limits
-            .max_execution_time_secs
-            .min(self.query_limits.max_execution_time_secs);
-        batch.limits.max_queries = batch
-            .limits
-            .max_queries
-            .min(self.query_limits.max_queries_per_batch);
+        let server_cap = BatchLimits {
+            max_result_size: self.query_limits.max_result_size_bytes,
+            max_execution_time_secs: self.query_limits.max_execution_time_secs,
+            max_queries: self.query_limits.max_queries_per_batch,
+            ..batch.limits.clone()
+        };
+        batch.limits = batch.limits.clamped_to(&server_cap);
 
         // Admin / auth gate. An explicit 4-op allowlist (`List`,
         // `AccessTree`, `DescribeTable`, `GetTableSchema` — task #553, see
@@ -146,6 +141,23 @@ impl ShamirDbHandler {
                 }
             }
         };
+
+        if it.remaining_lifetime().is_zero() {
+            self.tx_registry.remove(tx_handle);
+            drop(it);
+            return DbResponse::Error {
+                code: "tx_expired".into(),
+                message: "interactive transaction exceeded its absolute lifetime".into(),
+            };
+        }
+        // The call may not outlive the transaction: bound its budget by the
+        // remaining lifetime. The engine budget is in whole seconds, so the
+        // remainder rounds UP (at most one second past the lifetime; the
+        // call is never cancelled mid-flight).
+        let remaining = it.remaining_lifetime();
+        let remaining_secs = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
+        batch.limits.max_execution_time_secs =
+            batch.limits.max_execution_time_secs.min(remaining_secs);
 
         // The handle is pinned to one (db, repo); every TxExecute must match.
         if it.db() != db_name {
@@ -201,10 +213,19 @@ impl ShamirDbHandler {
                 }
                 DbResponse::TxBatch { response }
             }
-            Err(e) => DbResponse::Error {
-                code: super::handler::error_code(&e).to_string(),
-                message: e.to_string(),
-            },
+            Err(e) => {
+                if matches!(
+                    &e,
+                    BatchError::ExecutionTimedOut { .. } | BatchError::LimitExceeded { .. }
+                ) {
+                    self.tx_registry.remove(tx_handle);
+                    drop(it);
+                }
+                DbResponse::Error {
+                    code: super::handler::error_code(&e).to_string(),
+                    message: e.to_string(),
+                }
+            }
         }
     }
 

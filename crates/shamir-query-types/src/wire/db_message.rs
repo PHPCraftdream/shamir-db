@@ -326,7 +326,7 @@ pub enum DbResponse {
         /// - Interactive transactions: `tx_conflict`, `tx_not_found`,
         ///   `tx_already_open`, `tx_in_tx`, `tx_forbidden`, `tx_write`,
         ///   `tx_wrong_db`, `tx_wrong_repo`, `tx_cross_repo_not_supported`,
-        ///   `tx_too_large`, `tx_error`.
+        ///   `tx_too_large`, `tx_expired`, `tx_error`.
         /// - Foreign keys: `fk_violation`, `fk_restrict`, `fk_cascade_depth`,
         ///   `fk_requires_index`, `fk_actions`, `fk_on_update`,
         ///   `fk_restrict`, `fk_update_unsupported_new_value`.
