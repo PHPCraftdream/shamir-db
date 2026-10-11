@@ -7,7 +7,7 @@ use std::time::Duration;
 use super::{BatchError, BatchLimits, ExecutionDeadline};
 
 /// One root budget shared by all nested batches and loop bodies.
-/// Counters are scaffolding only; later stages own work/byte enforcement.
+/// Work is enforced at dispatch; byte accounting remains scaffolding.
 #[derive(Debug)]
 pub struct ExecScope {
     limits: BatchLimits,
@@ -43,10 +43,44 @@ impl ExecScope {
         &self.limits
     }
 
-    /// Work consumed so far (no charging in this refactor).
+    /// Work consumed so far, including the dispatch that exceeded the cap.
     pub fn work(&self) -> u64 {
         // Independent telemetry counter, not a payload publication mechanism.
         self.work.load(Ordering::Relaxed)
+    }
+
+    /// Charge dispatched work against the shared root budget.
+    pub fn charge_work(&self, n: u64) -> Result<(), BatchError> {
+        // This atomic only accounts for a budget, never publishes payload data.
+        // Relaxed suffices; each dispatch pays exactly one atomic add.
+        let previous = self.work.fetch_add(n, Ordering::Relaxed);
+        match previous.checked_add(n) {
+            Some(actual) if actual <= self.limits.max_total_work => Ok(()),
+            total => {
+                if total.is_none() {
+                    // Cold overflow path: do not leave a wrapped, small budget.
+                    self.work.fetch_max(u64::MAX, Ordering::Relaxed);
+                }
+                Err(BatchError::LimitExceeded {
+                    kind: shamir_query_types::batch::LimitKind::Work,
+                    actual: total.unwrap_or(u64::MAX),
+                    max: self.limits.max_total_work,
+                })
+            }
+        }
+    }
+
+    /// Check prospective work without reserving or charging it.
+    pub fn check_work(&self, extra: u64) -> Result<(), BatchError> {
+        // Not a reservation: nested dispatches still charge their actual work.
+        match self.work.load(Ordering::Relaxed).checked_add(extra) {
+            Some(actual) if actual <= self.limits.max_total_work => Ok(()),
+            total => Err(BatchError::LimitExceeded {
+                kind: shamir_query_types::batch::LimitKind::Work,
+                actual: total.unwrap_or(u64::MAX),
+                max: self.limits.max_total_work,
+            }),
+        }
     }
 
     /// Bytes consumed so far (no charging in this refactor).
