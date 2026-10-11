@@ -180,26 +180,8 @@ pub struct TableManager {
     /// DDL (`add_validator_binding` / `remove_validator_binding`)
     /// mutates + persists to the info-twin.
     pub(super) validator_bindings: Arc<arc_swap::ArcSwap<Vec<crate::validator::ValidatorBinding>>>,
-    /// Mirror of `validator_bindings.load_full().len()` for the hot-path
-    /// fast skip. Allows `run_validators_qv`/`run_validators_view` to
-    /// early-return on the common "no validators bound" case without paying
-    /// for an `ArcSwap::load_full()` Arc-clone. Updated atomically in
-    /// `add_validator_binding`/`remove_validator_binding` after the ArcSwap
-    /// store (Release ordering — pairs with Acquire in the fast-skip load).
-    ///
-    /// **Shared across clones via `Arc`** — `TableManager` is cloned
-    /// value-by-`get_table().cloned()` on every consumer (DDL bind path
-    /// AND the write path each get their own copy). A per-instance
-    /// `AtomicUsize` would desync: `add_validator_binding` on a bind-path
-    /// clone would bump only that clone's counter, while the next
-    /// write-path clone (snapshotted from the OnceCell primary, whose
-    /// counter was never bumped) still sees 0 → fast-skip → validators
-    /// silently never fire. Wrapping in `Arc` makes all clones observe the
-    /// same single counter, restoring the intended invariant that any
-    /// clone's `add`/`remove` is visible to every other clone's fast-skip
-    /// load. This mirrors how `validator_bindings` itself stays shared
-    /// through `Arc<ArcSwap<..>>`.
-    pub(super) bindings_len: Arc<std::sync::atomic::AtomicUsize>,
+    /// DDL-only contention across clones; held across persist awaits, never on writes.
+    pub(super) bindings_lock: Arc<tokio::sync::Mutex<()>>,
     /// Handle to the global validator registry (S3). `None` for system
     /// tables / tests that don't need validation. The S3 write path
     /// reads this to resolve `ValidatorBinding.validator_id` to a
@@ -411,12 +393,7 @@ impl Clone for TableManager {
             index2_registry: Arc::clone(&self.index2_registry),
             mvcc_store: self.mvcc_store.clone(),
             validator_bindings: Arc::clone(&self.validator_bindings),
-            // Clone shares the SAME Arc<AtomicUsize> so any clone's
-            // add/remove_validator_binding (which stores Release) is visible
-            // to every clone's fast-skip load (Acquire). A snapshot-copy
-            // here would desync the primary from bind-path clones (see the
-            // field doc on `bindings_len` for the regression this caused).
-            bindings_len: Arc::clone(&self.bindings_len),
+            bindings_lock: Arc::clone(&self.bindings_lock),
             validator_registry: self.validator_registry.clone(),
             changefeed: self.changefeed.clone(),
             scalar_resolver: Arc::clone(&self.scalar_resolver),
@@ -549,13 +526,10 @@ impl TableManager {
         }
 
         // Pre-load validator bindings from the info-twin (S2).
-        let (validator_bindings, initial_bindings_len) =
+        let validator_bindings =
             match crate::validator::persistence::load_validators_metadata(&info_store).await? {
-                Some(pv) => {
-                    let len = pv.bindings.len();
-                    (Arc::new(arc_swap::ArcSwap::from_pointee(pv.bindings)), len)
-                }
-                None => (Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())), 0),
+                Some(pv) => Arc::new(arc_swap::ArcSwap::from_pointee(pv.bindings)),
+                None => Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
             };
 
         let mgr = Self {
@@ -578,7 +552,7 @@ impl TableManager {
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
             mvcc_store: None,
             validator_bindings,
-            bindings_len: Arc::new(std::sync::atomic::AtomicUsize::new(initial_bindings_len)),
+            bindings_lock: Arc::new(tokio::sync::Mutex::new(())),
             validator_registry: None,
             changefeed: None,
             scalar_resolver: Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
@@ -943,7 +917,7 @@ impl TableManager {
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
             mvcc_store: None,
             validator_bindings: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
-            bindings_len: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            bindings_lock: Arc::new(tokio::sync::Mutex::new(())),
             validator_registry: None,
             changefeed: None,
             scalar_resolver: Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(

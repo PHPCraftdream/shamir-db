@@ -37,7 +37,8 @@ impl TableManager {
         &self,
         binding: crate::validator::ValidatorBinding,
     ) -> shamir_storage::error::DbResult<()> {
-        let mut bindings = (*self.validator_bindings.load_full()).clone();
+        let _guard = self.bindings_lock.lock().await;
+        let mut bindings = (**self.validator_bindings.load()).clone();
         if let Some(pos) = bindings
             .iter()
             .position(|b| b.validator_id == binding.validator_id)
@@ -48,15 +49,7 @@ impl TableManager {
         }
         crate::validator::persistence::save_validators_metadata(&bindings, &self.info_store)
             .await?;
-        // Capture new_len BEFORE moving bindings into Arc (bindings is
-        // consumed by Arc::new below).
-        let new_len = bindings.len();
         self.validator_bindings.store(Arc::new(bindings));
-        // Release ordering: publish the updated count so subsequent
-        // Acquire loads in run_validators_qv / run_validators_view see
-        // the new length after the ArcSwap store completes.
-        self.bindings_len
-            .store(new_len, std::sync::atomic::Ordering::Release);
         Ok(())
     }
 
@@ -66,21 +59,15 @@ impl TableManager {
         &self,
         validator_id: &RecordId,
     ) -> shamir_storage::error::DbResult<bool> {
-        let mut bindings = (*self.validator_bindings.load_full()).clone();
+        let _guard = self.bindings_lock.lock().await;
+        let mut bindings = (**self.validator_bindings.load()).clone();
         let before = bindings.len();
         bindings.retain(|b| b.validator_id != *validator_id);
         let removed = bindings.len() < before;
         if removed {
             crate::validator::persistence::save_validators_metadata(&bindings, &self.info_store)
                 .await?;
-            // Capture new_len BEFORE moving bindings into Arc (bindings is
-            // consumed by Arc::new below).
-            let new_len = bindings.len();
             self.validator_bindings.store(Arc::new(bindings));
-            // Release ordering: pairs with Acquire in the fast-skip load so
-            // readers see the decremented count after the ArcSwap store.
-            self.bindings_len
-                .store(new_len, std::sync::atomic::Ordering::Release);
         }
         Ok(removed)
     }
@@ -153,15 +140,15 @@ impl TableManager {
             None => return Ok(()),
         };
 
-        // Fast skip: most tables have no bound validators. Avoid the
-        // ArcSwap::load_full() Arc-clone in the empty case.
-        // Acquire ordering pairs with Release in add/remove_validator_binding.
-        if self.bindings_len.load(std::sync::atomic::Ordering::Acquire) == 0 {
+        // Fast skip: a short-lived guard (no Arc clone) for the common "no validators
+        // bound" case. The snapshot used for invocation below is an owned Arc, because
+        // the validators are awaited and an arc-swap guard must not live across `.await`.
+        if self.validator_bindings.load().is_empty() {
             return Ok(());
         }
-
-        // 2. Load bindings snapshot; filter to applicable ops.
         let all_bindings = self.validator_bindings.load_full();
+
+        // 2. Filter the snapshot to applicable ops.
         let applicable: Vec<&crate::validator::ValidatorBinding> = all_bindings
             .iter()
             .filter(|b| b.ops.contains(&op))
@@ -249,15 +236,15 @@ impl TableManager {
             None => return Ok(()),
         };
 
-        // Fast skip: most tables have no bound validators. Avoid the
-        // ArcSwap::load_full() Arc-clone in the empty case.
-        // Acquire ordering pairs with Release in add/remove_validator_binding.
-        if self.bindings_len.load(std::sync::atomic::Ordering::Acquire) == 0 {
+        // Fast skip: a short-lived guard (no Arc clone) for the common "no validators
+        // bound" case. The snapshot used for invocation below is an owned Arc, because
+        // the validators are awaited and an arc-swap guard must not live across `.await`.
+        if self.validator_bindings.load().is_empty() {
             return Ok(());
         }
-
-        // 2. Load bindings snapshot; filter to applicable ops.
         let all_bindings = self.validator_bindings.load_full();
+
+        // 2. Filter the snapshot to applicable ops.
         let applicable: Vec<&crate::validator::ValidatorBinding> = all_bindings
             .iter()
             .filter(|b| b.ops.contains(&op))
