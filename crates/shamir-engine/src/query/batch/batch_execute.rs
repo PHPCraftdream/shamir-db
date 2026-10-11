@@ -10,9 +10,10 @@ use crate::query::batch::op_watchdog::register_op_watchdog;
 use crate::query::batch::query_runner::{
     build_resolved_refs, execute_single_impl, resolve_skip, skipped_query_result, QueryRunner,
 };
-#[cfg(test)]
-use crate::query::batch::BatchOp;
-use crate::query::batch::{BatchError, BatchPlan, BatchRequest, BatchResponse, QueryEntry};
+use crate::query::batch::result_size::ResultSize;
+use crate::query::batch::{
+    BatchError, BatchOp, BatchPlan, BatchRequest, BatchResponse, QueryEntry,
+};
 use crate::query::read::QueryResult;
 use shamir_collections::TFxSet;
 use shamir_query_types::batch::ResultEncoding;
@@ -548,7 +549,11 @@ pub(super) async fn execute_plan_impl(
                 params,
                 resolver.scalar_resolver(),
             ) {
-                all_results.insert(alias.clone(), skipped_query_result());
+                let result = skipped_query_result();
+                if scope.enforce_result_size() {
+                    scope.charge_bytes(ResultSize::result(&result))?;
+                }
+                all_results.insert(alias.clone(), result);
                 continue;
             }
 
@@ -571,6 +576,13 @@ pub(super) async fn execute_plan_impl(
             )
             .await?;
             warn_if_op_slow(alias, op_started.elapsed());
+            if scope.enforce_result_size() {
+                // Containers pay incrementally in QueryRunner; their inner
+                // payloads have already paid at their own all_results insert.
+                if !matches!(&entry.op, BatchOp::Batch(_) | BatchOp::ForEach(_)) {
+                    scope.charge_bytes(ResultSize::result(&result))?;
+                }
+            }
             all_results.insert(alias.clone(), result);
         }
     }
@@ -664,7 +676,11 @@ pub(super) async fn execute_plan_tx_impl(
                 params,
                 resolver.scalar_resolver(),
             ) {
-                all_results.insert(alias.clone(), skipped_query_result());
+                let result = skipped_query_result();
+                if scope.enforce_result_size() {
+                    scope.charge_bytes(ResultSize::result(&result))?;
+                }
+                all_results.insert(alias.clone(), result);
                 continue;
             }
 
@@ -685,6 +701,13 @@ pub(super) async fn execute_plan_tx_impl(
             let _guard = register_op_watchdog(alias);
             let result = runner.run(alias, entry, &resolved_refs).await?;
             warn_if_op_slow(alias, op_started.elapsed());
+            if scope.enforce_result_size() {
+                // Containers pay incrementally in QueryRunner; their inner
+                // payloads have already paid at their own all_results insert.
+                if !matches!(&entry.op, BatchOp::Batch(_) | BatchOp::ForEach(_)) {
+                    scope.charge_bytes(ResultSize::result(&result))?;
+                }
+            }
             all_results.insert(alias.clone(), result);
         }
     }

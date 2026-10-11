@@ -7,23 +7,30 @@ use std::time::Duration;
 use super::{BatchError, BatchLimits, ExecutionDeadline};
 
 /// One root budget shared by all nested batches and loop bodies.
-/// Work is enforced at dispatch; byte accounting remains scaffolding.
+/// Work and policy-enabled materialization bytes share the root budget.
 #[derive(Debug)]
 pub struct ExecScope {
     limits: BatchLimits,
     deadline: ExecutionDeadline,
     work: AtomicU64,
     bytes: AtomicU64,
+    enforce_result_size: bool,
 }
 
 impl ExecScope {
     /// Preserve the supplied limits and start their cooperative time budget.
     pub fn root(limits: &BatchLimits) -> Self {
+        Self::root_with_result_size(limits, false)
+    }
+
+    /// Enable byte enforcement only for a caller-owned execution policy.
+    pub fn root_with_result_size(limits: &BatchLimits, enforce_result_size: bool) -> Self {
         Self {
             limits: limits.clone(),
             deadline: ExecutionDeadline::from_budget_secs(limits.max_execution_time_secs),
             work: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
+            enforce_result_size,
         }
     }
 
@@ -35,6 +42,7 @@ impl ExecScope {
             deadline: ExecutionDeadline::from_duration(duration),
             work: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
+            enforce_result_size: false,
         }
     }
 
@@ -83,7 +91,34 @@ impl ExecScope {
         }
     }
 
-    /// Bytes consumed so far (no charging in this refactor).
+    /// Whether insertion should run the estimator (OFF never traverses values).
+    pub fn enforce_result_size(&self) -> bool {
+        self.enforce_result_size
+    }
+
+    /// Charge bytes materialized, including intermediates; never give bytes back.
+    pub fn charge_bytes(&self, n: u64) -> Result<(), BatchError> {
+        if !self.enforce_result_size {
+            return Ok(());
+        }
+        // Budget only, not payload publication. Mirror W6's cold overflow path.
+        let previous = self.bytes.fetch_add(n, Ordering::Relaxed);
+        match previous.checked_add(n) {
+            Some(actual) if actual <= self.limits.max_result_size as u64 => Ok(()),
+            total => {
+                if total.is_none() {
+                    self.bytes.fetch_max(u64::MAX, Ordering::Relaxed);
+                }
+                Err(BatchError::LimitExceeded {
+                    kind: shamir_query_types::batch::LimitKind::ResultBytes,
+                    actual: total.unwrap_or(u64::MAX),
+                    max: self.limits.max_result_size as u64,
+                })
+            }
+        }
+    }
+
+    /// Bytes consumed so far, including the charge that exceeded the cap.
     pub fn bytes(&self) -> u64 {
         // Independent telemetry counter, not a payload publication mechanism.
         self.bytes.load(Ordering::Relaxed)
