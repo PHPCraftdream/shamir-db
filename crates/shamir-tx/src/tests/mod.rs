@@ -10,5 +10,6 @@ pub mod staging_store_tests;
 pub mod tx_context_tests;
 pub mod types_tests;
 pub mod version_codec_tests;
+pub mod version_guard_post_wal_tests;
 pub mod version_provider_tests;
 pub mod versioned_overlay_tests;

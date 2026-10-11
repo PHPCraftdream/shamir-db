@@ -7,8 +7,7 @@ use shamir_wal::WalOpV2;
 
 use crate::repo::RepoInstance;
 use crate::tx::commit_phases::{
-    apply_counter_phase, apply_data_phase, apply_vector_delta_phase, materialize_async_tail,
-    promote_vectors,
+    apply_data_phase, apply_vector_delta_phase, materialize_async_tail, promote_vectors,
 };
 use crate::tx::finalize::finalize_sync_post_publish;
 use crate::tx::materialize::materialize;
@@ -137,6 +136,49 @@ async fn fire_post_validate_pre_publish_test_hook() {
             hook.resume.notified().await;
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) struct PostWalPrePublishHook {
+    pub(crate) repo_name: String,
+    pub(crate) pre_wal: std::sync::atomic::AtomicBool,
+    pub(crate) after_counter: std::sync::atomic::AtomicBool,
+    pub(crate) fail_orphan_markers: std::sync::atomic::AtomicBool,
+    pub(crate) reached: tokio::sync::Notify,
+    pub(crate) resume: tokio::sync::Notify,
+    pub(crate) armed: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(test)]
+pub(crate) static TEST_POST_WAL_PRE_PUBLISH_HOOK: std::sync::OnceLock<
+    std::sync::Arc<PostWalPrePublishHook>,
+> = std::sync::OnceLock::new();
+
+pub(super) async fn fire_post_wal_pre_publish_test_hook(repo: &RepoInstance, after_counter: bool) {
+    #[cfg(test)]
+    if TEST_POST_WAL_PRE_PUBLISH_HOOK.get().is_some_and(|hook| {
+        hook.after_counter
+            .load(std::sync::atomic::Ordering::Acquire)
+            != after_counter
+    }) {
+        return;
+    }
+    let _ = after_counter;
+    fire_cancel_test_hook(repo, false).await;
+}
+
+async fn fire_cancel_test_hook(repo: &RepoInstance, pre_wal: bool) {
+    #[cfg(test)]
+    if let Some(hook) = TEST_POST_WAL_PRE_PUBLISH_HOOK.get() {
+        if hook.repo_name == repo.name()
+            && hook.pre_wal.load(std::sync::atomic::Ordering::Acquire) == pre_wal
+            && hook.armed.swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            hook.reached.notify_one();
+            hook.resume.notified().await;
+        }
+    }
+    let _ = (repo, pre_wal);
 }
 
 /// Test-only crash-injection seam for the real crash-recovery harness
@@ -687,7 +729,7 @@ async fn commit_tx_inner_legacy_async(
         commit_version,
         uwl_guards,
         drain_guards,
-        version_guard,
+        mut version_guard,
         cell_guards,
         wal_entry_arc,
     } = match pre_commit_locked(&mut tx, repo, gate, wal, uwl_guards, drain_guards).await {
@@ -709,6 +751,8 @@ async fn commit_tx_inner_legacy_async(
             return Err(e);
         }
     };
+    version_guard.wal_accepted();
+    gate.record_commit_writes(shamir_tx::build_footprint_from_tx(&tx, commit_version));
     // Op #2 Stage 2: offer the persisted WAL entry to the drainer window.
     repo.drainer().offer(wal_entry_arc);
     // SSI fix S2 — still-armed cell-reservation guards from pre_commit_locked
@@ -728,7 +772,7 @@ async fn commit_tx_inner_legacy_async(
         g.disarm();
     }
     drop(cell_guards);
-    apply_counter_phase(&tx, repo).await;
+    super::materialize::apply_tracked_counter_phase(&tx, repo, commit_version).await;
     // #426 (VR-4 variant A): append the durable vector delta-log chunk(s)
     // BEFORE `version_guard.commit()` (pre-publish). The delta chunk is the
     // bridge `restore_on_open::replay_delta` re-materializes vectors from
@@ -749,26 +793,15 @@ async fn commit_tx_inner_legacy_async(
     // durable for `restore_on_open::replay_delta` to pick up.
     maybe_crash("phase5d_delta_async", repo).await;
 
-    // F-28 Step 5 (S3-C): record the SSI footprint BEFORE publish, mirroring
-    // `materialize.rs`'s documented Phase 6-bis-before-Phase-6 ordering and
-    // the lock-free `commit_tx_lockfree` path (which already got this order
-    // right — see its own `record_commit_writes` call below). `VersionGuard::
-    // commit()` is SYNCHRONOUS: it immediately does `completion.mark(
-    // Materialized)` + `last_committed.fetch_max(watermark)`, advancing the
-    // reader-visible floor with no `.await` in between. If the footprint were
-    // recorded AFTER that publish, a concurrent Serializable validator
-    // reading `last_committed()` in that narrow window could observe this
-    // tx's version as already-visible with NO footprint recorded for it yet —
-    // a missed phantom conflict. Recording first closes that window: by the
-    // time this tx's version becomes visible, its footprint is already in the
-    // lock-free `commit_write_log`.
-    gate.record_commit_writes(shamir_tx::build_footprint_from_tx(&tx, commit_version));
+    // The SSI footprint was recorded immediately after WAL acceptance,
+    // before any cancellable materialization. Both normal publish and orphan
+    // replay therefore expose a version whose footprint is already recorded.
 
     // P0a: consume the RAII VersionGuard → mark(Materialized) + advance
     // last_committed_version from the watermark (fetch_max). Replaces the
     // prior manual mark + sync_last_committed_from_watermark +
     // publish_committed_max trio (identical watermark semantics). Closes H1:
-    // a panic between WAL-durable and here drops the guard → Aborted.
+    // a panic between WAL-durable and here registers an orphan for replay.
     version_guard.commit();
 
     // A4 (fix a): release Level-3 pessimistic locks AFTER the publish step
@@ -951,7 +984,7 @@ async fn commit_tx_lockfree(
         };
 
     let commit_version = validated.commit_version;
-    let version_guard = validated.version_guard;
+    let mut version_guard = validated.version_guard;
     // SSI fix S2 — the still-armed cell-reservation guards. Held across Phase 4
     // and `materialize`; `disarm`ed after publish (Phase 5a `finalize_reservation`
     // already cleared each `reserved_by`). On the WAL-begin abort below they drop
@@ -964,6 +997,7 @@ async fn commit_tx_lockfree(
     // `fire_post_validate_pre_publish_test_hook`'s doc. No-op unless a test
     // installed `TEST_POST_VALIDATE_PRE_PUBLISH_HOOK`.
     fire_post_validate_pre_publish_test_hook().await;
+    fire_cancel_test_hook(repo, true).await;
 
     // Phase 4: WAL begin — THE COMMIT POINT.
     // Concurrent-safe: each tx writes a unique WAL key (txn_id).
@@ -983,13 +1017,16 @@ async fn commit_tx_lockfree(
         return Err(TxError::Storage(e));
     }
 
+    version_guard.wal_accepted();
+    gate.record_commit_writes(shamir_tx::build_footprint_from_tx(&tx, commit_version));
+
     // Op #2 Stage 2: offer the persisted WAL entry to the drainer window.
     repo.drainer().offer(validated.wal_entry_arc);
 
     maybe_crash("phase4", repo).await;
 
-    // Phase 6-bis: record SSI footprint BEFORE publish (lock-free insert).
-    gate.record_commit_writes(shamir_tx::build_footprint_from_tx(&tx, commit_version));
+    // SSI footprint already recorded at WAL acceptance above, before replay
+    // could take ownership of a cancelled commit's version.
 
     repo.tx_metrics().on_tx_committed();
 

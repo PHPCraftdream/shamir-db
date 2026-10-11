@@ -184,32 +184,6 @@ pub(crate) async fn apply_data_phase(tx: &mut TxContext, repo: &RepoInstance, co
     }
 }
 
-/// Async-mode helper: run Phase 5b (counter) inline on the client path.
-/// Counter persistence is best-effort; a failure here is metric-only drift
-/// (same contract as sync mode).
-pub(crate) async fn apply_counter_phase(tx: &TxContext, repo: &RepoInstance) {
-    let tx_id = tx.tx_id.0;
-    for (table_id, delta) in &tx.counter_deltas {
-        match repo.table_by_token(*table_id).await {
-            Ok(Some(tbl)) => {
-                if let Err(e) = tbl.counter().increment(*delta).await {
-                    log::warn!(
-                        "commit_tx (async) Phase 5b (counter) failed for tx {tx_id} \
-                         table {table_id}: {e}; counter drift accepted (metric only)"
-                    );
-                }
-            }
-            Ok(None) => {}
-            Err(e) => {
-                log::warn!(
-                    "commit_tx (async) Phase 5b (counter) table lookup failed for \
-                     tx {tx_id} table {table_id}: {e}; counter drift accepted (metric only)"
-                );
-            }
-        }
-    }
-}
-
 /// VR-4 (#426) Phase 5d durability — variant A: append the durable
 /// delta-log chunk(s) for this tx's staged vectors + deletes BEFORE
 /// `version_guard.commit()` (pre-publish), so `restore_on_open`'s

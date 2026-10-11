@@ -102,6 +102,7 @@ pub(super) async fn materialize(
     // Crash seam (test-only): data (5a) is on disk but the index (5c) is
     // not, the version is unpublished, and Phase 7 has not run. The
     // inflight WAL marker survives → recovery replays the full entry.
+    super::commit::fire_post_wal_pre_publish_test_hook(repo, false).await;
     maybe_crash("phase5a", repo).await;
 
     // Phase 5b: counter deltas (CRIT-3).
@@ -110,33 +111,14 @@ pub(super) async fn materialize(
     // `wal_ops_from_tx`. The happy path also applies it in-memory so
     // callers observe the new count without waiting for recovery.
     //
-    // Recovery idempotency: the matching replay branch in
-    // `recovery::replay_v2_op` for `WalOpV2::CounterDelta` is intentionally
-    // SKIPPED at recovery time. Counter persistence is best-effort; the
-    // durable `last_committed_version` marker (Phase 6.5) is the
-    // authoritative MVCC milestone, and a per-tx counter-applied marker is
-    // overkill for an at-most-by-one drift on a metric counter. Because of
-    // that, a Phase 5b failure does NOT flip `ok` (recovery will not
-    // re-apply the counter, and the doctor reconciles by full data scan).
-    for (table_id, delta) in &tx.counter_deltas {
-        match repo.table_by_token(*table_id).await {
-            Ok(Some(tbl)) => {
-                if let Err(e) = tbl.counter().increment(*delta).await {
-                    log::warn!(
-                        "commit_tx materialization Phase 5b (counter) failed for tx {tx_id} \
-                         table {table_id}: {e}; counter drift accepted (metric only)"
-                    );
-                }
-            }
-            Ok(None) => {}
-            Err(e) => {
-                log::warn!(
-                    "commit_tx materialization Phase 5b (counter) table lookup failed for \
-                     tx {tx_id} table {table_id}: {e}; counter drift accepted (metric only)"
-                );
-            }
-        }
-    }
+    // Cold recovery skips CounterDelta because persisted counts may already
+    // include it. Warm orphan replay instead uses the drainer's per-version,
+    // per-table counter-applied membership: successful inline 5b is not
+    // repeated, while an orphan cancelled before 5b gets a best-effort replay.
+    // Counter failures remain metric-only drift and never flip `ok` or block
+    // orphan durability; the doctor reconciles counts by a full data scan.
+    apply_tracked_counter_phase(tx, repo, commit_version).await;
+    super::commit::fire_post_wal_pre_publish_test_hook(repo, true).await;
 
     // Phase 5c: apply staged index ops (HIGH-6).
     //
@@ -265,6 +247,36 @@ pub(super) async fn materialize(
         commit_version,
         projections_ok: ok,
         interner_delta_max_id,
+    }
+}
+
+pub(super) async fn apply_tracked_counter_phase(
+    tx: &TxContext,
+    repo: &RepoInstance,
+    commit_version: u64,
+) {
+    let tx_id = tx.tx_id.0;
+    for (table_id, delta) in &tx.counter_deltas {
+        match repo.table_by_token(*table_id).await {
+            Ok(Some(tbl)) => {
+                if let Err(e) = tbl.counter().increment(*delta).await {
+                    log::warn!(
+                        "commit_tx materialization Phase 5b (counter) failed for tx {tx_id} \
+                         table {table_id}: {e}; counter drift accepted (metric only)"
+                    );
+                } else {
+                    repo.drainer()
+                        .mark_counter_applied(commit_version, *table_id);
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                log::warn!(
+                    "commit_tx materialization Phase 5b (counter) table lookup failed for \
+                     tx {tx_id} table {table_id}: {e}; counter drift accepted (metric only)"
+                );
+            }
+        }
     }
 }
 
