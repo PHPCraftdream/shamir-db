@@ -286,7 +286,7 @@ async fn foreign_hnsw_rs_version_yields_version_mismatch() {
     );
 
     // Sanity: the supported version stamp is what Cargo.toml pins.
-    assert_eq!(HNSW_RS_VERSION, "0.3.4");
+    assert_eq!(HNSW_RS_VERSION, "0.3.5");
 }
 
 // ============================================================================

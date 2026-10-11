@@ -115,7 +115,7 @@ pub(crate) const QUANT_METHOD_SQ8: &str = "sq8";
 /// assert parity at load time — a dump written by a different `hnsw_rs`
 /// version is refused with `VersionMismatch` rather than handed to a
 /// loader that may panic on an unknown on-disk format.
-pub(crate) const HNSW_RS_VERSION: &str = "0.3.4";
+pub(crate) const HNSW_RS_VERSION: &str = "0.3.5";
 
 /// Default basename passed to `hnsw_rs::file_dump`. The loader records the
 /// ACTUAL basename (which `DumpInit` may uniquify on collision) in the

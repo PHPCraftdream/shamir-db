@@ -709,7 +709,7 @@ fn quant_meta_bincode_round_trip() {
 #[test]
 fn snapshot_constants_are_stable() {
     assert_eq!(SNAPSHOT_FORMAT_VERSION, 2);
-    assert_eq!(HNSW_RS_VERSION, "0.3.4");
+    assert_eq!(HNSW_RS_VERSION, "0.3.5");
     // SnapshotError must be Debug (used in `match` arms across the suite).
     let _: Option<SnapshotError> = None;
 }
