@@ -46,9 +46,10 @@ shamir-numa = { path = "../shamir-numa" }
 # Vector index
 # Pinned to an exact patch: hnsw_rs does NOT guarantee dump-format
 # stability across patches, and phase P2 (snapshots) round-trips dumps
-# through this exact version. A caret/minor bound would silently let a
-# resolver pick 0.3.5+ and break our persisted graph files.
-hnsw_rs = "=0.3.4"
+# through this exact version (`HNSW_RS_VERSION` in `vector/snapshot.rs` must
+# move together with this pin). 0.3.5 carries the reverse-edge layer fix that
+# 0.3.4 lacked (#1232).
+hnsw_rs = "=0.3.5"
 # CRC32 for snapshot integrity (phase P2). Same version the WAL crate uses.
 crc32fast = "1"
 # `tempfile::TempDir` for the snapshot codec's dump/load scratch space
