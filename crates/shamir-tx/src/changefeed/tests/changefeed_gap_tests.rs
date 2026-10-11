@@ -235,8 +235,20 @@ async fn failed_marker_put_retains_gap_and_retries_on_next_hint() {
         journal_dropped: AtomicU64::new(0),
         last_persisted_version: watermark.clone(),
         gap: gap.clone(),
+        confirmed_through: Arc::new(AtomicU64::new(0)),
+        barrier_notify: Arc::new(Notify::new()),
+        confirm_timeouts: AtomicU64::new(0),
     };
-    let writer = journal_writer_loop(journal_rx, store.clone(), notify, shutdown, watermark, gap);
+    let writer = journal_writer_loop(
+        journal_rx,
+        store.clone(),
+        notify,
+        shutdown,
+        watermark,
+        gap,
+        feed.confirmed_through.clone(),
+        feed.barrier_notify.clone(),
+    );
     tokio::pin!(writer);
 
     feed.mark_gap(8);

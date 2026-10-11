@@ -16,6 +16,60 @@ artifact).
 
 ## 1. Transactions
 
+- **Snapshot/Serializable table reads trade shortcuts for correctness.**
+  Latest-state counter, secondary-index, MIN/MAX and sorted-order shortcuts
+  are bypassed inside these transactions: reads scan the pinned MVCC snapshot
+  plus the staged overlay, so large tables pay O(N), with sorting when needed.
+  Pessimistic reads retain latest-committed state with locks; non-transactional
+  reads retain their applicable shortcuts. This describes ordinary latest-mode
+  table reads, not explicit temporal reads or EXPLAIN. Sources:
+  `crates/shamir-engine/src/table/read_exec.rs:341-365`,
+  `crates/shamir-engine/src/table/table_manager_streaming.rs:375-401,651-735`.
+- **B04b: vector similarity in Snapshot/Serializable still uses the latest
+  committed index plus the staged overlay, not a snapshot-consistent index.**
+  (`crates/shamir-engine/src/table/read_exec.rs:344-355`; the vector path is
+  explicitly excluded from the snapshot-scan routing.)
+- **Index-only transactions are outside the writer-drain protocol.** Commit
+  enters table drain guards by iterating `tx.write_set.keys()`, not
+  `index_write_set`; an index-only transaction therefore does not participate
+  in that drain/fence mechanism. Do not generalize data-writer drain guarantees
+  to index-only commits (`crates/shamir-engine/src/tx/pre_commit.rs:504-527`).
+- **Execution time budgets are cooperative, not preemptive.** A stalled
+  operation is not interrupted at its deadline. Checks stop subsequent dispatch
+  and run before a transactional batch's commit decision; once commit starts it
+  is not cancelled by the execution timeout
+  (`crates/shamir-engine/src/query/batch/exec_scope.rs:151-161`,
+  `crates/shamir-engine/src/query/batch/batch_execute.rs:806-819`). Runtime work
+  is enforced across nested/dynamic dispatch, but counts aliases, not rows or
+  instructions (`exec_scope.rs:85-115`, `batch_execute.rs:560,687`).
+- **Runtime materialization byte enforcement is ON by default in the server**
+  (`security.query_limits.enforce_result_size`, default `true`) and OFF in
+  embedded/WASM facade execution. It bounds the bytes MATERIALIZED by one
+  execution (a conservative estimate, not the serialized response length or
+  RSS); the server also refuses an encoded response larger than the
+  request/server-clamped `max_result_size`. Cursor pages have a separate
+  serialized cap. Intermediates and nested/ForEach containers consume one root
+  budget, with no give-back when results are dropped
+  (`crates/shamir-server/src/db_handler/config.rs`,
+  `crates/shamir-query-types/src/batch/exec_policy.rs`,
+  `crates/shamir-engine/src/query/batch/result_size.rs:12-18,143-145`).
+- **Nested string_agg inherits the root accumulator cap.** A smaller nested
+  batch `max_result_size` does not lower this cap. Each group's accumulator is
+  capped separately (root result-size cap, at most 100 MiB); separator is capped
+  at 1024 bytes. Accumulator overflow is a query error with a
+  `result_too_large: ResultBytes …` diagnostic, **not** `LimitExceeded`, so it
+  does not invoke the TxExecute budget-error handle-removal rule
+  (`crates/shamir-engine/src/query/batch/query_runner.rs:1193-1196`,
+  `crates/shamir-engine/src/query/read/aggregate.rs:936-1008`,
+  `crates/shamir-server/src/db_handler/tx_handlers.rs:211-218`).
+- **Literal NULL aggregate input cannot round-trip as an explicit input on
+  the wire.** Both aggregate variants use `Option<FilterValue>`: missing/null
+  selects legacy `field`/All input, rather than a per-row literal NULL.
+  In-memory `Some(FilterValue::Null)` is a different case; this limitation is
+  the optional wire field, not aggregate NULL handling generally
+  (`crates/shamir-query-types/src/read/select.rs:66-70,94-98`,
+  `crates/shamir-query-types/src/filter/filter_value.rs:9-12`).
+
 - **One repository per transaction.** A transactional batch (or an
   interactive/open transaction) whose queries span more than one repo is
   rejected with `BatchError::CrossRepoNotSupported`. See the guard in

@@ -126,8 +126,12 @@ Production-конфиг — `deploy/server.example.ktav` (все поля с
 ### Лимиты выполнения запросов
 
 `security.query_limits` задаёт серверную policy для `Execute` и `TxExecute`.
-Эффективный лимит — минимум из лимита клиента, policy оператора и жёсткого
-`BatchLimits::CEILING` движка; вложенные батчи не могут поднять его.
+Эффективный лимит — минимум из лимита клиента, server-owned `ExecPolicy.caps`
+оператора и жёсткого `BatchLimits::CEILING` движка; вложенные батчи не могут
+поднять его. Потолки движка: 100 MiB / 1000 queries / 3600 s; это caps,
+а не defaults запроса (у клиента defaults 10 MiB / 50 / 30 s).
+Источники: `crates/shamir-server/src/db_handler/config.rs::policy`,
+`crates/shamir-query-types/src/batch/batch_limits.rs`.
 
 || Поле | Default | Максимум при старте |
 ||---|---|---|
@@ -142,11 +146,19 @@ Production-конфиг — `deploy/server.example.ktav` (все поля с
 || `max_page_size` | 100000 | 100000 |
 || `max_offset` | 1000000 | 1000000 |
 
+Defaults и startup validation: `crates/shamir-server/src/config.rs:456-487,768-777`;
+engine caps: `crates/shamir-query-types/src/batch/batch_limits.rs:109-120`.
+
 `max_total_queries` ограничивает число узлов всего дерева батча;
-`max_total_work` статически ограничивает работу вложенных батчей и циклов
-с literal-числом повторений. Runtime-списание динамических повторений пока
-отсутствует (пробел движка вне scope W4); это не универсальный runtime-учёт
-совокупной работы. `max_page_size` и
+`max_total_work` ограничивает и статическую оценку вложенных батчей/циклов,
+и **runtime dispatch**: `ExecScope::charge_work(1)` списывает единицу перед
+каждым реально выполняемым alias, включая Batch/ForEach-контейнер и их
+вложенные dispatch. Пропущенный по `when` alias не списывает work.
+Динамические повторения тоже учитываются; все вложенные исполнения делят
+один root counter, предварительный `check_work` не резервирует работу.
+Это счётчик dispatch, не строк, CPU-инструкций или времени сканирования
+(`crates/shamir-engine/src/query/batch/exec_scope.rs`, `batch_execute.rs`,
+`query_runner.rs`). `max_page_size` и
 `max_offset` ограничивают пагинацию query, отдельно от `security.cursors`.
 Превышение запрошенной страницы/offset возвращает `pagination_too_large`,
 работы — `work_budget_exceeded`, вложенности — `nesting_too_deep`,
@@ -169,6 +181,68 @@ Production-конфиг — `deploy/server.example.ktav` (все поля с
 upfront-резерва RI-15 сохраняется. Embedded API остаётся OFF по умолчанию.
 Страницы курсоров сохраняют жёсткий байтовый cap `max_result_size_bytes`
 на сериализованный ответ.
+Embedded `ExecPolicy::EMBEDDED` и WASM `FacadeDbGateway` → `execute_as`
+оставляют enforcement OFF (флаг серверный:
+`crates/shamir-server/src/db_handler/config.rs`,
+`crates/shamir-query-types/src/batch/exec_policy.rs`,
+`crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs`).
+
+При включённом enforcement (`ExecPolicy { enforce_result_size: true, … }`) общий root
+budget означает **«bytes materialized by this execution»**, а не длину
+MessagePack, allocator capacity или live RSS. `ResultSize` детерминированно
+оценивает payload и контейнеры: промежуточные результаты, даже не возвращаемые
+клиенту, nested Batch и ForEach-оболочки тоже платят. Фильтрация/удаление
+результатов не возвращает bytes; внутренние payload контейнера не считаются
+повторно при его сборке. Превышение возвращает `LimitExceeded(ResultBytes)`
+→ `result_too_large` до решения о commit; уже выполненные non-transactional
+операции этим не откатываются. Источники:
+`crates/shamir-engine/src/query/batch/exec_scope.rs::charge_bytes`,
+`result_size.rs`, `batch_execute.rs`, `query_runner.rs`.
+
+### Время TxExecute и string_agg
+
+Абсолютный срок interactive handle — 300 s. Budget одного `TxExecute` —
+минимум effective request/policy time и оставшегося срока handle **с полной
+точностью `Duration`**, без округления до секунд и без продления на каждый
+вызов. Остаток берётся **после** захвата context lock; authorization тоже
+вычитается из него (`crates/shamir-server/src/db_handler/tx_handlers.rs:169-181`,
+`crates/shamir-db/src/shamir_db/execute/db_tx.rs:158-165`,
+`crates/shamir-engine/src/query/batch/exec_scope.rs`). Deadline cooperative:
+застрявшая операция не прерывается таймером; перед commit проверяется deadline
+и work budget, а начатый commit не отменяется по timeout.
+
+`string_agg` имеет независимые caps, даже при byte enforcement OFF:
+separator ≤ **1024 bytes** (не символов), default separator `,`;
+каждый accumulator, в том числе отдельная GROUP BY-группа, ограничен root
+`max_result_size` (не более 100 MiB). Без execution context cap — 100 MiB.
+Размер строки проверяется **до** добавления значения и разделителя; NULL
+пропускается. Nested batch наследует root accumulator cap, даже если его
+локальный `max_result_size` меньше. Превышение идёт как **query error** с
+диагностикой `result_too_large: ResultBytes …`, не `LimitExceeded`, и само по
+себе не удаляет interactive handle. Источники:
+`crates/shamir-engine/src/query/read/aggregate.rs::CappedStringAgg`,
+`crates/shamir-engine/src/query/filter/eval_context.rs`,
+`crates/shamir-engine/src/query/batch/query_runner.rs:1194`.
+
+### Migration source freeze и исход commit
+
+При подготовке миграции source table замораживается для data writes:
+raise freeze bit → drain writers → write-lock fence. Freeze guard живёт до
+завершения/отмены миграции; отмена подготовки снимает bit. Это не удержание
+DDL admission на весь срок: DDL остаётся разрешённым. Direct writes и commit
+транзакции, попавшие на freeze, получают `table_migrating`; не делайте busy
+retry, дождитесь завершения/отмены и заново разрешите активную таблицу
+(`crates/shamir-engine/src/table/table_manager.rs::begin_migration_freeze`,
+`table_manager_crud.rs`, `crates/shamir-engine/src/tx/pre_commit.rs`,
+`crates/shamir-db/src/shamir_db/execute/admin_migration.rs`).
+
+`wal_requires_reopen` требует reopen/reconciliation, новые commits отказаны.
+`status: committed` с `error: wal_durability` — уже опубликованные writes,
+**не retry и не rollback**, даже если TS `db.tx()` бросил Error.
+`materialized: false` не означает abort: проекции отложены до recovery на
+следующем open; при durability error нельзя обещать crash-durability.
+Полный wire contract и cleanup/retry table:
+[Transaction outcomes](../client-server-protocol-spec/TRANSACTION_OUTCOMES.md).
 
 ### Валидация при старте
 

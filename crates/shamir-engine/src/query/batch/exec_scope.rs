@@ -3,7 +3,75 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use shamir_storage::error::DbError;
+
+use super::result_size::ResultSize;
 use super::{BatchError, BatchLimits, ExecutionDeadline};
+use crate::query::read::{QueryRecord, QueryResult};
+
+/// Per-read credit, never a delta of the shared root counter.
+/// Intermediate charges are retained; only surviving, charged output rows
+/// are credited against the result envelope at completion.
+pub(crate) struct RowByteMeter<'a> {
+    scope: &'a ExecScope,
+    credited: AtomicU64,
+}
+
+impl<'a> RowByteMeter<'a> {
+    pub(crate) fn new(scope: &'a ExecScope) -> Option<Self> {
+        scope.enforce_result_size().then(|| Self {
+            scope,
+            credited: AtomicU64::new(0),
+        })
+    }
+
+    pub(crate) fn value_size(value: &shamir_types::types::value::QueryValue) -> u64 {
+        48u64.saturating_add(ResultSize::value(value))
+    }
+
+    pub(crate) fn record_size(record: &QueryRecord) -> u64 {
+        match record {
+            QueryRecord::Direct(value) => Self::value_size(value),
+            QueryRecord::IdBytes(bytes) => 72u64.saturating_add(bytes.len() as u64),
+            // Sinks never produce Inserted; keep its estimator authoritative.
+            QueryRecord::Inserted(_) => ResultSize::result(&QueryResult {
+                records: vec![record.clone()],
+                ..QueryResult::default()
+            })
+            .saturating_sub(80),
+        }
+    }
+
+    pub(crate) fn charge(&self, bytes: u64) -> Result<(), DbError> {
+        // Io owns a typed Error source: no string conversion through DbResult.
+        self.scope
+            .charge_bytes(bytes)
+            .map_err(|error| DbError::Io(std::io::Error::other(error)))
+    }
+
+    pub(crate) fn charge_record(&self, record: &QueryRecord) -> Result<(), DbError> {
+        let bytes = Self::record_size(record);
+        self.charge(bytes)?;
+        self.credited.fetch_add(bytes, Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub(crate) fn credit_survivors(&self, records: &[QueryRecord]) {
+        let bytes = records.iter().fold(0u64, |total, record| {
+            total.saturating_add(Self::record_size(record))
+        });
+        self.credited.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Total = all materialized rows + result estimate - surviving row credit.
+    /// Raw aggregate inputs have no output credit; the aggregate result pays
+    /// in full. Shortcut reads with no sink charges also pay in full here.
+    pub(crate) fn finish(&self, result: &QueryResult) -> Result<(), BatchError> {
+        self.scope.charge_bytes(
+            ResultSize::result(result).saturating_sub(self.credited.load(Ordering::Relaxed)),
+        )
+    }
+}
 
 /// One root budget shared by all nested batches and loop bodies.
 /// Work and policy-enabled materialization bytes share the root budget.

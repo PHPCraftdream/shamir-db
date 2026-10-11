@@ -1235,7 +1235,9 @@ impl<'a> QueryRunner<'a> {
                 // S-read: thread result_encoding into the read path so that
                 // Id-encoding requests return id-keyed IdBytes rows instead of
                 // de-interning on the server.
-                match self.tx.as_deref() {
+                let meter = super::exec_scope::RowByteMeter::new(self.scope);
+                let ctx = ctx.with_row_byte_meter(meter.as_ref());
+                let result = match self.tx.as_deref() {
                     Some(tx) => {
                         table
                             .read_tx_with_encoding(query, &ctx, Some(tx), self.result_encoding)
@@ -1247,11 +1249,24 @@ impl<'a> QueryRunner<'a> {
                             .await
                     }
                 }
-                .map_err(|e| BatchError::QueryError {
-                    alias: alias.to_string(),
-                    message: e.to_string(),
-                    code: None,
-                })
+                .map_err(|e| {
+                    if let shamir_storage::error::DbError::Io(io) = &e {
+                        if let Some(error) =
+                            io.get_ref().and_then(|e| e.downcast_ref::<BatchError>())
+                        {
+                            return error.clone();
+                        }
+                    }
+                    BatchError::QueryError {
+                        alias: alias.to_string(),
+                        message: e.to_string(),
+                        code: None,
+                    }
+                })?;
+                if let Some(meter) = &meter {
+                    meter.finish(&result)?;
+                }
+                Ok(result)
             }
 
             BatchOp::Insert(op) => {
