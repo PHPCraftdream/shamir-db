@@ -150,10 +150,11 @@ const WRITER_BATCH: usize = 256;
 /// testable (an in-memory fake implements it in unit tests).
 #[async_trait::async_trait]
 pub trait ChangelogStore: Send + Sync {
-    /// Durably persist one `(version_be_key, serialized_event)` pair.
+    /// Persist a journal pair or the dedicated [`gap_marker_key`] metadata.
+    /// Marker success must include the backend's explicit durability boundary.
     async fn put(&self, key: Bytes, value: Bytes) -> Result<(), String>;
     /// Range-read serialized events with keys in
-    /// `[from_key, ..)` ascending, up to `limit` entries.
+    /// `[from_key, ..)` ascending, up to `limit` entries, excluding metadata.
     async fn range_from(&self, from_key: Bytes, limit: usize) -> Result<Vec<Bytes>, String>;
 }
 
@@ -183,11 +184,8 @@ pub struct RepoChangefeed {
     /// against the highest emitted version to detect a stalled/dead writer.
     /// `0` means "nothing persisted yet".
     last_persisted_version: Arc<AtomicU64>,
-    /// CF-1 gap marker: the lowest `commit_version` that was dropped due to
-    /// journal-channel overflow, or `0` if no drops have occurred. Once set
-    /// it is only ever lowered (CAS min-loop), so it faithfully marks the
-    /// earliest known hole in the durable journal.
-    first_gap_version: AtomicU64,
+    /// CF-1: shared minimum known hole and writer wakeup.
+    gap: Arc<GapMarker>,
 }
 
 /// Result of a [`RepoChangefeed::read_from`] call.
@@ -215,10 +213,7 @@ impl std::fmt::Debug for RepoChangefeed {
                 "last_persisted_version",
                 &self.last_persisted_version.load(Ordering::Relaxed),
             )
-            .field(
-                "first_gap_version",
-                &self.first_gap_version.load(Ordering::Relaxed),
-            )
+            .field("first_gap_version", &self.gap.first.load(Ordering::Relaxed))
             .finish()
     }
 }
@@ -230,11 +225,24 @@ impl RepoChangefeed {
     /// the `Arc<dyn ChangelogStore>`; it exits when the `journal_tx` sender
     /// is dropped (channel closed) or `shutdown` is set + `notify` fired.
     pub fn new(store: Arc<dyn ChangelogStore>) -> Arc<Self> {
+        Self::new_with_gap(store, 0)
+    }
+
+    /// Build after loading the durable marker at repo init. `0` means absent.
+    /// Existing `new` callers must only use it for stores without a prior marker.
+    /// Exactly one live feed may own a given store's marker writer at a time;
+    /// stop/drain the old writer before re-opening the same store.
+    pub fn new_with_gap(store: Arc<dyn ChangelogStore>, restored_gap: u64) -> Arc<Self> {
         let (live, _) = broadcast::channel(BROADCAST_CAPACITY);
         let (journal_tx, journal_rx) = mpsc::channel(JOURNAL_CHANNEL_CAPACITY);
         let notify = Arc::new(Notify::new());
         let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let last_persisted_version = Arc::new(AtomicU64::new(0));
+        let gap = Arc::new(GapMarker {
+            first: AtomicU64::new(restored_gap),
+            persisted: AtomicU64::new(restored_gap),
+            notify: Arc::clone(&notify),
+        });
 
         let me = Arc::new(Self {
             live,
@@ -243,7 +251,7 @@ impl RepoChangefeed {
             shutdown: Arc::clone(&shutdown),
             journal_dropped: AtomicU64::new(0),
             last_persisted_version: Arc::clone(&last_persisted_version),
-            first_gap_version: AtomicU64::new(0),
+            gap: Arc::clone(&gap),
         });
 
         tokio::spawn(journal_writer_loop(
@@ -252,6 +260,7 @@ impl RepoChangefeed {
             notify,
             shutdown,
             last_persisted_version,
+            gap,
         ));
         me
     }
@@ -308,24 +317,7 @@ impl RepoChangefeed {
             match e {
                 mpsc::error::TrySendError::Full(ev) => {
                     let n = self.journal_dropped.fetch_add(1, Ordering::Relaxed) + 1;
-                    // CF-1: record the lowest dropped version so a resuming
-                    // reader can detect the gap (min-CAS loop).
-                    let v = ev.commit_version;
-                    let mut cur = self.first_gap_version.load(Ordering::Relaxed);
-                    loop {
-                        if cur != 0 && cur <= v {
-                            break;
-                        }
-                        match self.first_gap_version.compare_exchange_weak(
-                            cur,
-                            v,
-                            Ordering::Release,
-                            Ordering::Relaxed,
-                        ) {
-                            Ok(_) => break,
-                            Err(actual) => cur = actual,
-                        }
-                    }
+                    self.mark_gap(ev.commit_version);
                     log::warn!(
                         "changefeed journal channel full; dropped event for repo {} \
                          commit_version {} (total dropped: {n})",
@@ -355,15 +347,24 @@ impl RepoChangefeed {
         self.last_persisted_version.load(Ordering::Acquire)
     }
 
-    /// CF-1: the lowest `commit_version` that was dropped due to
-    /// journal-channel overflow. Returns `0` if no events have been dropped.
+    /// Record a known hole, keeping the minimum non-zero version.
+    /// Version zero (a read starting before the first commit) maps to one.
+    /// Safe on non-runtime threads: only atomics and a writer notification.
+    /// RAM visibility is immediate; durability follows asynchronously. Failed
+    /// marker writes retain dirty state and retry on writer activity, explicit
+    /// flush hints, repeated marks, and shutdown (no busy retry loop).
+    pub fn mark_gap(&self, version: u64) {
+        self.gap.mark_gap(version);
+    }
+
+    /// CF-1: the lowest known journal hole; zero means none.
     ///
     /// A non-zero value means the durable journal has a gap: at least one
     /// event at this version was never written. A consumer reading the journal
     /// from a version at or before this value cannot trust it for an unbroken
     /// history and should perform a full snapshot resync.
     pub fn first_gap_version(&self) -> u64 {
-        self.first_gap_version.load(Ordering::Acquire)
+        self.gap.first.load(Ordering::Acquire)
     }
 
     /// Wake the writer and ask it to drain + stop. Used at shutdown so the
@@ -405,21 +406,73 @@ impl RepoChangefeed {
             }
         };
         let mut events = Vec::with_capacity(raw.len());
+        let mut corrupt_gap = None;
         for bytes in raw {
             match rmp_serde::from_slice::<ChangelogEvent>(&bytes) {
                 Ok(ev) => events.push(ev),
-                Err(e) => log::warn!("changefeed read_from: corrupt journal entry skipped: {e}"),
+                Err(e) => {
+                    self.mark_gap(from_version);
+                    corrupt_gap = Some(from_version.max(1));
+                    log::warn!("changefeed read_from: corrupt journal entry skipped: {e}");
+                }
             }
         }
         // CF-1: signal if any known-dropped version lies at/after from_version.
         // Conservative over-signal is acceptable; silent omission is not.
-        let g = self.first_gap_version.load(Ordering::Acquire);
+        let g = self.gap.first.load(Ordering::Acquire);
         let gap_at = if g != 0 && g >= from_version {
             Some(g)
         } else {
-            None
+            corrupt_gap
         };
         JournalRead { events, gap_at }
+    }
+}
+
+/// Dedicated metadata key, sorting before every eight-byte journal key.
+/// This key is never an event and must be excluded from journal ranges.
+pub fn gap_marker_key() -> Bytes {
+    Bytes::from_static(b"\0")
+}
+
+/// Shared atomic state; only the journal writer performs marker I/O.
+struct GapMarker {
+    first: AtomicU64,
+    persisted: AtomicU64,
+    notify: Arc<Notify>,
+}
+
+impl GapMarker {
+    fn mark_gap(&self, version: u64) {
+        let version = version.max(1);
+        let _ = self
+            .first
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                if current == 0 || version < current {
+                    Some(version)
+                } else {
+                    None
+                }
+            });
+        // Also wake for unchanged marks: a prior marker put may have failed.
+        self.notify.notify_one();
+    }
+
+    async fn persist(&self, store: &Arc<dyn ChangelogStore>) {
+        loop {
+            let version = self.first.load(Ordering::Acquire);
+            if version == 0 || version == self.persisted.load(Ordering::Acquire) {
+                return;
+            }
+            if let Err(e) = store.put(gap_marker_key(), version_key(version)).await {
+                log::warn!("changefeed gap marker put failed at {version}: {e}");
+                return;
+            }
+            self.persisted.store(version, Ordering::Release);
+            // A lower mark may have arrived during the put. Finish it before
+            // sleeping. A single writer prevents older puts completing last
+            // and regressing the durable minimum; callers never spawn I/O.
+        }
     }
 }
 
@@ -560,14 +613,16 @@ async fn journal_writer_loop(
     notify: Arc<Notify>,
     shutdown: Arc<std::sync::atomic::AtomicBool>,
     last_persisted_version: Arc<AtomicU64>,
+    gap: Arc<GapMarker>,
 ) {
     loop {
+        gap.persist(&store).await;
         // Re-check shutdown at the top so a flag set between iterations is
         // honoured deterministically (closes the lost-wakeup window of a
         // freshly-armed `notified()` missing an already-consumed permit —
         // §B15e). On shutdown, drain whatever is buffered and exit.
         if shutdown.load(Ordering::SeqCst) {
-            drain_and_persist(&mut rx, &store, &last_persisted_version).await;
+            drain_and_persist(&mut rx, &store, &last_persisted_version, &gap).await;
             break;
         }
 
@@ -578,7 +633,7 @@ async fn journal_writer_loop(
             ev = rx.recv() => ev,
             () = notify.notified() => {
                 // A hint — drain whatever is buffered, then decide on exit.
-                drain_and_persist(&mut rx, &store, &last_persisted_version).await;
+                drain_and_persist(&mut rx, &store, &last_persisted_version, &gap).await;
                 if shutdown.load(Ordering::SeqCst) {
                     break;
                 }
@@ -589,17 +644,17 @@ async fn journal_writer_loop(
         let Some(first) = first else {
             // Channel closed: senders gone. Final drain (nothing left, but
             // defensive) and exit.
-            drain_and_persist(&mut rx, &store, &last_persisted_version).await;
+            drain_and_persist(&mut rx, &store, &last_persisted_version, &gap).await;
             break;
         };
 
-        persist_one(&store, &first, &last_persisted_version).await;
+        persist_one(&store, &first, &last_persisted_version, &gap).await;
         // Opportunistically batch any already-queued events.
         let mut batched = 0usize;
         while batched < WRITER_BATCH {
             match rx.try_recv() {
                 Ok(ev) => {
-                    persist_one(&store, &ev, &last_persisted_version).await;
+                    persist_one(&store, &ev, &last_persisted_version, &gap).await;
                     batched += 1;
                 }
                 Err(_) => break,
@@ -607,7 +662,7 @@ async fn journal_writer_loop(
         }
 
         if shutdown.load(Ordering::SeqCst) {
-            drain_and_persist(&mut rx, &store, &last_persisted_version).await;
+            drain_and_persist(&mut rx, &store, &last_persisted_version, &gap).await;
             break;
         }
     }
@@ -618,10 +673,12 @@ async fn drain_and_persist(
     rx: &mut mpsc::Receiver<Arc<ChangelogEvent>>,
     store: &Arc<dyn ChangelogStore>,
     last_persisted_version: &Arc<AtomicU64>,
+    gap: &GapMarker,
 ) {
     while let Ok(ev) = rx.try_recv() {
-        persist_one(store, &ev, last_persisted_version).await;
+        persist_one(store, &ev, last_persisted_version, gap).await;
     }
+    gap.persist(store).await;
 }
 
 /// Persist a single event. Failures are logged, never propagated — the
@@ -633,16 +690,19 @@ async fn persist_one(
     store: &Arc<dyn ChangelogStore>,
     ev: &ChangelogEvent,
     last_persisted_version: &Arc<AtomicU64>,
+    gap: &GapMarker,
 ) {
     let value = match serialize_event(ev) {
         Ok(v) => v,
         Err(e) => {
+            gap.mark_gap(ev.commit_version);
             log::warn!("changefeed writer: {e}; dropping journal entry");
             return;
         }
     };
     let key = version_key(ev.commit_version);
     if let Err(e) = store.put(key, value).await {
+        gap.mark_gap(ev.commit_version);
         log::warn!(
             "changefeed writer: journal put failed for repo {} commit_version {}: {e}",
             ev.repo,
