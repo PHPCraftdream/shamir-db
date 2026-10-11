@@ -32,6 +32,9 @@ pub mod recovery_gate_tests;
 #[cfg(debug_assertions)]
 pub mod recovery_tests;
 pub mod rederive_stale_value_dedup_cache_tests;
+#[cfg(feature = "fjall")]
+pub mod replication_interner_persistence_tests;
+pub mod replication_interner_tests;
 pub mod ssi_phantom_tests;
 pub mod ssi_stress_tests;
 pub mod ssi_unique_serialization_tests;
