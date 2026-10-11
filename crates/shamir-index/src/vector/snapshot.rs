@@ -117,6 +117,10 @@ pub(crate) const QUANT_METHOD_SQ8: &str = "sq8";
 /// loader that may panic on an unknown on-disk format.
 pub(crate) const HNSW_RS_VERSION: &str = "0.3.5";
 
+// The workspace builds hnsw_rs from `vendor/hnsw_rs` (lock-order fix for concurrent
+// inserts). A build against the plain crates.io crate has no such marker and fails here.
+const _: () = assert!(hnsw_rs::SHAMIR_REVERSE_UPDATE_LOCK_FIX);
+
 /// Default basename passed to `hnsw_rs::file_dump`. The loader records the
 /// ACTUAL basename (which `DumpInit` may uniquify on collision) in the
 /// manifest; this constant is only the seed.

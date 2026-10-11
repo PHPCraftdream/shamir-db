@@ -19,6 +19,11 @@ pub mod prelude;
 // we impose our version of anndists
 pub use anndists;
 
+/// Marker for the S.H.A.M.I.R. lock-order patch (see VENDORED.md). shamir-index asserts it
+/// at compile time, so dropping the `[patch.crates-io]` entry cannot silently re-introduce
+/// the deadlock.
+pub const SHAMIR_REVERSE_UPDATE_LOCK_FIX: bool = true;
+
 lazy_static! {
     static ref LOG: u64 = init_log();
 }

@@ -1243,7 +1243,12 @@ impl<'b, T: Clone + Send + Sync, D: Distance<T> + Send + Sync> Hnsw<'b, T, D> {
         );
         let level = new_point.p_id.0;
         for l in (0..level + 1).rev() {
-            for q in &new_point.neighbours.read()[l as usize] {
+            // SHAMIR PATCH: snapshot the neighbour list and release the read lock BEFORE any
+            // write lock below. Holding R(new_point) across W(q) deadlocks two concurrent
+            // inserts that reach each other's points (ABBA, see VENDORED.md).
+            let neighbours_at_l: Vec<Arc<PointWithOrder<T>>> =
+                new_point.neighbours.read()[l as usize].clone();
+            for q in &neighbours_at_l {
                 if new_point.p_id != q.point_ref.p_id {
                     // as new point is in global table, do not loop and deadlock!!
                     let q_point = &q.point_ref;
