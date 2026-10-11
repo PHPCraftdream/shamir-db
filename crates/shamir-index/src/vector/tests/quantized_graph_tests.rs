@@ -20,6 +20,28 @@ use crate::vector::hnsw_adapter::{HnswAdapter, HnswConfig};
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use std::sync::Arc;
+use std::time::Duration;
+
+// ----- hang diagnostics (#1232) --------------------------------------------
+//
+// Two of these tests were once killed by the anonymous 600 s nextest timeout
+// (once on ubuntu, once on macOS) with no output. A phase marker on stderr
+// names the stuck phase in the CI log; the deadline turns a stall of an
+// otherwise live runtime into a named failure. If the runtime thread itself
+// is blocked synchronously the deadline cannot fire, and the last marker is
+// the evidence.
+
+fn phase(test: &str, name: &str) {
+    eprintln!("SQ8-PHASE {test}: {name}");
+}
+
+async fn within_deadline<F: std::future::Future>(test: &str, fut: F) -> F::Output {
+    tokio::time::timeout(Duration::from_secs(120), fut)
+        .await
+        .unwrap_or_else(|_| {
+            panic!("{test}: no progress for 120 s (the last SQ8-PHASE marker names the phase)")
+        })
+}
 
 // ----- deterministic RNG (mirrors sq8_tests::Lcg lineage) -----------------
 
@@ -194,6 +216,14 @@ async fn fit_transition_at_threshold() {
 
 #[tokio::test]
 async fn recall_sq8_vs_f32_within_two_percent() {
+    within_deadline(
+        "recall_sq8_vs_f32",
+        recall_sq8_vs_f32_within_two_percent_body(),
+    )
+    .await;
+}
+
+async fn recall_sq8_vs_f32_within_two_percent_body() {
     let dim = 128u32;
     let n = 1200usize;
     let data = clustered(n, dim as usize, 50, 0.25, 0xBEEF);
@@ -221,9 +251,12 @@ async fn recall_sq8_vs_f32_within_two_percent() {
         .enumerate()
         .map(|(i, v)| (rid(i as u64), v.clone()))
         .collect();
+    phase("recall_sq8_vs_f32", "f32 upsert_batch");
     f32_adapter.upsert_batch(&items).await.unwrap();
+    phase("recall_sq8_vs_f32", "sq8 upsert_batch");
     sq8_adapter.upsert_batch(&items).await.unwrap();
     assert!(sq8_adapter.is_quantized(), "SQ8 adapter did not fit");
+    phase("recall_sq8_vs_f32", "queries");
 
     // Query the first 100 vectors and compare top-10 overlap.
     let k = 10u32;
@@ -232,7 +265,10 @@ async fn recall_sq8_vs_f32_within_two_percent() {
         oversample: None,
     };
     let mut total_recall = 0.0f32;
-    for q in data.iter().take(100) {
+    for (qi, q) in data.iter().take(100).enumerate() {
+        if qi % 25 == 0 {
+            phase("recall_sq8_vs_f32", &format!("query {qi}"));
+        }
         let truth = f32_adapter.search(q, k, opts, None).await.unwrap();
         let cand = sq8_adapter.search(q, k, opts, None).await.unwrap();
         let truth_rids: Vec<RecordId> = truth.iter().map(|(r, _)| *r).collect();
@@ -268,6 +304,14 @@ async fn recall_sq8_vs_f32_within_two_percent() {
 
 #[tokio::test]
 async fn concurrent_upsert_across_threshold_no_loss() {
+    within_deadline(
+        "concurrent_upsert_no_loss",
+        concurrent_upsert_across_threshold_no_loss_body(),
+    )
+    .await;
+}
+
+async fn concurrent_upsert_across_threshold_no_loss_body() {
     let dim = 24u32;
     let adapter = Arc::new(HnswAdapter::new_with_quantization(
         dim,
@@ -302,9 +346,11 @@ async fn concurrent_upsert_across_threshold_no_loss() {
             adapter.upsert_batch(&chunk).await.expect("upsert_batch");
         }));
     }
+    phase("concurrent_upsert_no_loss", "tasks spawned");
     for h in handles {
         h.await.unwrap();
     }
+    phase("concurrent_upsert_no_loss", "tasks joined");
 
     // The adapter MUST have fitted (400 > 256).
     assert!(adapter.is_quantized(), "adapter did not fit under load");
@@ -328,6 +374,9 @@ async fn concurrent_upsert_across_threshold_no_loss() {
     };
     let mut missing = 0usize;
     for (i, v) in data.iter().enumerate() {
+        if i % 100 == 0 {
+            phase("concurrent_upsert_no_loss", &format!("self-query {i}"));
+        }
         let res = adapter.search(v, 10, opts, None).await.unwrap();
         if !res.iter().any(|(r, _)| *r == rid(i as u64)) {
             missing += 1;
