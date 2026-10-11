@@ -14,6 +14,13 @@ use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
 use crate::tx::commit::{PostWalPrePublishHook, TEST_POST_WAL_PRE_PUBLISH_HOOK};
 
+/// Names the stuck phase instead of leaving the runner to kill the test after minutes.
+async fn within<T>(phase: &str, fut: impl std::future::Future<Output = T>) -> T {
+    tokio::time::timeout(std::time::Duration::from_secs(45), fut)
+        .await
+        .unwrap_or_else(|_| panic!("post_wal_cancel test stuck at {phase}"))
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_control() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -45,13 +52,15 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         .insert_tx(&InnerValue::Str("A".into()), Some(&mut tx))
         .await
         .unwrap();
-    repo.commit_tx(tx).await.unwrap();
+    within("commit_tx@48", repo.commit_tx(tx)).await.unwrap();
     drop(snapshot);
 
     // B1: a present but ACTIVE WAL entry is not a missing-key gap. A later
     // orphan raises the scan bound: the completed "later" commit alone cannot
     // advance contiguous visibility past the still-active version.
-    repo.drainer().drain_all(&repo).await.unwrap();
+    within("drain_all@54", repo.drainer().drain_all(&repo))
+        .await
+        .unwrap();
     hook.armed.store(true, Ordering::Release);
     let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
     let active_rid = tbl
@@ -60,7 +69,7 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         .unwrap();
     let owned = repo.clone();
     let active_task = tokio::spawn(async move { owned.commit_tx(tx).await });
-    hook.reached.notified().await;
+    within("reached@63", hook.reached.notified()).await;
     let active_version = *repo.drainer().window_keys().last().unwrap();
     assert!(gate.is_active_post_wal(active_version));
     let (mut tx, later_snapshot) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
@@ -68,7 +77,7 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         .insert_tx(&InnerValue::Str("later".into()), Some(&mut tx))
         .await
         .unwrap();
-    let later_outcome = repo.commit_tx(tx).await.unwrap();
+    let later_outcome = within("commit_tx@71", repo.commit_tx(tx)).await.unwrap();
     drop(later_snapshot);
     assert_eq!(active_version, gate.durable_watermark() + 1);
     assert_eq!(later_outcome.commit_version, active_version + 1);
@@ -83,7 +92,7 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         .unwrap();
     let owned = repo.clone();
     let orphan_task = tokio::spawn(async move { owned.commit_tx(tx).await });
-    hook.reached.notified().await;
+    within("reached@86", hook.reached.notified()).await;
     orphan_task.abort();
     assert!(orphan_task.await.unwrap_err().is_cancelled());
     drop(orphan_snapshot);
@@ -99,15 +108,22 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     assert!(scan_bound > gate.durable_watermark());
     assert!(scan_bound > active_version);
     let recover_before = repo.drainer().recover_calls();
-    let drained = repo.drainer().drain_step(&repo).await.unwrap();
+    let drained = within("drain_step@102", repo.drainer().drain_step(&repo))
+        .await
+        .unwrap();
     let recover_after = repo.drainer().recover_calls();
     hook.resume.notify_one();
-    active_task.await.unwrap().unwrap();
+    within("active_task@105", active_task)
+        .await
+        .unwrap()
+        .unwrap();
     drop(snapshot);
     assert_eq!(drained, 0);
     // Red before B1: the empty prefix caused a full WAL recovery here.
     assert_eq!(recover_after, recover_before);
-    repo.drainer().drain_all(&repo).await.unwrap();
+    within("drain_all@110", repo.drainer().drain_all(&repo))
+        .await
+        .unwrap();
     assert_eq!(gate.durable_watermark(), scan_orphan_version);
     assert!(!gate.is_orphaned_post_wal(scan_orphan_version));
     assert_eq!(gate.durable_watermark(), gate.last_committed());
@@ -130,7 +146,7 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     tbl.insert_tx(&InnerValue::Str("wait-for-replay".into()), Some(&mut tx))
         .await
         .unwrap();
-    let waiting_outcome = repo.commit_tx(tx).await.unwrap();
+    let waiting_outcome = within("commit_tx@133", repo.commit_tx(tx)).await.unwrap();
     drop(snapshot);
     let drainer = repo.drainer();
     // Genuine-gap control for B1: remove only the offered RAM copy. The
@@ -151,14 +167,14 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
             Poll::Pending => drain.await,
         }
     });
-    let pending = polled_rx.await.unwrap();
+    let pending = within("polled_rx@154", polled_rx).await.unwrap();
     for _ in 0..16 {
         tokio::task::yield_now().await;
     }
     let finished_while_locked = drain_task.is_finished();
     let durable_while_locked = gate.durable_watermark();
     drop(replay_guard);
-    let waiting_drained = drain_task.await.unwrap().unwrap();
+    let waiting_drained = within("drain_task@161", drain_task).await.unwrap().unwrap();
     // Red before B2: CAS contention returned Ok(0), not Pending.
     assert!(pending);
     assert!(!finished_while_locked);
@@ -185,7 +201,7 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     ));
     let owned = repo.clone();
     let task = tokio::spawn(async move { owned.commit_tx(tx).await });
-    hook.reached.notified().await;
+    within("reached@188", hook.reached.notified()).await;
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
     drop(snapshot);
@@ -195,9 +211,11 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         .insert_tx(&InnerValue::Str("C".into()), Some(&mut tx))
         .await
         .unwrap();
-    let outcome = repo.commit_tx(tx).await.unwrap();
+    let outcome = within("commit_tx@198", repo.commit_tx(tx)).await.unwrap();
     drop(snapshot);
-    repo.drainer().drain_all(&repo).await.unwrap();
+    within("drain_all@200", repo.drainer().drain_all(&repo))
+        .await
+        .unwrap();
     assert_eq!(gate.durable_watermark(), gate.last_committed());
     assert_eq!(gate.last_committed(), outcome.commit_version);
     assert_eq!(tbl.get(b).await.unwrap(), InnerValue::Str("B".into()));
@@ -209,7 +227,9 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         posting_value,
     );
     assert_eq!(tbl.counter().get().await.unwrap(), 7);
-    repo.drainer().drain_all(&repo).await.unwrap();
+    within("drain_all@212", repo.drainer().drain_all(&repo))
+        .await
+        .unwrap();
     assert_eq!(tbl.counter().get().await.unwrap(), 7);
 
     hook.after_counter.store(true, Ordering::Release);
@@ -221,18 +241,25 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         .unwrap();
     let owned = repo.clone();
     let task = tokio::spawn(async move { owned.commit_tx(tx).await });
-    hook.reached.notified().await;
+    within("reached@224", hook.reached.notified()).await;
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
     drop(snapshot);
     let orphan_version = gate.orphan_max();
     hook.fail_orphan_markers.store(true, Ordering::Release);
     // B3 markers: injected persistence failure is advisory, not a drain error.
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    assert_eq!(
+        within("drain_all@231", repo.drainer().drain_all(&repo))
+            .await
+            .unwrap(),
+        1
+    );
     assert!(!gate.is_orphaned_post_wal(orphan_version));
     assert_eq!(gate.durable_watermark(), orphan_version);
     assert_eq!(tbl.counter().get().await.unwrap(), 8);
-    repo.drainer().drain_all(&repo).await.unwrap();
+    within("drain_all@235", repo.drainer().drain_all(&repo))
+        .await
+        .unwrap();
     assert!(!gate.is_orphaned_post_wal(orphan_version));
     assert_eq!(tbl.counter().get().await.unwrap(), 8);
     assert_eq!(
@@ -253,7 +280,7 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     tx.counter_deltas.insert(table_token_for("t"), -1);
     let owned = repo.clone();
     let task = tokio::spawn(async move { owned.commit_tx(tx).await });
-    hook.reached.notified().await;
+    within("reached@256", hook.reached.notified()).await;
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
     drop(snapshot);
@@ -262,7 +289,12 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     let counter_error = tbl.counter().increment(-1).await.unwrap_err();
     assert!(counter_error.to_string().contains("cannot go below zero"));
     // Red before B3: increment(-1)? returned Err and wedged durability.
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    assert_eq!(
+        within("drain_all@265", repo.drainer().drain_all(&repo))
+            .await
+            .unwrap(),
+        1
+    );
     assert!(!gate.is_orphaned_post_wal(counter_failed_version));
     assert_eq!(gate.durable_watermark(), counter_failed_version);
     assert_eq!(gate.durable_watermark(), gate.last_committed());
@@ -271,7 +303,12 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         tbl.get(counter_failed_rid).await.unwrap(),
         InnerValue::Str("counter-failed".into()),
     );
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 0);
+    assert_eq!(
+        within("drain_all@274", repo.drainer().drain_all(&repo))
+            .await
+            .unwrap(),
+        0
+    );
     assert_eq!(tbl.counter().get().await.unwrap(), 0);
 
     hook.pre_wal.store(true, Ordering::Release);
@@ -283,7 +320,7 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         .unwrap());
     let owned = repo.clone();
     let task = tokio::spawn(async move { owned.commit_tx(tx).await });
-    hook.reached.notified().await;
+    within("reached@286", hook.reached.notified()).await;
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
     drop(snapshot);
@@ -299,13 +336,15 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         "x".repeat(shamir_tunables::instance_defaults::WAL_SEGMENT_MAX_BYTES as usize + 1024),
     );
     tbl.insert_tx(&padding, Some(&mut tx)).await.unwrap();
-    repo.commit_tx(tx).await.unwrap();
+    within("commit_tx@302", repo.commit_tx(tx)).await.unwrap();
     drop(snapshot);
     assert_eq!(tbl.get(a).await.unwrap(), InnerValue::Str("A".into()));
     let segments_before = wal_segment_names(&path).await;
     assert!(segments_before.len() >= 2);
     repo.repo_interner().await.unwrap().persist().await.unwrap();
-    repo.drainer().drain_all(&repo).await.unwrap();
+    within("drain_all@308", repo.drainer().drain_all(&repo))
+        .await
+        .unwrap();
     repo.flush_buffers().await.unwrap();
     assert_eq!(gate.durable_watermark(), gate.last_committed());
     let segments_after = wal_segment_names(&path).await;
