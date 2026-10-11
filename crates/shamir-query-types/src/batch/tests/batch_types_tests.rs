@@ -575,7 +575,7 @@ fn nested_batch_dispatch_by_batch_key() {
 }
 
 #[test]
-fn nested_batch_is_admin() {
+fn empty_nested_batch_is_not_admin() {
     let inner = BatchRequest {
         id: QueryValue::Int(1),
         name: None,
@@ -593,7 +593,8 @@ fn nested_batch_is_admin() {
         batch: inner,
         bind: TMap::default(),
     });
-    assert!(op.is_admin());
+    // A container has no intrinsic policy; only its leaves are classified.
+    assert!(!op.is_admin());
     assert!(op.table_ref().is_none());
 }
 
