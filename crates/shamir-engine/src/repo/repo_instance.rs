@@ -1528,46 +1528,6 @@ impl RepoInstance {
         Ok(h.feed.read_from(&h.store, from_version, limit).await)
     }
 
-    /// cancel-safe: yes — hands a pre-projected event to the changefeed's
-    /// two non-blocking tracks (broadcast `send` + journal `try_send`).
-    /// NEVER blocks the commit-path and NEVER errors out to it.
-    ///
-    /// Emit a committed tx's projected footprint to the changefeed. The
-    /// event must be projected by the caller (via [`shamir_tx::project_event`])
-    /// BEFORE Phase 5a drains `tx.write_set`. This legacy combined emit stays
-    /// post-publish for `apply_replicated` until S5b-4. Local commits instead
-    /// prepare before materialization, enqueue immediately before publication,
-    /// and broadcast the same Arc afterward. `None` is a no-op.
-    pub(crate) async fn emit_changefeed_event(&self, event: Option<shamir_tx::ChangelogEvent>) {
-        let Some(event) = event else {
-            return; // empty footprint — nothing to emit
-        };
-        let commit_version = event.commit_version;
-        match self.changefeed().await {
-            Ok(h) => {
-                // L10(a) journal-safe: always journal, skip broadcast when
-                // no live subscribers. Late subscribers use `changes_since`
-                // (journal), so they are unaffected by the broadcast skip.
-                if h.feed.subscriber_count() > 0 {
-                    h.feed.emit(event);
-                } else {
-                    h.feed.emit_journal_only(event);
-                }
-            }
-            Err(e) => {
-                self.record_pending_changefeed_gap(commit_version);
-                // Changefeed init failed (e.g. store_get error). The commit
-                // is already durable; the feed is best-effort, so log + move
-                // on rather than fail the commit.
-                log::warn!(
-                    "emit_changefeed: changefeed unavailable for repo {} commit_version \
-                     {commit_version}: {e}; skipping changefeed emission",
-                    self.name()
-                );
-            }
-        }
-    }
-
     // ============================================================================
     // Index Management API (proxy to TableManager)
     // ============================================================================
