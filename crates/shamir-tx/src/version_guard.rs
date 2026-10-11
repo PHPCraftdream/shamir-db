@@ -2,16 +2,17 @@
 //!
 //! A [`VersionGuard`] is handed out by
 //! [`RepoTxGate::assign_next_version_guarded`](crate::RepoTxGate::assign_next_version_guarded)
-//! and owns the obligation to terminally mark its version in the
-//! [`CompletionTracker`]. The guard makes the abort-path census invariant
-//! (every allocated version is marked exactly once — Materialized on success,
-//! Aborted on any early exit or panic) hold **by construction**: a `Drop`
-//! reaching the end of any scope without a prior [`VersionGuard::commit`]
-//! marks the version `Aborted`, so the contiguous watermark can never wedge
-//! at `version - 1` because a marking call was skipped on an error path.
+//! and owns the obligation to settle its version in the [`CompletionTracker`].
+//! Before WAL acceptance, dropping an armed guard marks both visibility and
+//! durability `Aborted`. After [`VersionGuard::wal_accepted`], dropping it
+//! registers an orphan instead: its WAL data must be replayed by the drainer
+//! before visibility completion and durability can advance. A successful
+//! [`VersionGuard::commit`] marks visibility `Materialized` and disarms it.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+use shamir_collections::THasher;
 
 use crate::completion_tracker::{CompletionTracker, State};
 
@@ -23,31 +24,32 @@ use crate::completion_tracker::{CompletionTracker, State};
 ///
 /// - On success: call [`commit`](Self::commit) → marks `Materialized` and
 ///   advances `last_committed_version` from the watermark.
-/// - On any early return / panic before `commit`: `Drop` marks `Aborted`
-///   and advances `last_committed_version` from the watermark.
+/// - Before WAL acceptance: early return / panic marks `Aborted` in both
+///   trackers and advances `last_committed_version` from the watermark.
+/// - After [`wal_accepted`](Self::wal_accepted): early return / panic registers
+///   an orphan and removes active membership, without aborting either tracker.
+///   The drainer owns its remaining replay and completion obligation.
 ///
-/// Both transitions are synchronous (atomics / `scc` — never `async`), so
-/// the `Drop` is sound. Watermark advance replays the exact semantics of
-/// `RepoTxGate::sync_last_committed_from_watermark`.
+/// All guard transitions are synchronous (atomics / `scc`, never async).
+/// Watermark advance follows `RepoTxGate::sync_last_committed_from_watermark`.
 #[must_use = "a VersionGuard must be committed on success, else it marks the \
               version Aborted on drop"]
 pub struct VersionGuard {
     version: u64,
     completion: Arc<CompletionTracker>,
-    /// P1d-1: second tracker for "value durable in history". On the abort
-    /// path (Drop with `armed == true`) we mark this Aborted so its
-    /// contiguous watermark advances past the burned version — otherwise it
-    /// would wedge below the visibility watermark on every SSI / phantom /
-    /// WAL-begin abort, violating the inline-materialize invariant
-    /// `durable_watermark == last_committed`. On the success path
-    /// (`commit()`) we do NOT mark durable here — the caller (engine
-    /// commit / non-tx write) calls `gate.mark_durable(version)` AFTER the
-    /// physical history write succeeds (Phase 5a `Complete` for tx,
-    /// `history.set/transact` for non-tx). Until P1d-2 the two marks land
-    /// on the same code path so the durable watermark stays in lock-step.
+    /// Tracker for history durability. Only a PRE-WAL armed drop marks
+    /// `Aborted`: that burned version has no durable data to replay. A
+    /// post-WAL drop leaves this tracker pending and registers an orphan.
+    /// Successful `commit()` marks only visibility; the engine drainer marks
+    /// durability after the physical history write succeeds.
     durable_completion: Arc<CompletionTracker>,
     last_committed: Arc<AtomicU64>,
     armed: bool,
+    /// Set by wal_accepted; armed Drop transfers completion to the drainer.
+    post_wal: bool,
+    orphaned_post_wal: Arc<scc::HashMap<u64, (), THasher>>,
+    orphan_max: Arc<AtomicU64>,
+    active_post_wal: Arc<scc::HashMap<u64, (), THasher>>,
 }
 
 impl VersionGuard {
@@ -61,6 +63,9 @@ impl VersionGuard {
         completion: Arc<CompletionTracker>,
         durable_completion: Arc<CompletionTracker>,
         last_committed: Arc<AtomicU64>,
+        orphaned_post_wal: Arc<scc::HashMap<u64, (), THasher>>,
+        orphan_max: Arc<AtomicU64>,
+        active_post_wal: Arc<scc::HashMap<u64, (), THasher>>,
     ) -> Self {
         Self {
             version,
@@ -68,12 +73,24 @@ impl VersionGuard {
             durable_completion,
             last_committed,
             armed: true,
+            post_wal: false,
+            orphaned_post_wal,
+            orphan_max,
+            active_post_wal,
         }
     }
 
     /// The MVCC version this guard owns.
     pub fn version(&self) -> u64 {
         self.version
+    }
+
+    /// Record WAL acceptance before the next suspension point. Until commit
+    /// or Drop, active membership prevents the drainer racing materialization.
+    /// An armed Drop then registers an orphan rather than aborting WAL data.
+    pub fn wal_accepted(&mut self) {
+        let _ = self.active_post_wal.insert_sync(self.version, ());
+        self.post_wal = true;
     }
 
     /// Mark the version `Materialized` and advance `last_committed_version`
@@ -84,6 +101,7 @@ impl VersionGuard {
         self.completion.mark(self.version, State::Materialized);
         self.advance_last_committed();
         self.armed = false;
+        let _ = self.active_post_wal.remove_sync(&self.version);
     }
 
     /// Advance `last_committed_version` to the tracker's current watermark
@@ -99,6 +117,12 @@ impl VersionGuard {
 
 impl Drop for VersionGuard {
     fn drop(&mut self) {
+        if self.armed && self.post_wal {
+            let _ = self.orphaned_post_wal.insert_sync(self.version, ());
+            self.orphan_max.fetch_max(self.version, Ordering::AcqRel);
+            let _ = self.active_post_wal.remove_sync(&self.version);
+            return;
+        }
         if self.armed {
             // No prior `commit()` reached this scope — the version was
             // allocated but never materialized (SSI/phantom/empty-tx abort,
