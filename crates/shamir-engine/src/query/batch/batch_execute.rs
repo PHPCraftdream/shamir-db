@@ -151,7 +151,9 @@ pub(crate) async fn execute_batch_unchecked(
 pub(super) async fn plan_and_validate_batch(
     request: &BatchRequest,
     resolver: &dyn TableResolver,
+    scope: &ExecScope,
 ) -> Result<BatchPlan, BatchError> {
+    let effective = request.limits.clamped_to(scope.limits());
     // 4.C: cross-repo guard for transactional batches.
     if request.transactional {
         let repos = shamir_query_types::batch::distinct_repos(&request.queries);
@@ -163,10 +165,10 @@ pub(super) async fn plan_and_validate_batch(
     }
 
     // 1. Plan
-    let plan = shamir_query_types::batch::BatchPlanner::plan(&request.queries, &request.limits)?;
+    let plan = shamir_query_types::batch::BatchPlanner::plan(&request.queries, &effective)?;
 
     // 2. Validate: all referenced tables exist (skip admin ops)
-    validate_tables(&request.queries, resolver).await?;
+    validate_tables(&request.queries, resolver, &effective, scope.limits()).await?;
 
     // 2b. Validate: filter nesting depth (DoS guard)
     validate_filter_depth(&request.queries)?;
@@ -263,7 +265,7 @@ pub(super) fn execute_batch_impl<'a>(
         // already elapsed.
         scope.check()?;
 
-        let mut plan = plan_and_validate_batch(request, resolver).await?;
+        let mut plan = plan_and_validate_batch(request, resolver, scope).await?;
 
         // 3. Execute — branch on transactional.
         let (all_results, tx_info) = if request.transactional {
@@ -804,7 +806,13 @@ pub(super) async fn execute_transactional_impl(
             // `aborted`-TransactionInfo `Ok` response. The lock release +
             // RAII rollback above have already run at this point, so the
             // cleanup is identical either way.
-            if matches!(plan_err, BatchError::ExecutionTimedOut { .. }) {
+            if matches!(
+                plan_err,
+                BatchError::ExecutionTimedOut { .. }
+                    | BatchError::TooManyQueries { .. }
+                    | BatchError::TooManyIterations { .. }
+                    | BatchError::LimitExceeded { .. }
+            ) {
                 return Err(plan_err);
             }
 

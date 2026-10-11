@@ -705,7 +705,10 @@ impl<'a> QueryRunner<'a> {
             // top-level outcome, identical to a timeout detected at any
             // outer checkpoint.
             let wrap_sub_batch_err = |e: BatchError| match e {
-                timeout @ BatchError::ExecutionTimedOut { .. } => timeout,
+                limit_error @ (BatchError::ExecutionTimedOut { .. }
+                | BatchError::TooManyQueries { .. }
+                | BatchError::TooManyIterations { .. }
+                | BatchError::LimitExceeded { .. }) => limit_error,
                 e => BatchError::QueryError {
                     alias: alias.to_string(),
                     message: format!("sub-batch '{}' failed: {}", alias, e),
@@ -714,7 +717,7 @@ impl<'a> QueryRunner<'a> {
             };
             let inner_results = match self.tx.as_deref_mut() {
                 Some(tx) => {
-                    let mut plan = plan_and_validate_batch(&sub.batch, self.resolver)
+                    let mut plan = plan_and_validate_batch(&sub.batch, self.resolver, self.scope)
                         .await
                         .map_err(wrap_sub_batch_err)?;
                     run_nested_body_in_outer_tx(
@@ -748,7 +751,10 @@ impl<'a> QueryRunner<'a> {
                     )
                     .await
                     .map_err(|e| match e {
-                        timeout @ BatchError::ExecutionTimedOut { .. } => timeout,
+                        limit_error @ (BatchError::ExecutionTimedOut { .. }
+                        | BatchError::TooManyQueries { .. }
+                        | BatchError::TooManyIterations { .. }
+                        | BatchError::LimitExceeded { .. }) => limit_error,
                         e => BatchError::QueryError {
                             alias: alias.to_string(),
                             message: format!("sub-batch '{}' failed: {}", alias, e),
@@ -880,7 +886,8 @@ impl<'a> QueryRunner<'a> {
             // Runtime gate (ADR Decision 3): reject BEFORE iteration 0 if
             // the resolved length exceeds max_iterations — never a partial
             // run followed by a mid-loop abort.
-            let max_iterations = effective_max_iterations(&fe.batch.limits);
+            let body_limits = fe.batch.limits.clamped_to(self.scope.limits());
+            let max_iterations = effective_max_iterations(&body_limits);
             if elements.len() > max_iterations {
                 return Err(BatchError::TooManyIterations {
                     alias: alias.to_string(),
@@ -904,7 +911,10 @@ impl<'a> QueryRunner<'a> {
             // reused (via a fresh `&mut` reborrow) by every iteration below.
             self.scope.check()?;
             let wrap_for_each_body_err = |e: BatchError| match e {
-                timeout @ BatchError::ExecutionTimedOut { .. } => timeout,
+                limit_error @ (BatchError::ExecutionTimedOut { .. }
+                | BatchError::TooManyQueries { .. }
+                | BatchError::TooManyIterations { .. }
+                | BatchError::LimitExceeded { .. }) => limit_error,
                 e => BatchError::QueryError {
                     alias: alias.to_string(),
                     message: format!(
@@ -914,7 +924,7 @@ impl<'a> QueryRunner<'a> {
                     code: e.code().map(str::to_owned),
                 },
             };
-            let mut plan = plan_and_validate_batch(&fe.batch, self.resolver)
+            let mut plan = plan_and_validate_batch(&fe.batch, self.resolver, self.scope)
                 .await
                 .map_err(wrap_for_each_body_err)?;
 
@@ -978,7 +988,10 @@ impl<'a> QueryRunner<'a> {
                     )
                     .await
                     .map_err(|e| match e {
-                        timeout @ BatchError::ExecutionTimedOut { .. } => timeout,
+                        limit_error @ (BatchError::ExecutionTimedOut { .. }
+                        | BatchError::TooManyQueries { .. }
+                        | BatchError::TooManyIterations { .. }
+                        | BatchError::LimitExceeded { .. }) => limit_error,
                         e => BatchError::QueryError {
                             alias: alias.to_string(),
                             message: format!("for_each '{}' iteration failed: {}", alias, e),
@@ -999,7 +1012,10 @@ impl<'a> QueryRunner<'a> {
                     )
                     .await
                     .map_err(|e| match e {
-                        timeout @ BatchError::ExecutionTimedOut { .. } => timeout,
+                        limit_error @ (BatchError::ExecutionTimedOut { .. }
+                        | BatchError::TooManyQueries { .. }
+                        | BatchError::TooManyIterations { .. }
+                        | BatchError::LimitExceeded { .. }) => limit_error,
                         e => BatchError::QueryError {
                             alias: alias.to_string(),
                             message: format!("for_each '{}' iteration failed: {}", alias, e),
