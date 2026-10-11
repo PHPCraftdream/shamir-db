@@ -52,12 +52,14 @@ impl ShamirAdminExecutor {
             return Err(err_code(
                 "experimental_feature_disabled",
                 "StartMigration is experimental and disabled by default. \
-                 It is not yet crash-safe or online-safe: writes to the source \
-                 table during an in-flight migration are lost from the \
-                 destination (no write interception), only the in_memory \
-                 dst_engine is supported, and the MigrationCoordinator state \
-                 is non-durable (a server restart mid-migration loses all \
-                 state). To opt in for internal testing, call \
+                 The source is frozen for writes during migration; rejected \
+                 writes return table_migrating. Only the in_memory dst_engine \
+                 is supported, so destination data does not survive restart. \
+                 Coordinator state is persisted in the source info store, but \
+                 the active coordinator and freeze guard are process-local; \
+                 persisted state alone does not provide crash-safe resumption. \
+                 Replication followers are unsupported: replicated apply \
+                 bypasses the freeze. To opt in for internal testing, call \
                  ShamirDb::enable_experimental_migration_api()."
                     .to_string(),
             ));
@@ -136,6 +138,12 @@ impl ShamirAdminExecutor {
         let run = async {
             let dst_table = db.get_table(dst_repo_name, table_name).await?;
             let dst_data = Arc::clone(dst_table.table().data_store());
+            // Local RAII owns preparation; failed/cancelled replication clears
+            // the bit. This guard does not retain ddl_admission at cutover.
+            let freeze = src_table
+                .begin_migration_freeze()
+                .await
+                .map_err(shamir_storage::error::DbError::from)?;
 
             // Step 1: carry src's repo-interner `(id → name)` mappings
             // into dst's repo interner BEFORE any data lands. The
@@ -174,19 +182,19 @@ impl ShamirAdminExecutor {
             // run_snapshot reads through the log seam
             // (current_stream) instead of the raw data_store.
             let src_mvcc = src_table.mvcc_store();
-            let coord = Arc::new(MigrationCoordinator::new(
-                state, shadow, src_data, dst_data, src_mvcc,
-            ));
+            let coord = Arc::new(
+                MigrationCoordinator::new(state, shadow, src_data, dst_data, src_mvcc)
+                    .with_migration_freeze(freeze),
+            );
 
             coord.run_snapshot().await?;
             let caught_up = coord.drain_until_caught_up(0).await?;
-            // Keep a lagging coordinator registered and Draining, not rolled back.
-            if caught_up.residual_lag == 0 {
-                match coord.mark_cutover_ready().await {
-                    Ok(()) | Err(shamir_storage::error::DbError::Conflict(_)) => {}
-                    Err(e) => return Err(e),
-                }
+            if caught_up.residual_lag != 0 {
+                return Err(shamir_storage::error::DbError::Conflict(
+                    "frozen migration has residual shadow lag; start again".to_string(),
+                ));
             }
+            coord.mark_cutover_ready().await?;
             coord.persist_state().await?;
             Ok::<_, shamir_storage::error::DbError>(coord)
         }
@@ -197,7 +205,10 @@ impl ShamirAdminExecutor {
             Err(e) => {
                 // Roll back: remove the orphan dst repo.
                 db.remove_repo(dst_repo_name).await;
-                return Err(err(e.to_string()));
+                return Err(err_code(
+                    e.code().unwrap_or("migration_start_error"),
+                    e.to_string(),
+                ));
             }
         };
 
@@ -205,12 +216,6 @@ impl ShamirAdminExecutor {
         self.shamir
             .active_migrations()
             .insert(migration_id.clone(), coord);
-        if phase == "draining" {
-            return Err(err_code(
-                "migration_residual_lag",
-                format!("migration '{migration_id}' is still draining; retry CommitMigration"),
-            ));
-        }
 
         Ok(admin_result(mpack!({
             "migration_id": @(QueryValue::Str(migration_id)),
@@ -276,6 +281,15 @@ impl ShamirAdminExecutor {
                             .await
                             .map_err(|e| err(e.to_string()))?
                     {
+                        // A process-local freeze cannot be reconstructed from
+                        // metadata. Refreezing now would miss intervening writes.
+                        if state.phase != MigrationPhase::Committed {
+                            return Err(err_code(
+                                "migration_restart_required",
+                                "Uncommitted migration has no source freeze; cannot resume its snapshot"
+                                    .to_string(),
+                            ));
+                        }
                         let src = db
                             .get_table(&state.src_repo, &state.table_name)
                             .await
@@ -318,7 +332,18 @@ impl ShamirAdminExecutor {
                     .value(),
             )
         };
+        // Only the serialized finaliser owns cleanup. A cancelled waiter must
+        // not take or release another operation's freeze. No await separates
+        // lock acquisition from the synchronous ownership transfer.
         let _finalisation = coord.lock_finalisation().await;
+        let source_freeze = coord.take_migration_freeze();
+        if source_freeze.is_none() && coord.phase().await != MigrationPhase::Committed {
+            return Err(err_code(
+                "migration_restart_required",
+                "Uncommitted migration has no source freeze; cannot resume its snapshot"
+                    .to_string(),
+            ));
+        }
         if coord.phase().await == MigrationPhase::Draining {
             let result = coord
                 .drain_until_caught_up(0)
@@ -355,10 +380,14 @@ impl ShamirAdminExecutor {
             .map_err(|e| err(e.to_string()))?;
         drop(src_write_lock);
         drop(src_barrier);
-        let (src_count, dst_count) = coord
-            .verify_record_count()
-            .await
-            .map_err(|e| err(e.to_string()))?;
+        let (src_count, dst_count) = if source_freeze.is_some() {
+            coord.verify_record_count().await
+        } else {
+            // Committed retries operate on the fixed destination, never on
+            // source writes admitted after a prior exit released the freeze.
+            coord.verify_committed_record_count().await
+        }
+        .map_err(|e| err(e.to_string()))?;
         let state = coord.state().await;
 
         // Bulk-populate index2 backends on dst.
@@ -538,6 +567,7 @@ impl ShamirAdminExecutor {
             })?
             .clone();
         let _finalisation = coord.lock_finalisation().await;
+        let _source_freeze = coord.take_migration_freeze();
         coord.rollback().await.map_err(|e| err(e.to_string()))?;
         self.shamir
             .active_migrations()
