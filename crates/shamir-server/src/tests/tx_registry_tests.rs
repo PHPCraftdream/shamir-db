@@ -1,6 +1,11 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use shamir_db::engine::repo::{BoxRepo, RepoInstance};
+use shamir_db::engine::table::TableConfig;
+use shamir_db::storage::storage_in_memory::InMemoryRepo;
+use shamir_types::types::value::InnerValue;
+
 use crate::tx_registry::{spawn_reaper_task, InteractiveTx, TxRegistry, TxRegistryError};
 
 const SID_A: [u8; 32] = [0xAA; 32];
@@ -305,5 +310,170 @@ async fn absolute_deadline_overrides_bump_activity() {
         vec![handle],
         "absolute deadline overrides bump_activity — it is the hard \
          upper bound on tx lifetime"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn long_lease_survives_repeated_reap_then_commits_real_write() {
+    let repo = RepoInstance::new(
+        "repo".into(),
+        BoxRepo::InMemory(Arc::new(InMemoryRepo::new())),
+        vec![TableConfig::new("items")],
+    );
+    let table = repo.get_table("items").await.unwrap();
+    let (tx, snapshot) = repo
+        .begin_tx(shamir_tx::IsolationLevel::Snapshot)
+        .await
+        .unwrap();
+    let handle = tx.tx_id.0;
+    let reg = TxRegistry::new();
+    reg.register(
+        handle,
+        InteractiveTx::new(
+            tx,
+            snapshot,
+            SID_A,
+            [0; 16],
+            "db".into(),
+            "repo".into(),
+            Duration::from_secs(300),
+        ),
+    )
+    .unwrap();
+    let (it, lease) = reg.acquire_owned(handle, &SID_A).unwrap();
+    let rid = {
+        let mut guard = it.ctx().lock().await;
+        table
+            .insert_tx(
+                &InnerValue::Str("leased-write".into()),
+                Some(guard.as_mut().unwrap()),
+            )
+            .await
+            .unwrap()
+    };
+    for _ in 0..4 {
+        tokio::time::advance(Duration::from_secs(31)).await;
+        assert_eq!(reg.reap_expired(Duration::from_secs(30)), 0);
+        assert_eq!(reg.len(), 1);
+    }
+    drop(lease);
+    reg.get_owned(handle, &SID_A)
+        .expect("commit still finds the handle");
+    let parked = reg.remove(handle).unwrap();
+    let tx = parked.ctx().lock().await.take().unwrap();
+    let outcome = repo.commit_tx(tx).await.unwrap();
+    assert!(outcome.commit_version > 0);
+    assert_eq!(
+        table.get(rid).await.unwrap(),
+        InnerValue::Str("leased-write".into()),
+    );
+    assert!(reg.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn lease_release_restarts_full_idle_ttl_with_overlapping_leases() {
+    let reg = TxRegistry::new();
+    let ttl = Duration::from_secs(30);
+    let (handle, it) = make_tx(SID_A, Duration::from_secs(300), 1).await;
+    reg.register(handle, it).unwrap();
+    tokio::time::advance(Duration::from_secs(20)).await;
+    let (it, first) = reg.acquire_owned(handle, &SID_A).unwrap();
+    assert!(!it.is_expired(tokio::time::Instant::now().into_std(), ttl));
+    let (_, second) = reg.acquire_owned(handle, &SID_A).unwrap();
+    tokio::time::advance(Duration::from_secs(40)).await;
+    drop(first);
+    tokio::time::advance(Duration::from_secs(31)).await;
+    assert_eq!(
+        reg.reap_expired(ttl),
+        0,
+        "second lease still protects the entry",
+    );
+    drop(second);
+    tokio::time::advance(Duration::from_secs(29)).await;
+    assert_eq!(reg.reap_expired(ttl), 0);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(reg.reap_expired(ttl), 1);
+    assert!(reg.is_empty());
+    let (next, it) = make_tx(SID_A, Duration::from_secs(300), 2).await;
+    reg.register(next, it)
+        .expect("reaping frees the session slot");
+}
+
+#[tokio::test(start_paused = true)]
+async fn abort_releases_lease_and_restarts_idle_ttl() {
+    let reg = Arc::new(TxRegistry::new());
+    let ttl = Duration::from_secs(30);
+    let (handle, it) = make_tx(SID_A, Duration::from_secs(300), 1).await;
+    reg.register(handle, it).unwrap();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let task_reg = Arc::clone(&reg);
+    let task = tokio::spawn(async move {
+        let (_it, _lease) = task_reg.acquire_owned(handle, &SID_A).unwrap();
+        ready_tx.send(()).unwrap();
+        std::future::pending::<()>().await;
+    });
+    ready_rx.await.unwrap();
+    tokio::time::advance(Duration::from_secs(61)).await;
+    assert_eq!(reg.reap_expired(ttl), 0);
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    tokio::time::advance(Duration::from_secs(29)).await;
+    assert_eq!(reg.reap_expired(ttl), 0);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(reg.reap_expired(ttl), 1);
+    assert!(reg.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn absolute_lifetime_reaps_even_with_active_lease() {
+    let reg = TxRegistry::new();
+    let (handle, it) = make_tx(SID_A, Duration::from_secs(60), 1).await;
+    reg.register(handle, it).unwrap();
+    let (_it, lease) = reg.acquire_owned(handle, &SID_A).unwrap();
+    tokio::time::advance(Duration::from_secs(59)).await;
+    assert_eq!(reg.reap_expired(Duration::from_secs(30)), 0);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(reg.reap_expired(Duration::from_secs(30)), 1);
+    assert!(matches!(
+        reg.acquire_owned(handle, &SID_A),
+        Err(TxRegistryError::TxNotFound),
+    ));
+    drop(lease);
+    assert!(
+        reg.is_empty(),
+        "lease release cannot resurrect a reaped entry",
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_reap_candidate_rechecks_lease_activity_and_identity() {
+    let reg = TxRegistry::new();
+    let ttl = Duration::from_secs(30);
+    let (handle, it) = make_tx(SID_A, Duration::from_secs(300), 1).await;
+    let candidate = reg.register(handle, it).unwrap();
+    tokio::time::advance(ttl).await;
+    assert_eq!(
+        reg.expired_handles(tokio::time::Instant::now().into_std(), ttl),
+        vec![handle],
+    );
+    let (_, lease) = reg.acquire_owned(handle, &SID_A).unwrap();
+    assert!(reg
+        .remove_expired(handle, &candidate, Duration::ZERO)
+        .is_none());
+    drop(lease);
+    assert!(reg.remove_expired(handle, &candidate, ttl).is_none());
+    reg.remove(handle).unwrap();
+    assert!(matches!(
+        reg.acquire_owned(handle, &SID_A),
+        Err(TxRegistryError::TxNotFound),
+    ));
+    let (_, replacement) = make_tx(SID_A, Duration::from_secs(300), handle).await;
+    reg.register(handle, replacement).unwrap();
+    tokio::time::advance(ttl).await;
+    assert!(reg.remove_expired(handle, &candidate, ttl).is_none());
+    assert_eq!(
+        reg.reap_expired(ttl),
+        1,
+        "only the current entry may be reaped",
     );
 }

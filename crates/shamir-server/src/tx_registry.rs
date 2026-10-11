@@ -21,7 +21,7 @@
 //! alive by the caller until commit returns, so the MVCC snapshot stays
 //! pinned through commit (SSI validation + history reads need it), then drops.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -91,15 +91,26 @@ pub struct InteractiveTx {
     /// this `Instant` so `last_activity` and `deadline` are stored as
     /// `u64` nanos (cheap atomic load/store on the bump path).
     created_at: Instant,
-    /// Nanos since `created_at` of the last activity bump. Atomic load on
-    /// every TxExecute — replaces the prior `parking_lot::Mutex<Instant>`.
-    /// Single-writer per handle (the owning session), so `Relaxed` is
-    /// sound for both bump and sweep read; we use `Release`/`Acquire` for
-    /// happens-before clarity with the reaper task on another thread.
+    /// Nanos since `created_at` of the last activity bump.
     last_activity_nanos: AtomicU64,
+    in_flight: AtomicUsize,
     /// Nanos since `created_at` for the absolute deadline. Set once at
     /// construction and never mutated.
     deadline_nanos: u64,
+}
+
+/// Keeps idle reaping suspended until the operation exits, including cancellation.
+#[must_use]
+pub(crate) struct TxLease {
+    tx: Arc<InteractiveTx>,
+}
+
+impl Drop for TxLease {
+    fn drop(&mut self) {
+        self.tx.bump_activity();
+        // Publish the refreshed timestamp before the last lease becomes idle.
+        self.tx.in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl InteractiveTx {
@@ -115,7 +126,7 @@ impl InteractiveTx {
         repo: String,
         max_lifetime: Duration,
     ) -> Self {
-        let now = Instant::now();
+        let now = tokio::time::Instant::now().into_std();
         Self {
             ctx: tokio::sync::Mutex::new(Some(ctx)),
             _snapshot: snapshot,
@@ -125,6 +136,7 @@ impl InteractiveTx {
             repo,
             created_at: now,
             last_activity_nanos: AtomicU64::new(0),
+            in_flight: AtomicUsize::new(0),
             deadline_nanos: max_lifetime.as_nanos() as u64,
         }
     }
@@ -157,11 +169,14 @@ impl InteractiveTx {
         &self.repo
     }
 
-    /// Mark activity (call on each successful `TxExecute`) to defer the idle
-    /// timeout. Single atomic store — no lock takt.
+    /// Mark activity without allowing concurrent refreshes to regress time.
     pub fn bump_activity(&self) {
-        let elapsed = self.created_at.elapsed().as_nanos() as u64;
-        self.last_activity_nanos.store(elapsed, Ordering::Release);
+        let elapsed = tokio::time::Instant::now()
+            .into_std()
+            .saturating_duration_since(self.created_at)
+            .as_nanos() as u64;
+        self.last_activity_nanos
+            .fetch_max(elapsed, Ordering::Release);
     }
 
     /// Whether this tx is past its absolute deadline OR has been idle longer
@@ -170,6 +185,9 @@ impl InteractiveTx {
         let elapsed_now = now.saturating_duration_since(self.created_at).as_nanos() as u64;
         if elapsed_now >= self.deadline_nanos {
             return true;
+        }
+        if self.in_flight.load(Ordering::Acquire) != 0 {
+            return false;
         }
         let last = self.last_activity_nanos.load(Ordering::Acquire);
         elapsed_now.saturating_sub(last) >= idle_ttl.as_nanos() as u64
@@ -237,6 +255,28 @@ impl TxRegistry {
         Ok(arc)
     }
 
+    /// Acquire idle protection while the map reference still excludes removal.
+    /// No map guard escapes this call; only the owned lease crosses `.await`.
+    pub(crate) fn acquire_owned(
+        &self,
+        handle: u64,
+        sid: &[u8; 32],
+    ) -> Result<(Arc<InteractiveTx>, TxLease), TxRegistryError> {
+        let entry = self.open.get(&handle).ok_or(TxRegistryError::TxNotFound)?;
+        let tx = entry.value();
+        if &tx.owner_sid != sid {
+            return Err(TxRegistryError::TxOwnershipMismatch);
+        }
+        tx.in_flight
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                count.checked_add(1)
+            })
+            .expect("interactive transaction lease count overflow");
+        let lease = TxLease { tx: Arc::clone(tx) };
+        tx.bump_activity();
+        Ok((Arc::clone(tx), lease))
+    }
+
     /// Remove a handle (COMMIT / ROLLBACK / reap). Also frees the session
     /// slot so the session can open a new tx. Returns the `Arc` so the caller
     /// can `take()` the `TxContext` for commit and keep the `SnapshotGuard`
@@ -261,6 +301,37 @@ impl TxRegistry {
             .collect()
     }
 
+    /// Recheck a sweep candidate under the same shard lock that excludes acquisition.
+    pub(crate) fn remove_expired(
+        &self,
+        handle: u64,
+        expected: &Arc<InteractiveTx>,
+        idle_ttl: Duration,
+    ) -> Option<Arc<InteractiveTx>> {
+        let (_, tx) = self.open.remove_if(&handle, |_, current| {
+            Arc::ptr_eq(current, expected)
+                && current.is_expired(tokio::time::Instant::now().into_std(), idle_ttl)
+        })?;
+        self.by_session
+            .remove_if(&tx.owner_sid, |_, h| *h == handle);
+        Some(tx)
+    }
+
+    /// Reap expired entries, revalidating identity and expiry at removal.
+    pub(crate) fn reap_expired(&self, idle_ttl: Duration) -> usize {
+        let now = tokio::time::Instant::now().into_std();
+        let candidates: Vec<_> = self
+            .open
+            .iter()
+            .filter(|entry| entry.value().is_expired(now, idle_ttl))
+            .map(|entry| (*entry.key(), Arc::clone(entry.value())))
+            .collect();
+        candidates
+            .into_iter()
+            .filter(|(handle, tx)| self.remove_expired(*handle, tx, idle_ttl).is_some())
+            .count()
+    }
+
     /// Number of open interactive transactions.
     pub fn len(&self) -> usize {
         self.open.len()
@@ -274,9 +345,8 @@ impl TxRegistry {
 
 /// Spawn the periodic interactive-tx reaper.
 ///
-/// The task loops every `reap_interval`, calling
-/// [`TxRegistry::expired_handles`] with `idle_ttl`, then [`TxRegistry::remove`]
-/// on each. Removing the [`Arc<InteractiveTx>`] drops it; if no commit /
+/// The task loops every `reap_interval`, calling [`TxRegistry::reap_expired`]
+/// with `idle_ttl`. Removing the [`Arc<InteractiveTx>`] drops it; if no commit /
 /// rollback path took the inner `TxContext` first, drop = RAII rollback per
 /// the `TxContext` doc-comment (no storage I/O). The `SnapshotGuard` held
 /// inside drops alongside, releasing MVCC GC's `min_alive` hold.
@@ -309,16 +379,9 @@ pub fn spawn_reaper_task(
                     break;
                 }
                 _ = interval.tick() => {
-                    let now = Instant::now();
-                    let expired = registry.expired_handles(now, idle_ttl);
-                    if expired.is_empty() {
+                    let reaped = registry.reap_expired(idle_ttl);
+                    if reaped == 0 {
                         continue;
-                    }
-                    let reaped = expired.len();
-                    for h in expired {
-                        // remove() returns the Arc<InteractiveTx>; drop = RAII
-                        // rollback if the ctx was never committed/rolled back.
-                        let _ = registry.remove(h);
                     }
                     tracing::info!(reaped, "interactive_tx_reaper: aborted past-deadline transactions");
                 }
