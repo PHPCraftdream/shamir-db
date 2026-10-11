@@ -139,26 +139,26 @@ async fn fire_post_validate_pre_publish_test_hook() {
     }
 }
 
-#[cfg(test)]
-pub(crate) struct PostWalPrePublishHook {
-    pub(crate) repo_name: String,
-    pub(crate) pre_wal: std::sync::atomic::AtomicBool,
-    pub(crate) after_counter: std::sync::atomic::AtomicBool,
-    pub(crate) fail_orphan_markers: std::sync::atomic::AtomicBool,
-    pub(crate) panic_after_resume: std::sync::atomic::AtomicBool,
-    pub(crate) panic_resume: tokio::sync::Notify,
-    pub(crate) reached: tokio::sync::Notify,
-    pub(crate) resume: tokio::sync::Notify,
-    pub(crate) armed: std::sync::atomic::AtomicBool,
+#[cfg(any(test, feature = "test-util"))]
+pub struct PostWalPrePublishHook {
+    pub repo_name: String,
+    pub pre_wal: std::sync::atomic::AtomicBool,
+    pub after_counter: std::sync::atomic::AtomicBool,
+    pub fail_orphan_markers: std::sync::atomic::AtomicBool,
+    pub panic_after_resume: std::sync::atomic::AtomicBool,
+    pub panic_resume: tokio::sync::Notify,
+    pub reached: tokio::sync::Notify,
+    pub resume: tokio::sync::Notify,
+    pub armed: std::sync::atomic::AtomicBool,
 }
 
-#[cfg(test)]
-pub(crate) static TEST_POST_WAL_PRE_PUBLISH_HOOK: std::sync::OnceLock<
+#[cfg(any(test, feature = "test-util"))]
+pub static TEST_POST_WAL_PRE_PUBLISH_HOOK: std::sync::OnceLock<
     std::sync::Arc<PostWalPrePublishHook>,
 > = std::sync::OnceLock::new();
 
 pub(super) async fn fire_post_wal_pre_publish_test_hook(repo: &RepoInstance, after_counter: bool) {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-util"))]
     if TEST_POST_WAL_PRE_PUBLISH_HOOK.get().is_some_and(|hook| {
         hook.after_counter
             .load(std::sync::atomic::Ordering::Acquire)
@@ -171,7 +171,7 @@ pub(super) async fn fire_post_wal_pre_publish_test_hook(repo: &RepoInstance, aft
 }
 
 async fn fire_cancel_test_hook(repo: &RepoInstance, pre_wal: bool) {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-util"))]
     if let Some(hook) = TEST_POST_WAL_PRE_PUBLISH_HOOK.get() {
         if hook.repo_name == repo.name()
             && hook.pre_wal.load(std::sync::atomic::Ordering::Acquire) == pre_wal

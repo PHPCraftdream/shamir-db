@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use crate::access::{Actor, ResourceMeta};
 use crate::engine::db_instance::db_instance::DbInstance;
 use crate::engine::repo::RepoConfig;
@@ -6,6 +8,8 @@ use crate::{DbError, DbResult};
 
 use super::ShamirDb;
 use super::SYSTEM_DB_NAME;
+
+const COMMIT_QUIESCE_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl ShamirDb {
     /// System-actor convenience wrapper around
@@ -630,6 +634,14 @@ impl ShamirDb {
     /// Best-effort: individual errors are logged and skipped; returns the
     /// first error encountered (if any) after attempting all repos/tables.
     pub async fn flush_all(&self) -> DbResult<()> {
+        self.flush_all_with_quiesce_timeout(COMMIT_QUIESCE_TIMEOUT)
+            .await
+    }
+
+    /// `timeout` is ONE budget shared by every repo: wedged tails must not
+    /// stack per-repo waits past the server's outer shutdown deadline.
+    pub(crate) async fn flush_all_with_quiesce_timeout(&self, timeout: Duration) -> DbResult<()> {
+        let deadline = Instant::now() + timeout;
         let mut first_err: Option<DbError> = None;
         let db_names = self.list_dbs();
         for db_name in &db_names {
@@ -641,6 +653,15 @@ impl ShamirDb {
                     continue;
                 };
 
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if let Err(e) = repo.quiesce_commits(remaining).await {
+                    log::warn!(
+                        "flush_all: {}/{}: {}; continuing with best-effort flush",
+                        db_name,
+                        repo_name,
+                        e
+                    );
+                }
                 if let Err(e) = repo.flush_buffers().await {
                     log::warn!("flush_all: {}/{}: {}", db_name, repo_name, e);
                     if first_err.is_none() {
@@ -651,7 +672,11 @@ impl ShamirDb {
         }
         // The system repo (catalogue) is not in `list_dbs`; its writes are
         // acked from the overlay + WAL like any other repo's.
-        if let Err(e) = self.system_store.flush_buffers().await {
+        if let Err(e) = self
+            .system_store
+            .flush_buffers_with_quiesce_timeout(deadline.saturating_duration_since(Instant::now()))
+            .await
+        {
             log::warn!("flush_all: system store: {}", e);
             if first_err.is_none() {
                 first_err = Some(e);
