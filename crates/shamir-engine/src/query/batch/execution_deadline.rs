@@ -274,6 +274,22 @@ impl ExecutionDeadline {
         }
     }
 
+    /// Test-only duration budget without the request's one-second minimum.
+    /// Zero expires immediately; fractional seconds are reported rounded down.
+    /// Overflow has the same effectively-unbounded semantics as request budgets.
+    #[cfg(test)]
+    pub(crate) fn from_duration(duration: Duration) -> Self {
+        match Instant::now().checked_add(duration) {
+            Some(deadline) => Self {
+                inner: Some(DeadlineInner {
+                    deadline,
+                    budget_secs: duration.as_secs(),
+                }),
+            },
+            None => Self::unbounded(),
+        }
+    }
+
     /// Cooperative checkpoint: `Err(BatchError::ExecutionTimedOut)` once
     /// the budget has elapsed, `Ok(())` otherwise (and always `Ok` for an
     /// [`unbounded`](Self::unbounded) deadline).
