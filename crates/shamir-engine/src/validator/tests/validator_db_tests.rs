@@ -344,8 +344,9 @@ async fn fk_final_staged_state_matrix() {
                     )
                     .await;
                 if scenario == "delete" || scenario == "update_old" {
-                    let err =
-                        result.expect_err("a removed or replaced parent cannot satisfy the FK");
+                    let err = result.expect_err(&format!(
+                        "indexed={indexed}, isolation={isolation:?}, scenario={scenario}:                          a removed or replaced parent cannot satisfy the FK"
+                    ));
                     assert!(
                         matches!(&err, DbError::ValidatorRejected(code) if code.contains("fk_violation")),
                         "indexed={indexed}, isolation={isolation:?}, scenario={scenario}: {err:?}"
