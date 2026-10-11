@@ -70,7 +70,7 @@ async fn aborted_advance_wakes_without_timer() {
 async fn out_of_order_11_then_10_releases_both_waiters() {
     let gate = RepoTxGate::new(9, 1);
     // Eager publication is intentionally NOT the visibility floor.
-    gate.publish_committed_max(11);
+    gate.raise_published(11);
     assert_eq!(gate.visible_floor(), 9);
     let probe10 = Arc::new(WakeProbe::default());
     let probe11 = Arc::new(WakeProbe::default());

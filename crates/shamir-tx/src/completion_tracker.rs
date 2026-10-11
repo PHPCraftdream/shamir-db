@@ -83,6 +83,31 @@ impl CompletionTracker {
         self.try_advance();
     }
 
+    /// Fixture-only settling. Preserve terminal states; pending slots become
+    /// Materialized and missing slots Aborted. Normal advancement wakes waiters
+    /// and compacts the prefix. Call only after fixture data is installed.
+    pub(crate) fn settle_through(&self, version: u64) {
+        let current = self.watermark();
+        if version <= current {
+            return;
+        }
+        for next in current + 1..=version {
+            {
+                match self.states.entry_sync(next) {
+                    scc::hash_map::Entry::Occupied(mut entry) => {
+                        if *entry.get() == State::Pending {
+                            *entry.get_mut() = State::Materialized;
+                        }
+                    }
+                    scc::hash_map::Entry::Vacant(entry) => {
+                        entry.insert_entry(State::Aborted);
+                    }
+                }
+            }
+            self.try_advance();
+        }
+    }
+
     /// Current watermark value.
     pub fn watermark(&self) -> u64 {
         self.watermark.load(Ordering::Acquire)

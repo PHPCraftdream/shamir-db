@@ -17,7 +17,7 @@ use crate::cell_reservation_guard::CellReservationGuard;
 use crate::mvcc_store::MvccStore;
 
 use super::helpers::make_mvcc;
-use shamir_storage::types::RecordKey;
+use shamir_storage::types::{KvOp, RecordKey};
 
 /// Read `(version, reserved_by)` straight out of the cell for assertions.
 /// Returns `None` when the key has no cell.
@@ -98,6 +98,32 @@ async fn finalize_sets_version_and_clears_reservation() {
         Some((42, 0)),
         "finalize publishes the version and clears the claim"
     );
+}
+
+/// PR-7: a delayed lower finalization must preserve the higher version/value.
+/// Before the fix, the direct finalization regresses the cell to 11 and the
+/// latest read resolves the lower overlay value instead of the higher one.
+#[tokio::test]
+async fn finalize_lower_after_higher_keeps_higher_version_and_latest_value() {
+    let mvcc = make_mvcc();
+    let key = RecordKey::from_slice(b"k");
+    let higher = Bytes::from_static(b"higher");
+    let lower = Bytes::from_static(b"lower");
+
+    // Install the higher value through the real overlay/cell/floor publish path.
+    mvcc.apply_committed_visible(&[KvOp::Set(key.clone(), higher.clone())], 12);
+    assert_eq!(mvcc.version_of(&key), 12);
+    assert!(mvcc.try_reserve(key.clone(), 12, 9));
+    assert_eq!(cell_state(&mvcc, &key), Some((12, 9)));
+
+    // Model the delayed publisher's overlay-before-cell order, then call the
+    // primitive directly so no later publish_cell can repair a regression.
+    mvcc.overlay.insert(key.clone(), 11, lower);
+    mvcc.finalize_reservation(key.clone(), 11);
+
+    assert_eq!(mvcc.version_of(&key), 12);
+    assert_eq!(cell_state(&mvcc, &key), Some((12, 0)));
+    assert_eq!(mvcc.get_current(key).await.unwrap(), Some(higher));
 }
 
 #[tokio::test]

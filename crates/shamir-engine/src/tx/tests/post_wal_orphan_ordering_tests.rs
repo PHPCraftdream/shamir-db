@@ -212,9 +212,11 @@ async fn post_wal_panic_same_record_later_writer_posting_survives_drain() {
             provenance: Default::default(),
         },
     ));
-    let outcome = repo.commit_tx(tx).await.unwrap();
+    let (later_version, task) =
+        super::snapshot_visibility_park_tests::spawn_settled_commit(&repo, tx).await;
     drop(snapshot);
-    assert_eq!(outcome.commit_version, orphan_version + 1);
+    assert_eq!(later_version, orphan_version + 1);
+    assert!(!task.is_finished());
     assert_eq!(gate.durable_watermark(), durable_before);
     assert!(gate.is_orphaned_post_wal(orphan_version));
     assert!(repo.drainer().window_entry(orphan_version).is_some());
@@ -228,6 +230,8 @@ async fn post_wal_panic_same_record_later_writer_posting_survives_drain() {
     );
 
     assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 2);
+    let outcome = task.await.unwrap().unwrap();
+    assert_eq!(outcome.commit_version, later_version);
     assert_eq!(gate.durable_watermark(), outcome.commit_version);
     assert_eq!(gate.last_committed(), outcome.commit_version);
     assert!(!gate.is_orphaned_post_wal(orphan_version));

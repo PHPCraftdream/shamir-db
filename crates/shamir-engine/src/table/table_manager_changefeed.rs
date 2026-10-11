@@ -66,6 +66,6 @@ impl TableManager {
         // `(snapshot, last_committed]` correctly includes this write.
         // Uses fetch_max semantics to avoid backward movement when racing
         // with concurrent tx commits or other non-tx writes.
-        cf.gate.publish_committed_max(commit_version);
+        cf.gate.raise_published(commit_version);
     }
 }
