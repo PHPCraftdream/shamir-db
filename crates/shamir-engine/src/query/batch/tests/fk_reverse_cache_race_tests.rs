@@ -76,8 +76,49 @@ use tokio::sync::Notify;
 
 use crate::repo::fk_reverse_cache::{
     PostGenCheckPrePublishHook, TEST_POST_GENCHECK_PRE_PUBLISH_HOOK,
+    TEST_POST_PUBLISH_PRE_RETURN_HOOK,
 };
 use crate::repo::{FkReverseCache, ReverseFkEntry, TaggedReverseFkEntry};
+
+// B06 red counterfactual: the old post-publish reread returns an empty slice
+// after invalidate(), even though the CAS successfully published new_entry().
+#[tokio::test]
+async fn post_publish_invalidate_preserves_returned_entries() {
+    let cache = Arc::new(FkReverseCache::new());
+    let hook = Arc::new(PostGenCheckPrePublishHook {
+        reached: AtomicUsize::new(0),
+        resume: Notify::new(),
+        armed: std::sync::atomic::AtomicBool::new(true),
+    });
+    TEST_POST_PUBLISH_PRE_RETURN_HOOK
+        .set(Arc::clone(&hook))
+        .expect("post-publish hook must not already be installed");
+    let task_cache = Arc::clone(&cache);
+    let handle = tokio::spawn(async move {
+        task_cache
+            .get_or_build_by_parent("parent", || async {
+                Ok::<_, Infallible>(vec![tagged(new_entry())])
+            })
+            .await
+            .unwrap()
+    });
+    while hook.reached.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+    cache.invalidate();
+    // One armed waiter; notify_one retains a permit if it has not polled yet.
+    hook.resume.notify_one();
+    let entries = handle.await.expect("cache task must complete");
+    assert_eq!(entries.to_vec(), vec![new_entry()]);
+    let fresh = cache
+        .get_or_build_by_parent("parent", || async {
+            Ok::<_, Infallible>(vec![tagged(old_entry())])
+        })
+        .await
+        .unwrap();
+    assert_eq!(fresh.to_vec(), vec![old_entry()]);
+    assert_eq!(entries.to_vec(), vec![new_entry()]);
+}
 
 /// Build a `ReverseFkEntry` whose `child_table` is `child` (everything else
 /// identical), so tests can distinguish "old schema" vs "new schema" scan

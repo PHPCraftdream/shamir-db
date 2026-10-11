@@ -252,6 +252,55 @@ fn write_value_error_to_batch_error(alias: &str, err: WriteValueError) -> BatchE
     }
 }
 
+/// B06 one-shot pause after graph acquisition, before an FK role decision.
+/// Each Notify has one waiter; notify_one retains an early permit.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct FkRoleDecisionHook {
+    pub(crate) reached: tokio::sync::Notify,
+    pub(crate) resume: tokio::sync::Notify,
+    pub(crate) armed: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(test)]
+impl FkRoleDecisionHook {
+    pub(crate) fn new() -> Self {
+        Self {
+            reached: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
+            armed: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+
+    async fn fire(&self) {
+        if self
+            .armed
+            .compare_exchange(
+                true,
+                false,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            self.reached.notify_one();
+            self.resume.notified().await;
+        }
+    }
+}
+
+// Installation assumes nextest's per-test process isolation, as do the
+// existing cache seams. Uninstalled hooks never suspend the caller.
+#[cfg(test)]
+pub(crate) static TEST_PARENT_PRE_ROLE_DECISION_HOOK: std::sync::OnceLock<
+    std::sync::Arc<FkRoleDecisionHook>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(crate) static TEST_CHILD_PRE_ROLE_DECISION_HOOK: std::sync::OnceLock<
+    std::sync::Arc<FkRoleDecisionHook>,
+> = std::sync::OnceLock::new();
+
 /// F-28 Step 5 (S3-C) — child-side hook: if `table_ref`'s table is flagged
 /// (via `RepoInstance::fk_reverse_cache`) as an FK child (it references some
 /// OTHER table via a foreign key), require this tx's commit footprint to be
@@ -272,7 +321,7 @@ fn write_value_error_to_batch_error(alias: &str, err: WriteValueError) -> BatchE
 /// token, a concurrent Serializable FK-parent-delete's Phase 2-bis check has
 /// nothing to conflict against — exactly the silent-corruption outcome S3-C
 /// exists to prevent). So when FK-role discovery ITSELF fails — a
-/// `resolve_repo` error, or a `get_or_build_by_parent` cache-build error —
+/// `resolve_repo` error, or a `get_or_build_snapshot` cache-build error —
 /// the hook does NOT fall back to the permissive "assume not an FK child"
 /// behavior; it widens the footprint UNCONDITIONALLY by calling
 /// [`TxContext::require_footprint_for`] anyway. This is safe because a
@@ -285,16 +334,8 @@ fn write_value_error_to_batch_error(alias: &str, err: WriteValueError) -> BatchE
 /// new spurious aborts on otherwise-healthy repos. A cache-build failure is
 /// rarer still and would likewise recur on the next real FK-discovery call.
 ///
-/// `FkReverseCache::is_fk_child` is a pure peek that returns `false` on a
-/// cold/never-built cache WITHOUT triggering a rebuild (see its doc
-/// comment) — the parent-side callers (`fk_restrict.rs`/`fk_actions.rs`)
-/// always warm it first via `get_or_build_by_parent` before peeking, but
-/// this child-side hook can run as the very FIRST FK-cache touch a repo
-/// ever sees (a child-table insert before any delete/cascade has run), so
-/// it warms the cache itself via the same `get_or_build_by_parent` +
-/// `build_reverse_fk_entries` pair before peeking — a cache miss pays the
-/// same one-time O(tables) scan `fk_restrict.rs`/`fk_actions.rs` already
-/// pay on their own first miss; a warm cache is an O(1) hit.
+/// The first touch builds the repo graph. Entries and roles come from one
+/// populated snapshot, unaffected by invalidation after acquisition.
 pub(crate) async fn require_footprint_if_fk_child(
     resolver: &dyn TableResolver,
     table_ref: &TableRef,
@@ -321,39 +362,36 @@ pub(crate) async fn require_footprint_if_fk_child(
         }
     };
     let cache = repo.fk_reverse_cache();
-    // Warm the cache (no-op if already warm) using this table as the
-    // nominal "parent" key — `get_or_build_by_parent` populates BOTH
-    // indices (by_parent AND by_child) from one repo-wide scan regardless
-    // of which table name is passed, so the by-parent result itself is
-    // discarded here; only the warming side-effect matters.
     let repo_name = table_ref.repo.clone();
-    let table_name = table_ref.table.clone();
-    if let Err(e) = cache
-        .get_or_build_by_parent(&table_name, || {
-            // F-36: the build closure is `Fn` (re-callable) so a
-            // generation-mismatched scan can retry under the same
-            // single-flight lock. Clone `repo_name` per call (the captured
-            // `String` must not be moved out of the closure); `resolver` is
-            // `&dyn TableResolver` (trivially `Copy`).
+    let snapshot = match cache
+        .get_or_build_snapshot(|| {
+            // Fn is re-callable after a generation CAS loss.
             let repo_name = repo_name.clone();
             async move { crate::repo::build_reverse_fk_entries(resolver, &repo_name).await }
         })
         .await
     {
-        // F-40: fail CLOSED — same rationale as the resolve_repo error path
-        // above. A cache-build failure means we cannot prove the table is
-        // NOT an FK child, so widen the footprint unconditionally rather
-        // than silently skipping the requirement.
-        log::warn!(
-            "F-40 fail-closed: require_footprint_if_fk_child: reverse-FK scan failed for repo \
-             '{}' ({e}) — widening footprint for table_token={table_token} anyway (cannot prove \
-             non-FK-child on cache-build failure)",
-            table_ref.repo
-        );
-        tx.require_footprint_for(table_token);
-        return;
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            // F-40: fail CLOSED — same rationale as the resolve_repo error path
+            // above. A cache-build failure means we cannot prove the table is
+            // NOT an FK child, so widen the footprint unconditionally rather
+            // than silently skipping the requirement.
+            log::warn!(
+                "F-40 fail-closed: require_footprint_if_fk_child: reverse-FK scan failed for repo \
+                 '{}' ({e}) — widening footprint for table_token={table_token} anyway (cannot prove \
+                 non-FK-child on cache-build failure)",
+                table_ref.repo
+            );
+            tx.require_footprint_for(table_token);
+            return;
+        }
+    };
+    #[cfg(test)]
+    if let Some(hook) = TEST_CHILD_PRE_ROLE_DECISION_HOOK.get() {
+        hook.fire().await;
     }
-    if cache.is_fk_child(&table_ref.table) {
+    if snapshot.is_fk_child(&table_ref.table) {
         tx.require_footprint_for(table_token);
     }
 }
@@ -366,9 +404,9 @@ pub(crate) async fn require_footprint_if_fk_child(
 /// iff `table_ref`'s table is flagged (via `RepoInstance::fk_reverse_cache`)
 /// as an FK parent with at least one non-`NoAction` action for the
 /// operation kind `op` selects — `FkParentOpKind::Delete` consults
-/// `FkReverseCache::is_fk_parent_with_delete_action` (the `on_delete`
+/// `FkSnapshot::is_parent_with_delete_action` (the `on_delete`
 /// flag), `FkParentOpKind::Update` consults
-/// `FkReverseCache::is_fk_parent_with_update_action` (the `on_update`
+/// `FkSnapshot::is_parent_with_update_action` (the `on_update`
 /// flag). I.e. a RESTRICT/CASCADE/SET NULL fan-out is about to run against
 /// it on that path. Upgrading to Serializable is what makes the fan-out's
 /// child-table scans (`fk_restrict.rs`/`fk_actions.rs`/`fk_on_update.rs`)
@@ -377,7 +415,7 @@ pub(crate) async fn require_footprint_if_fk_child(
 /// eventual commit.
 ///
 /// **F-40: fail-CLOSED on discovery failure.** When FK-role discovery ITSELF
-/// fails — a `resolve_repo` error, or a `get_or_build_by_parent` cache-build
+/// fails — a `resolve_repo` error, or a `get_or_build_snapshot` cache-build
 /// error — the hook returns `Serializable` (the MORE protective isolation),
 /// not `Snapshot`. The old permissive fallback (return `Snapshot`, byte-
 /// identical to a non-FK-parent table) was the wrong direction for a
@@ -424,35 +462,36 @@ pub(crate) async fn implicit_tx_isolation_for_fk_parent(
     };
     let cache = repo.fk_reverse_cache();
     let repo_name = table_ref.repo.clone();
-    let table_name = table_ref.table.clone();
-    // Warm the cache (no-op if already warm) — see the identical rationale
-    // in `require_footprint_if_fk_child`: this hook can be the very FIRST
-    // FK-cache touch a repo sees.
-    if cache
-        .get_or_build_by_parent(&table_name, || {
-            // F-36: `Fn` (re-callable) build closure — see the identical
-            // rationale in `require_footprint_if_fk_child`.
+    let snapshot = match cache
+        .get_or_build_snapshot(|| {
+            // Fn is re-callable after a generation CAS loss.
             let repo_name = repo_name.clone();
             async move { crate::repo::build_reverse_fk_entries(resolver, &repo_name).await }
         })
         .await
-        .is_err()
     {
-        // F-40: fail CLOSED — same rationale as the resolve_repo error path
-        // above. A cache-build failure means we cannot prove the table is
-        // NOT an FK parent, so return the MORE protective isolation rather
-        // than the old permissive `Snapshot` fallback.
-        log::warn!(
-            "F-40 fail-closed: implicit_tx_isolation_for_fk_parent: reverse-FK scan failed for \
-             repo '{}' — returning Serializable anyway (cannot prove non-FK-parent on \
-             cache-build failure)",
-            table_ref.repo
-        );
-        return shamir_tx::IsolationLevel::Serializable;
+        Ok(snapshot) => snapshot,
+        Err(_e) => {
+            // F-40: fail CLOSED — same rationale as the resolve_repo error path
+            // above. A cache-build failure means we cannot prove the table is
+            // NOT an FK parent, so return the MORE protective isolation rather
+            // than the old permissive `Snapshot` fallback.
+            log::warn!(
+                "F-40 fail-closed: implicit_tx_isolation_for_fk_parent: reverse-FK scan failed for \
+                 repo '{}' — returning Serializable anyway (cannot prove non-FK-parent on \
+                 cache-build failure)",
+                table_ref.repo
+            );
+            return shamir_tx::IsolationLevel::Serializable;
+        }
+    };
+    #[cfg(test)]
+    if let Some(hook) = TEST_PARENT_PRE_ROLE_DECISION_HOOK.get() {
+        hook.fire().await;
     }
     let is_fk_parent = match op {
-        FkParentOpKind::Delete => cache.is_fk_parent_with_delete_action(&table_ref.table),
-        FkParentOpKind::Update => cache.is_fk_parent_with_update_action(&table_ref.table),
+        FkParentOpKind::Delete => snapshot.is_parent_with_delete_action(&table_ref.table),
+        FkParentOpKind::Update => snapshot.is_parent_with_update_action(&table_ref.table),
     };
     if is_fk_parent {
         shamir_tx::IsolationLevel::Serializable

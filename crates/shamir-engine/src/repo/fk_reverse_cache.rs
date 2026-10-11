@@ -116,6 +116,33 @@ async fn fire_post_gencheck_pre_publish_test_hook() {
     }
 }
 
+/// B06 seam after a successful CAS, before returning its retained snapshot.
+#[cfg(test)]
+pub(crate) static TEST_POST_PUBLISH_PRE_RETURN_HOOK: std::sync::OnceLock<
+    Arc<PostGenCheckPrePublishHook>,
+> = std::sync::OnceLock::new();
+
+async fn fire_post_publish_pre_return_test_hook() {
+    #[cfg(test)]
+    if let Some(hook) = TEST_POST_PUBLISH_PRE_RETURN_HOOK.get() {
+        if hook
+            .armed
+            .compare_exchange(
+                true,
+                false,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            hook.reached
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Only the armed caller waits; notify_one retains an early permit.
+            hook.resume.notified().await;
+        }
+    }
+}
+
 /// A single reverse-FK reference: a child table + child field that
 /// references some parent table with the given `on_delete`/`on_update`
 /// actions.
@@ -159,7 +186,7 @@ pub struct TaggedReverseFkEntry {
 /// references it, across all `on_delete`/`on_update` actions).
 ///
 /// (#1181) Value is `Arc<[ReverseFkEntry]>`, not `Vec<ReverseFkEntry>`: a
-/// warm-cache hit in [`FkReverseCache::lookup_by_parent`] is then a pointer
+/// warm-cache hit in [`FkSnapshot::by_parent`] is then a pointer
 /// (refcount) clone instead of a deep clone of every entry's owned `String`
 /// fields — shared by all three discovery callers (`fk_restrict.rs`,
 /// `fk_actions.rs`, `fk_on_update.rs`), each of which already re-filters this
@@ -194,6 +221,53 @@ struct VersionedState {
     /// check, not from comparing this number.
     generation: u64,
     cache: Option<CacheState>,
+}
+
+/// One populated, immutable reverse-FK graph. Invalidation affects future
+/// acquisitions, never the entries or role decisions made from this snapshot.
+#[derive(Clone)]
+pub struct FkSnapshot {
+    state: Arc<VersionedState>,
+}
+
+impl FkSnapshot {
+    fn cache(&self) -> &CacheState {
+        self.state
+            .cache
+            .as_ref()
+            .expect("FkSnapshot always holds a populated state")
+    }
+
+    pub fn by_parent(&self, table: &str) -> Arc<[ReverseFkEntry]> {
+        self.cache()
+            .by_parent
+            .get(table)
+            .cloned()
+            .unwrap_or_else(|| Arc::from(Vec::new()))
+    }
+
+    pub fn is_fk_child(&self, table: &str) -> bool {
+        self.cache()
+            .by_child
+            .get(table)
+            .is_some_and(|parents| !parents.is_empty())
+    }
+
+    pub fn is_parent_with_delete_action(&self, table: &str) -> bool {
+        self.cache().by_parent.get(table).is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry.on_delete != FkAction::NoAction)
+        })
+    }
+
+    pub fn is_parent_with_update_action(&self, table: &str) -> bool {
+        self.cache().by_parent.get(table).is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry.on_update != FkAction::NoAction)
+        })
+    }
 }
 
 /// Per-repo cache of the reverse-FK map, lazily populated (cache-aside) and
@@ -266,72 +340,8 @@ impl FkReverseCache {
         });
     }
 
-    /// Cache-aside lookup: return the cached reverse-FK entries for
-    /// `parent_table`, running `build` (the existing O(tables) discovery
-    /// scan) once if the cache is currently empty (never built, or
-    /// invalidated since the last build).
-    ///
-    /// `build` must return the FULL repo's reverse-FK entries — every
-    /// parent → its children, each tagged with the parent table it targets
-    /// (see [`TaggedReverseFkEntry`]) — not just `parent_table`'s. A single
-    /// rebuild seeds every parent's entry at once, so a subsequent delete on
-    /// a DIFFERENT parent table in the same repo also hits the cache instead
-    /// of triggering its own rebuild.
-    ///
-    /// # F-36 — single-flight rebuild; F-47 (#858) — atomic versioned publish
-    ///
-    /// Fast path: a cheap `ArcSwap::load` outside any lock serves every
-    /// warm-cache reader. On a miss, [`build_lock`](Self::new) serializes
-    /// the build path so two concurrent misses don't each run their own
-    /// independent O(tables) scan (the second's post-acquire re-check finds
-    /// the first's already-warm result).
-    ///
-    /// Inside the lock, the publish is a SINGLE atomic operation: the exact
-    /// `Arc<VersionedState>` in effect is captured BEFORE the scan, and after
-    /// the scan the result is published via `ArcSwap::compare_and_swap`
-    /// against that SAME captured `Arc` (pointer identity, not a number
-    /// comparison). The CAS can only succeed if nothing — no concurrent
-    /// [`invalidate`](Self::invalidate), no other builder — replaced the
-    /// state since it was captured. F-36's original version of this method
-    /// captured a plain `u64` generation and, after the scan, compared it
-    /// against a FRESH `generation.load()` before a SEPARATE `state.store`
-    /// — two independent operations on two independent atomics, leaving a
-    /// window where a concurrent `invalidate`'s bump-then-clear could land
-    /// between the compare and the store and get overwritten by a stale
-    /// publish. F-47 closes that window by merging the generation and the
-    /// cached indices into ONE `VersionedState` behind ONE `ArcSwap`, making
-    /// the compare-then-publish a single atomic CAS instead of two racing
-    /// operations.
-    ///
-    /// A CAS loss means some other writer (an `invalidate`, or in principle
-    /// another concurrent builder) already published a newer state; the scan
-    /// result is dropped and the whole build retries against that new state,
-    /// still holding `build_lock` — this never returns a stale-or-empty
-    /// answer, only once a genuinely uncontested publish (or an existing warm
-    /// hit) has happened.
-    ///
-    /// `build` is `Fn` (not `FnOnce`) precisely so that a rare CAS-loss retry
-    /// can call it again.
-    ///
-    /// # #1200 — bounded cooperation on CAS-loss retry
-    ///
-    /// A CAS loss loops back and re-runs `build` under a continuous
-    /// `invalidate()` storm this could in principle retry indefinitely while
-    /// still holding `build_lock`, starving every concurrent waiter (in
-    /// practice bounded today: `invalidate()` is only called from rare DDL
-    /// paths, not a live incident). Rather than turn this into a bounded,
-    /// fallible retry — which would require a "retry budget exceeded" error
-    /// value of the caller-supplied, unconstrained generic type `E`, with no
-    /// bound (e.g. `From<...>`) to construct one from inside this method,
-    /// forcing a signature change (and a new error variant every one of the
-    /// 4 existing call sites and their fail-closed test suites would have to
-    /// thread through) for a scenario that is not a live incident — each
-    /// retry yields once via [`tokio::task::yield_now`] before re-capturing
-    /// state and re-running `build`. This keeps the function's existing
-    /// error contract (`Err` only ever means "the build closure itself
-    /// failed") intact while giving the executor a chance to run other
-    /// ready tasks (including whatever's driving a competing `invalidate`)
-    /// between attempts instead of immediately re-entering `build().await`.
+    /// Compatibility lookup for existing users; all data comes from one
+    /// retained snapshot, including after a successful publish.
     pub async fn get_or_build_by_parent<F, Fut, E>(
         &self,
         parent_table: &str,
@@ -341,120 +351,66 @@ impl FkReverseCache {
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<Vec<TaggedReverseFkEntry>, E>>,
     {
-        // Fast path: cheap ArcSwap load, no lock. A warm cache serves every
-        // concurrent reader here.
-        if let Some(hit) = self.lookup_by_parent(parent_table) {
-            return Ok(hit);
-        }
+        Ok(self
+            .get_or_build_snapshot(build)
+            .await?
+            .by_parent(parent_table))
+    }
 
-        // Miss: serialize the build path so concurrent misses don't each
-        // independently re-scan. Held across the scan's `.await`, hence the
-        // async-aware `tokio::sync::Mutex` (sanctioned low-frequency
-        // exception — see `build_lock`'s doc).
+    /// Acquire one populated repo-wide graph. Warm reads retain an owned Arc,
+    /// not an arc-swap Guard. Cold reads remain single-flight; a CAS loss
+    /// discards the scan and yields before retrying against a new generation.
+    /// The build closure must return ALL parent-tagged entries in the repo;
+    /// both parent and child indices are derived from that one complete scan.
+    /// Errors come only from the build closure and never publish partial data.
+    pub async fn get_or_build_snapshot<F, Fut, E>(&self, build: F) -> Result<FkSnapshot, E>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<TaggedReverseFkEntry>, E>>,
+    {
+        let state = self.state.load_full();
+        if state.cache.is_some() {
+            return Ok(FkSnapshot { state });
+        }
         let _guard = self.build_lock.lock().await;
-
-        // Double-checked locking: another builder may have populated the
-        // cache while we waited for the lock. Re-check before paying for our
-        // own scan (in the common no-raced-invalidate case this is exactly
-        // the single-flight hit that collapses the stampede).
-        if let Some(hit) = self.lookup_by_parent(parent_table) {
-            return Ok(hit);
+        let state = self.state.load_full();
+        if state.cache.is_some() {
+            return Ok(FkSnapshot { state });
         }
-
-        // Build loop: capture the CURRENT Arc<VersionedState> (not just its
-        // generation number), run the scan, and publish via a single
-        // pointer-identity CAS against that exact captured Arc. On a CAS
-        // loss, drop the stale result and rebuild against the current
-        // state, still holding `build_lock`.
         loop {
             let captured = self.state.load_full();
-
             let all_entries = build().await?;
-
             fire_post_gencheck_pre_publish_test_hook().await;
-
-            if self.try_publish(&captured, all_entries) {
-                return Ok(self.lookup_by_parent(parent_table).unwrap_or_default());
+            if let Some(state) = self.try_publish(&captured, all_entries) {
+                fire_post_publish_pre_return_test_hook().await;
+                return Ok(FkSnapshot { state });
             }
-            // CAS lost: some other writer (an `invalidate`, or in principle
-            // another builder) already published a newer state since we
-            // captured `captured`. Yield once (#1200) before looping so the
-            // executor can run other ready tasks between retries, then
-            // rebuild against the new state.
             tokio::task::yield_now().await;
         }
     }
 
-    /// O(1) role-flag helper for F-28 Step 5: is `table` referenced by ANY
-    /// FK with a non-`NoAction` `on_delete` action (i.e. is it a parent
-    /// worth an isolation upgrade at implicit-DELETE-begin time)? Derived
-    /// from the SAME cached rows `get_or_build_by_parent` serves — no second
-    /// structure. Returns `false` on a cold/invalidated cache without
-    /// triggering a rebuild (a pure peek); callers needing an authoritative
-    /// answer call [`get_or_build_by_parent`](Self::get_or_build_by_parent)
-    /// first so the cache is warm (see `query_runner.rs`'s
-    /// `implicit_tx_isolation_for_fk_parent`, which does exactly that).
+    // Legacy assertions in out-of-scope fk_race_closure_tests require these
+    // names. No production peek API: test helpers require populated state.
+    #[cfg(test)]
     pub fn is_fk_parent_with_delete_action(&self, table: &str) -> bool {
-        let guard = self.state.load();
-        match guard.cache.as_ref() {
-            Some(cache) => cache
-                .by_parent
-                .get(table)
-                .is_some_and(|entries| entries.iter().any(|e| e.on_delete != FkAction::NoAction)),
-            None => false,
-        }
+        let state = self.state.load_full();
+        assert!(
+            state.cache.is_some(),
+            "legacy role assertion requires a warm cache",
+        );
+        let snapshot = FkSnapshot { state };
+        snapshot.is_parent_with_delete_action(table)
     }
 
-    /// O(1) role-flag helper for F-28 Step 5 / F-35: is `table` referenced
-    /// by ANY FK with a non-`NoAction` `on_update` action (i.e. is it a
-    /// parent worth an isolation upgrade at implicit-UPDATE-begin time)?
-    ///
-    /// Symmetric with [`is_fk_parent_with_delete_action`](Self::is_fk_parent_with_delete_action)
-    /// but keyed on `on_update` — the two are consulted independently so a
-    /// FK shaped `on_delete = NoAction, on_update = Restrict` upgrades the
-    /// implicit UPDATE path (this helper) without upgrading the implicit
-    /// DELETE path (the sibling helper). Same cold-cache pure-peek semantics
-    /// — see `query_runner.rs`'s `implicit_tx_isolation_for_fk_parent`,
-    /// which warms the cache before peeking.
+    #[cfg(test)]
     pub fn is_fk_parent_with_update_action(&self, table: &str) -> bool {
-        let guard = self.state.load();
-        match guard.cache.as_ref() {
-            Some(cache) => cache
-                .by_parent
-                .get(table)
-                .is_some_and(|entries| entries.iter().any(|e| e.on_update != FkAction::NoAction)),
-            None => false,
-        }
-    }
-
-    /// O(1) role-flag helper for F-28 Step 5: does `table` reference ANY
-    /// other table via a FK (i.e. is it an FK child requiring
-    /// `require_footprint_for` at insert/update-staging time)? Derived from
-    /// the child→parents reverse-reverse index built alongside `by_parent`
-    /// in the SAME rebuild. Same cold-cache semantics as
-    /// [`is_fk_parent_with_delete_action`](Self::is_fk_parent_with_delete_action)
-    /// — see `query_runner.rs`'s `require_footprint_if_fk_child`, which warms
-    /// the cache before peeking.
-    pub fn is_fk_child(&self, table: &str) -> bool {
-        let guard = self.state.load();
-        match guard.cache.as_ref() {
-            Some(cache) => cache
-                .by_child
-                .get(table)
-                .is_some_and(|parents| !parents.is_empty()),
-            None => false,
-        }
-    }
-
-    fn lookup_by_parent(&self, parent_table: &str) -> Option<Arc<[ReverseFkEntry]>> {
-        let guard = self.state.load();
-        guard.cache.as_ref().map(|cache| {
-            cache
-                .by_parent
-                .get(parent_table)
-                .cloned()
-                .unwrap_or_else(|| Arc::from(Vec::new()))
-        })
+        let state = self.state.load_full();
+        assert!(
+            state.cache.is_some(),
+            "legacy role assertion requires a warm cache",
+        );
+        let snapshot = FkSnapshot { state };
+        snapshot.is_parent_with_update_action(table)
     }
 
     /// Build both indices from a flat, parent-tagged list of ALL reverse-FK
@@ -463,17 +419,16 @@ impl FkReverseCache {
     /// exact `Arc<VersionedState>` the caller observed before running the
     /// scan `all_entries` came from.
     ///
-    /// Returns `true` if the CAS won (our result is now published — no
-    /// concurrent `invalidate`/builder replaced `captured` since it was
-    /// read), `false` if it lost (some other writer already published a
-    /// newer state; the caller must drop this result and retry against the
-    /// new one). This is the F-47 (#858) fix: generation-check-then-publish
-    /// collapsed into one atomic CAS instead of a separate load + store.
+    /// Returns the published Arc if the CAS won (no concurrent writer
+    /// replaced `captured` since it was read), or `None` if it lost.
+    /// On loss, the caller must drop the scan and retry against the newer
+    /// state. F-47's generation-check-then-publish remains one atomic CAS,
+    /// not a separate load + store.
     fn try_publish(
         &self,
         captured: &Arc<VersionedState>,
         all_entries: Vec<TaggedReverseFkEntry>,
-    ) -> bool {
+    ) -> Option<Arc<VersionedState>> {
         // Accumulated as `Vec` (push-friendly) and converted to the cache's
         // `Arc<[ReverseFkEntry]>` storage shape once, below — `ParentIndex`
         // itself can't `.push()` into an `Arc<[T]>` slice.
@@ -505,9 +460,11 @@ impl FkReverseCache {
             }),
         });
 
-        let previous =
-            arc_swap::Guard::into_inner(self.state.compare_and_swap(captured, new_state));
-        Arc::ptr_eq(&previous, captured)
+        let previous = arc_swap::Guard::into_inner(
+            self.state
+                .compare_and_swap(captured, Arc::clone(&new_state)),
+        );
+        Arc::ptr_eq(&previous, captured).then_some(new_state)
     }
 }
 

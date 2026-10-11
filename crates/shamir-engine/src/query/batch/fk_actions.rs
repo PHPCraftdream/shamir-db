@@ -1069,7 +1069,7 @@ async fn discover_action_refs(
     let repo_name = parent_table_ref.repo.clone();
     let all_for_parent = repo
         .fk_reverse_cache()
-        .get_or_build_by_parent(&parent_table_ref.table, || {
+        .get_or_build_snapshot(|| {
             // F-36: `Fn` (re-callable) build closure so a
             // generation-mismatched scan can retry under the same
             // single-flight lock. Clone `repo_name` per call.
@@ -1081,7 +1081,8 @@ async fn discover_action_refs(
             alias: String::new(),
             message: format!("fk_actions: reverse-FK scan failed: {e}"),
             code: Some("fk_actions".to_string()),
-        })?;
+        })?
+        .by_parent(&parent_table_ref.table);
 
     let is_self_ref_table = &parent_table_ref.table;
     Ok(all_for_parent
