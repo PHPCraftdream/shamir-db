@@ -1,3 +1,4 @@
+pub mod aggregate_null_input_tests;
 pub mod ddl_tests;
 pub mod pagination_after_tests;
 pub mod query_record_tests;
