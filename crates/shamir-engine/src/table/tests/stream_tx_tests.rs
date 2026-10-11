@@ -272,22 +272,14 @@ async fn a3_record_scan_reads_records_snapshot_version_not_current_after_concurr
         "A's commit must advance the key past B's snapshot"
     );
 
-    // B scans the table via the production Serializable-scan path. Each
-    // yielded record is recorded into B's read-set by `record_scan_reads`.
-    // The streaming scan reads the committed/current store (NOT snapshot-
-    // gated like `read_one_tx`), so B observes A's v1 — but B's tx
-    // snapshot is still V0. Before the fix, `record_scan_reads` recorded
-    // the cell's current version (V1); at commit `validate_read_set` saw
-    // `current == version_seen` → no conflict → B committed having
-    // observed data past its own snapshot. After the fix, the recorded
-    // version is clamped to `min(V1, snap_b) = snap_b`, so
-    // `validate_read_set` sees `current(V1) > snap_b` → SsiConflict.
+    // B's scan now reads its pinned V0 snapshot; SSI must still record the
+    // snapshot version and reject the conflicting write at commit.
     let streamed = collect_stream(tbl.list_stream_tx(Some(&tx_b), 10)).await;
     assert!(
         streamed
             .iter()
-            .any(|(r, v)| { *r == rid && matches!(v, InnerValue::Str(ref s) if s == "v1") }),
-        "B's scan yields the current committed value v1 for rid {:?}, got {:?}",
+            .any(|(r, v)| { *r == rid && matches!(v, InnerValue::Str(ref s) if s == "v0") }),
+        "B's scan yields the snapshot value v0 for rid {:?}, got {:?}",
         rid,
         streamed
     );
