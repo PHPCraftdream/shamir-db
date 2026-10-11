@@ -171,12 +171,9 @@ impl TableManager {
 
                                     // Pipeline tail: no residual, no group_by, no aggregates,
                                     // no order_by (all excluded by the eligibility guard above).
-                                    if let Some((paged, pagination)) = try_project_page_only(
-                                        query,
-                                        &matched,
-                                        interner,
-                                        ctx.scalars.clone(),
-                                    )? {
+                                    if let Some((paged, pagination)) =
+                                        try_project_page_only(query, &matched, interner, ctx)?
+                                    {
                                         let records_returned = paged.len() as u64;
                                         return Ok(QueryResult::with_stats(
                                             paged,
@@ -193,11 +190,11 @@ impl TableManager {
                                         .with_pagination(pagination));
                                     }
 
-                                    let result_qv = exec::apply_select_value(
+                                    let result_qv = exec::apply_select_value_with_context(
                                         &matched,
                                         &query.select,
                                         interner,
-                                        ctx.scalars.clone(),
+                                        ctx,
                                     )?;
                                     let (paged_qv, pagination) = exec::apply_pagination(
                                         result_qv,
@@ -281,10 +278,10 @@ impl TableManager {
             let mut result_qv = if has_group_by {
                 exec::validate_aggregate_select(&query.select)?;
                 let group_by = query.group_by.as_ref().unwrap();
-                exec::apply_group_by(&matched, group_by, &query.select, interner, ctx)
+                exec::try_apply_group_by(&matched, group_by, &query.select, interner, ctx)?
             } else {
                 exec::validate_aggregate_select(&query.select)?;
-                exec::apply_aggregate_all(&matched, &query.select, interner, ctx.scalars.clone())
+                exec::apply_aggregate_all_with_context(&matched, &query.select, interner, ctx)?
             };
 
             if let Some(ref order_by) = query.order_by {
@@ -341,7 +338,7 @@ impl TableManager {
                 query,
                 &matched,
                 interner,
-                ctx.scalars.clone(),
+                ctx,
                 self.name(),
                 &mut corrupt,
             )? {
@@ -363,7 +360,7 @@ impl TableManager {
                 &matched,
                 &query.select,
                 interner,
-                ctx.scalars.clone(),
+                ctx,
                 self.name(),
                 &mut corrupt,
             )?;
@@ -454,7 +451,7 @@ impl TableManager {
             &matched,
             &query.select,
             interner,
-            ctx.scalars.clone(),
+            ctx,
             self.name(),
             &mut corrupt,
         )?;
@@ -591,7 +588,7 @@ impl TableManager {
             &matched,
             &query.select,
             interner,
-            ctx.scalars.clone(),
+            ctx,
             self.name(),
             &mut corrupt,
         )?;
@@ -722,10 +719,10 @@ impl TableManager {
             let mut result_qv = if has_group_by {
                 exec::validate_aggregate_select(&query.select)?;
                 let group_by = query.group_by.as_ref().unwrap();
-                exec::apply_group_by(&matched, group_by, &query.select, interner, ctx)
+                exec::try_apply_group_by(&matched, group_by, &query.select, interner, ctx)?
             } else {
                 exec::validate_aggregate_select(&query.select)?;
-                exec::apply_aggregate_all(&matched, &query.select, interner, ctx.scalars.clone())
+                exec::apply_aggregate_all_with_context(&matched, &query.select, interner, ctx)?
             };
 
             if query.select.distinct {
@@ -790,7 +787,7 @@ impl TableManager {
                 query,
                 &matched,
                 interner,
-                ctx.scalars.clone(),
+                ctx,
                 self.name(),
                 &mut corrupt,
             )? {
@@ -815,7 +812,7 @@ impl TableManager {
                 &matched,
                 &query.select,
                 interner,
-                ctx.scalars.clone(),
+                ctx,
                 self.name(),
                 &mut corrupt,
             )?;

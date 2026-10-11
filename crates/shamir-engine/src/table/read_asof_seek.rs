@@ -323,7 +323,7 @@ impl TableManager {
             &matched,
             &query.select,
             interner,
-            ctx.scalars.clone(),
+            ctx,
             self.name(),
             &mut corrupt,
         )?;

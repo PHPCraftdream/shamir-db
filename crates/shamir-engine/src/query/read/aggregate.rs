@@ -35,6 +35,7 @@ use crate::query::read::exec::pre_intern_select_keys;
 use crate::query::read::{AggFunc, AggregateField, GroupBy, QueryResult, Select, SelectItem};
 use shamir_funclib::agg::{Aggregator, DistinctWrapper};
 use shamir_funclib::scalar_resolver::ScalarResolver;
+use shamir_storage::error::{DbError, DbResult};
 use shamir_types::codecs::interned::inner_value_to_query_value;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::{HavingView, RecordRef, RecordView, ScalarRef};
@@ -779,9 +780,8 @@ fn intern_field_path_keys(field: &[String], interner: &Interner) -> Option<Vec<I
 // Aggregate-select validation (Fix 1b + Fix 2b)
 // ============================================================================
 
-/// Whether a [`FilterValue`] is a literal (not a dynamic `$ref`/`$fn`/etc.).
-/// Aggregate parameters must be literals — they are static SELECT-clause
-/// constants, not per-row values.
+/// Whether a [`FilterValue`] is a literal. Dynamic execution constants are
+/// validated after binding, while literal type/range errors are caught early.
 fn is_literal(fv: &FilterValue) -> bool {
     matches!(
         fv,
@@ -793,6 +793,43 @@ fn is_literal(fv: &FilterValue) -> bool {
             | FilterValue::Binary(_)
             | FilterValue::Array(_)
     )
+}
+
+/// Factory configuration may depend on this execution, but never on a row.
+/// Conditionals and function calls are conservatively excluded: they can carry
+/// implicit row inputs. AggregateFn.args is not the aggregate's row expression.
+fn is_execution_constant(fv: &FilterValue) -> bool {
+    match fv {
+        FilterValue::FieldRef { .. } | FilterValue::Cond { .. } | FilterValue::FnCall { .. } => {
+            false
+        }
+        FilterValue::Array(values) => values.iter().all(is_execution_constant),
+        FilterValue::Expr { expr } => expr.args.iter().all(is_execution_constant),
+        _ => true,
+    }
+}
+
+/// Resolve with an empty row and a fresh execution-local context. Preflight
+/// children so the evaluator's Null fallback cannot hide an unresolved binding.
+fn resolve_aggregate_param(fv: &FilterValue, ctx: &FilterContext<'_>) -> DbResult<QueryValue> {
+    match fv {
+        FilterValue::Expr { expr } => {
+            for arg in &expr.args {
+                resolve_aggregate_param(arg, ctx)?;
+            }
+        }
+        FilterValue::Array(values) => {
+            for value in values {
+                resolve_aggregate_param(value, ctx)?;
+            }
+        }
+        _ => {}
+    }
+    let fresh = FilterContext::new(ctx.interner, ctx.resolved_refs)
+        .with_params(ctx.params)
+        .with_scalars(ctx.scalars.clone());
+    resolve_filter_query(fv, &InnerValue::Null, &fresh)
+        .ok_or_else(|| DbError::Validation("agg_param_unresolved".into()))
 }
 
 /// Extract a literal `f64` from a [`FilterValue`] (`Float` or `Int`).
@@ -817,10 +854,9 @@ fn literal_string(fv: &FilterValue) -> Option<&str> {
 /// coded rejections.
 ///
 /// - `AggregateFn` with non-empty `args`: only `percentile` and `string_agg`
-///   accept parameters. The arg must be a literal (`agg_param_must_be_literal`
-///   for dynamic `$ref`/`$fn`/etc.), the right type (`type_mismatch`), and for
-///   `percentile` the `p` must be in `[0.0, 1.0]` (`out_of_range`). Any other
-///   aggregate name receiving args is `agg_params_not_supported`.
+///   accept one execution-constant parameter. Row-dependent configuration is
+///   rejected with `agg_param_must_be_literal` for legacy compatibility. Literal
+///   type/range errors are checked here; dynamic values are checked at execution.
 /// - `Aggregate { distinct: true, .. }` with `func` = `Sum`/`Avg`/`Count`:
 ///   rejected (`distinct_not_supported_for_fast_path_agg`) because the
 ///   hand-rolled `AggAccum` state machine has no distinct-dedup tracking.
@@ -831,10 +867,16 @@ pub fn validate_aggregate_select(select: &Select) -> shamir_storage::error::DbRe
         match item {
             SelectItem::AggregateFn { name, args, .. } if !args.is_empty() => match name.as_str() {
                 "percentile" => {
-                    if !is_literal(&args[0]) {
+                    if args.len() != 1 {
+                        return Err(DbError::Validation("agg_param_arity".into()));
+                    }
+                    if !is_execution_constant(&args[0]) {
                         return Err(shamir_storage::error::DbError::Validation(
                             "agg_param_must_be_literal".into(),
                         ));
+                    }
+                    if !is_literal(&args[0]) {
+                        continue;
                     }
                     let p = literal_f64(&args[0]).ok_or_else(|| {
                         shamir_storage::error::DbError::Validation("type_mismatch".into())
@@ -846,10 +888,16 @@ pub fn validate_aggregate_select(select: &Select) -> shamir_storage::error::DbRe
                     }
                 }
                 "string_agg" => {
-                    if !is_literal(&args[0]) {
+                    if args.len() != 1 {
+                        return Err(DbError::Validation("agg_param_arity".into()));
+                    }
+                    if !is_execution_constant(&args[0]) {
                         return Err(shamir_storage::error::DbError::Validation(
                             "agg_param_must_be_literal".into(),
                         ));
+                    }
+                    if !is_literal(&args[0]) {
+                        continue;
                     }
                     let _ = literal_string(&args[0]).ok_or_else(|| {
                         shamir_storage::error::DbError::Validation("type_mismatch".into())
@@ -884,27 +932,43 @@ pub fn validate_aggregate_select(select: &Select) -> shamir_storage::error::DbRe
     Ok(())
 }
 
-/// Construct the aggregator for an `AggregateFn` select item, honouring
-/// static `args` for `percentile`/`string_agg` (validated by
-/// [`validate_aggregate_select`]) and falling back to the default-parameter
-/// registry lookup when `args` is empty.
-fn make_aggregate_fn(name: &str, args: &[FilterValue]) -> Option<Box<dyn Aggregator>> {
+/// Construct factory configuration from the current execution, not a row.
+fn make_aggregate_fn(
+    name: &str,
+    args: &[FilterValue],
+    ctx: &FilterContext<'_>,
+) -> DbResult<Option<Box<dyn Aggregator>>> {
     if args.is_empty() {
-        return builtin_aggs().make(name);
+        return Ok(builtin_aggs().make(name));
     }
+    if args.len() != 1 {
+        return Err(DbError::Validation("agg_param_arity".into()));
+    }
+    if !is_execution_constant(&args[0]) {
+        return Err(DbError::Validation("agg_param_must_be_literal".into()));
+    }
+    let value = resolve_aggregate_param(&args[0], ctx)?;
     match name {
         "percentile" => {
-            let p = literal_f64(&args[0])?;
+            let p = match value {
+                QueryValue::F64(p) => p,
+                QueryValue::Int(p) => p as f64,
+                _ => return Err(DbError::Validation("type_mismatch".into())),
+            };
             if !(0.0..=1.0).contains(&p) {
-                return None;
+                return Err(DbError::Validation("out_of_range".into()));
             }
-            Some(shamir_funclib::agg::percentile(p)())
+            Ok(Some(shamir_funclib::agg::percentile(p)()))
         }
         "string_agg" => {
-            let sep = literal_string(&args[0])?;
-            Some(shamir_funclib::agg::string_agg(sep.to_owned())())
+            let QueryValue::Str(separator) = value else {
+                return Err(DbError::Validation("type_mismatch".into()));
+            };
+            Ok(Some(shamir_funclib::agg::string_agg(separator)()))
         }
-        _ => None,
+        _ => Err(DbError::Validation(format!(
+            "agg_params_not_supported: {name}"
+        ))),
     }
 }
 
@@ -924,7 +988,7 @@ pub(super) fn build_aggregate_object(
     group_key_values: Option<&[(String, QueryValue)]>,
     interner: &Interner,
     ctx: &FilterContext<'_>,
-) -> QueryValue {
+) -> DbResult<QueryValue> {
     let mut obj: indexmap::IndexMap<String, QueryValue, shamir_collections::THasher> =
         new_map_wc(select.items.len());
 
@@ -994,7 +1058,7 @@ pub(super) fn build_aggregate_object(
                     AggregateField::Field(p) => (intern_field_path_keys(p, interner), false),
                     AggregateField::All => (None, true),
                 };
-                let agg = make_aggregate_fn(name, args);
+                let agg = make_aggregate_fn(name, args, ctx)?;
                 let agg = if *distinct {
                     agg.map(|a| Box::new(DistinctWrapper::new(a)) as Box<dyn Aggregator>)
                 } else {
@@ -1141,7 +1205,7 @@ pub(super) fn build_aggregate_object(
         }
     }
 
-    QueryValue::Map(obj)
+    Ok(QueryValue::Map(obj))
 }
 
 /// Per-row view carrier: a small enum that abstracts over `RecordView` (hot)
@@ -1227,8 +1291,26 @@ pub fn apply_group_by(
     interner: &Interner,
     ctx: &FilterContext<'_>,
 ) -> Vec<QueryValue> {
+    try_apply_group_by(records, group_by, select, interner, ctx).unwrap_or_default()
+}
+
+/// Fallible grouped execution; legacy callers retain their Vec-returning helper.
+pub(crate) fn try_apply_group_by(
+    records: &[(RecordId, Bytes)],
+    group_by: &GroupBy,
+    select: &Select,
+    interner: &Interner,
+    ctx: &FilterContext<'_>,
+) -> DbResult<Vec<QueryValue>> {
+    validate_aggregate_select(select)?;
+    // Validate bindings even when there are no groups to build.
+    for item in &select.items {
+        if let SelectItem::AggregateFn { name, args, .. } = item {
+            make_aggregate_fn(name, args, ctx)?;
+        }
+    }
     if records.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     // Pre-intern group-by field paths.
@@ -1309,7 +1391,7 @@ pub fn apply_group_by(
             Some(key_vals),
             interner,
             ctx,
-        ));
+        )?);
     }
 
     // Apply HAVING filter — S4: compare via the `QueryValue` result map
@@ -1325,7 +1407,7 @@ pub fn apply_group_by(
         });
     }
 
-    result
+    Ok(result)
 }
 
 /// Resolve a single group-by field to a `GroupKeyItem` from a `RecordRef`
@@ -1384,7 +1466,7 @@ pub fn apply_aggregate_all(
 ) -> Vec<QueryValue> {
     let empty_refs: TMap<String, QueryResult> = new_map_wc(0);
     let ctx = FilterContext::new(interner, &empty_refs).with_scalars(scalars);
-    apply_aggregate_all_with_context(records, select, interner, &ctx)
+    apply_aggregate_all_with_context(records, select, interner, &ctx).unwrap_or_default()
 }
 
 /// Aggregate one execution with its resolved references and parameters.
@@ -1394,7 +1476,8 @@ pub(crate) fn apply_aggregate_all_with_context(
     select: &Select,
     interner: &Interner,
     ctx: &FilterContext<'_>,
-) -> Vec<QueryValue> {
-    let obj = build_aggregate_object(records, select, None, interner, ctx);
-    vec![obj]
+) -> DbResult<Vec<QueryValue>> {
+    validate_aggregate_select(select)?;
+    let obj = build_aggregate_object(records, select, None, interner, ctx)?;
+    Ok(vec![obj])
 }
