@@ -14,7 +14,8 @@
 
 use bytes::Bytes;
 use shamir_collections::{TFxMap, THasher};
-use std::sync::atomic::{AtomicU64, Ordering};
+use shamir_wal::{WalEntryV2, WalTicket};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::completion_tracker::CompletionTracker;
@@ -57,6 +58,10 @@ impl CommitWriteRecord {
         self.per_table.is_empty()
     }
 }
+
+/// Ticket and replay entry transferred to a resolver; taking it does not settle
+/// either tracker. A tuple keeps this additive handover API directly usable.
+pub type Unresolved = (Arc<WalTicket>, Arc<WalEntryV2>);
 
 /// Per-repo transactional synchronisation point.
 pub struct RepoTxGate {
@@ -192,6 +197,9 @@ pub struct RepoTxGate {
     /// GC will use it as the lower drain bound.
     durable_completion: Arc<CompletionTracker>,
 
+    orphan_entries: Arc<scc::HashMap<u64, Arc<WalEntryV2>, THasher>>,
+    wal_unresolved: Arc<scc::HashMap<u64, Unresolved, THasher>>,
+    requires_reopen: Arc<AtomicBool>,
     orphaned_post_wal: Arc<scc::HashMap<u64, (), THasher>>,
     orphan_max: Arc<AtomicU64>,
     active_post_wal: Arc<scc::HashMap<u64, (), THasher>>,
@@ -313,6 +321,9 @@ impl RepoTxGate {
             // current inline path the durable watermark is kept in lock-step
             // with the visibility watermark by `mark_durable` on each commit.
             durable_completion: Arc::new(CompletionTracker::with_watermark(last_committed)),
+            orphan_entries: Arc::new(scc::HashMap::with_hasher(THasher::default())),
+            wal_unresolved: Arc::new(scc::HashMap::with_hasher(THasher::default())),
+            requires_reopen: Arc::new(AtomicBool::new(false)),
             orphaned_post_wal: Arc::new(scc::HashMap::with_hasher(THasher::default())),
             orphan_max: Arc::new(AtomicU64::new(0)),
             active_post_wal: Arc::new(scc::HashMap::with_hasher(THasher::default())),
@@ -577,7 +588,54 @@ impl RepoTxGate {
             Arc::clone(&self.orphaned_post_wal),
             Arc::clone(&self.orphan_max),
             Arc::clone(&self.active_post_wal),
+            Arc::clone(&self.orphan_entries),
+            Arc::clone(&self.wal_unresolved),
+            Arc::clone(&self.requires_reopen),
         )
+    }
+
+    /// Retained replay entry, including frames outside the drainer's window.
+    pub fn orphan_entry(&self, version: u64) -> Option<Arc<WalEntryV2>> {
+        self.orphan_entries
+            .read_sync(&version, |_, entry| Arc::clone(entry))
+    }
+
+    /// Ascending snapshot; concurrent transfers may appear on the next scan.
+    pub fn unresolved_wal_versions(&self) -> Vec<u64> {
+        let mut versions = Vec::new();
+        self.wal_unresolved.iter_sync(|version, _| {
+            versions.push(*version);
+            true
+        });
+        versions.sort_unstable();
+        versions
+    }
+
+    /// Transfer resolution ownership without settling either tracker.
+    /// The caller must retain the ticket/entry until its physical fate is known.
+    pub fn take_unresolved(&self, version: u64) -> Option<Unresolved> {
+        self.wal_unresolved
+            .remove_sync(&version)
+            .map(|(_, value)| value)
+    }
+
+    /// Settle a version proven unwritten. Never use for PENDING or UNKNOWN.
+    /// The resolver must first take ownership with `take_unresolved`.
+    pub fn abort_unwritten(&self, version: u64) {
+        self.completion
+            .mark(version, crate::completion_tracker::State::Aborted);
+        self.durable_completion
+            .mark(version, crate::completion_tracker::State::Aborted);
+        self.sync_last_committed_from_watermark();
+    }
+
+    /// Fail-stop signal only; admission wiring belongs to the later engine stage.
+    pub fn set_requires_reopen(&self) {
+        self.requires_reopen.store(true, Ordering::Release);
+    }
+
+    pub fn requires_reopen(&self) -> bool {
+        self.requires_reopen.load(Ordering::Acquire)
     }
 
     /// Highest version ever registered as a post-WAL orphan (zero if none).
@@ -611,6 +669,7 @@ impl RepoTxGate {
     /// The drainer separately marks durability; orphan_max remains monotone.
     pub fn forget_orphaned_post_wal(&self, version: u64) {
         let _ = self.orphaned_post_wal.remove_sync(&version);
+        let _ = self.orphan_entries.remove_sync(&version);
     }
 
     /// Publish: update `last_committed_version` atomically.
@@ -816,6 +875,9 @@ impl RepoTxGate {
     /// footprint via `build_footprint_from_tx` which short-circuits to
     /// empty under Snapshot — but we re-gate here defensively, so this
     /// function is safe to call unconditionally.
+    /// Footprints may be recorded before WAL queueing: an eventual abort
+    /// leaves only conservative footprints (spurious SSI aborts), never a
+    /// missed conflict. Engine ordering is unchanged in this additive stage.
     pub fn record_commit_writes(&self, rec: CommitWriteRecord) {
         if rec.per_table.is_empty() {
             return;

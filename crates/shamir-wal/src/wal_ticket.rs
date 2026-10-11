@@ -64,6 +64,19 @@ impl WalTicket {
         }
     }
 
+    /// Construct a detached ticket fixture for cross-crate state-machine tests.
+    /// This ticket is not associated with any WAL frame and must never be used
+    /// to infer physical progress of an actual append. Mem fault knobs are
+    /// crate-private and cfg(test), unavailable to downstream unit tests.
+    #[doc(hidden)]
+    pub fn detached_for_test(state: WalTicketState) -> Self {
+        Self {
+            state: AtomicU8::new(state as u8),
+            done: AtomicBool::new(state != WalTicketState::Pending),
+            notify: Notify::new(),
+        }
+    }
+
     pub fn state(&self) -> WalTicketState {
         match self.state.load(Ordering::Acquire) {
             0 => WalTicketState::Pending,
