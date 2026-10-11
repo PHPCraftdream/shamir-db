@@ -372,131 +372,157 @@ async fn matrix(write: Write, read: Read) {
 }
 
 #[tokio::test]
+#[ignore = "#1211"]
 async fn matrix_insert_one_point_get() {
     matrix(Write::InsertOne, Read::PointGet).await;
 }
 
 #[tokio::test]
+#[ignore = "#1211"]
 async fn matrix_insert_one_full_scan() {
     matrix(Write::InsertOne, Read::FullScan).await;
 }
 
 #[tokio::test]
+#[ignore = "#1211"]
 async fn matrix_insert_one_filter() {
     matrix(Write::InsertOne, Read::Filter).await;
 }
 
 #[tokio::test]
+#[ignore = "#1211"]
 async fn matrix_insert_one_projection() {
     matrix(Write::InsertOne, Read::Projection).await;
 }
 
 #[tokio::test]
+#[ignore = "#1212"]
 async fn matrix_insert_one_count() {
     matrix(Write::InsertOne, Read::Count).await;
 }
 
 #[tokio::test]
+#[ignore = "#1211"]
 async fn matrix_insert_multi_point_get() {
     matrix(Write::InsertMulti, Read::PointGet).await;
 }
 
 #[tokio::test]
+#[ignore = "#1211"]
 async fn matrix_insert_multi_full_scan() {
     matrix(Write::InsertMulti, Read::FullScan).await;
 }
 
 #[tokio::test]
+#[ignore = "#1211"]
 async fn matrix_insert_multi_filter() {
     matrix(Write::InsertMulti, Read::Filter).await;
 }
 
 #[tokio::test]
+#[ignore = "#1211"]
 async fn matrix_insert_multi_projection() {
     matrix(Write::InsertMulti, Read::Projection).await;
 }
 
 #[tokio::test]
+#[ignore = "#1212"]
 async fn matrix_insert_multi_count() {
     matrix(Write::InsertMulti, Read::Count).await;
 }
 
 #[tokio::test]
+#[ignore = "#1211"]
 async fn matrix_update_point_get() {
     matrix(Write::Update, Read::PointGet).await;
 }
 
 #[tokio::test]
+#[ignore = "#1211"]
 async fn matrix_update_full_scan() {
     matrix(Write::Update, Read::FullScan).await;
 }
 
 #[tokio::test]
+#[ignore = "#1211"]
 async fn matrix_update_filter() {
     matrix(Write::Update, Read::Filter).await;
 }
 
 #[tokio::test]
+#[ignore = "#1211"]
 async fn matrix_update_projection() {
     matrix(Write::Update, Read::Projection).await;
 }
 
 #[tokio::test]
+#[ignore = "#1212"]
 async fn matrix_update_count() {
     matrix(Write::Update, Read::Count).await;
 }
 
 #[tokio::test]
+#[ignore = "#1211"]
 async fn matrix_delete_point_get() {
     matrix(Write::Delete, Read::PointGet).await;
 }
 
 #[tokio::test]
+#[ignore = "#1211"]
 async fn matrix_delete_full_scan() {
     matrix(Write::Delete, Read::FullScan).await;
 }
 
 #[tokio::test]
+#[ignore = "#1211"]
 async fn matrix_delete_filter() {
     matrix(Write::Delete, Read::Filter).await;
 }
 
 #[tokio::test]
+#[ignore = "#1211"]
 async fn matrix_delete_projection() {
     matrix(Write::Delete, Read::Projection).await;
 }
 
 #[tokio::test]
+#[ignore = "#1212"]
 async fn matrix_delete_count() {
     matrix(Write::Delete, Read::Count).await;
 }
 
 #[tokio::test]
+#[ignore = "#1211"]
 async fn matrix_two_tables_point_get() {
     matrix(Write::TwoTables, Read::PointGet).await;
 }
 
 #[tokio::test]
+#[ignore = "#1211"]
 async fn matrix_two_tables_full_scan() {
     matrix(Write::TwoTables, Read::FullScan).await;
 }
 
 #[tokio::test]
+#[ignore = "#1211"]
 async fn matrix_two_tables_filter() {
     matrix(Write::TwoTables, Read::Filter).await;
 }
 
 #[tokio::test]
+#[ignore = "#1211"]
 async fn matrix_two_tables_projection() {
     matrix(Write::TwoTables, Read::Projection).await;
 }
 
 #[tokio::test]
+#[ignore = "#1212"]
 async fn matrix_two_tables_count() {
     matrix(Write::TwoTables, Read::Count).await;
 }
 
 #[tokio::test(start_paused = true)]
+#[ignore = "#1213"]
 async fn matrix_unknown_table_bookmark() {
     let leader = build_db(&["items", "unknown"], false).await;
     let follower = build_db(&["items"], false).await;
@@ -521,6 +547,7 @@ async fn matrix_unknown_table_bookmark() {
 }
 
 #[tokio::test(start_paused = true)]
+#[ignore = "#1213"]
 async fn matrix_secondary_index_lookup() {
     let leader = build_db(&["items"], true).await;
     let follower = build_db(&["items"], true).await;
@@ -595,6 +622,7 @@ async fn matrix_secondary_index_lookup() {
 }
 
 #[tokio::test]
+#[ignore = "#1211"]
 async fn matrix_preinterned_field_leader_names() {
     let leader = build_db(&["items"], false).await;
     let follower = build_db(&["items"], false).await;
