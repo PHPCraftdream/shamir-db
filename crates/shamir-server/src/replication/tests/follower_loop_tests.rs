@@ -13,7 +13,7 @@
 //!      the previously-seen maximum terminates the loop with
 //!      [`ReplError::StaleLeaderEpoch`].
 //!   4. **Journal gap → terminal stop:** a source whose `pull` reply carries
-//!      `gap_at: Some(g)` with `g > from_version` (alongside events, to prove
+//!      `gap_at: Some(g)` with `g >= from_version` (alongside events, to prove
 //!      they are NOT applied) terminates the loop with
 //!      [`ReplError::JournalGap`] and leaves the bookmark unchanged.
 //!
