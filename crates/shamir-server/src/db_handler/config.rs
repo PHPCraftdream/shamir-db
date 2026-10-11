@@ -1,3 +1,5 @@
+use shamir_query_types::batch::{BatchLimits, ExecPolicy};
+
 /// Per-batch slow-query threshold (in microseconds, matching
 /// `BatchResponse::execution_time_us`). `0` disables the warning.
 /// Set on the handler at boot from `[logging] slow_query_threshold_ms`.
@@ -16,8 +18,7 @@ impl SlowQueryConfig {
 }
 
 /// Server-side hard caps on `BatchRequest.limits`. Applied as a max:
-/// the client's payload values are clamped DOWN to these caps before
-/// the batch is dispatched into `ShamirDb::execute`.
+/// the engine clamps the client's payload values DOWN to these caps.
 ///
 /// Set on the handler at boot from `[security.query_limits]`. Tests that
 /// don't care about resource limits use [`Self::UNLIMITED`].
@@ -26,15 +27,66 @@ pub struct QueryLimitsCap {
     pub max_result_size_bytes: usize,
     pub max_execution_time_secs: u64,
     pub max_queries_per_batch: usize,
+    pub max_nesting_depth: usize,
+    pub max_dependency_depth: usize,
+    pub max_iterations: usize,
+    pub max_total_queries: usize,
+    pub max_total_work: u64,
+    pub max_page_size: u64,
+    pub max_offset: u64,
 }
 
 impl QueryLimitsCap {
-    /// Effectively-no-cap defaults — for unit tests. Matches `BatchLimits::default()`.
+    /// No operator caps; hard engine ceilings still apply.
     pub const UNLIMITED: Self = Self {
         max_result_size_bytes: usize::MAX,
         max_execution_time_secs: u64::MAX,
         max_queries_per_batch: usize::MAX,
+        max_nesting_depth: usize::MAX,
+        max_dependency_depth: usize::MAX,
+        max_iterations: usize::MAX,
+        max_total_queries: usize::MAX,
+        max_total_work: u64::MAX,
+        max_page_size: u64::MAX,
+        max_offset: u64::MAX,
     };
+
+    pub fn policy(&self) -> ExecPolicy {
+        ExecPolicy {
+            caps: BatchLimits {
+                max_result_size: self.max_result_size_bytes,
+                max_execution_time_secs: self.max_execution_time_secs,
+                max_queries: self.max_queries_per_batch,
+                max_nesting_depth: self.max_nesting_depth,
+                max_dependency_depth: self.max_dependency_depth,
+                max_iterations: self.max_iterations,
+                max_total_queries: self.max_total_queries,
+                max_total_work: self.max_total_work,
+                max_page_size: self.max_page_size,
+                max_offset: self.max_offset,
+            },
+            // Preserve existing semantics: result size is a reserve estimate,
+            // not an engine-enforced serialized response limit.
+            enforce_result_size: false,
+        }
+    }
+}
+
+impl From<&crate::config::QueryLimitsConfig> for QueryLimitsCap {
+    fn from(config: &crate::config::QueryLimitsConfig) -> Self {
+        Self {
+            max_result_size_bytes: config.max_result_size_bytes,
+            max_execution_time_secs: config.max_execution_time_secs,
+            max_queries_per_batch: config.max_queries_per_batch,
+            max_nesting_depth: config.max_nesting_depth,
+            max_dependency_depth: config.max_dependency_depth,
+            max_iterations: config.max_iterations,
+            max_total_queries: config.max_total_queries,
+            max_total_work: config.max_total_work,
+            max_page_size: config.max_page_size,
+            max_offset: config.max_offset,
+        }
+    }
 }
 
 /// Read/write mode of this node. A replica follower runs `ReadOnly` and

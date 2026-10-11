@@ -11,6 +11,8 @@
 //! engine re-export (`crate::engine::tx::*`) — the same concrete `shamir-tx`
 //! types the server names. See `docs/dev-artifacts/roadmap/PHASE_B_INTERACTIVE_TX.md` §5.
 
+use shamir_query_types::batch::ExecPolicy;
+
 use crate::access::{Action, Actor, ResourcePath};
 use crate::query::batch::{
     commit_interactive_tx, execute_in_open_tx, open_interactive_tx, Authorized, BatchError,
@@ -123,7 +125,22 @@ impl ShamirDb {
         request: &BatchRequest,
         tx: &mut crate::engine::tx::TxContext,
     ) -> Result<BatchResponse, BatchError> {
-        let auth = Authorized::authorize(request, actor, db_name, self).await?;
+        self.tx_execute_with_policy(actor, db_name, request, tx, ExecPolicy::EMBEDDED)
+            .await
+    }
+
+    /// Execute in an open transaction with a server-owned resource policy.
+    pub async fn tx_execute_with_policy(
+        &self,
+        actor: Actor,
+        db_name: &str,
+        request: &BatchRequest,
+        tx: &mut crate::engine::tx::TxContext,
+        policy: ExecPolicy,
+    ) -> Result<BatchResponse, BatchError> {
+        let auth = Authorized::authorize(request, actor, db_name, self)
+            .await?
+            .with_policy(policy);
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),
             message: format!("Database '{}' not found", db_name),
