@@ -152,12 +152,13 @@ impl<'a> Authorized<'a> {
 
     /// Shared root construction used by both execution entry points.
     pub(super) fn root_scope(&self) -> ExecScope {
-        ExecScope::root(
+        ExecScope::root_with_result_size(
             &self
                 .request
                 .limits
                 .clamped_to(&self.policy().caps)
                 .clamped_to(&BatchLimits::CEILING),
+            self.policy.enforce_result_size,
         )
     }
 

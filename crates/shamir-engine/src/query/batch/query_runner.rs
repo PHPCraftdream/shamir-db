@@ -8,6 +8,7 @@ use crate::query::batch::batch_execute::{
 };
 use crate::query::batch::exec_scope::ExecScope;
 use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
+use crate::query::batch::result_size::ResultSize;
 use crate::query::batch::{BatchError, BatchOp, QueryEntry};
 use crate::query::filter::FilterContext;
 use crate::query::read::{QueryRecord, QueryResult, QueryStats};
@@ -779,6 +780,12 @@ impl<'a> QueryRunner<'a> {
             // into a `QueryValue` tree via `QueryValueSerializer` — same wire
             // shape the old msgpack round-trip produced, without the encode +
             // re-parse + re-allocate cost. See `query_value_serializer`.
+            if self.scope.enforce_result_size() {
+                self.scope.charge_bytes(
+                    ResultSize::result(&QueryResult::default())
+                        .saturating_add(ResultSize::assembled(&inner_results)),
+                )?;
+            }
             let value = super::query_value_serializer::to_query_value(&inner_results).ok();
             return Ok(QueryResult {
                 records: Vec::new(),
@@ -947,6 +954,11 @@ impl<'a> QueryRunner<'a> {
                 .await
                 .map_err(wrap_for_each_body_err)?;
 
+            if self.scope.enforce_result_size() {
+                self.scope.charge_bytes(
+                    ResultSize::result(&QueryResult::default()).saturating_add(ResultSize::SHELL),
+                )?;
+            }
             let mut iterations: Vec<QueryValue> = Vec::with_capacity(elements.len());
             for element in elements {
                 // #666 checkpoint: once per iteration, BEFORE recursing into
@@ -1047,6 +1059,11 @@ impl<'a> QueryRunner<'a> {
                 // produces (direct conversion via `QueryValueSerializer`,
                 // replacing the old msgpack round-trip — F5) — collected into
                 // a List, one entry per iteration (ADR Decision 2).
+                if self.scope.enforce_result_size() {
+                    self.scope.charge_bytes(
+                        ResultSize::ENTRY.saturating_add(ResultSize::assembled(&inner_results)),
+                    )?;
+                }
                 let value = super::query_value_serializer::to_query_value(&inner_results)
                     .ok()
                     .unwrap_or(QueryValue::Null);
