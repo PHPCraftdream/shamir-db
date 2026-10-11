@@ -417,6 +417,33 @@ impl RepoTxGate {
         }
     }
 
+    /// Register exactly `pin`, without reconciling it with the published
+    /// marker or the contiguous completion watermark W.
+    ///
+    /// Intended for DDL callers that establish a per-table cut under a
+    /// writer-drain barrier. The caller must ensure the requested history
+    /// has not already been reclaimed before registration begins.
+    ///
+    /// Uses the A10 opening barrier and the same refcount/Drop ownership as
+    /// `open_snapshot`. A pin above W must not become the GC minimum by
+    /// itself: GC must also include W in its floor (the separate GC-floor
+    /// remediation). This method does not settle versions or advance W.
+    ///
+    /// cancel-safe: yes — `bump_refcount` has no suspension points, so the
+    /// opening barrier, registration, and guard construction finish in one
+    /// poll. Dropping an unpolled future registers nothing.
+    pub async fn open_snapshot_at(&self, pin: u64) -> SnapshotGuard {
+        let _barrier = OpeningBarrier::new(&self.active_snapshots_opening);
+        // Allocate before registration so the guard owns every bumped refcount.
+        let registered = vec![pin];
+        self.bump_refcount(pin).await;
+        SnapshotGuard {
+            registered,
+            snapshots: Arc::clone(&self.active_snapshots),
+            serializable_count: None,
+        }
+    }
+
     /// Like [`open_snapshot`](Self::open_snapshot) but also increments
     /// `active_serializable_count` for the lifetime of the guard.
     ///
