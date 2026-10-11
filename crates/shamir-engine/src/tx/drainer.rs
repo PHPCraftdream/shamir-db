@@ -191,9 +191,12 @@ pub struct Drainer {
     /// raw `info_store` write never invalidated the posting cache, so a read
     /// that cached the resurrected list kept serving it after the removal
     /// (SET NULL left `dept_id = 100` matching a row whose FK was already
-    /// null — CI flake, ~12% under load). Cold recovery and the async-index
-    /// tail leave this empty and replay everything, as before.
-    index_applied: TreeIndex<(u64, u64), ()>,
+    /// null — CI flake, ~12% under load). Keys are captured before offer's
+    /// backpressure check; cold recovery/async-index entries start unapplied.
+    index_applied: scc::HashMap<(u64, u64), (bool, Vec<bytes::Bytes>), THasher>,
+    /// Exact info-store key granularity (not table/index): unrelated postings
+    /// must still replay. Retained only above the contiguous durable watermark.
+    posting_applied: scc::HashMap<(u64, bytes::Bytes), u64, THasher>,
     counter_applied: scc::HashMap<(u64, u64), (), THasher>,
     // Sanctioned async mutex: bounded contention between the background pass
     // and explicit drains; the guard must span awaited replay/history I/O.
@@ -220,7 +223,8 @@ impl Drainer {
             recover_calls: AtomicU64::new(0),
             window_depth: AtomicUsize::new(0),
             pending_unsafe: TreeIndex::new(),
-            index_applied: TreeIndex::new(),
+            index_applied: scc::HashMap::with_hasher(THasher::default()),
+            posting_applied: scc::HashMap::with_hasher(THasher::default()),
             counter_applied: scc::HashMap::with_hasher(THasher::default()),
             replaying: Mutex::new(()),
         }
@@ -231,27 +235,96 @@ impl Drainer {
     /// entry's `IndexPut` / `IndexDel` ops for the table. Must be called
     /// before the version is published (the drain only sees published ones).
     pub(crate) fn mark_index_applied(&self, commit_version: u64, table_token: u64) {
-        let _ = self
-            .index_applied
-            .insert_sync((commit_version, table_token), ());
+        // offer precedes inline materialization, even when the window is full.
+        // Clone keys out before touching the second map: never nest bucket guards.
+        let keys = {
+            let applied = self
+                .index_applied
+                .entry_sync((commit_version, table_token))
+                .and_modify(|state| state.0 = true)
+                .or_insert((true, Vec::new()));
+            // A batch containing only BumpFtsStats has no WAL posting keys,
+            // but must still preserve the existing inline-applied membership.
+            applied.get().1.clone()
+        };
+        for key in keys {
+            self.record_posting_applied(commit_version, table_token, key);
+        }
+    }
+
+    fn record_posting_applied(&self, version: u64, table: u64, key: bytes::Bytes) {
+        self.posting_applied
+            .entry_sync((table, key))
+            .and_modify(|highest| *highest = (*highest).max(version))
+            .or_insert(version);
+    }
+
+    fn posting_superseded(&self, version: u64, table: u64, key: &bytes::Bytes) -> bool {
+        self.posting_applied
+            .read_sync(&(table, key.clone()), |_, highest| *highest > version)
+            .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn posting_version_for_test(&self, table: u64, key: &bytes::Bytes) -> Option<u64> {
+        self.posting_applied
+            .read_sync(&(table, key.clone()), |_, version| *version)
     }
 
     fn index_applied_inline(&self, commit_version: u64, table_token: u64) -> bool {
-        let guard = scc::Guard::new();
-        let key = (commit_version, table_token);
-        self.index_applied.range(key..=key, &guard).next().is_some()
+        self.index_applied
+            .read_sync(&(commit_version, table_token), |_, state| state.0)
+            .unwrap_or(false)
     }
 
-    fn clear_index_applied(&self, commit_version: u64) {
-        let keys: Vec<(u64, u64)> = {
-            let guard = scc::Guard::new();
-            self.index_applied
-                .range((commit_version, 0)..=(commit_version, u64::MAX), &guard)
-                .map(|(k, _)| *k)
-                .collect()
-        };
-        for key in keys {
-            let _ = self.index_applied.remove_sync(&key);
+    fn prune_index_applied(&self, durable: u64) {
+        // The bucket-locked predicates preserve racing newer inline updates.
+        // No unresolved orphan can lie in the contiguous durable prefix.
+        self.index_applied
+            .retain_sync(|(version, _), _| *version > durable);
+        self.posting_applied
+            .retain_sync(|_, highest| *highest > durable);
+    }
+
+    fn clear_index_applied(&self, entry: &WalEntryV2) {
+        for op in &entry.ops {
+            if let WalOpV2::IndexPut {
+                table_id_interned, ..
+            }
+            | WalOpV2::IndexDel {
+                table_id_interned, ..
+            } = op
+            {
+                self.index_applied
+                    .remove_sync(&(entry.commit_version, *table_id_interned));
+            }
+        }
+    }
+
+    fn remember_index_keys(&self, entry: &WalEntryV2) {
+        let mut keys: TFxMap<u64, Vec<bytes::Bytes>> = TFxMap::default();
+        for op in &entry.ops {
+            if let WalOpV2::IndexPut {
+                table_id_interned,
+                key,
+                ..
+            }
+            | WalOpV2::IndexDel {
+                table_id_interned,
+                key,
+                ..
+            } = op
+            {
+                keys.entry(*table_id_interned)
+                    .or_default()
+                    .push(key.clone());
+            }
+        }
+        for (table, keys) in keys {
+            // Reseeding must not erase an already-applied inline marker.
+            let _ = self
+                .index_applied
+                .insert_sync((entry.commit_version, table), (false, keys));
         }
     }
 
@@ -289,6 +362,7 @@ impl Drainer {
     /// killed). The depth is approximate (racy +∆ ≤ concurrent committer
     /// count) and the cap is soft, so this is safe.
     pub fn offer(&self, entry: Arc<WalEntryV2>) {
+        self.remember_index_keys(&entry);
         let hw = self.window_high_watermark.load(Ordering::Relaxed);
         if self.window_depth.load(Ordering::Relaxed) >= hw {
             // Backpressure: drop, recovery is via drain_step's gap-reseed.
@@ -304,6 +378,7 @@ impl Drainer {
     /// Called ONCE during Drainer::spawn (or RepoInstance::drainer init).
     pub fn seed_from_recover(&self, entries: Vec<WalEntryV2>) {
         for e in entries {
+            self.remember_index_keys(&e);
             let v = e.commit_version;
             if self.window.insert_sync(v, Arc::new(e)).is_ok() {
                 self.window_depth.fetch_add(1, Ordering::Relaxed);
@@ -392,6 +467,8 @@ impl Drainer {
         let visible = gate.last_committed();
         let vis = visible.max(gate.orphan_max());
         let dur = gate.durable_watermark();
+        // Also clean up late async-index markers on otherwise idle passes.
+        self.prune_index_applied(dur);
         // Nothing visible is un-durable → nothing new to REPLAY. But CRIT-2
         // (#436): truncation may still be pending on an entry whose A5 gate
         // tripped unsafe in an earlier pass — the interner can catch up
@@ -469,6 +546,59 @@ impl Drainer {
             return Ok(0);
         }
 
+        // Warm missing registrations can be restored (remove_table/add_table).
+        // Unlike cold recovery, do not discard an orphan on a transient absence.
+        // Pin one resolved TableManager across history, postings and counters;
+        // never combine an old per_table_mvcc with a replacement registration.
+        // Lookup failure excludes the earliest missing orphan and everything
+        // after it, but does not hold back its already-published prefix.
+        let mut orphan_tables = TFxMap::default();
+        let mut replay_prefix = window_entries.len();
+        'resolve_orphans: for (position, entry) in window_entries.iter().enumerate() {
+            if !gate.is_orphaned_post_wal(entry.commit_version) {
+                continue;
+            }
+            for op in &entry.ops {
+                let token = match op {
+                    WalOpV2::Put {
+                        table_id_interned, ..
+                    }
+                    | WalOpV2::Delete {
+                        table_id_interned, ..
+                    }
+                    | WalOpV2::IndexPut {
+                        table_id_interned, ..
+                    }
+                    | WalOpV2::IndexDel {
+                        table_id_interned, ..
+                    }
+                    | WalOpV2::CounterDelta {
+                        table_id_interned, ..
+                    } => *table_id_interned,
+                    _ => continue,
+                };
+                if token == 0 || orphan_tables.contains_key(&token) {
+                    continue;
+                }
+                match repo.table_by_token(token).await {
+                    Ok(Some(table)) => {
+                        orphan_tables.insert(token, table);
+                    }
+                    Ok(None) | Err(_) => {
+                        log::warn!(
+                            "drain_step: orphan {} table {token} unavailable; retry next pass",
+                            entry.commit_version,
+                        );
+                        replay_prefix = position;
+                        break 'resolve_orphans;
+                    }
+                }
+            }
+        }
+        window_entries.truncate(replay_prefix);
+        if window_entries.is_empty() {
+            return Ok(0);
+        }
         let wal = repo.repo_wal().await?;
 
         // ================================================================
@@ -488,7 +618,7 @@ impl Drainer {
         // Only postings whose `table_id_interned != 0` (the common case —
         // `wal_ops_from_tx` never emits the `0` broadcast marker) are
         // batched here; broadcast postings still replay immediately below.
-        let mut index_batches: TFxMap<u64, Vec<KvOp>> = TFxMap::default();
+        let mut index_batches: TFxMap<u64, Vec<(u64, KvOp)>> = TFxMap::default();
         // Per-entry: which table_ids does this entry touch (for Phase C gating).
         let mut entry_tables: Vec<(u64 /* commit_version */, Vec<u64> /* table_ids */)> =
             Vec::with_capacity(window_entries.len());
@@ -538,28 +668,32 @@ impl Drainer {
                         value,
                         ..
                     } if *table_id_interned != 0 => {
-                        if self.index_applied_inline(v, *table_id_interned) {
+                        if self.index_applied_inline(v, *table_id_interned)
+                            || self.posting_superseded(v, *table_id_interned, key)
+                        {
                             continue;
                         }
                         this_entry_index_tables.push(*table_id_interned);
                         index_batches
                             .entry(*table_id_interned)
                             .or_default()
-                            .push(KvOp::Set(key.clone().into(), value.clone()));
+                            .push((v, KvOp::Set(key.clone().into(), value.clone())));
                     }
                     WalOpV2::IndexDel {
                         table_id_interned,
                         key,
                         ..
                     } if *table_id_interned != 0 => {
-                        if self.index_applied_inline(v, *table_id_interned) {
+                        if self.index_applied_inline(v, *table_id_interned)
+                            || self.posting_superseded(v, *table_id_interned, key)
+                        {
                             continue;
                         }
                         this_entry_index_tables.push(*table_id_interned);
                         index_batches
                             .entry(*table_id_interned)
                             .or_default()
-                            .push(KvOp::Remove(key.clone().into()));
+                            .push((v, KvOp::Remove(key.clone().into())));
                     }
                     WalOpV2::CounterDelta { .. } => {
                         // Orphan counters are best-effort in Phase C so a table
@@ -649,10 +783,13 @@ impl Drainer {
             // `read_sync`'s bucket lock is held only by a RUNNING thread for a
             // few instructions (an `Arc::clone`), bounding every wait. The fn
             // stays `async`; this call no longer suspends.
-            if let Some(mvcc) = repo
-                .per_table_mvcc()
-                .read_sync(table_id, |_, m| std::sync::Arc::clone(m))
-            {
+            let mvcc = if let Some(table) = orphan_tables.get(table_id) {
+                table.mvcc_store()
+            } else {
+                repo.per_table_mvcc()
+                    .read_sync(table_id, |_, m| Arc::clone(m))
+            };
+            if let Some(mvcc) = mvcc {
                 if let Err(e) = mvcc.write_committed_batch_to_history(published_pass).await {
                     log::warn!(
                         "drain_step: batch history write for table {} failed: {e}; \
@@ -686,7 +823,11 @@ impl Drainer {
             // resolves at all, the table was genuinely dropped: its data is
             // moot (the same disposition `drop_table` gives an orphaned
             // `__data__` store), so skipping is correct — not a silent loss.
-            match repo.table_by_token(*table_id).await {
+            match if let Some(table) = orphan_tables.get(table_id) {
+                Ok(Some(table.clone()))
+            } else {
+                repo.table_by_token(*table_id).await
+            } {
                 Ok(Some(tbl)) => {
                     if let Some(mvcc) = tbl.mvcc_store() {
                         // Race: the table was attached to `per_table_mvcc`
@@ -764,8 +905,43 @@ impl Drainer {
         // ================================================================
 
         for (table_id, ops) in index_batches {
-            match repo.table_by_token(table_id).await {
+            match if let Some(table) = orphan_tables.get(&table_id) {
+                Ok(Some(table.clone()))
+            } else {
+                repo.table_by_token(table_id).await
+            } {
                 Ok(Some(tbl)) => {
+                    // Exclude inline writers across check -> awaited transact ->
+                    // record. Order: replay -> DDL admission -> raise intent ->
+                    // drain writers -> unique_write_lock, one table at a time.
+                    // No commit lock or map guard is held across this await.
+                    // Commit's data-table prelock guards span Phase 5c and
+                    // mark_index_applied, then materialize drops them without
+                    // acquiring replaying. Index-only manually staged ops do
+                    // not participate in that writer-drain protocol.
+                    let posting_guards = if orphan_tables.contains_key(&table_id) {
+                        Some(
+                            tbl.begin_write_barrier(
+                                crate::index::write_barrier_flags::SCHEMA_ACTIVATION,
+                            )
+                            .await,
+                        )
+                    } else {
+                        None
+                    };
+                    // Recheck after table resolution: inline application may
+                    // have advanced a posting since Phase A accumulated it.
+                    let ops: Vec<_> = ops
+                        .into_iter()
+                        .filter(|(version, op)| {
+                            let key = match op {
+                                KvOp::Set(key, _) | KvOp::Remove(key) => {
+                                    bytes::Bytes::copy_from_slice(key.as_ref())
+                                }
+                            };
+                            !self.posting_superseded(*version, table_id, &key)
+                        })
+                        .collect();
                     let batch_len = ops.len();
                     // Test-only injection (see `FAIL_INDEX_BATCH_TABLE_ID`'s
                     // doc): simulate a persistent index-batch-write failure
@@ -786,7 +962,7 @@ impl Drainer {
                     // lists AFTER the write lands.
                     let touched_keys: Vec<bytes::Bytes> = ops
                         .iter()
-                        .map(|op| match op {
+                        .map(|(_, op)| match op {
                             KvOp::Set(k, _) | KvOp::Remove(k) => {
                                 bytes::Bytes::copy_from_slice(k.as_ref())
                             }
@@ -799,13 +975,22 @@ impl Drainer {
                              (test fault vector)"
                         )))
                     } else {
-                        tbl.info_store().transact(ops).await
+                        tbl.info_store()
+                            .transact(ops.iter().map(|(_, op)| op.clone()).collect())
+                            .await
                     };
                     if write_result.is_ok() {
+                        for ((version, _), key) in ops.iter().zip(&touched_keys) {
+                            self.record_posting_applied(*version, table_id, key.clone());
+                        }
                         tbl.index_manager_ref()
                             .invalidate_posting_cache_for_keys(touched_keys.iter().map(|k| &k[..]));
                     }
 
+                    if let Some((barrier, lock)) = posting_guards {
+                        drop(barrier);
+                        drop(lock);
+                    }
                     if let Err(e) = write_result {
                         log::warn!(
                             "drain_step: batch index-posting write for table {} \
@@ -933,23 +1118,14 @@ impl Drainer {
                     if self.counter_applied(*v, *table_id_interned) {
                         continue;
                     }
-                    match repo.table_by_token(*table_id_interned).await {
-                        Ok(Some(tbl)) => {
-                            if let Err(e) = tbl.counter().increment(*delta).await {
-                                log::warn!(
-                                    "drain_step: orphan {v} counter for table \
-                                     {table_id_interned} failed: {e}; metric drift accepted"
-                                );
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            log::warn!(
-                                "drain_step: orphan {v} counter table lookup \
-                                 {table_id_interned} failed: {e}; stopping finalization"
-                            );
-                            break 'finalize;
-                        }
+                    let Some(tbl) = orphan_tables.get(table_id_interned) else {
+                        break 'finalize;
+                    };
+                    if let Err(e) = tbl.counter().increment(*delta).await {
+                        log::warn!(
+                            "drain_step: orphan {v} counter for table \
+                             {table_id_interned} failed: {e}; metric drift accepted"
+                        );
                     }
                     // Failed metrics are settled too; never retry them forever.
                     self.mark_counter_applied(*v, *table_id_interned);
@@ -958,28 +1134,17 @@ impl Drainer {
                     let Some(orphan_pass) = pass.last().filter(|(version, _)| version == v) else {
                         continue;
                     };
-                    match repo.table_by_token(*table_id).await {
-                        Ok(Some(tbl)) => {
-                            if let Some(mvcc) = tbl.mvcc_store() {
-                                if let Err(e) = mvcc
-                                    .write_committed_batch_to_history(std::slice::from_ref(
-                                        orphan_pass,
-                                    ))
-                                    .await
-                                {
-                                    log::warn!(
-                                        "drain_step: orphan {v} history for table \
-                                         {table_id} failed: {e}; stopping finalization"
-                                    );
-                                    break 'finalize;
-                                }
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
+                    let Some(tbl) = orphan_tables.get(table_id) else {
+                        break 'finalize;
+                    };
+                    if let Some(mvcc) = tbl.mvcc_store() {
+                        if let Err(e) = mvcc
+                            .write_committed_batch_to_history(std::slice::from_ref(orphan_pass))
+                            .await
+                        {
                             log::warn!(
-                                "drain_step: orphan {v} table lookup {table_id} \
-                                 failed: {e}; stopping finalization"
+                                "drain_step: orphan {v} history for table \
+                                 {table_id} failed: {e}; stopping finalization"
                             );
                             break 'finalize;
                         }
@@ -1034,7 +1199,7 @@ impl Drainer {
             if self.window.remove_sync(v) {
                 self.window_depth.fetch_sub(1, Ordering::Relaxed);
             }
-            self.clear_index_applied(*v);
+            self.clear_index_applied(entry);
             for op in &entry.ops {
                 if let WalOpV2::CounterDelta {
                     table_id_interned, ..
@@ -1044,6 +1209,8 @@ impl Drainer {
                 }
             }
         }
+
+        self.prune_index_applied(gate.durable_watermark());
 
         if drained > 0 {
             self.drained_total
