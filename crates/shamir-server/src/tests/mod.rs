@@ -11,6 +11,7 @@ pub mod per_ip_limiter_tests;
 pub mod restore_tests;
 pub mod server_limit_policy_config_tests;
 pub mod server_meta_tests;
+pub mod server_result_enforcement_config_tests;
 pub mod server_tests;
 pub mod store_release_barrier_tests;
 pub mod tables_registry_tests;

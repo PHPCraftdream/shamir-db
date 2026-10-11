@@ -85,6 +85,7 @@ fn query_policy_rejects_nonsensical_zero_values() {
 fn query_policy_allows_meaningful_zero_and_ceiling_values() {
     let mut config = config();
     config.security.query_limits = QueryLimitsConfig {
+        enforce_result_size: false,
         max_result_size_bytes: BatchLimits::CEILING.max_result_size,
         max_execution_time_secs: BatchLimits::CEILING.max_execution_time_secs,
         max_queries_per_batch: BatchLimits::CEILING.max_queries,

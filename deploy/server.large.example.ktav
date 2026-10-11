@@ -91,6 +91,8 @@ security: {
         max_active_connections_per_ip: 100
     }
     query_limits: {
+        ## Cumulative materialized bytes, including silent/nested results; no give-back.
+        enforce_result_size: true
         ## Hard caps on `BatchRequest.limits` — operator's max wins
         ## over client payload.
         ## 100 MiB: the hard engine ceiling (BatchLimits::CEILING); a larger
