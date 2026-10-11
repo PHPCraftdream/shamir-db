@@ -1259,6 +1259,9 @@ impl RepoInstance {
             Ok(_outcome) => Ok(()),
             Err(commit_err) => {
                 let (message, code) = match commit_err {
+                    crate::tx::CommitError::MigrationFrozen { .. } => {
+                        (commit_err.to_string(), Some("table_migrating".to_string()))
+                    }
                     crate::tx::CommitError::UniqueViolation { .. } => {
                         (commit_err.to_string(), Some("unique_violation".to_string()))
                     }

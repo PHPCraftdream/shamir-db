@@ -75,6 +75,7 @@ use shamir_storage::error::{DbError, DbResult};
 use tokio::sync::{Mutex, Notify};
 
 use crate::wal_sink::WalSink;
+use crate::wal_ticket::{WalAppendError, WalTicket, WalTicketState};
 
 /// Durability tier for a single WAL append.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -86,32 +87,11 @@ pub enum WalDurability {
     Synced,
 }
 
-struct Waiter {
-    done: AtomicBool,
-    ok: AtomicBool,
-    notify: Notify,
-}
-
-impl Waiter {
-    fn new() -> Self {
-        Self {
-            done: AtomicBool::new(false),
-            ok: AtomicBool::new(false),
-            notify: Notify::new(),
-        }
-    }
-    fn complete(&self, ok: bool) {
-        self.ok.store(ok, Ordering::Release);
-        self.done.store(true, Ordering::Release);
-        self.notify.notify_one();
-    }
-}
-
 type Pending = (
     Vec<u8>,
     u64, /* commit_version */
     WalDurability,
-    Arc<Waiter>,
+    Arc<WalTicket>,
 );
 
 /// Lock-free-leader group commit over a [`WalSink`]. See the module-level
@@ -145,6 +125,8 @@ pub struct WalGroupCommit {
     // committers all validate before any published). Deferred, not rejected.
     pending: Mutex<Vec<Pending>>,
     flushing: AtomicBool,
+    indeterminate: AtomicBool,
+    stopped: Notify,
     // Count of fsyncs this coordinator issued (for the batching test).
     fsync_count: AtomicU64,
     // RF1: true when a Buffered append completed but no fsync has run since.
@@ -157,6 +139,8 @@ impl WalGroupCommit {
             sink,
             pending: Mutex::new(Vec::new()),
             flushing: AtomicBool::new(false),
+            indeterminate: AtomicBool::new(false),
+            stopped: Notify::new(),
             fsync_count: AtomicU64::new(0),
             dirty_since_sync: AtomicBool::new(false),
         }
@@ -172,42 +156,81 @@ impl WalGroupCommit {
         commit_version: u64,
         durability: WalDurability,
     ) -> DbResult<()> {
-        let waiter = Arc::new(Waiter::new());
-        {
-            let mut p = self.pending.lock().await;
-            p.push((payload, commit_version, durability, Arc::clone(&waiter)));
-        }
-        if self
-            .flushing
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+        let (_, completion) = self.append_ticketed(payload, commit_version, durability);
+        completion.await.map_err(DbError::from)
+    }
+
+    /// Return the frame's ticket and its lazy completion future without an
+    /// extra allocation or task hop. Nothing is queued until the first poll.
+    /// The future borrows this coordinator; the ticket is independently owned.
+    /// cancel-safe: NO — a queued follower is still written; dropping a leader
+    /// at append/sync awaits makes its window UNKNOWN and fail-stops the group.
+    pub fn append_ticketed(
+        &self,
+        payload: Vec<u8>,
+        commit_version: u64,
+        durability: WalDurability,
+    ) -> (
+        Arc<WalTicket>,
+        impl std::future::Future<Output = Result<(), WalAppendError>> + Send + '_,
+    ) {
+        let ticket = Arc::new(WalTicket::new());
+        let waiter = Arc::clone(&ticket);
+        (ticket, async move {
+            {
+                let mut pending = self.pending.lock().await;
+                if self.indeterminate.load(Ordering::Acquire) {
+                    waiter.complete(WalTicketState::Failed);
+                    return Err(WalAppendError::Indeterminate);
+                }
+                pending.push((payload, commit_version, durability, Arc::clone(&waiter)));
+            }
+            self.drive_and_wait(&waiter).await
+        })
+    }
+
+    async fn drive_and_wait(&self, waiter: &WalTicket) -> Result<(), WalAppendError> {
+        if !self.indeterminate.load(Ordering::Acquire)
+            && self
+                .flushing
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
         {
             self.lead_until_drained().await;
         }
-        // Park until the entry reaches its tier. enable()-before-check
-        // closes the Notify subscribe-window race.
         loop {
             let notified = waiter.notify.notified();
-            tokio::pin!(notified);
+            let stopped = self.stopped.notified();
+            tokio::pin!(notified, stopped);
             notified.as_mut().enable();
-            if waiter.done.load(Ordering::Acquire) {
-                break;
+            stopped.as_mut().enable();
+            if let Some(outcome) = waiter.outcome() {
+                return outcome;
             }
-            notified.await;
-        }
-        if waiter.ok.load(Ordering::Acquire) {
-            Ok(())
-        } else {
-            Err(DbError::Storage("wal group commit failed".into()))
+            if self.indeterminate.load(Ordering::Acquire) {
+                // UNKNOWN is published before fail-stop. Recheck after the
+                // acquire so a concurrent guard cannot be overwritten FAILED.
+                if let Some(outcome) = waiter.outcome() {
+                    return outcome;
+                }
+                // Still pending means this frame was never in the abandoned
+                // window. It is known not written, but admission is fail-stop.
+                waiter.complete(WalTicketState::Failed);
+                return Err(WalAppendError::Indeterminate);
+            }
+            tokio::select! {
+                _ = notified => {},
+                _ = stopped => {},
+            }
         }
     }
 
     /// Batched append — all payloads land in ONE leader window (one
     /// `append_batch` call to the sink), so the batch is atomic at the
-    /// segment level: either every payload is written in a single `write()`
-    /// syscall (and reaches the requested tier together) or, on a write/sync
-    /// failure, the segment is quarantined (§1.3) and every caller gets the
-    /// SAME error — no partial-write resurrection on recovery (audit §1.6).
+    /// segment level: payloads are submitted together, and a partial write
+    /// attempts to roll the batch back. File errors do not prove rollback
+    /// and are UNKNOWN, fail-stopping the group; explicit group fsync errors
+    /// mean WRITTEN, not absent. Legacy callers still receive DbError::Storage.
     ///
     /// `entries` is `(payload, commit_version)` pairs; `durability` applies to
     /// the whole batch. The window's `max_version` (folded into the sink's
@@ -216,50 +239,33 @@ impl WalGroupCommit {
     /// Atomicity argument: all entries are pushed to `pending` under ONE lock
     /// acquisition. The leader that drains the queue observes the full batch
     /// in one `mem::take` and issues a single `sink.append_batch(payloads, …)`
-    /// — one `write()`, so a partial write (ENOSPC mid-frame) quarantines the
-    /// segment and rolls back ALL frames in the batch (the §1.3 rollback
-    /// truncates to the pre-batch offset). No entry survives a partial write,
-    /// so recovery never replays a subset of a "failed" batch.
+    /// — a partial write (ENOSPC mid-frame) quarantines the segment and
+    /// attempts to roll back ALL frames to the pre-batch offset (§1.3).
+    /// Only a successful rollback proves no frame survives. The File sink
+    /// does not expose that distinction, so an append error is UNKNOWN;
+    /// recovery may still observe frames from that indeterminate batch.
     pub async fn append_many(
         &self,
         entries: Vec<(Vec<u8>, u64)>,
         durability: WalDurability,
     ) -> DbResult<()> {
+        if self.indeterminate.load(Ordering::Acquire) {
+            return Err(WalAppendError::Indeterminate.into());
+        }
         if entries.is_empty() {
             return Ok(());
         }
-        // One shared waiter for the whole batch. The leader completes it
-        // (possibly multiple times — idempotent) with the single batch
-        // outcome; every caller parks on the same waiter and observes the
-        // same Ok/Err.
-        let waiter = Arc::new(Waiter::new());
+        let waiter = Arc::new(WalTicket::new());
         {
-            let mut p = self.pending.lock().await;
+            let mut pending = self.pending.lock().await;
+            if self.indeterminate.load(Ordering::Acquire) {
+                return Err(WalAppendError::Indeterminate.into());
+            }
             for (payload, commit_version) in entries {
-                p.push((payload, commit_version, durability, Arc::clone(&waiter)));
+                pending.push((payload, commit_version, durability, Arc::clone(&waiter)));
             }
         }
-        if self
-            .flushing
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            self.lead_until_drained().await;
-        }
-        loop {
-            let notified = waiter.notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if waiter.done.load(Ordering::Acquire) {
-                break;
-            }
-            notified.await;
-        }
-        if waiter.ok.load(Ordering::Acquire) {
-            Ok(())
-        } else {
-            Err(DbError::Storage("wal group commit batch failed".into()))
-        }
+        self.drive_and_wait(&waiter).await.map_err(DbError::from)
     }
 
     // Caller holds leadership (flushing == true). Drain windows until the
@@ -267,10 +273,16 @@ impl WalGroupCommit {
     // empty observation (under the pending lock) so a concurrent pusher is
     // either seen by us or wins leadership itself — never stranded.
     async fn lead_until_drained(&self) {
+        let mut guard = LeaderGuard {
+            group: self,
+            metas: Vec::new(),
+            armed: true,
+        };
         loop {
             let batch = {
                 let mut p = self.pending.lock().await;
-                if p.is_empty() {
+                if self.indeterminate.load(Ordering::Acquire) || p.is_empty() {
+                    guard.armed = false;
                     self.flushing.store(false, Ordering::Release);
                     return;
                 }
@@ -278,12 +290,12 @@ impl WalGroupCommit {
             };
             // Split without cloning payloads.
             let mut payloads = Vec::with_capacity(batch.len());
-            let mut metas = Vec::with_capacity(batch.len());
+            guard.metas = Vec::with_capacity(batch.len());
             let mut batch_max_version = 0u64;
             for (p, version, tier, w) in batch {
                 payloads.push(p);
                 batch_max_version = batch_max_version.max(version);
-                metas.push((tier, w));
+                guard.metas.push((tier, w));
             }
             // One write() for the whole window (level 2). The window's max
             // commit_version is the watermark folded into the sink (F6).
@@ -292,20 +304,35 @@ impl WalGroupCommit {
                 .append_batch(payloads, batch_max_version)
                 .await
                 .is_ok();
+            // A File sink error does not prove rollback: SegmentSet can fail
+            // rotating AFTER a successful write, and rollback failure is not
+            // typed by WalSegment. Conservatively fail-stop those outcomes.
+            if !write_ok && matches!(self.sink.as_ref(), WalSink::File(_)) {
+                return;
+            }
+            // Publish WRITTEN before this coordinator's explicit sync. File
+            // auto-rotation can fsync inside append_batch before it returns;
+            // that earlier boundary is not observable at this layer.
             // Wake Buffered waiters immediately — level 2 reached. (write()
             // success means bytes are in the OS page cache regardless of a
             // later fsync outcome.)
-            let has_buffered = metas.iter().any(|(t, _)| *t == WalDurability::Buffered);
-            if write_ok && has_buffered {
+            if write_ok {
+                for (_, ticket) in &guard.metas {
+                    ticket.written();
+                }
                 self.dirty_since_sync.store(true, Ordering::Release);
             }
-            for (tier, w) in &metas {
+            for (tier, w) in &guard.metas {
                 if *tier == WalDurability::Buffered {
-                    w.complete(write_ok);
+                    w.complete(if write_ok {
+                        WalTicketState::Acked
+                    } else {
+                        WalTicketState::Failed
+                    });
                 }
             }
             // One fsync for the window iff any Synced waiter is present.
-            let needs_fsync = metas.iter().any(|(t, _)| *t == WalDurability::Synced);
+            let needs_fsync = guard.metas.iter().any(|(t, _)| *t == WalDurability::Synced);
             let sync_ok = if write_ok && needs_fsync {
                 self.fsync_count.fetch_add(1, Ordering::Relaxed);
                 let ok = self.sink.sync().await.is_ok();
@@ -316,15 +343,29 @@ impl WalGroupCommit {
             } else {
                 write_ok
             };
-            for (tier, w) in &metas {
+            for (tier, w) in &guard.metas {
                 if *tier == WalDurability::Synced {
-                    w.complete(write_ok && sync_ok);
+                    w.complete(if !write_ok {
+                        WalTicketState::Failed
+                    } else if sync_ok {
+                        WalTicketState::Acked
+                    } else {
+                        WalTicketState::Written
+                    });
                 }
             }
             // Circuit breaker: on write or sync error, release leadership
             // and return so the next append elects a fresh leader. Without
             // this, a dead segment causes infinite spin.
+            guard.metas.clear();
             if !write_ok || (needs_fsync && !sync_ok) {
+                // Fail queued (not yet written) frames too: no follower may
+                // remain parked waiting for a future append to elect a leader.
+                let mut pending = self.pending.lock().await;
+                for (_, _, _, ticket) in pending.drain(..) {
+                    ticket.complete(WalTicketState::Failed);
+                }
+                guard.armed = false;
                 self.flushing.store(false, Ordering::Release);
                 return;
             }
@@ -427,5 +468,35 @@ impl WalGroupCommit {
     #[cfg(test)]
     pub(crate) fn set_dirty(&self) {
         self.dirty_since_sync.store(true, Ordering::Release);
+    }
+}
+
+// Owns the existing metadata allocation, not another per-window allocation.
+// Drop performs only synchronous publication/wakes; it never waits or spawns.
+struct LeaderGuard<'a> {
+    group: &'a WalGroupCommit,
+    metas: Vec<(WalDurability, Arc<WalTicket>)>,
+    armed: bool,
+}
+
+impl Drop for LeaderGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Complete the window before publishing fail-stop; observers acquiring
+        // indeterminate must see UNKNOWN rather than misclassifying it FAILED.
+        // A detached blocking write may still land, so another leader must
+        // never touch the sink.
+        for (_, ticket) in &self.metas {
+            if ticket.outcome().is_none() {
+                ticket.complete(WalTicketState::Unknown);
+            }
+        }
+        self.group.indeterminate.store(true, Ordering::Release);
+        // No async lock in Drop. Queued followers observe stopped even when
+        // a concurrent producer currently owns the pending mutex.
+        self.group.stopped.notify_waiters();
+        self.group.flushing.store(false, Ordering::Release);
     }
 }
