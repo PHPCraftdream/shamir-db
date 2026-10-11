@@ -16,10 +16,13 @@
 
 use crate::kind::{VectorMetric, VectorQuantization};
 use crate::vector::adapter::{SearchOpts, VectorAdapter};
-use crate::vector::hnsw_adapter::{HnswAdapter, HnswConfig};
+use crate::vector::hnsw_adapter::{install_test_search_f32_gate, HnswAdapter, HnswConfig};
+use crate::vector::quantized_dist::RescoreCtx;
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
-use std::sync::Arc;
+use std::future::Future;
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 // ----- hang diagnostics (#1232) --------------------------------------------
@@ -35,12 +38,154 @@ fn phase(test: &str, name: &str) {
     eprintln!("SQ8-PHASE {test}: {name}");
 }
 
-async fn within_deadline<F: std::future::Future>(test: &str, fut: F) -> F::Output {
+async fn within_deadline<F: Future>(test: &str, fut: F) -> F::Output {
     tokio::time::timeout(Duration::from_secs(120), fut)
         .await
         .unwrap_or_else(|_| {
             panic!("{test}: no progress for 120 s (the last SQ8-PHASE marker names the phase)")
         })
+}
+
+// cancel-safe: NO for graph bodies — upsert awaits may leave running blocking
+// inserts or detached tasks. Deadline cancellation fails the test; the runner
+// bounds shutdown rather than pretending cancellation stops those inserts.
+// #1263: ordinary runtime Drop waits indefinitely for running spawn_blocking
+// work. Catch the body panic while retaining runtime ownership, bound shutdown
+// on both exits, then propagate the original assertion/deadline payload.
+// Requested flavor change: these were current_thread tests; use one async
+// worker (not the machine's core count) on the manual multi-thread runtime.
+fn run_graph_test<F: Future>(test: &str, body: F) -> F::Output {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("build graph test runtime");
+    // Test state is not reused after an unwind; only runtime shutdown follows.
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        runtime.block_on(within_deadline(test, body))
+    }));
+    runtime.shutdown_timeout(Duration::from_secs(5));
+    match result {
+        Ok(output) => output,
+        Err(payload) => resume_unwind(payload),
+    }
+}
+
+// ----- runtime shutdown regressions (#1263) -------------------------------
+
+// The outer synchronous test owns release, so the blocking closure cannot
+// finish until run_graph_test returns/unwinds. Ordinary runtime Drop would
+// deadlock here until the runner kills the test. Release also runs if any
+// assertion panics, and the completion channel ensures cleanup is observed.
+struct BlockingReleaseGuard {
+    release: Option<mpsc::Sender<()>>,
+    finished: mpsc::Receiver<()>,
+}
+
+impl Drop for BlockingReleaseGuard {
+    fn drop(&mut self) {
+        drop(self.release.take());
+        // Disconnection also handles setup failing before the closure starts.
+        let _ = self.finished.recv();
+    }
+}
+
+fn gated_blocking_task() -> (BlockingReleaseGuard, impl Future<Output = ()>) {
+    let (release, wait_for_release) = mpsc::channel();
+    let (finished, wait_for_finish) = mpsc::channel();
+    let guard = BlockingReleaseGuard {
+        release: Some(release),
+        finished: wait_for_finish,
+    };
+    let start = async move {
+        let (started, wait_for_start) = tokio::sync::oneshot::channel();
+        // fire-and-forget: detached by design to reproduce pending blocking
+        // work at shutdown; the outer guard releases and observes completion.
+        drop(tokio::task::spawn_blocking(move || {
+            // A cancelled body no longer needs the start acknowledgement.
+            let _ = started.send(());
+            let _ = wait_for_release.recv();
+            let _ = finished.send(());
+        }));
+        wait_for_start.await.expect("blocking closure started");
+    };
+    (guard, start)
+}
+
+#[test]
+fn graph_runner_success_with_pending_blocking_task() {
+    let (guard, started) = gated_blocking_task();
+    let output = run_graph_test("graph_runner_success_with_pending_blocking_task", async {
+        started.await;
+        42
+    });
+    assert_eq!(output, 42, "runner must return the body's output");
+    assert!(matches!(
+        guard.finished.try_recv(),
+        Err(mpsc::TryRecvError::Empty),
+    ));
+    drop(guard);
+}
+
+#[test]
+fn graph_runner_preserves_panic_with_pending_blocking_task() {
+    let (guard, started) = gated_blocking_task();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        run_graph_test(
+            "graph_runner_preserves_panic_with_pending_blocking_task",
+            async {
+                started.await;
+                panic!("original graph body assertion");
+            },
+        );
+    }));
+    let payload = result.expect_err("runner must propagate the body panic");
+    assert_eq!(
+        payload.downcast_ref::<&str>(),
+        Some(&"original graph body assertion"),
+    );
+    assert!(matches!(
+        guard.finished.try_recv(),
+        Err(mpsc::TryRecvError::Empty),
+    ));
+    drop(guard);
+}
+
+#[test]
+fn graph_runner_preserves_deadline_with_pending_blocking_task() {
+    let (guard, started) = gated_blocking_task();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        run_graph_test(
+            "graph_runner_preserves_deadline_with_pending_blocking_task",
+            async {
+                started.await;
+                // After the handshake the closure is definitely running. Pending
+                // never resolves: ZERO deterministically expires without sleeps,
+                // elapsed-time assertions, or a current-thread virtual-time feature.
+                tokio::time::timeout(Duration::ZERO, std::future::pending::<()>())
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "graph_runner_preserves_deadline_with_pending_blocking_task: \
+                                blocking phase deadline expired"
+                        )
+                    });
+            },
+        );
+    }));
+    let payload = result.expect_err("runner must propagate the actual deadline panic");
+    assert_eq!(
+        payload.downcast_ref::<&str>(),
+        Some(
+            &"graph_runner_preserves_deadline_with_pending_blocking_task: \
+               blocking phase deadline expired"
+        ),
+    );
+    assert!(matches!(
+        guard.finished.try_recv(),
+        Err(mpsc::TryRecvError::Empty),
+    ));
+    drop(guard);
 }
 
 // ----- deterministic RNG (mirrors sq8_tests::Lcg lineage) -----------------
@@ -122,8 +267,15 @@ fn recall_at_k(truth: &[RecordId], cand: &[RecordId]) -> f32 {
 // opt-in back-compat: quantization == None is the legacy f32 path
 // =========================================================================
 
-#[tokio::test]
-async fn opt_in_disabled_never_builds_u8_graph() {
+#[test]
+fn opt_in_disabled_never_builds_u8_graph() {
+    run_graph_test(
+        "opt_in_disabled_never_builds_u8_graph",
+        opt_in_disabled_never_builds_u8_graph_body(),
+    );
+}
+
+async fn opt_in_disabled_never_builds_u8_graph_body() {
     let dim = 8u32;
     let adapter = HnswAdapter::new(dim, VectorMetric::L2, HnswConfig::default());
     // Insert a handful — well below any threshold.
@@ -150,8 +302,15 @@ async fn opt_in_disabled_never_builds_u8_graph() {
 // fit transition: below threshold = f32 brute-force; crossing = u8 graph
 // =========================================================================
 
-#[tokio::test]
-async fn fit_transition_at_threshold() {
+#[test]
+fn fit_transition_at_threshold() {
+    run_graph_test(
+        "fit_transition_at_threshold",
+        fit_transition_at_threshold_body(),
+    );
+}
+
+async fn fit_transition_at_threshold_body() {
     let dim = 16u32;
     let adapter = HnswAdapter::new_with_quantization(
         dim,
@@ -214,13 +373,12 @@ async fn fit_transition_at_threshold() {
 // recall ≤ 2% drop: quantized+rescored vs f32 ground truth
 // =========================================================================
 
-#[tokio::test]
-async fn recall_sq8_vs_f32_within_two_percent() {
-    within_deadline(
-        "recall_sq8_vs_f32",
+#[test]
+fn recall_sq8_vs_f32_within_two_percent() {
+    run_graph_test(
+        "recall_sq8_vs_f32_within_two_percent",
         recall_sq8_vs_f32_within_two_percent_body(),
-    )
-    .await;
+    );
 }
 
 async fn recall_sq8_vs_f32_within_two_percent_body() {
@@ -302,13 +460,12 @@ async fn recall_sq8_vs_f32_within_two_percent_body() {
 // concurrent fit transition: no lost upserts (class #408 regression)
 // =========================================================================
 
-#[tokio::test]
-async fn concurrent_upsert_across_threshold_no_loss() {
-    within_deadline(
-        "concurrent_upsert_no_loss",
+#[test]
+fn concurrent_upsert_across_threshold_no_loss() {
+    run_graph_test(
+        "concurrent_upsert_across_threshold_no_loss",
         concurrent_upsert_across_threshold_no_loss_body(),
-    )
-    .await;
+    );
 }
 
 async fn concurrent_upsert_across_threshold_no_loss_body() {
@@ -393,8 +550,15 @@ async fn concurrent_upsert_across_threshold_no_loss_body() {
 /// produce duplicate rids in search results. Before the atomic-claim fix,
 /// both the fit catch-up AND the upsert self-migration could graph-insert
 /// the same internal, causing the same rid to appear twice in top-k.
-#[tokio::test]
-async fn concurrent_upsert_across_threshold_no_duplicate_rids() {
+#[test]
+fn concurrent_upsert_across_threshold_no_duplicate_rids() {
+    run_graph_test(
+        "concurrent_upsert_across_threshold_no_duplicate_rids",
+        concurrent_upsert_across_threshold_no_duplicate_rids_body(),
+    );
+}
+
+async fn concurrent_upsert_across_threshold_no_duplicate_rids_body() {
     let dim = 24u32;
     let adapter = Arc::new(HnswAdapter::new_with_quantization(
         dim,
@@ -454,8 +618,15 @@ async fn concurrent_upsert_across_threshold_no_duplicate_rids() {
 // clamp regression — ShamirDist/ShamirDistU8 .max(0.0) guard).
 // =========================================================================
 
-#[tokio::test]
-async fn cosine_quantized_graph_no_panic() {
+#[test]
+fn cosine_quantized_graph_no_panic() {
+    run_graph_test(
+        "cosine_quantized_graph_no_panic",
+        cosine_quantized_graph_no_panic_body(),
+    );
+}
+
+async fn cosine_quantized_graph_no_panic_body() {
     let dim = 32u32;
     let adapter = HnswAdapter::new_with_quantization(
         dim,
@@ -492,8 +663,15 @@ async fn cosine_quantized_graph_no_panic() {
 // delete on a quantized index: tombstone hides the vector
 // =========================================================================
 
-#[tokio::test]
-async fn delete_on_quantized_index() {
+#[test]
+fn delete_on_quantized_index() {
+    run_graph_test(
+        "delete_on_quantized_index",
+        delete_on_quantized_index_body(),
+    );
+}
+
+async fn delete_on_quantized_index_body() {
     let dim = 16u32;
     let adapter = HnswAdapter::new_with_quantization(
         dim,
@@ -556,8 +734,15 @@ async fn delete_on_quantized_index() {
 // mid-delete). The test pins the unconditional contract.
 // =========================================================================
 
-#[tokio::test]
-async fn delete_unconditionally_evicts_u8_codes_post_fit() {
+#[test]
+fn delete_unconditionally_evicts_u8_codes_post_fit() {
+    run_graph_test(
+        "delete_unconditionally_evicts_u8_codes_post_fit",
+        delete_unconditionally_evicts_u8_codes_post_fit_body(),
+    );
+}
+
+async fn delete_unconditionally_evicts_u8_codes_post_fit_body() {
     let dim = 16u32;
     let adapter = HnswAdapter::new_with_quantization(
         dim,
@@ -660,8 +845,15 @@ async fn delete_unconditionally_evicts_u8_codes_post_fit() {
 // this assertion fails (the code stays resident).
 // =========================================================================
 
-#[tokio::test]
-async fn delete_evicts_u8_codes_even_pre_fit_race_window() {
+#[test]
+fn delete_evicts_u8_codes_even_pre_fit_race_window() {
+    run_graph_test(
+        "delete_evicts_u8_codes_even_pre_fit_race_window",
+        delete_evicts_u8_codes_even_pre_fit_race_window_body(),
+    );
+}
+
+async fn delete_evicts_u8_codes_even_pre_fit_race_window_body() {
     let dim = 16u32;
     // Build a quantization-ENABLED adapter but stay WELL below FIT_THRESHOLD
     // (256) so no fit ever triggers — `quantized_active()` stays `false`.
@@ -734,8 +926,15 @@ async fn delete_evicts_u8_codes_even_pre_fit_race_window() {
 // upsert replace on a quantized index: old internal tombstoned
 // =========================================================================
 
-#[tokio::test]
-async fn upsert_replace_on_quantized_index() {
+#[test]
+fn upsert_replace_on_quantized_index() {
+    run_graph_test(
+        "upsert_replace_on_quantized_index",
+        upsert_replace_on_quantized_index_body(),
+    );
+}
+
+async fn upsert_replace_on_quantized_index_body() {
     let dim = 16u32;
     let adapter = Arc::new(HnswAdapter::new_with_quantization(
         dim,
@@ -796,8 +995,15 @@ async fn upsert_replace_on_quantized_index() {
 //  2. quant adapter pre-fit: f32 graph resident.
 //  3. quant adapter post-fit: f32 graph DROPPED; search still works.
 
-#[tokio::test]
-async fn f32_graph_present_non_quant_never_drops() {
+#[test]
+fn f32_graph_present_non_quant_never_drops() {
+    run_graph_test(
+        "f32_graph_present_non_quant_never_drops",
+        f32_graph_present_non_quant_never_drops_body(),
+    );
+}
+
+async fn f32_graph_present_non_quant_never_drops_body() {
     // A non-quant adapter never drops its f32 graph — bit-for-bit back-compat
     // with the pre-#418 legacy path.
     let dim = 8u32;
@@ -819,8 +1025,15 @@ async fn f32_graph_present_non_quant_never_drops() {
     assert_eq!(res.len(), 3);
 }
 
-#[tokio::test]
-async fn f32_graph_dropped_after_fit_and_search_survives() {
+#[test]
+fn f32_graph_dropped_after_fit_and_search_survives() {
+    run_graph_test(
+        "f32_graph_dropped_after_fit_and_search_survives",
+        f32_graph_dropped_after_fit_and_search_survives_body(),
+    );
+}
+
+async fn f32_graph_dropped_after_fit_and_search_survives_body() {
     // Quant adapter: f32 graph dropped post-fit, but search/upsert/delete
     // continue to work through the u8 path. This is the core #418 regression:
     // the drop must NOT break the post-fit path, and must NOT cause UAF under
@@ -895,8 +1108,15 @@ async fn f32_graph_dropped_after_fit_and_search_survives() {
 // overwhelming probability, while a genuinely LOST vector (no graph node)
 // never appears at any k. `missing == 0` is the no-loss invariant.
 
-#[tokio::test]
-async fn concurrent_upsert_across_fit_window_graph_path_no_loss() {
+#[test]
+fn concurrent_upsert_across_fit_window_graph_path_no_loss() {
+    run_graph_test(
+        "concurrent_upsert_across_fit_window_graph_path_no_loss",
+        concurrent_upsert_across_fit_window_graph_path_no_loss_body(),
+    );
+}
+
+async fn concurrent_upsert_across_fit_window_graph_path_no_loss_body() {
     let dim = 24u32;
     let adapter = Arc::new(HnswAdapter::new_with_quantization(
         dim,
@@ -1002,8 +1222,15 @@ async fn concurrent_upsert_across_fit_window_graph_path_no_loss() {
 // pre-flip internal has landed, so no in-flight upsert can miss it.
 // =========================================================================
 
-#[tokio::test]
-async fn concurrent_upsert_across_fit_no_f32_graph_absent_error() {
+#[test]
+fn concurrent_upsert_across_fit_no_f32_graph_absent_error() {
+    run_graph_test(
+        "concurrent_upsert_across_fit_no_f32_graph_absent_error",
+        concurrent_upsert_across_fit_no_f32_graph_absent_error_body(),
+    );
+}
+
+async fn concurrent_upsert_across_fit_no_f32_graph_absent_error_body() {
     let dim = 16u32;
     let adapter = Arc::new(HnswAdapter::new_with_quantization(
         dim,
@@ -1091,8 +1318,15 @@ async fn concurrent_upsert_across_fit_no_f32_graph_absent_error() {
 // Before the fix this test would hang (timeout) instead of failing fast.
 // =========================================================================
 
-#[tokio::test]
-async fn concurrent_upsert_with_tombstone_across_fit_does_not_hang() {
+#[test]
+fn concurrent_upsert_with_tombstone_across_fit_does_not_hang() {
+    run_graph_test(
+        "concurrent_upsert_with_tombstone_across_fit_does_not_hang",
+        concurrent_upsert_with_tombstone_across_fit_does_not_hang_body(),
+    );
+}
+
+async fn concurrent_upsert_with_tombstone_across_fit_does_not_hang_body() {
     let dim = 16u32;
     let adapter = Arc::new(HnswAdapter::new_with_quantization(
         dim,
@@ -1158,7 +1392,8 @@ async fn concurrent_upsert_with_tombstone_across_fit_does_not_hang() {
 
     assert!(
         result.is_ok(),
-        "#423 (Б-3 adversarial finding): concurrent upserts that tombstone \
+        "concurrent_upsert_with_tombstone_across_fit_does_not_hang: joining upsert tasks: \
+         #423 (Б-3 adversarial finding): concurrent upserts that tombstone \
          pre-flip internals during the fit transition HUNG past the 60s \
          timeout — the catch-up loop's convergence target excluded a \
          post-flip-tombstoned pre-flip internal and never reached it. \
@@ -1202,8 +1437,15 @@ async fn concurrent_upsert_with_tombstone_across_fit_does_not_hang() {
 // pre-flip vector out of both `vectors` and `vectors_u8`/the graph.
 // =========================================================================
 
-#[tokio::test]
-async fn concurrent_same_rid_upsert_race_across_fit_no_double_count() {
+#[test]
+fn concurrent_same_rid_upsert_race_across_fit_no_double_count() {
+    run_graph_test(
+        "concurrent_same_rid_upsert_race_across_fit_no_double_count",
+        concurrent_same_rid_upsert_race_across_fit_no_double_count_body(),
+    );
+}
+
+async fn concurrent_same_rid_upsert_race_across_fit_no_double_count_body() {
     let dim = 16u32;
     let adapter = Arc::new(HnswAdapter::new_with_quantization(
         dim,
@@ -1258,7 +1500,8 @@ async fn concurrent_same_rid_upsert_race_across_fit_no_double_count() {
     .await;
     assert!(
         result.is_ok(),
-        "concurrent same-rid upserts across the fit boundary hung past the \
+        "concurrent_same_rid_upsert_race_across_fit_no_double_count: joining upsert tasks: \
+         concurrent same-rid upserts across the fit boundary hung past the \
          60s timeout"
     );
 
@@ -1333,8 +1576,15 @@ async fn concurrent_same_rid_upsert_race_across_fit_no_double_count() {
 // authority the catch-up loop counts on.
 // =========================================================================
 
-#[tokio::test(flavor = "current_thread")]
-async fn concurrent_upsert_quantized_fastpath_converges_no_hang() {
+#[test]
+fn concurrent_upsert_quantized_fastpath_converges_no_hang() {
+    run_graph_test(
+        "concurrent_upsert_quantized_fastpath_converges_no_hang",
+        concurrent_upsert_quantized_fastpath_converges_no_hang_body(),
+    );
+}
+
+async fn concurrent_upsert_quantized_fastpath_converges_no_hang_body() {
     let dim = 8u32;
     let adapter = Arc::new(HnswAdapter::new_with_quantization(
         dim,
@@ -1378,7 +1628,8 @@ async fn concurrent_upsert_quantized_fastpath_converges_no_hang() {
 
     assert!(
         result.is_ok(),
-        "#433: concurrent upserts across the fit boundary HUNG past 60s — \
+        "concurrent_upsert_quantized_fastpath_converges_no_hang: joining upsert tasks: \
+         #433: concurrent upserts across the fit boundary HUNG past 60s — \
          the quantized fast-path published a pre-flip internal via a raw \
          vectors_u8 insert without bumping migrated_pre_flip, so the \
          catch-up loop never converged. See `quantized_fastpath_publish`."
@@ -1433,8 +1684,15 @@ async fn concurrent_upsert_quantized_fastpath_converges_no_hang() {
 // raw-insert, or the fitter hangs.
 // =========================================================================
 
-#[tokio::test(flavor = "current_thread")]
-async fn concurrent_upsert_batch_quantized_fastpath_converges_no_hang() {
+#[test]
+fn concurrent_upsert_batch_quantized_fastpath_converges_no_hang() {
+    run_graph_test(
+        "concurrent_upsert_batch_quantized_fastpath_converges_no_hang",
+        concurrent_upsert_batch_quantized_fastpath_converges_no_hang_body(),
+    );
+}
+
+async fn concurrent_upsert_batch_quantized_fastpath_converges_no_hang_body() {
     let dim = 8u32;
     let adapter = Arc::new(HnswAdapter::new_with_quantization(
         dim,
@@ -1478,7 +1736,8 @@ async fn concurrent_upsert_batch_quantized_fastpath_converges_no_hang() {
 
     assert!(
         result.is_ok(),
-        "#433: concurrent upsert_batch across the fit boundary HUNG past \
+        "concurrent_upsert_batch_quantized_fastpath_converges_no_hang: joining batch tasks: \
+         #433: concurrent upsert_batch across the fit boundary HUNG past \
          60s — the quantized batch fast-path published pre-flip internals \
          via raw vectors_u8 inserts without bumping migrated_pre_flip."
     );
@@ -1547,8 +1806,15 @@ async fn concurrent_upsert_batch_quantized_fastpath_converges_no_hang() {
 // transient-None defect.
 // =========================================================================
 
-#[tokio::test]
-async fn search_post_fit_returns_nonempty_via_u8_path() {
+#[test]
+fn search_post_fit_returns_nonempty_via_u8_path() {
+    run_graph_test(
+        "search_post_fit_returns_nonempty_via_u8_path",
+        search_post_fit_returns_nonempty_via_u8_path_body(),
+    );
+}
+
+async fn search_post_fit_returns_nonempty_via_u8_path_body() {
     // #424 (Б-4) — functional complement to the co-filter gate test.
     //
     // `search`'s f32-HNSW branch (where the transient-None race lives)
@@ -1633,10 +1899,15 @@ impl Drop for TestSearchF32GateGuard {
     }
 }
 
-#[tokio::test]
-async fn search_cofilter_transient_none_retries_into_u8_path() {
-    use crate::vector::hnsw_adapter::install_test_search_f32_gate;
+#[test]
+fn search_cofilter_transient_none_retries_into_u8_path() {
+    run_graph_test(
+        "search_cofilter_transient_none_retries_into_u8_path",
+        search_cofilter_transient_none_retries_into_u8_path_body(),
+    );
+}
 
+async fn search_cofilter_transient_none_retries_into_u8_path_body() {
     let dim = 16u32;
     let adapter = Arc::new(HnswAdapter::new_with_quantization(
         dim,
@@ -1743,10 +2014,15 @@ async fn search_cofilter_transient_none_retries_into_u8_path() {
 // bitwise-identical to production — the assertion uses exact bit equality
 // (no epsilon).
 // =========================================================================
-#[tokio::test]
-async fn f3_f7_quantized_bruteforce_exact_scored_output() {
-    use crate::vector::quantized_dist::RescoreCtx;
+#[test]
+fn f3_f7_quantized_bruteforce_exact_scored_output() {
+    run_graph_test(
+        "f3_f7_quantized_bruteforce_exact_scored_output",
+        f3_f7_quantized_bruteforce_exact_scored_output_body(),
+    );
+}
 
+async fn f3_f7_quantized_bruteforce_exact_scored_output_body() {
     let dim = 8u32;
     // 300 > FIT_THRESHOLD (256) → fit fires; 300 ≤ 512 → bruteforce path
     // (`search_quantized_bruteforce`), the site touched by F3/F7.

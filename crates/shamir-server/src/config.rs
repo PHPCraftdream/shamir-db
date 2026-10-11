@@ -131,6 +131,11 @@ pub struct ReplicationConfig {
     /// wire source cannot connect — reconcile logs and skips.
     #[serde(default)]
     pub replicator_password: Option<String>,
+    /// Decode replicated Put payloads before allocating a version. Adds per-Put
+    /// decoding cost; rejects undecodable records without schema/validator/DAC
+    /// checks. Defaults to false (Trusted, preserving existing behavior).
+    #[serde(default)]
+    pub validate_replicated_payload: bool,
     /// SNI hostname to present to the upstream's TLS layer. Defaults to
     /// `localhost` (matching the self-signed cert the server generates).
     #[serde(default = "default_repl_server_name")]
@@ -143,6 +148,7 @@ impl Default for ReplicationConfig {
             node_id: None,
             replicator_user: None,
             replicator_password: None,
+            validate_replicated_payload: false,
             server_name: default_repl_server_name(),
         }
     }

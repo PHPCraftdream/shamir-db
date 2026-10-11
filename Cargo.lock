@@ -1704,8 +1704,6 @@ dependencies = [
 [[package]]
 name = "hnsw_rs"
 version = "0.3.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9b4dcb9840006fae9964e97dfdb354cd00b7a15d69d143caae7eeca0410af9f"
 dependencies = [
  "anndists",
  "anyhow",
@@ -1723,6 +1721,7 @@ dependencies = [
  "rand 0.10.3",
  "rayon",
  "serde",
+ "tempfile",
 ]
 
 [[package]]

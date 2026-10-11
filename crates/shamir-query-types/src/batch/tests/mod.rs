@@ -5,3 +5,4 @@ pub mod distinct_repos_tests;
 pub mod for_each_op_tests;
 pub mod for_each_planner_tests;
 pub mod planner_tests;
+pub mod tree_visitor_tests;

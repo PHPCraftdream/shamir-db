@@ -173,15 +173,39 @@ impl Pagination {
     /// are **not** expressible as (skip, take) and are consumed by the planner
     /// via [`Pagination::keyset`]. The `(0, limit)` value keeps `resolve`
     /// total for existing offset-based call sites (limit still caps the page).
+    /// Existing callers use a saturated offset on overflow; use `try_resolve`
+    /// when invalid pagination must be rejected.
     pub fn resolve(&self) -> (u64, Option<u64>) {
         match self {
             Pagination::LimitOffset { limit, offset } => (*offset, *limit),
             Pagination::Page { page, page_size } => {
-                let skip = page.saturating_sub(1) * page_size;
+                let skip = page.saturating_sub(1).saturating_mul(*page_size);
                 (skip, Some(*page_size))
             }
             Pagination::After { limit, .. } => (0, *limit),
             Pagination::None => (0, Option::None),
+        }
+    }
+
+    /// Resolve pagination, rejecting a page offset that cannot fit in `u64`.
+    pub fn try_resolve(&self) -> Result<(u64, Option<u64>), crate::batch::BatchError> {
+        match self {
+            Pagination::Page { page, page_size } => {
+                let skip = page
+                    .saturating_sub(1)
+                    .checked_mul(*page_size)
+                    .ok_or_else(|| {
+                        crate::batch::BatchError::query_coded(
+                            "pagination",
+                            "pagination_too_large",
+                            "page offset exceeds u64",
+                        )
+                    })?;
+                Ok((skip, Some(*page_size)))
+            }
+            Pagination::LimitOffset { limit, offset } => Ok((*offset, *limit)),
+            Pagination::After { limit, .. } => Ok((0, *limit)),
+            Pagination::None => Ok((0, None)),
         }
     }
 
@@ -291,7 +315,7 @@ impl PaginationInfo {
         match (take, total_count) {
             (Some(page_size), Some(total)) if page_size > 0 => {
                 let total_pages = total.div_ceil(page_size);
-                let has_next = skip + page_size < total;
+                let has_next = skip.saturating_add(page_size) < total;
                 let current_page = match pagination {
                     Pagination::Page { page, .. } => Some(*page),
                     _ => Option::None,
