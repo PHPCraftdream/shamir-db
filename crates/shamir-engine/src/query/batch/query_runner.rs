@@ -6,7 +6,7 @@
 use crate::query::batch::batch_execute::{
     execute_batch_impl, execute_plan_tx_impl, execute_planned_batch_impl, plan_and_validate_batch,
 };
-use crate::query::batch::execution_deadline::ExecutionDeadline;
+use crate::query::batch::exec_scope::ExecScope;
 use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
 use crate::query::batch::{BatchError, BatchOp, QueryEntry};
 use crate::query::filter::FilterContext;
@@ -209,12 +209,12 @@ fn run_nested_body_in_outer_tx<'a>(
     depth: usize,
     params: &'a TMap<String, QueryValue>,
     result_encoding: ResultEncoding,
-    deadline: ExecutionDeadline,
+    scope: &'a ExecScope,
 ) -> NestedTxBodyFuture<'a> {
     Box::pin(async move {
         // #666 checkpoint: nested-body entry — mirrors the check at the top
         // of `execute_batch_impl` for the non-tx recursion path.
-        deadline.check()?;
+        scope.check()?;
 
         execute_plan_tx_impl(
             plan,
@@ -228,7 +228,7 @@ fn run_nested_body_in_outer_tx<'a>(
             depth,
             params,
             result_encoding,
-            deadline,
+            scope,
         )
         .await
     })
@@ -586,12 +586,10 @@ pub struct QueryRunner<'a> {
     /// server de-interns to name-keyed `QueryValue`; `Id` = server
     /// returns raw id-keyed storage msgpack (client de-interns).
     pub result_encoding: ResultEncoding,
-    /// #666 cooperative wall-clock budget for the whole execution tree —
-    /// consulted before each `ForEach` iteration and threaded into every
-    /// nested `Batch`/`ForEach` body recursion. `ExecutionDeadline::
-    /// unbounded()` on paths outside the single-call budget (interactive
-    /// tx). See `execution_deadline.rs`.
-    pub deadline: ExecutionDeadline,
+    /// Shared execution budget, consulted at the existing cooperative
+    /// checkpoints and borrowed by every nested `Batch`/`ForEach` body.
+    /// The borrow is bounded by this runner's execution lifetime.
+    pub scope: &'a ExecScope,
 }
 
 impl<'a> QueryRunner<'a> {
@@ -731,7 +729,7 @@ impl<'a> QueryRunner<'a> {
                         self.depth + 1,
                         &resolved_params,
                         self.result_encoding,
-                        self.deadline,
+                        self.scope,
                     )
                     .await
                     .map_err(wrap_sub_batch_err)?
@@ -746,7 +744,7 @@ impl<'a> QueryRunner<'a> {
                         self.db_name,
                         self.depth + 1,
                         &resolved_params,
-                        self.deadline,
+                        self.scope,
                     )
                     .await
                     .map_err(|e| match e {
@@ -904,7 +902,7 @@ impl<'a> QueryRunner<'a> {
             // the query shape — see `plan_and_validate_batch`'s doc comment
             // for why hoisting it out of the loop is sound. `plan` is then
             // reused (via a fresh `&mut` reborrow) by every iteration below.
-            self.deadline.check()?;
+            self.scope.check()?;
             let wrap_for_each_body_err = |e: BatchError| match e {
                 timeout @ BatchError::ExecutionTimedOut { .. } => timeout,
                 e => BatchError::QueryError {
@@ -929,7 +927,7 @@ impl<'a> QueryRunner<'a> {
                 // (unwrapped — see the map_err pass-through), reaching the
                 // outer tx's `Err`-arm cleanup like any other iteration
                 // failure.
-                self.deadline.check()?;
+                self.scope.check()?;
 
                 let mut resolved_params: TMap<String, QueryValue> = new_map();
                 resolved_params.insert(fe.bind_row.clone(), element);
@@ -976,7 +974,7 @@ impl<'a> QueryRunner<'a> {
                         self.depth + 1,
                         &resolved_params,
                         self.result_encoding,
-                        self.deadline,
+                        self.scope,
                     )
                     .await
                     .map_err(|e| match e {
@@ -997,7 +995,7 @@ impl<'a> QueryRunner<'a> {
                         self.db_name,
                         self.depth + 1,
                         &resolved_params,
-                        self.deadline,
+                        self.scope,
                     )
                     .await
                     .map_err(|e| match e {
@@ -1813,7 +1811,7 @@ pub(super) async fn execute_single_impl(
     depth: usize,
     params: &TMap<String, QueryValue>,
     result_encoding: ResultEncoding,
-    deadline: ExecutionDeadline,
+    scope: &ExecScope,
 ) -> Result<QueryResult, BatchError> {
     let mut runner = QueryRunner {
         resolver,
@@ -1825,7 +1823,7 @@ pub(super) async fn execute_single_impl(
         depth,
         params,
         result_encoding,
-        deadline,
+        scope,
     };
     runner.run(alias, entry, resolved_refs).await
 }
