@@ -516,11 +516,10 @@ impl ServerLauncher {
                     as Arc<dyn crate::replication::ReplSource>
             })
         });
-        let supervisor = Arc::new(crate::replication::SubscriptionSupervisor::new(
-            shamir.clone(),
-            repl_factory,
-            node_id,
-        ));
+        let supervisor = Arc::new(
+            crate::replication::SubscriptionSupervisor::new(shamir.clone(), repl_factory, node_id)
+                .with_validate_replicated_payload(repl_cfg.validate_replicated_payload),
+        );
 
         // Phase B Stage 6 — background reaper for interactive txs that
         // outlive their idle TTL or absolute deadline. Shares the root
