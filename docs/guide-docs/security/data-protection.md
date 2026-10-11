@@ -71,17 +71,16 @@ the database does not perform the encryption itself.*
 
 ### 1.3 Operator mitigation (required for any PII-bearing deployment)
 
-The data directory configured at server start (`--data-dir` /
-`server.example.ktav`'s `data_path`) **MUST** reside on encrypted storage in
+The data directory configured at server start (`data_dir` in the `.ktav` config) **MUST** reside on encrypted storage in
 any deployment that stores PII or any other sensitive data. Pick the layer
 that matches the deployment target:
 
 | Deployment | Recommended at-rest encryption |
 |---|---|
-| **Linux on bare metal / VM** | **LUKS** full-disk or partition encryption for the volume holding `data_path` (and any volume holding backups / copied snapshots). |
+| **Linux on bare metal / VM** | **LUKS** full-disk or partition encryption for the volume holding `data_dir` (and any volume holding backups / copied snapshots). |
 | **Windows** | **BitLocker** on the drive holding the data directory. |
 | **AWS EC2 / GCP / Azure VM** | Provider **EBS/disk encryption** (AWS EBS encryption, GCP CMEK, Azure Disk Encryption). For self-managed VMs, also acceptable: LUKS on top of an encrypted EBS volume (defense-in-depth). |
-| **Kubernetes** | A **StorageClass** backed by an encrypted CSI driver (e.g. AWS EBS CSI with encrypted volumes, GCE PD CSI with CMEK, or a CSI that wraps LUKS). Confirm `data_path`'s PVC uses it. |
+| **Kubernetes** | A **StorageClass** backed by an encrypted CSI driver (e.g. AWS EBS CSI with encrypted volumes, GCE PD CSI with CMEK, or a CSI that wraps LUKS). Confirm `data_dir`'s PVC uses it. |
 | **Backups / snapshots / replicas** | **Same requirement.** An unencrypted `tar`/`rsync` of the data directory, an EBS snapshot taken without CMK, or a replica whose data dir is on a plaintext volume all void the protection. The encryption obligation follows the data, not the primary. |
 
 The compliance posture is satisfied **only when every place the bytes land**
@@ -522,7 +521,7 @@ Verified at:
 | Question | Answer |
 |---|---|
 | Is record data encrypted at rest by the database? | **No.** Data is plaintext LZ4-compressed MessagePack on disk. Verified by grep across `shamir-storage`, vendored `fjall-3.0.1` and `lsm-tree-3.0.1`. |
-| Is the lack of at-rest encryption a compliance gap? | **No, given operator action.** The model is *delegated* to the OS/volume layer (LUKS/BitLocker/cloud disk encryption). The operator MUST place `data_path` on encrypted storage. This is the same model SQLite/RocksDB document. |
+| Is the lack of at-rest encryption a compliance gap? | **No, given operator action.** The model is *delegated* to the OS/volume layer (LUKS/BitLocker/cloud disk encryption). The operator MUST place `data_dir` on encrypted storage. This is the same model SQLite/RocksDB document. |
 | Is transport encrypted? | **Yes** — TLS via rustls (covered in `SECURITY.md`, not here). |
 | What is the default retention? | **`CurrentOnly`** — minimal-retention, privacy-favorable. History is not retained unless explicitly opted in. |
 | Is there a "right to erasure" API? | **No single API.** Compose `Delete` (current value) + `PurgeHistory` (history versions) + wait for WAL truncation + LSM compaction. Both ops are wire-protocol, gated by `Action::Manage`. |

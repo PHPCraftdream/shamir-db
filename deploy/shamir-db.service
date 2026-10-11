@@ -5,7 +5,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
 User=shamir
 Group=shamir
 ExecStart=/usr/local/bin/shamir-server --config /etc/shamir/server.ktav --bootstrap-token-path /run/shamir/bootstrap_token.txt

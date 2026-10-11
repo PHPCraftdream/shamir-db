@@ -472,6 +472,16 @@ artifact).
   automated snapshot-based reseed remains planned, see roadmap. See
   `crates/shamir-server/src/replication/error.rs:38-57` and
   `crates/shamir-db/src/shamir_db/execute/admin_replication.rs:563-594`.
+- **Schema is not replicated.** Databases, repos, tables, and indexes must be
+  created on the follower by hand; until then the follower loop backs off with
+  `ReplError::UnknownFollowerRepo`
+  (`crates/shamir-server/src/replication/follower_loop.rs:198-210`).
+- **No on/off switch.** The follower `SubscriptionSupervisor` always boots and
+  the leader-side `ReplRequest::Pull` is served to any superuser/replicator
+  session (`crates/shamir-server/src/config.rs:99-106`,
+  `crates/shamir-server/src/db_handler/repl_handler.rs:52`). Replication is
+  inactive until subscriptions and replicator credentials exist — it is not
+  disabled by a flag.
 
 ## 6. Results
 
@@ -983,3 +993,38 @@ artifact).
     (create-time arm, including the `data_root`-required guard) and
     `crates/shamir-db/src/shamir_db/shamir_db/core.rs:700-707`
     (restart-reattach arm).
+
+## 11. Scale and performance envelope
+
+No comparative benchmarks have been published; the numbers below are internal
+measurements on one development host and are a floor, not a promise.
+
+- `CREATE INDEX` on the unique / sorted / FTS / functional / vector families
+  blocks all writers for the whole backfill (§3): ~150 ms at 5k rows,
+  ~140–160 s at 100k rows (`f78_writer_latency`); the scan is superlinear, so
+  1M rows extrapolates to hours. Only regular/hash builds online.
+- FTS and functional indexes are rebuilt from data on every table open (every
+  restart): O(rows × indexes). Vector indexes restore from their snapshot.
+- Non-keyset cursor pages re-scan the pinned snapshot in full (§6).
+- `ORDER BY` / `GROUP BY` / `DISTINCT` materialize the full matching set
+  server-side before the first page.
+- `$cond` / `$expr` are ~29×–190× slower than a flat comparison
+  (`crates/shamir-engine/benches/cond_expr_eval.rs`).
+- Benchmarks in the repository go up to 100k rows per table; larger tables
+  have no published measurements (`docs/dev-artifacts/ops/CAPACITY_PLANNING.md`).
+
+## 12. Security defaults
+
+- New resources are open (`0o777`) until `chmod`-ed
+  (`crates/shamir-types/src/access.rs:135-136`).
+- Server-side Rust→WASM compilation (`compiler://`, default `0o755`) is
+  available to every authenticated user and runs `cargo` on the host; the
+  forbidden-macro guard is a lexical scan, not a sandbox
+  (`crates/shamir-wasm-host/src/compile.rs:8-47`,
+  `crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:163-173`).
+- The TypeScript client neither verifies the server's Ed25519 identity nor
+  uses TLS channel binding
+  (`crates/shamir-client-ts/src/core/types/connection.ts:43-49`); use a
+  CA-verified certificate outside local development.
+- No at-rest encryption (`security/data-protection.md`); the audit log covers
+  authentication events only.

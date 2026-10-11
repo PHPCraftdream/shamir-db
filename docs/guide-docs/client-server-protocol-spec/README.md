@@ -69,4 +69,4 @@
 
 ## Статус
 
-**v1 — draft.** Ревью пройдены (3 итерации, 3 reviewer perspectives). Test vectors — TBD при имплементации.
+**v1 — draft, не заморожен.** Wire-формат может меняться несовместимо до первого стабильного релиза. Test vectors — `crates/shamir-connect/test-vectors/`.

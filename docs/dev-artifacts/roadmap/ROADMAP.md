@@ -2,7 +2,7 @@
 
 Future features beyond v1 spec. Не нормативные, не binding обещания.
 
-> **Current state (2026-06-10):** the transactional layer is COMPLETE —
+> **Historical state (2026-06-10), partly superseded — replication R1 and offline backup/restore have since landed:** the transactional layer was declared complete —
 > SI + SSI + true serializability (phantom protection), single-batch and
 > interactive multi-call, crash-safe, property-covered — and has since gained:
 > Level-3 pessimistic locking (wound-wait, deadlock-free by construction);

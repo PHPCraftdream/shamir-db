@@ -41,8 +41,8 @@ wires the pieces together: `DbTableResolver` (db/repo/table → concrete
 
 **`shamir-engine` is where queries come alive.** `BatchRequest` is
 parsed by the planner: queries with `{"$query": "@alias[].field"}`
-references are ordered by their dependency graph; independent groups
-run in parallel. Each operation dives deeper:
+references are ordered by their dependency graph into stages, which
+execute sequentially. Each operation dives deeper:
 
 - *Read* → `ReadQuery + FilterContext` → `TableManager.read` →
   `IndexManager` picks a plan → collects `InternerKey`-encoded
@@ -59,9 +59,8 @@ run in parallel. Each operation dives deeper:
 
 **`shamir-storage` is the solid floor.** The `Store` trait moves
 buckets of bytes: `insert / get / set / remove / iter_stream`.
-Underneath it are seven implementations (Sled, Redb, Fjall, Nebari,
-Persy, Canopy, InMemory + a Cached wrapper), each behind a Cargo
-feature. There are no types, no queries here — only key/value.
+Underneath it are Fjall (durable) and InMemory, plus Cached and
+MemBuffer wrappers. There are no types, no queries here — only key/value.
 
 **`shamir-types` is the foundation.** The Value model, MessagePack
 codecs (plus a legacy text-encoding codec), `RecordId` (a 16-byte timestamped ULID), and the

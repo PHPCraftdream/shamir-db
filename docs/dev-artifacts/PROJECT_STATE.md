@@ -2,6 +2,8 @@
 
 # ShamirDB — Project State
 
+> ⚠ **HISTORICAL snapshot (2026-06-10), superseded.** Current status: README "Project Status" and `docs/guide-docs/KNOWN_LIMITATIONS.md`.
+
 **Snapshot date:** 2026-06-10. The canonical "where we are" document — what
 ShamirDB is, what shipped, and where it goes next. The actionable forward
 plan lives in [`roadmap/PLAN.md`](roadmap/PLAN.md); the (now historical)
@@ -40,7 +42,7 @@ Shomer access fabric enforced, validators + CAS, changefeed. Before that:
 
 ## 1. What it is
 
-**ShamirDB** — a production-grade, self-contained, decentralized database in
+**ShamirDB** — an alpha-stage, single-node database (decentralisation is a goal) in
 Rust. One binary (< 50 MB), no external runtime dependencies. The name is the
 charter:
 

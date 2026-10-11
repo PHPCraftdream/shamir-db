@@ -806,14 +806,15 @@ jobs:
             flag { print }
           ' CHANGELOG.md)"
           if [ -z "${NOTES}" ]; then
-            NOTES="Pre-release build of ${GITHUB_REF_NAME}.
-
-          Compatibility: this is an alpha release — alpha-to-alpha
-          compatibility is NOT guaranteed. See [CHANGELOG.md](CHANGELOG.md)
-          for the versioning scheme and the no-alpha-to-alpha-compatibility
-          statement."
+            NOTES="Pre-release build of ${GITHUB_REF_NAME}. See [CHANGELOG.md](CHANGELOG.md)."
           fi
-          printf '%s\n' "${NOTES}" > release-notes.md
+          PREAMBLE="**Alpha preview of a single-node database — not for production data.**
+          Experimental (may change or be removed): leader-follower replication, the
+          storage-migration API (disabled by default), server-side Rust-to-WASM compilation.
+          No online backup, no point-in-time recovery, no in-place upgrade between alpha
+          versions — on-disk format, wire protocol and APIs may change incompatibly.
+          See docs/guide-docs/KNOWN_LIMITATIONS.md."
+          printf '%s\n\n%s\n' "${PREAMBLE}" "${NOTES}" > release-notes.md
           echo "--- release notes ---"
           cat release-notes.md
       - name: Create GitHub Release (prerelease)
