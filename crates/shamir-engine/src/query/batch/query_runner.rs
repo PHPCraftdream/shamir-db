@@ -896,6 +896,25 @@ impl<'a> QueryRunner<'a> {
                 });
             }
 
+            // Check the static body tree before iteration zero; do not charge
+            // it here. Dynamic descendants are charged as they dispatch.
+            // Keep visitor/counter temporaries out of the per-op await state.
+            {
+                let overflow = || BatchError::LimitExceeded {
+                    kind: shamir_query_types::batch::LimitKind::Work,
+                    actual: u64::MAX,
+                    max: self.scope.limits().max_total_work,
+                };
+                let body_work = shamir_query_types::batch::BatchTreeVisitor::new(&fe.batch.queries)
+                    .try_fold(0u64, |count, _| count.checked_add(1))
+                    .ok_or_else(overflow)?;
+                let extra = u64::try_from(elements.len())
+                    .ok()
+                    .and_then(|len| len.checked_mul(body_work))
+                    .ok_or_else(overflow)?;
+                self.scope.check_work(extra)?;
+            }
+
             // Plan + validate the loop body ONCE, before iterating (P2 perf
             // fix — see `TASK_GROUPS.md` group 22). The body's SHAPE
             // (queries, table refs, filter ASTs) is byte-identical across
