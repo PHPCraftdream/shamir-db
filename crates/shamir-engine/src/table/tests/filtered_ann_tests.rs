@@ -801,11 +801,12 @@ async fn vr5_prefilter_sees_staged_and_filters_residual() {
 
     let result = tbl.read_tx(&query, &ctx, Some(&tx)).await.unwrap();
 
-    // Confirm the pre-filter path was taken.
+    // Snapshot transactions rank exactly over snapshot + staged overlay (B04b):
+    // no ANN strategy label; the result semantics below are the contract.
     let label = path_label(&result);
     assert_eq!(
-        label, "pre_filter",
-        "expected pre_filter path, got {label:?}"
+        label, "<none>",
+        "snapshot vector read is exact, got {label:?}"
     );
 
     // All returned records must be "red" (residual enforced on committed AND
@@ -907,8 +908,13 @@ async fn vr5_cofilter_sees_staged_and_filters_residual() {
 
     let result = tbl.read_tx(&query, &ctx, Some(&tx)).await.unwrap();
 
+    // Snapshot transactions rank exactly over snapshot + staged overlay (B04b):
+    // no ANN strategy label; the result semantics below are the contract.
     let label = path_label(&result);
-    assert_eq!(label, "co_filter", "expected co_filter path, got {label:?}");
+    assert_eq!(
+        label, "<none>",
+        "snapshot vector read is exact, got {label:?}"
+    );
 
     let tags = tags_in_order(&result);
     assert!(
@@ -983,10 +989,12 @@ async fn vr5_postfilter_sees_staged_and_filters_residual() {
 
     let result = tbl.read_tx(&query, &ctx, Some(&tx)).await.unwrap();
 
+    // Snapshot transactions rank exactly over snapshot + staged overlay (B04b):
+    // no ANN strategy label; the result semantics below are the contract.
     let label = path_label(&result);
-    assert!(
-        label.contains("filtered_vector"),
-        "expected filtered_vector_scan (post-filter) path, got {label:?}"
+    assert_eq!(
+        label, "<none>",
+        "snapshot vector read is exact, got {label:?}"
     );
 
     let tags = tags_in_order(&result);
@@ -1065,10 +1073,12 @@ async fn vr5_prefilter_update_in_tx_no_duplicate_rid() {
 
     let result = tbl.read_tx(&query, &ctx, Some(&tx)).await.unwrap();
 
+    // Snapshot transactions rank exactly over snapshot + staged overlay (B04b):
+    // no ANN strategy label; the result semantics below are the contract.
     assert_eq!(
         path_label(&result),
-        "pre_filter",
-        "expected pre_filter path"
+        "<none>",
+        "snapshot vector read is exact"
     );
 
     // The updated row's NEW embedding [0.99, 0.01] is unique in this dataset
