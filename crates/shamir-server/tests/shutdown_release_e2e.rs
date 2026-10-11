@@ -146,3 +146,32 @@ async fn relaunch_right_after_shutdown_never_hits_a_held_store() {
     drop(client);
     handle.shutdown().await;
 }
+
+/// Same contract with a client that is still connected when `shutdown()` is
+/// called: the per-connection task (and the stores it reaches through its
+/// handler context) must not outlive `shutdown()`, otherwise the relaunch hits
+/// a held store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn relaunch_right_after_shutdown_with_a_client_still_connected() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let data_dir = temp.path().to_path_buf();
+
+    let handle = launch(&data_dir).await;
+    let client = connect(&handle).await;
+    let mut batch = shamir_query_builder::batch::Batch::new();
+    batch
+        .id(1)
+        .create_table("items", shamir_query_builder::ddl::create_table("items"));
+    client
+        .execute("default", batch.build())
+        .await
+        .expect("create table");
+
+    // The client stays connected across the shutdown.
+    handle.shutdown().await;
+
+    let handle = launch(&data_dir).await;
+    drop(client);
+    handle.shutdown().await;
+}
