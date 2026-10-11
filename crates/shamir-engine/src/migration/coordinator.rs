@@ -216,10 +216,10 @@ impl MigrationCoordinator {
         Ok(copied)
     }
 
-    /// Apply a batch of shadow-log entries to `dst_data`, grouping
-    /// `Put`s into one `set_many` and `Delete`s into one `remove_many` —
-    /// mirrors `run_snapshot`'s existing batched write path instead of
-    /// each entry paying its own per-op round-trip + `value.clone()`.
+    /// Apply entries in LSN order, batching only adjacent operations of
+    /// the same kind. Put runs retain input order (including duplicate keys):
+    /// `Store::set_many`'s sequential default and MemBuffer's ordered override
+    /// preserve last-writer-wins; other current backends inherit the default.
     /// Returns `entries.len()` (every entry is applied; `set`/`remove`
     /// on a store never surface a per-key "not found" error — a missing
     /// key on `remove` just yields `false`, see `Store::remove`).
@@ -232,10 +232,18 @@ impl MigrationCoordinator {
         for entry in entries {
             match &entry.op {
                 ShadowOp::Put { record_id, value } => {
+                    if !deletes.is_empty() {
+                        self.dst_data
+                            .remove_many(std::mem::take(&mut deletes))
+                            .await?;
+                    }
                     let key = RecordKey::from(record_id.as_bytes().to_vec());
                     puts.push((key, Bytes::from(value.clone())));
                 }
                 ShadowOp::Delete { record_id } => {
+                    if !puts.is_empty() {
+                        self.dst_data.set_many(std::mem::take(&mut puts)).await?;
+                    }
                     let key = RecordKey::from(record_id.as_bytes().to_vec());
                     deletes.push(key);
                 }
