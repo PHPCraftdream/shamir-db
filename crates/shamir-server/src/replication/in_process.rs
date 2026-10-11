@@ -23,6 +23,8 @@ use tokio::sync::Mutex;
 use super::error::ReplError;
 use super::source::ReplSource;
 
+pub(crate) const MAX_PULL_EVENTS: u32 = 1024;
+
 /// In-process [`ReplSource`] backed directly by a leader `Arc<ShamirDb>`.
 ///
 /// `pull` reuses `ShamirDb::read_changelog_from_journal` (the same code the
@@ -93,7 +95,6 @@ impl ReplSource for InProcessReplSource {
 
         // Reuse the same journal-read path as the wire handler.
         // Effective limit floor of 1, mirroring `handle_pull`.
-        const MAX_PULL_EVENTS: u32 = 1024;
         let effective_limit = limit.clamp(1, MAX_PULL_EVENTS) as usize;
         let mut jr = match self
             .leader
