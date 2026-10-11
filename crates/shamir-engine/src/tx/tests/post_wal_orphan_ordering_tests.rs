@@ -17,6 +17,8 @@ async fn fixture(name: &str) -> (RepoInstance, Arc<PostWalPrePublishHook>) {
         pre_wal: AtomicBool::new(false),
         after_counter: AtomicBool::new(false),
         fail_orphan_markers: AtomicBool::new(false),
+        panic_after_resume: AtomicBool::new(false),
+        panic_resume: Notify::new(),
         reached: Notify::new(),
         resume: Notify::new(),
         armed: AtomicBool::new(false),

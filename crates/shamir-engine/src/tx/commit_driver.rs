@@ -15,12 +15,14 @@ use crate::repo::RepoInstance;
 use crate::tx::commit::TxError;
 use crate::tx::TxOutcome;
 
+type CommitFuture = Pin<Box<dyn Future<Output = Result<TxOutcome, TxError>> + Send + 'static>>;
+
 /// Polls commits inline; cancellation transfers the exact suspended future.
 /// Detachment and panic cleanup require the captured runtime to remain alive:
 /// shutdown must stop admission and await `RepoInstance::quiesce_commits`.
 #[must_use = "commit drivers must be awaited"]
 pub(crate) struct CommitDriver {
-    future: Option<Pin<Box<dyn Future<Output = Result<TxOutcome, TxError>> + Send + 'static>>>,
+    future: Option<CommitFuture>,
     in_poll: bool,
     handle: Handle,
     locked_keys: Option<LockSnapshot>,
