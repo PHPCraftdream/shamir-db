@@ -128,8 +128,11 @@ impl ShamirDbHandler {
         }
 
         // Look up the handle and verify it belongs to this session.
-        let it = match self.tx_registry.get_owned(tx_handle, &session.session_id) {
-            Ok(it) => it,
+        let (it, _lease) = match self
+            .tx_registry
+            .acquire_owned(tx_handle, &session.session_id)
+        {
+            Ok(acquired) => acquired,
             Err(TxRegistryError::TxNotFound) => {
                 return DbResponse::Error {
                     code: "tx_not_found".into(),
@@ -170,9 +173,6 @@ impl ShamirDbHandler {
             match guard.as_mut() {
                 Some(tx) => {
                     let r = self.db.tx_execute_as(actor, db_name, &batch, tx).await;
-                    if r.is_ok() {
-                        it.bump_activity();
-                    }
                     // Measure staged size INSIDE the same lock as the engine call.
                     r.map(|resp| (resp, guard.as_ref().map_or(0, |tx| tx.staged_bytes())))
                 }
