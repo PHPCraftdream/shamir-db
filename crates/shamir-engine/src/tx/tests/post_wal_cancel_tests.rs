@@ -83,7 +83,10 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     drop(later_snapshot);
     assert_eq!(active_version, gate.durable_watermark() + 1);
     assert_eq!(later_outcome.commit_version, active_version + 1);
-    assert_eq!(gate.last_committed(), gate.durable_watermark());
+    // The ack path published the later version, so the visible floor is past the
+    // still-active one while the durable prefix is not: the drain must scan beyond it.
+    assert_eq!(gate.last_committed(), later_outcome.commit_version);
+    assert!(gate.last_committed() > gate.durable_watermark());
     assert_eq!(gate.orphan_max(), 0);
 
     hook.armed.store(true, Ordering::Release);
