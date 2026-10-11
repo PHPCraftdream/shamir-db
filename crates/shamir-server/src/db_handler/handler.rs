@@ -628,41 +628,26 @@ impl ShamirDbHandler {
         // `WriterMsg::{Reply,ReplyAndClose}` so the release happens in the
         // writer task, after the socket write completes — never in this
         // dispatch task.
-        if budget_guard.is_some() || self.byte_budget.cap().is_some() {
-            if let Ok(bytes) = rmp_serde::to_vec_named(&final_response) {
-                if let Some(guard) = budget_guard.as_mut() {
-                    // Overshoot edge case: the final `DbResponse` envelope
-                    // can serialize a handful of bytes LARGER than the raw
-                    // `max_result_size` estimate reserved above (enum
-                    // discriminator framing on top of the inner payload) —
-                    // `shrink_to` is a no-op in that case, so absorb the
-                    // (bounded) shortfall via `grow_unchecked` instead of
-                    // under-reserving.
-                    if bytes.len() >= guard.bytes_reserved() {
-                        guard.grow_unchecked(bytes.len() - guard.bytes_reserved());
-                    } else {
-                        guard.shrink_to(bytes.len());
-                    }
-                } else {
-                    // No upfront guard existed (budget became active only
-                    // after execution started — a boot-time-fixed config in
-                    // practice, but defend against the theoretical race
-                    // rather than silently skip accounting): fall back to
-                    // acquiring for the actual size now, same as the
-                    // pre-CR-B2 behavior.
-                    budget_guard = Some(self.byte_budget.acquire(bytes.len()).await);
-                }
-                if let Some(guard) = budget_guard {
-                    stash_guard(guard);
-                }
-                stash_serialized_response(bytes);
-            } else if let Some(guard) = budget_guard {
-                // Serialization failed: nothing to shrink to or reuse —
-                // release the upfront reservation as-is (mirrors the
-                // pre-CR-B2 behavior of simply skipping the acquire on a
-                // serialize failure).
+        if let Ok(bytes) = rmp_serde::to_vec_named(&final_response) {
+            if bytes.len() > reserve_bytes {
+                // Includes arbitrary error strings, not just successful payloads.
+                // Release before returning; never stash the rejected payload.
+                drop(budget_guard);
+                return DbResponse::Error {
+                    code: "result_too_large".to_string(),
+                    message: format!(
+                        "encoded response is {} bytes; maximum is {reserve_bytes}",
+                        bytes.len(),
+                    ),
+                };
+            }
+            if let Some(guard) = budget_guard.as_mut() {
+                guard.shrink_to(bytes.len());
+            }
+            if let Some(guard) = budget_guard {
                 stash_guard(guard);
             }
+            stash_serialized_response(bytes);
         }
 
         final_response

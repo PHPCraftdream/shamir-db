@@ -46,8 +46,8 @@ async fn commit_write_log_not_pruned_below_live_snapshot() {
     // --- Plant a second record directly at V2 > V1 via the gate API,
     // bypassing `begin_tx` to avoid colliding with snap_guard's version
     // in `active_snapshots` (which is keyed by version).
-    let v2 = gate.assign_next_version();
-    gate.publish_committed(v2);
+    let v2_guard = gate.assign_next_version_guarded();
+    let v2 = v2_guard.version();
     gate.record_commit_writes(CommitWriteRecord {
         commit_version: v2,
         per_table: TFxMap::from_iter([(
@@ -58,6 +58,7 @@ async fn commit_write_log_not_pruned_below_live_snapshot() {
             },
         )]),
     });
+    v2_guard.commit();
     assert!(v2 > snap_v, "V2 must exceed the held snapshot");
 
     // --- Sanity: log has at least 2 records (V1, V2) before GC.
@@ -129,7 +130,8 @@ async fn snapshot_skips_phase_2bis() {
         .push(PredicateDep::TableScan { table_token });
 
     let gate = repo.tx_gate().await.unwrap();
-    let tx1_commit_v = gate.assign_next_version();
+    let tx1_guard = gate.assign_next_version_guarded();
+    let tx1_commit_v = tx1_guard.version();
     let mut per_table = TFxMap::default();
     per_table.insert(
         table_token,
@@ -142,7 +144,7 @@ async fn snapshot_skips_phase_2bis() {
         commit_version: tx1_commit_v,
         per_table,
     });
-    gate.publish_committed(tx1_commit_v);
+    tx1_guard.commit();
 
     tbl.insert_tx(&InnerValue::Str("dummy".into()), Some(&mut tx2))
         .await

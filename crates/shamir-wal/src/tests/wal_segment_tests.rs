@@ -233,3 +233,56 @@ async fn startup_replay_api_surface_exists() {
     let replayed_sealed = seg.replay_sealed_at_startup().await.unwrap();
     assert_eq!(replayed_sealed.len(), 1);
 }
+
+/// Startup replay absorbs a short-lived open denial (an antivirus / backup
+/// scanner or a delete-pending handle on a fresh segment) instead of failing
+/// the whole open or drain pass.
+#[cfg(unix)]
+#[tokio::test]
+async fn startup_replay_retries_a_transient_permission_denial() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let path = seg_path(&dir);
+    let seg = WalSegment::open(path.clone()).await.unwrap();
+    seg.append_batch(Arc::new(vec![entry(1, 10).encode().unwrap()]), 10)
+        .await
+        .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::File::open(&path).is_ok() {
+        // Running as root: a mode-000 file cannot be made unreadable.
+        return;
+    }
+    let restore = path.clone();
+    let healer = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::fs::set_permissions(&restore, std::fs::Permissions::from_mode(0o644)).unwrap();
+    });
+    let replayed = seg.replay_at_startup().await.unwrap();
+    healer.join().unwrap();
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(replayed[0].txn_id, 1);
+}
+
+/// A PERSISTENT denial stays a hard startup error (audit 2.4); the
+/// concurrent-truncation variant still tolerates it without waiting.
+#[cfg(unix)]
+#[tokio::test]
+async fn startup_replay_persistent_permission_denial_stays_a_hard_error() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let path = seg_path(&dir);
+    let seg = WalSegment::open(path.clone()).await.unwrap();
+    seg.append_batch(Arc::new(vec![entry(1, 10).encode().unwrap()]), 10)
+        .await
+        .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::File::open(&path).is_ok() {
+        return;
+    }
+    assert!(seg.replay().await.unwrap().is_empty());
+    let err = seg.replay_at_startup().await.unwrap_err().to_string();
+    assert!(err.contains("PermissionDenied"), "unexpected error: {err}");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+}

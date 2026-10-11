@@ -87,6 +87,7 @@ pub mod select_expression_reject_tests;
 pub mod select_remaining_paths_tests;
 pub mod set_byte_merge_parity_tests;
 pub mod shortcut_qv_golden_tests;
+pub mod snapshot_vector_tests;
 pub mod stale_index_tests;
 pub mod stream_tx_tests;
 pub mod stream_utils;

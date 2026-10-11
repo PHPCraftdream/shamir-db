@@ -10,6 +10,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::{RecordKey, Store};
+use shamir_tx::completion_tracker::State;
 use shamir_tx::{MvccStore, RepoTxGate, Retention};
 use std::sync::Arc;
 
@@ -90,6 +91,9 @@ async fn anti_gc_snapshot_guard_pins_min_alive() {
     assert_eq!(pin, 3, "should pin at version 3");
 
     // Advance last_committed past the pin.
+    for version in 1..=10 {
+        gate.completion().mark(version, State::Materialized);
+    }
     gate.publish_committed_max(10);
     assert_eq!(gate.last_committed(), 10);
 
@@ -101,6 +105,9 @@ async fn anti_gc_snapshot_guard_pins_min_alive() {
     );
 
     // Write more data to advance further.
+    for version in 1..=20 {
+        gate.completion().mark(version, State::Materialized);
+    }
     gate.publish_committed_max(20);
     assert_eq!(gate.last_committed(), 20);
     assert_eq!(
@@ -132,7 +139,9 @@ async fn anti_gc_fails_without_guard() {
 
     // Write some data.
     for i in 0..3 {
-        gate.publish_committed_max(i as u64 + 1);
+        let version = i as u64 + 1;
+        gate.completion().mark(version, State::Materialized);
+        gate.publish_committed_max(version);
     }
 
     // Capture the pin WITHOUT holding a guard.
@@ -140,6 +149,9 @@ async fn anti_gc_fails_without_guard() {
     assert_eq!(pin, 3);
 
     // Advance last_committed past the pin.
+    for version in 1..=10 {
+        gate.completion().mark(version, State::Materialized);
+    }
     gate.publish_committed_max(10);
     assert_eq!(gate.last_committed(), 10);
 
