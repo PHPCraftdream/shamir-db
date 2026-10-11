@@ -86,25 +86,8 @@ impl ShamirDb {
             )));
         }
 
-        // Determine the RecordId: on replace, try the live registry first,
-        // then fall back to the persisted catalogue (the boot loop skips
-        // Native rows, so the registry won't have them after a restart).
-        // The catalogue is keyed by `name`, so the fallback uses the O(1)
-        // `load_validator(name)` lookup rather than a full-catalogue scan.
-        let id = if replace {
-            if let Some(existing) = self.validators.id_for_name(name) {
-                existing
-            } else if let Some(rec) = self.system_store.load_validator(name).await? {
-                rec.get("_id")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse::<RecordId>().ok())
-                    .unwrap_or_default()
-            } else {
-                RecordId::default()
-            }
-        } else {
-            RecordId::new()
-        };
+        let (id, bound_in, restore_pending) =
+            self.validator_replacement_identity(name, replace).await?;
 
         // Build the catalogue row — kind=Native, no wasm_b64.
         let mut m = shamir_types::types::common::new_map();
@@ -127,7 +110,13 @@ impl ShamirDb {
         );
         m.insert(
             "bound_in".to_string(),
-            shamir_types::types::value::QueryValue::List(vec![]),
+            shamir_types::types::value::QueryValue::List(
+                bound_in
+                    .iter()
+                    .cloned()
+                    .map(shamir_types::types::value::QueryValue::Str)
+                    .collect(),
+            ),
         );
         m.insert(
             super::KIND_FIELD.to_string(),
@@ -141,16 +130,20 @@ impl ShamirDb {
             .save_validator(name, &record, &ResourceMeta::owned_enforced(actor))
             .await?;
 
-        if replace {
-            if let Some(old_id) = self.validators.id_for_name(name) {
-                self.validators.remove(&old_id);
-            }
-        }
-
         let adapter = Arc::new(NativeRecordValidator::new(validator)) as Arc<dyn RecordValidator>;
-        self.validators
-            .register(id, name, adapter)
-            .map_err(|e| DbError::Validation(e.to_string()))?;
+        if replace {
+            // Native boot skips materialisation. Restore pending catalogue
+            // bindings before publishing the artifact, not after it is live.
+            if restore_pending {
+                for table in &bound_in {
+                    self.validators.add_binding(&id, table);
+                }
+            }
+            self.validators.replace(id, name, adapter)
+        } else {
+            self.validators.register(id, name, adapter)
+        }
+        .map_err(|e| DbError::Validation(e.to_string()))?;
 
         Ok(id)
     }
@@ -244,12 +237,8 @@ impl ShamirDb {
             )));
         }
 
-        // Determine the RecordId: on replace, reuse existing; otherwise new.
-        let id = if replace {
-            self.validators.id_for_name(name).unwrap_or_default()
-        } else {
-            RecordId::new()
-        };
+        let (id, bound_in, restore_pending) =
+            self.validator_replacement_identity(name, replace).await?;
 
         let mut m = shamir_types::types::common::new_map();
         m.insert(
@@ -281,7 +270,13 @@ impl ShamirDb {
         );
         m.insert(
             "bound_in".to_string(),
-            shamir_types::types::value::QueryValue::List(vec![]),
+            shamir_types::types::value::QueryValue::List(
+                bound_in
+                    .iter()
+                    .cloned()
+                    .map(shamir_types::types::value::QueryValue::Str)
+                    .collect(),
+            ),
         );
         // Phase 0 parity plumbing: tag the artifact origin. Today every row
         // persisted here is WASM; later phases introduce `Native` rows. The
@@ -299,20 +294,64 @@ impl ShamirDb {
             .save_validator(name, &record, &ResourceMeta::owned_enforced(actor))
             .await?;
 
-        if replace {
-            // Remove old entry if it exists; ignore errors.
-            if let Some(old_id) = self.validators.id_for_name(name) {
-                self.validators.remove(&old_id);
-            }
-        }
         // Wrap the compiled WASM function in WasmRecordValidator so the
         // registry stores Arc<dyn RecordValidator> uniformly.
         let wasm_rv = Arc::new(WasmRecordValidator::new(Arc::new(wf))) as Arc<dyn RecordValidator>;
-        self.validators
-            .register(id, name, wasm_rv)
-            .map_err(|e| DbError::Validation(e.to_string()))?;
+        if replace {
+            if restore_pending {
+                for table in &bound_in {
+                    self.validators.add_binding(&id, table);
+                }
+            }
+            self.validators.replace(id, name, wasm_rv)
+        } else {
+            self.validators.register(id, name, wasm_rv)
+        }
+        .map_err(|e| DbError::Validation(e.to_string()))?;
 
         Ok(id)
+    }
+
+    /// Reuse live identity/bindings, or the pending native catalogue row on
+    /// restart. Live bindings are authoritative; do not resurrect stale durable
+    /// bindings after a live unbind. Only an absent-at-capture artifact needs
+    /// binding restoration; live snapshots must never be replayed after await.
+    /// This is not an async catalogue transaction: concurrent materialisation,
+    /// unbinding or catalogue changes after an absent-id capture can still race
+    /// pending restoration. Live catalogue rows can also retain a stale binding
+    /// snapshot if binding DDL overlaps the save; live bindings are not replayed.
+    async fn validator_replacement_identity(
+        &self,
+        name: &str,
+        replace: bool,
+    ) -> DbResult<(RecordId, Vec<String>, bool)> {
+        if !replace {
+            return Ok((RecordId::new(), Vec::new(), false));
+        }
+        if let Some(id) = self.validators.id_for_name(name) {
+            return Ok((id, self.validators.bound_tables(&id), false));
+        }
+        if let Some(rec) = self.system_store.load_validator(name).await? {
+            let id = rec
+                .get("_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<RecordId>().ok())
+                .ok_or_else(|| {
+                    DbError::Validation(
+                        format!("validator '{}' has an invalid catalogue id", name,),
+                    )
+                })?;
+            let mut bound_in = self.validators.bound_tables(&id);
+            if let Some(bound) = rec.get("bound_in").and_then(|v| v.as_array()) {
+                for table in bound.iter().filter_map(|v| v.as_str()) {
+                    if !bound_in.iter().any(|existing| existing == table) {
+                        bound_in.push(table.to_string());
+                    }
+                }
+            }
+            return Ok((id, bound_in, true));
+        }
+        Ok((RecordId::new(), Vec::new(), false))
     }
 
     /// Drop a validator by name.

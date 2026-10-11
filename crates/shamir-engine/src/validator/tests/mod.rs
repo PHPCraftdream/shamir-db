@@ -5,6 +5,7 @@ pub mod native_adapter_tests;
 pub mod persistence_tests;
 pub mod query_value_conv_tests;
 pub mod record_fields_tests;
+pub mod registry_atomic_tests;
 pub mod registry_tests;
 pub mod run_validators_tests;
 pub mod validator_actor_tests;
