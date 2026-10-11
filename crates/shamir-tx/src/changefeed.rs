@@ -18,9 +18,10 @@
 //!    equals numeric order). The commit-path hands the event to a bounded
 //!    [`tokio::sync::mpsc`] channel via `try_send` (NEVER blocks); a
 //!    background task batches pending events and writes them durably to
-//!    the changelog store. [`RepoChangefeed::read_from`] range-reads the
-//!    journal from a given version (resumable pull). A late subscriber
-//!    catches up via `read_from`, then switches to the live broadcast.
+//!    the changelog store. Engine pulls use `RepoInstance::read_changelog_from`
+//!    to confirm a writer barrier and range-read only the settled version prefix.
+//!    The lower-level [`RepoChangefeed::read_from`] is unbounded and does not
+//!    itself establish that ordering guarantee.
 //!
 //! NEITHER track blocks the hot commit-path. The projection is done once
 //! and reused for both tracks; a commit with an empty footprint emits
@@ -28,16 +29,26 @@
 //!
 //! ## Durability trade-off (journal)
 //!
-//! The journal write is asynchronous: `try_send` enqueues the event and
-//! returns immediately, and the background writer persists it shortly
-//! after. There is therefore a small window after a commit acks during
-//! which a process crash loses the not-yet-flushed journal tail. This is
-//! by design — the journal must never sit on the commit's critical path.
-//! The committed DATA itself is durable independently (Phase 4 WAL); the
-//! journal is an *observability/replication* feed, not a source of truth.
-//! On channel overflow (a sustained burst faster than the writer drains)
-//! the event is dropped with a `log::warn!` rather than growing memory
-//! unboundedly — see [`RepoChangefeed::emit`].
+//! Local commits and replicated applies enqueue (or mark a gap) immediately
+//! before version publication, without an await or fallible step between them.
+//! Engine journal pulls capture the contiguous completion watermark W (every
+//! version through W is settled), then confirm the preceding channel prefix
+//! with a writer barrier before reading events at or below the confirmed bound.
+//! Confirmation has a bounded budget; timeout returns an older safe prefix.
+//! A version still committing holds back the prefix rather than being skipped.
+//!
+//! Persistence remains asynchronous: a crash can lose the unflushed journal
+//! tail without a gap marker; cold WAL recovery does not check the journal.
+//! Queue overflow/closure, write failures and corrupt records mark known gaps.
+//! Gap metadata is persisted asynchronously and restored on reopen once durable;
+//! marker-write failures retain dirty state for retry. This does not eliminate
+//! the crash window before persistence. The journal is an observability and
+//! replication feed, not the data's source of truth.
+//!
+//! Live broadcast occurs after publication in commit-completion order, not
+//! necessarily version order. A consumer that discards versions at or below
+//! its last delivered version can skip a late lower-version event. Use bounded
+//! engine journal pulls for ordered history, and handle reported gaps.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -81,10 +92,11 @@ pub enum ChangeOp {
 
 /// One committed transaction, projected for the changefeed.
 ///
-/// Ordered by `commit_version` (monotonic per repo). Emitted from the
-/// commit-path AFTER `gate.publish_committed`, so by the time a subscriber
-/// (or journal reader) observes it the version is already visible to
-/// readers.
+/// Journal keys order events by `commit_version` (monotonic per repo), but
+/// enqueue and live-broadcast order need not match version order. The engine
+/// enqueues immediately BEFORE version publication and broadcasts AFTER it.
+/// Engine journal pulls confirm and bound the settled prefix before exposing
+/// events; live subscribers observe published versions in completion order.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangelogEvent {
     /// Repository name this commit belongs to.
