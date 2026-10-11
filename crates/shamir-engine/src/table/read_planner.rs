@@ -36,21 +36,24 @@ impl TableManager {
         &self,
         filter: &Filter,
         interner: &shamir_types::core::interner::Interner,
-    ) -> Option<crate::index2::backend::IndexResult> {
+    ) -> shamir_storage::error::DbResult<Option<super::candidate_set::CandidateSet>> {
         if self.index2_registry().is_empty() {
-            return None;
+            return Ok(None);
         }
         let registry = self.index2_registry();
 
         match filter {
             Filter::Fts { field, query, mode } => {
-                let interned = intern_field_path(field, interner)?;
+                let Some(interned) = intern_field_path(field, interner) else {
+                    return Ok(None);
+                };
                 // P0-3a (#1038): if the FTS backend is being dropped, fall back to None
                 // (caller will try other index types or full scan).
                 let lease = match registry.lease_by_field_and_kind(&interned, "fts").await {
-                    Err(DbError::IndexDrainInProgress(_)) => return None,
-                    Err(_e) => return None, // Other errors: fall back to full scan
-                    Ok(result) => result?,
+                    Err(DbError::IndexDrainInProgress(_)) => return Ok(None),
+                    Err(_e) => return Ok(None), // Other errors: fall back to full scan
+                    Ok(Some(lease)) => lease,
+                    Ok(None) => return Ok(None),
                 };
                 let backend = lease.backend;
                 let tokens: Vec<u64> = backend.tokenize_query(query);
@@ -59,13 +62,14 @@ impl TableManager {
                 } else {
                     FtsMode::AndAll
                 };
-                backend
+                let result = backend
                     .lookup(IndexQuery::Fts {
                         tokens,
                         mode: fts_mode,
                     })
                     .await
-                    .ok()
+                    .ok();
+                Ok(result.map(Into::into))
             }
             Filter::VectorSimilarity {
                 field,
@@ -74,16 +78,18 @@ impl TableManager {
                 ef_search,
                 oversample,
             } => {
-                let interned = intern_field_path(field, interner)?;
-                // P0-3a (#1038): if the vector backend is being dropped, fall back to None
-                // (caller will try other index types or full scan).
+                let Some(interned) = intern_field_path(field, interner) else {
+                    return Ok(None);
+                };
+                // A vector predicate has no scan equivalent: lease failures
+                // must remain typed errors, never become a True full scan.
                 let lease = match registry.lease_by_field_and_kind(&interned, "vector").await {
-                    Err(DbError::IndexDrainInProgress(_)) => return None,
-                    Err(_e) => return None, // Other errors: fall back to full scan
-                    Ok(result) => result?,
+                    Err(e) => return Err(e),
+                    Ok(Some(lease)) => lease,
+                    Ok(None) => return Ok(None),
                 };
                 let backend = lease.backend;
-                backend
+                let result = backend
                     .lookup(IndexQuery::Vector {
                         vec: query.clone(),
                         k: *k,
@@ -93,34 +99,41 @@ impl TableManager {
                         },
                     })
                     .await
-                    .ok()
+                    .map_err(|e| DbError::Internal(e.to_string()))?;
+                Ok(Some(result.into()))
             }
             Filter::Computed {
                 field, cmp, value, ..
             } if cmp == "eq" => {
-                let interned = intern_field_path(field, interner)?;
+                let Some(interned) = intern_field_path(field, interner) else {
+                    return Ok(None);
+                };
                 // P0-3a (#1038): if the functional backend is being dropped, fall back to None
                 // (caller will try other index types or full scan).
                 let lease = match registry
                     .lease_by_field_and_kind(&interned, "functional")
                     .await
                 {
-                    Err(DbError::IndexDrainInProgress(_)) => return None,
-                    Err(_e) => return None, // Other errors: fall back to full scan
-                    Ok(result) => result?,
+                    Err(DbError::IndexDrainInProgress(_)) => return Ok(None),
+                    Err(_e) => return Ok(None), // Other errors: fall back to full scan
+                    Ok(Some(lease)) => lease,
+                    Ok(None) => return Ok(None),
                 };
                 let backend = lease.backend;
-                let resolved = crate::query::filter::eval::filter_value_to_inner(value)?;
+                let Some(resolved) = filter_value_to_inner(value) else {
+                    return Ok(None);
+                };
                 let hash =
                     crate::index2::functional_backend::FunctionalBackend::hash_value(&resolved);
-                backend
+                let result = backend
                     .lookup(IndexQuery::Point {
                         keys: smallvec::smallvec![hash.to_vec()],
                     })
                     .await
-                    .ok()
+                    .ok();
+                Ok(result.map(Into::into))
             }
-            _ => None,
+            _ => Ok(None),
         }
     }
 
