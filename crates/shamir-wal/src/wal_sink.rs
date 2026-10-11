@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use shamir_storage::error::DbResult;
+#[cfg(test)]
+use tokio::sync::Notify;
 
 use crate::segment_set::SegmentSet;
 use crate::wal_entry_v2::WalEntryV2;
@@ -43,6 +45,20 @@ pub struct MemSink {
     /// untouched — it stays an enum, no dyn dispatch).
     #[cfg(test)]
     fail_next_append: AtomicBool,
+    #[cfg(test)]
+    fail_next_sync: AtomicBool,
+    #[cfg(test)]
+    pause_next_append: AtomicBool,
+    #[cfg(test)]
+    append_paused: Notify,
+    #[cfg(test)]
+    append_resume: Notify,
+    #[cfg(test)]
+    pause_next_sync: AtomicBool,
+    #[cfg(test)]
+    sync_paused: Notify,
+    #[cfg(test)]
+    sync_resume: Notify,
 }
 
 impl MemSink {
@@ -53,6 +69,20 @@ impl MemSink {
             max_committed: AtomicU64::new(0),
             #[cfg(test)]
             fail_next_append: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_sync: AtomicBool::new(false),
+            #[cfg(test)]
+            pause_next_append: AtomicBool::new(false),
+            #[cfg(test)]
+            append_paused: Notify::new(),
+            #[cfg(test)]
+            append_resume: Notify::new(),
+            #[cfg(test)]
+            pause_next_sync: AtomicBool::new(false),
+            #[cfg(test)]
+            sync_paused: Notify::new(),
+            #[cfg(test)]
+            sync_resume: Notify::new(),
         }
     }
 
@@ -106,10 +136,66 @@ impl WalSink {
         }
     }
 
+    // Single-consumer test handshakes: notify_one retains a permit when the
+    // test observes the pause after the sink has signalled it. No sleeps.
+    #[cfg(test)]
+    fn mem_for_test(&self) -> &MemSink {
+        match self {
+            Self::Mem(mem) => mem,
+            Self::File(_) => panic!("pause/fault injection is Mem-only"),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arm_pause_next_append(&self) {
+        self.mem_for_test()
+            .pause_next_append
+            .store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_append_paused(&self) {
+        self.mem_for_test().append_paused.notified().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resume_append(&self) {
+        self.mem_for_test().append_resume.notify_one();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arm_pause_next_sync(&self) {
+        self.mem_for_test()
+            .pause_next_sync
+            .store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_sync_paused(&self) {
+        self.mem_for_test().sync_paused.notified().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resume_sync(&self) {
+        self.mem_for_test().sync_resume.notify_one();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arm_fail_next_sync(&self) {
+        self.mem_for_test()
+            .fail_next_sync
+            .store(true, Ordering::Release);
+    }
+
     pub async fn append_batch(&self, payloads: Vec<Vec<u8>>, max_version: u64) -> DbResult<u64> {
         match self {
             Self::File(seg) => seg.append_batch(payloads, max_version).await,
             Self::Mem(m) => {
+                #[cfg(test)]
+                if m.pause_next_append.swap(false, Ordering::AcqRel) {
+                    m.append_paused.notify_one();
+                    m.append_resume.notified().await;
+                }
                 // Test-only fault injection (task #531): fail the whole batch
                 // BEFORE touching `next_seq` / `frames`, so no partial state
                 // survives. A genuine failure of the real Mem write path —
@@ -142,7 +228,21 @@ impl WalSink {
     pub async fn sync(&self) -> DbResult<()> {
         match self {
             Self::File(seg) => seg.sync().await,
-            Self::Mem(_) => Ok(()),
+            Self::Mem(_m) => {
+                #[cfg(test)]
+                {
+                    if _m.pause_next_sync.swap(false, Ordering::AcqRel) {
+                        _m.sync_paused.notify_one();
+                        _m.sync_resume.notified().await;
+                    }
+                    if _m.fail_next_sync.swap(false, Ordering::AcqRel) {
+                        return Err(shamir_storage::error::DbError::Storage(
+                            "MemSink injected sync failure".into(),
+                        ));
+                    }
+                }
+                Ok(())
+            }
         }
     }
 

@@ -50,6 +50,7 @@ pub mod wal_entry_v2;
 pub mod wal_group_commit;
 pub mod wal_segment;
 pub mod wal_sink;
+pub mod wal_ticket;
 
 pub use active_key::WalActiveKey;
 pub use segment_set::SegmentSet;
@@ -57,3 +58,4 @@ pub use wal_entry_v2::{WalEntryV2, WalOpV2, WAL_V2_MAGIC, WAL_V2_VERSION};
 pub use wal_group_commit::{WalDurability, WalGroupCommit};
 pub use wal_segment::WalSegment;
 pub use wal_sink::WalSink;
+pub use wal_ticket::{WalAppendError, WalTicket, WalTicketState};
