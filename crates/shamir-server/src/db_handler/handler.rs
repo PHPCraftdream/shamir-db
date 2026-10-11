@@ -714,6 +714,15 @@ impl ShamirDbHandler {
 /// errors fall back to heuristic string-matching for backward compat.
 pub(super) fn error_code(e: &BatchError) -> &str {
     match e {
+        BatchError::LimitExceeded { kind, .. } => match kind {
+            shamir_query_types::batch::LimitKind::PageSize
+            | shamir_query_types::batch::LimitKind::Offset => "pagination_too_large",
+            shamir_query_types::batch::LimitKind::Work
+            | shamir_query_types::batch::LimitKind::TotalQueries => "work_budget_exceeded",
+            shamir_query_types::batch::LimitKind::ResultBytes => "result_too_large",
+            shamir_query_types::batch::LimitKind::Depth => "nesting_too_deep",
+            shamir_query_types::batch::LimitKind::Iterations => "too_many_iterations",
+        },
         BatchError::TooManyQueries { .. }
         | BatchError::TooDeep { .. }
         | BatchError::TooManyIterations { .. }
