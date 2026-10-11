@@ -58,7 +58,7 @@ msgpack-encoded `events`, опциональный `gap_at` (если запро
 `current_version` для расчёта лага. Диспетчер —
 `crates/shamir-server/src/db_handler/repl_handler.rs`.
 
-### Leader-follower репликация — реализовано
+### Leader-follower репликация — реализовано (Experimental)
 
 Follower-цикл, супервизор и источники (`InProcess`/`Wire`) живут в
 `crates/shamir-server/src/replication/`: `follower_loop.rs`,
@@ -80,10 +80,10 @@ Follower-цикл, супервизор и источники (`InProcess`/`Wire
 живое соединение и отправляет unsolicited push-фреймы с изменениями,
 матчащими подписку клиента. На wire-уровне это `BatchOp::Subscribe`
 (`SubscribeOp`) / `BatchOp::Unsubscribe` (`UnsubscribeOp`)
-(`crates/shamir-query-types/src/batch/batch_op.rs`), плюс полноценная
-publication/subscription DDL-модель (`CreateSubscription` /
-`DropSubscription` / `AlterSubscription` / `ListSubscriptions`,
-см. `docs/dev-artifacts/roadmap/REPLICATION.md §5.5`). Тесты:
+(`crates/shamir-query-types/src/batch/batch_op.rs`), Не путать с DDL
+`CreateSubscription`/`DropSubscription`/`AlterSubscription`/`ListSubscriptions`:
+это подписки **репликации** (follower → leader, `REPLICATION.md §5.5`), а
+не клиентский push. Тесты:
 `subscriptions::tests::{bridge_tests, registry_tests,
 target_match_tests, filter_eval_tests, filter_lens_parity_tests,
 cache_eviction_tests, cache_depth_probe_tests, reactive_limits_tests}`
@@ -185,7 +185,12 @@ quorum, автоматического failover, multi-primary или sharding. 
 `resync_required` вместо тихого пропуска пропавших данных — recovery
 это ручной шаг оператора (проверить/починить данные follower'а, затем
 вызвать существующий admin action `Resume`); полностью автоматический
-snapshot-based reseed остаётся в роадмапе (R2).
+snapshot-based reseed остаётся в роадмапе (R2). **Схема не
+реплицируется:** базы, репозитории, таблицы и индексы на follower'е нужно
+создать вручную, иначе follower-loop ждёт с backoff
+(`ReplError::UnknownFollowerRepo`). Отдельного выключателя репликации в
+конфиге нет: лидерский `ReplRequest::Pull` доступен любой сессии с флагом
+superuser/replicator.
 
 ### Шаг 4: P2P / gossip → chat
 

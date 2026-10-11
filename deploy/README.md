@@ -1,14 +1,14 @@
 # Deployment artefacts
 
-This directory packages everything an operator needs to run `shamir-server`
-on a production host.
+This directory packages reference deployment artefacts for `shamir-server`
+(alpha — not yet recommended for production data).
 
 ## Files
 
 | File | What it is |
 |------|------------|
 | `shamir-db.service` | systemd unit. Drop into `/etc/systemd/system/` and `systemctl enable --now shamir-db` |
-| `Dockerfile` | Multi-stage Docker image (Rust 1.93 bookworm builder → debian:bookworm-slim runtime, ~80 MB) |
+| `Dockerfile` | Multi-stage Docker image (Rust 1.95 bookworm builder → debian:bookworm-slim runtime, ~80 MB) |
 | `server.example.ktav` | Base reference config (all fields shown), sized for a 2–4 GiB container (≈3 GiB budget): Argon2 128 MiB × 6, 1000 conns, 64 MiB result cap |
 | `server.small.example.ktav` | Resource profile for a 1–2 GiB container (≈1.5 GiB budget): Argon2 64 MiB × 6, 500 conns, 32 MiB result cap |
 | `server.medium.example.ktav` | Resource profile for a 4–8 GiB container (≈6 GiB budget): Argon2 128 MiB × 12, 2000 conns, 64 MiB result cap |

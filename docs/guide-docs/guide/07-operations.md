@@ -58,31 +58,9 @@ systemctl stop shamir-db
 `sd_notify(READY=1)` после bind listener'ов — systemd знает, что сервис
 готов.
 
-Пример production-юнита (`deploy/shamir-db.service`):
-
-```ini
-[Unit]
-Description=ShamirDB — production database server
-After=network-online.target
-
-[Service]
-Type=simple
-User=shamir
-ExecStart=/usr/local/bin/shamir-server --config /etc/shamir/server.ktav
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=65536
-
-# Hardening
-NoNewPrivileges=yes
-ProtectSystem=strict
-ReadWritePaths=/var/lib/shamir-db /var/log/shamir-db
-PrivateTmp=yes
-PrivateDevices=yes
-
-MemoryMax=4G
-TasksMax=4096
-```
+Готовый production-юнит — `deploy/shamir-db.service` (`Type=notify`,
+hardening, `RuntimeDirectory=shamir` + `--bootstrap-token-path` для
+одноразового bootstrap-токена). Бери файл, а не фрагменты из руководства.
 
 ### Windows Service
 
@@ -99,80 +77,37 @@ shamir-server service install
 
 ## 2. Конфиг: `.ktav`
 
-Конфиг — файл в формате Ktav (подмножество JSON5: комментарии, trailing
-commas). Минимальный конфиг (для e2e-тестов):
+Конфиг — файл в формате Ktav ≥ 0.6: без кавычек и запятых, комментарии —
+только целой строкой с префиксом `##`. Минимальный конфиг:
 
 ```ktav
-{
-    data_dir: "/tmp/shamir-test",
-    listeners: [{
-        kind: "tcp",
-        addr: "127.0.0.1:7000",
-        profile: "tls_exporter"
-    }],
-    tls: {
-        cert_path: "/tmp/shamir-test/cert.pem",
-        key_path: "/tmp/shamir-test/key.pem"
-    }
-}
-```
-
-Production-конфиг (`deploy/server.example.ktav`) — 99 строк с
-аннотациями:
-
-```ktav
-data_dir: /var/lib/shamir-db
-
-logging: {
-    level: info
-    slow_query_threshold_ms: 1000
-}
+data_dir: /tmp/shamir-test
 
 kdf_defaults: {
-    memory_kb: 131072
-    time: 4
+    memory_kb: 19456
+    time: 2
     parallelism: 1
     argon2_version: 19
 }
 
-argon2_concurrent_max: 64
-
 listeners: [
-    { kind: tcp,  addr: "0.0.0.0:7331", profile: tls_exporter }
-    { kind: ws,   addr: "0.0.0.0:7332", profile: tls_exporter,
-      path: "/shamir/v1" }
-    { kind: ws,   addr: "0.0.0.0:7333", profile: tls_no_export,
-      path: "/shamir/v1/browser",
-      browser_origin_allowlist: ["https://app.example.com"] }
+    {
+        kind: tcp
+        addr: 127.0.0.1:7000
+        profile: tls_exporter
+    }
 ]
 
 tls: {
-    cert_path: /var/lib/shamir-db/cert.pem
-    key_path:  /var/lib/shamir-db/key.pem
-}
-
-security: {
-    connection: {
-        auth_init_timeout_ms: 5000
-        max_active_connections: 10000
-    }
-    query_limits: {
-        max_result_size_bytes:        1073741824    # 1 GiB
-        max_execution_time_secs:      60
-        max_queries_per_batch:        100
-        max_inflight_response_bytes:  4294967296    # 4 GiB (RI-15, optional)
-    }
-}
-
-audit: {
-    max_file_size_mb: 100
-    retention_days: 30
-}
-
-observability: {
-    addr: "127.0.0.1:9090"
+    cert_path: /tmp/shamir-test/cert.pem
+    key_path:  /tmp/shamir-test/key.pem
 }
 ```
+
+Production-конфиг — `deploy/server.example.ktav` (все поля с
+комментариями); профили `server.{small,medium,large}.example.ktav` — под
+объём RAM. Не копируй фрагменты отсюда: разбор и валидация этих файлов
+закреплены тестами (`reference_example_parses_and_validates` и соседние).
 
 ### Секции конфига
 
@@ -190,9 +125,14 @@ observability: {
 
 ### Валидация при старте
 
-`Config::validate()` проверяет: `data_dir` существует, `listeners` не
-пустой, `tls` пути — файлы, `kdf_defaults` в диапазонах, порты ≥ 0.
-Ошибка → процесс не стартует, понятное сообщение.
+`Config::validate()` проверяет: `kdf_defaults` (и per-listener override) не
+ниже floor'ов spec §3.7.2; `argon2_concurrent_max` ∈ 1..=1024;
+`auth_init_rate_per_second` ∈ 1..=100000; `listeners` не пуст и каждый
+валиден (адрес, `path` для ws, `browser_origin_allowlist` для
+browser-профиля, `plain` — только loopback); лимиты курсоров ≥ 1;
+`max_inflight_response_bytes` ≥ `max_result_size_bytes`. `data_dir`
+создаётся, а отсутствующие cert/key генерируются (self-signed) при старте.
+Ошибка → процесс не стартует.
 
 `security.query_limits.max_inflight_response_bytes` (RI-15) — если задан,
 должен быть `>= max_result_size_bytes`: иначе ни один максимально большой
@@ -315,7 +255,7 @@ logging: {
 
 ### Namespace masks (lock-free)
 
-14 неймспейсов с индивидуальными уровнями: `shomer`, `wal`, `tx`,
+13 неймспейсов с индивидуальными уровнями: `shomer`, `wal`, `tx`,
 `storage`, `engine`, `query`, `vector`, `fts`, `fn`, `auth`, `wire`,
 `server`, `migration`. Hot-path `enabled()` — одно atomic load +
 longest-prefix match. Нет mutex/RwLock.
@@ -407,8 +347,8 @@ audit-лог и его ротации, TLS PEM) в каталог `<to>/YYYYMMDD
 > / mid-SST-flush), может быть повреждена и **молчаливо непригодна к
 > восстановлению** — дефект всплывёт только при restore.
 
-In-process online-snapshot без downtime (через существующий redb-handle
-`system_store`) — запланированное улучшение **P2**, пока не реализовано
+In-process online-snapshot без downtime — запланированное улучшение **P2**,
+пока не реализовано
 (см. комментарий-модуля `crates/shamir-server/src/backup.rs`, «Future enhancement
 (P2)»).
 
@@ -420,12 +360,18 @@ shamir-server`; либо wrapper-скрипт `stop → backup → restart`. Н�
 запускающий `backup` против всё ещё живого сервера, — в точности тот риск,
 которого избегает это правило.
 
-**Restore (runbook-обязанность).** После восстановления `SystemStore` из любого
-снимка оператор **обязан** выполнить `revokeAllTickets` (и `revokeAllLockouts`),
-чтобы откатнутые resumption-tickets / lockout-счётчики не допустили replay.
-Автоматического принуждения этой команды сейчас нет — это ручной шаг; см.
-`docs/guide-docs/client-server-protocol-spec/IMPLEMENTATION_GUIDE.md` §5.7 и
-`SECURITY_MODEL.md` §4.4.
+**Restore.** `shamir-server --config db.ktav restore --from <to>/<YYYYMMDD_HHMMSS>`
+— только при остановленном сервере (проверяется блокировка `data_dir`;
+`--force` её пропускает). Команда сверяет `manifest.json` (sha256 каждого
+файла), атомарно подменяет `data_dir` (прежний сохраняется как
+`.pre_restore_backup_<timestamp>`) и инвалидирует все resumption-тикеты.
+Счётчики lockout не сбрасываются. Не восстанавливай простым `cp -r`: так
+пропускаются проверка манифеста и инвалидация тикетов.
+
+**Point-in-time recovery нет:** восстановление возможно только к моменту снимка.
+
+**Проверка целостности.** `shamir-server --config db.ktav doctor [--apply]`
+(offline) — диагностика индексов и счётчиков, с `--apply` — перестройка.
 
 ### Durability (fsync) гарантии backup/restore (F-12, #802)
 
@@ -459,7 +405,7 @@ guard — interrupted-copy тест в `tests/restore_tests.rs`, проверя�
 
 ## 9. Capacity planning
 
-Подробная таблица — в `docs/dev-artifacts/ops/CAPACITY_PLANNING.md`. Кратко:
+Оценки ниже выведены из структур в коде, а не измерены — сверяй с `/metrics` своей инсталляции (источник: `docs/dev-artifacts/ops/CAPACITY_PLANNING.md`, частично устарел). Кратко:
 
 || Подсистема | Память |
 ||---|---|
@@ -497,8 +443,9 @@ scrape_configs:
 
 * **Один бинарник — все платформы.** `service install` генерирует
   платформенный юнит автоматически. Не нужен отдельный пакет.
-* **Observability — opt-in.** Без `observability.addr` — нет HTTP-метрик.
-  В проде — почти всегда нужен (load balancer / health checks).
+* **Observability включена по умолчанию** на `127.0.0.1:9090` (loopback).
+  Отключается только явным `addr: ""`; публичный адрес требует
+  `allow_public_metrics: true` и внешней аутентификации.
 * **Graceful shutdown — bounded.** 30 s deadline. Если застрявшее
   соединение не успело — процесс выходит, OS reclaim'ает сокеты.
 * **Single-instance guard.** Файловая блокировка (`fs4`) на `data_dir`.
