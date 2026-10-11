@@ -63,6 +63,11 @@ pub enum SelectItem {
     Aggregate {
         func: AggFunc,
         field: AggregateField,
+        /// Per-row input; when present, replaces `field` as the value source.
+        /// Uses the projection evaluator's FilterValue model to support refs and params.
+        /// Missing or null means the legacy field/All input; omitted on serialization.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<FilterValue>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         alias: Option<String>,
         #[serde(default)]
@@ -86,6 +91,11 @@ pub enum SelectItem {
         /// Aggregate name (plain, e.g. `"median"`).
         name: String,
         field: AggregateField,
+        /// Per-row input; when present, replaces `field` as the value source.
+        /// Uses the projection evaluator's FilterValue model to support refs and params.
+        /// Missing or null means the legacy field/All input; omitted on serialization.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<FilterValue>,
         /// Static parameters for parameterised aggregates (e.g. `percentile`'s
         /// `p`, `string_agg`'s `sep`). Must be literal `FilterValue`s —
         /// dynamic `$ref`/`$fn`/etc. are rejected at execution time. Mirrors
