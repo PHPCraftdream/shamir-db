@@ -348,6 +348,17 @@ impl TableManager {
                 });
             }
         }
+        self.list_stream_tx_after_predicate(tx, batch_size)
+    }
+
+    /// [`list_stream_tx`] without the defensive coarse `TableScan` record, for
+    /// scans reached through `read_tx`, which has already recorded the precise
+    /// predicate (a narrow index range must not widen to a table scan).
+    pub(super) fn list_stream_tx_after_predicate<'a>(
+        &'a self,
+        tx: Option<&'a shamir_tx::TxContext>,
+        batch_size: usize,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a {
         let inner = self.committed_stream_tx(tx, batch_size);
         let token = self.table_token();
         let mvcc = self.mvcc_store.clone();

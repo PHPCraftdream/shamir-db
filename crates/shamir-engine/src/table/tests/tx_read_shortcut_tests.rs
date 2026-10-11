@@ -465,7 +465,8 @@ async fn tx_read_shortcut_ssi_predicate_survives_scan_gate() {
             };
         });
         assert!(recorded);
-        let (mut writer, _gw) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+        // Only Serializable committers publish a write footprint for SSI.
+        let (mut writer, _gw) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
         table
             .insert_tx(&row(&table, 110, "hello phantom").await, Some(&mut writer))
             .await
@@ -476,10 +477,11 @@ async fn tx_read_shortcut_ssi_predicate_survives_scan_gate() {
             .insert_tx(&row(&table, 90, "hello own").await, Some(&mut reader))
             .await
             .unwrap();
-        assert!(matches!(
-            repo.commit_tx(reader).await,
-            Err(CommitError::PhantomConflict { .. })
-        ));
+        let committed = repo.commit_tx(reader).await;
+        assert!(
+            matches!(committed, Err(CommitError::PhantomConflict { .. })),
+            "indexed={indexed}: expected PhantomConflict, got {committed:?}"
+        );
     }
 }
 
@@ -512,29 +514,6 @@ async fn tx_read_shortcut_pessimistic_latest_and_actual_lock_owner() {
         reader.is_wounded(),
         "query read must own a real Shared lock"
     );
-}
-
-#[tokio::test]
-async fn tx_read_shortcut_snapshot_vector_explicit_rejection() {
-    let (repo, table, _) = fixture(true).await;
-    let interner = table.interner().get().await.unwrap();
-    let refs = new_map();
-    let ctx = FilterContext::new(interner, &refs);
-    for isolation in [IsolationLevel::Snapshot, IsolationLevel::Serializable] {
-        let (tx, _guard) = repo.begin_tx(isolation).await.unwrap();
-        let vector = filter::vector_similarity("embedding", vec![1.0, 0.0], 1);
-        for f in [
-            vector.clone(),
-            filter::and([vector.clone(), filter::eq("tag", "yes")]),
-        ] {
-            let q = Query::from("t").build().filter(f);
-            let result = table.read_tx(&q, &ctx, Some(&tx)).await;
-            assert!(matches!(
-                result,
-                Err(DbError::Validation(message)) if message.contains("snapshot-aware ranking")
-            ));
-        }
-    }
 }
 
 #[tokio::test]

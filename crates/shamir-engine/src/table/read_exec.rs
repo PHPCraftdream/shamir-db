@@ -341,23 +341,19 @@ impl TableManager {
         // Latest-state counters/indexes cannot answer a snapshot + staged overlay.
         // Snapshot/Serializable reads pay O(N) scans (and sorting when needed);
         // Pessimistic and non-tx reads retain the latest-committed shortcuts.
+        // Vector similarity keeps its own path (ANN + staged overlay merge): the
+        // row-level scan predicate cannot rank, so it is not routed here. Its
+        // candidates are not snapshot-filtered yet (tracked as B04b).
         if tx.is_some_and(|t| {
             matches!(
                 t.isolation,
                 shamir_tx::IsolationLevel::Snapshot | shamir_tx::IsolationLevel::Serializable
             )
-        }) {
-            if query
-                .r#where
-                .as_ref()
-                .is_some_and(contains_vector_similarity)
-            {
-                return Err(DbError::Validation(
-                    "snapshot vector reads require snapshot-aware ranking; latest ANN and \
-                     the row-level full-scan predicate cannot preserve vector semantics"
-                        .to_string(),
-                ));
-            }
+        }) && !query
+            .r#where
+            .as_ref()
+            .is_some_and(contains_vector_similarity)
+        {
             if query.pagination.keyset().is_some() {
                 return self
                     .read_snapshot_keyset(query, ctx, interner, tx, start)
@@ -983,7 +979,8 @@ impl TableManager {
         let mut rows: Vec<(Vec<Vec<u8>>, RecordId, Bytes)> = Vec::new();
         let mut scanned = 0;
         let mut corrupt = Vec::new();
-        let stream = self.list_stream_tx(tx, shamir_tunables::store_defaults::FULL_SCAN_BATCH);
+        let stream = self
+            .list_stream_tx_after_predicate(tx, shamir_tunables::store_defaults::FULL_SCAN_BATCH);
         futures::pin_mut!(stream);
         while let Some(batch) = stream.next().await {
             'rows: for (id, cow) in batch? {
@@ -1117,7 +1114,7 @@ impl TableManager {
         // the compiled filter_cb in the loop below is the authoritative gate.
 
         let stream: DynBatchStream<'_> = if tx.is_some() {
-            Box::pin(self.list_stream_tx(tx, batch_size))
+            Box::pin(self.list_stream_tx_after_predicate(tx, batch_size))
         } else if let Some(pf) = pre_filter {
             Box::pin(self.list_stream_filtered(batch_size, pf))
         } else {
@@ -1462,7 +1459,7 @@ impl TableManager {
         // When a tx context is present, use tx-aware list_stream_tx so SSI
         // read-set recording is fused into this single scan (see read_collecting).
         let mut stream: DynBatchStream<'_> = if tx.is_some() {
-            Box::pin(self.list_stream_tx(tx, batch_size))
+            Box::pin(self.list_stream_tx_after_predicate(tx, batch_size))
         } else if let Some(pf) = pre_filter {
             Box::pin(self.list_stream_filtered(batch_size, pf))
         } else {
@@ -1629,7 +1626,7 @@ impl TableManager {
         // When a tx context is present, use tx-aware list_stream_tx so SSI
         // read-set recording is fused into this single scan (see read_collecting).
         let mut stream: DynBatchStream<'_> = if tx.is_some() {
-            Box::pin(self.list_stream_tx(tx, batch_size))
+            Box::pin(self.list_stream_tx_after_predicate(tx, batch_size))
         } else if let Some(pf) = pre_filter {
             Box::pin(self.list_stream_filtered(batch_size, pf))
         } else {
