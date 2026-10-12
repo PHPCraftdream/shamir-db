@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use shamir_db::ShamirDb;
+use shamir_db::{ShamirDb, ShutdownReport};
 use shamir_tunables::runtime::RuntimeTunables;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -121,9 +121,22 @@ pub struct ServerHandle {
 
 impl ServerHandle {
     /// Stop accepting new connections, then drain the scheduler + audit log.
-    /// In-flight per-connection tasks are NOT awaited explicitly — they
-    /// finish on their own once their TcpStreams close.
-    pub async fn shutdown(self) {
+    /// Returns repository-level checkpoint failures; ignored reports preserve
+    /// the existing caller behaviour. Connection drain remains bounded.
+    pub async fn shutdown(self) -> ShutdownReport {
+        let mut report = self.pending_shutdown_report();
+        self.shutdown_with_report(&mut report).await;
+        crate::observability::record_shutdown(&report);
+        report
+    }
+
+    pub(crate) fn pending_shutdown_report(&self) -> ShutdownReport {
+        self.shamir.shutdown_report()
+    }
+
+    /// cancel-safe: NO — joins and flushes may be incomplete; caller retains
+    /// repository outcomes and marks deadline expiry as unclean.
+    pub(crate) async fn shutdown_with_report(self, report: &mut ShutdownReport) {
         // 1. Tell all accept loops to stop. CancellationToken::cancel() is
         //    persistent: every existing `.cancelled().await` resolves on the
         //    next poll, and any new caller sees the cancelled state
@@ -162,9 +175,9 @@ impl ServerHandle {
         //    commits in the last ~500 ms window are not lost on graceful
         //    stop. Must happen AFTER accept loops have stopped (no new
         //    writes can arrive) and BEFORE redb locks are released.
-        if let Err(e) = self.shamir.flush_all().await {
-            tracing::warn!("shutdown: flush_all failed: {}", e);
-        }
+        self.shamir
+            .flush_all_report(Duration::from_secs(5), report)
+            .await;
         // 5. Stop the observability HTTP server (if any).
         if let Some(obs) = self.observability {
             obs.shutdown().await;

@@ -144,6 +144,7 @@ export interface BatchRequest {
   name?: string;
   transactional?: true;
   isolation?: IsolationLevel;
+  visibility_wait?: VisibilityWait;
   durability?: DurabilityLevel;
   queries: Record<string, QueryEntry>;
   return_all?: false;
@@ -282,6 +283,22 @@ export interface QueryResult {
   ddl_status?: DdlOpState;
 }
 
+export type VisibilityWait =
+  | { mode: 'strict' }
+  | { mode: 'bounded'; timeout_ms: number | bigint };
+
+export type VisibilityPendingReason = 'timeout' | 'reopen_required';
+
+/** Independent settled-prefix observation; positions retain lossless u64s. */
+export type VisibilityState =
+  | { state: 'visible' }
+  | {
+      state: 'pending';
+      visible_through: number | bigint;
+      blocking_version: number | bigint;
+      reason: VisibilityPendingReason;
+    };
+
 /** Transaction metadata (present on transactional batches). */
 export interface TransactionInfo {
   tx_id: number;
@@ -292,6 +309,8 @@ export interface TransactionInfo {
   snapshot_version?: number;
   commit_version?: number;
   materialized: boolean;
+  /** Required when committed; absent when aborted. Never defaults to visible. */
+  visibility?: VisibilityState;
 }
 
 /**

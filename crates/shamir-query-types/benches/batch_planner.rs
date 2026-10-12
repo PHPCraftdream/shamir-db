@@ -51,6 +51,7 @@ fn make_batch(n: usize, chain: bool) -> BatchRequest {
         name: None,
         transactional: false,
         isolation: None,
+        visibility_wait: None,
         durability: None,
         queries,
         return_all: true,

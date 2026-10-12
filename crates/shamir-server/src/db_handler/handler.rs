@@ -386,8 +386,22 @@ impl RequestHandler for ShamirDbHandler {
                     self.tx_execute(session, query_version, &db, tx_handle, batch)
                         .await
                 }
-                DbRequest::TxCommit { db, tx_handle } => {
-                    self.tx_commit(session, &db, tx_handle).await
+                DbRequest::TxCommit {
+                    query_version,
+                    visibility_wait,
+                    db,
+                    tx_handle,
+                } => {
+                    if let Err(e) = crate::version::check_query_lang(query_version) {
+                        DbResponse::Error {
+                            code: "unsupported_query_version".into(),
+                            message: e.to_string(),
+                        }
+                    } else {
+                        // VIS-1 is contract-only: all accepted policies remain strict.
+                        let _ = visibility_wait;
+                        self.tx_commit(session, &db, tx_handle).await
+                    }
                 }
                 DbRequest::TxRollback { db, tx_handle } => {
                     self.tx_rollback(session, &db, tx_handle).await

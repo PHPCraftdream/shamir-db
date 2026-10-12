@@ -76,6 +76,7 @@ fn call_batch() -> BatchRequest {
         name: None,
         transactional: false,
         isolation: None,
+        visibility_wait: None,
         durability: None,
         queries,
         return_all: true,
@@ -178,6 +179,7 @@ async fn call_in_transactional_batch_rejected() {
         name: None,
         transactional: true, // ← this opens a TxContext
         isolation: None,
+        visibility_wait: None,
         durability: None,
         queries,
         return_all: true,
