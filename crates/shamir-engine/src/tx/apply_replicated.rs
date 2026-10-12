@@ -558,7 +558,7 @@ async fn apply_prepared(
     // Resolve only after the last failure exit: an aborted apply must enqueue
     // nothing and must not mark a changefeed gap. Preserve translated bytes,
     // actor and timestamp, but key downstream replication on the local version.
-    let downstream_event = reproject_for_downstream(&rewritten_event, repo.name(), local_version);
+    let downstream_event = reproject_for_downstream(rewritten_event, repo.name(), local_version);
     let prepared = repo.prepare_journal_event(Some(downstream_event)).await;
 
     // A12: discharge the VersionGuard's terminal-mark obligation by calling
