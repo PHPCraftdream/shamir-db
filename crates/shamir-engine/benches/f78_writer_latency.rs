@@ -48,13 +48,13 @@
 //! table size grows, where they used to track each other exactly.
 //!
 //! Run:
-//!   CARGO_TARGET_DIR=D:\dev\rust\.cargo-target-bench cargo bench -p shamir-engine --bench f78_writer_latency
+//!   CARGO_TARGET_DIR='<dedicated bench target dir>' cargo bench -p shamir-engine --bench f78_writer_latency
 //!   (calibrate first: ... -- --calibrate 4)
 //!   (for a faster sweep: ... -- --scale 0.1)
 //!
 //! ## Measured results (post-redesign, #1062, ACTUALLY RUN — not extrapolated)
 //!
-//! Run 2026-08-10, `CARGO_TARGET_DIR=D:/dev/rust/.cargo-target-bench cargo
+//! Run 2026-08-10, `CARGO_TARGET_DIR='<dedicated bench target dir>' cargo
 //! bench -p shamir-engine --bench f78_writer_latency -- --scale 0.1`. All
 //! scenarios: 64 concurrent writers, full TableManager+MvccStore stack
 //! (changefeed attached — online-build path), in-memory store.

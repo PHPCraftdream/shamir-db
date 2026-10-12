@@ -1,0 +1,106 @@
+name: hot-path-ab
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: Trusted full lowercase SHA; blank resolves master once
+        type: string
+        required: false
+      runner:
+        description: Hosted advisory or owner-designated dedicated runner
+        type: choice
+        options: [hosted, dedicated]
+        default: hosted
+      operation:
+        description: Comparison or separate candidate-count calibration (human review)
+        type: choice
+        options: [compare, calibrate]
+        default: compare
+  pull_request:
+    paths:
+      - 'scripts/bench_ab*'
+      - 'scripts/tests/test_bench_ab.py'
+      - '.github/workflows/hot-path-ab.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hot-path-ab-${{ github.event_name }}-${{ inputs.runner || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  selftest:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # copied from ci.yml
+        with:
+          persist-credentials: false
+      - name: Pure Python canned-data tests only
+        run: |
+          python3 -c 'import sys; assert sys.version_info >= (3, 11), "Python 3.11+ required"'
+          python3 -m unittest discover -s scripts/tests -p 'test_bench_ab.py' -v
+
+  compare:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+    runs-on: ${{ inputs.runner == 'dedicated' && fromJSON('["self-hosted","linux","shamir-bench"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 120
+    env:
+      REQUESTED_CANDIDATE: ${{ inputs.candidate }}
+      AB_MODE: ${{ inputs.runner }}
+      AB_OPERATION: ${{ inputs.operation }}
+      CARGO_TERM_COLOR: never
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: master
+          path: control
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require standard-library TOML support
+        run: python3 -c 'import sys; assert sys.version_info >= (3, 11), "Install Python 3.11+ on the dedicated runner"'
+      - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a # copied from ci.yml
+        with:
+          toolchain: '1.95.0'
+      - name: Freeze trusted revisions and reviewed manifests
+        id: plan
+        run: |
+          python3 control/scripts/bench_ab.py prepare \
+            --candidate-env REQUESTED_CANDIDATE --mode "$AB_MODE" \
+            --operation "$AB_OPERATION" --output "$RUNNER_TEMP/bench-ab"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ steps.plan.outputs.base_sha }}
+          path: A
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ steps.plan.outputs.candidate_sha }}
+          path: B
+          persist-credentials: false
+      # Deliberately no executable cache: no PR cache poisoning or cache identity ambiguity.
+      - name: Both locked release builds then sequential experiment
+        run: |
+          python3 control/scripts/bench_ab.py run \
+            --plan "$RUNNER_TEMP/bench-ab/plan.json" \
+            --a "$GITHUB_WORKSPACE/A" --b "$GITHUB_WORKSPACE/B" \
+            --target-root "$RUNNER_TEMP/bench-target-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+      - name: Publish partial report even on failure
+        if: always()
+        run: |
+          python3 control/scripts/bench_ab.py report \
+            --results "$RUNNER_TEMP/bench-ab" --summary "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # copied from release.yml
+        if: always()
+        with:
+          name: hot-path-ab-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bench-ab
+          retention-days: 90
+          if-no-files-found: error
+      - name: Enforce measurement validity and dedicated two-batch policy
+        if: always()
+        run: python3 control/scripts/bench_ab.py verdict --results "$RUNNER_TEMP/bench-ab"
