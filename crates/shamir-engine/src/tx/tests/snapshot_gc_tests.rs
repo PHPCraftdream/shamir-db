@@ -33,12 +33,26 @@ async fn no_snapshot_gc_preserves_key_at_watermark_after_nontx_v11_v12() {
     let parked = gate.assign_next_version_guarded();
     assert_eq!(parked.version(), 10);
     assert!(gate.active_snapshots_empty());
-    for expected in 11..=12 {
-        let (_, version) = table
-            .set_returning_version(id, &InnerValue::Int(expected))
-            .await
-            .unwrap();
-        assert_eq!(version, u64::try_from(expected).unwrap());
+    // Non-tx writes acknowledge only once W covers their version (SNAP-5), and
+    // parked v10 holds W below them: spawn each write and wait until it has
+    // PUBLISHED its version, never await it inline.
+    let mut writers = Vec::new();
+    for expected in 11..=12i64 {
+        let writer_repo = repo.clone();
+        writers.push(tokio::spawn(async move {
+            let table = writer_repo.get_table("a").await.unwrap();
+            table
+                .set_returning_version(id, &InnerValue::Int(expected))
+                .await
+        }));
+        let published = u64::try_from(expected).unwrap();
+        for _ in 0..10_000 {
+            if mvcc.version_of(id.as_bytes()) == published {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(mvcc.version_of(id.as_bytes()), published);
     }
     // Non-tx cell/history completion does not eagerly publish across a hole.
     // Exercise the documented eager floor independently of contiguous W.
@@ -57,6 +71,10 @@ async fn no_snapshot_gc_preserves_key_at_watermark_after_nontx_v11_v12() {
     );
     drop((reader, pin));
     drop(parked);
+    for (writer, expected) in writers.into_iter().zip(11u64..) {
+        let (_, version) = writer.await.unwrap().unwrap();
+        assert_eq!(version, expected);
+    }
     assert_eq!(gate.visible_floor(), 12);
 }
 
