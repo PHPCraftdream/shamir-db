@@ -77,3 +77,5 @@ pub use shamir_query_types::subscribe::{DeliverMode, EventMask};
 
 // Re-export proc-macros so users get `shamir_query_builder::{filter, q}`.
 pub use shamir_query_builder_macros::{filter, q};
+
+pub mod visibility;

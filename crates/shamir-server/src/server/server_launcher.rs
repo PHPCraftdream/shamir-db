@@ -477,6 +477,7 @@ impl ServerLauncher {
                 config.logging.slow_query_threshold_ms,
             ))
             .with_query_limits(QueryLimitsCap::from(&config.security.query_limits))
+            .with_transactions(config.transactions.clone())
             .with_tx_limits(TxLimitsCap {
                 max_tx_bytes: config.security.tx.max_tx_bytes,
             })

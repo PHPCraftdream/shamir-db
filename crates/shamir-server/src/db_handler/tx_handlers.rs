@@ -194,7 +194,7 @@ impl ShamirDbHandler {
                             db_name,
                             &batch,
                             tx,
-                            self.query_limits.policy(),
+                            self.execution_policy(),
                             Some(it.remaining_lifetime()),
                         )
                         .await;
@@ -234,10 +234,7 @@ impl ShamirDbHandler {
                     self.tx_registry.remove(tx_handle);
                     drop(it);
                 }
-                DbResponse::Error {
-                    code: super::handler::error_code(&e).to_string(),
-                    message: e.to_string(),
-                }
+                super::cursor_handlers::error_response(&e)
             }
         }
     }

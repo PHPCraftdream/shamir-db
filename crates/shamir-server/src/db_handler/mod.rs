@@ -5,6 +5,7 @@ mod handler;
 mod repl_handler;
 mod subscribe_handler;
 mod tx_handlers;
+mod visibility_handlers;
 
 #[cfg(test)]
 mod tests;

@@ -1,7 +1,7 @@
 use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
-use crate::batch::TransactionInfo;
+use crate::batch::{TransactionInfo, VisibilityPendingReason, VisibilityState, VisibilityWait};
 use crate::read::ReadQuery;
 use crate::wire::cursor_id::CursorId;
 use crate::wire::db_message::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
@@ -466,5 +466,83 @@ fn cursor_closed_response_roundtrip_and_tag() {
     assert!(matches!(
         back,
         DbResponse::CursorClosed { cursor_id } if cursor_id == CursorId(11)
+    ));
+}
+
+// Wire-format tests deliberately construct DTOs, rather than bypassing serde.
+#[test]
+fn visibility_request_response_roundtrip_and_tags() {
+    for wait in [
+        VisibilityWait::Strict,
+        VisibilityWait::Bounded { timeout_ms: 0 },
+        VisibilityWait::Bounded { timeout_ms: 30000 },
+    ] {
+        let request = DbRequest::WaitForVisibility {
+            query_version: 3,
+            db: "app".into(),
+            repo: "main".into(),
+            version: u64::MAX,
+            visibility_wait: wait,
+        };
+        let value = to_qv(&request);
+        assert_eq!(
+            value.get("op").and_then(QueryValue::as_str),
+            Some("wait_for_visibility"),
+        );
+        assert!(matches!(
+            from_qv::<DbRequest>(value),
+            DbRequest::WaitForVisibility {
+                version: u64::MAX,
+                visibility_wait,
+                query_version: 3,
+                ..
+            } if visibility_wait == wait,
+        ));
+    }
+    for visibility in [
+        VisibilityState::Visible,
+        VisibilityState::Pending {
+            visible_through: 40,
+            blocking_version: 41,
+            reason: VisibilityPendingReason::Timeout,
+        },
+        VisibilityState::Pending {
+            visible_through: 40,
+            blocking_version: 41,
+            reason: VisibilityPendingReason::ReopenRequired,
+        },
+    ] {
+        let response = DbResponse::VisibilityObserved {
+            version: 43,
+            visibility,
+        };
+        let value = to_qv(&response);
+        assert_eq!(
+            value.get("kind").and_then(QueryValue::as_str),
+            Some("visibility_observed"),
+        );
+        assert!(matches!(
+            from_qv::<DbResponse>(value),
+            DbResponse::VisibilityObserved {
+                version: 43,
+                visibility: observed,
+            } if observed == visibility,
+        ));
+    }
+    let error = DbResponse::AsOfVisibilityTimeout {
+        code: "as_of_visibility_timeout".into(),
+        message: "unsettled".into(),
+        requested: 43,
+        visible_through: 40,
+        blocking_version: 41,
+    };
+    assert!(matches!(
+        from_qv::<DbResponse>(to_qv(&error)),
+        DbResponse::AsOfVisibilityTimeout {
+            requested: 43,
+            visible_through: 40,
+            blocking_version: 41,
+            ..
+        },
     ));
 }

@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::batch::{BatchRequest, BatchResponse, TransactionInfo, VisibilityWait};
+use crate::batch::{BatchRequest, BatchResponse, TransactionInfo, VisibilityState, VisibilityWait};
 use crate::read::{QueryResult, ReadQuery};
 use crate::wire::cursor_id::CursorId;
 use crate::wire::repl::{ReplRequest, ReplResponse};
@@ -34,6 +34,15 @@ fn default_query_version() -> u32 {
 pub enum DbRequest {
     /// Health check — no DB lookup, no version negotiation.
     Ping,
+    /// Read-only settlement observation; positions belong to this repository.
+    WaitForVisibility {
+        #[serde(default = "default_query_version")]
+        query_version: u32,
+        db: String,
+        repo: String,
+        version: u64,
+        visibility_wait: VisibilityWait,
+    },
     /// Execute a [`BatchRequest`] against the named database. The batch
     /// payload is forwarded verbatim to `ShamirDb::execute`; the full
     /// [`BatchResponse`] (records, stats, pagination, plan, transaction
@@ -290,6 +299,19 @@ pub enum DbRequest {
 pub enum DbResponse {
     /// Reply to [`DbRequest::Ping`].
     Pong,
+    /// Settlement through a position, not evidence an unknown write committed.
+    VisibilityObserved {
+        version: u64,
+        visibility: VisibilityState,
+    },
+    /// Structured read-wait failure; no older snapshot was substituted.
+    AsOfVisibilityTimeout {
+        code: String,
+        message: String,
+        requested: u64,
+        visible_through: u64,
+        blocking_version: u64,
+    },
     /// Successful batch execution.
     Batch {
         /// Full [`BatchResponse`] — no fields dropped.

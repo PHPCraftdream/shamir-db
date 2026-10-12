@@ -68,12 +68,16 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use shamir_query_types::batch::BatchLimits;
 
+pub use crate::transactions_config::TransactionsConfig;
+
 /// Top-level configuration as loaded from the `.ktav` file.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     /// Root directory for durable state (server_meta, user_directory,
     /// audit log, fjall databases).
     pub data_dir: PathBuf,
+    #[serde(default)]
+    pub transactions: TransactionsConfig,
     /// Tracing / logging configuration.
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -733,6 +737,7 @@ impl Config {
     /// [`ConfigError::Validation`] with a human-readable message at the
     /// first violation; callers can surface that as a startup error.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.transactions.validate()?;
         // KDF: defaults first, then any per-listener override.
         validate_kdf(&self.kdf_defaults)
             .map_err(|m| ConfigError::Validation(format!("kdf_defaults: {m}")))?;

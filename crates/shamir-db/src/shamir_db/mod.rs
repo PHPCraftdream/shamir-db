@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests;
+mod visibility;
 
 mod curl_gateway;
 mod execute;

@@ -189,7 +189,8 @@ impl<'a> Authorized<'a> {
                 .clamped_to(&self.policy().caps)
                 .clamped_to(&BatchLimits::CEILING),
             self.policy.enforce_result_size,
-        );
+        )
+        .with_read_visibility_timeout(self.policy.read_visibility_timeout_ms);
         match self.deadline_cap {
             Some((deadline, cap)) => scope.with_deadline_cap(deadline, cap),
             None => scope,

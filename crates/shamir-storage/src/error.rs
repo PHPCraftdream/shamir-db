@@ -56,6 +56,20 @@ pub enum DbError {
     #[error("AsOf version {requested} cannot become visible; reopen the repository")]
     AsOfReopenRequired { requested: u64 },
 
+    // VIS-2 read-only observation errors (separate from follower durability).
+    #[error("Visibility version {requested} exceeds allocation high-water mark {allocated}")]
+    VisibilityFutureVersion { requested: u64, allocated: u64 },
+
+    #[error("Invalid visibility wait: {reason}")]
+    VisibilityWaitInvalid { reason: String },
+
+    #[error("AsOf version {requested} timed out at visible prefix {visible_through}")]
+    AsOfVisibilityTimeout {
+        requested: u64,
+        visible_through: u64,
+        blocking_version: u64,
+    },
+
     /// An error from the function engine (compile, invoke, registry).
     #[error("Function error: {0}")]
     Function(String),
@@ -114,6 +128,9 @@ impl DbError {
     /// codes instead of regex-matching messages.
     pub fn code(&self) -> Option<&'static str> {
         match self {
+            DbError::VisibilityFutureVersion { .. } => Some("visibility_future_version"),
+            DbError::VisibilityWaitInvalid { .. } => Some("visibility_wait_invalid"),
+            DbError::AsOfVisibilityTimeout { .. } => Some("as_of_visibility_timeout"),
             DbError::AsOfFutureVersion { .. } => Some("as_of_future_version"),
             DbError::AsOfReopenRequired { .. } => Some("as_of_reopen_required"),
             DbError::MigrationFrozen { .. } => Some("table_migrating"),
