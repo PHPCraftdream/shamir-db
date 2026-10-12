@@ -47,11 +47,11 @@ not-written and indeterminate WAL outcomes; the commit pipeline reports
 `WalDurability` after publication/materialization, and `into_transaction_info`
 retains committed status (source: `crates/shamir-engine/src/tx/commit.rs`).
 
-The TS `db.tx()` helper throws an `Error` for this committed outcome, carrying
-`transaction` (the entire metadata object) and `commit_version`. It does **not**
-issue rollback after that finalizing response. An exception from this helper
-therefore does not by itself mean the writes were aborted
-(source: `crates/shamir-client-ts/src/core/db.ts`).
+The TS `db.tx()` helper resolves this committed outcome as a receipt containing
+`value`, `transaction` (the entire metadata object), and discriminated
+`state: visible | pending` / `visibility`. It does not issue rollback after a
+commit attempt, even when acknowledgement is unknown. Inspect the retained
+`transaction.error`; a published durability warning never becomes an abort.
 
 `wal_requires_reopen` is different: WAL outcome was indeterminate, the repository
 is marked as requiring reopen, and new commits are refused. Stop issuing commits
@@ -173,8 +173,8 @@ whether an unknown transaction committed (aborted versions also settle). Do not
 use a receipt against a deleted/recreated repository. After reconciliation, open
 a **new snapshot/transaction** for reads: an old snapshot is not advanced by
 waiting. On `reopen_required`, reopen/reconcile first; visibility observation
-never repairs projections or upgrades durability. SDK receipt adoption remains
-VIS-5 work.
+never repairs projections or upgrades durability. Rust/TS transactional SDK
+receipts are adopted in VIS-5a; implicit per-alias SDK receipts remain VIS-5b.
 
 ### Embedded direct-write receipts (VIS-4a)
 
@@ -394,4 +394,4 @@ Embedded table reads can select explicit strict waits with
 `FilterContext::with_read_visibility_wait(VisibilityWait::Strict)` or bounded
 budgets; strict is not represented by zero. Execution/call budgets are sampled
 at the observation seam after asynchronous prerequisites.
-Commit acknowledgement defaults to Strict; Bounded returns committed receipts.
+Commit acknowledgements default to Strict and support explicit Strict or Bounded waits as above; Bounded returns committed receipts.

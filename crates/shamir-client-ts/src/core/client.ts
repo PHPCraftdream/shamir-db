@@ -7,6 +7,11 @@
  * PLATFORM-AGNOSTIC.
  */
 
+import type { VisibilityWait, VisibilityState } from './visibility/types.js';
+import { validateTransactionVisibility, normalizeWait } from './visibility/positions.js';
+import { commitTransaction } from './visibility/commit.js';
+import { waitForVisibility } from './visibility/wait.js';
+import { responseError } from './visibility/errors.js';
 import type { Platform } from './platform.js';
 import type { ConnectOptions, ConnectLocalOptions, ResumeOptions } from './types/index.js';
 import {
@@ -64,7 +69,7 @@ export interface TxOpened {
   /** Opaque handle for subsequent txExecute/txCommit/txRollback. */
   tx_handle: number;
   /** MVCC version the transaction's snapshot reads at. */
-  snapshot_version: number;
+  snapshot_version: number | bigint;
   /** Effective isolation (`"snapshot"` | `"serializable"`). */
   isolation: string;
 }
@@ -530,15 +535,12 @@ export class ShamirClient {
               );
               continue;
             }
-            if (dbResponse.kind === 'error') {
+            if (dbResponse.kind === 'error' || dbResponse.kind === 'as_of_visibility_timeout') {
               // Finding 2.1: surface a typed ShamirDbError carrying the
               // server's `code` + a `retryable` classification, instead of an
               // opaque interpolated-string Error the caller has to regex.
               waiter.reject(
-                new ShamirDbError(
-                  (dbResponse.code as string) ?? 'unknown',
-                  (dbResponse.message as string) ?? '',
-                ),
+                responseError(dbResponse),
               );
             } else {
               waiter.resolve(dbResponse);
@@ -663,7 +665,7 @@ export class ShamirClient {
    * - After receiving the response, merges any `interner_delta` entries into
    *   the per-repo FieldMap caches.
    */
-  async execute(db: string, batch: object): Promise<BatchResponse> {
+  async execute(db: string, batch: object, visibilityWait?: VisibilityWait): Promise<BatchResponse> {
     // Attach ambient interner epochs so the server returns only the delta.
     const epochs = this._internerCache.allEpochs(db);
     const enrichedBatch: Record<string, unknown> =
@@ -692,6 +694,7 @@ export class ShamirClient {
         : wireEpochs;
     }
 
+    if (visibilityWait !== undefined) enrichedBatch.visibility_wait = normalizeWait(visibilityWait);
     const r = await this.sendDbRequest({
       op: 'execute',
       query_version: CURRENT_QUERY_LANG_VERSION,
@@ -957,7 +960,7 @@ export class ShamirClient {
     }
     return {
       tx_handle: r.tx_handle as number,
-      snapshot_version: r.snapshot_version as number,
+      snapshot_version: r.snapshot_version as number | bigint,
       isolation: r.isolation as string,
     };
   }
@@ -985,23 +988,13 @@ export class ShamirClient {
     throw new Error(`unexpected DbResponse kind for tx_execute: ${r.kind}`);
   }
 
-  /**
-   * Commit an open interactive transaction (runs the full commit pipeline).
-   * Returns the {@link TransactionInfo} (committed or aborted).
-   */
-  async txCommit(db: string, txHandle: number): Promise<TransactionInfo> {
-    const r = await this.sendDbRequest({
-      op: 'tx_commit',
-      query_version: CURRENT_QUERY_LANG_VERSION,
-      db,
-      tx_handle: txHandle,
-    });
-    if (r.kind === 'tx_committed' && r.transaction !== undefined) {
-      const transaction = r.transaction as TransactionInfo;
-      validateTransactionVisibility(transaction);
-      return transaction;
-    }
-    throw new Error(`unexpected DbResponse kind for tx_commit: ${r.kind}`);
+  /** Settlement observation; open a fresh snapshot afterwards. */
+  waitForVisibility(db: string, repo: string, version: bigint, wait: VisibilityWait): Promise<VisibilityState> {
+    return waitForVisibility((req) => this.sendDbRequest(req), db, repo, version, wait);
+  }
+
+  async txCommit(db: string, txHandle: number, visibilityWait?: VisibilityWait): Promise<TransactionInfo> {
+    return commitTransaction((req) => this.sendDbRequest(req), db, txHandle, visibilityWait);
   }
 
   /** Roll back (abort) an open interactive transaction. */
@@ -1310,35 +1303,6 @@ export class ShamirClient {
 
 // ── Helpers (module-private) ──────────────────────────────────────────────
 
-function validateTransactionVisibility(transaction: TransactionInfo): void {
-  const malformed: () => never = () => {
-    throw new Error('malformed transaction visibility metadata');
-  };
-  if (transaction.status === 'aborted') {
-    if (transaction.visibility !== undefined) return malformed();
-    return;
-  }
-  if (transaction.status !== 'committed' || transaction.reason != null) return malformed();
-  const visibility = transaction.visibility;
-  if (visibility == null) return malformed();
-  if (visibility.state === 'visible') return;
-  if (
-    visibility.state !== 'pending' ||
-    (visibility.reason !== 'timeout' && visibility.reason !== 'reopen_required')
-  ) return malformed();
-  const position = (value: number | bigint): bigint => {
-    if (typeof value === 'number' && (!Number.isSafeInteger(value) || value < 0)) return malformed();
-    if (typeof value !== 'number' && typeof value !== 'bigint') return malformed();
-    const result = BigInt(value);
-    if (result < 0n || result > 18446744073709551615n) return malformed();
-    return result;
-  };
-  const floor = position(visibility.visible_through);
-  if (
-    floor === 18446744073709551615n ||
-    position(visibility.blocking_version) !== floor + 1n
-  ) return malformed();
-}
 
 /**
  * Race an in-flight `openSocket` promise against a connect deadline (Finding

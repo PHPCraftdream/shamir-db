@@ -20,6 +20,8 @@ use thiserror::Error;
 /// engine.
 #[derive(Debug, Error)]
 pub enum ReplError {
+    #[error("{0}")]
+    Seed(#[from] shamir_db::SeedRefusal),
     #[error("replication start failed: {0}")]
     Start(String),
 

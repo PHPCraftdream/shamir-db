@@ -69,6 +69,14 @@ pub struct ReplRepoInfo {
     pub gap_first: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gap_through: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_digest: Option<String>,
+    /// Settled source domain, distinct from eager journal position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_version: Option<u64>,
+    /// Named publications visible in full to this caller. Missing on older peers.
+    #[serde(default)]
+    pub publications: Vec<crate::admin::CreatePublicationOp>,
 }
 
 /// Privileged replication reply. Every variant carries `leader_epoch`
@@ -107,6 +115,8 @@ pub enum ReplResponse {
         gap_first: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gap_through: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema_digest: Option<String>,
     },
     /// Replication-layer error (bad role, denied repo, unknown repo, stale
     /// epoch). Carries the epoch so the follower can still fence.

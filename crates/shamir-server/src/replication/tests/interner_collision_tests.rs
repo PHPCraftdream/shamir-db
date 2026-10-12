@@ -45,6 +45,7 @@ impl ReplSource for EmittedSource {
         assert!(limit > 0);
         assert_eq!(wait_ms, Some(0));
         Ok(ReplResponse::Pull {
+            schema_digest: None,
             repo_lineage_id: None,
             history_epoch: None,
             gap_first: None,
