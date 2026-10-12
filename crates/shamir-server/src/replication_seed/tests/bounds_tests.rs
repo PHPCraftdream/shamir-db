@@ -119,21 +119,30 @@ async fn catalogue_record_count_cap_is_independent_of_byte_cap() {
             .unwrap(),
         None,
     );
-    for index in 0..4096 {
+    // Small explicit cap: the boundary logic is identical and the test does not
+    // write thousands of rows (slow on Windows runners).
+    const CAP: usize = 8;
+    for index in 0..CAP {
         source
             .system_store()
             .save_setting(&format!("setting-{index}"), &QueryValue::Null)
             .await
             .unwrap();
     }
-    source.check_seed_catalogue().await.unwrap();
+    source
+        .check_seed_catalogue_with_limits(CAP, usize::MAX)
+        .await
+        .unwrap();
     // Updating an existing setting adds history but no live catalogue row.
     source
         .system_store()
         .save_setting("setting-0", &QueryValue::Str("updated".into()))
         .await
         .unwrap();
-    source.check_seed_catalogue().await.unwrap();
+    source
+        .check_seed_catalogue_with_limits(CAP, usize::MAX)
+        .await
+        .unwrap();
     assert_eq!(
         source
             .system_store()
@@ -148,11 +157,14 @@ async fn catalogue_record_count_cap_is_independent_of_byte_cap() {
         .await
         .unwrap();
     assert!(source
-        .check_seed_catalogue()
+        .check_seed_catalogue_with_limits(CAP, usize::MAX)
         .await
         .unwrap_err()
         .to_string()
         .contains("budget"));
+    // The production caps stay pinned.
+    assert_eq!(ShamirDb::SEED_CATALOGUE_MAX_RECORDS, 4096);
+    assert_eq!(ShamirDb::SEED_CATALOGUE_MAX_BYTES, 8 * 1024 * 1024);
 }
 
 #[test]

@@ -65,13 +65,14 @@ fn shared_lock_refreshes_pid_and_preserves_server_io_errors() {
     std::fs::write(&path, b"stale-long-pid-diagnostics").unwrap();
     let owner = crate::maintenance_lock::acquire(dir.path()).unwrap();
     let pid = std::process::id().to_string();
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), pid);
     assert!(matches!(
         crate::maintenance_lock::acquire_server(dir.path()),
         Err(crate::server::BootError::AlreadyRunning(_)),
     ));
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), pid);
     drop(owner);
+    // Windows byte-range locks are mandatory: the file is readable only after
+    // release. A losing contender must not have erased the diagnostics.
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), pid);
     assert!(matches!(
         crate::maintenance_lock::acquire_server(&dir.path().join("missing")),
         Err(crate::server::BootError::Io(_)),
