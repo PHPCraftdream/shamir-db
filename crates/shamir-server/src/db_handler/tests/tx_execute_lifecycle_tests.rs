@@ -3,6 +3,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use shamir_connect::server::conn_services::ConnectionServices;
+use shamir_connect::server::dispatch::RequestHandler;
+use shamir_query_builder::write::{doc, insert};
+use shamir_query_types::batch::VisibilityWait;
+use shamir_query_types::wire::DbRequest;
+
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::session::{Session, SessionPermissions};
 use shamir_db::access::{principal64, Actor};
@@ -157,5 +163,146 @@ fn ordinary_query_error_preserves_handle_for_successful_execute() {
             "{response:?}",
         );
         assert!(handler.tx_registry.is_empty());
+    });
+}
+
+#[test]
+fn vis1_legacy_requests_reject_before_writes_and_commit_consumption() {
+    on_big_stack(|| async {
+        let (handler, session, handle) = fixture(Duration::from_secs(300)).await;
+        let conn = ConnectionServices::without_push(0);
+        let mut write = Batch::new();
+        write.insert("insert", insert("items").row(doc().set("marker", "vis1")));
+        for query_version in [0, 1, 2, 99] {
+            let request = DbRequest::Execute {
+                query_version,
+                db: "app".into(),
+                batch: write.build(),
+            };
+            let bytes = rmp_serde::to_vec_named(&request).unwrap();
+            let reply = handler.handle(&session, &bytes, &conn).await.unwrap();
+            let response: DbResponse = rmp_serde::from_slice(&reply).unwrap();
+            assert!(matches!(
+                response,
+                DbResponse::Error { code, .. } if code == "unsupported_query_version"
+            ));
+            for request in [
+                DbRequest::TxBegin {
+                    query_version,
+                    db: "app".into(),
+                    repo: "main".into(),
+                    isolation: None,
+                },
+                DbRequest::TxExecute {
+                    query_version,
+                    db: "app".into(),
+                    tx_handle: handle,
+                    batch: write.build(),
+                },
+            ] {
+                let bytes = rmp_serde::to_vec_named(&request).unwrap();
+                let reply = handler.handle(&session, &bytes, &conn).await.unwrap();
+                let response: DbResponse = rmp_serde::from_slice(&reply).unwrap();
+                assert!(matches!(
+                    response,
+                    DbResponse::Error { code, .. } if code == "unsupported_query_version"
+                ));
+            }
+        }
+        match execute(&handler, &session, handle, read("items")).await {
+            DbResponse::TxBatch { response } => {
+                assert!(
+                    response.results["read"].records.is_empty(),
+                    "nothing staged"
+                );
+            }
+            other => panic!("handle changed after version rejection: {other:?}"),
+        }
+        // Stage a real write: rejecting old COMMIT must leave it uncommitted
+        // and preserve the handle, not merely reject an unknown transaction.
+        assert!(matches!(
+            execute(&handler, &session, handle, write.build()).await,
+            DbResponse::TxBatch { .. }
+        ));
+        for query_version in [0, 1, 2, 99] {
+            let request = DbRequest::TxCommit {
+                query_version,
+                visibility_wait: None,
+                db: "app".into(),
+                tx_handle: handle,
+            };
+            let bytes = rmp_serde::to_vec_named(&request).unwrap();
+            let reply = handler.handle(&session, &bytes, &conn).await.unwrap();
+            let response: DbResponse = rmp_serde::from_slice(&reply).unwrap();
+            assert!(matches!(
+                response,
+                DbResponse::Error { code, .. } if code == "unsupported_query_version"
+            ));
+            assert!(handler
+                .tx_registry
+                .get_owned(handle, &session.session_id)
+                .is_ok());
+        }
+        match handler
+            .execute(
+                &session,
+                CURRENT_QUERY_LANG_VERSION,
+                "app",
+                read("items"),
+                &conn,
+            )
+            .await
+        {
+            DbResponse::Batch { response } => {
+                assert!(
+                    response.results["read"].records.is_empty(),
+                    "no write committed"
+                );
+            }
+            other => panic!("fresh read failed: {other:?}"),
+        }
+        handler.tx_rollback(&session, "app", handle).await;
+    });
+}
+
+#[test]
+fn vis1_tx_execute_rejects_commit_only_override_without_staging() {
+    on_big_stack(|| async {
+        let (handler, session, handle) = fixture(Duration::from_secs(300)).await;
+        let mut write = Batch::new();
+        write.insert(
+            "insert",
+            insert("items").row(doc().set("marker", "must-not-stage")),
+        );
+        for wait in [
+            VisibilityWait::Strict,
+            VisibilityWait::Bounded { timeout_ms: 0 },
+        ] {
+            write.visibility_wait(wait);
+            match execute(&handler, &session, handle, write.build()).await {
+                DbResponse::Error { code, .. } => assert_eq!(code, "validation"),
+                other => panic!("commit-only override executed: {other:?}"),
+            }
+        }
+        let mut inner = Batch::new();
+        inner.visibility_wait(VisibilityWait::Strict);
+        inner.insert("insert", insert("items").row(doc().set("marker", "nested")));
+        let mut outer = Batch::new();
+        outer.sub_batch_no_bind("nested", inner.build());
+        match execute(&handler, &session, handle, outer.build()).await {
+            DbResponse::Error { code, .. } => assert_eq!(code, "validation"),
+            other => panic!("nested commit-only override executed: {other:?}"),
+        }
+        match execute(&handler, &session, handle, read("items")).await {
+            DbResponse::TxBatch { response } => {
+                assert!(
+                    response.results["read"].records.is_empty(),
+                    "nothing staged"
+                );
+                assert!(response.transaction.is_none());
+            }
+            other => panic!("handle was lost: {other:?}"),
+        }
+        handler.tx_rollback(&session, "app", handle).await;
     });
 }

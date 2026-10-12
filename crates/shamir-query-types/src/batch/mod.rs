@@ -44,6 +44,9 @@ pub mod result_encoding;
 pub mod sub_batch_op;
 pub mod transaction_info;
 pub mod tree_visitor;
+pub mod visibility_pending_reason;
+pub mod visibility_state;
+pub mod visibility_wait;
 
 #[cfg(test)]
 mod tests;
@@ -67,3 +70,6 @@ pub use result_encoding::ResultEncoding;
 pub use sub_batch_op::SubBatchOp;
 pub use transaction_info::TransactionInfo;
 pub use tree_visitor::{BatchTreeEntry, BatchTreeVisitor};
+pub use visibility_pending_reason::VisibilityPendingReason;
+pub use visibility_state::VisibilityState;
+pub use visibility_wait::VisibilityWait;

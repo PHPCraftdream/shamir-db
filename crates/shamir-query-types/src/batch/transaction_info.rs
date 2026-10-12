@@ -1,9 +1,11 @@
 //! [`TransactionInfo`] — MVCC transaction metadata in batch responses.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+use super::VisibilityState;
 
 /// Transaction metadata returned in batch responses.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TransactionInfo {
     /// Transaction ID (monotonic per repo).
     pub tx_id: u64,
@@ -45,6 +47,10 @@ pub struct TransactionInfo {
     /// that omit it) deserialize to the fully-materialized common case.
     #[serde(default = "default_materialized")]
     pub materialized: bool,
+
+    /// Required for committed outcomes; absent for aborted outcomes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<VisibilityState>,
 }
 
 fn default_materialized() -> bool {
@@ -66,6 +72,7 @@ impl TransactionInfo {
             snapshot_version: Some(snapshot_version),
             commit_version: Some(commit_version),
             materialized,
+            visibility: Some(VisibilityState::Visible),
         }
     }
 
@@ -92,10 +99,61 @@ impl TransactionInfo {
             // Aborted txs never materialize; default is irrelevant to the
             // client because `status` already disambiguates.
             materialized: true,
+            visibility: None,
+        }
+    }
+
+    /// Set the orthogonal visibility observation without changing commit status.
+    pub fn with_visibility(mut self, visibility: VisibilityState) -> Self {
+        self.visibility = Some(visibility);
+        self
+    }
+
+    pub fn is_visible(&self) -> bool {
+        self.is_committed() && self.visibility == Some(VisibilityState::Visible)
+    }
+
+    /// Validate the v3 metadata contract, including sampled-prefix arithmetic.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        match (self.status.as_str(), self.visibility) {
+            ("committed", Some(visibility)) if self.reason.is_none() => visibility.validate(),
+            ("aborted", None) => Ok(()),
+            _ => Err("malformed transaction visibility metadata"),
         }
     }
 
     pub fn is_committed(&self) -> bool {
         self.status == "committed"
+    }
+}
+
+impl<'de> Deserialize<'de> for TransactionInfo {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Decode named fields before enforcing the cross-field v3 invariant.
+        #[derive(Deserialize)]
+        struct Fields {
+            tx_id: u64,
+            status: String,
+            reason: Option<String>,
+            error: Option<String>,
+            snapshot_version: Option<u64>,
+            commit_version: Option<u64>,
+            #[serde(default = "default_materialized")]
+            materialized: bool,
+            visibility: Option<VisibilityState>,
+        }
+        let fields = Fields::deserialize(deserializer)?;
+        let info = Self {
+            tx_id: fields.tx_id,
+            status: fields.status,
+            reason: fields.reason,
+            error: fields.error,
+            snapshot_version: fields.snapshot_version,
+            commit_version: fields.commit_version,
+            materialized: fields.materialized,
+            visibility: fields.visibility,
+        };
+        info.validate().map_err(serde::de::Error::custom)?;
+        Ok(info)
     }
 }

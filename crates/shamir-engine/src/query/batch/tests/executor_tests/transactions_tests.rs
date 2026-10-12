@@ -88,6 +88,7 @@ fn map_outcome_to_info(
         outcome.commit_version,
         outcome.materialized(),
     )
+    .with_visibility(outcome.visibility)
 }
 
 #[test]
@@ -96,22 +97,33 @@ fn published_durability_error_maps_to_committed_metadata() {
         crate::tx::tx_outcome::MaterializationState::Complete,
         crate::tx::tx_outcome::MaterializationState::Deferred,
     ] {
-        let error = crate::tx::CommitError::WalDurability {
-            commit_version: 107,
-            materialization,
-        };
-        // This production helper is shared by batch execution and the DB facade.
-        let info = error.into_transaction_info(11, 100);
-        assert_eq!(info.status, "committed");
-        assert_eq!(info.tx_id, 11);
-        assert_eq!(info.snapshot_version, Some(100));
-        assert_eq!(info.commit_version, Some(107));
-        assert_eq!(info.reason, None);
-        assert_eq!(info.error.as_deref(), Some("wal_durability"));
-        assert_eq!(
-            info.materialized,
-            materialization == crate::tx::tx_outcome::MaterializationState::Complete,
-        );
+        for visibility in [
+            shamir_query_types::batch::VisibilityState::Visible,
+            shamir_query_types::batch::VisibilityState::Pending {
+                visible_through: 100,
+                blocking_version: 101,
+                reason: shamir_query_types::batch::VisibilityPendingReason::Timeout,
+            },
+        ] {
+            let error = crate::tx::CommitError::WalDurability {
+                commit_version: 107,
+                materialization,
+                visibility,
+            };
+            // Production helper: a default-visible mapping would lose pending.
+            let info = error.into_transaction_info(11, 100);
+            assert_eq!(info.status, "committed");
+            assert_eq!(info.tx_id, 11);
+            assert_eq!(info.snapshot_version, Some(100));
+            assert_eq!(info.commit_version, Some(107));
+            assert_eq!(info.reason, None);
+            assert_eq!(info.error.as_deref(), Some("wal_durability"));
+            assert_eq!(info.visibility, Some(visibility));
+            assert_eq!(
+                info.materialized,
+                materialization == crate::tx::tx_outcome::MaterializationState::Complete,
+            );
+        }
     }
     let info = crate::tx::CommitError::WalRequiresReopen.into_transaction_info(12, 100);
     assert_eq!(info.status, "aborted");
@@ -130,6 +142,7 @@ fn deferred_outcome_maps_to_materialized_false() {
         snapshot_version: 100,
         commit_version: 101,
         materialization: MaterializationState::Complete,
+        visibility: shamir_query_types::batch::VisibilityState::Visible,
         background: None,
     };
     let deferred = crate::tx::TxOutcome {
@@ -137,6 +150,7 @@ fn deferred_outcome_maps_to_materialized_false() {
         snapshot_version: 100,
         commit_version: 102,
         materialization: MaterializationState::Deferred,
+        visibility: shamir_query_types::batch::VisibilityState::Visible,
         background: None,
     };
 

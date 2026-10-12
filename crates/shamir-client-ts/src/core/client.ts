@@ -702,6 +702,7 @@ export class ShamirClient {
     // unwrap the envelope so callers get the BatchResponse directly.
     if (r.kind === 'batch' && r.response !== undefined) {
       const response = r.response as BatchResponse;
+      if (response.transaction != null) validateTransactionVisibility(response.transaction);
       // Merge any interner_delta from the response into the local cache.
       this.mergeInternerDelta(db, response);
       return response;
@@ -991,11 +992,14 @@ export class ShamirClient {
   async txCommit(db: string, txHandle: number): Promise<TransactionInfo> {
     const r = await this.sendDbRequest({
       op: 'tx_commit',
+      query_version: CURRENT_QUERY_LANG_VERSION,
       db,
       tx_handle: txHandle,
     });
     if (r.kind === 'tx_committed' && r.transaction !== undefined) {
-      return r.transaction as TransactionInfo;
+      const transaction = r.transaction as TransactionInfo;
+      validateTransactionVisibility(transaction);
+      return transaction;
     }
     throw new Error(`unexpected DbResponse kind for tx_commit: ${r.kind}`);
   }
@@ -1305,6 +1309,36 @@ export class ShamirClient {
 }
 
 // ── Helpers (module-private) ──────────────────────────────────────────────
+
+function validateTransactionVisibility(transaction: TransactionInfo): void {
+  const malformed: () => never = () => {
+    throw new Error('malformed transaction visibility metadata');
+  };
+  if (transaction.status === 'aborted') {
+    if (transaction.visibility !== undefined) return malformed();
+    return;
+  }
+  if (transaction.status !== 'committed' || transaction.reason != null) return malformed();
+  const visibility = transaction.visibility;
+  if (visibility == null) return malformed();
+  if (visibility.state === 'visible') return;
+  if (
+    visibility.state !== 'pending' ||
+    (visibility.reason !== 'timeout' && visibility.reason !== 'reopen_required')
+  ) return malformed();
+  const position = (value: number | bigint): bigint => {
+    if (typeof value === 'number' && (!Number.isSafeInteger(value) || value < 0)) return malformed();
+    if (typeof value !== 'number' && typeof value !== 'bigint') return malformed();
+    const result = BigInt(value);
+    if (result < 0n || result > 18446744073709551615n) return malformed();
+    return result;
+  };
+  const floor = position(visibility.visible_through);
+  if (
+    floor === 18446744073709551615n ||
+    position(visibility.blocking_version) !== floor + 1n
+  ) return malformed();
+}
 
 /**
  * Race an in-flight `openSocket` promise against a connect deadline (Finding
