@@ -16,6 +16,36 @@ artifact).
 
 ## 1. Transactions
 
+- **Write acknowledgements wait for contiguous settlement, not just their own
+  projection.** For a transaction that allocates a version and ordinary
+  non-transactional writes, the visibility wait requires W to reach that version:
+  every version through it must materialize or abort. Read-only/empty commits
+  that allocate nothing skip this wait. One stuck lower version can indefinitely
+  delay every higher acknowledgement in the same repository; the five-second
+  warning and 50 ms recheck are not give-up timeouts. Sources:
+  `crates/shamir-engine/src/tx/commit.rs:587-604`,
+  `crates/shamir-tx/src/repo_tx_gate.rs:1049-1116`,
+  `crates/shamir-tx/src/mvcc_store/mod.rs:788-790,865-866,995-996`.
+- **Post-WAL projection failures wait for online orphan replay.** Failed
+  visibility projections leave the version unsettled and wake the drainer;
+  acknowledgement waits for replay and contiguous W progress, rather than
+  treating WAL publication as visibility. Persistent replay failures can keep
+  the wait pending. On `ReopenRequired`, transactional outcomes become
+  `Deferred` (`materialized: false`), but the non-transactional acknowledgement
+  helper only logs and returns normally without establishing visibility. Neither
+  is permission to blindly retry committed writes. Sources:
+  `crates/shamir-engine/src/tx/materialize.rs:255-273`,
+  `crates/shamir-engine/src/tx/drainer.rs:1190-1211`,
+  `crates/shamir-engine/src/tx/commit.rs:597-603,619-629`,
+  `crates/shamir-tx/src/repo_tx_gate.rs:1110-1116`.
+- **`AsOf(v)` can wait indefinitely for an allocated, unsettled version.**
+  Callers must cancel the read if they need a bounded wait; cancellation does
+  not settle a version or substitute Latest. An unallocated future version is
+  rejected (`as_of_future_version`); a pending position requiring reopen yields
+  `as_of_reopen_required`. Positions already at/below W do not wait. Sources:
+  `crates/shamir-engine/src/table/read_temporal.rs:85-101`,
+  `crates/shamir-tx/src/repo_tx_gate.rs:1055-1107`,
+  `crates/shamir-storage/src/error.rs:117-118`.
 - **Snapshot/Serializable table reads trade shortcuts for correctness.**
   Latest-state counter, secondary-index, MIN/MAX and sorted-order shortcuts
   are bypassed inside these transactions: reads scan the pinned MVCC snapshot
@@ -57,6 +87,13 @@ artifact).
   (`crates/shamir-server/src/db_handler/config.rs`,
   `crates/shamir-query-types/src/batch/exec_policy.rs`,
   `crates/shamir-engine/src/query/batch/result_size.rs:12-18,143-145`).
+- **A post-execution `result_too_large` is not proof of rollback.** Encoded
+  response enforcement runs after execution and subscription activation, so
+  rejection can follow a committed write and omit its transaction metadata.
+  Reconcile the outcome; do not blindly retry. Serialized cursor pages instead
+  use `cursor_page_too_large`, not `result_too_large`. Sources:
+  `crates/shamir-server/src/db_handler/handler.rs:595-605,631-642,747`,
+  `crates/shamir-server/src/db_handler/cursor_handlers.rs:315-322`.
 - **Nested string_agg inherits the root accumulator cap.** A smaller nested
   batch `max_result_size` does not lower this cap. Each group's accumulator is
   capped separately (root result-size cap, at most 100 MiB); separator is capped
@@ -478,7 +515,7 @@ artifact).
   short, bounded final step (Phase D: apply the residual, flip `Ready`).
   Falls back to the old whole-barrier path automatically for tables without
   an MVCC changefeed attached (e.g. system tables). Re-measured with the SAME
-  `f78_writer_latency` bench, 2026-08-10 (`CARGO_TARGET_DIR=D:/dev/rust/.cargo-target-bench
+  `f78_writer_latency` bench, 2026-08-10 (`CARGO_TARGET_DIR='<dedicated bench target dir>'
   cargo bench -p shamir-engine --bench f78_writer_latency -- --scale 0.1`):
   at 5k rows, build ≈ 148-192 ms, writer p50/p95/p99 ≈ **0-1 ms** (was ≈
   135-160 ms, tracking build duration); at 50k rows, build ≈ 31.6-33.2
@@ -539,10 +576,15 @@ artifact).
   single-leader replication is intended for read replicas, not clustering/HA.
   **`ReplMode::ReadOnly` is not enforced:** a follower accepts local writes.
   See [`guide/08-interconnect.md`](guide/08-interconnect.md).
-- **Replicated map records cannot reliably be read.** Field keys are the
-  leader's interner ids; journal events carry no id-to-name bindings. A
-  follower may fail to decode records or read them under wrong field names.
-  Per-event field-name translation is planned.
+- **Replicated map field ids are translated, not shared between interners.**
+  Pull envelopes carry per-event id-to-name bindings; apply preflights referenced
+  ids, persists follower-local bindings, and rewrites Put payloads before apply.
+  Missing or conflicting bindings are rejected rather than decoded under wrong
+  names. Sources: `crates/shamir-engine/src/tx/replicated_event.rs:7-12`,
+  `crates/shamir-engine/src/tx/apply_replicated.rs:230-239,276-280,348-372`.
+  Existing cross-interner/next-hop coverage:
+  `crates/shamir-engine/src/tx/tests/replication_interner_tests.rs:97-148`
+  (source inspected, not executed here).
 - **Follower secondary indexes are unsupported and fail closed.** An event
   touching a table with any index (hash, unique, sorted, FTS, functional or
   vector) is rejected before any data or version is applied; the typed
@@ -557,9 +599,12 @@ artifact).
   writes are.** Create the same databases, repos and tables on the follower
   first; **do not create secondary indexes there**. A missing follower repo
   causes backoff with `ReplError::UnknownFollowerRepo`
-  (`crates/shamir-server/src/replication/follower_loop.rs:198-210`), but an
-  event for a missing table is skipped with a warning and the bookmark still
-  advances, losing that table's writes.
+  (`crates/shamir-server/src/replication/follower_loop.rs:198-210`). An
+  event touching a missing table is rejected with `UnknownTable` before version
+  allocation; the follower loop stops with `ApplyRejected` without advancing
+  the bookmark across that event. Sources:
+  `crates/shamir-engine/src/tx/apply_replicated.rs:220-228,284-290`,
+  `crates/shamir-server/src/replication/follower_loop.rs:389-393`.
 - **Journal pulls preserve settled version order; cold recovery conservatively
   invalidates uncertified history.** Pulls capture the contiguous completion
   watermark W and confirm a writer barrier before returning ascending events
