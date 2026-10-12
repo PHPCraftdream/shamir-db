@@ -16,3 +16,6 @@ pub(super) const SYSTEM_DB_NAME: &str = "__system__";
 
 pub use artifact_kind::{ArtifactKind, KIND_FIELD};
 pub use core::{FunctionSource, ShamirDb};
+
+mod shutdown_report;
+pub use shutdown_report::ShutdownReport;

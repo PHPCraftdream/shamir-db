@@ -111,5 +111,7 @@ async fn serve_boots_and_shuts_down_on_trigger() {
         .expect("serve task did not finish within 10s of shutdown")
         .expect("serve task did not panic");
 
-    assert!(result.is_ok(), "serve should return Ok(())");
+    let report = result.expect("serve should return a shutdown report");
+    assert!(report.is_clean(), "{report:?}");
+    assert_eq!(report.exit_code(), 0);
 }

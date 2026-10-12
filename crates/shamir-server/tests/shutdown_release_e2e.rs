@@ -125,7 +125,9 @@ async fn relaunch_right_after_shutdown_never_hits_a_held_store() {
             .expect("insert");
 
         drop(client);
-        handle.shutdown().await;
+        let report = handle.shutdown().await;
+        assert!(report.is_clean(), "{report:?}");
+        assert_eq!(report.exit_code(), 0);
     }
 
     let handle = launch(&data_dir).await;

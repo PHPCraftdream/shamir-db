@@ -604,8 +604,13 @@ scrape_configs:
 * **Observability включена по умолчанию** на `127.0.0.1:9090` (loopback).
   Отключается только явным `addr: ""`; публичный адрес требует
   `allow_public_metrics: true` и внешней аутентификации.
-* **Graceful shutdown — bounded.** 30 s deadline. Если застрявшее
-  соединение не успело — процесс выходит, OS reclaim'ает сокеты.
+* **Graceful shutdown — bounded.** 30 s deadline и общий бюджет репозиториев
+  остаются неизменными. Ошибка flush/clean horizon или истечение deadline —
+  unclean shutdown: exit code **70**, один ERROR с именами неуспешных
+  репозиториев и счётчик `shutdown_unclean_total`. Clean требует quiesce,
+  drain, W = allocation high-water и сохранённого J. При следующем старте
+  uncertified интервал (J,H] сертифицируется как conservative replication
+  gap (пустой интервал не создаёт gap); OS reclaim'ает сокеты.
 * **Single-instance guard.** Файловая блокировка (`fs4`) на `data_dir`.
   Два процесса на одних данных → второй не стартует.
 * **Logging — non-blocking.** Никогда не блокирует горячий путь. Overflow

@@ -30,3 +30,5 @@ pub mod shamir_db;
 // without forcing callers to type the full `shamir_db::*` path.
 pub use crate::shamir_db::{PortError, PrincipalInfo, PrincipalResolver, UserAdminPort};
 pub use crate::shamir_db::{ShamirDb, SystemStoreConfig};
+
+pub use crate::shamir_db::shamir_db::ShutdownReport;

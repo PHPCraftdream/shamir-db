@@ -191,7 +191,17 @@ enum Subcmd {
     },
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> std::process::ExitCode {
+    match run_main() {
+        Ok(code) => std::process::ExitCode::from(code),
+        Err(error) => {
+            eprintln!("{error:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_main() -> anyhow::Result<u8> {
     let cli = Cli::parse();
 
     // Windows SCM dispatcher: the SCM starts the process with `--service`
@@ -209,7 +219,7 @@ fn main() -> anyhow::Result<()> {
     rt.block_on(run_async(cli))
 }
 
-async fn run_async(cli: Cli) -> anyhow::Result<()> {
+async fn run_async(cli: Cli) -> anyhow::Result<u8> {
     // Install rustls crypto provider (required by tokio-rustls; second call
     // is a harmless no-op).
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -250,7 +260,7 @@ async fn run_async(cli: Cli) -> anyhow::Result<()> {
                 report.bytes_copied,
                 report.dest_dir.display()
             );
-            return Ok(());
+            return Ok(0);
         }
         Some(Subcmd::Restore { from, force }) => {
             let report = shamir_server::restore::restore(&from, &config.data_dir, force)?;
@@ -267,7 +277,7 @@ async fn run_async(cli: Cli) -> anyhow::Result<()> {
                     pre.display()
                 );
             }
-            return Ok(());
+            return Ok(0);
         }
         Some(Subcmd::AccessTree {
             depth,
@@ -288,7 +298,7 @@ async fn run_async(cli: Cli) -> anyhow::Result<()> {
                 password,
             };
             shamir_server::access_tree::run(&config, &args).await?;
-            return Ok(());
+            return Ok(0);
         }
         Some(Subcmd::Service { action }) => {
             match action {
@@ -302,7 +312,7 @@ async fn run_async(cli: Cli) -> anyhow::Result<()> {
                     shamir_server::service::status()?;
                 }
             }
-            return Ok(());
+            return Ok(0);
         }
         Some(Subcmd::Doctor {
             db,
@@ -321,7 +331,7 @@ async fn run_async(cli: Cli) -> anyhow::Result<()> {
                 json,
             };
             shamir_server::doctor::run(&config, &args).await?;
-            return Ok(());
+            return Ok(0);
         }
         Some(Subcmd::Run { .. }) | None => {}
     }
@@ -379,4 +389,5 @@ async fn run_async(cli: Cli) -> anyhow::Result<()> {
         shamir_server::runtime::notify_ready,
     )
     .await
+    .map(|report| report.exit_code())
 }

@@ -1,4 +1,6 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use crate::access::{Actor, ResourceMeta};
 use crate::engine::db_instance::db_instance::DbInstance;
@@ -6,8 +8,8 @@ use crate::engine::repo::RepoConfig;
 use crate::types::value::QueryValue;
 use crate::{DbError, DbResult};
 
-use super::ShamirDb;
 use super::SYSTEM_DB_NAME;
+use super::{ShamirDb, ShutdownReport};
 
 const COMMIT_QUIESCE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -610,60 +612,74 @@ impl ShamirDb {
         Ok(())
     }
 
-    /// Drain every repo's in-memory MemBuffers to their durable backing.
-    ///
-    /// Called on graceful shutdown to close the ~500 ms buffered-commit
-    /// loss window. For each repo the tx-info store and every table's
-    /// data + info stores are flushed. In-memory stores are no-ops.
-    /// Best-effort: individual errors are logged and skipped; returns the
-    /// first error encountered (if any) after attempting all repos/tables.
+    /// Drain all repositories, retaining every failure in the compatibility error.
     pub async fn flush_all(&self) -> DbResult<()> {
         self.flush_all_with_quiesce_timeout(COMMIT_QUIESCE_TIMEOUT)
             .await
     }
 
-    /// `timeout` is ONE budget shared by every repo: wedged tails must not
-    /// stack per-repo waits past the server's outer shutdown deadline.
-    /// cancel-safe: NO — an admitted journal checkpoint can finish backend
-    /// I/O after cancellation; no cancelled caller reports shutdown complete.
+    pub fn shutdown_report(&self) -> ShutdownReport {
+        let mut names = Vec::new();
+        for db_name in self.list_dbs() {
+            if let Some(db) = self.get_db(&db_name) {
+                for repo_name in db.list_repos() {
+                    names.push(format!("{db_name}/{repo_name}"));
+                }
+            }
+        }
+        names.push(format!("{SYSTEM_DB_NAME}/system"));
+        ShutdownReport::pending(names)
+    }
+
+    /// Compatibility wrapper for embedded callers.
     pub(crate) async fn flush_all_with_quiesce_timeout(&self, timeout: Duration) -> DbResult<()> {
+        let mut report = self.shutdown_report();
+        self.flush_all_report(timeout, &mut report).await;
+        if report.is_clean() {
+            Ok(())
+        } else {
+            Err(DbError::Storage(format!(
+                "unclean shutdown: {:?}",
+                report.repository_failures(),
+            )))
+        }
+    }
+
+    /// One shared budget; completed outcomes survive cancellation by the server.
+    /// cancel-safe: NO — checkpoint I/O may finish after cancellation; pending
+    /// entries remain uncertified in the caller-owned report.
+    pub async fn flush_all_report(&self, timeout: Duration, report: &mut ShutdownReport) {
         let deadline = Instant::now() + timeout;
-        let mut first_err: Option<DbError> = None;
-        let db_names = self.list_dbs();
-        for db_name in &db_names {
-            let Some(db) = self.get_db(db_name) else {
+        for db_name in self.list_dbs() {
+            let Some(db) = self.get_db(&db_name) else {
                 continue;
             };
             for repo_name in db.list_repos() {
                 let Some(repo) = db.get_repo(&repo_name) else {
                     continue;
                 };
-
                 let remaining = deadline.saturating_duration_since(Instant::now());
-                if let Err(e) = repo.shutdown_clean(remaining).await {
+                let result = repo.shutdown_clean(remaining).await;
+                if let Err(e) = &result {
                     log::warn!("flush_all: {}/{}: {}", db_name, repo_name, e);
-                    if first_err.is_none() {
-                        first_err = Some(e);
-                    }
                 }
+                report.record(
+                    &format!("{db_name}/{repo_name}"),
+                    result.map_err(|e| e.to_string()),
+                );
             }
         }
-        // The system repo (catalogue) is not in `list_dbs`; its writes are
-        // acked from the overlay + WAL like any other repo's.
-        if let Err(e) = self
+        let result = self
             .system_store
             .flush_buffers_with_quiesce_timeout(deadline.saturating_duration_since(Instant::now()))
-            .await
-        {
+            .await;
+        if let Err(e) = &result {
             log::warn!("flush_all: system store: {}", e);
-            if first_err.is_none() {
-                first_err = Some(e);
-            }
         }
-        match first_err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        report.record(
+            &format!("{SYSTEM_DB_NAME}/system"),
+            result.map_err(|e| e.to_string()),
+        );
     }
 
     /// #984 — count degraded (non-`Ready`) indexes across all ALREADY-OPEN

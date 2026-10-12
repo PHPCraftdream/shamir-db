@@ -324,6 +324,12 @@ pub async fn spawn_with_byte_budget(
     // attaches metadata, the counter itself remains absent from the
     // exporter's output until first touched.
     metrics::describe_counter!(
+        "shutdown_unclean_total",
+        metrics::Unit::Count,
+        "Shutdowns that did not complete cleanly"
+    );
+    metrics::counter!("shutdown_unclean_total").increment(0);
+    metrics::describe_counter!(
         "auth_attempts_total",
         metrics::Unit::Count,
         "Number of authentication attempts, bucketed by terminal result \
@@ -599,4 +605,16 @@ async fn info_handler(State(s): State<AppState>) -> Response {
         bytes,
     )
         .into_response()
+}
+
+/// Single completion funnel for both direct handles and serve's deadline path.
+pub(crate) fn record_shutdown(report: &shamir_db::ShutdownReport) {
+    if !report.is_clean() {
+        metrics::counter!("shutdown_unclean_total").increment(1);
+        tracing::error!(
+            repositories = ?report.repository_failures(),
+            errors = ?report.errors(),
+            "unclean shutdown: next start will certify a conservative replication gap",
+        );
+    }
 }

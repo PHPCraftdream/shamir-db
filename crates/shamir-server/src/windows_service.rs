@@ -8,6 +8,7 @@
 //! reporting `Stopped`.
 
 use std::ffi::OsString;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,6 +22,8 @@ use windows_service::service_dispatcher;
 use crate::config::Config;
 use crate::service::SERVICE_NAME;
 
+static SERVICE_PROCESS_EXIT: AtomicU8 = AtomicU8::new(0);
+
 windows_service::define_windows_service!(ffi_service_main, service_main);
 
 /// Entry point called from `main` when `--service` is present.
@@ -28,10 +31,10 @@ windows_service::define_windows_service!(ffi_service_main, service_main);
 /// This is a BLOCKING call that hands the thread to the SCM dispatcher.
 /// It must run BEFORE any tokio runtime is built. The dispatcher calls
 /// [`service_main`] on an SCM thread.
-pub fn run() -> anyhow::Result<()> {
+pub fn run() -> anyhow::Result<u8> {
     service_dispatcher::start(SERVICE_NAME, ffi_service_main)
         .map_err(|e| anyhow::anyhow!("SCM dispatcher failed: {e}"))?;
-    Ok(())
+    Ok(SERVICE_PROCESS_EXIT.load(Ordering::Acquire))
 }
 
 /// Called by the SCM on its own thread. Re-parses CLI args (the SCM
@@ -40,6 +43,7 @@ pub fn run() -> anyhow::Result<()> {
 fn service_main(_args: Vec<OsString>) {
     if let Err(e) = service_main_inner() {
         // Best-effort log — tracing may not be initialised yet.
+        SERVICE_PROCESS_EXIT.store(1, Ordering::Release);
         eprintln!("shamir-server service_main failed: {e}");
     }
 }
@@ -173,9 +177,14 @@ fn service_main_inner() -> anyhow::Result<()> {
     // Run the server. On return (normal or error), ALWAYS report Stopped.
     let result = rt.block_on(crate::runtime::serve(config, bootstrap, shutdown, on_ready));
 
+    SERVICE_PROCESS_EXIT.store(
+        result.as_ref().map_or(1, |report| report.exit_code()),
+        Ordering::Release,
+    );
+
     // Report StopPending then Stopped.
     let exit_code = match &result {
-        Ok(()) => ServiceExitCode::Win32(0),
+        Ok(report) => ServiceExitCode::Win32(u32::from(report.exit_code())),
         Err(_) => ServiceExitCode::Win32(1),
     };
 
@@ -198,11 +207,11 @@ fn service_main_inner() -> anyhow::Result<()> {
 
     if let Err(e) = &result {
         tracing::error!("shamir-server service stopped with error: {e}");
-    } else {
+    } else if result.as_ref().is_ok_and(|report| report.is_clean()) {
         tracing::info!("shamir-server service stopped cleanly");
     }
 
-    result
+    result.map(|_| ())
 }
 
 /// Helper to report a service status to the SCM.
