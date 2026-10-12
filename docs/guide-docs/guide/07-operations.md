@@ -75,6 +75,41 @@ shamir-server service install
 
 `service install` генерирует launchd plist (macOS) или rc.d-скрипт (BSD).
 
+### After a leader crash
+
+После нештатной остановки cold open записывает консервативный GAP
+`[J + 1, H]`, если восстановленный horizon H больше persisted clean horizon J.
+Это происходит **даже при полном журнале**: точного детектора потерь пока нет.
+Старый data directory без J сертифицируется один раз при первом старте;
+ошибка записи сертификата запрещает open. Followers с первым pull `<= H`
+останавливаются с `JournalGap`, без применения сопровождающих events и без
+продвижения bookmark. `ListSubscriptions` и `ReplicationStatus` показывают
+`resync_required`; это состояние каталога, не измерение lag.
+
+1. Остановите replication и writes; сохраните **offline** backup лидера и
+   followers. Не копируйте живой data_dir: backup — stop-and-copy, не online
+   consistent snapshot.
+2. Не используйте `Resume` как ремонт и не поднимайте bookmark без данных.
+   Новый follower с bookmark 0 снова встретит сохранённый GAP; clean stop
+   лидера и пересоздание subscription тоже не очищают интервал.
+3. Для полного replay с нуля выгрузите проверенные authoritative logical data,
+   создайте **новую независимую source lineage** с тем же schema и загрузите
+   данные через обычные writes (они создают новый gap-free journal). Создайте
+   пустые followers с тем же schema и без secondary indexes; пересоздайте
+   profiles/subscriptions на новый upstream и запустите replay. Старую lineage
+   сохраните offline, не удаляйте GAP metadata вручную. Проверяйте данные и
+   достижение нового head, прежде чем вернуть writes.
+4. Альтернатива — проверенный follower image с данными **и его matching upstream
+   bookmark** через H. Произвольный старый backup недостаточен. Встроенного
+   snapshot-plus-bookmark seed command и автоматического reseed нет; такой
+   image требует отдельного проверенного tooling/procedure.
+
+Источники: `crates/shamir-engine/src/repo/repo_instance.rs:1829-1877`,
+`crates/shamir-server/src/replication/follower_loop.rs:311-325`,
+`crates/shamir-server/src/replication/supervisor.rs:309-334`,
+`crates/shamir-db/src/shamir_db/execute/admin_replication.rs:413-467`,
+`crates/shamir-server/src/backup.rs:3-32`.
+
 ## 2. Конфиг: `.ktav`
 
 Конфиг — файл в формате Ktav ≥ 0.6: без кавычек и запятых, комментарии —

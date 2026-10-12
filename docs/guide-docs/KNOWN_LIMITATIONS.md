@@ -560,62 +560,54 @@ artifact).
   (`crates/shamir-server/src/replication/follower_loop.rs:198-210`), but an
   event for a missing table is skipped with a warning and the bookmark still
   advances, losing that table's writes.
-- **Journal pulls preserve settled version order; crash-gap detection remains
-  incomplete.** Local commits and the follower's downstream feed enqueue the
-  event (or mark a gap) immediately before version publication
-  (`crates/shamir-engine/src/tx/publish_journaled.rs:16-29`,
-  `crates/shamir-engine/src/tx/commit.rs:962-981`,
-  `crates/shamir-engine/src/tx/apply_replicated.rs:496-518,541-544`). Pulls
-  capture the contiguous completion watermark W, the highest version through
-  which every version is settled (published or aborted), and confirm a writer
-  barrier before returning ascending events `<= W`. Earlier queued events have
-  been written or marked as gaps; a still-committing version pauses the prefix
-  instead of being skipped. The one-second confirmation budget can return an
-  older safe prefix if the writer stalls
-  (`crates/shamir-engine/src/repo/repo_instance.rs:28,1534-1544`,
-  `crates/shamir-tx/src/completion_tracker.rs:131-163`,
-  `crates/shamir-engine/src/repo/changelog_store.rs:45-87`,
-  `crates/shamir-tx/src/changefeed.rs:382-411,487-530,847-860`).
-  Queue overflow/closure, persistence failures and corrupt records are reported
-  as `gap_at`, not silently omitted
-  (`crates/shamir-tx/src/changefeed.rs:344-369,515-530,875-894`). A replayed
-  post-WAL orphan marks a gap before completion
-  (`crates/shamir-engine/src/tx/drainer.rs:1166-1211`); changefeed initialization
-  failure records a pending gap when the version publishes, transferred to the
-  feed on successful initialization
-  (`crates/shamir-engine/src/tx/publish_journaled.rs:21-28`,
-  `crates/shamir-engine/src/repo/repo_instance.rs:1402-1447,1461-1487`).
-  **Persisted gap metadata survives restart:** marker writes cross an explicit
-  flush boundary and initialization restores the marker. Persistence is
-  asynchronous; failed marker writes remain dirty for retry
-  (`crates/shamir-tx/src/changefeed.rs:563-577`,
-  `crates/shamir-engine/src/repo/changelog_store.rs:28-42`,
-  `crates/shamir-engine/src/repo/repo_instance.rs:1382-1427`).
-  **A crash can still lose the unflushed journal tail with NO gap marker.**
-  Cold WAL recovery replays data and advances completion without checking or
-  repairing the journal; crash-tail reconciliation is planned
-  (`crates/shamir-tx/src/changefeed.rs:710-711`,
-  `crates/shamir-engine/src/tx/recovery.rs:329-459`).
-  **Live subscriptions can still skip events:** broadcast follows
-  commit-completion order, and the bridge discards versions `<=` its per-repo
-  processed-version watermark, advanced before filtering or delivery. Use
-  journal pulls for gap-free ordered history while handling reported gaps and
-  the crash-tail caveat above; live ordering repair is planned
-  (`crates/shamir-engine/src/tx/commit.rs:962-981`,
-  `crates/shamir-server/src/subscriptions/bridge.rs:408-415`).
+- **Journal pulls preserve settled version order; cold recovery conservatively
+  invalidates uncertified history.** Pulls capture the contiguous completion
+  watermark W and confirm a writer barrier before returning ascending events
+  `<= W`; a stalled writer can return an older safe prefix
+  (`crates/shamir-engine/src/repo/repo_instance.rs:1587-1604`).
+  The persisted clean horizon J is loaded from `__changelog__`; absent J is
+  treated as zero, while read/decode errors fail the open
+  (`crates/shamir-engine/src/repo/changelog_store.rs:26-37`). After an unclean
+  stop, cold recovery durably certifies `[J + 1, H]` before serving when H > J,
+  even if all journal events survived. H is the recovered marker/surviving-WAL
+  gate floor, **not a scan of the history maximum**. It then records J = H,
+  so a pre-S5c directory certifies once on first start; another crash with
+  newer commits can widen the interval. Any certification error refuses open
+  (`crates/shamir-engine/src/repo/repo_instance.rs:1829-1844`,
+  `crates/shamir-engine/src/tx/recovery.rs:458`). Successful clean shutdown
+  quiesces commits, flushes data and records J only after W = H
+  (`crates/shamir-engine/src/repo/repo_instance.rs:1852-1877`).
+  GAP and J writes cross an explicit flush boundary; recording J first flushes
+  earlier journal writes (`crates/shamir-engine/src/repo/changelog_store.rs:64-85`).
+  A crash can still lose the unflushed journal tail: certification detects
+  uncertainty, **not the exact missing events**, and does not reconstruct them.
+  The exact no-false-positive detector is not implemented; history-only
+  coverage beyond the recovered gate floor is not established by this policy.
+  Live subscriptions deliver from this same journal (broadcast is only a
+  wake-up hint) and so inherit its caveats: a certified gap terminates the
+  subscription and the journal tail lost in a crash is not reconstructed (see
+  the live-ordering bullet in section 4 and
+  `crates/shamir-server/src/subscriptions/bridge.rs`).
 - **Detected gaps stop replication, but `Resume` does not repair data.**
   When the leader reports a `gap_at` at or after the requested `from_version`,
   the loop stops before applying the response's events with
   `ReplError::JournalGap`; the supervisor marks the subscription
   `resync_required`, visible via `ReplicationStatus`/`ListSubscriptions`.
-  See `crates/shamir-server/src/replication/follower_loop.rs:305-325`,
-  `crates/shamir-server/src/replication/supervisor.rs:307-335` and
-  `crates/shamir-db/src/shamir_db/execute/admin_replication.rs:563-594`.
-  There is **no snapshot/reseed and no journal retention**. If behind a gap,
-  recreate the follower from scratch with bookmark 0 and full replay; this
-  only works if the leader's journal has no hole. Otherwise restore the
-  follower from a backup. `Resume` only changes subscription state; it
-  neither repairs missing data nor fixes journal holes.
+  See `crates/shamir-server/src/replication/follower_loop.rs:311-325`,
+  `crates/shamir-server/src/replication/supervisor.rs:309-334` and
+  `crates/shamir-db/src/shamir_db/execute/admin_replication.rs:413-467`.
+  There is **no automatic snapshot/reseed and no journal retention**. The
+  persisted recovery interval rejects requests at/below its affected horizon,
+  including a fresh follower's bookmark 0 (first pull from 1), even with a
+  complete journal. `Resume`, clean shutdown and recreating the subscription
+  do not clear it. Full replay from zero works only against a gap-free source
+  lineage. To recover, stop replication and writes, preserve an offline backup,
+  rebuild a new source lineage from authoritative logical data with the same
+  schema, recreate empty followers and subscriptions, and replay that new
+  journal. Alternatively use a verified, matching follower data image AND its
+  upstream bookmark through the affected horizon; an arbitrary older backup
+  or a bookmark advanced without the matching data is not a repair. There is
+  no built-in operator command for atomic snapshot-plus-bookmark seeding.
 - **Duplicate loops and bookmark crash risk.** Two subscriptions for the
   same `(db, repo)` start two loops; bookmark advancement is not atomic.
   The bookmark is stored in `__tx__` without flush ordering against follower

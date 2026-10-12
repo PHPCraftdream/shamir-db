@@ -26,6 +26,7 @@
 //!     breaking client TOFU pin sanity)
 
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,6 +36,7 @@ use shamir_types::types::value::QueryValue;
 use tempfile::TempDir;
 use tokio::io::{split, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::runtime::Builder;
 use tokio_rustls::TlsConnector;
 use zeroize::Zeroizing;
 
@@ -47,6 +49,7 @@ use shamir_connect::common::username::NormalizedUsername;
 use shamir_transport_tcp::framing::{read_frame, write_frame, MAX_FRAME_SIZE_DEFAULT};
 use shamir_transport_tcp::tls::{extract_tls_exporter, make_client_config_no_ca};
 
+use shamir_query_types::wire::repl::{ReplRequest, ReplResponse};
 use shamir_server::backup;
 use shamir_server::config::{
     Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ObservabilityConfig,
@@ -307,6 +310,120 @@ fn read_req(table: &str) -> DbRequest {
         db: "default".into(),
         batch: b.build(),
     }
+}
+
+/// Offline backup of an unclean server lifecycle, not an unsupported live
+/// file copy. Child process teardown closes every store without calling the
+/// clean-checkpoint path; the parent copies only after process completion.
+/// Expected green today; omitting cold certification makes gap_at == None.
+#[test]
+fn backup_unclean_server_restore_certifies_before_serving_pull() {
+    const CHILD_DIR: &str = "SHAMIR_RECOVERY_GAP_BACKUP_CHILD_DIR";
+    const PASSWORD: &[u8] = b"recovery gap backup contract password";
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    if let Some(path) = std::env::var_os(CHILD_DIR) {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let handle = launch(PathBuf::from(path), 0, PASSWORD).await;
+            let (mut r, mut w, sid) =
+                login(handle.first_tls_exporter_addr().unwrap(), PASSWORD).await;
+            for (rid, request) in [
+                create_table_req("unclean_backup_items"),
+                write_req("unclean_backup_items", "CRASH", 71),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let response = roundtrip(
+                    &request,
+                    sid,
+                    u32::try_from(rid + 1).unwrap(),
+                    &mut w,
+                    &mut r,
+                )
+                .await;
+                let DbResponse::Batch { response } = response else {
+                    panic!("fixture write failed: {response:?}");
+                };
+                assert!(!response.results.contains_key("__error"), "{response:?}");
+            }
+            // No ServerHandle::shutdown, flush_all or shutdown_clean. This
+            // models unclean termination, not a guaranteed power-loss boundary.
+            drop(w);
+            drop(r);
+            drop(handle);
+        });
+        drop(runtime);
+        return;
+    }
+
+    let data = TempDir::new().unwrap();
+    let destination = TempDir::new().unwrap();
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "backup_unclean_server_restore_certifies_before_serving_pull",
+            "--nocapture",
+        ])
+        .env(CHILD_DIR, data.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "unclean fixture child failed: {status:?}");
+    // All source writers are gone. J, GAP, history and WAL are copied from
+    // one stationary directory tree; no cross-file live snapshot is claimed.
+    let snapshot = backup::backup(data.path(), destination.path()).unwrap();
+    backup::verify_manifest(&snapshot.dest_dir).unwrap();
+    let restored = restore::restore(&snapshot.dest_dir, data.path(), false).unwrap();
+    assert!(restored.files_restored > 0);
+    assert!(restored.pre_restore_backup.unwrap().exists());
+
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let handle = launch(data.path().to_path_buf(), 0, PASSWORD).await;
+        let (mut r, mut w, sid) = login(handle.first_tls_exporter_addr().unwrap(), PASSWORD).await;
+        let response = roundtrip(&read_req("unclean_backup_items"), sid, 1, &mut w, &mut r).await;
+        let DbResponse::Batch { response } = response else {
+            panic!("restored repository did not open: {response:?}");
+        };
+        let rows = &response.results["rd"].records;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get_value_str("sku"), Some("CRASH"));
+        assert_eq!(rows[0].get_value_i64("qty"), Some(71));
+
+        let response = roundtrip(
+            &DbRequest::Repl(ReplRequest::Pull {
+                db: "default".into(),
+                repo: "main".into(),
+                from_version: 1,
+                limit: 100,
+                wait_ms: None,
+            }),
+            sid,
+            2,
+            &mut w,
+            &mut r,
+        )
+        .await;
+        let DbResponse::Repl(ReplResponse::Pull {
+            gap_at,
+            current_version,
+            ..
+        }) = response
+        else {
+            panic!("expected restored replication Pull: {response:?}");
+        };
+        assert!(current_version >= 1, "restored committed horizon");
+        assert_eq!(
+            gap_at,
+            Some(1),
+            "cursor inside cold certificate must fail loud",
+        );
+        drop(w);
+        drop(r);
+        handle.shutdown().await;
+    });
+    drop(runtime);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
