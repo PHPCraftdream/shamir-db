@@ -113,6 +113,10 @@ fn repl_hello_response_roundtrip_with_repos() {
     let resp = DbResponse::Repl(ReplResponse::Hello {
         leader_epoch: 42,
         repos: vec![ReplRepoInfo {
+            repo_lineage_id: None,
+            history_epoch: None,
+            gap_first: None,
+            gap_through: None,
             db: "app".into(),
             repo: "main".into(),
             current_version: 1234,
@@ -129,6 +133,10 @@ fn repl_hello_response_roundtrip_with_repos() {
             assert_eq!(
                 repos[0],
                 ReplRepoInfo {
+                    repo_lineage_id: None,
+                    history_epoch: None,
+                    gap_first: None,
+                    gap_through: None,
                     db: "app".into(),
                     repo: "main".into(),
                     current_version: 1234,
@@ -144,6 +152,10 @@ fn repl_hello_response_roundtrip_with_repos() {
 #[test]
 fn repl_pull_response_roundtrip_with_events_and_gap() {
     let resp = DbResponse::Repl(ReplResponse::Pull {
+        repo_lineage_id: None,
+        history_epoch: None,
+        gap_first: None,
+        gap_through: None,
         leader_epoch: 7,
         events: vec![0x01, 0x02, 0x03, 0xDE, 0xAD],
         gap_at: Some(50),
@@ -155,6 +167,7 @@ fn repl_pull_response_roundtrip_with_events_and_gap() {
             events,
             gap_at,
             current_version,
+            ..
         }) => {
             assert_eq!(leader_epoch, 7);
             assert_eq!(events, vec![0x01, 0x02, 0x03, 0xDE, 0xAD]);
@@ -168,6 +181,10 @@ fn repl_pull_response_roundtrip_with_events_and_gap() {
 #[test]
 fn repl_pull_response_roundtrip_without_gap() {
     let resp = DbResponse::Repl(ReplResponse::Pull {
+        repo_lineage_id: None,
+        history_epoch: None,
+        gap_first: None,
+        gap_through: None,
         leader_epoch: 7,
         events: vec![],
         gap_at: None,

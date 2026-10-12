@@ -627,6 +627,7 @@ async fn repl_hello_and_pull_with_events() {
             events,
             gap_at,
             current_version,
+            ..
         }) => {
             assert_eq!(leader_epoch, 1);
             (events, current_version, gap_at)

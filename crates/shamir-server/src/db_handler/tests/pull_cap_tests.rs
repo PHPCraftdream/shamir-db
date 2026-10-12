@@ -126,6 +126,7 @@ async fn wire_pull(
             events,
             gap_at,
             current_version,
+            ..
         }) => {
             assert_eq!(leader_epoch, 1);
             assert_eq!(gap_at, None);

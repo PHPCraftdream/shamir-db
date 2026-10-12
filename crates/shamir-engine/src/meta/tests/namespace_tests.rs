@@ -15,6 +15,7 @@ const ALL: &[MetaKey] = &[
     MetaKey::LastCommittedVersion,
     MetaKey::NextTxId,
     MetaKey::Validators,
+    MetaKey::RepoIdentity,
 ];
 
 #[test]

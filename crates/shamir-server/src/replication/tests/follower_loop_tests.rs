@@ -387,6 +387,10 @@ impl ReplSource for GapReplSource {
         _wait_ms: Option<u32>,
     ) -> Result<ReplResponse, ReplError> {
         Ok(ReplResponse::Pull {
+            repo_lineage_id: None,
+            history_epoch: None,
+            gap_first: None,
+            gap_through: None,
             leader_epoch: 1,
             events: self.events_bytes.clone(),
             gap_at: Some(self.gap_at),

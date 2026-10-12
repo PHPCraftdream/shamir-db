@@ -58,9 +58,12 @@
 //!    it's still there.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use shamir_db::engine::meta::repo_identity::RepoIdentity;
+use shamir_db::ShamirDb;
 use thiserror::Error;
 
 use crate::backup::{self, copy_dir_recursive, BackupError};
@@ -118,6 +121,8 @@ pub enum RestoreError {
     },
     #[error("opening restored user directory failed: {0}")]
     UserDirectory(#[from] fjall::Error),
+    #[error("restore identity: {0}")]
+    Identity(#[from] shamir_db::DbError),
     #[error("invalidating tickets in restored user directory failed: {0}")]
     Invalidate(#[from] shamir_connect::common::error::Error),
 }
@@ -221,6 +226,11 @@ pub fn restore(from: &Path, data_dir: &Path, force: bool) -> Result<RestoreRepor
         }
     };
 
+    // Mark the unpublished copy BEFORE either swap rename. Never adopt a
+    // marker copied from a backup: each restore has a new OS-random operation.
+    // Failure leaves the live directory untouched and staging available.
+    write_restore_marker(&temp_dir)?;
+
     // ---- Step 5: atomic swap ----
     let pre_restore_backup = if data_dir.exists() {
         let backup_sibling = parent.join(format!(
@@ -300,6 +310,77 @@ pub fn restore(from: &Path, data_dir: &Path, force: bool) -> Result<RestoreRepor
         users_invalidated,
         pre_restore_backup,
     })
+}
+
+const RESTORE_MARKER: &str = ".shamir_restore_epoch";
+const RESTORE_MAGIC: &[u8; 4] = b"SRE1";
+
+pub(crate) fn write_restore_marker(data_dir: &Path) -> Result<[u8; 16], RestoreError> {
+    let operation = RepoIdentity::new_lineage_id()?;
+    // Staging is exclusively owned by this offline restore. Truncation is
+    // deliberate: a backup's old operation must not suppress this restore.
+    let mut file = fs::File::create(data_dir.join(RESTORE_MARKER))?;
+    file.write_all(RESTORE_MAGIC)?;
+    file.write_all(&operation)?;
+    file.sync_all()?;
+    sync_restore_directory(data_dir)?;
+    Ok(operation)
+}
+
+/// Called under the server data-directory ownership lock, before handlers or
+/// supervisors exist, and before creating any new default repository. All
+/// restored catalogue repos are processed before removing the global marker.
+/// cancel-safe: NO — completed bumps remain, but their atomic receipts make a
+/// subsequent open of the same marker idempotent.
+pub(crate) async fn consume_restore_marker(
+    data_dir: &Path,
+    db: &ShamirDb,
+) -> Result<(), RestoreError> {
+    let path = data_dir.join(RESTORE_MARKER);
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    if bytes.len() != 20 || &bytes[..4] != RESTORE_MAGIC {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid restore operation marker",
+        )
+        .into());
+    }
+    let mut operation = [0; 16];
+    operation.copy_from_slice(&bytes[4..]);
+    for name in db.list_dbs() {
+        let database = db.get_db(&name).ok_or_else(|| {
+            std::io::Error::other("restore database disappeared during exclusive open")
+        })?;
+        for name in database.list_repos() {
+            let repo = database.get_repo(&name).ok_or_else(|| {
+                std::io::Error::other("restore repository disappeared during exclusive open")
+            })?;
+            repo.apply_restore_operation(operation).await?;
+        }
+    }
+    tokio::fs::remove_file(path).await?;
+    let directory = data_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || sync_restore_directory(&directory))
+        .await
+        .map_err(|e| std::io::Error::other(format!("restore directory sync task: {e}")))??;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_restore_directory(dir: &Path) -> std::io::Result<()> {
+    fs::File::open(dir)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_restore_directory(_dir: &Path) -> std::io::Result<()> {
+    // File contents are explicitly synced. The existing non-Unix rename
+    // helper is NOT evidence of directory-entry durability on power loss.
+    tracing::warn!("restore: directory-entry power-loss durability unverified on this platform");
+    Ok(())
 }
 
 /// Step 4 body: open the staged copy's `users` store and invalidate every

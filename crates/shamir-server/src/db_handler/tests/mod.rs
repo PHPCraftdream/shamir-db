@@ -8,6 +8,7 @@ pub mod p1064_ddl_op_status_acl_tests;
 pub mod pull_cap_tests;
 pub mod repl_handler_tests;
 pub mod rowwise_response_budget_tests;
+pub mod seed_identity_tests;
 pub mod server_limit_policy_tests;
 pub mod server_result_enforcement_tests;
 pub mod session_actor_tests;

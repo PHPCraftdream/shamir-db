@@ -14,6 +14,7 @@ pub mod prealloc_bounds_tests;
 pub mod recovery_gap_marker_tests;
 pub mod repl_bookmark_tests;
 pub mod repo_config_tests;
+pub mod repo_identity_tests;
 pub mod repo_instance_tests;
 pub mod repo_tx_accessors_tests;
 pub mod table_init_retry_tests;

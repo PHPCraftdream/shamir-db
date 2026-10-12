@@ -120,12 +120,35 @@ impl ShamirDbHandler {
                     .current_commit_version(&db_name, &repo_name)
                     .await
                     .unwrap_or(0);
+                let Some(instance) = db_instance.get_repo(&repo_name) else {
+                    continue;
+                };
+                let metadata = async {
+                    let identity = instance.repo_identity().await?;
+                    let gap = instance.certified_gap_interval().await?;
+                    Ok::<_, shamir_db::DbError>((identity, gap))
+                }
+                .await;
+                let (identity, gap) = match metadata {
+                    Ok(metadata) => metadata,
+                    Err(error) => {
+                        return ReplResponse::Error {
+                            leader_epoch: self.leader_epoch,
+                            code: "replication_read_error".into(),
+                            message: error.to_string(),
+                        };
+                    }
+                };
                 repos.push(ReplRepoInfo {
                     db: db_name.clone(),
                     repo: repo_name,
                     current_version,
                     // R0: no retention — the journal floor is 0 (G4).
                     journal_floor: 0,
+                    repo_lineage_id: Some(identity.lineage_id),
+                    history_epoch: Some(identity.history_epoch),
+                    gap_first: gap.map(|(first, _)| first),
+                    gap_through: gap.map(|(_, through)| through),
                 });
             }
         }
@@ -159,6 +182,13 @@ impl ShamirDbHandler {
             };
         }
 
+        let Some(instance) = self.db.get_db(db).and_then(|db| db.get_repo(repo)) else {
+            return ReplResponse::Error {
+                leader_epoch: self.leader_epoch,
+                code: "unknown_repo".into(),
+                message: format!("repository '{db}/{repo}' not found"),
+            };
+        };
         // Clamp limit to a non-zero floor so the journal read always has
         // room to return at least one event. A `limit == 0` request is
         // treated as "give me what you can" — we use 1 as the effective
@@ -168,26 +198,16 @@ impl ShamirDbHandler {
 
         // First read — if we get events or the caller didn't ask to wait,
         // return immediately.
-        let mut jr = match self
-            .db
-            .read_changelog_for_replication(db, repo, from_version, effective_limit)
+        let mut jr = match instance
+            .read_changelog_for_replication(from_version, effective_limit)
             .await
         {
-            Ok(Some(jr)) => jr,
+            Ok(jr) => jr,
             Err(error) => {
                 return ReplResponse::Error {
                     leader_epoch: self.leader_epoch,
                     code: "replication_read_error".into(),
                     message: error.to_string(),
-                };
-            }
-            Ok(None) => {
-                // db/repo does not exist (shouldn't happen after the auth
-                // gate above, but the journal may not be initialised yet).
-                return ReplResponse::Error {
-                    leader_epoch: self.leader_epoch,
-                    code: "unknown_repo".into(),
-                    message: format!("repository '{db}/{repo}' not found or journal unavailable"),
                 };
             }
         };
@@ -211,13 +231,11 @@ impl ShamirDbHandler {
                         let remaining = deadline - now;
                         tokio::time::sleep(remaining.min(POLL_STEP)).await;
 
-                        match self
-                            .db
-                            .read_changelog_for_replication(db, repo, from_version, effective_limit)
+                        match instance
+                            .read_changelog_for_replication(from_version, effective_limit)
                             .await
                         {
-                            Ok(Some(fresh)) => jr = fresh,
-                            Ok(None) => break,
+                            Ok(fresh) => jr = fresh,
                             Err(error) => {
                                 return ReplResponse::Error {
                                     leader_epoch: self.leader_epoch,
@@ -244,15 +262,35 @@ impl ShamirDbHandler {
             }
         };
 
-        let current_version = self
-            .db
-            .current_commit_version(db, repo)
+        let current_version = instance
+            .current_commit_version()
             .await
             .unwrap_or(from_version);
+
+        let metadata = async {
+            let identity = instance.repo_identity().await?;
+            let gap = instance.certified_gap_interval().await?;
+            Ok::<_, shamir_db::DbError>((identity, gap))
+        }
+        .await;
+        let (identity, gap) = match metadata {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                return ReplResponse::Error {
+                    leader_epoch: self.leader_epoch,
+                    code: "replication_read_error".into(),
+                    message: error.to_string(),
+                };
+            }
+        };
 
         ReplResponse::Pull {
             leader_epoch: self.leader_epoch,
             events: events_bytes,
+            repo_lineage_id: Some(identity.lineage_id),
+            history_epoch: Some(identity.history_epoch),
+            gap_first: gap.map(|(first, _)| first),
+            gap_through: gap.map(|(_, through)| through),
             gap_at: jr.1,
             current_version,
         }
