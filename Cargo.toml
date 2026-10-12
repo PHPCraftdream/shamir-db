@@ -21,12 +21,12 @@ exclude = ["crates/shamir-client-node", "crates/shamir-client-ts"]
 # than a caret range so (a) the supply-chain cooldown's lockfile-baseline stays
 # stable, and (b) `cargo deny` / downstream consumers cannot silently pick up a
 # future 0.1.x/0.2 that hasn't been reviewed here. Was a non-reproducible
-# `path = "D:/dev/rust/captrack"` (audit C1). 0.1.1 fixes RUSTSEC-2026-0205
+# workstation-local captrack path dependency (audit C1). 0.1.1 fixes RUSTSEC-2026-0205
 # (scc 2.2->3.8 migration) — see captrack's own CHANGELOG.
 captrack = { version = "=0.1.1", features = ["telemetry"] }
 # Published on crates.io (https://crates.io/crates/bench-scale-tool, repo
 # https://github.com/PHPCraftdream/bench-scale-tool). Was a non-reproducible
-# `path = "D:/dev/rust/bench-scale-tool"` — broke every CI runner, which
+# workstation-local bench-scale-tool path dependency — broke every CI runner, which
 # never has that absolute path (numa.yml, supply-chain.yml).
 bench-scale-tool = { version = "0.1.0" }
 
