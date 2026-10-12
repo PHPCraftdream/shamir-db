@@ -512,9 +512,10 @@ artifact).
   with available history emit nondecreasing commit versions (multiple record
   frames may share a version); broadcast lag triggers journal recovery, not
   an automatic Gap. A journal gap or read failure terminates the subscription.
-  Initial snapshots retain version-zero frames and Ready ordering, but their
-  pre-snapshot completion cut permits duplicate rows at the handoff until
-  N1L-4. Delivery adds journal-writer latency; no delivery acknowledgement or
+  Initial snapshots use one read-only Snapshot transaction per repo at cut S;
+  version-zero frames precede Ready, and live journal delivery starts strictly
+  after S, without snapshot/live handoff duplicates. Snapshot failures terminate
+  without Ready. Delivery adds journal-writer latency; no delivery acknowledgement or
   exactly-once guarantee exists across disconnects, and a crash can still
   lose the journal tail (S5c).
 - **No durable offsets / resume tokens.** A missed range surfaces as a

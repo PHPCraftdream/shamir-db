@@ -1,4 +1,5 @@
 pub mod bridge_ordering_tests;
+pub mod bridge_snapshot_cut_tests;
 pub mod bridge_tests;
 pub mod cache_depth_probe_tests;
 pub mod cache_eviction_tests;
