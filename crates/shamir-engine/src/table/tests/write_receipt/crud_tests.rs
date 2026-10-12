@@ -98,6 +98,31 @@ async fn assert_rows(table: &TableManager, write: Write, ids: &[RecordId]) {
     }
 }
 
+// Pending writes are committed but not yet visible at W, so a Latest read cannot
+// see them; the oracle reads the explicit committed version instead.
+async fn assert_committed_at(table: &TableManager, write: Write, ids: &[RecordId], target: u64) {
+    let mvcc = table.mvcc_store().unwrap();
+    let rows = mvcc.snapshot_stream(16, target);
+    tokio::pin!(rows);
+    let mut found = Vec::new();
+    while let Some(batch) = rows.next().await {
+        for (key, bytes) in batch.unwrap() {
+            found.push((
+                RecordId::try_from_bytes(&key).unwrap(),
+                InnerValue::from_bytes(bytes).unwrap(),
+            ));
+        }
+    }
+    for &id in ids {
+        let row = found.iter().find(|(found_id, _)| *found_id == id);
+        if matches!(write, Write::Delete) {
+            assert!(row.is_none());
+        } else {
+            assert_eq!(row.map(|(_, value)| value), Some(&InnerValue::Int(2)));
+        }
+    }
+}
+
 // Explicit-version storage inspection captures generated IDs before ack returns.
 // This bypasses W only for the test's committed-data oracle, not a Latest read
 // or a visibility claim. No production hook or mutation is introduced.
@@ -219,7 +244,7 @@ async fn strict_observer_releases_all_crud_guards_and_preserves_recovery_on_canc
             assert_eq!(gate.completion().waiter_count(), 1);
             assert!(gate.is_active_post_wal(lower_version));
             let ids = capture_written_ids(&table, write, id, target).await;
-            assert_rows(&table, write, &ids).await;
+            assert_committed_at(&table, write, &ids, target).await;
             drop(barrier);
             // Exact lower-replay protocol, while the Strict observer is parked.
             let (replay, lock) = table
@@ -232,7 +257,7 @@ async fn strict_observer_releases_all_crud_guards_and_preserves_recovery_on_canc
             assert_eq!(gate.completion().waiter_count(), 0);
             assert_eq!(gate.visible_floor(), lower_version - 1);
             assert!(gate.is_active_post_wal(lower_version));
-            assert_rows(&table, write, &ids).await;
+            assert_committed_at(&table, write, &ids, target).await;
             // Transfer the still-owned blocker to the existing legacy orphan
             // protocol. Cancellation must not have discharged this obligation.
             drop(lower);
@@ -300,7 +325,7 @@ async fn bounded_crud_timers_expire_with_values_then_reconcile_visible() {
             },
         );
         assert_eq!(gate.completion().waiter_count(), 0);
-        assert_rows(&table, write, &receipt.value).await;
+        assert_committed_at(&table, write, &receipt.value, target).await;
         lower.commit();
         assert_eq!(
             repo.observe_visibility(target, STATUS).await.unwrap(),
@@ -374,7 +399,7 @@ async fn reopen_receipt_is_pending_and_strict_error_retains_committed_position()
             reason: "reopen_required",
         } if commit_version == lower.version() + 2 && visible_through == lower.version() - 1
     ));
-    assert_eq!(table.get(id).await.unwrap(), InnerValue::Int(7));
+    let lower_version = lower.version();
     lower.commit();
     assert_eq!(
         repo.observe_visibility(receipt.commit_version.unwrap(), STATUS)
@@ -382,6 +407,13 @@ async fn reopen_receipt_is_pending_and_strict_error_retains_committed_position()
             .unwrap(),
         VisibilityState::Visible,
     );
+    assert_eq!(
+        repo.observe_visibility(lower_version + 2, STATUS)
+            .await
+            .unwrap(),
+        VisibilityState::Visible,
+    );
+    assert_eq!(table.get(id).await.unwrap(), InnerValue::Int(7));
 }
 
 // Counterfactual: minting a tombstone on a missing CRUD delete or reporting
