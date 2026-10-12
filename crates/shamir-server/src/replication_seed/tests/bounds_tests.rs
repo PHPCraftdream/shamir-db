@@ -191,7 +191,7 @@ fn maintenance_catalogue_cap_refuses_before_complete_loaders() {
             .unwrap_err()
             .to_string()
             .contains("budget"));
-        source.flush_all().await.unwrap();
+        source.flush_seed_catalogue().await.unwrap();
     });
     drop(rt);
     let rt = tokio::runtime::Builder::new_current_thread()
