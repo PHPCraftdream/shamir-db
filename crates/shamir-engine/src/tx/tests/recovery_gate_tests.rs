@@ -34,7 +34,7 @@ fn rid(n: u8) -> RecordId {
 async fn open_disk(name: &str, path: PathBuf, tables: Vec<TableConfig>) -> RepoInstance {
     let mut last_err = None;
     for _attempt in 0..10 {
-        match RepoInstance::from_factory(
+        match RepoInstance::from_factory_for_recovery_test(
             name.into(),
             BoxRepoFactory::fjall_raw(path.clone()),
             tables.clone(),
