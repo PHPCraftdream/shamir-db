@@ -205,6 +205,14 @@ name = "tx_pipeline"
 harness = false
 
 [[bench]]
+name = "tx_aware_reads"
+harness = false
+
+[[bench]]
+name = "replication_apply"
+harness = false
+
+[[bench]]
 name = "tx_concurrent"
 harness = false
 
