@@ -261,6 +261,7 @@ async fn pull_returns_events_after_writes() {
             events,
             gap_at,
             current_version,
+            ..
         } => {
             assert_eq!(leader_epoch, 1);
             (events, current_version, gap_at)

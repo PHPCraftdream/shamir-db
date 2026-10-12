@@ -51,6 +51,8 @@ pub enum MetaKey {
     /// Stored in the info-twin alongside `Indexes`.
     Validators,
 
+    RepoIdentity,
+
     /// Durable per-(db,repo) follower replication bookmark (`u64 BE` body).
     ///
     /// The highest LEADER `commit_version` applied on this follower repo.
@@ -80,6 +82,7 @@ impl MetaKey {
             MetaKey::LastCommittedVersion => "_t.lcv",
             MetaKey::NextTxId => "_t.nti",
             MetaKey::Validators => "_m.val",
+            MetaKey::RepoIdentity => "_t.rid",
             MetaKey::ReplicationBookmark => "_t.rbm",
         }
     }

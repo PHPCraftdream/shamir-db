@@ -547,6 +547,11 @@ impl RepoChangefeed {
             .map_err(DbError::Storage)
     }
 
+    /// Persisted/certified interval only; both endpoints from one RCU snapshot.
+    pub fn certified_gap_interval(&self) -> Option<(u64, u64)> {
+        *self.gap.persisted.load_full()
+    }
+
     /// CF-1: the lowest known journal hole; zero means none.
     ///
     /// A non-zero value means the durable journal has a gap: at least one

@@ -61,6 +61,14 @@ pub struct ReplRepoInfo {
     /// Lowest version still retained in the journal (G4). R0: 0 (no
     /// retention yet) — follower with bookmark+1 < floor needs reseed.
     pub journal_floor: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_lineage_id: Option<[u8; 16]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_epoch: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gap_first: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gap_through: Option<u64>,
 }
 
 /// Privileged replication reply. Every variant carries `leader_epoch`
@@ -91,6 +99,14 @@ pub enum ReplResponse {
         gap_at: Option<u64>,
         /// Highest version in the repo at reply time (lag computation).
         current_version: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo_lineage_id: Option<[u8; 16]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        history_epoch: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gap_first: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gap_through: Option<u64>,
     },
     /// Replication-layer error (bad role, denied repo, unknown repo, stale
     /// epoch). Carries the epoch so the follower can still fence.
