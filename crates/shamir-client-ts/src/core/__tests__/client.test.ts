@@ -273,6 +273,36 @@ describe('ShamirClient request envelopes carry CURRENT_QUERY_LANG_VERSION', () =
     expect(req['query_version']).not.toBe(1);
   });
 
+  it('txCommit opts into v3 and rejects missing committed visibility', async () => {
+    const { client, socket } = await resumeV2Client();
+    const pending = client.txCommit('mydb', 7);
+    expect(decodeLastRequest(socket)['query_version']).toBe(CURRENT_QUERY_LANG_VERSION);
+    pushDbResponse(socket, 1, {
+      kind: 'tx_committed',
+      transaction: { tx_id: 7, status: 'committed', materialized: true },
+    });
+    await expect(pending).rejects.toThrow('malformed transaction visibility metadata');
+  });
+
+  it('txCommit preserves pending, WAL warnings and lossless prefix positions', async () => {
+    const { client, socket } = await resumeV2Client();
+    const pending = client.txCommit('mydb', 7);
+    const transaction = {
+      tx_id: 7,
+      status: 'committed',
+      materialized: false,
+      error: 'wal_durability',
+      visibility: {
+        state: 'pending',
+        visible_through: 9007199254740992n,
+        blocking_version: 9007199254740993n,
+        reason: 'timeout',
+      },
+    };
+    pushDbResponse(socket, 1, { kind: 'tx_committed', transaction });
+    expect(await pending).toEqual(transaction);
+  });
+
   it('txExecute() sends query_version = CURRENT_QUERY_LANG_VERSION (not the stale 1)', async () => {
     const { client, socket } = await resumeV2Client();
     pushDbResponse(socket, 1, {

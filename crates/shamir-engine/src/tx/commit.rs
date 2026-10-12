@@ -318,6 +318,7 @@ pub enum TxError {
     WalDurability {
         commit_version: u64,
         materialization: MaterializationState,
+        visibility: shamir_query_types::batch::VisibilityState,
     },
     #[error("table '{table}' is frozen for migration")]
     MigrationFrozen { table: String },
@@ -370,6 +371,7 @@ impl TxError {
             Self::WalDurability {
                 commit_version,
                 materialization,
+                visibility,
             } => {
                 return TransactionInfo::committed_with_error(
                     tx_id,
@@ -377,7 +379,8 @@ impl TxError {
                     commit_version,
                     materialization == MaterializationState::Complete,
                     "wal_durability",
-                );
+                )
+                .with_visibility(visibility);
             }
             Self::MigrationFrozen { .. } => "table_migrating".to_string(),
             Self::SsiConflict { .. } | Self::PhantomConflict { .. } | Self::Wounded { .. } => {
@@ -928,6 +931,7 @@ async fn commit_tx_inner_legacy_async(
                 snapshot_version: tx.snapshot_version,
                 commit_version: tx.snapshot_version,
                 materialization: MaterializationState::Complete,
+                visibility: shamir_query_types::batch::VisibilityState::Visible,
                 background: None,
             });
         }
@@ -1059,6 +1063,7 @@ async fn commit_tx_inner_legacy_async(
         return Err(TxError::WalDurability {
             commit_version,
             materialization,
+            visibility: shamir_query_types::batch::VisibilityState::Visible,
         });
     }
     Ok(TxOutcome {
@@ -1066,6 +1071,7 @@ async fn commit_tx_inner_legacy_async(
         snapshot_version,
         commit_version,
         materialization,
+        visibility: shamir_query_types::batch::VisibilityState::Visible,
         background: Some(BackgroundCommitHandle { join }),
     })
 }
@@ -1177,6 +1183,7 @@ async fn commit_tx_lockfree(
                     snapshot_version: tx.snapshot_version,
                     commit_version: tx.snapshot_version,
                     materialization: MaterializationState::Complete,
+                    visibility: shamir_query_types::batch::VisibilityState::Visible,
                     background: None,
                 });
             }
@@ -1295,6 +1302,7 @@ async fn commit_tx_lockfree(
         return Err(TxError::WalDurability {
             commit_version,
             materialization,
+            visibility: shamir_query_types::batch::VisibilityState::Visible,
         });
     }
     Ok(TxOutcome {
@@ -1302,6 +1310,7 @@ async fn commit_tx_lockfree(
         snapshot_version,
         commit_version,
         materialization,
+        visibility: shamir_query_types::batch::VisibilityState::Visible,
         background: None,
     })
 }

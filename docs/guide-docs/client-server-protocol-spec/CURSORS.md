@@ -191,7 +191,7 @@ rename_all = "snake_case")]`).
 ```msgpack
 {
   "op": "create_cursor",
-  "query_version": 2,
+  "query_version": 3,
   "db": "app",
   "query": { "from": "users", "where": { "op": "eq", "field": ["active"], "value": true } },
   "page_size": 500

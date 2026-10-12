@@ -45,6 +45,7 @@ fn batch(queries: TMap<String, QueryEntry>) -> BatchRequest {
         name: None,
         transactional: false,
         isolation: None,
+        visibility_wait: None,
         durability: None,
         queries,
         return_all: true,

@@ -69,6 +69,7 @@ function fakeClient(captured: Captured[]) {
     txCommit: async (): Promise<import('../types/batch.js').TransactionInfo> => ({
       tx_id: 0,
       status: 'committed',
+      visibility: { state: 'visible' },
       materialized: true,
     }),
     txRollback: async (): Promise<void> => {},
@@ -451,6 +452,7 @@ describe('Db.tx() (unit)', () => {
     const commitResp = overrides?.commitResponse ?? {
       tx_id: 1,
       status: 'committed' as const,
+      visibility: { state: 'visible' as const },
       materialized: true,
       commit_version: 42,
     };
@@ -575,6 +577,7 @@ describe('Db.tx() (unit)', () => {
     const info: import('../types/batch.js').TransactionInfo = {
       tx_id: 17,
       status: 'committed',
+      visibility: { state: 'visible' },
       snapshot_version: 10,
       commit_version: 47,
       materialized,

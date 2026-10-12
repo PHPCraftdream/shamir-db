@@ -209,6 +209,8 @@ async fn interactive_tx_happy_path_wire() {
             .handle(
                 &s,
                 &encode(&DbRequest::TxCommit {
+                    query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
+                    visibility_wait: None,
                     db: "app".into(),
                     tx_handle,
                 }),
@@ -386,6 +388,8 @@ async fn interactive_tx_foreign_session_rejected_wire() {
             .handle(
                 &sb,
                 &encode(&DbRequest::TxCommit {
+                    query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
+                    visibility_wait: None,
                     db: "app".into(),
                     tx_handle,
                 }),

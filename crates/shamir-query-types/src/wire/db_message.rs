@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::batch::{BatchRequest, BatchResponse, TransactionInfo};
+use crate::batch::{BatchRequest, BatchResponse, TransactionInfo, VisibilityWait};
 use crate::read::{QueryResult, ReadQuery};
 use crate::wire::cursor_id::CursorId;
 use crate::wire::repl::{ReplRequest, ReplResponse};
@@ -18,10 +18,12 @@ use crate::wire::repl::{ReplRequest, ReplResponse};
 /// Advertised to the client via `WireAuthOk.server_query_version` /
 /// `WireResumeOkWire.server_query_version`; clients opt in only when
 /// they see `server_query_version >= 2`.
-pub const CURRENT_QUERY_LANG_VERSION: u32 = 2;
+/// v3: committed outcomes require explicit visibility metadata and opt-in.
+pub const CURRENT_QUERY_LANG_VERSION: u32 = 3;
 
 fn default_query_version() -> u32 {
-    CURRENT_QUERY_LANG_VERSION
+    // Missing version is legacy, never an implicit opt-in to v3.
+    0
 }
 
 /// Application-layer DB request (msgpack-encoded payload of
@@ -37,7 +39,7 @@ pub enum DbRequest {
     /// [`BatchResponse`] (records, stats, pagination, plan, transaction
     /// info) is returned to the client.
     Execute {
-        /// Query-language version. Default: [`CURRENT_QUERY_LANG_VERSION`].
+        /// Query-language version. Omission is legacy version 0.
         #[serde(default = "default_query_version")]
         query_version: u32,
         /// Target database name.
@@ -87,7 +89,7 @@ pub enum DbRequest {
     /// against it until `TxCommit`/`TxRollback`. Cross-repo transactions stay
     /// out of scope (one repo per handle).
     TxBegin {
-        /// Query-language version. Default: [`CURRENT_QUERY_LANG_VERSION`].
+        /// Query-language version. Omission is legacy version 0.
         #[serde(default = "default_query_version")]
         query_version: u32,
         /// Target database name.
@@ -104,7 +106,7 @@ pub enum DbRequest {
     /// batch's `transactional` flag is ignored here (the handle already
     /// establishes tx mode).
     TxExecute {
-        /// Query-language version. Default: [`CURRENT_QUERY_LANG_VERSION`].
+        /// Query-language version. Omission is legacy version 0.
         #[serde(default = "default_query_version")]
         query_version: u32,
         /// Target database name (must match the handle's pinned db).
@@ -117,6 +119,12 @@ pub enum DbRequest {
     /// Commit an open interactive transaction (runs the full commit
     /// pipeline). The reply carries the [`TransactionInfo`].
     TxCommit {
+        /// Explicit v3 opt-in; omission is rejected as a legacy request.
+        #[serde(default = "default_query_version")]
+        query_version: u32,
+        /// Commit acknowledgement override (contract only in VIS-1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        visibility_wait: Option<VisibilityWait>,
         /// Target database name.
         db: String,
         /// The handle to commit.
@@ -220,7 +228,7 @@ pub enum DbRequest {
     /// (this call's page AND every subsequent `FetchNext`'s default,
     /// though `FetchNext` may request a different size per call).
     CreateCursor {
-        /// Query-language version. Default: [`CURRENT_QUERY_LANG_VERSION`].
+        /// Query-language version. Omission is legacy version 0.
         #[serde(default = "default_query_version")]
         query_version: u32,
         /// Target database name.

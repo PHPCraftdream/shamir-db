@@ -470,6 +470,7 @@ describe('Batch — response type smoke', () => {
       transaction: {
         tx_id: 7,
         status: 'committed',
+        visibility: { state: 'visible' },
         snapshot_version: 5,
         commit_version: 6,
         materialized: true,

@@ -169,6 +169,7 @@ fn main() {
                     name: None,
                     transactional: false, // non-tx insert for fast setup
                     isolation: None,
+                    visibility_wait: None,
                     durability: None,
                     queries: insert_queries,
                     return_all: false,
@@ -209,6 +210,7 @@ fn main() {
                     name: None,
                     transactional: true, // TRANSACTIONAL UPDATE (the measured path)
                     isolation: None,
+                    visibility_wait: None,
                     durability: None,
                     queries: update_queries,
                     return_all: false,

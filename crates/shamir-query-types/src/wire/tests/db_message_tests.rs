@@ -17,9 +17,9 @@ fn from_qv<T: serde::de::DeserializeOwned>(qv: QueryValue) -> T {
 }
 
 #[test]
-fn current_query_lang_version_is_two() {
-    // v2: server now supports MessagePack id-keyed write/read pass-through.
-    assert_eq!(CURRENT_QUERY_LANG_VERSION, 2);
+fn current_query_lang_version_is_three() {
+    // v3: committed visibility metadata requires explicit opt-in.
+    assert_eq!(CURRENT_QUERY_LANG_VERSION, 3);
 }
 
 #[test]
@@ -57,10 +57,7 @@ fn tx_begin_isolation_optional_and_query_version_defaults() {
             isolation,
             ..
         } => {
-            assert_eq!(
-                query_version, CURRENT_QUERY_LANG_VERSION,
-                "absent query_version must default"
-            );
+            assert_eq!(query_version, 0, "absent query_version is legacy");
             assert!(isolation.is_none(), "absent isolation decodes to None");
         }
         _ => panic!("expected TxBegin"),
@@ -85,6 +82,8 @@ fn tx_execute_request_roundtrip() {
 #[test]
 fn tx_commit_and_rollback_request_tags() {
     let commit = to_qv(&DbRequest::TxCommit {
+        query_version: CURRENT_QUERY_LANG_VERSION,
+        visibility_wait: None,
         db: "app".into(),
         tx_handle: 7,
     });
@@ -109,6 +108,45 @@ fn tx_commit_and_rollback_request_tags() {
         rollback.get("tx_handle").and_then(QueryValue::as_i64),
         Some(7)
     );
+}
+
+#[test]
+fn visibility_commit_override_roundtrip_and_legacy_version() {
+    // Wire-format subject: old TxCommit never declared visibility support.
+    let legacy: DbRequest = from_qv(mpack!({
+        "op": "tx_commit",
+        "db": "app",
+        "tx_handle": 7_i64
+    }));
+    assert!(matches!(
+        legacy,
+        DbRequest::TxCommit {
+            query_version: 0,
+            visibility_wait: None,
+            ..
+        }
+    ));
+    for wait in [
+        crate::batch::VisibilityWait::Strict,
+        crate::batch::VisibilityWait::Bounded { timeout_ms: 0 },
+    ] {
+        let request = DbRequest::TxCommit {
+            query_version: CURRENT_QUERY_LANG_VERSION,
+            visibility_wait: Some(wait),
+            db: "app".into(),
+            tx_handle: 7,
+        };
+        let back: DbRequest = from_qv(to_qv(&request));
+        assert!(matches!(
+            back,
+            DbRequest::TxCommit {
+                query_version: CURRENT_QUERY_LANG_VERSION,
+                visibility_wait: Some(actual),
+                tx_handle: 7,
+                ..
+            } if actual == wait
+        ));
+    }
 }
 
 #[test]
@@ -296,10 +334,7 @@ fn create_cursor_query_version_defaults_when_absent() {
     let req: DbRequest = from_qv(v);
     match req {
         DbRequest::CreateCursor { query_version, .. } => {
-            assert_eq!(
-                query_version, CURRENT_QUERY_LANG_VERSION,
-                "absent query_version must default"
-            );
+            assert_eq!(query_version, 0, "absent query_version is legacy");
         }
         _ => panic!("expected CreateCursor"),
     }

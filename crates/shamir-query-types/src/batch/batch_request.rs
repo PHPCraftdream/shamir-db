@@ -80,6 +80,10 @@ pub struct BatchRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durability: Option<String>,
 
+    /// Commit-only override; VIS-1 carries it without enabling bounded waits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility_wait: Option<super::VisibilityWait>,
+
     /// Queries map: alias -> query entry.
     ///
     /// Each key is the alias used in `$query` references.

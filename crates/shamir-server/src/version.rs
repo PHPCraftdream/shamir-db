@@ -42,19 +42,10 @@ pub const CURRENT_HANDSHAKE_PROTO_VERSION: u8 = 1;
 /// `u32` rather than `u8` because the query-language version is much more
 /// likely to evolve than the wire-level handshake — easier to bump for a
 /// long time without overflowing.
-pub const SUPPORTED_QUERY_LANG_VERSIONS: &[u32] = &[
-    // v1: original `shamir_db::query::batch::BatchRequest` shape.
-    1,
-    // v2: server now supports MessagePack id-keyed write/read pass-through.
-    // Advertised via `auth_ok.server_query_version`; clients opt in to v2
-    // behaviour only when they see that field >= 2. The request schema is
-    // backward-compatible: a v2 client sending v2 `query_version` is treated
-    // identically to v1 until the pass-through path is wired in (S-client).
-    2,
-];
+pub const SUPPORTED_QUERY_LANG_VERSIONS: &[u32] = &[3];
 
 /// The query-language version the server prefers to advertise.
-pub const CURRENT_QUERY_LANG_VERSION: u32 = 2;
+pub const CURRENT_QUERY_LANG_VERSION: u32 = shamir_query_types::wire::CURRENT_QUERY_LANG_VERSION;
 
 /// Version-mismatch error.
 #[derive(Debug, Error, PartialEq, Eq)]
