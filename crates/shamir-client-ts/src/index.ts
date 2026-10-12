@@ -44,6 +44,19 @@ export async function resume(opts: ResumeOptions): Promise<ShamirClient> {
 
 export { VisibilityError } from './core/visibility/errors.js';
 export type { TransactionResult, TransactionOptions } from './core/visibility/types.js';
+export {
+  extractReceipts,
+  reconcileReceipts,
+  executeWithReceipts,
+  decodeChangesSince,
+} from './core/receipts/index.js';
+export type {
+  AliasReceipt,
+  ChangesSinceEvent,
+  ChangesSinceRecordChange,
+  ChangesSinceResult,
+  RepoObservation,
+} from './core/receipts/index.js';
 export { ShamirClient };
 // Typed error surface (Finding 2.1 / 2.2): callers branch on `.code` /
 // `.retryable` instead of regexing message strings.
