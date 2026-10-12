@@ -23,6 +23,12 @@ const CONN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 /// their directory locks (a client that stays connected can hold one).
 const STORE_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// One shared budget for quiescing and checkpointing every repository at
+/// shutdown. A slow disk (fsync on a loaded runner) must not turn a healthy stop
+/// into an unclean report; with the connection drain it stays inside the
+/// 30 s outer deadline of `runtime::serve`.
+const REPO_FLUSH_BUDGET: Duration = Duration::from_secs(15);
+
 /// Handle for the periodic meta-snapshot task. Just the `JoinHandle` — the
 /// stop signal is the shared root `shutdown_token` (cancelled by
 /// [`ServerHandle::shutdown`] before this handle is awaited), so no per-task
@@ -176,7 +182,7 @@ impl ServerHandle {
         //    stop. Must happen AFTER accept loops have stopped (no new
         //    writes can arrive) and BEFORE redb locks are released.
         self.shamir
-            .flush_all_report(Duration::from_secs(5), report)
+            .flush_all_report(REPO_FLUSH_BUDGET, report)
             .await;
         // 5. Stop the observability HTTP server (if any).
         if let Some(obs) = self.observability {
