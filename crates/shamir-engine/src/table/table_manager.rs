@@ -176,6 +176,11 @@ pub struct TableManager {
     /// fields).
     pub(super) in_flight_creates: super::in_flight_create_guard::InFlightCreateSet,
     pub(super) index2_registry: Arc<crate::index2::IndexRegistry>,
+    /// Per-manager planner thresholds for cheap filtered-ANN tests. Set before
+    /// reads; copied by Clone, with no global or thread-local async state.
+    /// None uses the production constants, including in ordinary unit tests.
+    #[cfg(test)]
+    pub(super) filtered_ann_thresholds: Option<(usize, f64)>,
     pub(super) mvcc_store: Option<Arc<shamir_tx::MvccStore>>,
     /// Per-table validator bindings (S2). Lock-free reads via
     /// `ArcSwap`; the S3 write path reads this on every write.
@@ -393,6 +398,8 @@ impl Clone for TableManager {
             // another.
             in_flight_creates: self.in_flight_creates.clone(),
             index2_registry: Arc::clone(&self.index2_registry),
+            #[cfg(test)]
+            filtered_ann_thresholds: self.filtered_ann_thresholds,
             mvcc_store: self.mvcc_store.clone(),
             validator_bindings: Arc::clone(&self.validator_bindings),
             bindings_lock: Arc::clone(&self.bindings_lock),
@@ -552,6 +559,8 @@ impl TableManager {
             writer_drain: super::writer_drain_barrier::WriterDrainBarrier::new(),
             in_flight_creates: super::in_flight_create_guard::InFlightCreateSet::new(),
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
+            #[cfg(test)]
+            filtered_ann_thresholds: None,
             mvcc_store: None,
             validator_bindings,
             bindings_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -917,6 +926,8 @@ impl TableManager {
             writer_drain: super::writer_drain_barrier::WriterDrainBarrier::new(),
             in_flight_creates: super::in_flight_create_guard::InFlightCreateSet::new(),
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
+            #[cfg(test)]
+            filtered_ann_thresholds: None,
             mvcc_store: None,
             validator_bindings: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
             bindings_lock: Arc::new(tokio::sync::Mutex::new(())),
