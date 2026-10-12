@@ -677,6 +677,7 @@ fn single_batch_op_req(
         name: None,
         transactional: false,
         isolation: None,
+        visibility_wait: None,
         durability: None,
         queries,
         return_all: true,

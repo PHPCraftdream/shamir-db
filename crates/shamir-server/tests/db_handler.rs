@@ -1097,6 +1097,8 @@ async fn tx_too_large_aborts_and_removes_handle() {
     // Verify the handle is gone — a follow-up COMMIT on it should now
     // surface `tx_not_found`, proving the abort removed it from the registry.
     let commit = DbRequest::TxCommit {
+        query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
+        visibility_wait: None,
         db: "prod".into(),
         tx_handle,
     };

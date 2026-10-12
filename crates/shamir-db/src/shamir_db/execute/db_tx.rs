@@ -236,7 +236,8 @@ impl ShamirDb {
                 outcome.snapshot_version,
                 outcome.commit_version,
                 outcome.materialized(),
-            )),
+            )
+            .with_visibility(outcome.visibility)),
             Err(commit_err) => Ok(commit_err.into_transaction_info(tx_id, snapshot_version)),
         }
     }
