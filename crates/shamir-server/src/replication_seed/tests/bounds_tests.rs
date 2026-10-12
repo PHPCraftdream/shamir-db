@@ -215,7 +215,7 @@ async fn sorted_registry_exports_full_descriptors_and_rows() {
         .await
         .unwrap();
     let interner = table.interner().get().await.unwrap();
-    let payload = query_value_to_inner(&doc! { "body" => "seed row" }, interner)
+    let payload = query_value_to_inner(&doc! { "body" => "seed row" }.into(), interner)
         .unwrap()
         .to_bytes()
         .unwrap();
@@ -275,7 +275,7 @@ async fn index2_registry_exports_full_descriptors_and_rows() {
     };
     table.create_index_v2(&op).await.unwrap();
     let interner = table.interner().get().await.unwrap();
-    let payload = query_value_to_inner(&doc! { "body" => "seed row" }, interner)
+    let payload = query_value_to_inner(&doc! { "body" => "seed row" }.into(), interner)
         .unwrap()
         .to_bytes()
         .unwrap();

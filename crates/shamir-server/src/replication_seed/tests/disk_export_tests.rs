@@ -48,7 +48,7 @@ async fn fixture(root: &Path, clean: bool) -> (u64, Vec<(Vec<u8>, Vec<u8>)>) {
     let repo = source.get_db("app").unwrap().get_repo("main").unwrap();
     let table = repo.get_table("rows").await.unwrap();
     let interner = table.interner().get().await.unwrap();
-    let value = query_value_to_inner(&doc! { "name" => "committed" }, interner).unwrap();
+    let value = query_value_to_inner(&doc! { "name" => "committed" }.into(), interner).unwrap();
     let payload = value.to_bytes().unwrap();
     let mvcc = table.mvcc_store().unwrap();
     mvcc.set_versioned_no_wait(RecordKey::from_slice(&[0, 255, 128]), payload.clone())
@@ -60,7 +60,8 @@ async fn fixture(root: &Path, clean: bool) -> (u64, Vec<(Vec<u8>, Vec<u8>)>) {
         .unwrap();
     mvcc.delete_versioned_no_wait(deleted).await.unwrap();
     // Stage a genuine transaction and abort by the documented RAII contract.
-    let aborted_value = query_value_to_inner(&doc! { "name" => "aborted" }, interner).unwrap();
+    let aborted_value =
+        query_value_to_inner(&doc! { "name" => "aborted" }.into(), interner).unwrap();
     let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     let aborted_id = table
         .insert_tx(&aborted_value, Some(&mut tx))
