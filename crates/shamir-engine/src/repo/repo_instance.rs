@@ -177,6 +177,10 @@ impl Clone for RepoInstance {
 }
 
 impl RepoInstance {
+    /// Construct an unregistered low-level handle. Reused backing stores MUST
+    /// run recover_v2_inflight before any caller serves reads/writes. Registry
+    /// entry points enforce that ordering; this synchronous fixture constructor
+    /// cannot perform asynchronous recovery.
     pub fn new(name: String, repo: BoxRepo, configs: Vec<TableConfig>) -> Self {
         Self::from_box_repo(name, repo, configs)
     }
@@ -300,13 +304,41 @@ impl RepoInstance {
         }))
     }
 
-    /// cancel-safe: yes — single `factory.create().await`; cancellation
-    /// before completion drops any half-constructed repo with no
-    /// externally observable state change.
+    /// cancel-safe: NO — recovery can apply durable history and certify a gap
+    /// before cancellation. A failed/cancelled open exposes no instance; the
+    /// next open retries the idempotent recovery and certification protocol.
     ///
-    /// Creates a RepoInstance asynchronously from a factory.
-    /// This is the preferred method as it properly handles blocking I/O.
+    /// Create, recover and durably certify before returning to ANY caller.
     pub async fn from_factory(
+        name: String,
+        factory: BoxRepoFactory,
+        configs: Vec<TableConfig>,
+    ) -> DbResult<Self> {
+        #[cfg(test)]
+        let fixture = super::tests::recovery_gap_marker_tests::take_open_fixture(&name);
+        #[cfg(test)]
+        let instance = match fixture {
+            Some(instance) => instance,
+            None => Self::from_factory_unrecovered(name, factory, configs).await?,
+        };
+        #[cfg(not(test))]
+        let instance = Self::from_factory_unrecovered(name, factory, configs).await?;
+        instance.recover_v2_inflight().await?;
+        Ok(instance)
+    }
+
+    /// Unrecovered disk handle solely for tests that explicitly exercise replay
+    /// or must install a fault before recovery. Not available in production.
+    #[cfg(test)]
+    pub(crate) async fn from_factory_for_recovery_test(
+        name: String,
+        factory: BoxRepoFactory,
+        configs: Vec<TableConfig>,
+    ) -> DbResult<Self> {
+        Self::from_factory_unrecovered(name, factory, configs).await
+    }
+
+    async fn from_factory_unrecovered(
         name: String,
         factory: BoxRepoFactory,
         configs: Vec<TableConfig>,
@@ -1390,6 +1422,7 @@ impl RepoInstance {
                 }
                 let store: Arc<dyn Store> = self.repo.store_get("__changelog__").await?;
                 let adapter = crate::repo::changelog_store::StoreChangelog::new(store);
+                let clean_horizon = adapter.load_clean_horizon().await?;
                 let (marker, repair_marker) = adapter.load_gap_marker().await?;
                 let cl_store: Arc<dyn shamir_tx::ChangelogStore> = Arc::new(adapter);
                 let pending = self.pending_changefeed_gap.load(Ordering::Acquire);
@@ -1418,9 +1451,10 @@ impl RepoInstance {
                             .map_err(DbError::Storage)?;
                     }
                 }
-                let feed = shamir_tx::RepoChangefeed::new_with_gap_interval(
+                let feed = shamir_tx::RepoChangefeed::new_with_metadata(
                     Arc::clone(&cl_store),
                     restored,
+                    clean_horizon,
                 );
                 Ok::<ChangefeedHandle, DbError>(ChangefeedHandle {
                     feed,
@@ -1801,6 +1835,57 @@ impl RepoInstance {
         crate::tx::recovery::recover_inflight_v2(self).await
     }
 
+    /// Exclusive cold-open certification, before ANY registry insertion.
+    /// Conservative, not exact: even a complete journal invalidates (J, H].
+    /// Followers at/below H stop with JournalGap/resync_required; automated
+    /// reseeding is not supported. A legacy directory without J certifies once.
+    /// H is the existing marker/surviving-WAL gate floor, NOT a history maximum.
+    pub(crate) async fn certify_cold_start(&self) -> DbResult<()> {
+        let gate = self.tx_gate().await?;
+        let h = gate.version_allocation_high_water_mark();
+        let handle = self.changefeed().await?;
+        let j = handle.feed.clean_horizon();
+        if h > j {
+            // h > j proves j + 1 cannot overflow.
+            handle.feed.record_recovery_gap(j + 1, h).await?;
+            handle.feed.record_clean_horizon(h).await?;
+        }
+        Ok(())
+    }
+
+    /// Caller MUST stop commit/apply admission before calling this method.
+    /// One bounded budget covers quiescence, drain/store flush and checkpoint.
+    /// cancel-safe: NO — drain/flush may partially finish; J is never requested
+    /// after an earlier failure or timeout. Once admitted, checkpoint I/O can
+    /// finish independently; a cancelled caller never reports shutdown success.
+    pub async fn shutdown_clean(&self, budget: std::time::Duration) -> DbResult<()> {
+        let deadline = tokio::time::Instant::now() + budget;
+        self.quiesce_commits(budget).await?;
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        tokio::time::timeout(remaining, async {
+            self.flush_buffers().await?;
+            let gate = self.tx_gate().await?;
+            let h = gate.version_allocation_high_water_mark();
+            // Settled includes aborted allocations, unlike last_committed.
+            // After stopped admission + quiescence + drain, W must equal H;
+            // unresolved allocation holes refuse a clean certificate.
+            if gate.completion().watermark() != h {
+                return Err(DbError::Storage(
+                    "unsettled versions at clean shutdown".into(),
+                ));
+            }
+            let handle = self.changefeed().await?;
+            if tokio::time::Instant::now() >= deadline {
+                return Err(DbError::Storage(
+                    "clean shutdown timed out before checkpoint".into(),
+                ));
+            }
+            handle.feed.record_clean_horizon(h).await
+        })
+        .await
+        .map_err(|_| DbError::Storage("clean shutdown timed out".into()))?
+    }
+
     /// Flush this repo's in-memory buffers to their durable backing.
     ///
     /// Drains the `__tx__` store and every table's data + info stores.
@@ -1825,9 +1910,16 @@ impl RepoInstance {
             }
         }
 
-        if let Ok(store) = self.tx_info_store().await {
-            if let Err(e) = store.flush().await {
-                log::warn!("flush_buffers: tx_info_store {}: {}", self.name, e);
+        match self.tx_info_store().await {
+            Ok(store) => {
+                if let Err(e) = store.flush().await {
+                    log::warn!("flush_buffers: tx_info_store {}: {}", self.name, e);
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
+            Err(e) => {
                 if first_err.is_none() {
                     first_err = Some(e);
                 }
@@ -1881,9 +1973,16 @@ impl RepoInstance {
         // (the manager is Arc-shared so any table's `interner()` handle is
         // the same live state). After this, WAL entries whose deltas covered
         // these ids can be safely truncated on next boot.
-        if let Ok(repo_interner) = self.repo_interner().await {
-            if let Err(e) = repo_interner.persist().await {
-                log::warn!("flush_buffers: repo interner persist {}: {}", self.name, e);
+        match self.repo_interner().await {
+            Ok(repo_interner) => {
+                if let Err(e) = repo_interner.persist().await {
+                    log::warn!("flush_buffers: repo interner persist {}: {}", self.name, e);
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
+            Err(e) => {
                 if first_err.is_none() {
                     first_err = Some(e);
                 }
