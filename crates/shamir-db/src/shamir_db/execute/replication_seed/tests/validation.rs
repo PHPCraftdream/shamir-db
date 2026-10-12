@@ -5,6 +5,9 @@ use shamir_query_types::wire::repl::{ReplRepoInfo, ReplResponse};
 
 use crate::{validate_seed_hello, SeedRefusal};
 
+/// A peer-metadata mutation paired with the refusal it must provoke.
+pub(super) type MetadataCase = (fn(&mut ReplRepoInfo), SeedRefusal);
+
 pub(super) fn receipt() -> SeedReceipt {
     SeedReceipt {
         artifact_digest: "a".repeat(64),
@@ -49,7 +52,7 @@ pub(super) fn hello() -> ReplResponse {
 /// Before SEED-4 Resume accepted all these peers without observing Hello.
 #[test]
 fn resume_metadata_refusals_are_distinct_and_matching_gap_is_not_bypassed() {
-    let cases: &[(fn(&mut ReplRepoInfo), SeedRefusal)] = &[
+    let cases: &[MetadataCase] = &[
         (|r| r.repo_lineage_id = None, SeedRefusal::MissingIdentity),
         (
             |r| r.repo_lineage_id = Some([2; 16]),

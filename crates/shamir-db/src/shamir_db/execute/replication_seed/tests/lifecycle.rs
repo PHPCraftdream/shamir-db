@@ -10,7 +10,7 @@ use shamir_query_types::admin::{ReplDirection, ReplMode, SubAction};
 use shamir_query_types::wire::repl::ReplResponse;
 
 use super::super::catalogue::rows;
-use super::validation::{hello, receipt};
+use super::validation::{hello, receipt, MetadataCase};
 use crate::{ResumeProbe, SeedRefusal, ShamirDb};
 
 struct Probe(ReplResponse);
@@ -78,10 +78,7 @@ async fn resume_refusal_does_not_mutate_and_recreate_still_checks_repository_rec
         Err(SeedRefusal::WrongScope)
     );
     assert_eq!(rows(&home, "subscriptions").await.unwrap()[0], before);
-    let cases: &[(
-        fn(&mut shamir_query_types::wire::repl::ReplRepoInfo),
-        SeedRefusal,
-    )] = &[
+    let cases: &[MetadataCase] = &[
         (|r| r.repo_lineage_id = None, SeedRefusal::MissingIdentity),
         (
             |r| r.repo_lineage_id = Some([9; 16]),

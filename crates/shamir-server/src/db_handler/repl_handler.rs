@@ -32,6 +32,8 @@ use shamir_query_types::wire::repl::{
 };
 
 use crate::replication::in_process::MAX_PULL_EVENTS;
+use crate::replication::source::seed::advertisement::authorized_publications;
+use crate::replication::source::seed::fence::live_schema;
 
 use super::handler::{session_actor, ShamirDbHandler};
 
@@ -98,21 +100,16 @@ impl ShamirDbHandler {
     /// Repos the caller cannot read are omitted (no existence leak).
     async fn handle_hello(&self, session: &Session) -> ReplResponse {
         let actor = session_actor(session);
-        let publications =
-            match crate::replication::source::seed::advertisement::authorized_publications(
-                &self.db, &actor,
-            )
-            .await
-            {
-                Ok(publications) => publications,
-                Err(error) => {
-                    return ReplResponse::Error {
-                        leader_epoch: self.leader_epoch,
-                        code: "replication_read_error".into(),
-                        message: error.to_string(),
-                    }
+        let publications = match authorized_publications(&self.db, &actor).await {
+            Ok(publications) => publications,
+            Err(error) => {
+                return ReplResponse::Error {
+                    leader_epoch: self.leader_epoch,
+                    code: "replication_read_error".into(),
+                    message: error.to_string(),
                 }
-            };
+            }
+        };
         let mut repos = Vec::new();
 
         for db_name in self.db.list_dbs() {
@@ -154,11 +151,7 @@ impl ShamirDbHandler {
                         };
                     }
                 };
-                let schema_digest = match crate::replication::source::seed::fence::live_schema(
-                    &self.db, &db_name, &repo_name,
-                )
-                .await
-                {
+                let schema_digest = match live_schema(&self.db, &db_name, &repo_name).await {
                     Ok(digest) => digest,
                     Err(error) => {
                         return ReplResponse::Error {
@@ -326,17 +319,16 @@ impl ShamirDbHandler {
             }
         };
 
-        let schema_digest =
-            match crate::replication::source::seed::fence::live_schema(&self.db, db, repo).await {
-                Ok(digest) => digest,
-                Err(error) => {
-                    return ReplResponse::Error {
-                        leader_epoch: self.leader_epoch,
-                        code: "replication_read_error".into(),
-                        message: error.to_string(),
-                    }
+        let schema_digest = match live_schema(&self.db, db, repo).await {
+            Ok(digest) => digest,
+            Err(error) => {
+                return ReplResponse::Error {
+                    leader_epoch: self.leader_epoch,
+                    code: "replication_read_error".into(),
+                    message: error.to_string(),
                 }
-            };
+            }
+        };
         ReplResponse::Pull {
             schema_digest: Some(schema_digest),
             leader_epoch: self.leader_epoch,
