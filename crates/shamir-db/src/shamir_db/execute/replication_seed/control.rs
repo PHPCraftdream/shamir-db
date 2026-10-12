@@ -1,7 +1,8 @@
 use shamir_engine::repo::SeedReceipt;
+use shamir_query_types::admin::ReplDirection;
 use shamir_query_types::wire::repl::{ReplRepoInfo, ReplResponse};
 
-use crate::query::admin::{CreateSubscriptionOp, ReplDirection};
+use crate::query::admin::CreateSubscriptionOp;
 use crate::query::batch::BatchError;
 use crate::types::value::QueryValue;
 use crate::ShamirDb;

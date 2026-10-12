@@ -1,10 +1,11 @@
-use crate::query::admin::{CreateSubscriptionOp, ReplDirection, ReplMode, ReplStream};
+use crate::query::admin::{CreateSubscriptionOp, ReplStream};
 use crate::query::filter::FilterContext;
 use crate::query::read::ReadQuery;
 use crate::query::write::SetOp;
 use crate::types::value::QueryValue;
 use crate::{DbResult, ShamirDb};
 use shamir_engine::repo::{RepoInstance, SeedInstallState, SeedReceipt};
+use shamir_query_types::admin::{ReplDirection, ReplMode};
 use shamir_types::mpack;
 
 use super::SeedRefusal;
