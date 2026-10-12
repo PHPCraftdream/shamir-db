@@ -126,7 +126,7 @@ wildcards = "warn"
 
 [sources]
 # crates.io is the only allowed registry. `captrack` is now published there
-# (was a non-reproducible `path = "D:/dev/rust/captrack"` — audit C1), so no
+# (was a non-reproducible workstation-local captrack path dependency — audit C1), so no
 # `allow-git` entry is required. If a genuine git-only dependency is added
 # later, add it to `allow-git` AND pin a specific rev in Cargo.toml.
 unknown-registry = "deny"
