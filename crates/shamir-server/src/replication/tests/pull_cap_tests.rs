@@ -84,6 +84,7 @@ fn decode_pull(response: ReplResponse, current: u64) -> Vec<ChangelogEvent> {
             events,
             gap_at,
             current_version,
+            ..
         } => {
             assert_eq!(leader_epoch, 1);
             assert_eq!(gap_at, None);

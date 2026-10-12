@@ -323,6 +323,9 @@ impl RepoInstance {
         };
         #[cfg(not(test))]
         let instance = Self::from_factory_unrecovered(name, factory, configs).await?;
+        // Exclusive factory open initializes legacy identity before registry
+        // publication. All later cloned handles share marker_write_mutex.
+        instance.repo_identity().await?;
         instance.recover_v2_inflight().await?;
         Ok(instance)
     }
@@ -800,6 +803,34 @@ impl RepoInstance {
         );
 
         Ok(true)
+    }
+
+    /// Cold metadata operation; clones serialize read/create/flush with the
+    /// same async mutex. No synchronous guard crosses an await.
+    pub async fn repo_identity(&self) -> DbResult<crate::meta::repo_identity::RepoIdentity> {
+        let _guard = self.marker_write_mutex.lock().await;
+        let store = self.tx_info_store().await?;
+        crate::meta::repo_identity::RepoIdentity::load_or_create(&store).await
+    }
+
+    pub async fn bump_history_epoch(&self) -> DbResult<crate::meta::repo_identity::RepoIdentity> {
+        let _guard = self.marker_write_mutex.lock().await;
+        let store = self.tx_info_store().await?;
+        crate::meta::repo_identity::RepoIdentity::bump(&store, None).await
+    }
+
+    /// Retry-safe even when a previous open bumped before marker removal.
+    pub async fn apply_restore_operation(
+        &self,
+        operation: [u8; 16],
+    ) -> DbResult<crate::meta::repo_identity::RepoIdentity> {
+        let _guard = self.marker_write_mutex.lock().await;
+        let store = self.tx_info_store().await?;
+        crate::meta::repo_identity::RepoIdentity::bump(&store, Some(operation)).await
+    }
+
+    pub async fn certified_gap_interval(&self) -> DbResult<Option<(u64, u64)>> {
+        Ok(self.changefeed().await?.feed.certified_gap_interval())
     }
 
     /// Returns the repo's transactional info_store under the
