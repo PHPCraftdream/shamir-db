@@ -58,7 +58,9 @@ pub struct TxOutcome {
     pub tx_id: u64,
     pub snapshot_version: u64,
     pub commit_version: u64,
-    /// Independent contiguous-prefix observation (always Visible in VIS-1).
+    /// Independent contiguous-prefix acknowledgement. Pending is still committed;
+    /// reconcile this repository-scoped position before opening a fresh snapshot.
+    /// Visibility does not upgrade materialization or WAL durability.
     pub visibility: VisibilityState,
     /// Whether projections materialized inline (`Complete`) or were
     /// deferred to recovery (`Deferred`). Either way the tx is

@@ -627,13 +627,20 @@ scrape_configs:
 | Setting | Default | Meaning |
 |---|---:|---|
 | `visibility_ack_mode` | `"strict"` | Strict commit acknowledgement; `"bounded"` parses but startup rejects it in this build |
-| `visibility_ack_timeout_ms` | `5000` | Reserved bounded acknowledgement budget, at most `max_visibility_wait_ms` |
-| `max_visibility_wait_ms` | `30000` | Maximum network reconciliation wait; excessive overrides are rejected, never clamped |
-| `allow_strict_visibility_wait` | `true` | Permit explicit indefinite reconciliation waits |
+| `visibility_ack_timeout_ms` | `5000` | Budget only when bounded acknowledgement is selected; no effect on Strict. Reserved default while bounded startup mode is disabled; explicit Bounded carries its own budget. At most `max_visibility_wait_ms` |
+| `max_visibility_wait_ms` | `30000` | Maximum explicit Bounded commit/reconciliation wait, including nested overrides; excessive requests fail before writes, never clamp |
+| `allow_strict_visibility_wait` | `true` | Permit explicit Strict commit/reconciliation waits; does not forbid the configured Strict default when the commit override is absent |
 | `read_visibility_timeout_ms` | `5000` | Allocated-version AsOf wait, capped by remaining execution budget |
 
 All millisecond values accept zero (immediate predicate check, never infinity)
 and must fit `0..=4294967295`. Strict waits intentionally retain indefinite-wait
-risk. Bounded acknowledgement is reserved for a later end-to-end rollout; once
-enabled, it is recommended for services prioritizing connection-resource liveness.
+risk. Per-request Bounded is accepted on TxCommit and top-level transactional
+Execute, including zero; non-transactional/implicit and nested Batch/ForEach
+paths fail closed. For connection-resource liveness, prefer explicit Bounded
+transactional receipts and handle Pending as committed, not a retry signal.
+The budget excludes inner commit (including async-index durability-error tail
+awaits), admission and network backpressure; post-ack soft pressure is not a
+hard memory admission guarantee. Reconcile Pending with WaitForVisibility and
+open a new snapshot for reads. Bounded server defaults remain rejected pending
+VIS-4/VIS-5 end-to-end propagation and SDK adoption.
 Ktav uses `transactions: { visibility_ack_mode: strict ... }` with the same keys.

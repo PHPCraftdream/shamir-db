@@ -6,6 +6,8 @@ pub mod apply_replicated_preflight_tests;
 pub mod apply_replicated_tests;
 pub mod backpressure_gc_tests;
 pub mod base_index_tx_tests;
+pub mod commit_ack_budget_tests;
+pub mod commit_ack_pipeline_tests;
 pub mod commit_async_visibility_tests;
 pub mod commit_detach_tests;
 pub mod commit_phase5_defer_tests;
