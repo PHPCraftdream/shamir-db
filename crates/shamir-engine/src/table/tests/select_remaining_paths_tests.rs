@@ -120,9 +120,12 @@ async fn setup(temporal: bool) -> (Resolver, Option<Arc<MvccStore>>) {
         .unwrap();
     let mvcc = if temporal {
         let history: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let store = Arc::new(MvccStore::new(history, Arc::new(RepoTxGate::fresh())));
+        let gate = Arc::new(RepoTxGate::fresh());
+        let store = Arc::new(MvccStore::new(history, Arc::clone(&gate)));
         store.set_retention(Retention::keep_history()).unwrap();
-        table = table.with_mvcc_store(Arc::clone(&store));
+        table = table
+            .with_mvcc_store(Arc::clone(&store))
+            .with_changefeed(gate);
         Some(store)
     } else {
         None

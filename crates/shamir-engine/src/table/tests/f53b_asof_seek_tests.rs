@@ -67,7 +67,9 @@ async fn make_mvcc_score_table() -> (TableManager, Arc<MvccStore>, Arc<RepoTxGat
     // Keep full history so pinned-version values survive vacuum.
     mvcc.set_retention(Retention::keep_history()).unwrap();
 
-    let tbl = base.with_mvcc_store(Arc::clone(&mvcc));
+    let tbl = base
+        .with_mvcc_store(Arc::clone(&mvcc))
+        .with_changefeed(Arc::clone(&gate));
     // Single-column ORDER BY index on `score` — the target case. NON-covering
     // (no INCLUDES), so postings carry NO covering-projection version stamp.
     // The mechanism is `MvccStore::version_of`, not the envelope stamp.
@@ -707,7 +709,9 @@ async fn make_mvcc_two_index_table() -> (TableManager, Arc<MvccStore>, Arc<RepoT
     let mvcc = Arc::new(MvccStore::new(history, Arc::clone(&gate)));
     mvcc.set_retention(Retention::keep_history()).unwrap();
 
-    let tbl = base.with_mvcc_store(Arc::clone(&mvcc));
+    let tbl = base
+        .with_mvcc_store(Arc::clone(&mvcc))
+        .with_changefeed(Arc::clone(&gate));
     tbl.create_sorted_index("score_idx", &["score"])
         .await
         .unwrap();

@@ -37,12 +37,14 @@ async fn setup() -> Resolver {
     let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let info: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let history: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-    let mvcc = Arc::new(MvccStore::new(history, Arc::new(RepoTxGate::fresh())));
+    let gate = Arc::new(RepoTxGate::fresh());
+    let mvcc = Arc::new(MvccStore::new(history, Arc::clone(&gate)));
     mvcc.set_retention(Retention::keep_history()).unwrap();
     let table = TableManager::create("rows".into(), data, info)
         .await
         .unwrap()
-        .with_mvcc_store(Arc::clone(&mvcc));
+        .with_mvcc_store(Arc::clone(&mvcc))
+        .with_changefeed(gate);
     let mut version = 0;
     let interner = table.interner().get().await.unwrap();
     for (v, text) in [(10, "a"), (30, "b")] {

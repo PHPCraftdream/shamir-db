@@ -48,6 +48,14 @@ pub enum DbError {
     #[error("Validation error: {0}")]
     Validation(String),
 
+    /// The requested snapshot version has not been allocated yet.
+    #[error("AsOf version {requested} exceeds allocation high-water mark {allocated}")]
+    AsOfFutureVersion { requested: u64, allocated: u64 },
+
+    /// An indeterminate WAL outcome prevents the snapshot from settling.
+    #[error("AsOf version {requested} cannot become visible; reopen the repository")]
+    AsOfReopenRequired { requested: u64 },
+
     /// An error from the function engine (compile, invoke, registry).
     #[error("Function error: {0}")]
     Function(String),
@@ -106,6 +114,8 @@ impl DbError {
     /// codes instead of regex-matching messages.
     pub fn code(&self) -> Option<&'static str> {
         match self {
+            DbError::AsOfFutureVersion { .. } => Some("as_of_future_version"),
+            DbError::AsOfReopenRequired { .. } => Some("as_of_reopen_required"),
             DbError::MigrationFrozen { .. } => Some("table_migrating"),
             DbError::VersionConflict(_) => Some("version_conflict"),
             DbError::Conflict(_) => Some("tx_conflict"),

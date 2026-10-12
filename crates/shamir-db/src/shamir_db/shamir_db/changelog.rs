@@ -137,14 +137,21 @@ impl ShamirDb {
         Some(jr.events)
     }
 
-    /// Returns the current (last committed) version for a repo.
+    /// Returns the eager latest-state publication floor for a repo.
     ///
-    /// Returns `None` when the database or repository does not exist, or
-    /// the tx gate has not been initialised yet. Used by the subscription
-    /// bridge to seed watermarks after an initial snapshot.
+    /// Lower versions may still be unsettled. Use
+    /// [`consistent_version`](Self::consistent_version) for snapshot seeds.
+    /// Returns `None` when the database/repository is absent or gate init fails.
     pub async fn current_commit_version(&self, db: &str, repo: &str) -> Option<u64> {
         let repo_instance = self.get_db(db)?.get_repo(repo)?;
         repo_instance.current_commit_version().await.ok()
+    }
+
+    /// Returns the contiguous settled position for snapshot reads and seeds.
+    /// Returns `None` when the database/repository is absent or gate init fails.
+    pub async fn consistent_version(&self, db: &str, repo: &str) -> Option<u64> {
+        let repo_instance = self.get_db(db)?.get_repo(repo)?;
+        repo_instance.consistent_version().await.ok()
     }
 
     /// Pull-only journal read with field-name bindings and unchanged gap metadata.

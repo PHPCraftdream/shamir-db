@@ -101,6 +101,17 @@ allowlist of every operation-specific DDL/query code.
 | `invalid_page_size` | `InvalidPageSize` |
 | `cursor_page_too_large` | `CursorPageTooLarge` (serialized cursor page cap) |
 
+### AsOf read errors (forwarded QueryError.code)
+
+| Code | Meaning / action |
+|---|---|
+| `as_of_future_version` | Requested version exceeds the repository allocation high-water mark; use an existing version or a consistent snapshot position. |
+| `as_of_reopen_required` | Requested allocated version cannot settle because the repository requires reopen; reopen/reconcile before retrying. |
+
+Allocated AsOf positions above the contiguous completion watermark wait until
+all versions through the requested position materialize or abort. Positions at
+or below the watermark do not wait, even when reopening is required.
+
 ### Interactive handle lifecycle
 
 `TxExecute` removes the handle on **`ExecutionTimedOut`** (`limits`) and
