@@ -13,6 +13,11 @@ impl RepoInstance {
         self.repo.clone()
     }
 
+    /// Stop the journal writer of an installation image before it is dropped.
+    pub async fn seed_stop_journal_writer(&self) -> DbResult<()> {
+        self.changefeed().await?.feed.shutdown_and_wait().await
+    }
+
     /// Staged seed schema store of this installation image.
     pub async fn seed_schema_store(&self) -> DbResult<Arc<dyn Store>> {
         self.repo.store_get(SEED_SCHEMA_STORE).await

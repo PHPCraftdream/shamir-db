@@ -141,7 +141,7 @@ async fn install_inner(
                 return Err(invalid("seed artifact changed during import"));
             }
             writer.finish(&[schema_store]).await?;
-            image.changefeed().await?.feed.shutdown_and_wait().await?;
+            image.seed_stop_journal_writer().await?;
             drop(image);
             stage
         }

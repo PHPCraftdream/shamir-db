@@ -85,7 +85,7 @@ async fn catalogue_only_retry_requires_matching_image_and_never_overwrites_table
         )
         .await
         .unwrap();
-    writer.finish(&[store.clone()]).await.unwrap();
+    writer.finish(std::slice::from_ref(&store)).await.unwrap();
     let bytes = store.get(RecordKey::from_slice(b"schemas")).await.unwrap();
     let records: Vec<QueryValue> = MetaEnvelope::open(&bytes).unwrap();
     let meta = ResourceMeta::owned_enforced(Actor::System);
