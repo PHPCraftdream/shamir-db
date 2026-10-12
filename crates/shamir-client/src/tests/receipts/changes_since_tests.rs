@@ -64,7 +64,10 @@ fn changes_since_cursor_survives_the_wire_losslessly() {
     let BatchOp::ChangesSince(op) = &batch.queries.get("changes_since").unwrap().op else {
         panic!("expected ChangesSince op");
     };
-    assert_eq!(op.changes_since, WIRE_CURSOR_MAX, "u64 cursor must not narrow");
+    assert_eq!(
+        op.changes_since, WIRE_CURSOR_MAX,
+        "u64 cursor must not narrow"
+    );
 }
 
 fn payload(response: &ChangesSinceResponse) -> QueryValue {
