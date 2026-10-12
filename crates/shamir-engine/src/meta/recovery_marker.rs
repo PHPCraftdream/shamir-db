@@ -5,14 +5,15 @@
 //! [`MetaEnvelope`] so future schema migrations dispatch on the
 //! envelope's version field.
 //!
-//! Currently NOT wired into any production write path — used only by
-//! tests. Stage 2 (`RepoTxGate`) will call these helpers on commit /
-//! periodic snapshot and on repo open.
+//! Gate open propagates read/decode errors. WAL-less follower apply reserves
+//! a flushed allocation upper bound before history writes.
 
-use crate::meta::{MetaEnvelope, MetaError, MetaKey};
+use std::sync::Arc;
+
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{RecordKey, Store};
-use std::sync::Arc;
+
+use crate::meta::{MetaEnvelope, MetaError, MetaKey};
 
 fn convert(err: MetaError) -> DbError {
     DbError::Internal(format!("recovery_marker codec: {err}"))
@@ -29,6 +30,15 @@ pub async fn load_last_committed(info_store: &Arc<dyn Store>) -> DbResult<Option
 /// during the publish phase of every tx commit.
 pub async fn save_last_committed(info_store: &Arc<dyn Store>, version: u64) -> DbResult<()> {
     save_u64(info_store, MetaKey::LastCommittedVersion, version).await
+}
+
+/// Persist and flush WAL-less allocation evidence before writing history.
+pub async fn save_last_committed_flushed(
+    info_store: &Arc<dyn Store>,
+    version: u64,
+) -> DbResult<()> {
+    save_last_committed(info_store, version).await?;
+    info_store.flush().await
 }
 
 /// Load the persisted snapshot of `next_tx_id`. Returns `Ok(None)`

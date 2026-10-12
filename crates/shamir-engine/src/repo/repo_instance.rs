@@ -931,13 +931,11 @@ impl RepoInstance {
                 let info_store = self.repo.store_get("__tx__").await?;
 
                 let marker = crate::meta::recovery_marker::load_last_committed(&info_store)
-                    .await
-                    .unwrap_or(None)
+                    .await?
                     .unwrap_or(0);
                 let next_tx_id =
                     crate::meta::recovery_marker::load_next_tx_id_snapshot(&info_store)
-                        .await
-                        .unwrap_or(None)
+                        .await?
                         .unwrap_or(1);
 
                 // Pre-scan inflight V2 entries so the version floor covers

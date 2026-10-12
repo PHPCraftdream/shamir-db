@@ -11,7 +11,10 @@ use crate::{DbError, DbResult};
 use super::SYSTEM_DB_NAME;
 use super::{ShamirDb, ShutdownReport};
 
-const COMMIT_QUIESCE_TIMEOUT: Duration = Duration::from_secs(5);
+/// One shared budget for quiescing and checkpointing every repository. Sized like
+/// the server's shutdown budget: a slow fsync on a loaded runner must not turn
+/// a healthy flush into an unclean report.
+const COMMIT_QUIESCE_TIMEOUT: Duration = Duration::from_secs(15);
 
 impl ShamirDb {
     /// System-actor convenience wrapper around
