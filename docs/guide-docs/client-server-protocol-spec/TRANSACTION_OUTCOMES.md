@@ -160,6 +160,45 @@ waiting. On `reopen_required`, reopen/reconcile first; visibility observation
 never repairs projections or upgrades durability. SDK receipt adoption remains
 VIS-5 work.
 
+### Embedded direct-write receipts (VIS-4a)
+
+`TableManager::{insert, insert_many, delete, set}_with_receipt(..., wait)`
+returns a must-use `WriteOutcome<T>` with the ordinary value, an optional
+`commit_version`, and `VisibilityState`. Values are respectively `RecordId`,
+`Vec<RecordId>`, `bool` (removed), and `bool` (created). `None` means no version
+was minted: non-MVCC writes, missing-record delete and empty insert-many do
+not expose zero as a reconciliation position or create a visibility timer.
+
+Each caller chooses explicit Strict or Bounded; Bounded zero is an immediate
+status sample. W is checked before reopen, and re-sampled on expiry so visibility
+wins. Pending preserves the committed value/position and is **not retryable**.
+Writer drain and unique-write guards are released before either observation
+path, allowing lower posting replay to proceed. Dropping only the observer
+restores waiter registration without undoing the write or settling its blocker.
+
+The existing value-only methods (including internal version-returning adapters)
+are explicitly Strict, never inheriting a bounded repository default. If reopen
+prevents visibility, they return `DbError::WriteCommittedVisibilityPending`
+(`write_committed_visibility_pending`) carrying `commit_version`,
+`visible_through`, and `reason: "reopen_required"`. This exceptional outcome
+means **committed**, not failed/aborted; do not resend it. Reconcile against the
+same repository incarnation and then open a new snapshot.
+
+Direct `MvccStore` writes expose analogous receipt forms for set/delete and both
+many variants, including immediate-observation no-wait receipt forms. Their
+low-level delete still writes a tombstone even for an absent key; missing-record
+no-op semantics belong to TableManager. The lower storage/tx layers use local
+visibility types; engine receipts use the shared query DTO types.
+
+**No durability upgrade:** direct CRUD remains best-effort/no-WAL and unsafe to
+cancel mid-sequence (data, counters and indexes are not a transaction). Bound
+only post-known-outcome observation, never the entire write. A receipt promises
+neither transactional atomicity, fsync/crash durability, async-index completion,
+nor bounded end-to-end latency. Direct writes add no independent post-ack brake;
+existing transactional soft backpressure and execution/admission limits are
+unchanged. Implicit/network batch receipts remain VIS-4b; server bounded-default
+rollout and SDK adoption remain gated.
+
 ### Materialization is not durability
 
 `materialized` describes the projection outcome, **not a visibility field**.
@@ -181,12 +220,11 @@ For commits that allocate a version, Strict acknowledgement waits for the
 contiguous completion watermark W to reach it (all versions through it must
 materialize or abort). Read-only/empty commits skip this wait. A stuck lower
 version can delay Strict acknowledgements indefinitely. Bounded expiry or
-reopen returns Pending, not Deferred or proof of visibility. Non-transactional
-write acknowledgement still logs `ReopenRequired` and returns normally,
-without a typed visibility receipt (VIS-4). Sources:
-`crates/shamir-engine/src/tx/commit.rs`,
-`crates/shamir-tx/src/repo_tx_gate.rs:1049-1116`,
-`crates/shamir-tx/src/mvcc_store/mod.rs:788-790`.
+reopen returns Pending, not Deferred or proof of visibility. Embedded direct
+writes now expose receipts or explicit Strict exceptional outcomes as described
+above. Sources: `crates/shamir-engine/src/tx/ack/`,
+`crates/shamir-engine/src/table/write_receipt/`,
+`crates/shamir-tx/src/mvcc_store/write_receipt/`.
 
 `requires_reopen` is repository state, **not a generic wire error code or a
 TransactionInfo field**. The commit-entry metadata reason is

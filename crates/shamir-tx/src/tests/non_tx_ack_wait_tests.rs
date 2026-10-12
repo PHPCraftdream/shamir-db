@@ -183,12 +183,22 @@ async fn non_tx_already_visible_ack_does_not_suspend_or_register() {
 }
 
 #[tokio::test]
-async fn non_tx_reopen_required_returns_committed_version_not_error() {
+async fn non_tx_reopen_required_returns_typed_committed_exception() {
     for write in [Write::Set, Write::Many, Write::AppendOnly, Write::Delete] {
         let (gate, mvcc) = fixture();
         let lower = gate.assign_next_version_guarded();
         gate.set_requires_reopen();
-        let version = write.apply(&mvcc).await.unwrap();
+        let error = write.apply(&mvcc).await.unwrap_err();
+        let shamir_storage::error::DbError::WriteCommittedVisibilityPending {
+            commit_version: version,
+            visible_through,
+            reason,
+        } = error
+        else {
+            panic!("expected committed visibility exception, got {error:?}");
+        };
+        assert_eq!(reason, "reopen_required");
+        assert_eq!(visible_through, 0);
         assert!(version > lower.version());
         assert_eq!(gate.visible_floor(), 0);
         assert_eq!(
