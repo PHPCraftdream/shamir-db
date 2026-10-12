@@ -1,7 +1,34 @@
+use serde::Serialize;
+use shamir_types::types::value::QueryValue;
+
 use crate::batch::{TransactionInfo, VisibilityPendingReason, VisibilityState};
 use crate::read::{QueryResult, VisibilityDependencyCode, VisibilityDependencyPending};
 
-// Wire-format tests intentionally inspect named fields, not query construction.
+/// Old-protocol fixture: a result as peers encoded it before the receipt field.
+#[derive(Serialize)]
+struct LegacyResult {
+    records: Vec<u8>,
+}
+
+#[derive(Serialize)]
+struct MalformedReceipt {
+    tx_id: u64,
+    status: &'static str,
+    commit_version: u64,
+    materialized: bool,
+}
+
+#[derive(Serialize)]
+struct MalformedResult {
+    records: Vec<u8>,
+    receipt: MalformedReceipt,
+}
+
+/// Wire-format tests intentionally inspect named fields, not query construction.
+fn named(value: &impl Serialize) -> QueryValue {
+    rmp_serde::from_slice(&rmp_serde::to_vec_named(value).unwrap()).unwrap()
+}
+
 #[test]
 fn receipts_roundtrip_absence_visible_pending_and_durability_warning() {
     for visibility in [
@@ -22,20 +49,18 @@ fn receipts_roundtrip_absence_visible_pending_and_durability_warning() {
         let bytes = rmp_serde::to_vec_named(&result).unwrap();
         let decoded: QueryResult = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(decoded, result);
-        let wire: serde_json::Value = serde_json::to_value(&result).unwrap();
-        assert_eq!(wire["receipt"]["status"], "committed");
-        assert_eq!(wire["receipt"]["error"], "wal_durability");
-        assert!(wire["receipt"]["visibility"].is_object());
+        let wire = named(&result);
+        assert_eq!(wire["receipt"]["status"].as_str(), Some("committed"));
+        assert_eq!(wire["receipt"]["error"].as_str(), Some("wal_durability"));
+        assert!(wire["receipt"].get("visibility").is_some());
     }
-    let old = serde_json::json!({
-        "records": []
-    });
-    let result: QueryResult = serde_json::from_value(old).unwrap();
+    let legacy = rmp_serde::to_vec_named(&LegacyResult {
+        records: Vec::new(),
+    })
+    .unwrap();
+    let result: QueryResult = rmp_serde::from_slice(&legacy).unwrap();
     assert!(result.receipt.is_none());
-    assert!(serde_json::to_value(result)
-        .unwrap()
-        .get("receipt")
-        .is_none());
+    assert!(named(&result).get("receipt").is_none());
 }
 
 #[test]
@@ -45,18 +70,20 @@ fn dependency_failure_has_stable_code_and_lossless_positions() {
         commit_version: u64::MAX,
         visible_through: u64::MAX - 2,
     };
-    let wire = serde_json::to_value(&failure).unwrap();
-    assert_eq!(wire["code"], "visibility_dependency_pending");
+    let wire = named(&failure);
+    assert_eq!(wire["code"].as_str(), Some("visibility_dependency_pending"));
     let bytes = rmp_serde::to_vec_named(&failure).unwrap();
     let decoded: VisibilityDependencyPending = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(decoded, failure);
-    let malformed = serde_json::json!({
-        "records": [],
-        "receipt": {
-            "tx_id": 7,
-            "status": "committed",
-            "commit_version": 43
-        }
-    });
-    assert!(serde_json::from_value::<QueryResult>(malformed).is_err());
+    let malformed = rmp_serde::to_vec_named(&MalformedResult {
+        records: Vec::new(),
+        receipt: MalformedReceipt {
+            tx_id: 7,
+            status: "committed",
+            commit_version: 43,
+            materialized: false,
+        },
+    })
+    .unwrap();
+    assert!(rmp_serde::from_slice::<QueryResult>(&malformed).is_err());
 }
