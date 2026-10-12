@@ -1634,6 +1634,20 @@ impl RepoInstance {
         Ok(self.tx_gate().await?.await_visible(target_version).await)
     }
 
+    /// Persisted clean horizon J of the replication journal: every version
+    /// through J had its journal event durably checkpointed by a clean stop.
+    /// cancel-safe: yes — retryable lazy journal initialization, then an atomic read.
+    pub async fn clean_horizon(&self) -> DbResult<u64> {
+        Ok(self.changefeed().await?.feed.clean_horizon())
+    }
+
+    /// Stop the journal writer so the next clean-horizon checkpoint fails.
+    /// Failure-injection seam for shutdown-reporting tests only.
+    #[doc(hidden)]
+    pub async fn stop_journal_writer_for_test(&self) -> DbResult<()> {
+        self.changefeed().await?.feed.shutdown_and_wait().await
+    }
+
     /// Install an isolated journal fixture before lazy initialization.
     #[cfg(test)]
     pub(crate) fn install_journal_for_test(&self, handle: ChangefeedHandle) {

@@ -15,7 +15,7 @@
 //! repetition count, so each registered call must stay a cheap unit. The
 //! per-group `N ∈ {…}` ranges below describe the original Criterion
 //! coverage and are kept for historical context; only the smallest N is
-//! registered now.
+//! registered now, except the disjoint-tables n=4/8 family below.
 //!
 //! 1. `tx_concurrent/disjoint_inserts` — N concurrent writers, each inserting
 //!    into the same table at DISJOINT keys (no SSI / lock conflict). Reveals
@@ -273,6 +273,61 @@ fn main() {
                 for hd in handles {
                     hd.await.unwrap();
                 }
+            },
+        );
+    }
+
+    // --- Disjoint TABLES: staging + barrier-aligned commit + join + readback ---
+    // Fixed fan-out (at most eight tasks); fresh tables in untimed setup.
+    // One call is the whole N-writer round, not per-commit latency.
+    for &n in &[4usize, 8] {
+        h.bench_batched_async(
+            &format!("disjoint_tables/n_{n}"),
+            move || async move {
+                let storage = Arc::new(InMemoryRepo::new());
+                let repo =
+                    RepoInstance::new("bench".into(), BoxRepo::InMemory(storage), Vec::new());
+                let mut tables = Vec::with_capacity(n);
+                for w in 0..n {
+                    let name = format!("writer_{w}");
+                    repo.add_table(TableConfig::new(name.clone()));
+                    tables.push(repo.get_table(&name).await.unwrap());
+                }
+                (repo, tables)
+            },
+            move |(repo, tables)| async move {
+                let barrier = Arc::new(tokio::sync::Barrier::new(n));
+                let mut handles = Vec::with_capacity(n);
+                for (w, table) in tables.into_iter().enumerate() {
+                    let repo = repo.clone();
+                    let barrier = Arc::clone(&barrier);
+                    handles.push(tokio::spawn(async move {
+                        let (mut tx, _guard) =
+                            repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+                        let mut rows = Vec::with_capacity(K);
+                        for i in 0..K {
+                            let value = InnerValue::Str(format!("writer_{w}_row_{i}"));
+                            let rid = table.insert_tx(&value, Some(&mut tx)).await.unwrap();
+                            rows.push((rid, value));
+                        }
+                        // All writers finish staging before ANY commit starts.
+                        barrier.wait().await;
+                        let outcome = repo.commit_tx(tx).await.unwrap();
+                        for (rid, expected) in rows {
+                            assert_eq!(table.get(rid).await.unwrap(), expected);
+                        }
+                        outcome.commit_version
+                    }));
+                }
+                let mut versions = Vec::with_capacity(n);
+                for handle in handles {
+                    versions.push(handle.await.unwrap());
+                }
+                versions.sort_unstable();
+                assert_eq!(versions.len(), n);
+                assert!(versions[0] > 0);
+                assert!(versions.windows(2).all(|pair| pair[0] < pair[1]));
+                std::hint::black_box(versions);
             },
         );
     }
