@@ -88,13 +88,7 @@ async fn failed_checkpoint_names_only_failed_repository() {
             .unwrap();
     }
     let bad = db.get_repo("bad").unwrap();
-    bad.changefeed()
-        .await
-        .unwrap()
-        .feed
-        .shutdown_and_wait()
-        .await
-        .unwrap();
+    bad.stop_journal_writer_for_test().await.unwrap();
     let mut report = shamir.shutdown_report();
     shamir
         .flush_all_report(Duration::from_secs(5), &mut report)
@@ -108,13 +102,7 @@ async fn failed_checkpoint_names_only_failed_repository() {
         "Storage backend error: changefeed writer closed",
     );
     assert_eq!(
-        db.get_repo("good")
-            .unwrap()
-            .changefeed()
-            .await
-            .unwrap()
-            .feed
-            .clean_horizon(),
+        db.get_repo("good").unwrap().clean_horizon().await.unwrap(),
         0,
     );
     assert_eq!(report.exit_code(), 70);
@@ -172,7 +160,7 @@ fn clean_report_writes_j_and_hard_reopen_certifies_nothing() {
             .await;
         assert!(report.is_clean(), "{report:?}");
         assert_eq!(report.exit_code(), 0);
-        assert_eq!(repo.changefeed().await.unwrap().feed.clean_horizon(), h);
+        assert_eq!(repo.clean_horizon().await.unwrap(), h);
         h
     });
     drop(runtime);
@@ -188,7 +176,7 @@ fn clean_report_writes_j_and_hard_reopen_certifies_nothing() {
         )
         .await
         .unwrap();
-        assert_eq!(repo.changefeed().await.unwrap().feed.clean_horizon(), h);
+        assert_eq!(repo.clean_horizon().await.unwrap(), h);
         assert_eq!(repo.read_changelog_from(0, 100).await.unwrap().gap_at, None);
     });
     drop(runtime);
