@@ -653,6 +653,20 @@ artifact).
   upstream bookmark through the affected horizon; an arbitrary older backup
   or a bookmark advanced without the matching data is not a repair. There is
   no built-in operator command for atomic snapshot-plus-bookmark seeding.
+  What IS built in (SEED-2..5, offline R2-lite) is a STOPPED-source
+  operator runbook, not an online snapshot: `replication-seed-export` /
+  `-verify` / `-install` move the leader's logical state at a settled
+  version `V >= certified_gap.through` into a NEW follower repository with
+  a paused, receipt-bound subscription, and validated `Resume` starts the
+  first pull at `V+1` (runbook:
+  `guide/09-seed-recovery.md`; format:
+  `guide-docs/architecture/SEED_FORMAT.md`). It does NOT replicate DDL
+  (schema divergence is refused), does NOT seed secondary indexes, is
+  Unix-only, whole-repository-scoped, requires the leader to be stopped,
+  recovers NOTHING the leader itself could not recover, and is not an
+  automatic reseed, promotion, or full-server recovery. The CI
+  certification kills leader PROCESSES (SIGKILL) and proves process-crash
+  behaviour only — not power-loss guarantees.
 - **Duplicate loops and bookmark crash risk.** Two subscriptions for the
   same `(db, repo)` start two loops; bookmark advancement is not atomic.
   The bookmark is stored in `__tx__` without flush ordering against follower

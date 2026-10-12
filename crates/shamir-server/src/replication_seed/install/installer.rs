@@ -17,10 +17,7 @@ pub async fn install(
     artifact: &Path,
     manifest_digest: &str,
 ) -> Result<SeedReceipt, SeedError> {
-    #[cfg(test)]
-    return install_with(data_dir, db, repo, artifact, manifest_digest, |_| Ok(())).await;
-    #[cfg(not(test))]
-    install_inner(data_dir, db, repo, artifact, manifest_digest, None).await
+    install_with(data_dir, db, repo, artifact, manifest_digest, |_| Ok(())).await
 }
 
 pub async fn install_subscription(
@@ -39,14 +36,17 @@ pub async fn install_subscription(
         artifact,
         manifest_digest,
         Some(subscription),
-        #[cfg(test)]
         |_| Ok(()),
     )
     .await
 }
 
-#[cfg(test)]
-pub(super) async fn install_with(
+/// Fault-injection seam (SEED-3/SEED-5): run the full installer with a
+/// callback invoked at each durable boundary. Production callers pass a
+/// no-op closure — the boundaries are pure observation points. Public so the
+/// `tests/seed_recovery_e2e` integration target can interrupt an install
+/// mid-flight and prove the boot gate refuses the abandoned image.
+pub async fn install_with(
     data_dir: &Path,
     db: &str,
     repo: &str,
@@ -73,7 +73,7 @@ async fn install_inner(
     artifact: &Path,
     manifest_digest: &str,
     subscription: Option<&super::subscription::SeedSubscriptionArgs>,
-    #[cfg(test)] boundary: impl Fn(u8) -> Result<(), SeedError>,
+    boundary: impl Fn(u8) -> Result<(), SeedError>,
 ) -> Result<SeedReceipt, SeedError> {
     let root = artifact.to_owned();
     let expected = manifest_digest.to_owned();
@@ -124,7 +124,6 @@ async fn install_inner(
         Some(complete) => complete,
         None => {
             let stage = staging::fresh(&target)?;
-            #[cfg(test)]
             boundary(0)?;
             let image = staging::open_image(&stage, repo).await?;
             let tables = manifest
@@ -139,19 +138,8 @@ async fn install_inner(
             // like WAL-less follower apply. This conservative recovery evidence
             // is not image readiness: final floors, gap and Complete follow data.
             let mut writer = SeedImageWriter::begin(image.clone(), receipt.clone(), tables).await?;
-            #[cfg(test)]
             boundary(1)?;
-            stream::import(
-                artifact,
-                &manifest,
-                &mut writer,
-                #[cfg(test)]
-                &boundary,
-                #[cfg(test)]
-                &image,
-            )
-            .await?;
-            #[cfg(test)]
+            stream::import(artifact, &manifest, &mut writer, &boundary, &image).await?;
             boundary(2)?;
             let schemas = manifest
                 .tables
@@ -178,17 +166,14 @@ async fn install_inner(
             stage
         }
     };
-    #[cfg(test)]
     boundary(3)?;
     staging::publish(&stage, &target)?;
-    #[cfg(test)]
     boundary(4)?;
     let image = match home.get_db(db).and_then(|database| database.get_repo(repo)) {
         Some(image) => image,
         None => staging::open_image(&target, repo).await?,
     };
     home.register_seed_image(&image, &receipt, &target).await?;
-    #[cfg(test)]
     boundary(5)?;
     if let Some(subscription) = subscription {
         subscription.persist(&home, &image, &receipt).await?;

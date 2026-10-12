@@ -16,8 +16,8 @@ pub(super) async fn import(
     root: &Path,
     manifest: &Manifest,
     writer: &mut SeedImageWriter,
-    #[cfg(test)] boundary: &impl Fn(u8) -> Result<(), SeedError>,
-    #[cfg(test)] image: &shamir_db::engine::repo::RepoInstance,
+    boundary: &impl Fn(u8) -> Result<(), SeedError>,
+    image: &shamir_db::engine::repo::RepoInstance,
 ) -> Result<(), SeedError> {
     for file in manifest
         .files
@@ -53,11 +53,13 @@ pub(super) async fn import(
             writer
                 .row(table as usize, key.into(), payload.into())
                 .await?;
-            #[cfg(test)]
-            {
+            // The per-row history flush is a test-only observation aid (it
+            // makes a mid-stream interruption genuinely partial); production
+            // installs keep the batched flush inside `SeedImageWriter`.
+            if cfg!(test) {
                 image.flush_all_history().await?;
-                boundary(6)?;
             }
+            boundary(6)?;
         }
     }
     Ok(())

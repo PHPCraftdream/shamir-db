@@ -77,6 +77,10 @@ Follower-цикл, супервизор и источники (`InProcess`/`Wire
 This contract supersedes the older metadata-only Resume description below for
 seeded repositories. Replication remains experimental; this is offline R2-lite,
 not online snapshots, automatic reseeding, promotion, or full disaster recovery.
+The operator runbook for the full recovery procedure (export / verify /
+install / Resume, refusal codes, failure boundaries) is
+[`09-seed-recovery.md`](./09-seed-recovery.md); the artifact wire/format
+contract is [`../architecture/SEED_FORMAT.md`](../architecture/SEED_FORMAT.md).
 
 On Unix, `replication-seed-install --db app --repo main --artifact DIR
 --manifest-digest DIGEST --subscription app-main --upstream ENDPOINT
