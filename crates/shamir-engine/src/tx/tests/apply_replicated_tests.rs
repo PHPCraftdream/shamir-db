@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::Stream;
 use shamir_storage::error::{DbError, DbResult};
-use shamir_storage::storage_in_memory::InMemoryRepo;
+use shamir_storage::storage_in_memory::{InMemoryRepo, InMemoryStore};
 use shamir_storage::types::{RecordKey, Repo, Store};
 use shamir_tx::{IsolationLevel, MvccStore, TxContext, TxId};
 use shamir_types::access::Actor;
@@ -311,9 +311,9 @@ async fn apply_before_any_read_is_mvcc_visible() {
 // allocated but never marked in `completion` leaves a permanent hole: the
 // tracker's `try_advance` stops at the first version with no terminal state,
 // so a later local commit at M > N cannot push the contiguous watermark past
-// N. The fix routes both paths through a `VersionGuard` (success → `commit()`
-// marks `Materialized`, failure → `Drop` marks `Aborted`), matching the
-// compiler-enforced RAII pattern the rest of the commit pipeline uses.
+// N. The fix routes both paths through a VersionGuard: success materializes,
+// pure failures abort, and SNAP-6 partial visibility requires reopen without
+// settling either tracker. RAII also protects cancellation at awaited history.
 
 /// Reproduce the stuck-watermark scenario: apply_replicated succeeds (version
 /// N allocated), then a LOCAL tx commits at M > N. The completion tracker's
@@ -391,13 +391,11 @@ async fn a12_success_path_completion_watermark_advances_past_replicated_version(
     assert_eq!(gate.last_committed(), m);
 }
 
-/// Failure path: when `apply_replicated` errors AFTER allocating a version,
-/// the VersionGuard's `Drop` MUST mark the version `Aborted` in the
-/// completion tracker so the watermark advances past it. Before the fix the
-/// bare `mark_durable_aborted` touched ONLY the durable tracker — the
-/// visibility tracker's watermark was permanently clogged at N-1.
+/// Failure path: history errors follow overlay publication, so SNAP-6 must
+/// leave visibility and durability unsettled and require reopen. Only a pure
+/// pre-image failure before the first apply can preserve A12's normal abort.
 #[tokio::test]
-async fn a12_failure_path_version_marked_aborted_in_completion_tracker() {
+async fn a12_history_failure_keeps_visible_version_unsettled_until_reopen() {
     let follower = follower_repo();
     let _ = follower.get_table("items").await.unwrap();
     let gate = follower.tx_gate().await.unwrap();
@@ -425,35 +423,12 @@ async fn a12_failure_path_version_marked_aborted_in_completion_tracker() {
     );
     assert_eq!(gate.version_allocation_high_water_mark(), 1);
 
-    // The burned version (N = 1) MUST be terminally marked `Aborted` in the
-    // completion tracker — the guard's Drop does this automatically. Before
-    // the fix `mark_durable_aborted` marked only the durable tracker, leaving
-    // the visibility tracker with a hole at N that would clog a later local
-    // commit's watermark advance.
-    assert_eq!(
-        gate.completion().watermark(),
-        1,
-        "completion watermark must advance past the aborted version N=1"
-    );
-
-    // Prove the un-clog end-to-end: a subsequent LOCAL commit at M > N must
-    // be able to push the visibility watermark through the (now-Aborted) N.
-    use bytes::Bytes;
-    use shamir_storage::storage_in_memory::InMemoryStore;
-    use shamir_tx::{StagingStore, TxContext};
-    let mut local_tx = TxContext::new(TxId::new(99), 0, 0, IsolationLevel::Snapshot);
-    let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-    let mut staging = StagingStore::new(Arc::clone(&data_store));
-    staging.set(Bytes::from_static(b"fk").into(), Bytes::from_static(b"fv"));
-    local_tx.write_set.insert(7777u64, staging);
-    let outcome = crate::tx::commit_tx(local_tx, &follower).await.unwrap();
-    let m = outcome.commit_version;
-    assert!(m > 1, "local commit M ({m}) must be > aborted N=1");
-    assert_eq!(
-        gate.completion().watermark(),
-        m,
-        "completion watermark must advance through M after the aborted N"
-    );
+    // apply_committed_ops publishes the overlay before history can fail.
+    // There is no follower WAL replay owner: neither tracker may abort it.
+    assert!(gate.requires_reopen());
+    assert_eq!(gate.completion().watermark(), 0);
+    assert_eq!(gate.durable_watermark(), 0);
+    assert!(!gate.is_orphaned_post_wal(1));
 }
 
 /// Regression: the A12 fix MUST NOT change apply_replicated's externally

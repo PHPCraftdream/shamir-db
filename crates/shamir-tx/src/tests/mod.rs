@@ -5,6 +5,7 @@ pub mod gc_visible_floor_tests;
 pub mod id_remap_tests;
 pub mod layered_interner_tests;
 pub mod mvcc_store_tests;
+pub mod non_tx_ack_wait_tests;
 pub mod predicate_set_tests;
 pub mod repo_tx_gate_tests;
 pub mod repo_wal_manager_tests;
