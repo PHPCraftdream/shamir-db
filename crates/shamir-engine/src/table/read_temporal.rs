@@ -14,8 +14,9 @@ use crate::query::read::{
     exec, At, OrderDirection, QueryRecord, QueryResult, QueryStats, ReadQuery,
 };
 use bytes::Bytes;
-use shamir_storage::error::DbResult;
+use shamir_storage::error::{DbError, DbResult};
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
+use shamir_tx::repo_tx_gate::VisibleOutcome;
 use shamir_types::core::interner::Interner;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
@@ -36,7 +37,8 @@ impl TableManager {
     ///
     /// Requires an MVCC-backed table; a non-MVCC table returns a clear error.
     ///
-    /// `At::Version(v)` is used directly.
+    /// `At::Version(v)` is validated against the contiguous completion floor;
+    /// allocated but unsettled versions wait, unallocated versions are rejected.
     /// `At::Timestamp(t)` is resolved via `MvccStore::version_at_or_before_ts`;
     /// if no version has a recorded ts ≤ `t` this returns a clear error rather
     /// than silently treating it as Latest.
@@ -71,6 +73,32 @@ impl TableManager {
                 }
             },
         };
+
+        // The changefeed handle carries the same repo gate as the MVCC store.
+        // Standalone MVCC tables must attach it too: an eager floor cannot
+        // establish that an explicit snapshot is stable.
+        let gate = &self
+            .changefeed
+            .as_ref()
+            .ok_or_else(|| DbError::Validation("AsOf read requires a repo gate".into()))?
+            .gate;
+        if version > gate.visible_floor() {
+            let allocated = gate.version_allocation_high_water_mark();
+            if version > allocated {
+                return Err(DbError::AsOfFutureVersion {
+                    requested: version,
+                    allocated,
+                });
+            }
+            // Cancellation only drops the wait registration, never settles a
+            // version or changes the requested position.
+            match gate.await_visible(version).await {
+                VisibleOutcome::Visible => {}
+                VisibleOutcome::ReopenRequired => {
+                    return Err(DbError::AsOfReopenRequired { requested: version });
+                }
+            }
+        }
 
         // F-53b Step 2 (#878) / F-67 (#893): AsOf-aware sorted-index keyset
         // seek fast path.

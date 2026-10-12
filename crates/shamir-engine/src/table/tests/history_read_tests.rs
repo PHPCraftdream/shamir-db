@@ -52,7 +52,9 @@ async fn make_mvcc_table() -> (TableManager, Arc<MvccStore>) {
     // Opt into KeepHistory so prior versions survive.
     mvcc.set_retention(Retention::keep_history()).unwrap();
 
-    let tbl = base.with_mvcc_store(Arc::clone(&mvcc));
+    let tbl = base
+        .with_mvcc_store(Arc::clone(&mvcc))
+        .with_changefeed(Arc::clone(&gate));
     (tbl, mvcc)
 }
 
@@ -315,11 +317,11 @@ async fn asof_returns_ok_on_mvcc_table() {
     let mut q = ReadQuery::new("t")
         .select(Select::fields(["n"]))
         .filter(eq_name("alice"));
-    q.temporal = Temporal::AsOf { at: At::Version(1) };
+    q.temporal = Temporal::AsOf { at: At::Version(0) };
 
     // AsOf is implemented — must succeed, not error.
     let result = tbl.read(&q, &ctx).await.unwrap();
-    // Empty table → 0 rows (no records existed at version 1 or at all).
+    // Empty table → 0 rows at the initial settled version 0.
     assert_eq!(
         result.records.len(),
         0,
