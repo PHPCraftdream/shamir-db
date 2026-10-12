@@ -5,9 +5,13 @@
 mod alias_receipt;
 mod client_ops;
 mod extract;
+mod nested_receipt;
 mod reconcile;
 
 pub use alias_receipt::AliasReceipt;
+// Production caller: the VIS-5a `Client::wait_for_visibility` delegates here.
+pub(crate) use client_ops::wait_for_visibility_via;
+#[cfg(test)]
 pub(crate) use client_ops::{changes_since_via, decode_changes_since, execute_with_receipts_via};
 pub use extract::extract_receipts;
 pub use reconcile::{reconcile_receipts, RepoObservation};

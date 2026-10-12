@@ -109,6 +109,36 @@ fn record_change_key_and_value_stay_bin_on_the_wire() {
 }
 
 #[test]
+fn dto_serialization_matches_the_server_adapters_exactly() {
+    // OUTPUT oracle, mirroring the server's own adapters byte for byte:
+    // - `serde_bytes_compat` calls serialize_bytes => key is msgpack bin
+    //   (bin8 0xc4, length, payload).
+    // - `serde_opt_bytes_compat` calls serialize_some(v.as_ref()); rmp-serde
+    //   serializes Some transparently (NO option marker) and the &[u8] goes
+    //   through collect_seq with BytesMode::Normal => a FIXARRAY of the four
+    //   u8s. The DTO must behave IDENTICALLY (its adapter is the same
+    //   helper), and the same bytes must round-trip back into the DTO.
+    let event = sample_event(1);
+    let bytes = rmp_serde::to_vec_named(&event).unwrap();
+    let contains = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+    // key = [0,1,2,3]: bin8 marker, length 4, then the bytes.
+    assert!(
+        contains(&[0xc4, 0x04, 0x00, 0x01, 0x02, 0x03]),
+        "key must serialize as msgpack bin8, bytes: {bytes:02x?}"
+    );
+    // value = Some([9,9,9,9]): fixarray 0x94 + four posfixints — the exact
+    // shape the server's serde_opt_bytes_compat produces (an array, NOT
+    // bin; Some is transparent under rmp-serde).
+    assert!(
+        contains(&[0x94, 0x09, 0x09, 0x09, 0x09]),
+        "value must serialize exactly like the server adapter (fixarray), bytes: {bytes:02x?}"
+    );
+    // The same bytes must round-trip into the DTO.
+    let decoded: ChangesSinceEvent = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(decoded, event);
+}
+
+#[test]
 fn from_query_value_accepts_decimal_string_positions_above_i64_max() {
     // QueryValue promotes integers above i64::MAX to `Big`, which
     // serializes as a decimal string. `from_query_value` must parse that

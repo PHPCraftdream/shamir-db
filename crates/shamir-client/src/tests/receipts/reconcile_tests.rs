@@ -183,9 +183,12 @@ async fn end_to_end_receipts_feed_reconcile() {
     .await
     .unwrap();
     let log = log.lock().unwrap().clone();
-    // Each entry IS the WaitForVisibility request the transport would
-    // receive: op=wait_for_visibility { repo, version } — one per
-    // repository, at the max pending position (43 for main, 44 for hot).
+    // Callback-level check: these (repo, version) pairs feed
+    // `Client::wait_for_visibility`, which sends the real
+    // DbRequest::WaitForVisibility — that wire-level assertion lives in
+    // `client_ops_tests::reconciliation_sends_the_exact_wait_for_visibility_requests`.
+    // One observation per repository, at the max pending position
+    // (43 for main, 44 for hot).
     assert_eq!(log, vec![("main".to_string(), 43), ("hot".to_string(), 44)]);
     assert_eq!(observations.len(), 2);
     assert_eq!(observations[0].repo, "main");

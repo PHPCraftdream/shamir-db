@@ -160,8 +160,11 @@ describe('implicit batch receipts (VIS-5b)', () => {
       const batch = f.client
         .db('db')
         .batch()
-        .add('outer', { batch: { id: 1, queries: {} } })
-        .add('loop', { over: [], bind_row: 'row', for_each: { id: 2, queries: {} } })
+        .add('outer', { batch: { id: 1, queries: { inner: insert('items', [{ id: 1 }]) } } })
+        .add('loop', {
+          over: [], bind_row: 'row',
+          for_each: { id: 2, queries: { w: insert('items', [{ id: 2 }]) } },
+        })
         .build();
       const run = f.client.executeWithReceipts('db', batch);
       await f.nextRequest();
@@ -250,23 +253,128 @@ describe('implicit batch receipts (VIS-5b)', () => {
     } finally { await f.client.close(); }
   });
 
-  it('reconcile groups by repository at the max pending position and refuses guesses', async () => {
-    const observed: Array<[string, bigint]> = [];
-    const receipts = [
-      pendingReceipt('a', 'main', 5n),
-      pendingReceipt('b', 'main', BIG),
-      pendingReceipt('c', 'hot', 3n),
-      { ...pendingReceipt('d', 'hot', 4n), visibility: { state: 'visible' as const } },
-    ];
-    const observations = await reconcileReceipts(receipts, async (repo, version) => {
-      observed.push([repo, version]);
-      return { state: 'visible' };
-    });
-    expect(observed).toEqual([['main', BIG], ['hot', 3n]]);
-    expect(observations).toHaveLength(2);
-    await expect(
-      reconcileReceipts([pendingReceipt('nested', null, 9n)], async () => ({ state: 'visible' })),
-    ).rejects.toThrow(/no derivable repository/);
+  it('reconcile sends the real WaitForVisibility wire requests and refuses guesses', async () => {
+    const f = await fixture();
+    try {
+      const receipts = [
+        pendingReceipt('a', 'main', 5n),
+        pendingReceipt('b', 'main', BIG),
+        pendingReceipt('c', 'hot', 3n),
+        { ...pendingReceipt('d', 'hot', 4n), visibility: { state: 'visible' as const } },
+      ];
+      // PRODUCTION reconciliation: grouping (per repository, max pending
+      // position, one observation per repository) happens inside
+      // reconcileReceipts; the observer drives the CLIENT so the mock
+      // socket records the actual wire objects written.
+      const observed: Array<{ repo: string; version: bigint }> = [];
+      const observations = await reconcileReceipts(
+        receipts,
+        (repo, version) => {
+          const requestDone = f.client.waitForVisibility('db', repo, version, {
+            mode: 'bounded', timeout_ms: 0,
+          });
+          // Await the request ARRIVING on the wire, assert it, answer it —
+          // then await the observation. (Responding only after requestDone
+          // resolves would deadlock: the response IS what resolves it.)
+          return f.nextRequest().then((request) => {
+            expect(request).toMatchObject({
+              op: 'wait_for_visibility', query_version: 3, db: 'db', repo, version,
+              visibility_wait: { mode: 'bounded', timeout_ms: 0n },
+            });
+            observed.push({ repo, version });
+            f.respond({ kind: 'visibility_observed', version, visibility: { state: 'visible' } });
+            return requestDone.then((state) => {
+              expect(state).toEqual({ state: 'visible' });
+              return state;
+            });
+          });
+        },
+      );
+      expect(observed).toEqual([{ repo: 'main', version: BIG }, { repo: 'hot', version: 3n }]);
+      expect(observations).toHaveLength(2);
+      await expect(
+        reconcileReceipts([pendingReceipt('nested', null, 9n)], async () => ({ state: 'visible' })),
+      ).rejects.toThrow(/no derivable repository/);
+    } finally { await f.client.close(); }
+  });
+
+  it('nested receipts accept decimal-string positions above 2^53 and i64::MAX', async () => {
+    const f = await fixture();
+    try {
+      const batch = f.client
+        .db('db')
+        .batch()
+        .add('outer', { batch: { id: 1, queries: { w: insert('items', [{ id: 1 }]) } } })
+        .build();
+      const run = f.client.executeWithReceipts('db', batch);
+      await f.nextRequest();
+      f.respond({
+        kind: 'batch',
+        response: {
+          id: 1,
+          execution_plan: [],
+          execution_time_us: 0,
+          results: {
+            outer: {
+              records: [],
+              value: {
+                w: {
+                  records: [],
+                  // Big positions travel as DECIMAL STRINGS on the wire.
+                  receipt: { tx_id: 7, status: 'committed',
+                    commit_version: '18446744073709551615', snapshot_version: '9007199254740993',
+                    materialized: true,
+                    visibility: { state: 'pending', visible_through: '18446744073709551614',
+                      blocking_version: '18446744073709551615', reason: 'timeout' } },
+                },
+              },
+            },
+          },
+        },
+      });
+      const { receipts } = await run;
+      expect(receipts[0].alias).toBe('outer.w');
+      expect(receipts[0].repo).toBeNull();
+      expect(receipts[0].transaction.commit_version).toBe(MAX_U64);
+      expect(receipts[0].transaction.tx_id).toBe(7);
+      expect(receipts[0].visibility).toEqual({ state: 'pending',
+        visible_through: MAX_U64 - 1n, blocking_version: MAX_U64, reason: 'timeout' });
+    } finally { await f.client.close(); }
+  });
+
+  it('a read/call application value containing a receipt key yields NO receipt', async () => {
+    const f = await fixture();
+    try {
+      const batch = f.client.db('db').batch().add('w1', insert('items', [{ id: 1 }])).build();
+      const run = f.client.executeWithReceipts('db', batch);
+      await f.nextRequest();
+      f.respond({
+        kind: 'batch',
+        response: {
+          id: 1,
+          execution_plan: [],
+          execution_time_us: 0,
+          results: {
+            w1: {
+              records: [],
+              // Application data shaped like the old walker's target: a
+              // value MAP whose MEMBER carries its own valid-looking
+              // receipt. Non-container ops are never inspected, so this
+              // must fabricate NOTHING.
+              value: {
+                phantom: {
+                  records: [],
+                  receipt: { tx_id: 9, status: 'committed', commit_version: 1,
+                    materialized: true, visibility: { state: 'visible' } },
+                },
+              },
+            },
+          },
+        },
+      });
+      const { receipts } = await run;
+      expect(receipts).toEqual([]);
+    } finally { await f.client.close(); }
   });
 });
 

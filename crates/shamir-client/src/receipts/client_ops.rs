@@ -6,7 +6,7 @@
 use std::future::Future;
 
 use shamir_query_types::admin::ChangesSinceResponse;
-use shamir_query_types::batch::{BatchRequest, BatchResponse, VisibilityWait};
+use shamir_query_types::batch::{BatchRequest, BatchResponse, VisibilityState, VisibilityWait};
 use shamir_query_types::read::QueryRecord;
 use shamir_query_types::wire::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
 
@@ -19,14 +19,34 @@ const CHANGES_SINCE_ALIAS: &str = "changes_since";
 impl Client {
     /// Execute a NON-transactional batch and extract per-alias implicit
     /// commit receipts (pending is a committed result — never an error,
-    /// never resent; `batch.transactional` is never touched).
+    /// never resent; `batch.transactional` is never touched). Interner
+    /// epoch advertisement and delta merging behave exactly like
+    /// [`Client::execute`].
     pub async fn execute_with_receipts(
         &self,
         db: &str,
-        batch: BatchRequest,
+        mut batch: BatchRequest,
         visibility_wait: Option<VisibilityWait>,
     ) -> Result<(BatchResponse, Vec<AliasReceipt>), ClientError> {
-        execute_with_receipts_via(|batch| self.execute(db, batch), batch, visibility_wait).await
+        // Same interner-epoch advertisement `Client::execute` performs
+        // before building the wire request.
+        if batch.interner_epochs.is_empty() {
+            for repo in shamir_query_types::batch::distinct_repos(&batch.queries) {
+                let epoch = self.interner_cache().get_or_create(db, &repo).epoch();
+                batch.interner_epochs.insert(repo, epoch);
+            }
+        }
+        let (response, receipts) = execute_with_receipts_via(
+            |req| async move { self.roundtrip(&req).await },
+            db,
+            batch,
+            visibility_wait,
+        )
+        .await?;
+        if !response.interner_delta.is_empty() {
+            self.merge_interner_delta(db, &response);
+        }
+        Ok((response, receipts))
     }
 
     /// One-shot `changes_since` journal read, built with the query
@@ -51,23 +71,36 @@ impl Client {
 }
 
 /// Production core for [`Client::execute_with_receipts`]: sets the
-/// visibility wait, sends the batch through `send` exactly once (the
-/// transport owns deadlines; a transport failure is never retried or
-/// replayed), and extracts the receipts.
+/// visibility wait, sends the exact `DbRequest::Execute` through `send`
+/// exactly once (the transport owns deadlines; a transport failure is
+/// never retried or replayed), and extracts the receipts.
 pub(crate) async fn execute_with_receipts_via<F, Fut>(
     send: F,
+    db: &str,
     mut batch: BatchRequest,
     visibility_wait: Option<VisibilityWait>,
 ) -> Result<(BatchResponse, Vec<AliasReceipt>), ClientError>
 where
-    F: Fn(BatchRequest) -> Fut,
-    Fut: Future<Output = Result<BatchResponse, ClientError>>,
+    F: FnOnce(DbRequest) -> Fut,
+    Fut: Future<Output = Result<DbResponse, ClientError>>,
 {
     batch.visibility_wait = visibility_wait;
     let request = batch.clone();
-    let response = send(batch).await?;
-    let receipts = extract_receipts(&request, &response)?;
-    Ok((response, receipts))
+    let response = send(DbRequest::Execute {
+        query_version: CURRENT_QUERY_LANG_VERSION,
+        db: db.to_string(),
+        batch,
+    })
+    .await?;
+    match response {
+        DbResponse::Batch { response } => {
+            let receipts = extract_receipts(&request, &response)?;
+            Ok((response, receipts))
+        }
+        other => Err(ClientError::Protocol(format!(
+            "expected Batch, got {other:?}"
+        ))),
+    }
 }
 
 /// Production core for [`Client::changes_since`]: builds the request with
@@ -96,7 +129,7 @@ where
     let response = send(DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
         db: db.to_string(),
-        batch,
+        batch: batch.build(),
     })
     .await?;
     match response {
@@ -105,6 +138,29 @@ where
             "expected Batch, got {other:?}"
         ))),
     }
+}
+
+/// Production core for [`Client::wait_for_visibility`]: builds the exact
+/// `DbRequest::WaitForVisibility` and validates one observation.
+pub(crate) async fn wait_for_visibility_via<F, Fut>(
+    send: F,
+    db: &str,
+    repo: &str,
+    version: u64,
+    wait: VisibilityWait,
+) -> Result<VisibilityState, ClientError>
+where
+    F: FnOnce(DbRequest) -> Fut,
+    Fut: Future<Output = Result<DbResponse, ClientError>>,
+{
+    let request = DbRequest::WaitForVisibility {
+        query_version: CURRENT_QUERY_LANG_VERSION,
+        db: db.to_string(),
+        repo: repo.to_string(),
+        version,
+        visibility_wait: wait,
+    };
+    crate::visibility::observe_once(version, send(request)).await
 }
 
 /// Decode the admin payload out of the response's single result record.

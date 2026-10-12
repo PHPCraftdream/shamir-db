@@ -1,10 +1,12 @@
 //! Per-alias receipt extraction from an implicit (non-transactional)
-//! batch response, including NESTED results.
+//! batch response, including NESTED results of sub-batch / for-each
+//! containers.
 
-use shamir_query_types::batch::{BatchRequest, BatchResponse};
+use shamir_query_types::batch::{BatchOp, BatchRequest, BatchResponse, QueryEntry};
 use shamir_types::types::value::QueryValue;
 
 use super::alias_receipt::AliasReceipt;
+use super::nested_receipt::decode_nested_transaction;
 use crate::visibility::CommitResult;
 use crate::ClientError;
 
@@ -19,18 +21,19 @@ use crate::ClientError;
 /// rows. Only aliases present in the REQUEST are considered at the top
 /// level.
 ///
-/// NESTED results: sub-batch containers keep their inner results inside
-/// the container's `value` map (`alias -> QueryResult`,
-/// `query_runner.rs`), and for-each containers inside its `value` LIST
-/// (one iteration map of `alias -> QueryResult` per iteration). Nested
-/// receipts are surfaced with a path-style alias (`outer.inner`,
-/// `loop[3].w`) and `repo: None` — a nested alias's repository cannot be
-/// derived unambiguously — so reconciliation refuses them rather than
-/// guess. Nested receipts are decoded through the same strict
-/// `TransactionInfo` validation; any result map carrying a `receipt` key
-/// that decodes is treated as a receipt carrier (an application value
-/// that happens to embed a well-formed committed TransactionInfo would
-/// be surfaced too — the decode is exact, so this is not a guess).
+/// NESTED results are walked REQUEST-DRIVEN: descent happens ONLY under
+/// a request entry whose op is a sub-batch (`BatchOp::Batch`) or a
+/// for-each (`BatchOp::ForEach`), and the inner request entries decide
+/// recursion and the inner alias names — the server stores sub-batch
+/// results inside the container's `value` MAP (`alias -> QueryResult`)
+/// and for-each results inside its `value` LIST (one iteration map per
+/// iteration; see `query_runner.rs`). Nested receipts surface with a
+/// path-style alias (`outer.inner`, `loop[3].w`) and `repo: None` — a
+/// nested alias's repository cannot be derived unambiguously — so
+/// reconciliation refuses them rather than guess. The `value` of ANY
+/// other op (reads, calls, writes) is application data and is never
+/// inspected; if a result does not match the request shape it is
+/// skipped, never guessed.
 pub fn extract_receipts(
     request: &BatchRequest,
     response: &BatchResponse,
@@ -41,98 +44,95 @@ pub fn extract_receipts(
             continue;
         };
         let repo = entry.op.table_ref().map(|tr| tr.repo.clone());
-        push_result(
-            alias,
-            &result.receipt,
-            result.value.as_ref(),
-            repo,
-            &mut receipts,
-        )?;
+        if let Some(transaction) = &result.receipt {
+            let commit = CommitResult::from_transaction(transaction.clone())?;
+            let crate::visibility::CommitResult::Committed {
+                transaction,
+                visibility,
+            } = commit;
+            receipts.push(AliasReceipt {
+                alias: alias.to_string(),
+                transaction,
+                visibility,
+                repo,
+            });
+        }
+        walk_entry(alias, &entry.op, result.value.as_ref(), &mut receipts)?;
     }
     Ok(receipts)
 }
 
-/// Emit `alias`'s own receipt (if any) and descend into its `value`
-/// container, if it is one.
-fn push_result(
-    alias: &str,
-    receipt: &Option<shamir_query_types::batch::TransactionInfo>,
-    value: Option<&QueryValue>,
-    repo: Option<String>,
-    out: &mut Vec<AliasReceipt>,
-) -> Result<(), ClientError> {
-    if let Some(transaction) = receipt {
-        let commit = CommitResult::from_transaction(transaction.clone())?;
-        let crate::visibility::CommitResult::Committed {
-            transaction,
-            visibility,
-        } = commit;
-        out.push(AliasReceipt {
-            alias: alias.to_string(),
-            transaction,
-            visibility,
-            repo,
-        });
-    }
-    walk_container(alias, value, out)
-}
-
-/// Walk a container's `value`: a sub-batch stores a MAP of
-/// `alias -> QueryResult`; a for-each stores a LIST of iteration MAPS of
-/// `alias -> QueryResult`. Anything else is an application value and is
-/// ignored.
-fn walk_container(
+/// Descend into `op`'s result only when the REQUEST op is a container;
+/// recurse over the inner request entries. Anything else is application
+/// data and is ignored.
+fn walk_entry(
     prefix: &str,
+    op: &BatchOp,
     value: Option<&QueryValue>,
     out: &mut Vec<AliasReceipt>,
 ) -> Result<(), ClientError> {
-    let Some(value) = value else {
-        return Ok(());
-    };
-    match value {
-        QueryValue::Map(entries) => {
-            for (alias, result) in entries {
-                walk_nested(&format!("{prefix}.{alias}"), result, out)?;
-            }
+    match op {
+        BatchOp::Batch(sub) => {
+            let Some(QueryValue::Map(entries)) = value else {
+                return Ok(()); // result does not match the request shape: skip
+            };
+            walk_result_map(prefix, &sub.batch.queries, entries, out)
         }
-        QueryValue::List(iterations) => {
+        BatchOp::ForEach(fe) => {
+            let Some(QueryValue::List(iterations)) = value else {
+                return Ok(()); // result does not match the request shape: skip
+            };
             for (i, iteration) in iterations.iter().enumerate() {
                 if let QueryValue::Map(entries) = iteration {
-                    for (alias, result) in entries {
-                        walk_nested(&format!("{prefix}[{i}].{alias}"), result, out)?;
-                    }
+                    walk_result_map(&format!("{prefix}[{i}]"), &fe.batch.queries, entries, out)?;
                 }
             }
+            Ok(())
         }
-        _ => {}
+        _ => Ok(()), // application value: never inspected
     }
-    Ok(())
 }
 
-/// A nested serialized `QueryResult`: decode its `receipt` (if any)
-/// through the strict transaction validation and keep walking deeper
-/// containers. Nested receipts always carry `repo: None`.
-fn walk_nested(
-    alias: &str,
-    result: &QueryValue,
+/// Walk one nested results map against the inner REQUEST entries: the
+/// request decides which aliases exist and which are containers. A nested
+/// result that is not a map, or an alias the request does not declare, is
+/// skipped.
+fn walk_result_map(
+    prefix: &str,
+    queries: &shamir_collections::TMap<String, QueryEntry>,
+    entries: &shamir_types::types::common::TMap<String, QueryValue>,
     out: &mut Vec<AliasReceipt>,
 ) -> Result<(), ClientError> {
-    let QueryValue::Map(map) = result else {
-        return Ok(());
-    };
-    let receipt = match map.get("receipt") {
-        Some(r) if !matches!(r, QueryValue::Null) => Some(decode_nested_transaction(r)?),
-        _ => None,
-    };
-    push_result(alias, &receipt, map.get("value"), None, out)
-}
-
-/// Reverse of the server's msgpack round-trip for one nested
-/// `TransactionInfo`, with the same strict v3 validation.
-fn decode_nested_transaction(
-    receipt: &QueryValue,
-) -> Result<shamir_query_types::batch::TransactionInfo, ClientError> {
-    let bytes = rmp_serde::to_vec_named(receipt)
-        .map_err(|e| ClientError::Protocol(format!("nested receipt encode: {e}")))?;
-    rmp_serde::from_slice(&bytes).map_err(|e| ClientError::Protocol(format!("nested receipt: {e}")))
+    for (alias, entry) in queries.iter() {
+        let Some(result) = entries.get(alias) else {
+            continue;
+        };
+        let QueryValue::Map(result_map) = result else {
+            continue;
+        };
+        let receipt = match result_map.get("receipt") {
+            Some(r) if !matches!(r, QueryValue::Null) => Some(decode_nested_transaction(r)?),
+            _ => None,
+        };
+        if let Some(transaction) = receipt {
+            let commit = CommitResult::from_transaction(transaction)?;
+            let crate::visibility::CommitResult::Committed {
+                transaction,
+                visibility,
+            } = commit;
+            out.push(AliasReceipt {
+                alias: format!("{prefix}.{alias}"),
+                transaction,
+                visibility,
+                repo: None,
+            });
+        }
+        walk_entry(
+            &format!("{prefix}.{alias}"),
+            &entry.op,
+            result_map.get("value"),
+            out,
+        )?;
+    }
+    Ok(())
 }

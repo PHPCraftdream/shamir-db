@@ -124,12 +124,14 @@ struct PreVis4c {
 #[test]
 fn fail_closed_bounded_rejections_map_to_their_typed_variants() {
     // The server really returns these codes: Call/admin writes under
-    // Bounded are rejected with "validation"
-    // (engine/.../receipts/policy.rs), TxExecute commit-only overrides
-    // with "visibility_wait_invalid" (tx_handlers.rs), and a known
-    // pending-with-reopen surfaces as "write_committed_visibility_pending".
-    // The client maps each to its typed variant WITHOUT retrying or
-    // parsing messages.
+    // Bounded AND TxExecute commit-only overrides are rejected with
+    // "validation" (engine/.../receipts/policy.rs;
+    // server/.../tx_handlers.rs returns code "validation" with the
+    // "visibility_wait is commit-only" message), "visibility_wait_invalid"
+    // is the wait-cap / strict-permission rejection (handler.rs), and a
+    // known pending-with-reopen surfaces as
+    // "write_committed_visibility_pending". The client maps each to its
+    // typed variant WITHOUT retrying or parsing messages.
     for (code, expected) in [
         ("validation", "validation"),
         ("visibility_wait_invalid", "visibility_wait_invalid"),
