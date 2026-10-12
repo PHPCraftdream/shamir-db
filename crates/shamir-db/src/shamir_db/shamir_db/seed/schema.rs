@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use shamir_engine::meta::MetaEnvelope;
 use shamir_engine::repo::RepoInstance;
 use shamir_engine::validator::schema::SchemaValidator;
 use shamir_engine::validator::{RecordValidator, ValidatorBinding, WriteOp};
@@ -9,6 +8,8 @@ use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
 use crate::{DbError, DbResult, ShamirDb};
+
+use super::records_codec::encode_schema_records;
 
 use super::super::schema_management::{
     parse_schema, schema_validator_name, SCHEMA_VALIDATOR_PRIORITY,
@@ -96,9 +97,7 @@ impl ShamirDb {
             records.push(record);
         }
         let store = repo.seed_schema_store().await?;
-        let bytes = MetaEnvelope::new(records)
-            .encode()
-            .map_err(|e| DbError::Codec(e.to_string()))?;
+        let bytes = encode_schema_records(&records)?;
         store
             .set(RecordKey::from_slice(b"schemas"), bytes.into())
             .await?;

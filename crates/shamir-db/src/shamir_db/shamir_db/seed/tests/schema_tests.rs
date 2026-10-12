@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use shamir_engine::meta::repo_identity::RepoIdentity;
-use shamir_engine::meta::MetaEnvelope;
 use shamir_engine::repo::{BoxRepo, RepoInstance, SeedImageWriter, SeedReceipt, SeedTable};
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_storage::types::RecordKey;
@@ -9,6 +8,8 @@ use shamir_types::types::value::QueryValue;
 
 use crate::shamir_db::shamir_db::schema_management::parse_schema;
 use crate::ShamirDb;
+
+use super::super::records_codec::decode_schema_records;
 
 #[tokio::test]
 async fn names_schema_is_compiled_and_durable_before_complete() {
@@ -54,7 +55,7 @@ async fn names_schema_is_compiled_and_durable_before_complete() {
         .unwrap();
     assert!(home.system_store.load_tables().await.unwrap().is_empty());
     let bytes = store.get(RecordKey::from_slice(b"schemas")).await.unwrap();
-    let records: Vec<QueryValue> = MetaEnvelope::open(&bytes).unwrap();
+    let records = decode_schema_records(&bytes).unwrap();
     assert_eq!(records[0]["schema_version"].as_i64(), Some(9));
     let manager = image.repo_interner().await.unwrap();
     let interner = manager.get().await.unwrap();

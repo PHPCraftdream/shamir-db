@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use shamir_engine::meta::MetaEnvelope;
 #[cfg(feature = "fjall")]
 use shamir_engine::repo::{BoxRepoFactory, RepoFactory};
 use shamir_engine::repo::{RepoInstance, SeedInstallState, SeedReceipt, SeedTable};
@@ -10,6 +9,8 @@ use shamir_types::types::value::QueryValue;
 
 use crate::access::{Actor, ResourceMeta};
 use crate::{DbError, DbResult, ShamirDb};
+
+use super::records_codec::decode_schema_records;
 
 impl ShamirDb {
     pub async fn check_seed_target(
@@ -204,8 +205,7 @@ async fn load_schema_records(store: &Arc<dyn Store>) -> DbResult<Vec<QueryValue>
             "seed schema metadata budget exceeded".into(),
         ));
     }
-    let records: Vec<QueryValue> =
-        MetaEnvelope::open(&bytes).map_err(|e| DbError::Codec(e.to_string()))?;
+    let records = decode_schema_records(&bytes)?;
     if records.len() > 65_536 {
         return Err(DbError::Codec(
             "seed schema inventory count exceeded".into(),

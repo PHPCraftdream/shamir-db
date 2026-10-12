@@ -1,6 +1,4 @@
 use shamir_engine::meta::repo_identity::RepoIdentity;
-#[cfg(all(unix, feature = "fjall"))]
-use shamir_engine::meta::MetaEnvelope;
 use shamir_engine::repo::SeedReceipt;
 #[cfg(all(unix, feature = "fjall"))]
 use shamir_engine::repo::{BoxRepoFactory, RepoFactory, RepoInstance, SeedImageWriter, SeedTable};
@@ -14,6 +12,17 @@ use crate::access::{Actor, ResourceMeta};
 use crate::query::write::SetOp;
 use crate::query::TableRef;
 use crate::ShamirDb;
+
+#[cfg(all(unix, feature = "fjall"))]
+use super::super::records_codec::decode_schema_records;
+
+// doc! converts through FilterValue, which cannot carry a list of maps.
+fn owner_profile(streams: QueryValue) -> QueryValue {
+    let mut fields = shamir_types::types::common::new_map();
+    fields.insert("name".into(), QueryValue::Str("owner".into()));
+    fields.insert("streams".into(), streams);
+    QueryValue::Map(fields)
+}
 
 fn receipt() -> SeedReceipt {
     SeedReceipt {
@@ -87,7 +96,7 @@ async fn catalogue_only_retry_requires_matching_image_and_never_overwrites_table
         .unwrap();
     writer.finish(std::slice::from_ref(&store)).await.unwrap();
     let bytes = store.get(RecordKey::from_slice(b"schemas")).await.unwrap();
-    let records: Vec<QueryValue> = MetaEnvelope::open(&bytes).unwrap();
+    let records = decode_schema_records(&bytes).unwrap();
     let meta = ResourceMeta::owned_enforced(Actor::System);
     let database: QueryValue = doc! {
         "name" => "app",
@@ -163,7 +172,7 @@ async fn only_destination_pull_subscription_conflicts() {
         let profile = SetOp {
             set: TableRef::new("replication_profiles"),
             key: doc! { "name" => "owner" }.into(),
-            value: doc! { "name" => "owner", "streams" => streams }.into(),
+            value: owner_profile(streams),
         };
         home.system_store
             .set_via_implicit_tx(&profiles, &profile)
