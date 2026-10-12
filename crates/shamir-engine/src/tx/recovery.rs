@@ -455,6 +455,7 @@ pub async fn recover_inflight_v2(repo: &RepoInstance) -> DbResult<usize> {
             floor
         );
     }
+    repo.certify_cold_start().await?;
     Ok(count)
 }
 

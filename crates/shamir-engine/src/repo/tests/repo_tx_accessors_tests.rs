@@ -56,7 +56,7 @@ async fn repo_wal_seeds_txn_id_floor_above_inflight() {
     async fn open_disk(path: &std::path::Path) -> RepoInstance {
         let mut last_err = None;
         for _attempt in 0..10 {
-            match RepoInstance::from_factory(
+            match RepoInstance::from_factory_for_recovery_test(
                 "r".into(),
                 BoxRepoFactory::fjall_raw(path.to_path_buf()),
                 vec![TableConfig::new("t")],
