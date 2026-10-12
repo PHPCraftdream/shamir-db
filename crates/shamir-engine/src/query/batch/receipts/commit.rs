@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::pin::Pin;
+
 use crate::query::batch::BatchError;
 use crate::repo::RepoInstance;
 use crate::tx::CommitError;
@@ -5,7 +8,20 @@ use shamir_query_types::batch::{TransactionInfo, VisibilityWait};
 
 /// Preserve known publication, including durability warnings, as metadata.
 /// The commit itself is never raced against an execution deadline.
-pub(crate) async fn commit_implicit(
+///
+/// Boxed on purpose: the commit pipeline future is large and this is awaited
+/// from four write arms of the per-op runner, which recurses through nested
+/// batches; inlining it would multiply the runner's stack footprint.
+pub(crate) fn commit_implicit<'a>(
+    repo: &'a RepoInstance,
+    tx: shamir_tx::TxContext,
+    alias: &'a str,
+    wait: VisibilityWait,
+) -> Pin<Box<dyn Future<Output = Result<TransactionInfo, BatchError>> + Send + 'a>> {
+    Box::pin(commit_implicit_inner(repo, tx, alias, wait))
+}
+
+async fn commit_implicit_inner(
     repo: &RepoInstance,
     tx: shamir_tx::TxContext,
     alias: &str,

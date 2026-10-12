@@ -20,7 +20,9 @@ impl QueryRunner<'_> {
         entry: &QueryEntry,
         refs: &TMap<String, QueryResult>,
     ) -> Result<QueryResult, BatchError> {
-        super::dependency::scope(self.run_with_wait(alias, entry, refs, None)).await
+        // Boxed: the per-op future is large and must not be copied by value
+        // through the task-local wrapper at every recursion level.
+        super::dependency::scope(Box::pin(self.run_with_wait(alias, entry, refs, None))).await
     }
 }
 
