@@ -5,11 +5,16 @@
 //! arbitrary shutdown future. Only the shutdown trigger differs between
 //! modes; the boot + graceful-drain logic is identical.
 
+use std::future::Future;
+use std::pin::Pin;
+
+use shamir_db::ShutdownReport;
+
 use crate::config::Config;
 use crate::server::{BootstrapMode, ServerLauncher};
 
 /// Maximum time to wait for in-flight connections to drain after receiving
-/// a shutdown signal. If the deadline expires, we log a warning and return
+/// a shutdown signal. If the deadline expires, we return an unclean report
 /// so the process exits (the OS reclaims sockets).
 const SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -21,14 +26,14 @@ const SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30
 ///
 /// After the shutdown signal fires, the drain phase is bounded by
 /// [`SHUTDOWN_DEADLINE`]. If draining exceeds the deadline (e.g. a stuck
-/// connection), we log a warning and return rather than blocking
+/// connection), we return an unclean report rather than blocking
 /// indefinitely.
 pub async fn serve(
     config: Config,
     bootstrap: BootstrapMode,
     shutdown: impl std::future::Future<Output = ()>,
     on_ready: impl FnOnce(),
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ShutdownReport> {
     let launcher = ServerLauncher { config, bootstrap };
     let handle = launcher
         .launch()
@@ -45,18 +50,30 @@ pub async fn serve(
     shutdown.await;
     tracing::info!("shutting down");
 
-    // NOTE: The deadline is exercised only via the tokio::time::timeout
-    // wrapper below. A full serve()+hung-drain integration test would
-    // require a mock ServerHandle; the timeout path is obviously correct
-    // and covered by tokio's own test suite.
-    match tokio::time::timeout(SHUTDOWN_DEADLINE, handle.shutdown()).await {
-        Ok(()) => {}
-        Err(_) => tracing::warn!(
-            deadline_secs = SHUTDOWN_DEADLINE.as_secs(),
-            "graceful shutdown exceeded deadline — forcing exit"
-        ),
+    let mut report = handle.pending_shutdown_report();
+    let report = finish_shutdown(SHUTDOWN_DEADLINE, &mut report, |report| {
+        Box::pin(handle.shutdown_with_report(report))
+    })
+    .await;
+    crate::observability::record_shutdown(&report);
+    Ok(report)
+}
+
+/// cancel-safe: NO — expiry abandons unfinished teardown, not completed outcomes.
+pub(crate) async fn finish_shutdown(
+    deadline: std::time::Duration,
+    report: &mut ShutdownReport,
+    shutdown: impl for<'a> FnOnce(
+        &'a mut ShutdownReport,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>,
+) -> ShutdownReport {
+    if tokio::time::timeout(deadline, shutdown(report))
+        .await
+        .is_err()
+    {
+        report.add_error("graceful shutdown exceeded deadline — forcing exit");
     }
-    Ok(())
+    report.clone()
 }
 
 /// Notify the init system that the server is ready (post-bind).
