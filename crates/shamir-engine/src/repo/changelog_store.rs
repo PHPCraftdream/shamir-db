@@ -23,6 +23,20 @@ impl StoreChangelog {
         Self { store }
     }
 
+    pub(crate) async fn load_clean_horizon(&self) -> DbResult<u64> {
+        match self
+            .store
+            .get(shamir_tx::changefeed::clean_horizon_key().into())
+            .await
+        {
+            Ok(bytes) => {
+                shamir_tx::changefeed::decode_clean_horizon(&bytes).map_err(DbError::Storage)
+            }
+            Err(DbError::NotFound(_)) => Ok(0),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Load extended invalidation metadata, accepting legacy single-u64 points.
     /// Corruption is invalidation of an unknown horizon, never a small point.
     /// The bool asks init to flush the conservative replacement before seeding.
@@ -48,7 +62,15 @@ impl StoreChangelog {
 #[async_trait::async_trait]
 impl shamir_tx::ChangelogStore for StoreChangelog {
     async fn put(&self, key: Bytes, value: Bytes) -> Result<(), String> {
-        let is_marker = key == shamir_tx::changefeed::gap_marker_key();
+        let is_clean = key == shamir_tx::changefeed::clean_horizon_key();
+        let is_marker = key == shamir_tx::changefeed::gap_marker_key() || is_clean;
+        if is_clean {
+            // Establish event/gap durability before staging any certificate.
+            self.store
+                .flush()
+                .await
+                .map_err(|e| format!("changelog checkpoint flush: {e}"))?;
+        }
         self.store
             .set(key.into(), value)
             .await
@@ -90,7 +112,9 @@ impl shamir_tx::ChangelogStore for StoreChangelog {
             };
             let chunk = chunk.map_err(|e| format!("changelog store range: {e}"))?;
             for (key, v) in chunk {
-                if key.as_ref() == shamir_tx::changefeed::gap_marker_key().as_ref() {
+                if key.as_ref() == shamir_tx::changefeed::gap_marker_key().as_ref()
+                    || key.as_ref() == shamir_tx::changefeed::clean_horizon_key().as_ref()
+                {
                     continue;
                 }
                 if v.len() > remaining_bytes {

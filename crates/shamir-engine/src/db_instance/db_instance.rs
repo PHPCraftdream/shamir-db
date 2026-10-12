@@ -53,6 +53,8 @@ impl DbInstance {
         let name = config.name.clone();
         let instance =
             RepoInstance::from_factory(name.clone(), config.factory, config.tables).await?;
+        // The async constructor recovers/certifies before returning a handle.
+        // Includes facade, config-driven and system-store callers.
         self.repos.insert(name, instance);
         Ok(())
     }

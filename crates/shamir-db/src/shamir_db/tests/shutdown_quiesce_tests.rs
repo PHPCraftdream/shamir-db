@@ -21,6 +21,15 @@ use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::TableConfig;
 use crate::ShamirDb;
 
+#[cfg(feature = "fjall")]
+use crate::storage::storage_fjall::FjallRepo;
+#[cfg(feature = "fjall")]
+use crate::storage::types::Repo;
+#[cfg(feature = "fjall")]
+use crate::DbError;
+#[cfg(feature = "fjall")]
+use bytes::Bytes;
+
 const REPO: &str = "shutdown_quiesce_detached_tail";
 const BUDGET: Duration = Duration::from_secs(45);
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -150,6 +159,83 @@ fn flush_all_persists_detached_post_wal_tail() {
     drop(runtime);
 }
 
+// The original tail resumes only AFTER shutdown timed out. A mistaken late J
+// would hide the unclean interval on the next public-constructor hard reopen.
+#[cfg(feature = "fjall")]
+#[test]
+fn quiescence_timeout_leaves_j_absent_and_hard_reopen_certifies() {
+    let _serial = SERIAL.blocking_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("repo");
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    let h = runtime.block_on(async {
+        let hook = hook();
+        let shamir = ShamirDb::init_memory().await.unwrap();
+        let db = shamir.create_db("app").await;
+        db.add_repo(
+            RepoConfig::new(REPO, BoxRepoFactory::fjall_raw(&path))
+                .add_table(TableConfig::new("items")),
+        )
+        .await
+        .unwrap();
+        let repo = db.get_repo(REPO).unwrap();
+        let table = repo.get_table("items").await.unwrap();
+        let interner = table.interner().get().await.unwrap();
+        let value =
+            query_value_to_inner(&doc().set("name", "late-tail").build(), interner).unwrap();
+        let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+        table.insert_tx(&value, Some(&mut tx)).await.unwrap();
+        hook.armed.store(true, Ordering::Release);
+        let owned = repo.clone();
+        let caller = tokio::spawn(async move { owned.commit_tx(tx).await });
+        within(hook.reached.notified()).await;
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        let error = repo.shutdown_clean(Duration::ZERO).await.unwrap_err();
+        assert!(error.to_string().contains("commit quiescence"));
+        hook.resume.notify_one();
+        within(repo.quiesce_commits(BUDGET)).await.unwrap();
+        // Drain data only; never retry clean shutdown after the failed attempt.
+        repo.flush_buffers().await.unwrap();
+        drop(snapshot);
+        repo.current_commit_version().await.unwrap()
+    });
+    drop(runtime);
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        // Inspect durable state before any opener can advance J.
+        let backing = FjallRepo::new(&path).unwrap();
+        let store = backing.store_get("__changelog__").await.unwrap();
+        assert!(matches!(
+            store
+                .get(Bytes::from_static(b"\0journal-clean-v1").into())
+                .await,
+            Err(DbError::NotFound(_))
+        ));
+    });
+    drop(runtime);
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let repo = RepoInstance::from_factory(
+            REPO.into(),
+            BoxRepoFactory::fjall_raw(&path),
+            vec![TableConfig::new("items")],
+        )
+        .await
+        .unwrap();
+        assert!(h > 0);
+        assert_eq!(
+            repo.read_changelog_from(h, 100).await.unwrap().gap_at,
+            Some(h),
+        );
+        assert_eq!(
+            repo.read_changelog_from(h + 1, 100).await.unwrap().gap_at,
+            None,
+        );
+    });
+    drop(runtime);
+}
+
 async fn detached_tail_in_memory() {
     let hook = hook();
     let shamir = ShamirDb::init_memory().await.unwrap();
@@ -222,15 +308,17 @@ async fn flush_all_warns_and_continues_past_wedged_tail() {
 
     // ZERO is a deterministic expired deadline, not a wall-clock assertion.
     // Red before the fix: no quiescence warning is emitted at all.
+    // A timed-out tail must not advance J even if it later resumes.
+    // Hard-stop/reopen controls live in clean_horizon_tests.
     within(shamir.flush_all_with_quiesce_timeout(Duration::ZERO))
         .await
-        .unwrap();
+        .unwrap_err();
     assert!(repo.quiesce_commits(Duration::ZERO).await.is_err());
     {
         let warnings = WARNINGS.0.lock().unwrap();
         assert_eq!(warnings.len(), 1, "expected one repo-specific warning");
         assert!(warnings[0].contains(&format!("app/{REPO}")));
-        assert!(warnings[0].contains("continuing"));
+        assert!(warnings[0].contains("commit quiescence"));
     }
     hook.resume.notify_one();
     within(shamir.flush_all()).await.unwrap();

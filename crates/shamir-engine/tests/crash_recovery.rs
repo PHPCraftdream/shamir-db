@@ -1582,16 +1582,16 @@ async fn crit1_history_seed_failure_aborts_recovery_on_disk() {
     // is inflight (the drainer may or may not have drained it — either way the
     // recovery loop replays inflight entries, and the fault injection fires
     // on the seed step).
-    let repo = open_repo(&repo_path).await;
-
-    // Arm the fault-injection env var so `seed_version_cache_for_entry`
-    // returns a synthetic error IN PLACE OF `write_committed_to_history`.
-    // The env var is read under `#[cfg(debug_assertions)]` (same gate as
-    // `maybe_crash`), so a `--release` build is unaffected — and this test
-    // binary builds in debug, where the seam is live.
+    // Arm before the public constructor: recovery now completes before a
+    // RepoInstance can escape to any caller.
     std::env::set_var("SHAMIR_TEST_FAIL_HISTORY_SEED", "1");
 
-    let result = repo.recover_v2_inflight().await;
+    let result = RepoInstance::from_factory(
+        REPO_NAME.into(),
+        BoxRepoFactory::fjall_raw(repo_path.clone()),
+        vec![TableConfig::new(TABLE), TableConfig::new(TABLE_B)],
+    )
+    .await;
 
     // CRITICAL: disarm IMMEDIATELY so no later test in the same binary is
     // poisoned by a stale env var (the static-atomic seam is per-process, but
@@ -1601,11 +1601,10 @@ async fn crit1_history_seed_failure_aborts_recovery_on_disk() {
     // THE FIX: recovery MUST return Err. Pre-fix it returned Ok and the entry
     // was marked durable despite the history write never landing — the silent
     // loss of an acked commit.
-    let err = result.expect_err(
-        "CRIT-1: a history-write failure during recovery MUST propagate as Err \
-         over the real on-disk image (pre-fix this was Ok — silent loss of an \
-         acked commit)",
-    );
+    let err = match result {
+        Err(error) => error,
+        Ok(_) => panic!("CRIT-1: history seed failure must refuse the public constructor"),
+    };
     let msg = format!("{err}");
     assert!(
         msg.contains("CRIT-1"),

@@ -40,7 +40,7 @@ async fn open_repo_with_sabotaged_wal_dir(path: &std::path::Path) -> RepoInstanc
     let wal_dir = path.with_file_name(wal_dir_name);
     std::fs::write(&wal_dir, b"not a directory").expect("seed wal-dir sabotage file");
 
-    RepoInstance::from_factory(
+    RepoInstance::from_factory_for_recovery_test(
         "r".into(),
         BoxRepoFactory::fjall_raw(path.to_path_buf()),
         vec![TableConfig::new("t")],

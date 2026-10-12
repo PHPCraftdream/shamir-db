@@ -83,6 +83,8 @@ fn fixture(capacity: usize) -> (RepoChangefeed, mpsc::Receiver<JournalMsg>) {
             gap,
             confirmed_through: Arc::new(AtomicU64::new(0)),
             barrier_notify: Arc::new(Notify::new()),
+            writer_done: tokio::sync::watch::channel(false).1,
+            clean_horizon: Arc::new(AtomicU64::new(0)),
             confirm_timeouts: AtomicU64::new(0),
         },
         journal_rx,

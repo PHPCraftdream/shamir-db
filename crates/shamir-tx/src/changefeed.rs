@@ -38,7 +38,9 @@
 //! A version still committing holds back the prefix rather than being skipped.
 //!
 //! Persistence remains asynchronous: a crash can lose the unflushed journal
-//! tail without a gap marker; cold WAL recovery does not check the journal.
+//! tail. The engine conservatively certifies the cold interval (J, H] before
+//! registration, even when all events survived; affected followers require
+//! manual resync. H remains limited by the recovered gate floor.
 //! Queue overflow/closure, write failures and corrupt records mark known gaps.
 //! Gap metadata is persisted asynchronously and restored on reopen once durable;
 //! marker-write failures retain dirty state for retry. This does not eliminate
@@ -59,7 +61,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_types::access::Actor;
-use tokio::sync::{broadcast, mpsc, oneshot, Notify};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
 use tokio::time::{sleep_until, timeout_at, Instant};
 
 /// One record-level change inside a committed transaction.
@@ -167,6 +169,8 @@ const WRITER_BATCH: usize = 256;
 #[async_trait::async_trait]
 pub trait ChangelogStore: Send + Sync {
     /// Persist a journal pair or the dedicated [`gap_marker_key`] metadata.
+    /// Clean-horizon puts must flush prior events BEFORE set, then flush the
+    /// metadata AFTER set. Success certifies both boundaries, not just set.
     /// Marker success must include the backend's explicit durability boundary.
     async fn put(&self, key: Bytes, value: Bytes) -> Result<(), String>;
     /// Range-read serialized events with keys in
@@ -179,6 +183,11 @@ pub trait ChangelogStore: Send + Sync {
 enum JournalMsg {
     Event(Arc<ChangelogEvent>),
     Barrier(u64),
+    CleanHorizon {
+        through: u64,
+        horizon: Arc<AtomicU64>,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
     RecoveryGap {
         interval: (u64, u64),
         ack: oneshot::Sender<Result<(), String>>,
@@ -215,6 +224,8 @@ pub struct RepoChangefeed {
     gap: Arc<GapMarker>,
     confirmed_through: Arc<AtomicU64>,
     barrier_notify: Arc<Notify>,
+    writer_done: watch::Receiver<bool>,
+    clean_horizon: Arc<AtomicU64>,
     confirm_timeouts: AtomicU64,
 }
 
@@ -288,6 +299,7 @@ impl RepoChangefeed {
             notify: Arc::clone(&notify),
         });
 
+        let (done, writer_done) = watch::channel(false);
         let me = Arc::new(Self {
             live,
             journal_tx,
@@ -298,20 +310,27 @@ impl RepoChangefeed {
             gap: Arc::clone(&gap),
             confirmed_through: Arc::clone(&confirmed_through),
             barrier_notify: Arc::clone(&barrier_notify),
+            writer_done,
+            clean_horizon: Arc::new(AtomicU64::new(0)),
             confirm_timeouts: AtomicU64::new(0),
         });
 
         // fire-and-forget: detached by design; owns no feed and drains on shutdown.
-        tokio::spawn(journal_writer_loop(
-            journal_rx,
-            store,
-            notify,
-            shutdown,
-            last_persisted_version,
-            gap,
-            confirmed_through,
-            barrier_notify,
-        ));
+        tokio::spawn(async move {
+            journal_writer_loop(
+                journal_rx,
+                store,
+                notify,
+                shutdown,
+                last_persisted_version,
+                gap,
+                confirmed_through,
+                barrier_notify,
+            )
+            .await;
+            // No waiter is required; channel closure also reports writer failure.
+            let _ = done.send(true);
+        });
         me
     }
 
@@ -380,6 +399,8 @@ impl RepoChangefeed {
                 }
                 mpsc::error::TrySendError::Full(JournalMsg::Barrier(_))
                 | mpsc::error::TrySendError::Closed(JournalMsg::Barrier(_))
+                | mpsc::error::TrySendError::Full(JournalMsg::CleanHorizon { .. })
+                | mpsc::error::TrySendError::Closed(JournalMsg::CleanHorizon { .. })
                 | mpsc::error::TrySendError::Full(JournalMsg::RecoveryGap { .. })
                 | mpsc::error::TrySendError::Closed(JournalMsg::RecoveryGap { .. }) => {
                     unreachable!("journal_enqueue only sends events");
@@ -489,6 +510,43 @@ impl RepoChangefeed {
             .map_err(DbError::Storage)
     }
 
+    /// Construct from strictly loaded durable metadata. One writer per store.
+    pub fn new_with_metadata(
+        store: Arc<dyn ChangelogStore>,
+        restored_gap: Option<(u64, u64)>,
+        clean_horizon: u64,
+    ) -> Arc<Self> {
+        let feed = Self::new_with_gap_interval(store, restored_gap);
+        feed.clean_horizon.store(clean_horizon, Ordering::Release);
+        feed
+    }
+
+    pub fn clean_horizon(&self) -> u64 {
+        self.clean_horizon.load(Ordering::Acquire)
+    }
+
+    /// Checkpoint a settled prefix through the sole writer. The store's clean
+    /// metadata put MUST flush preceding events before setting J, then flush J.
+    /// Call only at exclusive startup or after admission stops and work settles.
+    /// cancel-safe: NO — after admission the writer owns the request. A closed
+    /// acknowledgement suppresses a not-yet-started J put, but an in-flight
+    /// backend write may finish; cancellation never acknowledges durability.
+    pub async fn record_clean_horizon(&self, through: u64) -> DbResult<()> {
+        let (ack, result) = oneshot::channel();
+        self.journal_tx
+            .send(JournalMsg::CleanHorizon {
+                through,
+                horizon: Arc::clone(&self.clean_horizon),
+                ack,
+            })
+            .await
+            .map_err(|_| DbError::Storage("changefeed writer closed".into()))?;
+        result
+            .await
+            .map_err(|_| DbError::Storage("clean horizon acknowledgement lost".into()))?
+            .map_err(DbError::Storage)
+    }
+
     /// CF-1: the lowest known journal hole; zero means none.
     ///
     /// A non-zero value means the durable journal has a gap: at least one
@@ -504,6 +562,20 @@ impl RepoChangefeed {
     pub fn shutdown(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
         self.notify.notify_one();
+    }
+
+    /// Stop the writer without recording J, then await its final drain.
+    /// Admission must already be stopped. Suitable for hard-reopen fixtures:
+    /// unlike a clean checkpoint, this never certifies the stopped prefix.
+    /// cancel-safe: yes — cancellation drops only this waiter; shutdown remains
+    /// requested and a later waiter can observe the same termination signal.
+    pub async fn shutdown_and_wait(&self) -> DbResult<()> {
+        self.shutdown();
+        let mut done = self.writer_done.clone();
+        done.wait_for(|finished| *finished)
+            .await
+            .map_err(|_| DbError::Storage("changefeed writer termination lost".into()))?;
+        Ok(())
     }
 
     /// Wake the writer to flush promptly (used by tests / explicit flush).
@@ -576,6 +648,28 @@ impl RepoChangefeed {
         };
         JournalRead { events, gap_at }
     }
+}
+
+/// Versioned clean-stop / cold-certification metadata, never a journal event.
+pub fn clean_horizon_key() -> Bytes {
+    Bytes::from_static(b"\0journal-clean-v1")
+}
+
+/// Format: ASCII JCLN, format version 1, BE u64 horizon (13 bytes).
+pub fn encode_clean_horizon(through: u64) -> Bytes {
+    let mut bytes = Vec::with_capacity(13);
+    bytes.extend_from_slice(b"JCLN\x01");
+    bytes.extend_from_slice(&through.to_be_bytes());
+    Bytes::from(bytes)
+}
+
+pub fn decode_clean_horizon(bytes: &[u8]) -> Result<u64, String> {
+    if bytes.len() != 13 || &bytes[..5] != b"JCLN\x01" {
+        return Err("invalid clean horizon format/version/length".into());
+    }
+    Ok(u64::from_be_bytes(
+        bytes[5..].try_into().map_err(|_| "invalid clean horizon")?,
+    ))
 }
 
 /// Dedicated metadata key, sorting before every eight-byte journal key.
@@ -961,6 +1055,29 @@ async fn process_journal_msg(
 ) {
     match msg {
         JournalMsg::Event(ev) => persist_one(store, &ev, last_persisted_version, gap).await,
+        JournalMsg::CleanHorizon {
+            through,
+            horizon,
+            ack,
+        } => {
+            // FIFO processing drains all preceding events. Failed events have
+            // marked gaps; those gaps must cross durability before J can advance.
+            let result = async {
+                gap.persist_current(store).await?;
+                if ack.is_closed() {
+                    return Err("clean horizon caller cancelled".into());
+                }
+                let through = through.max(horizon.load(Ordering::Acquire));
+                store
+                    .put(clean_horizon_key(), encode_clean_horizon(through))
+                    .await?;
+                horizon.store(through, Ordering::Release);
+                Ok(())
+            }
+            .await;
+            // Cancellation means the caller no longer wants the acknowledgement.
+            let _ = ack.send(result);
+        }
         JournalMsg::RecoveryGap { interval, ack } => {
             let result = gap.persist_recovery(store, interval).await;
             // A cancelled caller no longer wants the ack; the repair still finishes.

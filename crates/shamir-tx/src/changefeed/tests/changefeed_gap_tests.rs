@@ -245,6 +245,8 @@ async fn failed_marker_put_retains_gap_and_retries_on_next_hint() {
         gap: gap.clone(),
         confirmed_through: Arc::new(AtomicU64::new(0)),
         barrier_notify: Arc::new(Notify::new()),
+        writer_done: tokio::sync::watch::channel(false).1,
+        clean_horizon: Arc::new(AtomicU64::new(0)),
         confirm_timeouts: AtomicU64::new(0),
     };
     let writer = journal_writer_loop(

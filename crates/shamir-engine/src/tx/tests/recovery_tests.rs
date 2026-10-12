@@ -19,7 +19,7 @@ use crate::table::TableConfig;
 async fn reopen_disk_repo(name: &str, path: PathBuf, tables: Vec<TableConfig>) -> RepoInstance {
     let mut last_err = None;
     for _attempt in 0..10 {
-        match RepoInstance::from_factory(
+        match RepoInstance::from_factory_for_recovery_test(
             name.into(),
             BoxRepoFactory::fjall_raw(path.clone()),
             tables.clone(),
@@ -642,9 +642,13 @@ async fn f3_file_wal_process_crash_recovery_replays_committed_tx() {
     let rid;
     {
         let factory = BoxRepoFactory::fjall_raw(path.clone());
-        let repo = RepoInstance::from_factory("f3".into(), factory, vec![TableConfig::new("t")])
-            .await
-            .expect("from_factory");
+        let repo = RepoInstance::from_factory_for_recovery_test(
+            "f3".into(),
+            factory,
+            vec![TableConfig::new("t")],
+        )
+        .await
+        .expect("from_factory");
         repo.get_table("t").await.unwrap();
 
         let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
@@ -713,9 +717,13 @@ async fn f4b_nontx_insert_crash_recovery() {
     let rid;
     {
         let factory = BoxRepoFactory::fjall_raw(path.clone());
-        let repo = RepoInstance::from_factory("f4b".into(), factory, vec![TableConfig::new("t")])
-            .await
-            .expect("from_factory");
+        let repo = RepoInstance::from_factory_for_recovery_test(
+            "f4b".into(),
+            factory,
+            vec![TableConfig::new("t")],
+        )
+        .await
+        .expect("from_factory");
         let tbl = repo.get_table("t").await.unwrap();
 
         let op = write::insert("t")
@@ -806,9 +814,13 @@ async fn c5_implicit_insert_new_field_recovers_with_preserved_id() {
     let pre_crash_id;
     {
         let factory = BoxRepoFactory::fjall_raw(path.clone());
-        let repo = RepoInstance::from_factory("c5".into(), factory, vec![TableConfig::new("t")])
-            .await
-            .expect("from_factory");
+        let repo = RepoInstance::from_factory_for_recovery_test(
+            "c5".into(),
+            factory,
+            vec![TableConfig::new("t")],
+        )
+        .await
+        .expect("from_factory");
         let tbl = repo.get_table("t").await.unwrap();
 
         // "c5_fresh_field" is guaranteed new to the table's interner.
@@ -928,10 +940,13 @@ async fn f3_file_wal_replay_is_idempotent() {
     let rid;
     {
         let factory = BoxRepoFactory::fjall_raw(path.clone());
-        let repo =
-            RepoInstance::from_factory("f3_idem".into(), factory, vec![TableConfig::new("t")])
-                .await
-                .expect("from_factory");
+        let repo = RepoInstance::from_factory_for_recovery_test(
+            "f3_idem".into(),
+            factory,
+            vec![TableConfig::new("t")],
+        )
+        .await
+        .expect("from_factory");
         repo.get_table("t").await.unwrap();
 
         let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();

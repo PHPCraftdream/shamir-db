@@ -240,36 +240,9 @@ impl ShamirDb {
                             }
                         }
                     }
-                    if let Err(e) = db.add_repo(config).await {
-                        log::warn!(
-                            "shamir_db::init: failed to attach repo '{}/{}' ({}): {}",
-                            db_name,
-                            repo_name,
-                            engine,
-                            e
-                        );
-                        continue;
-                    }
-
-                    // CRIT-A: run V2 WAL crash recovery on the OPEN path,
-                    // BEFORE the server accepts requests. A crash between
-                    // commit Phase 4 (`wal.begin`) and Phase 7
-                    // (`wal.commit`) leaves a durable inflight `WalEntryV2`;
-                    // without this replay the committed tx data is silently
-                    // lost on restart. A recovery failure is propagated
-                    // (not swallowed) — a repo that cannot recover must not
-                    // serve.
-                    if let Some(repo) = db.get_repo(repo_name) {
-                        let recovered = repo.recover_v2_inflight().await?;
-                        if recovered > 0 {
-                            log::info!(
-                                "recovered {} inflight transactions for repo '{}/{}'",
-                                recovered,
-                                db_name,
-                                repo_name
-                            );
-                        }
-                    }
+                    // Fail closed, before registry insertion, including J load
+                    // and gap/J persistence failures. Do not silently skip repos.
+                    db.add_repo(config).await?;
                 }
             }
         }

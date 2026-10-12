@@ -111,16 +111,8 @@ impl SystemStore {
             .add_table(TableConfig::new(TABLE_PUBLICATIONS))
             .add_table(TableConfig::new(TABLE_SUBSCRIPTIONS));
 
+        // DbInstance recovers/certifies before exposing the system repo.
         db.add_repo(repo_config).await?;
-
-        // Replay inflight WAL entries before the first catalogue read, like
-        // every user repo does on open. A catalogue write is acked from the
-        // overlay + WAL and reaches `history` only when the drainer lands it,
-        // so an entry still inflight at the previous close (or crash) is
-        // otherwise invisible to this boot's catalogue loads.
-        if let Some(repo) = db.get_repo(SYSTEM_REPO) {
-            repo.recover_v2_inflight().await?;
-        }
 
         Ok(Self { db })
     }
@@ -128,19 +120,14 @@ impl SystemStore {
     /// Drain the system repo's inflight WAL tail into `history` and flush its
     /// buffers (graceful-stop counterpart of the per-repo flush in
     /// [`ShamirDb::flush_all`](crate::ShamirDb::flush_all)).
+    /// cancel-safe: NO — delegates to bounded repo shutdown; a checkpoint
+    /// already in backend I/O can finish without acknowledging this caller.
     pub(crate) async fn flush_buffers_with_quiesce_timeout(
         &self,
         timeout: Duration,
     ) -> DbResult<()> {
         let repo = self.system_repo()?;
-        if let Err(e) = repo.quiesce_commits(timeout).await {
-            log::warn!(
-                "flush_all: system store/{}: {}; continuing with best-effort flush",
-                SYSTEM_REPO,
-                e
-            );
-        }
-        repo.flush_buffers().await
+        repo.shutdown_clean(timeout).await
     }
 
     /// Get the table manager for a system table.
