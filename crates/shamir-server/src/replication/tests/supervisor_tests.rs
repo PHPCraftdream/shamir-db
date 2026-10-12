@@ -637,6 +637,10 @@ impl ReplSource for PartialSource {
     ) -> Result<ReplResponse, ReplError> {
         self.pulls.fetch_add(1, Ordering::AcqRel);
         Ok(ReplResponse::Pull {
+            repo_lineage_id: None,
+            history_epoch: None,
+            gap_first: None,
+            gap_through: None,
             leader_epoch: 1,
             events: self.events.clone(),
             gap_at: None,
