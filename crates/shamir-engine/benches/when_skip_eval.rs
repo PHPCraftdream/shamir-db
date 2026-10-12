@@ -38,7 +38,7 @@
 //!   whose value the next op's filter references).
 //!
 //! ## Measured results (this machine,
-//! `CARGO_TARGET_DIR=D:/dev/rust/.cargo-target-bench cargo bench -p
+//! `CARGO_TARGET_DIR='<dedicated bench target dir>' cargo bench -p
 //! shamir-engine --bench when_skip_eval`, JIT-calibrated iteration
 //! counts — actual run output):
 //!

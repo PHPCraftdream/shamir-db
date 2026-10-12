@@ -1,7 +1,7 @@
 //! Bench helpers for the S.H.A.M.I.R. workspace.
 //!
 //! The workspace's benches run on `bench-scale-tool` (a fixed-iteration
-//! harness — see `D:/dev/rust/bench-scale-tool`), not Criterion. This crate
+//! harness — see the published `bench-scale-tool` crate), not Criterion. This crate
 //! now only carries the pieces that harness doesn't provide: shared test
 //! fixture generation ([`vector_data`]) and optional peak-RSS sampling
 //! ([`peak_mem`]).

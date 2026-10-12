@@ -21,7 +21,7 @@ The response variant alone is not proof of success: inspect `status`, then
 | `error` | **Additive, optional** published-commit error; omitted when absent. Does not change `status` or set `reason`. |
 | `snapshot_version` | Read snapshot version; present for committed outcomes. |
 | `commit_version` | Published version; present for committed outcomes, absent for aborted outcomes. |
-| `materialized` | Whether all commit projections completed inline; only meaningful for committed outcomes. Deserialization defaults to `true` for older payloads. |
+| `materialized` | Inline projection outcome, not a visibility watermark; may also be forced to `false` when the acknowledgement wait requires reopen. Only meaningful for committed outcomes. Deserialization defaults to `true` for older payloads. |
 
 (Source: `crates/shamir-query-types/src/batch/transaction_info.rs`.)
 
@@ -62,14 +62,38 @@ write is absent on disk (source: `crates/shamir-engine/src/tx/commit.rs`,
 
 ### Materialization is not durability
 
-`materialized: true` means projections (main store, counters, secondary indexes,
-vector graph) landed inline. `false` means at least one projection was deferred
-to idempotent recovery on the next repository open: restart-bounded eventual
-visibility, **not an abort**. Do not replay the transaction to repair a deferred
-projection. A `wal_durability` error remains a durability warning regardless of
-this flag; do not infer guaranteed crash recovery from `materialized` alone
-(source: `crates/shamir-query-types/src/batch/transaction_info.rs`,
-`crates/shamir-engine/src/tx/commit.rs`).
+`materialized` describes the projection outcome, **not a visibility field**.
+`false` (`Deferred`) can mean a projection was deferred to idempotent online
+orphan replay or cold recovery on repository open; it can also be forced when
+an acknowledgement wait returns `ReopenRequired`, even if this commit's own
+projections succeeded. It is **not an abort**, nor a next-open-only or bounded
+visibility guarantee. Do not replay the transaction to repair it. A
+`wal_durability` error remains a durability warning regardless of this flag;
+do not infer guaranteed crash recovery from `materialized` alone. Sources:
+`crates/shamir-engine/src/tx/materialize.rs:255-273`,
+`crates/shamir-engine/src/tx/drainer.rs:1190-1211`,
+`crates/shamir-engine/src/tx/recovery.rs:413-430`,
+`crates/shamir-engine/src/tx/commit.rs:597-603,619-629`.
+
+For commits that allocate a version, the acknowledgement waits for the
+contiguous completion watermark W to reach it (all versions through it must
+materialize or abort). Read-only/empty commits skip this wait. A stuck lower
+version can delay all higher acknowledgements in that repository indefinitely;
+the warning/recheck timers do not impose a give-up timeout. Reopen ends the
+visibility wait with `Deferred`, not proof of visibility. Non-transactional
+write acknowledgement instead logs `ReopenRequired` and returns normally,
+without a typed deferred outcome. Sources:
+`crates/shamir-engine/src/tx/commit.rs:587-604`,
+`crates/shamir-tx/src/repo_tx_gate.rs:1049-1116`,
+`crates/shamir-tx/src/mvcc_store/mod.rs:788-790`.
+
+`requires_reopen` is repository state, **not a generic wire error code or a
+TransactionInfo field**. The commit-entry metadata reason is
+`wal_requires_reopen` (documented above); a pending AsOf read instead maps to
+`as_of_reopen_required` (below). Sources:
+`crates/shamir-engine/src/tx/commit.rs:389,814-829`,
+`crates/shamir-query-types/src/batch/transaction_info.rs:7-48`,
+`crates/shamir-storage/src/error.rs:117-118`.
 
 ## BatchError → DbResponse.Error.code
 
@@ -101,6 +125,17 @@ allowlist of every operation-specific DDL/query code.
 | `invalid_page_size` | `InvalidPageSize` |
 | `cursor_page_too_large` | `CursorPageTooLarge` (serialized cursor page cap) |
 
+### Post-execution response rejection
+
+`result_too_large` also comes directly from encoded Execute response enforcement,
+after execution and subscription activation. It can therefore follow committed
+writes and discard the transaction metadata: **it is not proof of rollback and
+not a blind-retry guarantee**. Reconcile the outcome before issuing writes
+again. Serialized cursor page rejection is `cursor_page_too_large`, not
+`result_too_large`. Sources:
+`crates/shamir-server/src/db_handler/handler.rs:595-605,631-642,747`,
+`crates/shamir-server/src/db_handler/cursor_handlers.rs:315-322`.
+
 ### AsOf read errors (forwarded QueryError.code)
 
 | Code | Meaning / action |
@@ -109,8 +144,14 @@ allowlist of every operation-specific DDL/query code.
 | `as_of_reopen_required` | Requested allocated version cannot settle because the repository requires reopen; reopen/reconcile before retrying. |
 
 Allocated AsOf positions above the contiguous completion watermark wait until
-all versions through the requested position materialize or abort. Positions at
-or below the watermark do not wait, even when reopening is required.
+all versions through the requested position materialize or abort. This wait has
+no give-up timeout; callers cancel the read to bound it, without settling a
+version or changing the requested position. Positions at or below the watermark
+do not wait, even when reopening is required. Sources:
+`crates/shamir-engine/src/table/read_temporal.rs:85-101`,
+`crates/shamir-tx/src/repo_tx_gate.rs:1055-1107`,
+`crates/shamir-storage/src/error.rs:117-118`,
+`crates/shamir-server/src/db_handler/handler.rs:711-719`.
 
 ### Interactive handle lifecycle
 

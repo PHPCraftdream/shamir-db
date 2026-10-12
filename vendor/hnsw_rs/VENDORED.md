@@ -4,6 +4,11 @@ Upstream: <https://github.com/jean-pierreBoth/hnswlib-rs>, crate `hnsw_rs` **0.3
 (crates.io checksum `c9b4dcb9840006fae9964e97dfdb354cd00b7a15d69d143caae7eeca0410af9f`).
 Licence: MIT / Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`).
 
+Shipped dependency: **0.3.5 + Shamir patch**, identified by the repository release
+commit, not an unmodified crates.io package. The checksum above records upstream
+origin, not the modified tree (`Cargo.toml:136-137`,
+`vendor/hnsw_rs/Cargo.toml:8-9`).
+
 Wired in through `[patch.crates-io]` in the workspace `Cargo.toml`; the exact pin
 `hnsw_rs = "=0.3.5"` in `crates/shamir-index/Cargo.toml` and the dump-format guard
 `HNSW_RS_VERSION` stay unchanged because the vendored version is still 0.3.5.
@@ -21,7 +26,10 @@ upstream fix yet.
 ## Differences from upstream 0.3.5
 
 - `Cargo.toml`: trimmed (no example/test targets, no hdf5/ndarray/itertools/skiplist
-  dev-dependencies), `publish = false`.
+  dev-dependencies), `publish = false`. The `simdeez_f` and `stdsimd` features
+  are empty rather than forwarding upstream's `anndists` features: this avoids
+  pulling simdeez and unmaintained `paste` into workspace all-feature resolution
+  for features Shamir does not enable (`vendor/hnsw_rs/Cargo.toml:28-34`).
 - `rustfmt.toml`: formatting disabled for this directory.
 - `src/lib.rs`: `#![allow(warnings, clippy::all)]` (third-party code must not trip the
   workspace `-D warnings` gates) and the `SHAMIR_REVERSE_UPDATE_LOCK_FIX` marker.
