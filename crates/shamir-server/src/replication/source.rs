@@ -20,6 +20,9 @@
 use async_trait::async_trait;
 use shamir_query_types::wire::repl::{ReplRequest, ReplResponse, CURRENT_REPL_PROTO_VER};
 
+#[path = "seed/mod.rs"]
+pub(crate) mod seed;
+
 use super::error::ReplError;
 
 /// Transport-agnostic source of replication data from a leader.

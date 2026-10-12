@@ -3,7 +3,9 @@ mod installer;
 mod staging;
 mod stream;
 
-pub use installer::install;
+mod subscription;
+pub use installer::{install, install_subscription};
+pub use subscription::SeedSubscriptionArgs;
 
 #[cfg(test)]
 mod tests;

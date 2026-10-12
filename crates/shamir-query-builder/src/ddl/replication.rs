@@ -211,12 +211,29 @@ pub fn subscription(
         upstream: upstream.into(),
         publication: publication.into(),
         profile: profile.into(),
+        paused: false,
     })
 }
 
 // ============================================================================
 // drop_subscription
 // ============================================================================
+
+/// Create a stopped subscription; activation always requires explicit Resume.
+pub fn paused_subscription(
+    name: impl Into<String>,
+    upstream: impl Into<String>,
+    publication: impl Into<String>,
+    profile: impl Into<String>,
+) -> BatchOp {
+    BatchOp::CreateSubscription(CreateSubscriptionOp {
+        create_subscription: name.into(),
+        upstream: upstream.into(),
+        publication: publication.into(),
+        profile: profile.into(),
+        paused: true,
+    })
+}
 
 /// Drop a subscription by name.
 pub fn drop_subscription(name: impl Into<String>) -> BatchOp {

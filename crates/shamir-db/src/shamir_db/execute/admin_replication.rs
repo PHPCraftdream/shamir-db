@@ -72,8 +72,13 @@ impl ShamirAdminExecutor {
             code: None,
         };
         self.authorize_repl_mutation().await?;
+        let _control = self.shamir.replication_control_lock.lock().await;
 
         let name = op.create_replication_profile.clone();
+        self.shamir
+            .validate_seed_profile_change(&name, &op.streams)
+            .await
+            .map_err(super::replication_seed::control::batch_error)?;
         let mut m = crate::types::common::new_map();
         m.insert("name".to_string(), QueryValue::Str(name.clone()));
         m.insert("streams".to_string(), to_qv(&op.streams));
@@ -115,6 +120,7 @@ impl ShamirAdminExecutor {
             code: None,
         };
         self.authorize_repl_mutation().await?;
+        let _control = self.shamir.replication_control_lock.lock().await;
 
         let name = op.drop_replication_profile.clone();
         let table = self
@@ -153,6 +159,7 @@ impl ShamirAdminExecutor {
             code: None,
         };
         self.authorize_repl_mutation().await?;
+        let _control = self.shamir.replication_control_lock.lock().await;
 
         let name = op.create_publication.clone();
         let mut m = crate::types::common::new_map();
@@ -196,6 +203,7 @@ impl ShamirAdminExecutor {
             code: None,
         };
         self.authorize_repl_mutation().await?;
+        let _control = self.shamir.replication_control_lock.lock().await;
 
         let name = op.drop_publication.clone();
         let table = self
@@ -256,6 +264,7 @@ impl ShamirAdminExecutor {
             code: None,
         };
         self.authorize_repl_mutation().await?;
+        let _control = self.shamir.replication_control_lock.lock().await;
 
         let name = op.create_subscription.clone();
         let mut m = crate::types::common::new_map();
@@ -267,8 +276,15 @@ impl ShamirAdminExecutor {
         );
         m.insert("profile".to_string(), QueryValue::Str(op.profile.clone()));
         // `state` drives 386-b pause/resume; a fresh subscription is active.
-        m.insert("state".to_string(), QueryValue::Str("active".to_string()));
-        let record = QueryValue::Map(m);
+        m.insert(
+            "state".to_string(),
+            QueryValue::Str(if op.paused { "paused" } else { "active" }.to_string()),
+        );
+        let mut record = QueryValue::Map(m);
+        self.shamir
+            .bind_seed_creation(op, &mut record)
+            .await
+            .map_err(super::replication_seed::control::batch_error)?;
 
         let table = self
             .shamir
@@ -291,6 +307,10 @@ impl ShamirAdminExecutor {
             .persist()
             .await
             .map_err(|e| err(e.to_string()))?;
+        self.shamir
+            .flush_seed_catalogue()
+            .await
+            .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
             "created_subscription": @(QueryValue::Str(name)),
         })))
@@ -306,6 +326,7 @@ impl ShamirAdminExecutor {
             code: None,
         };
         self.authorize_repl_mutation().await?;
+        let _control = self.shamir.replication_control_lock.lock().await;
 
         let name = op.drop_subscription.clone();
         let table = self
@@ -345,6 +366,7 @@ impl ShamirAdminExecutor {
             code: Some(code.to_string()),
         };
         self.authorize_repl_mutation().await?;
+        let _control = self.shamir.replication_control_lock.lock().await;
 
         let name = op.alter_subscription.clone();
         let table = self
@@ -378,6 +400,10 @@ impl ShamirAdminExecutor {
         }
 
         let mut record = existing.records[0].as_value().into_owned();
+        self.shamir
+            .validate_seed_resume_action(&record, &op.action)
+            .await
+            .map_err(super::replication_seed::control::batch_error)?;
         if let QueryValue::Map(ref mut m) = record {
             match &op.action {
                 SubAction::Pause => {
@@ -443,6 +469,7 @@ impl ShamirAdminExecutor {
                         }
                     }
                     m.shift_remove("status_message");
+                    m.insert("seed_resume_validated".into(), QueryValue::Bool(true));
                     m.insert("state".to_string(), QueryValue::Str("active".to_string()));
                 }
                 SubAction::SetProfile(p) => {
@@ -463,6 +490,10 @@ impl ShamirAdminExecutor {
         table
             .interner()
             .persist()
+            .await
+            .map_err(|e| err(e.to_string()))?;
+        self.shamir
+            .flush_seed_catalogue()
             .await
             .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
@@ -511,23 +542,11 @@ impl ShamirAdminExecutor {
         let records = Self::read_all(&table, "subscriptions")
             .await
             .map_err(|e| err(e.to_string()))?;
-        let entries: Vec<QueryValue> = records
-            .into_iter()
-            .map(|rec| {
-                let name = rec.get("name").cloned().unwrap_or(QueryValue::Null);
-                let state = rec.get("state").cloned().unwrap_or(QueryValue::Null);
-                let mut m = crate::types::common::new_map();
-                m.insert("name".to_string(), name);
-                m.insert("state".to_string(), state);
-                m.insert(
-                    "status_message".into(),
-                    rec.get("status_message")
-                        .cloned()
-                        .unwrap_or(QueryValue::Null),
-                );
-                QueryValue::Map(m)
-            })
-            .collect();
+        let entries = self
+            .shamir
+            .seed_status_entries(records)
+            .await
+            .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
             "subscriptions": @(QueryValue::List(entries)),
         })))
@@ -647,6 +666,7 @@ impl ShamirDb {
         state: &str,
         message: &str,
     ) -> DbResult<()> {
+        let _control = self.replication_control_lock.lock().await;
         let table = self.system_store().subscriptions_table().await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
@@ -673,6 +693,10 @@ impl ShamirDb {
         }
         if let QueryValue::Map(ref mut fields) = record {
             fields.insert(
+                "last_terminal_reason".into(),
+                QueryValue::Str(state.to_string()),
+            );
+            fields.insert(
                 "status_message".into(),
                 QueryValue::Str(message.to_string()),
             );
@@ -686,6 +710,7 @@ impl ShamirDb {
             .set_via_implicit_tx(&table, &set_op)
             .await?;
         table.interner().persist().await?;
+        self.flush_seed_catalogue().await?;
         Ok(())
     }
 }

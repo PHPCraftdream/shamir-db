@@ -72,6 +72,54 @@ Follower-цикл, супервизор и источники (`InProcess`/`Wire
 `repl_convergence_e2e.rs`, `repl_supervisor_boot.rs`,
 `set_replicator_wire.rs`.
 
+### Offline seeded subscriptions: paused install and validated Resume (SEED-4)
+
+This contract supersedes the older metadata-only Resume description below for
+seeded repositories. Replication remains experimental; this is offline R2-lite,
+not online snapshots, automatic reseeding, promotion, or full disaster recovery.
+
+On Unix, `replication-seed-install --db app --repo main --artifact DIR
+--manifest-digest DIGEST --subscription app-main --upstream ENDPOINT
+--publication PUBLICATION --profile PROFILE` installs a new isolated image and,
+as its final durable step, creates an exact whole-repository pull profile and a
+**paused** subscription bound to the repository's Complete receipt. No follower
+loop or Pull starts while paused. An exact artifact/identity/arguments retry
+finishes a missing subscription without importing rows again; an existing
+matching subscription is left unchanged, including if already active. Conflicts
+are refused. Durable publication is unsupported off Unix. Offline authorization
+is OS filesystem authority; protect seed artifacts as sensitive data.
+
+Online `Resume` still requires root `Manage`. Before writing active state it
+contacts the real authenticated upstream using Hello and validates the named
+publication and local read-only pull profile as exactly the receipt's complete
+`(db, repo)` scope. Hello publication scopes are advertised only when all their
+repository read checks succeed. An older peer without publication metadata is
+refused. Complete installation, lineage, history epoch, canonical schema,
+settled source position, certified affected horizon, exclusive upstream owner,
+and checked bookmark-plus-one are required. Refusal leaves the subscription
+unchanged and returns a distinct `seed_*` code. Dropping/recreating a subscription
+does not remove the repository receipt or bypass these checks.
+
+The follower fences Hello and every Pull's identity/schema metadata **before
+payload decoding or apply**. Missing identity, a new lineage/history epoch, or
+schema divergence is a terminal typed reason, persisted for status. DDL is not
+replicated in R2-lite: freeze source DDL for this relationship. A new certified
+gap beyond the bookmark still stops the follower; no certificate is cleared and
+no missing interval is excused. The first pull after seed version V is V+1.
+
+Root `List` / `ReplicationStatus` reports per repository:
+`installation_state`, `artifact_digest`, `source_db`, `source_repo`,
+`source_lineage_id`, `source_history_epoch`, `seed_source_version`,
+`upstream_bookmark`, `next_pull_version`, `local_baseline_version`,
+`local_consistent_version`, `schema_digest`, `certified_gap_first`,
+`certified_gap_through`, `subscription_state`, and `last_terminal_reason`.
+Source seed/bookmark/next-pull positions are **upstream versions**; baseline and
+consistent positions are **destination-local versions** (seed baseline 1).
+The certified interval shown is the destination repository's certificate.
+New peer metadata is additive/defaulted so old payloads decode, but seeded
+activation fails closed when required evidence is absent. The full recovery
+runbook and real process-crash acceptance scenario belong to SEED-5.
+
 ### Live subscriptions (server-push) — реализовано
 
 `crates/shamir-server/src/subscriptions/` (`bridge.rs`, `registry.rs`,

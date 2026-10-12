@@ -387,6 +387,7 @@ impl ReplSource for GapReplSource {
         _wait_ms: Option<u32>,
     ) -> Result<ReplResponse, ReplError> {
         Ok(ReplResponse::Pull {
+            schema_digest: None,
             repo_lineage_id: None,
             history_epoch: None,
             gap_first: None,

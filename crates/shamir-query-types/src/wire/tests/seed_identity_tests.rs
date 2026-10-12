@@ -76,6 +76,9 @@ fn identity_interval_named_messagepack_roundtrip() {
         let hello = ReplResponse::Hello {
             leader_epoch: 1,
             repos: vec![ReplRepoInfo {
+                schema_digest: None,
+                settled_version: None,
+                publications: Vec::new(),
                 db: "app".into(),
                 repo: "main".into(),
                 current_version: 100,
@@ -87,6 +90,7 @@ fn identity_interval_named_messagepack_roundtrip() {
             }],
         };
         let pull = ReplResponse::Pull {
+            schema_digest: None,
             leader_epoch: 1,
             events: vec![],
             gap_at: Some(10),

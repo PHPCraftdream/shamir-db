@@ -224,6 +224,7 @@ fn create_subscription_op_roundtrip() {
         upstream: "tls://leader:7432".to_string(),
         publication: "pub_app".to_string(),
         profile: "cluster".to_string(),
+        paused: false,
     };
     let back: CreateSubscriptionOp = from_qv(to_qv(&op));
     assert_eq!(back, op);

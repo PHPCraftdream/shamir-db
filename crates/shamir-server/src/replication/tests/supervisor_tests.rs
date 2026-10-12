@@ -363,6 +363,7 @@ impl ReplSource for AlwaysGapReplSource {
         _wait_ms: Option<u32>,
     ) -> Result<ReplResponse, ReplError> {
         Ok(ReplResponse::Pull {
+            schema_digest: None,
             repo_lineage_id: None,
             history_epoch: None,
             gap_first: None,
@@ -637,6 +638,7 @@ impl ReplSource for PartialSource {
     ) -> Result<ReplResponse, ReplError> {
         self.pulls.fetch_add(1, Ordering::AcqRel);
         Ok(ReplResponse::Pull {
+            schema_digest: None,
             repo_lineage_id: None,
             history_epoch: None,
             gap_first: None,

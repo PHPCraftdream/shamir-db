@@ -1,4 +1,4 @@
 pub(super) mod exporter;
 pub(super) mod maintenance_open;
-pub(super) mod schema_as_names;
-pub(super) mod schema_digest;
+pub(crate) mod schema_as_names;
+pub(crate) mod schema_digest;

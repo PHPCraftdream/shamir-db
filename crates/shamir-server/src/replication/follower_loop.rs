@@ -161,8 +161,9 @@ pub async fn run_follower_loop(
         ApplyPolicy::Trusted
     };
     // 1. hello → seed max-seen epoch (§5.2).
+    let seed_receipt = super::source::seed::fence::load_receipt(&db, &db_name, &repo).await?;
     let mut max_seen_epoch = match source.hello(&node_id).await {
-        Ok(resp) => leader_epoch_of(&resp),
+        Ok(resp) => super::source::seed::fence::fence_hello(seed_receipt.as_ref(), &resp)?,
         // A hello that already trips fencing is fatal — propagate.
         Err(e @ ReplError::StaleLeaderEpoch { .. }) => return Err(e),
         Err(e) => {
@@ -247,7 +248,9 @@ pub async fn run_follower_loop(
         // 3. pull — always from the durable bookmark; a journal gap is now
         // terminal (see step 6), so there is no cursor-shift state to track
         // across iterations.
-        let from_version = bookmark + 1;
+        let from_version = bookmark
+            .checked_add(1)
+            .ok_or(shamir_db::SeedRefusal::BookmarkOverflow)?;
         let resp = match source
             .pull(
                 &db_name,
@@ -260,7 +263,8 @@ pub async fn run_follower_loop(
         {
             Ok(r) => r,
             Err(e @ ReplError::StaleLeaderEpoch { .. })
-            | Err(e @ ReplError::ReopenRequired { .. }) => return Err(e),
+            | Err(e @ ReplError::ReopenRequired { .. })
+            | Err(e @ ReplError::Seed(_)) => return Err(e),
             Err(e) => {
                 warn!(node_id = %node_id, error = %e, "follower_loop: pull failed, backing off");
                 sleep_backoff(&cancel, &mut backoff_ms).await;
@@ -291,6 +295,7 @@ pub async fn run_follower_loop(
         backoff_ms = INITIAL_BACKOFF_MS;
 
         // 5. dispatch on the reply payload.
+        super::source::seed::fence::fence_pull(seed_receipt.as_ref(), &resp)?;
         let (events_bytes, gap_at) = match resp {
             ReplResponse::Pull { events, gap_at, .. } => (events, gap_at),
             ReplResponse::Error { code, message, .. } => {

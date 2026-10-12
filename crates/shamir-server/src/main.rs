@@ -110,6 +110,8 @@ enum Subcmd {
         artifact: PathBuf,
         #[arg(long)]
         manifest_digest: String,
+        #[command(flatten)]
+        subscription: shamir_server::replication_seed::SeedSubscriptionArgs,
     },
 
     /// Snapshot `data_dir` (from --config) into `<to>/<UTC-timestamp>/`.
@@ -290,13 +292,15 @@ async fn run_async(cli: Cli) -> anyhow::Result<u8> {
             repo,
             artifact,
             manifest_digest,
+            subscription,
         }) => {
-            let receipt = shamir_server::replication_seed::install(
+            let receipt = shamir_server::replication_seed::install_subscription(
                 &config.data_dir,
                 &db,
                 &repo,
                 &artifact,
                 &manifest_digest,
+                &subscription,
             )
             .await?;
             println!("installed manifest sha256: {}", receipt.artifact_digest);

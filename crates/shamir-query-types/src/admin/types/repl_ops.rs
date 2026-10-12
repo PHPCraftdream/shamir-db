@@ -31,6 +31,10 @@
 //! ops are write-classified (`is_write == true`). Every op here is an admin
 //! op (`is_admin == true`) — repl-DDL is an administrative surface.
 
+#[path = "seed_subscription/mod.rs"]
+mod seed_subscription;
+pub use seed_subscription::SeedRepositoryStatus;
+
 use serde::{Deserialize, Serialize};
 
 /// Serde skip-serializing-if helper: omit `false` booleans from the wire.
@@ -145,7 +149,7 @@ pub struct DropReplicationProfileOp {
 /// downstream subscribers may pull. `system/*` (users, roles, settings) is
 /// included by adding its scope explicitly — there is no separate
 /// "replicate accounts" op (§5.5 insight).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreatePublicationOp {
     /// Publication name (discriminator key).
     pub create_publication: String,
@@ -175,6 +179,9 @@ pub struct CreateSubscriptionOp {
     pub publication: String,
     /// Local replication profile governing this subscription's streams.
     pub profile: String,
+    /// Start stopped; legacy requests default to active.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub paused: bool,
 }
 
 /// Drop a subscription. The node stops pulling from the upstream; already-

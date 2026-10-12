@@ -43,6 +43,7 @@ mod db_execute;
 mod db_tx;
 mod function_invoker;
 mod helpers;
+pub(crate) mod replication_seed;
 mod table_resolver;
 
 #[cfg(test)]
