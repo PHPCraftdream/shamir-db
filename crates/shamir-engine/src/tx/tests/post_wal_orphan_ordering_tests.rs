@@ -11,7 +11,7 @@ use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
 use crate::tx::commit::{PostWalPrePublishHook, TEST_POST_WAL_PRE_PUBLISH_HOOK};
 
-pub(super) async fn fixture(name: &str) -> (RepoInstance, Arc<PostWalPrePublishHook>) {
+pub(crate) async fn fixture(name: &str) -> (RepoInstance, Arc<PostWalPrePublishHook>) {
     let hook = Arc::new(PostWalPrePublishHook {
         repo_name: name.into(),
         pre_wal: AtomicBool::new(false),

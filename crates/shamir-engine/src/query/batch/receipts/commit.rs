@@ -3,8 +3,10 @@ use std::pin::Pin;
 
 use crate::query::batch::BatchError;
 use crate::repo::RepoInstance;
+use crate::tx::ack::commit_tx_with_kind;
 use crate::tx::CommitError;
 use shamir_query_types::batch::{TransactionInfo, VisibilityWait};
+use shamir_tx::visibility_metrics::PendingKind;
 
 /// Preserve known publication, including durability warnings, as metadata.
 /// The commit itself is never raced against an execution deadline.
@@ -29,7 +31,7 @@ async fn commit_implicit_inner(
 ) -> Result<TransactionInfo, BatchError> {
     let tx_id = tx.tx_id.0;
     let snapshot = tx.snapshot_version;
-    match repo.commit_tx_with_options(tx, wait).await {
+    match commit_tx_with_kind(tx, repo, wait, PendingKind::ImplicitBatch).await {
         Ok(outcome) => Ok(TransactionInfo::committed(
             outcome.tx_id,
             outcome.snapshot_version,
