@@ -22,6 +22,7 @@ use shamir_server::server::{BootstrapMode, ServerLauncher};
 fn make_test_config(temp: &TempDir) -> Config {
     let data_dir: PathBuf = temp.path().to_path_buf();
     Config {
+        transactions: Default::default(),
         data_dir: data_dir.clone(),
         logging: LoggingConfig {
             level: "warn".into(),

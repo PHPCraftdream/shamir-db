@@ -849,6 +849,7 @@ pub(super) async fn execute_transactional_impl(
                     | BatchError::TooManyQueries { .. }
                     | BatchError::TooManyIterations { .. }
                     | BatchError::LimitExceeded { .. }
+                    | BatchError::AsOfVisibilityTimeout { .. }
             ) {
                 return Err(plan_err);
             }

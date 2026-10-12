@@ -1,9 +1,10 @@
 //! FilterContext — evaluation context for filter callbacks.
 
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use shamir_funclib::scalar_resolver::ScalarResolver;
-use shamir_query_types::batch::BatchLimits;
+use shamir_query_types::batch::{BatchLimits, VisibilityWait};
 use shamir_types::core::interner::Interner;
 use shamir_types::types::common::TMap;
 use shamir_types::types::value::QueryValue;
@@ -39,6 +40,8 @@ use crate::query::read::QueryResult;
 /// top level it is an empty shared map (zero allocation on the common
 /// path). Used to resolve `FilterValue::Param { name }` references.
 pub struct FilterContext<'a> {
+    pub(crate) read_visibility_budget: Option<Duration>,
+    pub(crate) read_visibility_scope: Option<&'a crate::query::batch::ExecScope>,
     pub(crate) row_byte_meter: Option<&'a RowByteMeter<'a>>,
     max_accumulator_bytes: Option<usize>,
     pub interner: &'a Interner,
@@ -123,6 +126,8 @@ fn builtins_only_resolver() -> ScalarResolver {
 impl<'a> FilterContext<'a> {
     pub fn new(interner: &'a Interner, resolved_refs: &'a TMap<String, QueryResult>) -> Self {
         Self {
+            read_visibility_budget: Some(Duration::from_millis(5000)),
+            read_visibility_scope: None,
             row_byte_meter: None,
             max_accumulator_bytes: None,
             interner,
@@ -139,6 +144,36 @@ impl<'a> FilterContext<'a> {
     pub(crate) fn with_row_byte_meter(mut self, meter: Option<&'a RowByteMeter<'a>>) -> Self {
         self.row_byte_meter = meter;
         self
+    }
+
+    /// Explicit allocated-version read budget for embedded callers.
+    pub fn with_read_visibility_budget(mut self, budget: Duration) -> Self {
+        self.read_visibility_budget = Some(budget);
+        self
+    }
+
+    /// Select strict or bounded allocated-version waits for embedded reads.
+    pub fn with_read_visibility_wait(mut self, wait: VisibilityWait) -> Self {
+        self.read_visibility_budget = match wait {
+            VisibilityWait::Strict => None,
+            VisibilityWait::Bounded { timeout_ms } => Some(Duration::from_millis(timeout_ms)),
+        };
+        self
+    }
+
+    pub(crate) fn with_read_visibility_scope(
+        mut self,
+        scope: &'a crate::query::batch::ExecScope,
+    ) -> Self {
+        self.read_visibility_scope = Some(scope);
+        self
+    }
+
+    pub(crate) fn remaining_read_visibility_budget(&self) -> Option<Duration> {
+        match self.read_visibility_scope {
+            Some(scope) => Some(scope.read_visibility_budget()),
+            None => self.read_visibility_budget,
+        }
     }
 
     pub fn with_max_accumulator_bytes(mut self, max: usize) -> Self {

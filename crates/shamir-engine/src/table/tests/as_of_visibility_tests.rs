@@ -181,3 +181,72 @@ async fn as_of_reopen_required_is_typed_error() {
     ));
     drop(lower);
 }
+
+#[tokio::test(start_paused = true)]
+async fn as_of_budget_returns_structured_timeout_without_data() {
+    let (table, _mvcc, gate, _op) = fixture().await;
+    let lower = gate.assign_next_version_guarded();
+    let query = Query::from("t").as_of_version(1).build();
+    let interner = table.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs)
+        .with_read_visibility_budget(std::time::Duration::from_millis(17));
+    let mut read = Box::pin(table.read(&query, &ctx));
+    poll_fn(|cx| {
+        assert!(read.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    tokio::time::advance(std::time::Duration::from_millis(17)).await;
+    let error = read.await.unwrap_err();
+    assert_eq!(error.code(), Some("as_of_visibility_timeout"));
+    assert!(matches!(
+        error,
+        DbError::AsOfVisibilityTimeout {
+            requested: 1,
+            visible_through: 0,
+            blocking_version: 1,
+        },
+    ));
+    assert_eq!(gate.visible_floor(), 0);
+    drop(lower);
+}
+
+#[tokio::test(start_paused = true)]
+async fn as_of_explicit_strict_wait_outlives_bounded_budget() {
+    let (table, _mvcc, gate, _op) = fixture().await;
+    let lower = gate.assign_next_version_guarded();
+    let query = Query::from("t").as_of_version(1).build();
+    let interner = table.interner().get().await.unwrap();
+    let refs = new_map();
+    let bounded_ctx = FilterContext::new(interner, &refs).with_read_visibility_wait(
+        shamir_query_types::batch::VisibilityWait::Bounded { timeout_ms: 17 },
+    );
+    let strict_ctx = FilterContext::new(interner, &refs)
+        .with_read_visibility_wait(shamir_query_types::batch::VisibilityWait::Strict);
+    let mut bounded = Box::pin(table.read(&query, &bounded_ctx));
+    let mut strict = Box::pin(table.read(&query, &strict_ctx));
+    poll_fn(|cx| {
+        assert!(bounded.as_mut().poll(cx).is_pending());
+        assert!(strict.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    tokio::time::advance(std::time::Duration::from_millis(17)).await;
+    assert!(matches!(
+        bounded.await.unwrap_err(),
+        DbError::AsOfVisibilityTimeout {
+            requested: 1,
+            visible_through: 0,
+            blocking_version: 1,
+        },
+    ));
+    tokio::time::advance(std::time::Duration::from_secs(60)).await;
+    poll_fn(|cx| {
+        assert!(strict.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(lower);
+    assert!(strict.await.unwrap().records.is_empty());
+}

@@ -55,6 +55,7 @@ impl QueryLimitsCap {
 
     pub fn policy(&self) -> ExecPolicy {
         ExecPolicy {
+            read_visibility_timeout_ms: 5000,
             caps: BatchLimits {
                 max_result_size: self.max_result_size_bytes,
                 max_execution_time_secs: self.max_execution_time_secs,

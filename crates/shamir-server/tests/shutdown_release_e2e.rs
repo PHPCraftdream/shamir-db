@@ -18,6 +18,7 @@ const PASSWORD: &[u8] = b"admin-password";
 
 fn make_config(data_dir: &Path) -> Config {
     Config {
+        transactions: Default::default(),
         data_dir: data_dir.to_path_buf(),
         logging: LoggingConfig {
             level: "warn".into(),

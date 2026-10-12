@@ -148,6 +148,7 @@ async fn limit_enforcement_loop_rejects_before_first_iteration() {
 async fn limit_enforcement_policy_page_size_boundary() {
     let resolver = setup().await;
     let policy = ExecPolicy {
+        read_visibility_timeout_ms: 5000,
         caps: BatchLimits {
             max_page_size: 10,
             ..BatchLimits::CEILING
@@ -264,6 +265,7 @@ fn limit_enforcement_root_clamps_every_field_to_ceiling() {
     let request = reads(0, unlimited.clone());
     for caps in [unlimited, BatchLimits::CEILING] {
         let auth = Authorized::unchecked(&request, Actor::System, "test").with_policy(ExecPolicy {
+            read_visibility_timeout_ms: 5000,
             caps,
             enforce_result_size: false,
         });

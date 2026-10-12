@@ -261,3 +261,40 @@ on a direct write. Preparation raises the freeze bit, drains writers, then
 fences the write lock; transactional commit checks the bit too
 (`crates/shamir-engine/src/table/table_manager.rs::begin_migration_freeze`,
 `crates/shamir-engine/src/tx/pre_commit.rs`).
+
+## Read-only visibility reconciliation (protocol v3)
+
+`WaitForVisibility { query_version: 3, db, repo, version, visibility_wait }`
+returns `VisibilityObserved { version, visibility }`. Repository READ access is
+required. `visibility_wait` is `{ mode: "strict" }` or
+`{ mode: "bounded", timeout_ms: N }`. Zero is an immediate status check,
+not infinity. Excessive bounded waits and forbidden strict waits are rejected
+with `visibility_wait_invalid`, never clamped. Unallocated positions are rejected
+with `visibility_future_version`. Legacy query versions are rejected before lookup.
+
+`Visible` proves settlement through a **position**, not whether an unknown
+transaction committed: aborted allocated positions also lie beneath the settled
+prefix. It does not upgrade WAL durability, materialization, index readiness, or
+push delivery. Open a new snapshot after reconciliation; old snapshots do not advance.
+Pending carries the sampled `visible_through`, `blocking_version = visible_through + 1`,
+and `reason: timeout | reopen_required`. Settlement wins over timeout and reopen.
+The operation mutates no transaction, creates no snapshot or background polling task,
+and cancellation drops only its temporary observer.
+
+Positions are repository/incarnation-scoped. **Current limitation:** this request
+has no receipt identity field, although repository identity exists internally.
+The server cannot detect a stale receipt for a deleted/recreated repository at the
+same name. Do not reconcile such receipts against a replacement repository.
+
+Allocated-but-unsettled AsOf reads use `transactions.read_visibility_timeout_ms`,
+limited by the remaining execution/call budget (including interactive execution).
+Expiry returns the structured `as_of_visibility_timeout` response with `requested`,
+`visible_through`, and `blocking_version`; no older snapshot/data is substituted.
+Future-version and reopen errors remain distinct. A read-specific timeout leaves
+an interactive handle open; an enclosing execution deadline still removes it.
+This bounds the visibility wait, not inner execution, storage I/O, or network delivery.
+Embedded table reads can select explicit strict waits with
+`FilterContext::with_read_visibility_wait(VisibilityWait::Strict)` or bounded
+budgets; strict is not represented by zero. Execution/call budgets are sampled
+at the observation seam after asynchronous prerequisites.
+Commit acknowledgements remain strict and Visible in this stage.

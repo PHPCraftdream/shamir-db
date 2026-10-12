@@ -211,6 +211,21 @@ fn wrap_engine_err(e: impl std::fmt::Display) -> BatchError {
 }
 
 pub(super) fn error_response(e: &BatchError) -> DbResponse {
+    if let BatchError::AsOfVisibilityTimeout {
+        requested,
+        visible_through,
+        blocking_version,
+        ..
+    } = e
+    {
+        return DbResponse::AsOfVisibilityTimeout {
+            code: "as_of_visibility_timeout".into(),
+            message: e.to_string(),
+            requested: *requested,
+            visible_through: *visible_through,
+            blocking_version: *blocking_version,
+        };
+    }
     DbResponse::Error {
         code: super::handler::error_code(e).to_string(),
         message: e.to_string(),

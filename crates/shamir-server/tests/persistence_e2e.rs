@@ -113,6 +113,7 @@ fn fast_kdf() -> KdfConfig {
 /// (OS-picked).
 fn make_config(data_dir: PathBuf, port: u16) -> Config {
     Config {
+        transactions: Default::default(),
         data_dir: data_dir.clone(),
         logging: LoggingConfig {
             level: "warn".into(),

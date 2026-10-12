@@ -1,4 +1,5 @@
 mod bounded_journal_read;
+pub(crate) mod visibility_observer;
 pub use bounded_journal_read::BoundedJournalRead;
 
 pub mod changelog_store;

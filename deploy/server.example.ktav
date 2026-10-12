@@ -116,3 +116,12 @@ observability: {
     ## blind).
     addr: 127.0.0.1:9090
 }
+
+## Visibility acknowledgement remains strict in this build; bounded is rejected.
+transactions: {
+    visibility_ack_mode: strict
+    visibility_ack_timeout_ms: 5000
+    max_visibility_wait_ms: 30000
+    allow_strict_visibility_wait: true
+    read_visibility_timeout_ms: 5000
+}

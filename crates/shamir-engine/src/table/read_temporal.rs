@@ -13,10 +13,11 @@ use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::{
     exec, At, OrderDirection, QueryRecord, QueryResult, QueryStats, ReadQuery,
 };
+use crate::repo::visibility_observer::observe_gate_with_budget;
 use bytes::Bytes;
+use shamir_query_types::batch::{VisibilityPendingReason, VisibilityState};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
-use shamir_tx::repo_tx_gate::VisibleOutcome;
 use shamir_types::core::interner::Interner;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
@@ -90,12 +91,27 @@ impl TableManager {
                     allocated,
                 });
             }
-            // Cancellation only drops the wait registration, never settles a
-            // version or changes the requested position.
-            match gate.await_visible(version).await {
-                VisibleOutcome::Visible => {}
-                VisibleOutcome::ReopenRequired => {
+            // cancel-safe: observation owns only a temporary gate waiter.
+            match observe_gate_with_budget(gate, version, ctx.remaining_read_visibility_budget())
+                .await?
+            {
+                VisibilityState::Visible => {}
+                VisibilityState::Pending {
+                    reason: VisibilityPendingReason::ReopenRequired,
+                    ..
+                } => {
                     return Err(DbError::AsOfReopenRequired { requested: version });
+                }
+                VisibilityState::Pending {
+                    visible_through,
+                    blocking_version,
+                    ..
+                } => {
+                    return Err(DbError::AsOfVisibilityTimeout {
+                        requested: version,
+                        visible_through,
+                        blocking_version,
+                    });
                 }
             }
         }

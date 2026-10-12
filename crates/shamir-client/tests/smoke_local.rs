@@ -71,6 +71,7 @@ fn make_config(temp: &TempDir, addr: &str) -> Config {
             file: None,
             flush_interval_ms: 2000,
         },
+        transactions: Default::default(),
         kdf_defaults: fast_kdf(),
         argon2_concurrent_max: 4,
         listeners: vec![ListenerConfig {

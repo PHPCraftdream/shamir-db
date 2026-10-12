@@ -113,6 +113,7 @@ fn fast_kdf() -> KdfConfig {
 fn make_test_config(temp: &TempDir) -> Config {
     let data_dir = temp.path().to_path_buf();
     Config {
+        transactions: Default::default(),
         data_dir: data_dir.clone(),
         logging: LoggingConfig {
             level: "warn".into(),

@@ -23,3 +23,5 @@ pub mod tx_registry_tests;
 pub mod user_directory_tests;
 pub mod user_state_lookup_tests;
 pub mod version_tests;
+
+pub mod transactions_config_tests;

@@ -35,6 +35,7 @@ fn request_and_policy_clamp_budget_metadata_with_independent_time_enforcement() 
         });
         let request = batch.build();
         let policy = ExecPolicy {
+            read_visibility_timeout_ms: 5000,
             caps: BatchLimits {
                 max_execution_time_secs: policy_secs,
                 ..BatchLimits::CEILING
@@ -69,4 +70,30 @@ fn zero_duration_expires_immediately_but_uncapped_zero_secs_keeps_legacy_minimum
         capped.check(),
         Err(BatchError::ExecutionTimedOut { budget_secs: 0 }),
     ));
+}
+
+#[test]
+fn read_visibility_budget_is_capped_without_millisecond_rounding() {
+    let request = Batch::new().build();
+    let exact = Duration::from_nanos(123_456_789);
+    let now = Instant::now();
+    let auth = Authorized::unchecked(&request, Actor::System, "test")
+        .with_policy(ExecPolicy {
+            read_visibility_timeout_ms: 9000,
+            ..ExecPolicy::EMBEDDED
+        })
+        .with_deadline_cap_at_for_test(now, exact);
+    let scope = auth.root_scope();
+    assert_eq!(scope.read_visibility_budget_at_for_test(now), exact);
+    assert_eq!(
+        scope.read_visibility_budget_at_for_test(now + exact),
+        Duration::ZERO,
+    );
+    let zero = Authorized::unchecked(&request, Actor::System, "test")
+        .with_policy(ExecPolicy {
+            read_visibility_timeout_ms: 0,
+            ..ExecPolicy::EMBEDDED
+        })
+        .root_scope();
+    assert_eq!(zero.read_visibility_budget_at_for_test(now), Duration::ZERO);
 }
