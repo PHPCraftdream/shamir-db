@@ -26,11 +26,13 @@
 //!    `applied_watermark` parameter (R1-a) for O(1) idempotent re-delivery
 //!    gating.
 
-use crate::meta::recovery_marker::{load_u64, save_u64};
-use crate::meta::MetaKey;
+use std::sync::Arc;
+
 use shamir_storage::error::DbResult;
 use shamir_storage::types::Store;
-use std::sync::Arc;
+
+use crate::meta::recovery_marker::{load_u64, save_u64};
+use crate::meta::MetaKey;
 
 /// Load the durable replication bookmark from the info_store.
 ///
@@ -46,7 +48,8 @@ pub async fn load_replication_bookmark(info_store: &Arc<dyn Store>) -> DbResult<
         .unwrap_or(0))
 }
 
-/// Persist the replication bookmark.
+/// Persist AND explicitly flush the replication bookmark. Callers must flush
+/// every covered history write first; a set alone is not a durability boundary.
 ///
 /// This is the LOW-LEVEL store helper; callers that need monotonicity
 /// protection against out-of-order delivery should prefer
@@ -55,5 +58,6 @@ pub async fn load_replication_bookmark(info_store: &Arc<dyn Store>) -> DbResult<
 /// value smaller than the current one (the bookmark is a high-water mark,
 /// not a free variable).
 pub async fn save_replication_bookmark(info_store: &Arc<dyn Store>, version: u64) -> DbResult<()> {
-    save_u64(info_store, MetaKey::ReplicationBookmark, version).await
+    save_u64(info_store, MetaKey::ReplicationBookmark, version).await?;
+    info_store.flush().await
 }

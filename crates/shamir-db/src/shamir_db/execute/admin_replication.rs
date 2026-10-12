@@ -16,7 +16,8 @@
 use crate::access::{Action, ResourcePath};
 use crate::query::admin::{
     AlterSubscriptionOp, CreatePublicationOp, CreateReplicationProfileOp, CreateSubscriptionOp,
-    DropPublicationOp, DropReplicationProfileOp, DropSubscriptionOp, SubAction,
+    DropPublicationOp, DropReplicationProfileOp, DropSubscriptionOp, ReplDirection, ReplStream,
+    SubAction,
 };
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
@@ -383,6 +384,58 @@ impl ShamirAdminExecutor {
                     m.insert("state".to_string(), QueryValue::Str("paused".to_string()));
                 }
                 SubAction::Resume => {
+                    let profile = m
+                        .get("profile")
+                        .and_then(|value| value.as_str())
+                        .ok_or_else(|| err("Subscription has no profile".into()))?;
+                    let profiles = self
+                        .shamir
+                        .system_store()
+                        .replication_profiles_table()
+                        .await
+                        .map_err(|error| err(error.to_string()))?;
+                    let rows = Self::read_all(&profiles, "replication_profiles")
+                        .await
+                        .map_err(|error| err(error.to_string()))?;
+                    let row = rows
+                        .iter()
+                        .find(|row| {
+                            row.get("name").and_then(|value| value.as_str()) == Some(profile)
+                        })
+                        .ok_or_else(|| err(format!("Replication profile '{profile}' not found")))?;
+                    let streams = row
+                        .get("streams")
+                        .ok_or_else(|| err("Profile has no streams".into()))?;
+                    let bytes =
+                        rmp_serde::to_vec_named(streams).map_err(|error| err(error.to_string()))?;
+                    let streams: Vec<ReplStream> =
+                        rmp_serde::from_slice(&bytes).map_err(|error| err(error.to_string()))?;
+                    for stream in streams {
+                        if !matches!(stream.direction, ReplDirection::Pull) {
+                            continue;
+                        }
+                        let Some(repo) = stream.scope.repo else {
+                            continue;
+                        };
+                        let destination = self
+                            .shamir
+                            .get_db(&stream.scope.db)
+                            .and_then(|db| db.get_repo(&repo))
+                            .ok_or_else(|| {
+                                err(format!("Destination {}/{repo} not found", stream.scope.db))
+                            })?;
+                        let gate = destination
+                            .tx_gate()
+                            .await
+                            .map_err(|error| err(error.to_string()))?;
+                        if gate.requires_reopen() {
+                            return Err(err_code(
+                                "reopen_required",
+                                format!("Destination {}/{repo} requires reopen", stream.scope.db),
+                            ));
+                        }
+                    }
+                    m.remove("status_message");
                     m.insert("state".to_string(), QueryValue::Str("active".to_string()));
                 }
                 SubAction::SetProfile(p) => {
@@ -459,6 +512,12 @@ impl ShamirAdminExecutor {
                 let mut m = crate::types::common::new_map();
                 m.insert("name".to_string(), name);
                 m.insert("state".to_string(), state);
+                m.insert(
+                    "status_message".into(),
+                    rec.get("status_message")
+                        .cloned()
+                        .unwrap_or(QueryValue::Null),
+                );
                 QueryValue::Map(m)
             })
             .collect();
@@ -566,6 +625,21 @@ impl ShamirDb {
         gap_at: u64,
         from_version: u64,
     ) -> DbResult<()> {
+        self.mark_subscription_terminal(
+            name,
+            "resync_required",
+            &format!("journal gap at {gap_at}, requested from {from_version}"),
+        )
+        .await
+    }
+
+    /// Persist an operational stop reason exposed verbatim by status/list.
+    pub async fn mark_subscription_terminal(
+        &self,
+        name: &str,
+        state: &str,
+        message: &str,
+    ) -> DbResult<()> {
         let table = self.system_store().subscriptions_table().await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
@@ -580,7 +654,7 @@ impl ShamirDb {
         let Some(row) = existing.records.into_iter().next() else {
             log::warn!(
                 "mark_subscription_resync_required: subscription '{name}' not found \
-                 (gap_at={gap_at}, from_version={from_version}); treating as a no-op \
+                 (state={state}); treating as a no-op \
                  — it may have been dropped concurrently"
             );
             return Ok(());
@@ -588,9 +662,12 @@ impl ShamirDb {
 
         let mut record = row.as_value().into_owned();
         if let QueryValue::Map(ref mut m) = record {
-            m.insert(
-                "state".to_string(),
-                QueryValue::Str("resync_required".to_string()),
+            m.insert("state".to_string(), QueryValue::Str(state.to_string()));
+        }
+        if let QueryValue::Map(ref mut fields) = record {
+            fields.insert(
+                "status_message".into(),
+                QueryValue::Str(message.to_string()),
             );
         }
         let set_op = crate::query::write::SetOp {

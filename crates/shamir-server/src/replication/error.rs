@@ -20,6 +20,23 @@ use thiserror::Error;
 /// engine.
 #[derive(Debug, Error)]
 pub enum ReplError {
+    #[error("replication start failed: {0}")]
+    Start(String),
+
+    #[error("destination {db}/{repo} requires reopen: {detail}")]
+    ReopenRequired {
+        db: String,
+        repo: String,
+        detail: String,
+    },
+
+    #[error("destination {db}/{repo} already has replication owner {owner}")]
+    DuplicateOwner {
+        db: String,
+        repo: String,
+        owner: String,
+    },
+
     /// VR-style fencing trip (§5.2): the source returned a `leader_epoch`
     /// strictly lower than a previously observed one. The follower treats
     /// this as a stale ("resurrected") leader and terminates the loop —
