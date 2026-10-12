@@ -435,7 +435,11 @@ impl ShamirAdminExecutor {
                             .map_err(|e| err(e.to_string()))?
                             .is_none()
                         {
-                            mvcc.set_versioned_many(vec![(key, value)])
+                            // commit_migration retains destination barrier/UWL
+                            // through index finalisation. No wait: ack -> lower
+                            // orphan -> drainer Phase B posting replay -> this
+                            // barrier -> ack would deadlock.
+                            mvcc.set_versioned_many_no_wait(vec![(key, value)])
                                 .await
                                 .map_err(|e| err(e.to_string()))?;
                         }

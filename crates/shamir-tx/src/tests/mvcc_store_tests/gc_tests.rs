@@ -101,7 +101,7 @@ async fn gc_evicts_stale_version_cache_entries() {
     let fresh = Bytes::from("fresh");
     // Advance the version counter so `fresh` lands well above the olds.
     for _ in 0..10 {
-        gate.assign_next_version();
+        drop(gate.assign_next_version_guarded());
     }
     mvcc.set_versioned(RecordKey::from(fresh.clone()), Bytes::from("f_val"))
         .await
@@ -118,10 +118,8 @@ async fn gc_evicts_stale_version_cache_entries() {
     // min_alive == last_committed.
     let min_alive_target = v_old_b + 1; // > both olds, <= v_fresh
     assert!(min_alive_target <= v_fresh);
-    drop(_guard); // no live snapshots → min_alive == last_committed
-    for version in 1..=min_alive_target {
-        gate.completion().mark(version, State::Materialized);
-    }
+    let _floor_pin = gate.open_snapshot_at(min_alive_target).await;
+    drop(_guard);
     gate.publish_committed_max(min_alive_target);
     assert_eq!(gate.min_alive(), min_alive_target);
 
