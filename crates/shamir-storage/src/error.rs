@@ -32,6 +32,16 @@ pub enum DbError {
     #[error("Repository requires reopen: {0}")]
     RepoRequiresReopen(String),
 
+    // VIS-4a: exceptional STRICT acknowledgement, not a retryable write failure.
+    #[error(
+        "Write committed at {commit_version}, visible through {visible_through}: {reason}; do not retry"
+    )]
+    WriteCommittedVisibilityPending {
+        commit_version: u64,
+        visible_through: u64,
+        reason: &'static str,
+    },
+
     /// An error related to configuration.
     #[error("Configuration error: {0}")]
     Config(String),
@@ -132,6 +142,9 @@ impl DbError {
     /// codes instead of regex-matching messages.
     pub fn code(&self) -> Option<&'static str> {
         match self {
+            DbError::WriteCommittedVisibilityPending { .. } => {
+                Some("write_committed_visibility_pending")
+            }
             DbError::VisibilityFutureVersion { .. } => Some("visibility_future_version"),
             DbError::VisibilityWaitInvalid { .. } => Some("visibility_wait_invalid"),
             DbError::AsOfVisibilityTimeout { .. } => Some("as_of_visibility_timeout"),

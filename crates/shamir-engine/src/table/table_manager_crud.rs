@@ -169,7 +169,7 @@ impl TableManager {
     /// Like [`insert`](Self::insert) but also returns the MVCC version
     /// assigned by the underlying store (for changefeed version
     /// alignment). Returns `0` when no `MvccStore` is attached.
-    pub(crate) async fn insert_returning_version(
+    pub(super) async fn insert_unacknowledged(
         &self,
         value: &InnerValue,
     ) -> DbResult<(RecordId, u64)> {
@@ -257,9 +257,6 @@ impl TableManager {
 
         drop(_guard);
         drop(drain_guard);
-        if let Some(mvcc) = &self.mvcc_store {
-            mvcc.await_non_tx_ack(version).await;
-        }
         Ok((id, version))
     }
 
@@ -283,7 +280,7 @@ impl TableManager {
     /// maximum MVCC version assigned across the batch (for changefeed
     /// version alignment). Returns `0` when no `MvccStore` is attached
     /// or the batch is empty.
-    pub(crate) async fn insert_many_returning_version(
+    pub(super) async fn insert_many_unacknowledged(
         &self,
         values: &[InnerValue],
     ) -> DbResult<(Vec<RecordId>, u64)> {
@@ -439,9 +436,6 @@ impl TableManager {
 
         drop(_guard);
         drop(drain_guard);
-        if let Some(mvcc) = &self.mvcc_store {
-            mvcc.await_non_tx_ack(batch_version).await;
-        }
         Ok((ids, batch_version))
     }
 
@@ -465,7 +459,7 @@ impl TableManager {
     /// assigned by the underlying store (for changefeed version
     /// alignment). Returns `0` when no `MvccStore` is attached or the
     /// record did not exist.
-    pub(crate) async fn delete_returning_version(&self, id: RecordId) -> DbResult<(bool, u64)> {
+    pub(super) async fn delete_unacknowledged(&self, id: RecordId) -> DbResult<(bool, u64)> {
         // #534 finding 1: hold the barrier across the whole delete→index-cleanup
         // sequence while an index2 create_index_v2 backfill is in flight, so the
         // new index's backfill and this delete's posting removal can't interleave
@@ -530,9 +524,6 @@ impl TableManager {
         }
         drop(_guard);
         drop(drain_guard);
-        if let Some(mvcc) = &self.mvcc_store {
-            mvcc.await_non_tx_ack(version).await;
-        }
         Ok((removed, version))
     }
 
@@ -555,7 +546,7 @@ impl TableManager {
     /// Like [`set`](Self::set) but also returns the MVCC version
     /// assigned by the underlying store (for changefeed version
     /// alignment). Returns `0` when no `MvccStore` is attached.
-    pub(crate) async fn set_returning_version(
+    pub(super) async fn set_unacknowledged(
         &self,
         id: RecordId,
         value: &InnerValue,
@@ -661,9 +652,6 @@ impl TableManager {
 
         drop(_guard);
         drop(drain_guard);
-        if let Some(mvcc) = &self.mvcc_store {
-            mvcc.await_non_tx_ack(version).await;
-        }
         Ok((created, version))
     }
 
