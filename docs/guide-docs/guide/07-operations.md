@@ -438,6 +438,15 @@ Prometheus text format. Метрики:
 || `shamir_tx_aborted_expired_total` | counter | Истёкшие tx |
 || `shamir_gc_runs_total` | counter | GC-циклы |
 || `shamir_gc_entries_deleted_total` | counter | GC-удаления |
+|| `shamir_visibility_ack_total{mode,result}` | counter | Acknowledgement outcomes: `mode=strict\|bounded`, `result=visible\|pending_timeout\|pending_reopen\|error` (VIS-4c) |
+|| `shamir_visibility_ack_wait_seconds_bucket{mode,result,le}` | gauge (cumulative histogram) | Duration of acknowledgements that ACTUALLY waited; the non-blocking fast path is counted only in `shamir_visibility_ack_total` |
+|| `shamir_visibility_ack_wait_seconds_count{mode,result}` | gauge | Observed waits per label set |
+|| `shamir_visibility_pending_total{reason,kind}` | counter | Pending outcomes: `reason=timeout\|reopen_required`, `kind=explicit_tx\|implicit_batch\|direct_write` |
+|| `shamir_visibility_read_wait_timeouts_total` | counter | AsOf reads that timed out waiting for visibility |
+|| `shamir_visibility_reconciliation_total{result}` | counter | `WaitForVisibility` outcomes |
+|| `shamir_visibility_reconciliation_wait_seconds_bucket{result,le}` | gauge | Reconciliation wait durations |
+|| `shamir_visibility_ack_waiters{db,repo}` | gauge | Acknowledgements currently parked (reuses the completion tracker's waiter registration) |
+|| `shamir_gate_*` | gauge | REPO-DIAGNOSTICS per-repo gate snapshot (allocation high water, visible floor, oldest blocker, …) |
 
 `process_*` опрашиваются каждые 5 секунд (crate `metrics-process`).
 
@@ -665,6 +674,22 @@ scrape_configs:
 И примеры alert-правил:
 * `auth_attempts_total{result="bad_proof"}` > threshold → brute-force alert.
 * `shamir_tx_aborted_ssi_total` growing → contention hot-spot.
+* `increase(shamir_visibility_ack_total{result="pending_timeout"}[5m])` > 0 →
+  commits are answering Pending (bounded mode): a writer version is unsettled —
+  correlate with `shamir_gate_oldest_blocker_*` before restarting anything.
+* `increase(shamir_visibility_pending_total{reason="reopen_required"}[5m])` > 0 →
+  the repository needs reopen/recovery attention, not client retries.
+* `increase(shamir_visibility_read_wait_timeouts_total[5m])` > 0 → AsOf reads
+  are waiting past `read_visibility_timeout_ms`: check the blocking writer.
+* `shamir_visibility_ack_waiters` near the connection limit → acknowledgement
+  parking is consuming connection slots; switch the service to
+  `visibility_ack_mode = "bounded"` (connection-resource liveness).
+* `increase(shamir_visibility_reconciliation_total{result="pending_timeout"}[15m])`
+  high → callers reconcile repeatedly against a stalled version; investigate
+  `shamir_gate_unsettled_versions` / orphan-replay counters.
+* Expiry of any of these waits also emits a rate-limited WARN log (at most one
+  per repository per 5 s) with `target`, `visible_through`, `blocking_version`
+  and `elapsed_ms` — alert on the metric, read the log for the position.
 
 ## Что важно знать уже сейчас (дозированно)
 
@@ -717,3 +742,11 @@ hard memory admission guarantee. Reconcile Pending with WaitForVisibility and
 open a new snapshot for reads. Materialization is independent of visibility.
 Protocol v3 gating is unchanged; supported SDK adoption remains VIS-5 work.
 Ktav uses `transactions: { visibility_ack_mode: strict ... }` with the same keys.
+
+VIS-4c exposes this policy as metrics: acknowledgement duration histograms
+(`shamir_visibility_ack_wait_seconds_*`, labelled `mode` × `result`), pending
+counters by `reason` and write `kind`, AsOf read-timeout and
+`WaitForVisibility` reconciliation counters, and the `shamir_visibility_ack_waiters`
+gauge — see `/metrics` above. Structured WARN logs fire at every wait expiry,
+rate-limited per repository. `shamir_tx_committed_total` keeps counting
+commits: Pending acknowledgement is a committed outcome, not an abort.

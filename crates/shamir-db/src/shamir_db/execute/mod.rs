@@ -45,6 +45,7 @@ mod function_invoker;
 mod helpers;
 pub(crate) mod replication_seed;
 mod table_resolver;
+mod visibility_sample;
 
 #[cfg(test)]
 mod tests;

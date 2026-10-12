@@ -98,8 +98,14 @@ impl TableManager {
                 VisibilityState::Visible => {}
                 VisibilityState::Pending {
                     reason: VisibilityPendingReason::ReopenRequired,
-                    ..
+                    visible_through,
+                    blocking_version,
                 } => {
+                    if gate.visibility().reserve_pending_warning() {
+                        log::warn!(
+                            "AsOf read visibility wait ended in reopen-required: requested={version}, visible_through={visible_through}, blocking_version={blocking_version}",
+                        );
+                    }
                     return Err(DbError::AsOfReopenRequired { requested: version });
                 }
                 VisibilityState::Pending {
@@ -107,6 +113,12 @@ impl TableManager {
                     blocking_version,
                     ..
                 } => {
+                    gate.visibility().record_read_wait_timeout();
+                    if gate.visibility().reserve_pending_warning() {
+                        log::warn!(
+                            "AsOf read visibility wait timed out: requested={version}, visible_through={visible_through}, blocking_version={blocking_version}",
+                        );
+                    }
                     return Err(DbError::AsOfVisibilityTimeout {
                         requested: version,
                         visible_through,

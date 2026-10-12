@@ -10,6 +10,8 @@ use tokio::sync::{futures::Notified, Notify};
 
 use shamir_collections::THasher;
 
+use crate::visibility_metrics::VisibilityMetrics;
+
 /// Terminal state of a version slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -29,6 +31,8 @@ pub struct CompletionTracker {
     waiters: AtomicUsize,
     progress: Notify,
     visible_wait_slow_count: AtomicU64,
+    /// VIS-4c telemetry; pure counters, nothing on the commit path reads it.
+    visibility: VisibilityMetrics,
     #[cfg(test)]
     waiter_registrations: AtomicUsize,
 }
@@ -53,6 +57,7 @@ impl CompletionTracker {
             waiters: AtomicUsize::new(0),
             progress: Notify::new(),
             visible_wait_slow_count: AtomicU64::new(0),
+            visibility: VisibilityMetrics::new(),
             #[cfg(test)]
             waiter_registrations: AtomicUsize::new(0),
         }
@@ -67,6 +72,7 @@ impl CompletionTracker {
             waiters: AtomicUsize::new(0),
             progress: Notify::new(),
             visible_wait_slow_count: AtomicU64::new(0),
+            visibility: VisibilityMetrics::new(),
             #[cfg(test)]
             waiter_registrations: AtomicUsize::new(0),
         }
@@ -142,6 +148,11 @@ impl CompletionTracker {
     #[cfg(test)]
     pub(crate) fn waiter_registrations(&self) -> usize {
         self.waiter_registrations.load(Ordering::Relaxed)
+    }
+
+    /// Visibility-acknowledgement telemetry of this repository gate.
+    pub fn visibility(&self) -> &VisibilityMetrics {
+        &self.visibility
     }
 
     /// Current registered visibility waits, including cancellation-safe RAII owners.
