@@ -43,15 +43,15 @@ fn transactions_full_example_and_custom_values_reach_config() {
     );
     let config: Config = ktav::from_str(&bounded).unwrap();
     assert_eq!(config.transactions.visibility_ack_mode, "bounded");
-    assert!(config
-        .validate()
-        .unwrap_err()
-        .to_string()
-        .contains("not enabled in this build"));
+    config.validate().unwrap();
+    assert_eq!(
+        config.transactions.resolve_commit_wait(None).unwrap(),
+        VisibilityWait::Bounded { timeout_ms: 17 },
+    );
 }
 
 #[test]
-fn transactions_legacy_defaults_zero_and_bounded_rejection() {
+fn transactions_legacy_defaults_zero_and_bounded_acceptance() {
     let example = include_str!("../../../../deploy/server.example.ktav");
     let legacy = example
         .split("## Visibility acknowledgement")
@@ -66,11 +66,11 @@ fn transactions_legacy_defaults_zero_and_bounded_rejection() {
     assert!(config.transactions.allow_strict_visibility_wait);
     let parsed: TransactionsConfig =
         ktav::from_str("visibility_ack_mode: bounded\nvisibility_ack_timeout_ms: 0\n").unwrap();
-    assert!(parsed
-        .validate()
-        .unwrap_err()
-        .to_string()
-        .contains("not enabled in this build"));
+    parsed.validate().unwrap();
+    assert_eq!(
+        parsed.resolve_commit_wait(None).unwrap(),
+        VisibilityWait::Bounded { timeout_ms: 0 },
+    );
     let mut zero = TransactionsConfig {
         visibility_ack_timeout_ms: 0,
         max_visibility_wait_ms: 0,

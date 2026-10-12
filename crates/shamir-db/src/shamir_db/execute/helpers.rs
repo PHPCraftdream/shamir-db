@@ -11,6 +11,7 @@ use shamir_types::types::record_id::RecordId;
 /// Construct a `QueryResult` for a successful admin operation.
 pub(super) fn admin_result(data: QueryValue) -> QueryResult {
     QueryResult {
+        receipt: None,
         records: vec![QueryRecord::Direct(data)],
         stats: Some(QueryStats {
             index_used: None,
@@ -41,6 +42,7 @@ pub(super) fn admin_result(data: QueryValue) -> QueryResult {
 /// via `DbRequest::GetDdlOpStatus` to see `SucceededViaCrashRecovery`.
 pub(super) fn admin_result_with_op_id(data: QueryValue, op_id: RecordId) -> QueryResult {
     QueryResult {
+        receipt: None,
         records: vec![QueryRecord::Direct(data)],
         stats: Some(QueryStats {
             index_used: None,

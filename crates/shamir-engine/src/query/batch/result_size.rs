@@ -61,6 +61,7 @@ impl ResultSize {
     pub(super) fn result(result: &QueryResult) -> u64 {
         // Destructure exhaustively so additions to QueryResult require review.
         let QueryResult {
+            receipt,
             records,
             stats,
             pagination,
@@ -73,6 +74,9 @@ impl ResultSize {
             ddl_status,
         } = result;
         let mut size = 32u64.saturating_add(Self::sequence(records.len()));
+        if let Some(receipt) = receipt {
+            size = size.saturating_add(super::receipts::receipt_size(receipt));
+        }
         for record in records {
             size = size.saturating_add(32);
             size = size.saturating_add(match record {
@@ -152,6 +156,7 @@ impl ResultSize {
                 .saturating_add(Self::ENTRY + 7) // records key
                 .saturating_add(Self::sequence(result.records.len()));
             for (key, present) in [
+                ("receipt", result.receipt.is_some()),
                 ("stats", result.stats.is_some()),
                 ("pagination", result.pagination.is_some()),
                 ("value", result.value.is_some()),

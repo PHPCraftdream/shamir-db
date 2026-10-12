@@ -113,7 +113,7 @@ impl FunctionInvoker for SlowFunctionInvoker {
             versions: None,
             corrupt_records: vec![],
             op_id: None,
-            ddl_status: None,
+            ..QueryResult::default()
         })
     }
 }

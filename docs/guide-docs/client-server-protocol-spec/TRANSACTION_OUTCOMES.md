@@ -21,7 +21,7 @@ The response variant alone is not proof of success: inspect `status`, then
 | `error` | **Additive, optional** published-commit error; omitted when absent. Does not change `status` or set `reason`. |
 | `snapshot_version` | Read snapshot version; present for committed outcomes. |
 | `commit_version` | Published version; present for committed outcomes, absent for aborted outcomes. |
-| `materialized` | Inline projection outcome, independent of visibility and WAL durability. A timeout acknowledgement does not change it; a reopen-required acknowledgement reports `false` (`Deferred`), as before. Only meaningful for committed outcomes. Deserialization defaults to `true` for older payloads. |
+| `materialized` | Inline projection outcome, independent of visibility and WAL durability. Neither timeout nor reopen observation changes it. Only meaningful for committed outcomes. |
 
 (Source: `crates/shamir-query-types/src/batch/transaction_info.rs`.)
 
@@ -78,17 +78,33 @@ is unchanged.
   validation helper rejects forbidden strict requests and above-cap bounded
   requests without clamping; the server applies `[transactions]` policy before
   admission or writes and reports `visibility_wait_invalid` on rejection.
-- Absence selects the configured Strict default even when explicit Strict
-  overrides are forbidden. `TxExecute` rejects this commit-only override
+- Absence selects the configured default (Strict unless the operator selects
+  Bounded). `TxExecute` rejects this commit-only override
   (including nested bodies) with `validation`, rather than silently ignoring it.
 
-Per-request Bounded is supported on `TxCommit` and top-level transactional
-`Execute`. Non-transactional Execute (including implicit writes) and nested
-Batch/ForEach bodies cannot return the required commit receipt and reject
-Bounded before writes. The server checks caps and Strict permission recursively
-for every explicit override, including bodies that might not execute. Server
-startup still rejects `visibility_ack_mode = "bounded"` pending VIS-4/VIS-5;
-per-request support does not enable a bounded server default.
+Bounded is supported on TxCommit, explicit Execute, and implicit DML batches,
+including nested Batch/ForEach bodies and multi-repository execution. Startup
+accepts `visibility_ack_mode = "bounded"`; the default remains Strict. Query v3
+gating and recursive caps/Strict permissions still apply before writes.
+Receipt-less Call/admin write paths reject Bounded with validation. Nested
+commit-only overrides inside an already transactional outer batch remain rejected;
+the outer transaction owns its acknowledgement policy.
+
+Implicit writes attach `QueryResult.receipt` using the TransactionInfo shape.
+Suppressed write aliases remain present with their receipt, including when
+`return_only` excludes them. Nested bodies carry receipts in their existing
+per-alias result envelopes; explicit outer transactions retain top-level metadata.
+Pending remains a committed write, not a query failure.
+
+A dependent read does not run after an observed Pending write in the same
+repository or on a DAG dependency. Its alias has `skipped: true`, empty records,
+and a typed `value` containing `code: "visibility_dependency_pending"`,
+`commit_version`, and `visible_through`. Data-flow consumers of this failure also
+stop before execution and retain the failure position. Ordering-only consumers
+remain independent. Nested bodies and ForEach iterations share request-owned
+pending positions: only dependent reads are suppressed, not unrelated contained
+operations. Reconcile the write, then issue the read in a new snapshot.
+Same-connection completion order is not a visibility fence.
 
 Every committed `TransactionInfo` in v3 includes `visibility`; aborted metadata
 omits it. Missing/null committed visibility, visibility on an abort, invalid
@@ -131,7 +147,7 @@ The Bounded budget starts only after the inner commit returns a known outcome
 (success or a published `wal_durability` warning). Strict waits for W to reach
 the commit version; Bounded checks W immediately, waits at most its budget, and
 re-samples W at expiry so visibility wins. Reopen before visibility yields
-Pending with `reason: "reopen_required"` and `materialized: false` (`Deferred`).
+Pending with `reason: "reopen_required"` without changing materialization.
 Read-only/no-allocation commits already at their snapshot position are Visible.
 Pre-commit aborts and indeterminate WAL outcomes keep their existing classification;
 a timeout never manufactures committed metadata for them.
@@ -196,17 +212,16 @@ only post-known-outcome observation, never the entire write. A receipt promises
 neither transactional atomicity, fsync/crash durability, async-index completion,
 nor bounded end-to-end latency. Direct writes add no independent post-ack brake;
 existing transactional soft backpressure and execution/admission limits are
-unchanged. Implicit/network batch receipts remain VIS-4b; server bounded-default
-rollout and SDK adoption remain gated.
+unchanged. Implicit/network batch receipts are described above; supported SDK
+receipt adoption remains VIS-5 work.
 
 ### Materialization is not durability
 
 `materialized` describes the projection outcome, **not a visibility field**.
 `false` (`Deferred`) can mean a projection was deferred to idempotent online
 orphan replay or cold recovery on repository open. A visibility acknowledgement
-that expires leaves materialization untouched; one that observes
-`ReopenRequired` reports `Deferred`, even if this commit's own projections
-succeeded. It is **not an abort**, nor a
+that expires or observes reopen leaves materialization untouched. It is **not
+an abort**, nor a
 next-open-only or bounded visibility guarantee. Do not replay the transaction
 to repair it. A
 `wal_durability` error remains a durability warning regardless of this flag;
@@ -379,4 +394,4 @@ Embedded table reads can select explicit strict waits with
 `FilterContext::with_read_visibility_wait(VisibilityWait::Strict)` or bounded
 budgets; strict is not represented by zero. Execution/call budgets are sampled
 at the observation seam after asynchronous prerequisites.
-Commit acknowledgements remain strict and Visible in this stage.
+Commit acknowledgement defaults to Strict; Bounded returns committed receipts.
