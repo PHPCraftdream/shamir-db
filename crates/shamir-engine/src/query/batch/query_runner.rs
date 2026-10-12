@@ -709,7 +709,8 @@ impl<'a> QueryRunner<'a> {
                 limit_error @ (BatchError::ExecutionTimedOut { .. }
                 | BatchError::TooManyQueries { .. }
                 | BatchError::TooManyIterations { .. }
-                | BatchError::LimitExceeded { .. }) => limit_error,
+                | BatchError::LimitExceeded { .. }
+                | BatchError::AsOfVisibilityTimeout { .. }) => limit_error,
                 e => BatchError::QueryError {
                     alias: alias.to_string(),
                     message: format!("sub-batch '{}' failed: {}", alias, e),
@@ -755,7 +756,8 @@ impl<'a> QueryRunner<'a> {
                         limit_error @ (BatchError::ExecutionTimedOut { .. }
                         | BatchError::TooManyQueries { .. }
                         | BatchError::TooManyIterations { .. }
-                        | BatchError::LimitExceeded { .. }) => limit_error,
+                        | BatchError::LimitExceeded { .. }
+                        | BatchError::AsOfVisibilityTimeout { .. }) => limit_error,
                         e => BatchError::QueryError {
                             alias: alias.to_string(),
                             message: format!("sub-batch '{}' failed: {}", alias, e),
@@ -940,7 +942,8 @@ impl<'a> QueryRunner<'a> {
                 limit_error @ (BatchError::ExecutionTimedOut { .. }
                 | BatchError::TooManyQueries { .. }
                 | BatchError::TooManyIterations { .. }
-                | BatchError::LimitExceeded { .. }) => limit_error,
+                | BatchError::LimitExceeded { .. }
+                | BatchError::AsOfVisibilityTimeout { .. }) => limit_error,
                 e => BatchError::QueryError {
                     alias: alias.to_string(),
                     message: format!(
@@ -1022,7 +1025,8 @@ impl<'a> QueryRunner<'a> {
                         limit_error @ (BatchError::ExecutionTimedOut { .. }
                         | BatchError::TooManyQueries { .. }
                         | BatchError::TooManyIterations { .. }
-                        | BatchError::LimitExceeded { .. }) => limit_error,
+                        | BatchError::LimitExceeded { .. }
+                        | BatchError::AsOfVisibilityTimeout { .. }) => limit_error,
                         e => BatchError::QueryError {
                             alias: alias.to_string(),
                             message: format!("for_each '{}' iteration failed: {}", alias, e),
@@ -1046,7 +1050,8 @@ impl<'a> QueryRunner<'a> {
                         limit_error @ (BatchError::ExecutionTimedOut { .. }
                         | BatchError::TooManyQueries { .. }
                         | BatchError::TooManyIterations { .. }
-                        | BatchError::LimitExceeded { .. }) => limit_error,
+                        | BatchError::LimitExceeded { .. }
+                        | BatchError::AsOfVisibilityTimeout { .. }) => limit_error,
                         e => BatchError::QueryError {
                             alias: alias.to_string(),
                             message: format!("for_each '{}' iteration failed: {}", alias, e),
@@ -1236,7 +1241,9 @@ impl<'a> QueryRunner<'a> {
                 // Id-encoding requests return id-keyed IdBytes rows instead of
                 // de-interning on the server.
                 let meter = super::exec_scope::RowByteMeter::new(self.scope);
-                let ctx = ctx.with_row_byte_meter(meter.as_ref());
+                let ctx = ctx
+                    .with_row_byte_meter(meter.as_ref())
+                    .with_read_visibility_scope(self.scope);
                 let result = match self.tx.as_deref() {
                     Some(tx) => {
                         table
@@ -1257,10 +1264,27 @@ impl<'a> QueryRunner<'a> {
                             return error.clone();
                         }
                     }
+                    if let shamir_storage::error::DbError::AsOfVisibilityTimeout {
+                        requested,
+                        visible_through,
+                        blocking_version,
+                    } = &e
+                    {
+                        // A call deadline still takes precedence for handle cleanup.
+                        if let Err(deadline) = self.scope.check() {
+                            return deadline;
+                        }
+                        return BatchError::AsOfVisibilityTimeout {
+                            alias: alias.into(),
+                            requested: *requested,
+                            visible_through: *visible_through,
+                            blocking_version: *blocking_version,
+                        };
+                    }
                     BatchError::QueryError {
                         alias: alias.to_string(),
                         message: e.to_string(),
-                        code: None,
+                        code: e.code().map(str::to_string),
                     }
                 })?;
                 if let Some(meter) = &meter {

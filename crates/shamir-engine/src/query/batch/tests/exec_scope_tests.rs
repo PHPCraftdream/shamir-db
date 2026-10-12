@@ -55,6 +55,7 @@ fn authorized_root_clamps_every_field_without_changing_request() {
     batch.limits(limits.clone());
     let request = batch.build();
     let auth = Authorized::unchecked(&request, Actor::System, "test").with_policy(ExecPolicy {
+        read_visibility_timeout_ms: 5000,
         caps: caps.clone(),
         enforce_result_size: true,
     });

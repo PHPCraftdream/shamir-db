@@ -621,3 +621,19 @@ scrape_configs:
 ||| Упёрся в… | Поднимайся на |
 ||---|---|---|
 || «нужна децентрализация / P2P» | [Этаж 8 — Interconnect](./08-interconnect.md) |
+
+### `[transactions]` — visibility policy
+
+| Setting | Default | Meaning |
+|---|---:|---|
+| `visibility_ack_mode` | `"strict"` | Strict commit acknowledgement; `"bounded"` parses but startup rejects it in this build |
+| `visibility_ack_timeout_ms` | `5000` | Reserved bounded acknowledgement budget, at most `max_visibility_wait_ms` |
+| `max_visibility_wait_ms` | `30000` | Maximum network reconciliation wait; excessive overrides are rejected, never clamped |
+| `allow_strict_visibility_wait` | `true` | Permit explicit indefinite reconciliation waits |
+| `read_visibility_timeout_ms` | `5000` | Allocated-version AsOf wait, capped by remaining execution budget |
+
+All millisecond values accept zero (immediate predicate check, never infinity)
+and must fit `0..=4294967295`. Strict waits intentionally retain indefinite-wait
+risk. Bounded acknowledgement is reserved for a later end-to-end rollout; once
+enabled, it is recommended for services prioritizing connection-resource liveness.
+Ktav uses `transactions: { visibility_ack_mode: strict ... }` with the same keys.
