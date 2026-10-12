@@ -151,8 +151,8 @@ mod op_watchdog;
 mod param_subst;
 mod query_runner;
 mod query_value_serializer;
+pub(crate) mod receipts;
 mod result_size;
-
 // Only the executor (which actually drives a TableManager) lives here.
 // DTOs, the topological planner, and the `$query` reference parser are
 // all pure-data and live in `shamir-query-types::batch` — re-exported

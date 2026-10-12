@@ -1419,54 +1419,9 @@ impl RepoInstance {
         &self,
         tx: shamir_tx::TxContext,
         alias: &str,
-    ) -> Result<(), BatchError> {
-        match self
-            .commit_tx_with_options(tx, VisibilityWait::Strict)
+    ) -> Result<shamir_query_types::batch::TransactionInfo, BatchError> {
+        crate::query::batch::receipts::commit_implicit(self, tx, alias, VisibilityWait::Strict)
             .await
-        {
-            Ok(_outcome) => Ok(()),
-            Err(commit_err) => {
-                let (message, code) = match commit_err {
-                    crate::tx::CommitError::MigrationFrozen { .. } => {
-                        (commit_err.to_string(), Some("table_migrating".to_string()))
-                    }
-                    crate::tx::CommitError::UniqueViolation { .. } => {
-                        (commit_err.to_string(), Some("unique_violation".to_string()))
-                    }
-                    // FG-7: a commit-time CAS failure on the implicit
-                    // (plain non-transactional) Snapshot path must surface
-                    // the SAME "version_conflict" code as the immediate
-                    // staging-time check — mirrors the identical mapping in
-                    // `batch_execute.rs` / `db_tx.rs`.
-                    crate::tx::CommitError::CasConflict { .. } => {
-                        (commit_err.to_string(), Some("version_conflict".to_string()))
-                    }
-                    // F-28 Step 5: an implicit tx upgraded to Serializable
-                    // (FK-parent delete/update fan-out) can now abort with a
-                    // genuine SSI conflict — code it the same as the explicit
-                    // transactional-batch path (`batch_execute.rs`) does, so
-                    // client retry logic keyed on "tx_conflict" covers this
-                    // path too.
-                    crate::tx::CommitError::PhantomConflict { .. }
-                    | crate::tx::CommitError::SsiConflict { .. } => {
-                        (commit_err.to_string(), Some("tx_conflict".to_string()))
-                    }
-                    crate::tx::CommitError::WalRequiresReopen => (
-                        commit_err.to_string(),
-                        Some("wal_requires_reopen".to_string()),
-                    ),
-                    crate::tx::CommitError::WalDurability { .. } => {
-                        (commit_err.to_string(), Some("wal_durability".to_string()))
-                    }
-                    other => (other.to_string(), None),
-                };
-                Err(BatchError::QueryError {
-                    alias: alias.to_string(),
-                    message,
-                    code,
-                })
-            }
-        }
     }
 
     pub(crate) async fn mark_changefeed_gap(&self, version: u64) -> DbResult<()> {

@@ -30,12 +30,7 @@ impl Default for TransactionsConfig {
 impl TransactionsConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         match self.visibility_ack_mode.as_str() {
-            "strict" => {}
-            "bounded" => {
-                return Err(ConfigError::Validation(
-                    "transactions: bounded acknowledgement is not enabled in this build".into(),
-                ));
-            }
+            "strict" | "bounded" => {}
             _ => {
                 return Err(ConfigError::Validation(
                     "transactions.visibility_ack_mode must be strict or bounded".into(),
@@ -74,8 +69,8 @@ impl TransactionsConfig {
         match wait {
             Some(wait) => self.resolve_wait(wait),
             None if self.visibility_ack_mode == "strict" => Ok(VisibilityWait::Strict),
-            None => Err(DbError::VisibilityWaitInvalid {
-                reason: "bounded default acknowledgement is not enabled in this build".into(),
+            None => Ok(VisibilityWait::Bounded {
+                timeout_ms: self.visibility_ack_timeout_ms,
             }),
         }
     }
