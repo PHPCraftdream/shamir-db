@@ -436,9 +436,9 @@ pub(crate) async fn bridge_task(
                 let cut = tx.snapshot_version;
                 #[cfg(test)]
                 super::tests::bridge_snapshot_cut_tests::pause(1, cut).await;
-                for (_target_idx, (target_repo, target_table, _mask, filter)) in
-                    targets.iter().enumerate()
-                {
+                #[cfg(test)]
+                let mut first_target_of_repo = true;
+                for (target_repo, target_table, _mask, filter) in targets.iter() {
                     if target_repo != repo {
                         continue;
                     }
@@ -508,7 +508,7 @@ pub(crate) async fn bridge_task(
                         }
                     }
                     #[cfg(test)]
-                    if _target_idx == 0 {
+                    if std::mem::take(&mut first_target_of_repo) {
                         super::tests::bridge_snapshot_cut_tests::pause(2, cut).await;
                     }
                 }
