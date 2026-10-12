@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::sync::Arc;
 
 use shamir_db::engine::BoundedJournalRead;
@@ -11,20 +10,12 @@ use super::super::journal_source::JournalSource;
 struct ExhaustedSource;
 
 impl JournalSource for ExhaustedSource {
-    fn read(
-        &self,
-        _repo: &str,
-        _from: u64,
-    ) -> impl Future<Output = Result<BoundedJournalRead, String>> + Send {
-        async { panic!("exhausted u64 cursor must not wrap into a history read") }
+    async fn read(&self, _repo: &str, _from: u64) -> Result<BoundedJournalRead, String> {
+        panic!("exhausted u64 cursor must not wrap into a history read")
     }
 
-    fn progress(
-        &self,
-        _repo: &str,
-        _target: u64,
-    ) -> impl Future<Output = Result<(), String>> + Send {
-        async { panic!("exhausted cursor has no pending progress") }
+    async fn progress(&self, _repo: &str, _target: u64) -> Result<(), String> {
+        panic!("exhausted cursor has no pending progress")
     }
 }
 
