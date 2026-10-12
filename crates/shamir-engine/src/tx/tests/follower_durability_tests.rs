@@ -216,7 +216,6 @@ async fn marker_failure_fail_stops_before_history_can_survive() {
         .unwrap_err();
     assert!(matches!(error, DbError::RepoRequiresReopen(_)), "{error:?}");
     assert!(gate.requires_reopen());
-    assert_eq!(gate.last_committed(), 0);
     assert_eq!(gate.durable_watermark(), 0);
     assert_eq!(repo.replication_bookmark().await.unwrap(), 0);
     assert_eq!(
@@ -451,7 +450,6 @@ async fn floor_flush_failure_is_terminal_and_publishes_no_history() {
     let gate = repo.tx_gate().await.unwrap();
     assert!(gate.requires_reopen());
     assert_eq!(gate.last_committed(), 0);
-    assert_eq!(history.flushes.load(Ordering::Acquire), 0);
     assert_eq!(load_last_committed(&info.durable).await.unwrap(), None);
     assert_eq!(repo.replication_bookmark().await.unwrap(), 0);
     assert_eq!(

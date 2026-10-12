@@ -244,9 +244,14 @@ async fn follower_failure(pre_image: bool, two_tables: bool) {
     let error = apply_replicated(&repo, &event, &[], 0, ApplyPolicy::Trusted)
         .await
         .unwrap_err();
-    assert!(matches!(error, DbError::Storage(_)), "{error:?}");
     let version = gate.version_allocation_high_water_mark();
     let partial = two_tables || !pre_image;
+    // A partial apply is terminal (reopen required); an untouched one keeps the raw error.
+    if partial {
+        assert!(matches!(error, DbError::RepoRequiresReopen(_)), "{error:?}");
+    } else {
+        assert!(matches!(error, DbError::Storage(_)), "{error:?}");
+    }
     assert_eq!(gate.requires_reopen(), partial);
     assert_eq!(
         gate.visible_floor(),

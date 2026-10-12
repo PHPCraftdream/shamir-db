@@ -478,11 +478,14 @@ async fn reopen_required_is_visible_and_resume_refused() {
         "resume",
         alter_subscription("sub_a").resume().build().unwrap(),
     );
-    let response = follower
+    let error = follower
         .execute("app", &batch.to_request_via_msgpack())
         .await
-        .unwrap();
-    assert!(response.results.contains_key("__error"), "{response:?}");
+        .unwrap_err();
+    assert!(
+        format!("{error:?}").contains("reopen_required"),
+        "{error:?}"
+    );
     sup.reconcile().await;
     assert!(!sup.is_running("sub_a"));
     sup.stop_all().await;
@@ -592,11 +595,14 @@ async fn partial_history_failure_stops_supervisor_and_refuses_paused_resume() {
         "resume",
         alter_subscription("sub_a").resume().build().unwrap(),
     );
-    let response = follower
+    let error = follower
         .execute("app", &batch.to_request_via_msgpack())
         .await
-        .unwrap();
-    assert!(response.results.contains_key("__error"), "{response:?}");
+        .unwrap_err();
+    assert!(
+        format!("{error:?}").contains("reopen_required"),
+        "{error:?}"
+    );
     sup.reconcile().await;
     assert!(!sup.is_running("sub_a"));
     assert_eq!(source.pulls.load(Ordering::Acquire), 1);

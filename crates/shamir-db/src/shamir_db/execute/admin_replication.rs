@@ -384,55 +384,62 @@ impl ShamirAdminExecutor {
                     m.insert("state".to_string(), QueryValue::Str("paused".to_string()));
                 }
                 SubAction::Resume => {
+                    // Refuse to reactivate over a dead destination gate. A
+                    // missing profile or destination is not this check's concern.
                     let profile = m
                         .get("profile")
                         .and_then(|value| value.as_str())
-                        .ok_or_else(|| err("Subscription has no profile".into()))?;
-                    let profiles = self
-                        .shamir
-                        .system_store()
-                        .replication_profiles_table()
-                        .await
-                        .map_err(|error| err(error.to_string()))?;
-                    let rows = Self::read_all(&profiles, "replication_profiles")
-                        .await
-                        .map_err(|error| err(error.to_string()))?;
-                    let row = rows
-                        .iter()
-                        .find(|row| {
-                            row.get("name").and_then(|value| value.as_str()) == Some(profile)
-                        })
-                        .ok_or_else(|| err(format!("Replication profile '{profile}' not found")))?;
-                    let streams = row
-                        .get("streams")
-                        .ok_or_else(|| err("Profile has no streams".into()))?;
-                    let bytes =
-                        rmp_serde::to_vec_named(streams).map_err(|error| err(error.to_string()))?;
-                    let streams: Vec<ReplStream> =
-                        rmp_serde::from_slice(&bytes).map_err(|error| err(error.to_string()))?;
-                    for stream in streams {
-                        if !matches!(stream.direction, ReplDirection::Pull) {
-                            continue;
-                        }
-                        let Some(repo) = stream.scope.repo else {
-                            continue;
-                        };
-                        let destination = self
+                        .map(str::to_owned);
+                    if let Some(profile) = profile {
+                        let profiles = self
                             .shamir
-                            .get_db(&stream.scope.db)
-                            .and_then(|db| db.get_repo(&repo))
-                            .ok_or_else(|| {
-                                err(format!("Destination {}/{repo} not found", stream.scope.db))
-                            })?;
-                        let gate = destination
-                            .tx_gate()
+                            .system_store()
+                            .replication_profiles_table()
                             .await
                             .map_err(|error| err(error.to_string()))?;
-                        if gate.requires_reopen() {
-                            return Err(err_code(
-                                "reopen_required",
-                                format!("Destination {}/{repo} requires reopen", stream.scope.db),
-                            ));
+                        let rows = Self::read_all(&profiles, "replication_profiles")
+                            .await
+                            .map_err(|error| err(error.to_string()))?;
+                        let streams = rows
+                            .iter()
+                            .find(|row| {
+                                row.get("name").and_then(|value| value.as_str())
+                                    == Some(profile.as_str())
+                            })
+                            .and_then(|row| row.get("streams"));
+                        if let Some(streams) = streams {
+                            let bytes = rmp_serde::to_vec_named(streams)
+                                .map_err(|error| err(error.to_string()))?;
+                            let streams: Vec<ReplStream> = rmp_serde::from_slice(&bytes)
+                                .map_err(|error| err(error.to_string()))?;
+                            for stream in streams {
+                                if !matches!(stream.direction, ReplDirection::Pull) {
+                                    continue;
+                                }
+                                let Some(repo) = stream.scope.repo else {
+                                    continue;
+                                };
+                                let Some(destination) = self
+                                    .shamir
+                                    .get_db(&stream.scope.db)
+                                    .and_then(|db| db.get_repo(&repo))
+                                else {
+                                    continue;
+                                };
+                                let gate = destination
+                                    .tx_gate()
+                                    .await
+                                    .map_err(|error| err(error.to_string()))?;
+                                if gate.requires_reopen() {
+                                    return Err(err_code(
+                                        "reopen_required",
+                                        format!(
+                                            "Destination {}/{repo} requires reopen",
+                                            stream.scope.db
+                                        ),
+                                    ));
+                                }
+                            }
                         }
                     }
                     m.shift_remove("status_message");
