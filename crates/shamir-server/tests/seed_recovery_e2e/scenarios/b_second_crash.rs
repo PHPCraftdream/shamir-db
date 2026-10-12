@@ -46,8 +46,6 @@ async fn seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues() {
     drop(admin);
     child::kill(&mut leader).await;
     let digest1 = child::cli_export(&leader.config_path, &seed1).await;
-    let bytes = std::fs::read(seed1.join("manifest.mpack")).expect("manifest");
-    let manifest1: Manifest = rmp_serde::from_slice(&bytes).expect("decode manifest");
 
     // -- Seed #1 into home-1 and converge. --
     let home1_cfg = child::write_home_config(&home1, addr);

@@ -35,7 +35,6 @@ const BOOT_DEADLINE: Duration = Duration::from_secs(90);
 pub struct LeaderChild {
     pub child: Child,
     pub addr: SocketAddr,
-    pub data_dir: PathBuf,
     pub config_path: PathBuf,
 }
 
@@ -114,7 +113,6 @@ pub async fn spawn_leader(data_dir: &Path, addr: SocketAddr) -> LeaderChild {
     LeaderChild {
         child,
         addr,
-        data_dir: data_dir.to_path_buf(),
         config_path,
     }
 }
