@@ -43,6 +43,10 @@ pub mod rederive_stale_value_dedup_cache_tests;
 #[cfg(feature = "fjall")]
 pub mod replication_interner_persistence_tests;
 pub mod replication_interner_tests;
+pub mod snapshot_gc_tests;
+pub mod snapshot_index_build_tests;
+pub mod snapshot_orphan_tests;
+pub mod snapshot_stress_tests;
 pub mod snapshot_visibility_park_tests;
 pub mod ssi_phantom_tests;
 pub mod ssi_stress_tests;
