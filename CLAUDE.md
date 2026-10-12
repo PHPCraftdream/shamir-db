@@ -321,6 +321,27 @@ Bypass in emergencies only — `git push --no-verify` (or
 `SHAMIR_SKIP_PREPUSH=1 git push`). The hook is a fast safety net, not a
 substitute for running the gate yourself before committing.
 
+### 📐 Layout limits (MANDATORY for new and changed code)
+
+* **At most 7 direct entries per folder** (files plus subfolders, `mod.rs`
+  / `lib.rs` included). A module that outgrows it is split into topical
+  subfolders (for tests: `tests/<topic>/…`), not a longer flat list.
+* **At most 1000 lines per source file** (`.rs`, `.ts`, `.py`, `.sh`;
+  physical lines as `wc -l` counts them). A file that outgrows it is split
+  along its seams, each part keeping the "one file = one primary export"
+  rule.
+
+Scope: source trees only — not lockfiles, generated code, vendored code,
+fixtures or docs.
+
+Existing violations are grandfathered; there is **no repo-wide sweep**.
+The limits are a ratchet: a change must not push a new file or folder over
+a limit, and must not grow a file or folder that is already over it. New
+logic goes into a new file or subfolder instead; when a task substantially
+rewrites an over-limit file, split it in that task. Delegated briefs
+carry this rule, and the orchestrator checks it on the diff of every
+delegated change (changed paths only, so the check is instant).
+
 ---
 
 ## 🔒 Code ideology (NORMATIVE)
