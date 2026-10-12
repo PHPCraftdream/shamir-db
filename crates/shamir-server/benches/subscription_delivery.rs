@@ -99,7 +99,7 @@ const RETRY_FRAMES: usize = RETRY_ROWS + 1;
 
 struct BoundedRejectPush {
     attempts: Vec<AtomicUsize>,
-    tx: Sender<(Vec<u8>, bool)>,
+    tx: Sender<RecordedFrame>,
 }
 
 impl PushSink for BoundedRejectPush {
@@ -123,7 +123,10 @@ impl PushSink for BoundedRejectPush {
     }
 }
 
-fn bounded_reject_capture() -> (Arc<dyn PushSink>, Receiver<(Vec<u8>, bool)>) {
+/// Recorded frame bytes plus whether the sink accepted that attempt.
+type RecordedFrame = (Vec<u8>, bool);
+
+fn bounded_reject_capture() -> (Arc<dyn PushSink>, Receiver<RecordedFrame>) {
     let (tx, rx) = channel(RETRY_FRAMES * (REJECT_FIRST + 1));
     let attempts = (0..RETRY_FRAMES).map(|_| AtomicUsize::new(0)).collect();
     (Arc::new(BoundedRejectPush { attempts, tx }), rx)
