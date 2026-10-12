@@ -96,7 +96,10 @@ Ordering rules:
 1. If `from_version` is set, any `gap` from journal-backfill is emitted **before** any
    backfilled events.
 2. If `initial: true`, all snapshot `event` frames precede the single `ready` frame.
-3. Live `event` frames begin only after the snapshot watermark is seeded (see §13).
+3. Live `event` frames follow `ready` for initial snapshots. Journal delivery
+   has nondecreasing commit versions per repo; several frames may share one
+   transaction version. The pre-snapshot completion cut permits duplicate
+   snapshot rows until N1L-4 (see §13).
 4. `seq` is monotonic per subscription. It is only advanced on **successful** push, so
    the client never observes a hole from transient push backpressure: the same frame
    is retried, or the subscription is terminated rather than silently skipping it.
@@ -390,17 +393,22 @@ Semantics:
 
 `from_version` is a resume cursor expressed as a repository commit version.
 
-- The server replays journal events with `commit_version > from_version`, up to
-  `JOURNAL_BACKFILL_LIMIT` (default `10_000`).
-- If the requested `from_version` is older than the journal's oldest retained event,
-  the server emits a single `gap` push with `gap_at = from_version` **before** any
-  replayed events.
-- During backfill, the server seeds an internal per-repo watermark equal to the
-  highest replayed `commit_version`. Live events with `commit_version <= watermark`
-  are dropped to prevent duplicates with replayed events.
-- If `initial: true` is also set, the snapshot runs **after** backfill, and on its
-  completion the watermark is bumped to `current_commit_version` to prevent
-  duplicates between snapshot rows and the live tail. The `ready` push follows.
+- The server replays journal events with `commit_version >= from_version`
+  (inclusive), in ascending pages of up to `JOURNAL_BACKFILL_LIMIT` events;
+  this limit is a page size, not a total replay cap.
+- Broadcasts are wake-up hints only. Resume and live delivery use the same
+  completion-watermark-bounded journal drain, advancing the processed-through
+  cursor only after all selected changes are accepted. Lag alone is not a Gap.
+- A journal-reported `gap_at` emits `gap` then terminates the subscription;
+  read errors also terminate. No ordinary suffix follows a known gap.
+- Live-only activation excludes history through the completion cut sampled
+  when receivers are attached. With `initial: true`, that cut is sampled before
+  snapshot queries, not bumped after them. Snapshot frames retain version zero
+  and precede `ready`; duplicates at the snapshot/live handoff remain possible
+  until consistent snapshot-cut support (N1L-4).
+- Journal-writer latency is added to delivery. There is no delivery
+  acknowledgement or exactly-once guarantee across disconnects/client loss;
+  a crash can still lose the journal tail (S5c).
 
 > The combination `from_version + initial: true` is permitted but unusual: the client
 > receives backfill events, then the present-state snapshot, then `ready`, then live.

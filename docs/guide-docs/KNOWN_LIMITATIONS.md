@@ -504,6 +504,15 @@ artifact).
   `subscription_filter_unsupported_operator`. See §7 ("Grant rejections")
   in
   [`client-server-protocol-spec/SUBSCRIPTIONS.md`](client-server-protocol-spec/SUBSCRIPTIONS.md#7-grant-rejections).
+- **Live ordering is journal-authoritative per repo.** Healthy subscriptions
+  with available history emit nondecreasing commit versions (multiple record
+  frames may share a version); broadcast lag triggers journal recovery, not
+  an automatic Gap. A journal gap or read failure terminates the subscription.
+  Initial snapshots retain version-zero frames and Ready ordering, but their
+  pre-snapshot completion cut permits duplicate rows at the handoff until
+  N1L-4. Delivery adds journal-writer latency; no delivery acknowledgement or
+  exactly-once guarantee exists across disconnects, and a crash can still
+  lose the journal tail (S5c).
 - **No durable offsets / resume tokens.** A missed range surfaces as a
   best-effort `gap` push (§9 of the same doc); there is no
   client-presentable resume token that guarantees exactly-once replay.
