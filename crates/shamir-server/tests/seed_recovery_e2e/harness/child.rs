@@ -36,6 +36,8 @@ pub struct LeaderChild {
     pub child: Child,
     pub addr: SocketAddr,
     pub config_path: PathBuf,
+    /// Combined stdout/stderr of the child, surfaced when boot fails.
+    pub log_path: PathBuf,
 }
 
 /// Write a `.ktav` config for CLI subcommands operating on `data_dir`
@@ -99,6 +101,13 @@ pub async fn spawn_leader(data_dir: &Path, addr: SocketAddr) -> LeaderChild {
     let config_path = data_dir.join("leader.ktav");
     std::fs::write(&config_path, ktav_config(data_dir, addr)).expect("write leader config");
 
+    let log_path = data_dir.join("leader.log");
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .expect("open leader log");
+    let log_err = log.try_clone().expect("clone leader log handle");
     let child = tokio::process::Command::new(SERVER_BIN)
         .arg("--config")
         .arg(&config_path)
@@ -106,22 +115,33 @@ pub async fn spawn_leader(data_dir: &Path, addr: SocketAddr) -> LeaderChild {
         .arg(ADMIN)
         .arg("--bootstrap-password")
         .arg(ADMIN_PW)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err))
         .spawn()
         .expect("spawn shamir-server child");
     LeaderChild {
         child,
         addr,
         config_path,
+        log_path,
     }
+}
+
+/// Last bytes of the child's log, for failure messages.
+fn log_tail(path: &Path) -> String {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| format!("<unreadable: {e}>"));
+    let keep = text.len().saturating_sub(4000);
+    let start = (keep..text.len())
+        .find(|i| text.is_char_boundary(*i))
+        .unwrap_or(text.len());
+    text[start..].to_owned()
 }
 
 /// Connect an admin TLS+SCRAM client, retrying until the child is serving
 /// (bounded — no fixed startup sleep). Every returned client is a live
 /// session the caller drives over the real wire.
 pub async fn connect_admin(leader: &LeaderChild) -> Client {
-    wait_listening(leader.addr).await;
+    wait_listening(leader.addr, &leader.log_path).await;
     let deadline = tokio::time::Instant::now() + BOOT_DEADLINE;
     loop {
         match Client::connect(admin_options(leader.addr, ADMIN, ADMIN_PW)).await {
@@ -129,7 +149,10 @@ pub async fn connect_admin(leader: &LeaderChild) -> Client {
             Err(error) => {
                 assert!(
                     tokio::time::Instant::now() < deadline,
-                    "leader admin login did not succeed in time: {error}",
+                    "leader admin login did not succeed in time: {error}
+leader log tail:
+{}",
+                    log_tail(&leader.log_path),
                 );
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
@@ -140,7 +163,7 @@ pub async fn connect_admin(leader: &LeaderChild) -> Client {
 /// Poll a plain TCP connect until the child's listener accepts (or panic at
 /// the boot deadline). The listener only exists once boot reached the
 /// bind-listeners stage, so this is an observable readiness signal.
-async fn wait_listening(addr: SocketAddr) {
+async fn wait_listening(addr: SocketAddr, log_path: &Path) {
     let deadline = tokio::time::Instant::now() + BOOT_DEADLINE;
     loop {
         if tokio::net::TcpStream::connect(addr).await.is_ok() {
@@ -148,7 +171,10 @@ async fn wait_listening(addr: SocketAddr) {
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "leader child never started listening on {addr}",
+            "leader child never started listening on {addr}
+leader log tail:
+{}",
+            log_tail(log_path),
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }

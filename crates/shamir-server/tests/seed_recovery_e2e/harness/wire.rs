@@ -40,6 +40,10 @@ pub async fn setup_leader(admin: &Client) {
     let mut batch = Batch::new();
     batch.id("setup");
     batch.create_db("db", ddl::create_db(DB));
+    // A database is created from the always-present `default` context.
+    execute(admin, "default", batch).await;
+    let mut batch = Batch::new();
+    batch.id("setup-repo");
     batch.create_repo("repo", ddl::create_repo(REPO).tables(TABLES));
     execute(admin, DB, batch).await;
     // Open (0o777) db + repo + each table so the replicator-role session
