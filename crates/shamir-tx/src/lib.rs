@@ -36,6 +36,7 @@ mod tests;
 pub mod cell_reservation_guard;
 pub mod changefeed;
 pub mod completion_tracker;
+pub mod gate_diagnostics;
 pub mod id_remap;
 pub mod index_write_op;
 pub mod layered_interner;
@@ -59,6 +60,7 @@ pub use changefeed::{
     RecordChange, RepoChangefeed, BROADCAST_CAPACITY, JOURNAL_CHANNEL_CAPACITY,
 };
 pub use completion_tracker::{CompletionTracker, State as CompletionState};
+pub use gate_diagnostics::{GateBlocker, GateBlockerClass, GateDiagnostics};
 pub use id_remap::{collect_referenced_ids, remap_inner_value_bytes, remap_value};
 pub use index_write_op::{IndexFamily, IndexWriteOp, Provenance};
 pub use layered_interner::{

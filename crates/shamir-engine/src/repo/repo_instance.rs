@@ -274,6 +274,20 @@ impl RepoInstance {
         bg
     }
 
+    /// Read-only progress of initialized state; never opens stores or starts
+    /// a drainer. An untouched gate reports an idle snapshot.
+    pub fn diagnostics(&self) -> shamir_tx::GateDiagnostics {
+        let mut snapshot = self
+            .tx_gate
+            .get()
+            .map(|gate| gate.diagnostics())
+            .unwrap_or_default();
+        if let Some(drainer) = self.drainer.get() {
+            drainer.enrich_diagnostics(&mut snapshot);
+        }
+        snapshot
+    }
+
     /// D2 P1d-2b: the repo's background drainer, spawned once (single-owner).
     ///
     /// First call lazily creates the [`Drainer`](crate::tx::drainer::Drainer)

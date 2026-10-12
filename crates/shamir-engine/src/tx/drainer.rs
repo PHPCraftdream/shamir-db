@@ -81,6 +81,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+use arc_swap::ArcSwapOption;
+
 /// Default high-watermark for the drain window. When `window.len() >=` this
 /// value, `offer` drops the entry (backpressure). The gap-reseed path in
 /// `drain_step` recovers dropped entries from the WAL on the next pass.
@@ -126,6 +128,10 @@ pub struct Drainer {
     /// Total versions drained across all `drain_step` calls — telemetry and
     /// a hook for tests to assert progress without reading the gate.
     drained_total: AtomicU64,
+    orphan_replay_attempts_total: AtomicU64,
+    orphan_replay_failures_total: AtomicU64,
+    orphan_replay_consecutive_failures: AtomicU64,
+    orphan_replay_last_error: ArcSwapOption<String>,
     /// Per-repo ordered window of inflight WAL entries already offered by
     /// the commit path. Replaces wal.recover() on the drain hot path —
     /// see Op #2 design.
@@ -217,6 +223,10 @@ impl Drainer {
         Self {
             notify: Notify::new(),
             drained_total: AtomicU64::new(0),
+            orphan_replay_attempts_total: AtomicU64::new(0),
+            orphan_replay_failures_total: AtomicU64::new(0),
+            orphan_replay_consecutive_failures: AtomicU64::new(0),
+            orphan_replay_last_error: ArcSwapOption::empty(),
             window: TreeIndex::new(),
             window_high_watermark: AtomicUsize::new(DEFAULT_WINDOW_HIGH_WATERMARK),
             offer_dropped_total: AtomicU64::new(0),
@@ -334,6 +344,79 @@ impl Drainer {
 
     fn counter_applied(&self, version: u64, table: u64) -> bool {
         self.counter_applied.contains_sync(&(version, table))
+    }
+
+    /// Best-effort telemetry reads; never initializes repository state.
+    pub(crate) fn enrich_diagnostics(&self, snapshot: &mut shamir_tx::GateDiagnostics) {
+        snapshot.orphan_replay_attempts_total =
+            self.orphan_replay_attempts_total.load(Ordering::Relaxed);
+        snapshot.orphan_replay_failures_total =
+            self.orphan_replay_failures_total.load(Ordering::Relaxed);
+        snapshot.orphan_replay_consecutive_failures = self
+            .orphan_replay_consecutive_failures
+            .load(Ordering::Relaxed);
+        snapshot.orphan_replay_last_error = self
+            .orphan_replay_last_error
+            .load_full()
+            .map(|error| (*error).clone());
+    }
+
+    // Called only under the existing serialized replay guard. Count at most
+    // one failure per attempted orphan, not each failing operation/table.
+    fn record_orphan_failure(&self, failed: &mut bool, error: impl std::fmt::Display) {
+        if *failed {
+            return;
+        }
+        *failed = true;
+        let mut error = error.to_string();
+        let mut end = error.len().min(1024);
+        while !error.is_char_boundary(end) {
+            end -= 1;
+        }
+        error.truncate(end);
+        error.shrink_to_fit();
+        self.orphan_replay_last_error.store(Some(Arc::new(error)));
+        self.orphan_replay_failures_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.orphan_replay_consecutive_failures
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_orphan_failure_for_test(&self, failed: &mut bool, error: &str) {
+        self.record_orphan_failure(failed, error);
+    }
+
+    fn record_orphan_table_failure(
+        &self,
+        entries: &[Arc<WalEntryV2>],
+        orphan: Option<u64>,
+        table: u64,
+        failed: &mut bool,
+        error: &DbError,
+    ) {
+        if orphan.is_some_and(|version| {
+            entries.iter().any(|entry| {
+                entry.commit_version == version
+                    && entry.ops.iter().any(|op| match op {
+                        WalOpV2::Put {
+                            table_id_interned, ..
+                        }
+                        | WalOpV2::Delete {
+                            table_id_interned, ..
+                        }
+                        | WalOpV2::IndexPut {
+                            table_id_interned, ..
+                        }
+                        | WalOpV2::IndexDel {
+                            table_id_interned, ..
+                        } => *table_id_interned == table,
+                        _ => false,
+                    })
+            })
+        }) {
+            self.record_orphan_failure(failed, error);
+        }
     }
 
     /// Total `wal.recover()` reseed calls fired from `drain_step`.
@@ -609,12 +692,17 @@ impl Drainer {
         // never combine an old per_table_mvcc with a replacement registration.
         // Lookup failure excludes the earliest missing orphan and everything
         // after it, but does not hold back its already-published prefix.
+        let mut orphan_failed = false;
+        let mut orphan_version = None;
         let mut orphan_tables = TFxMap::default();
         let mut replay_prefix = window_entries.len();
         'resolve_orphans: for (position, entry) in window_entries.iter().enumerate() {
             if !gate.is_orphaned_post_wal(entry.commit_version) {
                 continue;
             }
+            orphan_version = Some(entry.commit_version);
+            self.orphan_replay_attempts_total
+                .fetch_add(1, Ordering::Relaxed);
             for op in &entry.ops {
                 let token = match op {
                     WalOpV2::Put {
@@ -642,6 +730,13 @@ impl Drainer {
                         orphan_tables.insert(token, table);
                     }
                     Ok(None) | Err(_) => {
+                        self.record_orphan_failure(
+                            &mut orphan_failed,
+                            format_args!(
+                                "orphan {} table {token} unavailable",
+                                entry.commit_version,
+                            ),
+                        );
                         log::warn!(
                             "drain_step: orphan {} table {token} unavailable; retry next pass",
                             entry.commit_version,
@@ -656,7 +751,11 @@ impl Drainer {
         if window_entries.is_empty() {
             return Ok(0);
         }
-        let wal = repo.repo_wal().await?;
+        let wal = repo.repo_wal().await.inspect_err(|error| {
+            if orphan_version.is_some() && !orphan_failed {
+                self.record_orphan_failure(&mut orphan_failed, error);
+            }
+        })?;
 
         // ================================================================
         // Phase A: per-entry interner delta + accumulate data ops per table.
@@ -696,6 +795,9 @@ impl Drainer {
                             entry.txn_id,
                             v
                         );
+                        if orphan_version == Some(v) {
+                            self.record_orphan_failure(&mut orphan_failed, &e);
+                        }
                         phase_a_failed = true;
                         break;
                     }
@@ -764,6 +866,9 @@ impl Drainer {
                                 entry.txn_id,
                                 v
                             );
+                            if orphan_version == Some(v) {
+                                self.record_orphan_failure(&mut orphan_failed, &e);
+                            }
                             phase_a_failed = true;
                             break;
                         }
@@ -853,6 +958,13 @@ impl Drainer {
                          entries touching this table will not be finalized",
                         table_id
                     );
+                    self.record_orphan_table_failure(
+                        &window_entries,
+                        orphan_version,
+                        *table_id,
+                        &mut orphan_failed,
+                        &e,
+                    );
                     failed_tables.insert(*table_id);
                 }
                 continue;
@@ -900,6 +1012,13 @@ impl Drainer {
                                  finalized",
                                 table_id
                             );
+                            self.record_orphan_table_failure(
+                                &window_entries,
+                                orphan_version,
+                                *table_id,
+                                &mut orphan_failed,
+                                &e,
+                            );
                             failed_tables.insert(*table_id);
                         }
                     } else {
@@ -930,6 +1049,13 @@ impl Drainer {
                                  table will not be finalized",
                                 table_id
                             );
+                            self.record_orphan_table_failure(
+                                &window_entries,
+                                orphan_version,
+                                *table_id,
+                                &mut orphan_failed,
+                                &e,
+                            );
                             failed_tables.insert(*table_id);
                         }
                     }
@@ -947,6 +1073,13 @@ impl Drainer {
                          an unattached-table data batch: {e}; entries touching \
                          this table will not be finalized",
                         table_id
+                    );
+                    self.record_orphan_table_failure(
+                        &window_entries,
+                        orphan_version,
+                        *table_id,
+                        &mut orphan_failed,
+                        &e,
                     );
                     failed_tables.insert(*table_id);
                 }
@@ -1056,6 +1189,13 @@ impl Drainer {
                             table_id,
                             batch_len
                         );
+                        self.record_orphan_table_failure(
+                            &window_entries,
+                            orphan_version,
+                            table_id,
+                            &mut orphan_failed,
+                            &e,
+                        );
                         failed_tables.insert(table_id);
                     }
                 }
@@ -1073,6 +1213,13 @@ impl Drainer {
                          batched index-posting write: {e}; entries touching this \
                          table will not be finalized",
                         table_id
+                    );
+                    self.record_orphan_table_failure(
+                        &window_entries,
+                        orphan_version,
+                        table_id,
+                        &mut orphan_failed,
+                        &e,
                     );
                     failed_tables.insert(table_id);
                 }
@@ -1199,6 +1346,7 @@ impl Drainer {
                             .write_committed_batch_to_history(std::slice::from_ref(orphan_pass))
                             .await
                         {
+                            self.record_orphan_failure(&mut orphan_failed, &e);
                             log::warn!(
                                 "drain_step: orphan {v} history for table \
                                  {table_id} failed: {e}; stopping finalization"
@@ -1207,8 +1355,13 @@ impl Drainer {
                         }
                     }
                 }
-                repo.mark_changefeed_gap(*v).await?;
+                repo.mark_changefeed_gap(*v).await.inspect_err(|error| {
+                    self.record_orphan_failure(&mut orphan_failed, error);
+                })?;
                 gate.complete_orphaned_post_wal(*v);
+                self.orphan_replay_consecutive_failures
+                    .store(0, Ordering::Relaxed);
+                self.orphan_replay_last_error.store(None);
                 #[cfg(test)]
                 let inject_marker_failure = crate::tx::commit::TEST_POST_WAL_PRE_PUBLISH_HOOK
                     .get()

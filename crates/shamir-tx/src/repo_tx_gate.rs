@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::completion_tracker::CompletionTracker;
+use crate::gate_diagnostics::{GateBlocker, GateBlockerClass, GateDiagnostics};
 use crate::pending_commit::PendingCommit;
 use crate::version_guard::VersionGuard;
 use crate::TxId;
@@ -204,6 +205,14 @@ pub struct RepoTxGate {
     orphan_max: Arc<AtomicU64>,
     active_post_wal: Arc<scc::HashMap<u64, (), THasher>>,
 
+    // Diagnostic-only RCU slot: bounded to one observation, never touched by
+    // allocation/commit/Drop. Lazy sampling adds no work to those hot paths.
+    oldest_observation: arc_swap::ArcSwapOption<(u64, tokio::time::Instant)>,
+    warning_epoch: tokio::time::Instant,
+    next_visibility_warning_ns: AtomicU64,
+    #[cfg(test)]
+    visibility_warning_count: AtomicU64,
+
     /// D2 P1e — durable-progress signal. Notified by
     /// [`mark_durable`](Self::mark_durable) every time a version is marked
     /// durable (the drainer's `drain_step` calls it once per drained version).
@@ -334,6 +343,11 @@ impl RepoTxGate {
             orphaned_post_wal: Arc::new(scc::HashMap::with_hasher(THasher::default())),
             orphan_max: Arc::new(AtomicU64::new(0)),
             active_post_wal: Arc::new(scc::HashMap::with_hasher(THasher::default())),
+            oldest_observation: arc_swap::ArcSwapOption::empty(),
+            warning_epoch: tokio::time::Instant::now(),
+            next_visibility_warning_ns: AtomicU64::new(0),
+            #[cfg(test)]
+            visibility_warning_count: AtomicU64::new(0),
             durable_progress: Arc::new(tokio::sync::Notify::new()),
         }
     }
@@ -1052,10 +1066,98 @@ impl RepoTxGate {
         self.completion().watermark()
     }
 
+    /// Best-effort progress snapshot using atomic reads and existing registries.
+    /// Counts scan sparse completion entries (not the potentially huge H-W
+    /// interval). scc reads follow its concurrent-map protocol, not a global
+    /// lock; no Mutex/RwLock or commit-path instrumentation is added.
+    /// Independent reads are NOT a coherent cut. The oldest candidate is W+1
+    /// and may already be settled by the time its ownership is classified.
+    pub fn diagnostics(&self) -> GateDiagnostics {
+        let visible_floor = self.visible_floor();
+        let allocation_high_water = self.version_allocation_high_water_mark();
+        let (unsettled_versions, pending_versions, missing_versions) = self
+            .completion
+            .unsettled_counts(visible_floor, allocation_high_water);
+        let oldest_blocker = if allocation_high_water > visible_floor {
+            let version = visible_floor + 1; // H>W proves this cannot overflow.
+            let class = if self.is_active_post_wal(version) {
+                GateBlockerClass::ActiveTail
+            } else if self.is_orphaned_post_wal(version) {
+                GateBlockerClass::OrphanAwaitingReplay
+            } else if self.wal_unresolved.contains_sync(&version) {
+                GateBlockerClass::UnresolvedTicket
+            } else {
+                GateBlockerClass::PendingUnclassified
+            };
+            Some(GateBlocker {
+                version,
+                class,
+                age: self.oldest_blocker_age(version),
+            })
+        } else {
+            None
+        };
+        GateDiagnostics {
+            allocation_high_water,
+            visible_floor,
+            last_committed: self.last_committed(),
+            durable_watermark: self.durable_watermark(),
+            requires_reopen: self.requires_reopen(),
+            visibility_waiters: self.completion.waiter_count(),
+            oldest_blocker,
+            unsettled_versions,
+            pending_versions,
+            missing_versions,
+            ..GateDiagnostics::default()
+        }
+    }
+
+    fn oldest_blocker_age(&self, version: u64) -> std::time::Duration {
+        let now = tokio::time::Instant::now();
+        // W is monotonic: stale diagnostic readers must not replace a newer
+        // version's observation. Same-version races preserve the first winner.
+        self.oldest_observation.rcu(|observed| match observed {
+            Some(previous) if previous.0 >= version => Some(Arc::clone(previous)),
+            _ => Some(Arc::new((version, now))),
+        });
+        let observed = self.oldest_observation.load();
+        observed
+            .as_ref()
+            .map_or(std::time::Duration::ZERO, |observed| {
+                if observed.0 == version {
+                    now.saturating_duration_since(observed.1)
+                } else {
+                    std::time::Duration::ZERO
+                }
+            })
+    }
+
+    /// Lock-free rolling 5 s warning reservation, scoped to this repository.
+    /// Relaxed is sufficient: this atomic publishes no payload, only a deadline.
+    fn reserve_visibility_warning(&self) -> bool {
+        let now = u64::try_from(self.warning_epoch.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.next_visibility_warning_ns
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                if now >= next && now != u64::MAX {
+                    Some(now.saturating_add(5_000_000_000))
+                } else {
+                    None
+                }
+            })
+            .is_ok()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn visibility_warning_count(&self) -> u64 {
+        self.visibility_warning_count.load(Ordering::Relaxed)
+    }
+
     /// Wait until every version through `v` is materialized or aborted.
     ///
     /// A 50 ms park slice detects reopen even without completion progress.
-    /// After 5 s, warn and count once per wait, but NEVER give up on visibility.
+    /// After 5 s, count once per wait and warn at most once per repository per
+    /// 5 s, but NEVER give up on visibility. Existing SeqCst registration and
+    /// release RMWs are preserved; diagnostics add no hot-path RMW/allocation.
     /// If both conditions hold, visibility takes precedence.
     ///
     /// cancel-safe: yes — the only suspension is a notification under a
@@ -1092,13 +1194,24 @@ impl RepoTxGate {
             if self.requires_reopen() {
                 return VisibleOutcome::ReopenRequired;
             }
-            if !warned && started.elapsed() >= SLOW_WAIT {
-                warned = true;
-                tracker.record_slow_visible_wait();
-                log::warn!(
-                    "visibility wait exceeded 5 s: target={v}, floor={}",
-                    self.visible_floor(),
-                );
+            if started.elapsed() >= SLOW_WAIT {
+                if !warned {
+                    warned = true;
+                    tracker.record_slow_visible_wait();
+                }
+                if self.reserve_visibility_warning() {
+                    let diagnostics = self.diagnostics();
+                    #[cfg(test)]
+                    self.visibility_warning_count
+                        .fetch_add(1, Ordering::Relaxed);
+                    log::warn!(
+                        "visibility wait exceeded 5 s: target={v}, floor={}, waiters={}, \
+                         oldest_blocker={:?}",
+                        diagnostics.visible_floor,
+                        diagnostics.visibility_waiters,
+                        diagnostics.oldest_blocker,
+                    );
+                }
             }
             // Expiry only triggers a predicate recheck, never a failed wait.
             let _ = tokio::time::timeout(PARK_SLICE, notified.as_mut()).await;
