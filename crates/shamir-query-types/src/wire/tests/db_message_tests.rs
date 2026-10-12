@@ -481,7 +481,8 @@ fn visibility_request_response_roundtrip_and_tags() {
             query_version: 3,
             db: "app".into(),
             repo: "main".into(),
-            version: u64::MAX,
+            // QueryValue holds i64; the u64 extreme is covered by the direct codec below.
+            version: i64::MAX as u64,
             visibility_wait: wait,
         };
         let value = to_qv(&request);
@@ -492,13 +493,28 @@ fn visibility_request_response_roundtrip_and_tags() {
         assert!(matches!(
             from_qv::<DbRequest>(value),
             DbRequest::WaitForVisibility {
-                version: u64::MAX,
+                version: 9_223_372_036_854_775_807,
                 visibility_wait,
                 query_version: 3,
                 ..
             } if visibility_wait == wait,
         ));
     }
+    let extreme = DbRequest::WaitForVisibility {
+        query_version: 3,
+        db: "app".into(),
+        repo: "main".into(),
+        version: u64::MAX,
+        visibility_wait: VisibilityWait::Strict,
+    };
+    let bytes = rmp_serde::to_vec_named(&extreme).unwrap();
+    assert!(matches!(
+        rmp_serde::from_slice::<DbRequest>(&bytes).unwrap(),
+        DbRequest::WaitForVisibility {
+            version: u64::MAX,
+            ..
+        }
+    ));
     for visibility in [
         VisibilityState::Visible,
         VisibilityState::Pending {
