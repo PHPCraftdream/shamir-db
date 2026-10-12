@@ -187,7 +187,8 @@ async fn n_slow_waiters_share_rolling_warning_limiter_but_count_each_wait() {
         assert!(poll_once(wait.as_mut()).is_pending());
     }
     assert_eq!(gate.visibility_warning_count(), 0);
-    tokio::time::advance(Duration::from_millis(1)).await;
+    // The wait re-checks only after its 50 ms park slice expires.
+    tokio::time::advance(Duration::from_millis(51)).await;
     for wait in &mut waits {
         assert!(poll_once(wait.as_mut()).is_pending());
     }
@@ -201,7 +202,8 @@ async fn n_slow_waiters_share_rolling_warning_limiter_but_count_each_wait() {
         assert!(poll_once(wait.as_mut()).is_pending());
     }
     assert_eq!(gate.visibility_warning_count(), 1);
-    tokio::time::advance(Duration::from_millis(1)).await;
+    // The wait re-checks only after its 50 ms park slice expires.
+    tokio::time::advance(Duration::from_millis(51)).await;
     for wait in &mut waits {
         assert!(poll_once(wait.as_mut()).is_pending());
     }
