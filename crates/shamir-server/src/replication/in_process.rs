@@ -91,6 +91,16 @@ impl ReplSource for InProcessReplSource {
                     .await
                     .map_err(|e| ReplError::Transport(e.to_string()))?;
                 repos.push(ReplRepoInfo {
+                    schema_digest: Some(
+                        super::source::seed::fence::live_schema(&self.leader, &db, &repo).await?,
+                    ),
+                    settled_version: Some(
+                        instance
+                            .consistent_version()
+                            .await
+                            .map_err(|e| ReplError::Transport(e.to_string()))?,
+                    ),
+                    publications: super::source::seed::fence::publications(&self.leader).await?,
                     db: db.clone(),
                     repo,
                     current_version: instance
@@ -206,6 +216,9 @@ impl ReplSource for InProcessReplSource {
 
         Ok(ReplResponse::Pull {
             leader_epoch: self.epoch(),
+            schema_digest: Some(
+                super::source::seed::fence::live_schema(&self.leader, db, repo).await?,
+            ),
             events: events_bytes,
             repo_lineage_id: Some(identity.lineage_id),
             history_epoch: Some(identity.history_epoch),

@@ -114,6 +114,9 @@ fn repl_hello_response_roundtrip_with_repos() {
         leader_epoch: 42,
         repos: vec![ReplRepoInfo {
             repo_lineage_id: None,
+            settled_version: None,
+            publications: Vec::new(),
+            schema_digest: None,
             history_epoch: None,
             gap_first: None,
             gap_through: None,
@@ -134,6 +137,9 @@ fn repl_hello_response_roundtrip_with_repos() {
                 repos[0],
                 ReplRepoInfo {
                     repo_lineage_id: None,
+                    settled_version: None,
+                    publications: Vec::new(),
+                    schema_digest: None,
                     history_epoch: None,
                     gap_first: None,
                     gap_through: None,
@@ -153,6 +159,7 @@ fn repl_hello_response_roundtrip_with_repos() {
 fn repl_pull_response_roundtrip_with_events_and_gap() {
     let resp = DbResponse::Repl(ReplResponse::Pull {
         repo_lineage_id: None,
+        schema_digest: None,
         history_epoch: None,
         gap_first: None,
         gap_through: None,
@@ -182,6 +189,7 @@ fn repl_pull_response_roundtrip_with_events_and_gap() {
 fn repl_pull_response_roundtrip_without_gap() {
     let resp = DbResponse::Repl(ReplResponse::Pull {
         repo_lineage_id: None,
+        schema_digest: None,
         history_epoch: None,
         gap_first: None,
         gap_through: None,

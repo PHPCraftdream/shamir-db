@@ -48,6 +48,12 @@ pub enum FunctionSource<'a> {
 /// ```
 #[derive(Clone)]
 pub struct ShamirDb {
+    /// Serialises replication catalogue admin ops (admin-only, never a record hot path).
+    pub(crate) replication_control_lock: Arc<Mutex<()>>,
+    // Startup-only injected transport (written once at server construction, read per
+    // Resume): contention is nil, no guard is held across an `.await`.
+    pub(crate) replication_resume_probe:
+        Arc<std::sync::RwLock<Option<Arc<dyn crate::ResumeProbe>>>>,
     pub(super) dbs: Arc<DashMap<String, DbInstance, THasher>>,
     pub(super) system_store: SystemStore,
     /// Serialises admin RMW ops (GrantRole/RevokeRole) per user_name
@@ -183,6 +189,8 @@ impl ShamirDb {
         let validators = Arc::new(ValidatorRegistry::new());
 
         let shamir = Self {
+            replication_control_lock: Arc::new(Mutex::new(())),
+            replication_resume_probe: Arc::new(std::sync::RwLock::new(None)),
             dbs,
             system_store,
             admin_user_locks,

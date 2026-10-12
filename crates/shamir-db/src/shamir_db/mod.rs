@@ -3,7 +3,7 @@ mod tests;
 mod visibility;
 
 mod curl_gateway;
-mod execute;
+pub(crate) mod execute;
 pub mod ports;
 #[allow(clippy::module_inception)]
 pub mod shamir_db;
