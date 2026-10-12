@@ -18,10 +18,7 @@ pub async fn install(
     manifest_digest: &str,
 ) -> Result<SeedReceipt, SeedError> {
     #[cfg(test)]
-    return install_inner(data_dir, db, repo, artifact, manifest_digest, None, |_| {
-        Ok(())
-    })
-    .await;
+    return install_with(data_dir, db, repo, artifact, manifest_digest, |_| Ok(())).await;
     #[cfg(not(test))]
     install_inner(data_dir, db, repo, artifact, manifest_digest, None).await
 }
