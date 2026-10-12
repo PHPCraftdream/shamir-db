@@ -4,7 +4,8 @@
 //!
 //! * **Snapshot** (`initial: true`) — on subscribe, the bridge scans the
 //!   target table, emits one `Event` per row, then a terminal `Ready`
-//!   frame. Worst-case latency a client sees before live delivery starts.
+//!   frame. Subscribe runs in untimed setup; the snapshot cell measures
+//!   remaining frame drain + unsubscribe, NOT subscribe-to-Ready latency.
 //!   Table sizes sweep 100 → 10k (smallest tier by default; set
 //!   `BENCH_SUBSCRIPTION_DELIVERY_SCALING=1` for the full ladder) to
 //!   characterise the scan cost.
@@ -33,11 +34,14 @@
 //! accumulate for reactive) — both use `bench_batched_async`.
 
 use std::hint::black_box;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use bench_scale_tool::Harness;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{
+    channel, unbounded_channel, Receiver, Sender, UnboundedReceiver, UnboundedSender,
+};
 use tokio::time::timeout;
 
 use shamir_collections::new_map;
@@ -61,10 +65,14 @@ use shamir_query_builder::Query;
 use shamir_query_types::batch::{BatchRequest, SubBatchOp};
 use shamir_query_types::TableRef;
 
+use shamir_types::types::value::QueryValue;
+
 use shamir_server::db_handler::{DbRequest, DbResponse, ShamirDbHandler};
 use shamir_server::subscriptions::SubscriptionRegistry;
 
 // ── CapturePush: drains delivered frames into an mpsc ──
+// Legacy accepting cells use finite per-iteration worklists (snapshot N
+// Events + Ready, reactive one Event); no sustained producer loop is timed.
 
 struct CapturePush {
     tx: UnboundedSender<Vec<u8>>,
@@ -80,6 +88,48 @@ impl PushSink for CapturePush {
 fn capture() -> (Arc<dyn PushSink>, UnboundedReceiver<Vec<u8>>) {
     let (tx, rx) = unbounded_channel();
     (Arc::new(CapturePush { tx }), rx)
+}
+
+// Fixed two-row snapshot: two Events + Ready, each rejected twice before
+// acceptance. Attempts (including bytes) fit in nine bounded channel slots.
+// No map/lock is needed: sequence numbers address a closed three-frame set.
+const RETRY_ROWS: usize = 2;
+const REJECT_FIRST: usize = 2;
+const RETRY_FRAMES: usize = RETRY_ROWS + 1;
+
+struct BoundedRejectPush {
+    attempts: Vec<AtomicUsize>,
+    tx: Sender<RecordedFrame>,
+}
+
+impl PushSink for BoundedRejectPush {
+    fn try_push(&self, frame: Vec<u8>) -> Result<(), PushRejected> {
+        let env: PushEnvelope = rmp_serde::from_slice(&frame).expect("valid push envelope");
+        let seq = usize::try_from(env.seq).expect("small snapshot sequence");
+        assert!(seq < RETRY_FRAMES, "unexpected frame: {env:?}");
+        let attempt = self.attempts[seq].fetch_add(1, Ordering::Relaxed);
+        assert!(attempt <= REJECT_FIRST, "duplicate accepted frame: {env:?}");
+        let accepted = attempt == REJECT_FIRST;
+        // Full/closed is a fixture failure, never silent success. This
+        // recorder also retains rejected bytes to prove retry identity.
+        self.tx
+            .try_send((frame, accepted))
+            .expect("bounded retry recorder");
+        if accepted {
+            Ok(())
+        } else {
+            Err(PushRejected)
+        }
+    }
+}
+
+/// Recorded frame bytes plus whether the sink accepted that attempt.
+type RecordedFrame = (Vec<u8>, bool);
+
+fn bounded_reject_capture() -> (Arc<dyn PushSink>, Receiver<RecordedFrame>) {
+    let (tx, rx) = channel(RETRY_FRAMES * (REJECT_FIRST + 1));
+    let attempts = (0..RETRY_FRAMES).map(|_| AtomicUsize::new(0)).collect();
+    (Arc::new(BoundedRejectPush { attempts, tx }), rx)
 }
 
 fn fixture_session() -> Session {
@@ -161,7 +211,6 @@ async fn subscribe_and_get_id(
             .await
             .unwrap(),
     );
-    use shamir_types::types::value::QueryValue;
     match resp {
         DbResponse::Batch { response } => {
             let v = response
@@ -354,7 +403,7 @@ async fn snapshot_routine(mut state: SnapshotIterState) {
         )
         .await
         .unwrap();
-    debug_assert_eq!(state.registry.count(), 0);
+    assert_eq!(state.registry.count(), 0);
 }
 
 // =============================================================================
@@ -513,13 +562,114 @@ fn main() {
             n,
         });
 
-        let id = format!("subscription_snapshot/n_{n}");
+        let id = format!("subscription_snapshot/drain_unsubscribe/n_{n}");
         h.bench_batched_async(
             &id,
             move || snapshot_setup(shared.clone()),
             snapshot_routine,
         );
     }
+
+    // Required-frame retry: includes subscribe, retained-byte retries,
+    // frame drain/assertions and unsubscribe. Production retry delays are
+    // measured; they are NOT fixture synchronization or timing assertions.
+    // Baseline e1106477 skips rejected Events and Ready instead of retrying:
+    // this frozen workload is intentionally UNSUPPORTED there (must fail,
+    // never patch old production delivery to manufacture an A/B result).
+    let shamir = setup_block_on(make_db_one_repo("app", "main", "messages"));
+    let handler = Arc::new(ShamirDbHandler::new(shamir));
+    let seed_session = fixture_session();
+    let (seed_push, _seed_rx) = capture();
+    let seed_conn = conn_with(seed_push, Arc::new(SubscriptionRegistry::new()));
+    setup_block_on(seed_table(
+        &handler,
+        &seed_session,
+        &seed_conn,
+        "app",
+        "messages",
+        RETRY_ROWS,
+    ));
+    h.bench_batched_async(
+        "subscription_bounded_retry/subscribe_drain_unsubscribe/n_2/k_2",
+        move || {
+            let handler = Arc::clone(&handler);
+            async move {
+                let session = fixture_session();
+                let registry = Arc::new(SubscriptionRegistry::new());
+                let (push, rx) = bounded_reject_capture();
+                let conn = conn_with(push, Arc::clone(&registry));
+                (handler, session, registry, conn, rx)
+            }
+        },
+        move |(handler, session, registry, conn, mut rx)| async move {
+            let sub_op = Subscribe::table(TableRef::with_repo("main", "messages"))
+                .with_initial()
+                .build();
+            let sub_id = subscribe_and_get_id(&handler, &session, &conn, "app", sub_op).await;
+            let mut seen = [false; RETRY_ROWS];
+            for seq in 0..RETRY_FRAMES {
+                let mut retained = None;
+                for attempt in 0..=REJECT_FIRST {
+                    // A watchdog only; correctness is bytes/count/order,
+                    // never an elapsed-time threshold.
+                    let (frame, accepted) = timeout(Duration::from_secs(30), rx.recv())
+                        .await
+                        .expect("required frame retry missing")
+                        .expect("retry recorder closed");
+                    assert_eq!(accepted, attempt == REJECT_FIRST);
+                    if let Some(original) = &retained {
+                        assert_eq!(&frame, original, "retry changed serialized bytes");
+                    } else {
+                        retained = Some(frame.clone());
+                    }
+                    let env: PushEnvelope = rmp_serde::from_slice(&frame).unwrap();
+                    assert_eq!(env.sub, sub_id);
+                    assert_eq!(env.seq, seq as u64);
+                    assert_eq!(env.gap_at, None);
+                    if seq == RETRY_ROWS {
+                        assert_eq!(env.push, PushKind::Ready);
+                        assert_eq!(env.data, None);
+                    } else {
+                        assert_eq!(env.push, PushKind::Event);
+                        let payload: QueryValue =
+                            rmp_serde::from_slice(env.data.as_ref().expect("Event payload"))
+                                .unwrap();
+                        assert_eq!(
+                            payload.get("table").and_then(QueryValue::as_str),
+                            Some("messages"),
+                        );
+                        assert_eq!(payload.get("op").and_then(QueryValue::as_str), Some("put"));
+                        let value = payload.get("value").expect("snapshot row");
+                        let body = value.get("body").and_then(QueryValue::as_str).unwrap();
+                        let row = match body {
+                            "seed-0" => 0,
+                            "seed-1" => 1,
+                            other => panic!("unexpected snapshot body: {other}"),
+                        };
+                        assert_eq!(
+                            value.get("thread_id").and_then(QueryValue::as_i64),
+                            Some(row as i64),
+                        );
+                        if accepted {
+                            assert!(!seen[row], "duplicate snapshot row");
+                            seen[row] = true;
+                        }
+                    }
+                }
+            }
+            assert!(seen.into_iter().all(|row| row));
+            assert!(rx.try_recv().is_err(), "extra delivery attempt");
+            let mut ub = Batch::new();
+            ub.id(99);
+            ub.unsubscribe("u", sub_id);
+            handler
+                .handle(&session, &encode(&execute_built("app", ub.build())), &conn)
+                .await
+                .unwrap();
+            assert_eq!(registry.count(), 0);
+            black_box(sub_id);
+        },
+    );
 
     // -- Group 2: reactive batch inserts, N = 1.
     h.bench_batched_async(

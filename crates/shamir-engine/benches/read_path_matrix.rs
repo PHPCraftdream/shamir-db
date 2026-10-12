@@ -12,7 +12,7 @@
 //! 2. s2_no_index — ORDER BY y LIMIT 10, no index (full materialize+sort).
 //! 3. s2_s3_combo — WHERE x > 5 ORDER BY y LIMIT 10, no index (worst case).
 //! 4. s3_range_and — WHERE x >= 10 AND name = "foo", sorted index on x.
-//! 5. s1_asof — AsOf(Timestamp(t)) point read (version_at_or_before_ts scan).
+//! 5. s1_asof — AsOf(Timestamp(t)) filtered snapshot read.
 //!
 //! Migrated to the fixed-iteration harness (`bench_scale_tool`): each query
 //! shape's fixture (table + index) is built ONCE per N at registration time
@@ -29,7 +29,7 @@ use shamir_query_builder::filter::{and, eq, gt, gte};
 use shamir_query_builder::query::Query;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
-use shamir_tx::{MvccStore, RepoTxGate};
+use shamir_tx::{MvccStore, RepoTxGate, Retention};
 use shamir_types::core::interner::TouchInd;
 use shamir_types::types::common::{new_map, new_map_wc};
 use shamir_types::types::record_id::RecordId;
@@ -87,6 +87,19 @@ async fn build_table_mvcc(n: usize) -> TableFixture {
     build_table_inner(n, true).await
 }
 
+/// Compatibility seam checked with read-only `git show` at baseline
+/// e11064772960e06c24b97379ea637335a286382e: both revisions expose these
+/// builders. Attach the SAME gate to MVCC and non-tx writes, as production
+/// does; current AsOf validation requires it, baseline accepts it unchanged.
+fn attach_temporal_gate(mgr: TableManager) -> TableManager {
+    let gate = Arc::new(RepoTxGate::fresh());
+    let history: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let mvcc = Arc::new(MvccStore::new(history, Arc::clone(&gate)));
+    mvcc.set_retention(Retention::keep_history()).unwrap();
+    mvcc.set_test_now(1_000);
+    mgr.with_mvcc_store(mvcc).with_changefeed(gate)
+}
+
 async fn build_table_inner(n: usize, with_mvcc: bool) -> TableFixture {
     let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let info: Arc<dyn Store> = Arc::new(InMemoryStore::new());
@@ -94,10 +107,7 @@ async fn build_table_inner(n: usize, with_mvcc: bool) -> TableFixture {
         .await
         .unwrap();
     if with_mvcc {
-        let gate = Arc::new(RepoTxGate::fresh());
-        let history: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let mvcc = Arc::new(MvccStore::new(history, gate));
-        mgr = mgr.with_mvcc_store(mvcc);
+        mgr = attach_temporal_gate(mgr);
     }
 
     let interner = mgr.interner().get().await.unwrap();
@@ -217,12 +227,13 @@ fn query_s3_range_and_selective() -> ReadQuery {
         .build()
 }
 
-/// Shape 5: AsOf(Timestamp) point read. Triggers version_at_or_before_ts
-/// resolution (S1 ts-index lookup). LIMIT 1 isolates the ts resolution
-/// cost from full-snapshot materialization.
+/// Shape 5: AsOf(Timestamp) filtered read. Triggers version_at_or_before_ts
+/// resolution (S1 ts-index lookup) followed by snapshot filtering.
+/// The first seeded row is updated later; its original name identifies it.
 fn query_s1_asof(ts_millis: u64) -> ReadQuery {
     Query::from("bench_table")
         .as_of_timestamp(ts_millis)
+        .where_(eq("name", "00000000"))
         .limit(1)
         .build()
 }
@@ -348,20 +359,22 @@ fn main() {
         // at N >= 100K unless BENCH_READ_PATH_HUGE=1 — per-N runs are
         // minutes-scale.
         if n < 100_000 || parse_bool_env("BENCH_READ_PATH_HUGE") {
-            // Capture ts BETWEEN initial inserts and history accumulation:
-            // initial versions have ts < ts_millis, updated versions have
-            // ts > ts_millis. AsOf(ts_millis) should return the initial
-            // version for any record.
+            // Freeze the MVCC clock, not executor time: no sleeps or clock
+            // races. Every initial version is stamped 1_000, updates 2_000.
             let (fixture, ts_millis) = rt.block_on(async {
                 let f = build_table_mvcc(n).await;
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64;
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                f.mgr.mvcc_store().unwrap().set_test_now(2_000);
                 accumulate_history(&f.mgr, &f.record_ids).await;
-                (f, ts)
+                let current = f.mgr.get(f.record_ids[0]).await.unwrap();
+                let interner = f.mgr.interner().get().await.unwrap();
+                let k_x = interner.touch_ind("x").unwrap().into_key();
+                match current {
+                    InnerValue::Map(m) => {
+                        assert_eq!(m.get(&k_x), Some(&InnerValue::Int(500)));
+                    }
+                    other => panic!("expected updated map, got {other:?}"),
+                }
+                (f, 1_000)
             });
             let q = query_s1_asof(ts_millis);
             let mgr = fixture.mgr.clone();
@@ -372,7 +385,13 @@ fn main() {
                     let interner = mgr.interner().get().await.unwrap();
                     let refs = new_map();
                     let ctx = FilterContext::new(interner, &refs);
-                    std::hint::black_box(mgr.read(&q, &ctx).await.unwrap());
+                    let result = mgr.read(&q, &ctx).await.unwrap();
+                    assert_eq!(result.records.len(), 1, "AsOf lost the original row");
+                    let row = &result.records[0];
+                    assert_eq!(row.get_value_i64("x"), Some(0));
+                    assert_eq!(row.get_value_i64("y"), Some(0));
+                    assert_eq!(row.get_value_str("name"), Some("00000000"));
+                    std::hint::black_box(result);
                 }
             });
         }
