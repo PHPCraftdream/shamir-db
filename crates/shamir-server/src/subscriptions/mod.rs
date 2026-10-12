@@ -1,9 +1,12 @@
 pub(crate) mod bridge;
+pub(crate) mod db_journal_source;
 pub(crate) mod decode_cache;
 pub(crate) mod deliver_cache;
 // `pub` (was `pub(crate)`): exposed for `benches/subscription_hot_paths.rs`
 // to call `filter_eval::filter_matches_value` directly.
 pub mod filter_eval;
+pub(crate) mod journal_drain;
+pub(crate) mod journal_source;
 // `pub` (was `pub(crate)`): exposed for `benches/subscription_hot_paths.rs`
 // to call `payload::make_event_data` directly.
 pub mod payload;

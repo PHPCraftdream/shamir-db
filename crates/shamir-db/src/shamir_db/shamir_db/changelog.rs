@@ -166,6 +166,12 @@ impl ShamirDb {
             .map(Some)
     }
 
+    /// Completion cut for subscription activation, not last committed version.
+    pub async fn changelog_visible_floor(&self, db: &str, repo: &str) -> Option<u64> {
+        let repo = self.get_db(db)?.get_repo(repo)?;
+        Some(repo.tx_gate().await.ok()?.visible_floor())
+    }
+
     /// Error-preserving bounded journal page. `Ok(None)` means only that
     /// the database or repo does not exist; init/range failures remain errors.
     pub async fn read_changelog_bounded(
