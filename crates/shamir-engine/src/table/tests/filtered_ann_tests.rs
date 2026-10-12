@@ -25,8 +25,9 @@ use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_tx::IsolationLevel;
 use shamir_types::core::interner::{InternerKey, TouchInd};
 use shamir_types::types::common::{new_map, new_map_wc};
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::{InnerValue, QueryValue};
 
+use crate::index2::vector::hnsw_adapter::{CO_FILTER_MAX_SELECTIVITY, PRE_FILTER_MAX_CANDIDATES};
 use crate::query::filter::eval_context::FilterContext;
 use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_types::BoxRepo;
@@ -97,7 +98,6 @@ fn tags_in_order(result: &crate::query::read::QueryResult) -> Vec<String> {
 /// row with the same tag, which would make a "some red row is present"
 /// assertion pass even if the staged merge were a no-op.
 fn embeddings_in_order(result: &crate::query::read::QueryResult) -> Vec<Vec<f32>> {
-    use shamir_types::types::value::QueryValue;
     result
         .records
         .iter()
@@ -727,12 +727,9 @@ fn path_label(result: &crate::query::read::QueryResult) -> &str {
 /// point `[1.0, 0.0]` (dim=2) so they all rank near the top of ANN search.
 ///
 /// Uses the bulk `insert_many` path (one store transaction + batch index
-/// hooks) instead of `count` sequential `insert` round-trips. This matters
-/// for the co-filter test (vr5), whose minimum-valid construction is still
-/// ~20k rows (`n_candidates > PRE_FILTER_MAX_CANDIDATES` /
-/// `selectivity ≤ CO_FILTER_MAX_SELECTIVITY`) — under nextest's parallel
-/// load the original per-row `insert` loop blew past the 180s kill (TIMEOUT).
-/// The batch path collapses the store writes to one transaction per call.
+/// hooks) instead of `count` sequential `insert` round-trips. The co-filter
+/// test lowers only its manager's planner thresholds to keep this fixture
+/// small; index2 still inserts each vector through the real backend.
 async fn commit_cluster(tbl: &TableManager, emb_id: u64, tag_id: u64, tag: &str, count: usize) {
     // VR-5 tests query [1.0, 0.0] and stage a vector at [0.99, 0.01] to prove
     // read-your-own-writes. Committed rows here MUST be farther from the
@@ -842,43 +839,51 @@ async fn vr5_prefilter_sees_staged_and_filters_residual() {
     );
 }
 
-/// **CO-FILTER path** (`n_candidates > PRE_FILTER_MAX_CANDIDATES` and
-/// `selectivity ≤ CO_FILTER_MAX_SELECTIVITY`): build a table large enough that
-/// `eq(tag,"red")` yields > 4096 candidates but the red fraction is ≤ 20% of
-/// the live set, so the planner selects `search_cofilter`. A staged "red"
-/// record must appear, a staged "blue" must be filtered out.
+/// Contract pin: speeding up VR-5 must not change production planner defaults.
+/// This guard builds no vector index and is independent of the test override.
+#[test]
+fn vr5_cofilter_production_thresholds_unchanged() {
+    assert_eq!(PRE_FILTER_MAX_CANDIDATES, 4096);
+    assert_eq!(CO_FILTER_MAX_SELECTIVITY, 0.20);
+}
+
+/// **CO-FILTER path**: lower this manager's planner thresholds, not the
+/// production defaults, so 200 committed rows suffice. Pessimistic isolation
+/// uses the live ANN planner; Snapshot/Serializable bypass it for exact MVCC
+/// ranking. A staged "red" must appear and a staged "blue" must be filtered
+/// out, regardless of approximate recall among tied committed vectors.
 #[tokio::test]
 #[serial_test::serial]
 async fn vr5_cofilter_sees_staged_and_filters_residual() {
     let repo = make_repo();
     repo.add_table(TableConfig::new("vecs"));
-    let tbl = repo.get_table("vecs").await.unwrap();
+    let mut tbl = repo.get_table("vecs").await.unwrap();
+    assert_eq!(tbl.filtered_ann_thresholds, None);
+    tbl.filtered_ann_thresholds = Some((16, 0.15));
+    // A separately obtained manager keeps defaults: no async/global leakage.
+    assert_eq!(
+        repo.get_table("vecs")
+            .await
+            .unwrap()
+            .filtered_ann_thresholds,
+        None,
+    );
+    assert_eq!(tbl.clone().filtered_ann_thresholds, Some((16, 0.15)));
     tbl.create_index_v2(&vector_index_op(2)).await.unwrap();
     tbl.create_index("tag_idx", &["tag"]).await.unwrap();
 
     let emb_id = field_id(&tbl, "embedding").await;
     let tag_id = field_id(&tbl, "tag").await;
 
-    // Near-minimum-row construction that satisfies BOTH co-filter
-    // invariants with real headroom: `n_candidates > PRE_FILTER_MAX_CANDIDATES`
-    // (4096, `read_exec.rs`) AND `selectivity <= CO_FILTER_MAX_SELECTIVITY`
-    // (0.20, `hnsw_adapter.rs`). red=4097 is the smallest count strictly
-    // above 4096; blue=16600 makes total_live = 20697 -> selectivity =
-    // 4097/20697 ~= 0.19795 (real ~0.002 margin below 0.20 -- NOT a
-    // knife-edge: 4097/20485 = 16388's original pairing is an EXACT tie
-    // at 0.20 in f64 arithmetic, verified in review, which would flip to
-    // the wrong path under any future `<=` -> `<` refactor of that
-    // comparison; this pairing keeps genuine margin instead).
-    // Reducing from the original 25000 rows keeps the HNSW graph build
-    // (the dominant cost — `index2_on_insert` runs per-row even via the
-    // bulk `insert_many` path) under the 180s nextest kill under parallel
-    // load. The test's actual invariant is the path-selection threshold,
-    // not the absolute row count; the staged-merge assertions are
-    // independent of how many committed rows exist.
-    commit_cluster(&tbl, emb_id, tag_id, "red", 4097).await;
-    commit_cluster(&tbl, emb_id, tag_id, "blue", 16_600).await;
+    // 24 > 16 candidates and 24/200 = 0.12 < 0.15 selectivity, with
+    // headroom at both thresholds. Only the planner choice is overridden;
+    // search_cofilter and the residual-aware staged merge run unchanged.
+    // The oracle does not depend on HNSW recall/order among committed ties:
+    // the unique staged red is strictly closer than every committed vector.
+    commit_cluster(&tbl, emb_id, tag_id, "red", 24).await;
+    commit_cluster(&tbl, emb_id, tag_id, "blue", 176).await;
 
-    let (mut tx, _guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let (mut tx, _guard) = repo.begin_tx(IsolationLevel::Pessimistic).await.unwrap();
 
     // Stage a "red" record near the query.
     let _staged_red = tbl
@@ -908,15 +913,12 @@ async fn vr5_cofilter_sees_staged_and_filters_residual() {
 
     let result = tbl.read_tx(&query, &ctx, Some(&tx)).await.unwrap();
 
-    // Snapshot transactions rank exactly over snapshot + staged overlay (B04b):
-    // no ANN strategy label; the result semantics below are the contract.
+    // This must reach the live co-filter branch, not exact snapshot ranking.
     let label = path_label(&result);
-    assert_eq!(
-        label, "<none>",
-        "snapshot vector read is exact, got {label:?}"
-    );
+    assert_eq!(label, "co_filter", "expected co-filter, got {label:?}");
 
     let tags = tags_in_order(&result);
+    assert_eq!(tags.len(), result.records.len(), "every result needs a tag");
     assert!(
         tags.iter().all(|t| t == "red"),
         "co_filter must return only red (staged blue filtered); got {tags:?}"
