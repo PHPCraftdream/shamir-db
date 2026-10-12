@@ -347,7 +347,10 @@ fn application_value_maps_are_never_treated_as_receipts() {
     // A read/call/write result's `value` is application data: even when
     // it happens to contain a map with a "receipt" key, extraction must
     // yield NOTHING (descent only happens under container request ops).
-    let request = two_write_batch();
+    // Non-container READ entry (a real query op through the builder).
+    let mut batch = Batch::new();
+    batch.query("w1", crate::builder::Query::from("items"));
+    let request = batch.build();
     // Application data shaped like the old walker's target: a value MAP
     // whose MEMBER carries its own valid-looking receipt. Non-container
     // ops are never inspected, so this must fabricate NOTHING.

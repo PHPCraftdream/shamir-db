@@ -31,7 +31,10 @@ export interface RepoObservation {
   visibility: VisibilityState;
 }
 
-/** Record-level change inside a {@link ChangesSinceEvent}. */
+/** Record-level change inside a {@link ChangesSinceEvent}. On the wire
+ * `key` travels as MessagePack bin (framing gives Uint8Array) while the
+ * optional `value` travels as an ARRAY OF BYTE INTEGERS (the server's
+ * `serde_opt_bytes_compat`); the decoder normalizes both to Uint8Array. */
 export interface ChangesSinceRecordChange {
   table: string;
   key: Uint8Array;

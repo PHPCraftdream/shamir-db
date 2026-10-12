@@ -20,6 +20,7 @@ use crate::builder::batch::Batch;
 use crate::builder::write::insert;
 use crate::builder::write::Insert;
 use crate::client::{await_pending_response, PendingMap};
+use crate::interner_cache::InternerCacheRegistry;
 use crate::receipts::{changes_since_via, execute_with_receipts_via, wait_for_visibility_via};
 use crate::{ChangesSinceResponse, ClientError, DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
 
@@ -92,7 +93,7 @@ fn logging_send(
 async fn execute_with_receipts_sends_one_implicit_execute_and_extracts() {
     let log: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
     let capture = log.clone();
-    let response = response_with([
+    let mut response = response_with([
         ("w1", TransactionInfo::committed(7, 40, 43, true)),
         (
             "w2",
@@ -100,6 +101,15 @@ async fn execute_with_receipts_sends_one_implicit_execute_and_extracts() {
                 .with_visibility(pending(43, VisibilityPendingReason::Timeout)),
         ),
     ]);
+    // A delta the core must merge into the registry after the response.
+    response.interner_delta.insert(
+        "main".to_string(),
+        shamir_query_types::batch::InternerDelta {
+            epoch: 5,
+            entries: vec![(1, "name".to_string())],
+        },
+    );
+    let registry = InternerCacheRegistry::new();
     let (batch_response, receipts) = execute_with_receipts_via(
         move |req: DbRequest| {
             capture
@@ -112,6 +122,7 @@ async fn execute_with_receipts_sends_one_implicit_execute_and_extracts() {
             .unwrap();
             std::future::ready(rmp_serde::from_slice(&bytes).map_err(ClientError::from))
         },
+        Some(&registry),
         "db",
         two_write_batch(),
         Some(VisibilityWait::Bounded { timeout_ms: 0 }),
@@ -138,7 +149,20 @@ async fn execute_with_receipts_sends_one_implicit_execute_and_extracts() {
         Some(VisibilityWait::Bounded { timeout_ms: 0 })
     );
     assert!(!batch.transactional, "never flipped transactional");
+    // Interner section 1: the core advertised epochs on the sent request.
+    assert!(
+        !batch.interner_epochs.is_empty(),
+        "interner-epoch advertisement must run in the core"
+    );
     drop(sent);
+    // Interner section 2: the delta was merged into the registry.
+    let fm = registry.get_or_create("db", "main");
+    assert_eq!(
+        fm.epoch(),
+        5,
+        "delta epoch must be CAS-maxed into the cache"
+    );
+    assert_eq!(fm.id_of("name"), Some(1), "delta entries must be inserted");
     // One visible + one pending receipt, scoped to their own repos.
     assert_eq!(receipts.len(), 2);
     let w1 = receipts.iter().find(|r| r.alias == "w1").unwrap();
@@ -176,6 +200,7 @@ async fn transport_timeout_sends_exactly_once_and_never_replays() {
                 rmp_serde::from_slice(&payload).map_err(ClientError::from)
             }
         },
+        None,
         "db",
         two_write_batch(),
         Some(VisibilityWait::Bounded { timeout_ms: 0 }),

@@ -12,6 +12,7 @@ use shamir_query_types::wire::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION
 
 use super::alias_receipt::AliasReceipt;
 use super::extract::extract_receipts;
+use crate::interner_cache::InternerCacheRegistry;
 use crate::{Client, ClientError};
 
 const CHANGES_SINCE_ALIAS: &str = "changes_since";
@@ -25,28 +26,17 @@ impl Client {
     pub async fn execute_with_receipts(
         &self,
         db: &str,
-        mut batch: BatchRequest,
+        batch: BatchRequest,
         visibility_wait: Option<VisibilityWait>,
     ) -> Result<(BatchResponse, Vec<AliasReceipt>), ClientError> {
-        // Same interner-epoch advertisement `Client::execute` performs
-        // before building the wire request.
-        if batch.interner_epochs.is_empty() {
-            for repo in shamir_query_types::batch::distinct_repos(&batch.queries) {
-                let epoch = self.interner_cache().get_or_create(db, &repo).epoch();
-                batch.interner_epochs.insert(repo, epoch);
-            }
-        }
-        let (response, receipts) = execute_with_receipts_via(
+        execute_with_receipts_via(
             |req| async move { self.roundtrip(&req).await },
+            Some(self.interner_cache()),
             db,
             batch,
             visibility_wait,
         )
-        .await?;
-        if !response.interner_delta.is_empty() {
-            self.merge_interner_delta(db, &response);
-        }
-        Ok((response, receipts))
+        .await
     }
 
     /// One-shot `changes_since` journal read, built with the query
@@ -70,12 +60,19 @@ impl Client {
     }
 }
 
-/// Production core for [`Client::execute_with_receipts`]: sets the
-/// visibility wait, sends the exact `DbRequest::Execute` through `send`
-/// exactly once (the transport owns deadlines; a transport failure is
-/// never retried or replayed), and extracts the receipts.
+/// Production core for [`Client::execute_with_receipts`]: the WHOLE entry
+/// point minus the transport call. With `interner = Some(..)` it performs
+/// the same interner-epoch advertisement `Client::execute` does before
+/// building the wire request and merges the response's `interner_delta`
+/// afterwards (mirroring [`crate::interner_cache_ops`] `merge_interner_delta`
+/// call for call). It sets the visibility wait, sends the exact
+/// `DbRequest::Execute` through `send` exactly once (the transport owns
+/// deadlines; a transport failure is never retried or replayed), and
+/// extracts the receipts. Tests pass a fresh registry to exercise the
+/// interner sections, or `None` to opt out.
 pub(crate) async fn execute_with_receipts_via<F, Fut>(
     send: F,
+    interner: Option<&InternerCacheRegistry>,
     db: &str,
     mut batch: BatchRequest,
     visibility_wait: Option<VisibilityWait>,
@@ -84,6 +81,14 @@ where
     F: FnOnce(DbRequest) -> Fut,
     Fut: Future<Output = Result<DbResponse, ClientError>>,
 {
+    if let Some(cache) = interner {
+        if batch.interner_epochs.is_empty() {
+            for repo in shamir_query_types::batch::distinct_repos(&batch.queries) {
+                let epoch = cache.get_or_create(db, &repo).epoch();
+                batch.interner_epochs.insert(repo, epoch);
+            }
+        }
+    }
     batch.visibility_wait = visibility_wait;
     let request = batch.clone();
     let response = send(DbRequest::Execute {
@@ -92,7 +97,7 @@ where
         batch,
     })
     .await?;
-    match response {
+    let out = match response {
         DbResponse::Batch { response } => {
             let receipts = extract_receipts(&request, &response)?;
             Ok((response, receipts))
@@ -100,7 +105,18 @@ where
         other => Err(ClientError::Protocol(format!(
             "expected Batch, got {other:?}"
         ))),
+    };
+    if let (Some(cache), Ok((response, _))) = (interner, &out) {
+        // Mirror of `Client::merge_interner_delta` (identical calls).
+        for (repo, delta) in &response.interner_delta {
+            let fm = cache.get_or_create(db, repo);
+            for (id, name) in &delta.entries {
+                fm.insert_entry(name, *id);
+            }
+            fm.set_epoch(delta.epoch);
+        }
     }
+    out
 }
 
 /// Production core for [`Client::changes_since`]: builds the request with

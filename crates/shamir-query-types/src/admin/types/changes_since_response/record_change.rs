@@ -6,10 +6,15 @@ use serde::{Deserialize, Serialize};
 /// One record-level change inside a
 /// [`ChangesSinceEvent`](super::event::ChangesSinceEvent).
 ///
-/// Faithful wire mirror of `shamir_tx::changefeed::RecordChange` (the crate
-/// cannot depend on `shamir-tx`): `key` and `value` travel as raw MessagePack
-/// bin fields, exactly like the server-side serde adapters — NOT as arrays
-/// of integers.
+/// Faithful wire mirror of `shamir_tx::changefeed::RecordChange` (the
+/// crate cannot depend on `shamir-tx`). Its adapters are byte-for-byte the
+/// server's own (`serde_bytes_compat` / `serde_opt_bytes_compat`), so on
+/// the wire `key` is MessagePack BIN (`serialize_bytes`) while the
+/// optional `value` is an ARRAY OF BYTE INTEGERS: the server's
+/// `serde_opt_bytes_compat` calls `serialize_some(v.as_ref())`, rmp-serde
+/// serializes `Some` transparently and the `&[u8]` slice goes through
+/// `collect_seq` with `BytesMode::Normal` (the default), producing a
+/// fixarray — NOT bin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangesSinceRecordChange {
     /// Human-readable table name the change belongs to.

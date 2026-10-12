@@ -12,6 +12,22 @@ import type {
   ChangesSinceResult,
 } from './types.js';
 
+/** Journal bytes arrive in TWO wire forms: `key` as MessagePack bin
+ * (decoded to Uint8Array by the framing layer) and the optional `value`
+ * as an ARRAY OF BYTE INTEGERS (the server's `serde_opt_bytes_compat`
+ * emits a transparent `Some` of a slice, which is a fixarray on the
+ * wire). Both are normalized to Uint8Array. */
+function asBytes(v: unknown): Uint8Array {
+  if (v instanceof Uint8Array) return v;
+  if (
+    Array.isArray(v) &&
+    v.every((b) => typeof b === 'number' && Number.isInteger(b) && b >= 0 && b <= 255)
+  ) {
+    return Uint8Array.from(v as number[]);
+  }
+  throw new Error('malformed changes_since bytes field');
+}
+
 function decodeChange(raw: unknown): ChangesSinceRecordChange {
   if (raw === null || typeof raw !== 'object') {
     throw new Error('malformed changes_since record change');
@@ -19,9 +35,9 @@ function decodeChange(raw: unknown): ChangesSinceRecordChange {
   const change = raw as Record<string, unknown>;
   return {
     table: String(change.table),
-    key: change.key as Uint8Array,
+    key: asBytes(change.key),
     op: change.op === 'Delete' ? 'Delete' : 'Put',
-    value: (change.value ?? null) as Uint8Array | null,
+    value: change.value == null ? null : asBytes(change.value),
   };
 }
 

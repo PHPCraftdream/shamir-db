@@ -79,20 +79,31 @@ fn u64_positions_survive_native_msgpack_exactly() {
 }
 
 #[test]
-fn record_change_key_and_value_stay_bin_on_the_wire() {
-    // INDEPENDENT oracle: build the `QueryValue` map exactly as the
-    // server's `to_qv` pipeline produces it from a `ChangelogEvent`
-    // (key/value as `QueryValue::Bin`, `op` as the unit-variant string),
-    // serialize the QueryValue (the bytes the client record carries), and
-    // decode into the DTO. This fails if the mirror ever switched
-    // key/value to integer arrays.
+fn record_change_decodes_the_server_journal_shape() {
+    // INDEPENDENT decode oracle: build the `QueryValue` map exactly as the
+    // server's `to_qv` pipeline produces it from a `ChangelogEvent` —
+    // `key` as `QueryValue::Bin` (the server's `serde_bytes_compat` calls
+    // `serialize_bytes`) and `value` as an ARRAY OF BYTE INTEGERS (the
+    // server's `serde_opt_bytes_compat` emits a transparent `Some` of a
+    // slice, which rmp-serde renders as a fixarray under BytesMode::Normal)
+    // — then decode into the DTO. This proves the DTO accepts the shape
+    // the server actually emits.
     let mut actor = shamir_types::types::common::TMap::default();
     actor.insert("User".to_string(), QueryValue::Int(42));
     let mut change = shamir_types::types::common::TMap::default();
     change.insert("table".to_string(), QueryValue::Str("items".into()));
     change.insert("key".to_string(), QueryValue::Bin(vec![0u8, 1, 2, 3]));
     change.insert("op".to_string(), QueryValue::Str("Put".into()));
-    change.insert("value".to_string(), QueryValue::Bin(vec![9u8, 9, 9, 9]));
+    // value arrives as an ARRAY OF BYTE INTEGERS (not bin) — see above.
+    change.insert(
+        "value".to_string(),
+        QueryValue::List(vec![
+            QueryValue::Int(9),
+            QueryValue::Int(9),
+            QueryValue::Int(9),
+            QueryValue::Int(9),
+        ]),
+    );
     let mut event_map = shamir_types::types::common::TMap::default();
     event_map.insert("repo".to_string(), QueryValue::Str("main".into()));
     event_map.insert("commit_version".to_string(), QueryValue::Int(1));

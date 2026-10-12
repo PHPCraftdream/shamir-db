@@ -162,7 +162,7 @@ describe('implicit batch receipts (VIS-5b)', () => {
         .batch()
         .add('outer', { batch: { id: 1, queries: { inner: insert('items', [{ id: 1 }]) } } })
         .add('loop', {
-          over: [], bind_row: 'row',
+          over: [1], bind_row: 'row',
           for_each: { id: 2, queries: { w: insert('items', [{ id: 2 }]) } },
         })
         .build();
@@ -342,10 +342,11 @@ describe('implicit batch receipts (VIS-5b)', () => {
     } finally { await f.client.close(); }
   });
 
-  it('a read/call application value containing a receipt key yields NO receipt', async () => {
+  it('a READ result whose application value member carries a receipt yields NO receipt', async () => {
     const f = await fixture();
     try {
-      const batch = f.client.db('db').batch().add('w1', insert('items', [{ id: 1 }])).build();
+      // Non-container READ entry (a real query op through the builder).
+      const batch = f.client.db('db').batch().add('w1', f.client.db('db').query('items')).build();
       const run = f.client.executeWithReceipts('db', batch);
       await f.nextRequest();
       f.respond({
@@ -404,7 +405,13 @@ describe('typed changesSince (VIS-5b)', () => {
                 events: [{
                   repo: 'archive', commit_version: cursor, tx_id: 7, actor: { User: 42 },
                   timestamp_ns: BIG,
-                  changes: [{ table: 'items', key: new Uint8Array([1, 2]), op: 'Put', value: new Uint8Array([9]) }],
+                  changes: [
+                    // bin wire form (framing Uint8Array).
+                    { table: 'items', key: new Uint8Array([1, 2]), op: 'Put', value: new Uint8Array([9]) },
+                    // array-of-byte-integers wire form (the optional value
+                    // adapter of the server emits a fixarray, NOT bin).
+                    { table: 'logs', key: [3, 4], op: 'Delete', value: null },
+                  ],
                 }],
               }],
             },
@@ -418,7 +425,14 @@ describe('typed changesSince (VIS-5b)', () => {
       expect(result.events).toHaveLength(1);
       expect(result.events[0]).toMatchObject({ repo: 'archive', commit_version: cursor, tx_id: 7n,
         timestamp_ns: BIG,
-        changes: [{ table: 'items', op: 'Put' }] });
+        changes: [
+          { table: 'items', op: 'Put' },
+          { table: 'logs', op: 'Delete' },
+        ] });
+      expect(result.events[0].changes[0].key).toEqual(new Uint8Array([1, 2]));
+      expect(result.events[0].changes[0].value).toEqual(new Uint8Array([9]));
+      expect(result.events[0].changes[1].key).toEqual(new Uint8Array([3, 4]));
+      expect(result.events[0].changes[1].value).toBeNull();
     } finally { await f.client.close(); }
   });
 
