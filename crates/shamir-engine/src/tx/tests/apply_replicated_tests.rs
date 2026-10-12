@@ -418,7 +418,7 @@ async fn a12_history_failure_keeps_visible_version_unsettled_until_reopen() {
         .await
         .expect_err("history persistence must fail");
     assert!(
-        matches!(err, DbError::Storage(_)),
+        matches!(err, DbError::RepoRequiresReopen(_)),
         "unexpected error: {err:?}"
     );
     assert_eq!(gate.version_allocation_high_water_mark(), 1);

@@ -78,6 +78,7 @@ impl<'a> RowByteMeter<'a> {
 #[derive(Debug)]
 pub struct ExecScope {
     limits: BatchLimits,
+    read_visibility_timeout_ms: u64,
     deadline: ExecutionDeadline,
     deadline_cap: Option<(Instant, Duration)>,
     work: AtomicU64,
@@ -95,6 +96,7 @@ impl ExecScope {
     pub fn root_with_result_size(limits: &BatchLimits, enforce_result_size: bool) -> Self {
         Self {
             limits: limits.clone(),
+            read_visibility_timeout_ms: 5000,
             deadline: ExecutionDeadline::from_budget_secs(limits.max_execution_time_secs),
             deadline_cap: None,
             work: AtomicU64::new(0),
@@ -130,12 +132,38 @@ impl ExecScope {
     pub(crate) fn from_duration(limits: &BatchLimits, duration: Duration) -> Self {
         Self {
             limits: limits.clone(),
+            read_visibility_timeout_ms: 5000,
             deadline: ExecutionDeadline::from_duration(duration),
             deadline_cap: None,
             work: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             enforce_result_size: false,
         }
+    }
+
+    pub(super) fn with_read_visibility_timeout(mut self, timeout_ms: u64) -> Self {
+        self.read_visibility_timeout_ms = timeout_ms;
+        self
+    }
+
+    pub(crate) fn read_visibility_budget(&self) -> Duration {
+        self.read_visibility_budget_at(Instant::now())
+    }
+
+    fn read_visibility_budget_at(&self, now: Instant) -> Duration {
+        let mut budget = Duration::from_millis(self.read_visibility_timeout_ms);
+        if let Some(remaining) = self.deadline.remaining_at(now) {
+            budget = budget.min(remaining);
+        }
+        if let Some((deadline, _)) = self.deadline_cap {
+            budget = budget.min(deadline.saturating_duration_since(now));
+        }
+        budget
+    }
+
+    #[cfg(test)]
+    pub(super) fn read_visibility_budget_at_for_test(&self, now: Instant) -> Duration {
+        self.read_visibility_budget_at(now)
     }
 
     /// Borrow the limits owned by this execution scope.

@@ -182,7 +182,7 @@ fn transaction_info_committed_roundtrip() {
     );
     assert!(qv.get("reason").is_none()); // skip_serializing_if
     assert!(qv.get("error").is_none());
-    // Wire-format subject: exact pre-extension payload must remain unchanged.
+    // Wire-format subject: exact v3 payload, including required visibility.
     assert_eq!(
         rmp_serde::to_vec_named(&info).unwrap(),
         rmp_serde::to_vec_named(&mpack!({
@@ -190,7 +190,8 @@ fn transaction_info_committed_roundtrip() {
             "status": "committed",
             "snapshot_version": 100_i64,
             "commit_version": 105_i64,
-            "materialized": true
+            "materialized": true,
+            "visibility": { "state": "visible" }
         }))
         .unwrap(),
     );
@@ -269,7 +270,10 @@ fn transaction_info_missing_materialized_defaults_true() {
         "tx_id": 5_i64,
         "status": "committed",
         "snapshot_version": 100_i64,
-        "commit_version": 105_i64
+        "commit_version": 105_i64,
+        "visibility": {
+            "state": "visible"
+        }
     });
     let info: TransactionInfo = from_qv(qv);
     assert_eq!(info.error, None);
@@ -544,6 +548,7 @@ fn nested_batch_serde_roundtrip() {
         name: None,
         transactional: false,
         isolation: None,
+        visibility_wait: None,
         durability: None,
         queries: TMap::default(),
         return_all: true,
@@ -581,6 +586,7 @@ fn nested_batch_empty_bind_omitted() {
         name: None,
         transactional: false,
         isolation: None,
+        visibility_wait: None,
         durability: None,
         queries: TMap::default(),
         return_all: true,
@@ -619,6 +625,7 @@ fn empty_nested_batch_is_not_admin() {
         name: None,
         transactional: false,
         isolation: None,
+        visibility_wait: None,
         durability: None,
         queries: TMap::default(),
         return_all: true,
@@ -682,6 +689,7 @@ fn batch_request_interner_epochs_omitted_when_empty() {
         name: None,
         transactional: false,
         isolation: None,
+        visibility_wait: None,
         durability: None,
         queries: TMap::default(),
         return_all: true,
@@ -709,6 +717,7 @@ fn batch_request_interner_epochs_roundtrip() {
         name: None,
         transactional: false,
         isolation: None,
+        visibility_wait: None,
         durability: None,
         queries: TMap::default(),
         return_all: true,
@@ -911,6 +920,7 @@ fn batch_request_result_encoding_id_roundtrip_via_msgpack() {
         name: None,
         transactional: false,
         isolation: None,
+        visibility_wait: None,
         durability: None,
         queries: TMap::default(),
         return_all: true,
@@ -957,6 +967,7 @@ fn single_query_batch(alias: &str, inner: BatchOp) -> BatchRequest {
         name: None,
         transactional: false,
         isolation: None,
+        visibility_wait: None,
         durability: None,
         queries,
         return_all: true,
@@ -1182,6 +1193,7 @@ fn is_write_subbatch_with_read_and_insert_is_true() {
         name: None,
         transactional: false,
         isolation: None,
+        visibility_wait: None,
         durability: None,
         queries,
         return_all: true,

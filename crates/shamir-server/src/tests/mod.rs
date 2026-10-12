@@ -7,6 +7,7 @@ pub mod config_tests;
 pub mod conn_limiter_tests;
 pub mod connection_tests;
 pub mod cursor_registry_tests;
+pub mod gate_observability_tests;
 pub mod per_ip_limiter_tests;
 pub mod restore_identity_tests;
 pub mod restore_tests;
@@ -22,3 +23,5 @@ pub mod tx_registry_tests;
 pub mod user_directory_tests;
 pub mod user_state_lookup_tests;
 pub mod version_tests;
+
+pub mod transactions_config_tests;

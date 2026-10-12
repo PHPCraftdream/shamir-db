@@ -290,6 +290,12 @@ impl ExecutionDeadline {
         }
     }
 
+    /// Remaining budget at an explicitly sampled monotonic instant.
+    pub(super) fn remaining_at(&self, now: Instant) -> Option<Duration> {
+        self.inner
+            .map(|d| d.deadline.saturating_duration_since(now))
+    }
+
     /// Cooperative checkpoint: `Err(BatchError::ExecutionTimedOut)` once
     /// the budget has elapsed, `Ok(())` otherwise (and always `Ok` for an
     /// [`unbounded`](Self::unbounded) deadline).

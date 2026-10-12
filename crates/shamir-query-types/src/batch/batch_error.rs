@@ -52,6 +52,14 @@ pub enum BatchError {
         code: Option<String>,
     },
 
+    /// Allocated AsOf position did not settle within the selected read budget.
+    AsOfVisibilityTimeout {
+        alias: String,
+        requested: u64,
+        visible_through: u64,
+        blocking_version: u64,
+    },
+
     /// Lock timeout (deadlock prevention).
     ///
     /// Could not acquire locks within the timeout period.
@@ -294,6 +302,17 @@ impl std::fmt::Display for BatchError {
                     write!(f, "Query '{}' failed: {}", alias, message)
                 }
             }
+            BatchError::AsOfVisibilityTimeout {
+                alias,
+                requested,
+                visible_through,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Query '{alias}' AsOf {requested} timed out at prefix {visible_through}"
+                )
+            }
             BatchError::LockTimeout { aliases } => {
                 write!(f, "Lock timeout for queries: {}", aliases.join(", "))
             }
@@ -401,6 +420,7 @@ impl BatchError {
     pub fn code(&self) -> Option<&str> {
         match self {
             BatchError::QueryError { code, .. } => code.as_deref(),
+            BatchError::AsOfVisibilityTimeout { .. } => Some("as_of_visibility_timeout"),
             _ => None,
         }
     }

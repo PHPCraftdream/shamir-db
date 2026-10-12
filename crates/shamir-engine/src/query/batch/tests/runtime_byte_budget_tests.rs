@@ -425,6 +425,7 @@ async fn exact_loop_boundary_and_embedded_policy_opt_out() {
     );
     assert_eq!(invoker.iterations.load(Ordering::Relaxed), 20);
     let auth = Authorized::unchecked(&small, Actor::System, "test").with_policy(ExecPolicy {
+        read_visibility_timeout_ms: 5000,
         caps: BatchLimits::CEILING,
         enforce_result_size: true,
     });

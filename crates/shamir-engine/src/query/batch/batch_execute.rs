@@ -849,6 +849,7 @@ pub(super) async fn execute_transactional_impl(
                     | BatchError::TooManyQueries { .. }
                     | BatchError::TooManyIterations { .. }
                     | BatchError::LimitExceeded { .. }
+                    | BatchError::AsOfVisibilityTimeout { .. }
             ) {
                 return Err(plan_err);
             }
@@ -874,7 +875,8 @@ pub(super) async fn execute_transactional_impl(
                         outcome.snapshot_version,
                         outcome.commit_version,
                         outcome.materialized(),
-                    );
+                    )
+                    .with_visibility(outcome.visibility);
                     Ok((results, Some(info)))
                 }
                 Err(commit_err) => {

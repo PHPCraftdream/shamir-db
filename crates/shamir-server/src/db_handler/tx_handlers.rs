@@ -86,6 +86,24 @@ impl ShamirDbHandler {
             };
         }
 
+        let nested_override =
+            BatchTreeVisitor::new(&batch.queries).any(|visit| match &visit.entry.op {
+                shamir_query_types::batch::BatchOp::Batch(sub) => {
+                    sub.batch.visibility_wait.is_some()
+                }
+                shamir_query_types::batch::BatchOp::ForEach(fe) => {
+                    fe.batch.visibility_wait.is_some()
+                }
+                // Only container operations carry nested BatchRequest options.
+                _ => false,
+            });
+        if batch.visibility_wait.is_some() || nested_override {
+            return DbResponse::Error {
+                code: "validation".into(),
+                message: "visibility_wait is commit-only; use TxCommit".into(),
+            };
+        }
+
         // Admin / auth gate. An explicit 4-op allowlist (`List`,
         // `AccessTree`, `DescribeTable`, `GetTableSchema` — task #553, see
         // `is_coarse_admin_gate_exempt`) is exempted from this coarse
@@ -176,7 +194,7 @@ impl ShamirDbHandler {
                             db_name,
                             &batch,
                             tx,
-                            self.query_limits.policy(),
+                            self.execution_policy(),
                             Some(it.remaining_lifetime()),
                         )
                         .await;
@@ -216,10 +234,7 @@ impl ShamirDbHandler {
                     self.tx_registry.remove(tx_handle);
                     drop(it);
                 }
-                DbResponse::Error {
-                    code: super::handler::error_code(&e).to_string(),
-                    message: e.to_string(),
-                }
+                super::cursor_handlers::error_response(&e)
             }
         }
     }

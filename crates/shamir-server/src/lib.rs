@@ -41,6 +41,7 @@ pub mod service;
 pub mod subscriptions;
 pub mod tables_registry;
 pub mod tls;
+mod transactions_config;
 pub mod tx_registry;
 pub mod user_directory;
 pub mod version;

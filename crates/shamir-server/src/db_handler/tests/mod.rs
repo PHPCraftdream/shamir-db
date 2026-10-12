@@ -15,3 +15,5 @@ pub mod session_actor_tests;
 pub mod subscribe_handler_tests;
 pub mod tx_execute_budget_seam_tests;
 pub mod tx_execute_lifecycle_tests;
+
+pub mod visibility_handler_tests;

@@ -19,6 +19,7 @@ fn empty_batch() -> BatchRequest {
         name: None,
         transactional: false,
         isolation: None,
+        visibility_wait: None,
         durability: None,
         queries: TMap::default(),
         return_all: true,

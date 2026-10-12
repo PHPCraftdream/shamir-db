@@ -2184,7 +2184,14 @@ impl TableManager {
                             1.0
                         };
 
-                        if n_candidates <= PRE_FILTER_MAX_CANDIDATES {
+                        let (pre_filter_max_candidates, co_filter_max_selectivity) =
+                            (PRE_FILTER_MAX_CANDIDATES, CO_FILTER_MAX_SELECTIVITY);
+                        #[cfg(test)]
+                        let (pre_filter_max_candidates, co_filter_max_selectivity) = self
+                            .filtered_ann_thresholds
+                            .unwrap_or((pre_filter_max_candidates, co_filter_max_selectivity));
+
+                        if n_candidates <= pre_filter_max_candidates {
                             // PRE-FILTER: exact SIMD scoring over small candidate set.
                             let ranked = hnsw
                                 .search_prefilter(&fvq.query, k, &candidates)
@@ -2221,7 +2228,7 @@ impl TableManager {
                                 corrupt,
                             ))
                             .await;
-                        } else if selectivity <= CO_FILTER_MAX_SELECTIVITY {
+                        } else if selectivity <= co_filter_max_selectivity {
                             // CO-FILTER: HNSW search_filter with allow-set.
                             let ranked = hnsw
                                 .search_cofilter(&fvq.query, k, fvq.ef_search, &candidates)

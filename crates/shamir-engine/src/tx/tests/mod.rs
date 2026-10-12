@@ -18,6 +18,7 @@ pub mod durable_watermark_tests;
 pub mod early_assign_tests;
 pub mod f73_rederive_fail_closed_tests;
 pub mod f74_bump_apply_ordering_tests;
+pub mod follower_durability_tests;
 pub mod gc_tests;
 pub mod index_rollback_tests;
 pub mod interner_checkpoint_tests;
@@ -44,6 +45,7 @@ pub mod rederive_stale_value_dedup_cache_tests;
 #[cfg(feature = "fjall")]
 pub mod replication_interner_persistence_tests;
 pub mod replication_interner_tests;
+pub mod repo_diagnostics_tests;
 pub mod snapshot_gc_tests;
 pub mod snapshot_index_build_tests;
 pub mod snapshot_orphan_tests;

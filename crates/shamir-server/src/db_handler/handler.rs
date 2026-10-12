@@ -147,6 +147,7 @@ pub(super) fn session_actor(session: &Session) -> Actor {
 #[derive(Clone)]
 pub struct ShamirDbHandler {
     pub(super) db: Arc<ShamirDb>,
+    pub(super) transactions: crate::config::TransactionsConfig,
     /// `None` means the handler was constructed without admin support;
     /// `CreateScramUser` requests will return `not_supported`.
     pub(super) admin: Option<AdminGlue>,
@@ -210,6 +211,7 @@ impl ShamirDbHandler {
     pub fn new(db: Arc<ShamirDb>) -> Self {
         Self {
             db,
+            transactions: crate::config::TransactionsConfig::default(),
             admin: None,
             slow_query: SlowQueryConfig::DISABLED,
             query_limits: QueryLimitsCap::UNLIMITED,
@@ -229,6 +231,7 @@ impl ShamirDbHandler {
     pub fn with_admin(db: Arc<ShamirDb>, admin: AdminGlue) -> Self {
         Self {
             db,
+            transactions: crate::config::TransactionsConfig::default(),
             admin: Some(admin),
             slow_query: SlowQueryConfig::DISABLED,
             query_limits: QueryLimitsCap::UNLIMITED,
@@ -346,6 +349,23 @@ impl RequestHandler for ShamirDbHandler {
 
             let response = match request {
                 DbRequest::Ping => DbResponse::Pong,
+                DbRequest::WaitForVisibility {
+                    query_version,
+                    db,
+                    repo,
+                    version,
+                    visibility_wait,
+                } => {
+                    self.wait_for_visibility(
+                        session,
+                        query_version,
+                        &db,
+                        &repo,
+                        version,
+                        visibility_wait,
+                    )
+                    .await
+                }
                 DbRequest::Execute {
                     query_version,
                     db,
@@ -386,8 +406,22 @@ impl RequestHandler for ShamirDbHandler {
                     self.tx_execute(session, query_version, &db, tx_handle, batch)
                         .await
                 }
-                DbRequest::TxCommit { db, tx_handle } => {
-                    self.tx_commit(session, &db, tx_handle).await
+                DbRequest::TxCommit {
+                    query_version,
+                    visibility_wait,
+                    db,
+                    tx_handle,
+                } => {
+                    if let Err(e) = crate::version::check_query_lang(query_version) {
+                        DbResponse::Error {
+                            code: "unsupported_query_version".into(),
+                            message: e.to_string(),
+                        }
+                    } else {
+                        // VIS-1 is contract-only: all accepted policies remain strict.
+                        let _ = visibility_wait;
+                        self.tx_commit(session, &db, tx_handle).await
+                    }
                 }
                 DbRequest::TxRollback { db, tx_handle } => {
                     self.tx_rollback(session, &db, tx_handle).await
@@ -572,7 +606,7 @@ impl ShamirDbHandler {
         let actor = session_actor(session);
         let exec_result = self
             .db
-            .execute_with_policy(actor.clone(), db_name, &batch, self.query_limits.policy())
+            .execute_with_policy(actor.clone(), db_name, &batch, self.execution_policy())
             .await;
         let final_response = match exec_result {
             Ok(mut response) => {
@@ -604,10 +638,7 @@ impl ShamirDbHandler {
 
                 DbResponse::Batch { response }
             }
-            Err(e) => DbResponse::Error {
-                code: error_code(&e).to_string(),
-                message: e.to_string(),
-            },
+            Err(e) => error_response(&e),
         };
 
         // RI-15 (CR-B2) — single convergence point for BOTH the success and
@@ -745,6 +776,7 @@ pub(super) fn error_code(e: &BatchError) -> &str {
         // CR-A5: a cursor page's serialized size exceeded
         // `max_result_size_bytes`; rejected outright, never truncated.
         BatchError::CursorPageTooLarge { .. } => "cursor_page_too_large",
+        BatchError::AsOfVisibilityTimeout { .. } => "as_of_visibility_timeout",
     }
 }
 

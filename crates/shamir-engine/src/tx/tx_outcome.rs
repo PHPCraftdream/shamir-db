@@ -1,3 +1,5 @@
+use shamir_query_types::batch::VisibilityState;
+
 /// Whether the committed transaction's projections (data → main,
 /// counter, index → info, HNSW graph) were fully materialized inline
 /// on the commit path.
@@ -56,6 +58,8 @@ pub struct TxOutcome {
     pub tx_id: u64,
     pub snapshot_version: u64,
     pub commit_version: u64,
+    /// Independent contiguous-prefix observation (always Visible in VIS-1).
+    pub visibility: VisibilityState,
     /// Whether projections materialized inline (`Complete`) or were
     /// deferred to recovery (`Deferred`). Either way the tx is
     /// COMMITTED — see [`MaterializationState`].
