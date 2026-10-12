@@ -84,7 +84,9 @@ async fn make_mvcc_score_table() -> (TableManager, Arc<MvccStore>, Arc<RepoTxGat
     // Keep full history so pinned-version values survive vacuum.
     mvcc.set_retention(Retention::keep_history()).unwrap();
 
-    let tbl = base.with_mvcc_store(Arc::clone(&mvcc));
+    let tbl = base
+        .with_mvcc_store(Arc::clone(&mvcc))
+        .with_changefeed(Arc::clone(&gate));
     // Single-column ORDER BY index on `score` — the target case. NOTE: this
     // is a NON-covering index (no INCLUDES), so its postings carry NO
     // covering-projection version stamp (the value is `Bytes::new()`). The

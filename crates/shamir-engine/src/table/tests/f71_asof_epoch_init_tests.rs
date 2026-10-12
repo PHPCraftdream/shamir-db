@@ -165,7 +165,9 @@ async fn open_score_table(
     let gate = Arc::new(RepoTxGate::new(recovered_version, 1));
     let mvcc = Arc::new(MvccStore::new(history, Arc::clone(&gate)));
     mvcc.set_retention(Retention::keep_history()).unwrap();
-    let tbl = base.with_mvcc_store(Arc::clone(&mvcc));
+    let tbl = base
+        .with_mvcc_store(Arc::clone(&mvcc))
+        .with_changefeed(Arc::clone(&gate));
     (tbl, mvcc, gate)
 }
 

@@ -51,7 +51,9 @@ async fn make_mvcc_table_with_gate() -> (TableManager, Arc<MvccStore>, Arc<RepoT
     // Keep full history so prior versions survive vacuum.
     mvcc.set_retention(Retention::keep_history()).unwrap();
 
-    let tbl = base.with_mvcc_store(Arc::clone(&mvcc));
+    let tbl = base
+        .with_mvcc_store(Arc::clone(&mvcc))
+        .with_changefeed(Arc::clone(&gate));
     (tbl, mvcc, gate)
 }
 

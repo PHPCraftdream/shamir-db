@@ -158,7 +158,9 @@ async fn temporal_asof_evaluates_select_expression() {
     let gate = Arc::new(RepoTxGate::fresh());
     let mvcc = Arc::new(MvccStore::new(history, Arc::clone(&gate)));
     mvcc.set_retention(Retention::keep_history()).unwrap();
-    let tbl = base.with_mvcc_store(Arc::clone(&mvcc));
+    let tbl = base
+        .with_mvcc_store(Arc::clone(&mvcc))
+        .with_changefeed(Arc::clone(&gate));
 
     let ids = seed_rows(&tbl).await;
     let v1 = mvcc.version_of(&ids[0].to_bytes());
