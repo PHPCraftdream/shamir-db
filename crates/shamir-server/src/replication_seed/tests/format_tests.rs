@@ -171,7 +171,7 @@ fn canonical_schema_digest_ignores_map_order_counts_and_index_inventory() {
         .excluded_indexes
         .push(("unique".into(), vec![1, 2, 3]));
     assert_eq!(
-        schema_digest(&[first.clone()]).unwrap(),
+        schema_digest(std::slice::from_ref(&first)).unwrap(),
         schema_digest(&[second.clone()]).unwrap(),
     );
     second.schema_version += 1;
