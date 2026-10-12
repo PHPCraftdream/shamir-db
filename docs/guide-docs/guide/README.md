@@ -11,6 +11,7 @@ alpha: перед работой с ценными данными прочита
 Не нужно читать всё. Поднимайся на этаж только когда упёрся в его потребность.
 
 ```
+этаж 9  Offline seed recovery (R2-lite)      ← когда реплика отстала навсегда
 этаж 8  Interconnect (P2P / chat)            ← когда нужна децентрализация
 этаж 7  Эксплуатация (service, метрики, логи) ← когда выкатываешь в прод
 этаж 6  Поиск (FTS, векторы / embeddings)     ← когда нужен поиск/AI
@@ -35,6 +36,7 @@ alpha: перед работой с ценными данными прочита
 | **6** | `06-search.md` | Full-text search (токенизация, стемминг), векторы/embeddings (HNSW). | Нужен поиск / AI-фичи. |
 | **7** | `07-operations.md` | Рантайм-режимы (foreground + service/systemd, один бинарник), `/healthz` `/readyz` `/metrics`, логирование, rate-limit, конфиг. | Выкатка в прод. |
 | **8** | `08-interconnect.md` | Changefeed, live subscriptions, экспериментальная read-replica репликация; P2P/chat — только роадмап. | Нужен поток изменений / реплика. |
+| **9** | [`09-seed-recovery.md`](./09-seed-recovery.md) | Offline seed recovery (R2-lite): `replication-seed-export` / `verify` / `install`, validated Resume, отказ-коды, границы отказа. | Подписка в `resync_required` / новый follower против лидера с gap. |
 
 ## Сквозной принцип
 

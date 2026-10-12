@@ -15,7 +15,7 @@ use verify::verifier;
 pub use error::SeedError;
 pub use exporter::export;
 pub use file_record::FileRecord;
-pub use install::{install, install_subscription, SeedSubscriptionArgs};
+pub use install::{install, install_subscription, install_with, SeedSubscriptionArgs};
 pub use manifest::Manifest;
 pub use table_record::TableRecord;
 pub use verifier::verify;
