@@ -33,6 +33,8 @@ use crate::table::TableConfig;
 use crate::tx::commit_phases::{
     FAIL_PHASE_5A_TABLE_TOKEN, FAIL_PHASE_5A_TX_ID, FAIL_PHASE_5C_TX_ID,
 };
+use crate::tx::tests::materialized_means_visible_tests::spawn_deferred_commit;
+use crate::tx::tests::post_wal_orphan_ordering_tests::fixture;
 use crate::tx::tx_outcome::MaterializationState;
 
 fn make_repo() -> RepoInstance {
@@ -76,7 +78,7 @@ const MULTI_TABLE_INJECT_TX_ID: u64 = 7_000_010;
 /// the armed injection register is observed deterministically.
 #[tokio::test(flavor = "current_thread")]
 async fn post_commit_phase5_failure_is_committed_then_recovered() {
-    let repo = make_repo();
+    let (repo, _) = fixture("phase5_deferred_replay").await;
     repo.add_table(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let token = table_token_for("t");
@@ -112,23 +114,12 @@ async fn post_commit_phase5_failure_is_committed_then_recovered() {
     // serialises this window against any other `FAIL_PHASE_5C_TX_ID` armer.
     let inject_guard = PHASE_5C_INJECT_LOCK.lock().await;
     FAIL_PHASE_5C_TX_ID.store(INJECT_TX_ID, Ordering::SeqCst);
-    let outcome = repo.commit_tx(tx).await;
+    let task = spawn_deferred_commit(&repo, tx).await;
     FAIL_PHASE_5C_TX_ID.store(0, Ordering::SeqCst);
     drop(inject_guard);
 
-    // (1) COMMITTED, not aborted — this is the bug fix. Old code returned
-    //     Err here because Phase 5c propagated via `?`.
-    let outcome = outcome.expect("post-commit Phase 5c failure must NOT abort the tx");
-    assert_eq!(
-        outcome.materialization,
-        MaterializationState::Deferred,
-        "materialization must be reported as Deferred"
-    );
-    assert!(
-        !outcome.materialized(),
-        "materialized() must be false on the deferred path"
-    );
-    assert!(outcome.commit_version > 0, "version must be assigned");
+    // The ack remains pending until online replay settles visibility.
+    assert!(!task.is_finished());
 
     // (2) The WAL entry is in the segment so recovery re-applies it — the
     //     deferred projection's safety net.
@@ -152,8 +143,11 @@ async fn post_commit_phase5_failure_is_committed_then_recovered() {
 
     // (4) Recovery materializes the deferred projection — index posting +
     //     data both land, and the marker is cleaned.
-    let count = repo.recover_v2_inflight().await.unwrap();
-    assert_eq!(count, 1, "recovery must replay the one inflight entry");
+    let count = repo.drainer().drain_all(&repo).await.unwrap();
+    assert_eq!(count, 1, "online replay must settle the one inflight entry");
+    let outcome = task.await.unwrap().unwrap();
+    assert_eq!(outcome.materialization, MaterializationState::Deferred);
+    assert!(!outcome.materialized());
 
     let recovered_posting = tbl
         .info_store()
@@ -239,7 +233,7 @@ async fn pre_commit_failure_aborts_and_leaves_nothing() {
 async fn deferred_materialization_increments_metric() {
     const METRIC_INJECT_TX_ID: u64 = 7_000_002;
 
-    let repo = make_repo();
+    let (repo, _) = fixture("phase5_deferred_metric").await;
     repo.add_table(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let token = table_token_for("t");
@@ -273,11 +267,11 @@ async fn deferred_materialization_increments_metric() {
     // `FAIL_PHASE_5C_TX_ID` armer (see `PHASE_5C_INJECT_LOCK`).
     let inject_guard = PHASE_5C_INJECT_LOCK.lock().await;
     FAIL_PHASE_5C_TX_ID.store(METRIC_INJECT_TX_ID, Ordering::SeqCst);
-    let outcome = repo.commit_tx(tx).await;
+    let task = spawn_deferred_commit(&repo, tx).await;
     FAIL_PHASE_5C_TX_ID.store(0, Ordering::SeqCst);
     drop(inject_guard);
-
-    let outcome = outcome.expect("post-commit Phase 5c failure must NOT abort the tx");
+    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    let outcome = task.await.unwrap().unwrap();
     assert_eq!(
         outcome.materialization,
         MaterializationState::Deferred,
@@ -292,34 +286,17 @@ async fn deferred_materialization_increments_metric() {
     );
 }
 
-/// Audit MED (multi-table partial materialization → restart-bounded eventual
-/// consistency). A SINGLE tx writes TWO tables. The SECOND table's Phase 5a
-/// (data) write is injected to fail (`FAIL_PHASE_5A_*`, keyed by
-/// `(table_token, tx_id)`), while the first table's data + index land inline.
-/// This proves the cross-table inconsistency the audit flagged and that
-/// recovery reconciles it (previously only single-table reconciliation was
-/// tested):
-///
-///  (a) the commit returns `Ok(Deferred)` — NOT an abort (the WAL entry is
-///      durable, so the tx is COMMITTED even though table B didn't land);
-///  (b) one inflight WAL marker survives (Phase 7 skipped);
-///  (c) BEFORE recovery the two tables are OBSERVABLY split at the SAME
-///      committed version — table A's data + index posting are present,
-///      table B's data is ABSENT (the audit's "A's new value + B's old
-///      value");
-///  (d) AFTER `recover_v2_inflight` BOTH tables are consistent — table B's
-///      data lands via WAL `Put` replay, table A is unchanged, marker cleaned.
+/// Audit MED: partial latest-state visibility is reconciled by online replay.
+/// A single transaction writes two tables; B fails Phase 5a while A lands.
+/// The ack must stay pending until replay makes both tables visible. Snapshots
+/// stay below the version in that interval (covered by the SNAP-6 regressions).
 ///
 /// `current_thread` flavor keeps the whole commit on one task/thread so the
 /// process-global injection register pair is observed deterministically.
 #[tokio::test(flavor = "current_thread")]
 async fn multi_table_partial_deferral_is_reconciled_by_recovery() {
-    let repo = make_repo();
-    repo.add_table(TableConfig::new("a"));
-    repo.add_table(TableConfig::new("b"));
-    // get_table registers each table's MvccStore in `per_table_mvcc`, so
-    // Phase 5a routes data writes through `apply_committed_ops` (where the
-    // injection seam lives).
+    let (repo, _) = fixture("phase5_partial_replay").await;
+    // Phase 5a routes through apply_committed_visible after table registration.
     let tbl_a = repo.get_table("a").await.unwrap();
     let tbl_b = repo.get_table("b").await.unwrap();
     let token_a = table_token_for("a");
@@ -364,19 +341,13 @@ async fn multi_table_partial_deferral_is_reconciled_by_recovery() {
     let inject_guard = PHASE_5A_INJECT_LOCK.lock().await;
     FAIL_PHASE_5A_TX_ID.store(MULTI_TABLE_INJECT_TX_ID, Ordering::SeqCst);
     FAIL_PHASE_5A_TABLE_TOKEN.store(token_b, Ordering::SeqCst);
-    let outcome = repo.commit_tx(tx).await;
+    let task = spawn_deferred_commit(&repo, tx).await;
     FAIL_PHASE_5A_TX_ID.store(0, Ordering::SeqCst);
     FAIL_PHASE_5A_TABLE_TOKEN.store(0, Ordering::SeqCst);
     drop(inject_guard);
 
-    // (a) COMMITTED with Deferred — table B's data write failed AFTER the
-    //     commit point, so the tx is committed but materialization deferred.
-    let outcome = outcome.expect("a partial multi-table failure must NOT abort the tx");
-    assert_eq!(
-        outcome.materialization,
-        MaterializationState::Deferred,
-        "a failed second-table Phase 5a must defer materialization (not abort)"
-    );
+    // WAL acceptance is committed, but acknowledgement waits for replay.
+    assert!(!task.is_finished());
 
     // (b) One WAL entry in the segment (the deferred tx's, for recovery).
     let wal = repo.repo_wal().await.unwrap();
@@ -413,8 +384,11 @@ async fn multi_table_partial_deferral_is_reconciled_by_recovery() {
     // (d) AFTER recovery: BOTH tables consistent. Recovery replays the one
     //     inflight WAL entry, which carries every table's ops (Put(A), Put(B),
     //     IndexPut(A)), so table B's data lands and table A is unchanged.
-    let count = repo.recover_v2_inflight().await.unwrap();
-    assert_eq!(count, 1, "recovery must replay the one inflight entry");
+    let count = repo.drainer().drain_all(&repo).await.unwrap();
+    assert_eq!(count, 1, "online replay must settle the one inflight entry");
+    let outcome = task.await.unwrap().unwrap();
+    assert_eq!(outcome.materialization, MaterializationState::Deferred);
+    assert!(!outcome.materialized());
 
     let b_row = tbl_b
         .get(rid_b)

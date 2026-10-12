@@ -24,24 +24,19 @@ pub(super) static TEST_PRE_MATERIALIZE_REPO: std::sync::OnceLock<String> =
 /// overlapping-table commits serialize on the uwl_guard, not on the global
 /// commit_mutex.
 ///
-/// cancel-safe: NO, and it does NOT need to be — by the time this runs
-/// the tx is already COMMITTED (Phase 4 succeeded). It applies the WAL
-/// entry's visibility-bearing projections (data → main, counter, index →
-/// info) and publishes the version via P1c's contiguous-prefix watermark.
-/// It does NOT promote HNSW vectors — that derived, rebuild-on-open
-/// read-accelerator moved OUT of the commit critical section (III.5).
-/// NONE of the projections here may abort the tx: a sub-phase failure is
-/// logged and the WAL marker is left inflight so recovery re-applies the
-/// entry on the next open (recovery is the materialization guarantor —
-/// `Put`/`Delete`/`IndexPut`/`IndexDel` are last-write-wins, counter
-/// replay is intentionally skipped, HNSW is rebuilt on open).
+/// The WAL entry is already accepted (Phase 4 succeeded), so no projection
+/// may abort the transaction. Dropping the PostWal guard transfers unfinished
+/// visibility to online orphan replay; recovery also replays on the next open.
+/// Data and index projections govern snapshot visibility. Counter drift is
+/// advisory, and HNSW promotion remains a derived post-lock accelerator.
 ///
 /// Returns a [`PostPublishState`] that the caller passes to
 /// [`post_publish_cleanup`]. Phase 6.5 (markers) and Phase 7 (WAL cleanup)
 /// are I/O-bound and also run outside the lock.
 ///
-/// Phase 6 (`publish_committed_max`) ALWAYS runs — the version is committed
-/// regardless of whether the projections landed inline.
+/// Phase 6 settles visibility only after the data and index projections succeed.
+/// Otherwise PostWal Drop transfers settlement and changefeed gap ownership to
+/// the drainer; WAL acceptance alone is not snapshot visibility.
 ///
 /// Phase 6-bis (`record_commit_writes`) is called here BEFORE Phase 6
 /// publish (P2c). The footprint is inserted into the lock-free
@@ -51,17 +46,9 @@ pub(super) static TEST_PRE_MATERIALIZE_REPO: std::sync::OnceLock<String> =
 /// `commit_lock` — the ordering invariant (footprint visible before
 /// publish) is maintained by sequencing within this function.
 ///
-/// MULTI-TABLE DEFERRAL IS PARTIAL (audit MED, by-design): the Phase 5a
-/// (data) and Phase 5c (index) loops below iterate per table, each with its
-/// own bounded retry. A failure on ONE table flips `ok` but does NOT halt
-/// the other tables — so a tx touching tables A and B can materialize A
-/// inline and leave B for recovery, yet `publish_committed_max` still
-/// publishes the single shared `commit_version`. The result is a cross-table
-/// / data-vs-index inconsistency that is *restart-bounded eventually
-/// consistent*: it is reconciled only when the next `recover_v2_inflight`
-/// replays the one inflight WAL entry (which carries every table's ops).
-/// There is no online reconciler. This is honest, not reassuring — see
-/// [`MaterializationState::Deferred`] for the reader-visible contract.
+/// Multi-table failure can leave some rows visible to latest-state readers.
+/// The shared version remains unsettled until orphan replay completes every
+/// visibility-bearing projection, so snapshots stay below that version.
 pub(super) async fn materialize(
     tx: &mut TxContext,
     repo: &RepoInstance,
@@ -222,6 +209,7 @@ pub(super) async fn materialize(
     // mutation) stays post-lock in `promote_vectors` (III.5). A
     // delta-append failure flips `ok` → `Deferred` (detectable pre-ack,
     // unlike the prior silent post-ack loss).
+    let visible = ok;
     apply_vector_delta_phase(tx, repo, commit_version).await;
     if tx.async_prefix_failed {
         ok = false;
@@ -235,21 +223,12 @@ pub(super) async fn materialize(
     // A: delta durable pre-publish survives a crash at this seam.
     maybe_crash("phase5d_delta", repo).await;
 
-    // Phase 6: publish — atomic publish-committed. ALWAYS runs: the
-    // version IS committed (the WAL entry is durable) regardless of
-    // whether the projections above landed inline.
-    // P0a: consume the RAII VersionGuard → mark(Materialized) + advance
-    // last_committed_version from the watermark (fetch_max). This replaces
-    // the prior manual mark + sync_last_committed_from_watermark +
-    // publish_committed_max trio; the watermark advance is the same
-    // monotonic fetch_max, and the guard can no longer be dropped Aborted
-    // once committed here (it is moved into `commit`).
-    let changefeed_event =
-        super::publish_journaled::publish_journaled(repo, version_guard, prepared_journal);
+    // WAL acceptance is not completion: only fully visible projections let W
+    // pass this version. Vector delta failure remains recovery bookkeeping.
+    let changefeed_event = settle_visible(repo, version_guard, prepared_journal, visible);
 
-    // Crash seam (test-only): version published in-memory but lost with
-    // the process; markers (6.5) not yet persisted and Phase 7 not run.
-    // The inflight WAL marker survives → recovery materializes the tx.
+    // Phase 6 settles inline success; on deferral the orphan remains pending.
+    // A crash still leaves the inflight WAL entry for recovery.
     maybe_crash("phase6", repo).await;
 
     // A5 + Stage I: capture the max interner id across the tx's per-repo
@@ -271,6 +250,27 @@ pub(super) async fn materialize(
         },
         changefeed_event,
     )
+}
+
+/// Transfer a failed visible projection to the existing orphan replay path.
+/// No false visible event is journaled or broadcast: the drainer records the
+/// changefeed gap before settling the orphan. Its WAL entry retains the data.
+pub(super) fn settle_visible(
+    repo: &RepoInstance,
+    guard: shamir_tx::VersionGuard,
+    prepared: Option<(
+        Arc<shamir_tx::ChangelogEvent>,
+        Option<Arc<shamir_tx::RepoChangefeed>>,
+    )>,
+    visible: bool,
+) -> Option<Arc<shamir_tx::ChangelogEvent>> {
+    if visible {
+        super::publish_journaled::publish_journaled(repo, guard, prepared)
+    } else {
+        drop(guard);
+        repo.drainer().wake();
+        None
+    }
 }
 
 pub(super) async fn apply_tracked_counter_phase(
@@ -308,8 +308,8 @@ pub(super) async fn apply_tracked_counter_phase(
 pub(super) struct PostPublishState {
     pub tx_id: u64,
     pub commit_version: u64,
-    /// True iff Phases 5a–5c all succeeded. When false, Phase 7 is
-    /// skipped so the WAL marker stays inflight for recovery.
+    /// True iff data/index projections and vector delta bookkeeping succeeded.
+    /// False reports Deferred; failed data/index visibility is owned by replay.
     pub projections_ok: bool,
     /// A5 + Stage I: max interner id across the WAL entry's per-repo
     /// interner delta (`None` if the delta was empty). Phase 7 checks that
@@ -335,12 +335,12 @@ pub(super) struct PostPublishState {
 ///
 /// `wal.commit` is NOW exclusively the drainer's job, gated on the version
 /// being durable in `history` (`replay_v2_entry` → `mark_durable` →
-/// `wal.commit`). The `MaterializationState` it returns reflects only the
-/// marker write (the visible projections already ran in [`materialize`]).
+/// `wal.commit`). The returned `MaterializationState` combines the projection
+/// result from [`materialize`] with recovery marker bookkeeping.
 ///
-/// These phases are pure crash-recovery bookkeeping: they do not affect
-/// in-memory visibility (Phase 6 already published the version) and do not
-/// need serialisation against other committers.
+/// Marker writes do not settle in-memory visibility: inline success already
+/// settled Phase 6, while failed projections remain owned by orphan replay.
+/// They do not need serialisation against other committers.
 pub(super) async fn post_publish_cleanup(
     state: PostPublishState,
     repo: &RepoInstance,

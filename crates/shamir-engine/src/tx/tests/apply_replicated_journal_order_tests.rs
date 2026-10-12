@@ -138,10 +138,10 @@ async fn follower_journal_contains_a_and_b_while_a_broadcast_is_parked() {
     assert!(matches!(live.try_recv(), Err(TryRecvError::Empty)));
 }
 
-/// Safety control: already passes baseline; catches enqueue/gap moved before
-/// the failed-history exit (including eager preparation that marks a gap).
+/// SNAP-6: history fails after overlay publication. Keep both trackers pending
+/// and emit neither a journal event nor a gap for this failed follower apply.
 #[tokio::test]
-async fn follower_failed_apply_aborts_without_journal_event_or_gap() {
+async fn follower_failed_history_requires_reopen_without_journal_event_or_gap() {
     let follower = follower_repo();
     let _ = follower.get_table("items").await.unwrap();
     let gate = follower.tx_gate().await.unwrap();
@@ -159,11 +159,11 @@ async fn follower_failed_apply_aborts_without_journal_event_or_gap() {
         .await
         .expect_err("history persistence must fail");
     assert!(matches!(&error, DbError::Storage(_)), "{error:?}");
-    // A failed apply burned a version but no materialization was published.
-    // Guard Drop advances BOTH trackers past that aborted version.
+    // History failure follows overlay publication, so this is not an abort.
+    assert!(gate.requires_reopen());
     assert_eq!(gate.version_allocation_high_water_mark(), 1);
-    assert_eq!(gate.completion().watermark(), 1);
-    assert_eq!(gate.durable_watermark(), 1);
+    assert_eq!(gate.completion().watermark(), 0);
+    assert_eq!(gate.durable_watermark(), 0);
     let read = bounded(&follower, &handle, 1).await;
     assert!(read.events.is_empty());
     assert_eq!(read.gap_at, None);

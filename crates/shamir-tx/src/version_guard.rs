@@ -37,6 +37,10 @@ use crate::repo_tx_gate::Unresolved;
 /// - After [`wal_queued`](Self::wal_queued): physical ticket fate determines
 ///   abort, orphan replay, or unresolved handover; ambiguity blocks progress.
 ///
+/// - After [`visibility_started_without_wal`](Self::visibility_started_without_wal):
+///   follower failure / cancellation requires reopen without settling either
+///   tracker. There is no local WAL entry to register for orphan replay.
+///
 /// All guard transitions are synchronous (atomics / `scc`, never async).
 /// Watermark advance follows `RepoTxGate::sync_last_committed_from_watermark`.
 #[must_use = "a VersionGuard must be committed or transfer resolution on drop"]
@@ -52,6 +56,8 @@ pub struct VersionGuard {
     armed: bool,
     /// Set by wal_accepted; armed Drop transfers completion to the drainer.
     post_wal: bool,
+    /// Follower visibility has started without a local WAL replay owner.
+    reopen_on_drop: bool,
     queued: Option<Unresolved>,
     orphan_entries: Arc<scc::HashMap<u64, Arc<WalEntryV2>, THasher>>,
     wal_unresolved: Arc<scc::HashMap<u64, Unresolved, THasher>>,
@@ -88,6 +94,7 @@ impl VersionGuard {
             last_committed,
             armed: true,
             post_wal: false,
+            reopen_on_drop: false,
             queued: None,
             orphan_entries,
             wal_unresolved,
@@ -129,6 +136,13 @@ impl VersionGuard {
         self.post_wal = true;
     }
 
+    /// Arm fail-closed Drop BEFORE a follower publishes any row without WAL.
+    /// Success can still commit normally; cancellation, panic or failure leaves
+    /// both trackers unsettled and requires reopen instead of a false abort.
+    pub fn visibility_started_without_wal(&mut self) {
+        self.reopen_on_drop = true;
+    }
+
     /// Mark the version `Materialized` and advance `last_committed_version`
     /// from the resulting watermark, then disarm so `Drop` is a no-op.
     ///
@@ -153,6 +167,11 @@ impl VersionGuard {
 
 impl Drop for VersionGuard {
     fn drop(&mut self) {
+        if self.armed && self.reopen_on_drop {
+            self.requires_reopen.store(true, Ordering::Release);
+            let _ = self.active_post_wal.remove_sync(&self.version);
+            return;
+        }
         if self.armed {
             if let Some((ticket, entry)) = self.queued.take() {
                 match ticket.state() {
