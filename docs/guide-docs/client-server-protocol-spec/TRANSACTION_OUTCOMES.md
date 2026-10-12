@@ -298,11 +298,12 @@ again. Serialized cursor page rejection is `cursor_page_too_large`, not
 | `as_of_reopen_required` | Requested allocated version cannot settle because the repository requires reopen; reopen/reconcile before retrying. |
 
 Allocated AsOf positions above the contiguous completion watermark wait until
-all versions through the requested position materialize or abort. This wait has
-no give-up timeout; callers cancel the read to bound it, without settling a
-version or changing the requested position. Positions at or below the watermark
-do not wait, even when reopening is required. Sources:
-`crates/shamir-engine/src/table/read_temporal.rs:85-101`,
+all versions through the requested position materialize or abort, bounded by
+`transactions.read_visibility_timeout_ms` and the remaining execution/call
+budget; expiry returns `as_of_visibility_timeout` without settling a version
+or changing the requested position. Positions at or below the watermark do not
+wait, even when reopening is required. Sources:
+`crates/shamir-engine/src/table/read_temporal.rs`,
 `crates/shamir-tx/src/repo_tx_gate.rs:1055-1107`,
 `crates/shamir-storage/src/error.rs:117-118`,
 `crates/shamir-server/src/db_handler/handler.rs:711-719`.
@@ -395,3 +396,33 @@ Embedded table reads can select explicit strict waits with
 budgets; strict is not represented by zero. Execution/call budgets are sampled
 at the observation seam after asynchronous prerequisites.
 Commit acknowledgements default to Strict and support explicit Strict or Bounded waits as above; Bounded returns committed receipts.
+
+## `changes_since` and the sampled settled prefix
+
+The admin read `changes_since { repo, cursor, limit }` returns `events`,
+`gap_at`, and — since VIS-4c — `visible_through`: the settled prefix W sampled
+once, before the journal read (source:
+`crates/shamir-db/src/shamir_db/execute/admin_retention.rs`). The field is
+additive and omitted when the repository's visibility gate is not initialized;
+old payloads and old clients are unaffected.
+
+Semantics:
+
+- Events are bounded by the settled prefix exactly as before; `visible_through`
+  never extends the returned range, it only reports the sample. It is a
+  settlement sample, not a coverage certificate: journal confirmation may lag
+  it and events stay subject to the cursor, `limit`, gaps and retention, so do
+  not advance your event cursor to `visible_through` from this field alone.
+- An EMPTY event list is **not** proof that a pending write aborted or
+  vanished: if `visible_through` is below your write's commit version, the
+  write is committed-but-pending — reconcile with `WaitForVisibility` and do
+  not resend.
+- `gap_at` / retention truncation still require a full resynchronisation;
+  `changes_since` is not the primary reconciliation API and its sample is not
+  a visibility receipt.
+
+For operators: the acknowledgement side of the same mechanism is exported as
+the `shamir_visibility_*` metrics with structured, rate-limited expiry logs
+(see the operations guide). A visible acknowledgement — like materialization —
+implies nothing about push delivery: subscription events remain bounded by the
+settled prefix and are delivered as hints, never as a commit receipt.

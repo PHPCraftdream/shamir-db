@@ -19,9 +19,9 @@ fn scrape_renders_repo_labels_and_absolute_replay_counters() {
     let mut snapshot = gate.diagnostics();
     snapshot.orphan_replay_failures_total = 2;
     metrics::with_local_recorder(&recorder, || {
-        record_gate_metrics("db", "repo-a", &snapshot);
-        record_gate_metrics("db", "repo-a", &snapshot);
-        record_gate_metrics("db", "repo-b", &RepoTxGate::fresh().diagnostics());
+        record_gate_metrics("db", "repo-a", &snapshot, None);
+        record_gate_metrics("db", "repo-a", &snapshot, None);
+        record_gate_metrics("db", "repo-b", &RepoTxGate::fresh().diagnostics(), None);
     });
     let rendered = handle.render();
     for name in [

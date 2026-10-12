@@ -188,6 +188,18 @@ impl ShamirAdminExecutor {
             .checked_add(1)
             .ok_or_else(|| err("changes_since cursor overflow".to_string()))?;
         let limit = op.limit.unwrap_or(1000) as usize;
+        // VIS-4c: sample the settled prefix W BEFORE the journal read. It is a
+        // settlement sample, not journal coverage (confirmation may lag W).
+        // An empty list with `visible_through` below the caller's write
+        // position means the write is still PENDING, not that it aborted or
+        // vanished. Gaps (`gap_at`) and retention still require resync;
+        // `WaitForVisibility` stays the primary reconciliation operation.
+        let repo = self
+            .shamir
+            .get_db(&self.db_name)
+            .and_then(|db| db.get_repo(&op.repo));
+        let visible_through =
+            super::visibility_sample::changes_since_visible_through(repo.as_ref());
         let jr = match self
             .shamir
             .read_changelog_from_journal(&self.db_name, &op.repo, from_version, limit)
@@ -208,10 +220,19 @@ impl ShamirAdminExecutor {
             Some(v) => QueryValue::Int(v as i64),
             None => QueryValue::Null,
         };
-        Ok(admin_result(mpack!({
-            "changes_since": @(QueryValue::Int(op.changes_since as i64)),
-            "events": @(QueryValue::List(events_qv)),
-            "gap_at": @(gap_at_qv),
-        })))
+        let payload = match visible_through {
+            Some(w) => mpack!({
+                "changes_since": @(QueryValue::Int(op.changes_since as i64)),
+                "events": @(QueryValue::List(events_qv)),
+                "gap_at": @(gap_at_qv),
+                "visible_through": @(QueryValue::Int(w as i64)),
+            }),
+            None => mpack!({
+                "changes_since": @(QueryValue::Int(op.changes_since as i64)),
+                "events": @(QueryValue::List(events_qv)),
+                "gap_at": @(gap_at_qv),
+            }),
+        };
+        Ok(admin_result(payload))
     }
 }

@@ -53,6 +53,7 @@ pub mod version_codec;
 pub mod version_guard;
 pub mod version_provider;
 pub mod versioned_overlay;
+pub mod visibility_metrics;
 
 pub use cell_reservation_guard::CellReservationGuard;
 pub use changefeed::{
@@ -84,3 +85,7 @@ pub use version_codec::{decode_version_key, encode_version_key};
 pub use version_guard::VersionGuard;
 pub use version_provider::VersionProvider;
 pub use versioned_overlay::VersionedOverlay;
+pub use visibility_metrics::{
+    AckMode, AckResult, PendingKind, PendingReason, VisibilityMetrics, VisibilityMetricsSnapshot,
+    BUCKET_BOUNDS_MS, BUCKET_COUNT,
+};

@@ -57,6 +57,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::byte_budget::ByteBudget;
 
+mod visibility_export;
+
+#[cfg(test)]
+mod tests;
+
+use visibility_export::{record_visibility_metrics, register_visibility_metrics};
+
 /// Live state shared between the HTTP handlers and the boot path.
 ///
 /// `ready` flips to `true` once `ServerLauncher::launch` has bound every
@@ -436,6 +443,9 @@ pub async fn spawn_with_byte_budget(
     );
     metrics::gauge!("shamir_degraded_indexes_total").set(0.0);
 
+    // VIS-4c: visibility acknowledgement/reconciliation family, zero-touch.
+    register_visibility_metrics();
+
     // 4. Background poller: refresh process metrics every 5 s. Cheap
     // (~30-50 µs of work). The first collect() is invoked synchronously
     // so /metrics returns useful data immediately.
@@ -608,7 +618,7 @@ async fn info_handler(State(s): State<AppState>) -> Response {
         visibility_stalls: s.db.as_ref().map_or_else(Vec::new, |db| {
             open_gate_snapshots(db)
                 .into_iter()
-                .filter_map(|(db, repo, snapshot)| visibility_stall(&db, &repo, &snapshot))
+                .filter_map(|(db, repo, snapshot, _)| visibility_stall(&db, &repo, &snapshot))
                 .collect()
         }),
     };
@@ -652,9 +662,14 @@ fn blocker_class(class: shamir_tx::GateBlockerClass) -> &'static str {
     }
 }
 
-fn open_gate_snapshots(
-    db: &shamir_db::ShamirDb,
-) -> Vec<(String, String, shamir_tx::GateDiagnostics)> {
+type GateSample = (
+    String,
+    String,
+    shamir_tx::GateDiagnostics,
+    Option<shamir_tx::VisibilityMetricsSnapshot>,
+);
+
+fn open_gate_snapshots(db: &shamir_db::ShamirDb) -> Vec<GateSample> {
     let mut snapshots = Vec::new();
     for db_name in db.list_dbs() {
         let Some(instance) = db.get_db(&db_name) else {
@@ -664,19 +679,29 @@ fn open_gate_snapshots(
             let Some(repo) = instance.get_repo(&repo_name) else {
                 continue;
             };
-            snapshots.push((db_name.clone(), repo_name, repo.diagnostics()));
+            snapshots.push((
+                db_name.clone(),
+                repo_name,
+                repo.diagnostics(),
+                repo.visibility_metrics_snapshot(),
+            ));
         }
     }
     snapshots
 }
 
 pub(crate) fn sample_gate_metrics(db: &shamir_db::ShamirDb) {
-    for (db_name, repo, snapshot) in open_gate_snapshots(db) {
-        record_gate_metrics(&db_name, &repo, &snapshot);
+    for (db_name, repo, snapshot, visibility) in open_gate_snapshots(db) {
+        record_gate_metrics(&db_name, &repo, &snapshot, visibility.as_ref());
     }
 }
 
-pub(crate) fn record_gate_metrics(db: &str, repo: &str, s: &shamir_tx::GateDiagnostics) {
+pub(crate) fn record_gate_metrics(
+    db: &str,
+    repo: &str,
+    s: &shamir_tx::GateDiagnostics,
+    visibility: Option<&shamir_tx::VisibilityMetricsSnapshot>,
+) {
     // Separate db label avoids collisions between identically named repos.
     // Only registered/open repository names enter this label space.
     for (name, value) in [
@@ -746,6 +771,15 @@ pub(crate) fn record_gate_metrics(db: &str, repo: &str, s: &shamir_tx::GateDiagn
         "db" => db.to_owned(), "repo" => repo.to_owned(),
     )
     .absolute(s.orphan_replay_attempts_total);
+    // VIS-4c snapshot family; the waiters gauge reuses the completion
+    // tracker's RAII registration via GateDiagnostics::visibility_waiters.
+    if let Some(visibility) = visibility {
+        record_visibility_metrics(db, repo, visibility, s.visibility_waiters);
+    } else {
+        metrics::gauge!("shamir_visibility_ack_waiters",
+            "db" => db.to_owned(), "repo" => repo.to_owned())
+        .set(s.visibility_waiters as f64);
+    }
 }
 
 /// Single completion funnel for both direct handles and serve's deadline path.

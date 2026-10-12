@@ -1,8 +1,15 @@
+use std::future::Future;
+use std::time::Duration;
+
 use shamir_query_types::batch::{VisibilityPendingReason, VisibilityState, VisibilityWait};
 use shamir_storage::error::DbError;
 use shamir_tunables::instance_defaults::MAX_UNDRAINED_VERSIONS;
+use shamir_tx::visibility_metrics::{AckMode, AckResult, PendingKind};
 use shamir_tx::TxContext;
 
+use crate::repo::visibility_observer::{
+    observe_gate_with_budget, query_ack_result, record_pending_kind,
+};
 use crate::repo::RepoInstance;
 use crate::tx::commit::{commit_tx_inner, release_pessimistic_locks, TxError};
 use crate::tx::tx_outcome::{MaterializationState, TxOutcome};
@@ -12,10 +19,22 @@ use crate::tx::tx_outcome::{MaterializationState, TxOutcome};
 /// queue/socket backpressure or disconnect ambiguity.
 /// cancel-safe: partial — same inner-driver contract as commit_tx; after a known
 /// outcome cancellation drops only observation, not materialization or recovery.
-pub(crate) async fn commit_tx_with_options(
+pub(crate) fn commit_tx_with_options(
     tx: TxContext,
     repo: &RepoInstance,
     wait: VisibilityWait,
+) -> impl Future<Output = Result<TxOutcome, TxError>> + '_ {
+    commit_tx_with_kind(tx, repo, wait, PendingKind::ExplicitTx)
+}
+
+/// Same pipeline as [`commit_tx_with_options`]; a Pending outcome is counted
+/// under `kind`, the write family only the caller knows (the shared
+/// acknowledgement tail serves explicit and implicit commits alike).
+pub(crate) async fn commit_tx_with_kind(
+    tx: TxContext,
+    repo: &RepoInstance,
+    wait: VisibilityWait,
+    kind: PendingKind,
 ) -> Result<TxOutcome, TxError> {
     // Validate before entering the pipeline, never erase a known commit.
     if let VisibilityWait::Bounded { timeout_ms } = wait {
@@ -41,7 +60,17 @@ pub(crate) async fn commit_tx_with_options(
         .initialized_tx_gate()
         .expect("gate initialized before commit");
     let result = commit_tx_inner(tx, repo).await;
-    acknowledge_known_outcome(result, repo, gate, wait, MAX_UNDRAINED_VERSIONS).await
+    let acknowledged =
+        acknowledge_known_outcome(result, repo, gate, wait, MAX_UNDRAINED_VERSIONS).await;
+    let visibility = match &acknowledged {
+        Ok(outcome) => Some(outcome.visibility),
+        Err(TxError::WalDurability { visibility, .. }) => Some(*visibility),
+        Err(_) => None,
+    };
+    if let Some(visibility) = visibility {
+        record_pending_kind(repo, visibility, kind);
+    }
+    acknowledged
 }
 
 /// cancel-safe: yes — only read-only observation and a soft brake remain;
@@ -82,10 +111,28 @@ pub(crate) async fn acknowledge_known_outcome(
             )
         }
     };
+    // VIS-4c wait bookkeeping. Captured ONLY on a genuinely-waiting path;
+    // the Strict/Visible fast path (no target, or already visible) never
+    // reaches an Instant::now() call or an allocation.
+    let mode = match wait {
+        VisibilityWait::Strict => AckMode::Strict,
+        VisibilityWait::Bounded { .. } => AckMode::Bounded,
+    };
+    let wait_started = match target {
+        Some(version)
+            if gate.visible_floor() < version
+                && !gate.requires_reopen()
+                && !matches!(wait, VisibilityWait::Bounded { timeout_ms: 0 }) =>
+        {
+            Some(tokio::time::Instant::now())
+        }
+        _ => None,
+    };
+    let mut observe_failed = false;
     let visibility = match target {
         None => VisibilityState::Visible,
         Some(version) => {
-            let observation = crate::repo::visibility_observer::observe_gate_with_budget(
+            let observation = observe_gate_with_budget(
                 gate,
                 version,
                 budget.map(|deadline| {
@@ -101,12 +148,44 @@ pub(crate) async fn acknowledge_known_outcome(
                     // replace a known commit with an error or a panic: take the
                     // zero-budget sample (W still wins over timeout/reopen).
                     log::error!("known commit visibility observation failed: {error}");
+                    observe_failed = true;
                     budget = Some(tokio::time::Instant::now());
                     settled_sample(gate, version)
                 }
             }
         }
     };
+    // VIS-4c: one relaxed counter increment per acknowledgement; the
+    // duration histogram only when this acknowledgement actually waited.
+    // Pending expiry additionally emits a rate-limited structured warning.
+    if let Some(version) = target {
+        let ack_result = if observe_failed {
+            AckResult::Error
+        } else {
+            query_ack_result(visibility)
+        };
+        let waited = wait_started.is_some() && ack_result.observed_wait();
+        let elapsed = wait_started.map_or(Duration::ZERO, |s| s.elapsed());
+        gate.visibility()
+            .record_ack(mode, ack_result, waited, elapsed);
+        if let VisibilityState::Pending {
+            visible_through,
+            blocking_version,
+            ..
+        } = visibility
+        {
+            // Pending-kind attribution happens at the kind-known call sites
+            // (explicit batch, implicit batch, direct write), not here: this
+            // acknowledgement tail serves both explicit and implicit commits.
+            if gate.visibility().reserve_pending_warning() {
+                log::warn!(
+                    "transaction acknowledgement pending at wait expiry: repository={}, target={version}, visible_through={visible_through}, blocking_version={blocking_version}, elapsed_ms={}",
+                    repo.name(),
+                    elapsed.as_millis(),
+                );
+            }
+        }
+    }
     // A reopen-required wait keeps the established Deferred marker.
     let reopen = matches!(
         visibility,
