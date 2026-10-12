@@ -418,9 +418,13 @@ impl RequestHandler for ShamirDbHandler {
                             message: e.to_string(),
                         }
                     } else {
-                        // VIS-1 is contract-only: all accepted policies remain strict.
-                        let _ = visibility_wait;
-                        self.tx_commit(session, &db, tx_handle).await
+                        match visibility_wait {
+                            None => self.tx_commit(session, &db, tx_handle).await,
+                            Some(wait) => {
+                                self.tx_commit_with_options(session, &db, tx_handle, Some(wait))
+                                    .await
+                            }
+                        }
                     }
                 }
                 DbRequest::TxRollback { db, tx_handle } => {
@@ -510,7 +514,7 @@ impl ShamirDbHandler {
         session: &Session,
         query_version: u32,
         db_name: &str,
-        batch: BatchRequest,
+        mut batch: BatchRequest,
         conn: &ConnectionServices,
     ) -> DbResponse {
         // Query-language version dispatch — fast reject before any DB work.
@@ -519,6 +523,55 @@ impl ShamirDbHandler {
                 code: "unsupported_query_version".into(),
                 message: e.to_string(),
             };
+        }
+
+        // Resolve all explicit policies before admission or any writes, including
+        // nested bodies whose outcomes cannot carry a bounded commit receipt.
+        let policy = (|| {
+            let wait = self
+                .transactions
+                .resolve_commit_wait(batch.visibility_wait)?;
+            for visit in BatchTreeVisitor::new(&batch.queries) {
+                let nested = match &visit.entry.op {
+                    shamir_query_types::batch::BatchOp::Batch(sub) => sub.batch.visibility_wait,
+                    shamir_query_types::batch::BatchOp::ForEach(fe) => fe.batch.visibility_wait,
+                    _ => None,
+                };
+                if let Some(nested) = nested {
+                    self.transactions.resolve_wait(nested)?;
+                    if matches!(
+                        nested,
+                        shamir_query_types::batch::VisibilityWait::Bounded { .. }
+                    ) {
+                        return Err(shamir_db::DbError::VisibilityWaitInvalid {
+                            reason:
+                                "bounded visibility is unsupported by nested Batch/ForEach bodies"
+                                    .into(),
+                        });
+                    }
+                }
+            }
+            if !batch.transactional
+                && matches!(
+                    wait,
+                    shamir_query_types::batch::VisibilityWait::Bounded { .. }
+                )
+            {
+                return Err(shamir_db::DbError::VisibilityWaitInvalid {
+                    reason: "bounded visibility requires a receipt-bearing transactional batch"
+                        .into(),
+                });
+            }
+            Ok(wait)
+        })();
+        match policy {
+            Ok(wait) => batch.visibility_wait = Some(wait),
+            Err(e) => {
+                return DbResponse::Error {
+                    code: "visibility_wait_invalid".into(),
+                    message: e.to_string(),
+                };
+            }
         }
 
         // Admin / auth gate. An explicit 4-op allowlist (`List`,

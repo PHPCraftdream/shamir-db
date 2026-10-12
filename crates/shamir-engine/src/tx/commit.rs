@@ -1,5 +1,7 @@
 use shamir_collections::TFxMap;
-use shamir_query_types::batch::TransactionInfo;
+use shamir_query_types::batch::{
+    TransactionInfo, VisibilityPendingReason, VisibilityState, VisibilityWait,
+};
 use shamir_storage::error::DbError;
 use shamir_tunables::instance_defaults::MAX_UNDRAINED_VERSIONS;
 use shamir_tx::{IsolationLevel, TxContext};
@@ -588,56 +590,137 @@ pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
 /// RAII win: no per-tx buffer outlives the `TxContext`, so no broadcast
 /// drain is needed (HIGH-6).
 pub async fn commit_tx(tx: TxContext, repo: &RepoInstance) -> Result<TxOutcome, TxError> {
-    match commit_tx_inner(tx, repo).await {
-        Ok(mut outcome) => {
-            // The inner driver has settled its own version and released all locks.
-            // Cancelling this read-only wait cannot undo or interrupt the commit.
-            // A commit that allocated a version is strictly above its snapshot
-            // (snapshots read at W <= the allocation counter); the read-only and
-            // empty-footprint fast paths return commit_version == snapshot_version
-            // and allocated nothing, so there is nothing to wait for (and waiting
-            // on a never-allocated version would never resolve).
-            if outcome.commit_version > outcome.snapshot_version {
-                let gate = repo.tx_gate().await?;
-                if gate.await_visible(outcome.commit_version).await
-                    == shamir_tx::repo_tx_gate::VisibleOutcome::ReopenRequired
-                {
-                    outcome.materialization = MaterializationState::Deferred;
-                }
+    commit_tx_with_options(tx, repo, repo.commit_visibility_wait()).await
+}
+
+/// The budget covers only post-known-outcome observation and soft backpressure,
+/// not inner execution, WAL uncertainty, async-index durability-error tails,
+/// queue/socket backpressure or disconnect ambiguity.
+/// cancel-safe: partial — same inner-driver contract as commit_tx; after a known
+/// outcome cancellation drops only observation, not materialization or recovery.
+pub(crate) async fn commit_tx_with_options(
+    tx: TxContext,
+    repo: &RepoInstance,
+    wait: VisibilityWait,
+) -> Result<TxOutcome, TxError> {
+    // Validate before entering the pipeline, never erase a known commit.
+    if let VisibilityWait::Bounded { timeout_ms } = wait {
+        if tokio::time::Instant::now()
+            .checked_add(std::time::Duration::from_millis(timeout_ms))
+            .is_none()
+        {
+            release_pessimistic_locks(&tx, repo).await;
+            return Err(DbError::VisibilityWaitInvalid {
+                reason: "visibility wait duration is not representable".into(),
             }
-            // D2 P1e — soft backpressure. The ack-path published only the
-            // in-memory overlay; the value is durable in `history` only after
-            // the background drainer replays its WAL entry. Under sustained
-            // write pressure faster than the disk drains, the overlay + inflight
-            // WAL tail grow unbounded. Park the committer here, AFTER the commit
-            // is published (the tx is COMMITTED and observable on its return),
-            // until the undrained gap falls back under the low-watermark. This
-            // is the single choke point: every live commit path funnels through
-            // this wrapper, and it is on the SUCCESS path only — aborts never
-            // grew the overlay, so they never brake.
-            apply_backpressure(repo, MAX_UNDRAINED_VERSIONS).await;
-            Ok(outcome)
+            .into());
         }
-        Err(mut e) => {
-            if let TxError::WalDurability {
-                commit_version,
-                materialization,
-                ..
-            } = &mut e
-            {
-                let gate = repo.tx_gate().await?;
-                if gate.await_visible(*commit_version).await
-                    == shamir_tx::repo_tx_gate::VisibleOutcome::ReopenRequired
-                {
-                    *materialization = MaterializationState::Deferred;
-                }
-                apply_backpressure(repo, MAX_UNDRAINED_VERSIONS).await;
-            }
-            if let TxError::Storage(_) = &e {
+    }
+    // Borrow the initialized gate: no new Arc RMW on the Strict/Visible path.
+    if repo.initialized_tx_gate().is_none() {
+        if let Err(error) = repo.tx_gate().await {
+            release_pessimistic_locks(&tx, repo).await;
+            return Err(error.into());
+        }
+    }
+    let gate = repo
+        .initialized_tx_gate()
+        .expect("gate initialized before commit");
+    let result = commit_tx_inner(tx, repo).await;
+    acknowledge_known_outcome(result, repo, gate, wait, MAX_UNDRAINED_VERSIONS).await
+}
+
+/// cancel-safe: yes — only read-only observation and a soft brake remain;
+/// dropping an outcome's background handle detaches, never aborts its tail.
+pub(crate) async fn acknowledge_known_outcome(
+    result: Result<TxOutcome, TxError>,
+    repo: &RepoInstance,
+    gate: &shamir_tx::RepoTxGate,
+    wait: VisibilityWait,
+    high: u64,
+) -> Result<TxOutcome, TxError> {
+    let mut result = result;
+    let target = match &result {
+        Ok(outcome) if outcome.commit_version > outcome.snapshot_version => {
+            Some(outcome.commit_version)
+        }
+        Ok(_) => None,
+        Err(TxError::WalDurability { commit_version, .. }) => Some(*commit_version),
+        Err(error) => {
+            if matches!(error, TxError::Storage(_)) {
                 repo.tx_metrics().on_tx_aborted_storage();
             }
-            Err(e)
+            return result;
         }
+    };
+    // Taken only for Bounded; Strict/Visible adds neither a clock nor a timer.
+    let mut budget = match wait {
+        VisibilityWait::Strict => None,
+        VisibilityWait::Bounded { timeout_ms } => {
+            let start = tokio::time::Instant::now();
+            // A long inner commit can invalidate initial representability.
+            // Exhaust an unrepresentable post-known budget, never panic or
+            // replace the committed outcome with a validation error.
+            Some(
+                start
+                    .checked_add(std::time::Duration::from_millis(timeout_ms))
+                    .unwrap_or(start),
+            )
+        }
+    };
+    let visibility = match target {
+        None => VisibilityState::Visible,
+        Some(version) => {
+            let observation = crate::repo::visibility_observer::observe_gate_with_budget(
+                gate,
+                version,
+                budget.map(|deadline| {
+                    deadline.saturating_duration_since(tokio::time::Instant::now())
+                }),
+            )
+            .await;
+            match observation {
+                Ok(state) => state,
+                Err(error) => {
+                    // A version this gate allocated cannot be a future version, and
+                    // an unrepresentable post-known deadline is exhausted. Never
+                    // replace a known commit with an error or a panic: take the
+                    // zero-budget sample (W still wins over timeout/reopen).
+                    log::error!("known commit visibility observation failed: {error}");
+                    budget = Some(tokio::time::Instant::now());
+                    settled_sample(gate, version)
+                }
+            }
+        }
+    };
+    match &mut result {
+        Ok(outcome) => outcome.visibility = visibility,
+        Err(TxError::WalDurability {
+            visibility: state, ..
+        }) => *state = visibility,
+        Err(_) => unreachable!("only known outcomes reach acknowledgement"),
+    }
+    if visibility == VisibilityState::Visible {
+        apply_backpressure_with_budget(repo, gate, high, budget).await;
+    }
+    result
+}
+
+/// Zero-budget final sample of the settled prefix for a known version.
+fn settled_sample(gate: &shamir_tx::RepoTxGate, version: u64) -> VisibilityState {
+    let visible_through = gate.visible_floor();
+    if visible_through >= version {
+        return VisibilityState::Visible;
+    }
+    VisibilityState::Pending {
+        visible_through,
+        // visible_through < version <= u64::MAX proves this addition fits.
+        blocking_version: visible_through + 1,
+        reason: if gate.requires_reopen() {
+            VisibilityPendingReason::ReopenRequired
+        } else {
+            VisibilityPendingReason::Timeout
+        },
     }
 }
 
@@ -684,12 +767,24 @@ pub async fn commit_tx(tx: TxContext, repo: &RepoInstance) -> Result<TxOutcome, 
 ///
 /// Takes `high` as a parameter so tests can drive the state machine with a tiny
 /// artificial gap; production callers pass [`MAX_UNDRAINED_VERSIONS`].
+#[cfg(test)]
 pub(crate) async fn apply_backpressure(repo: &RepoInstance, high: u64) {
     let Ok(gate) = repo.tx_gate().await else {
         // No gate (repo teardown / construction race) — nothing to brake on.
         return;
     };
 
+    apply_backpressure_with_budget(repo, &gate, high, None).await;
+}
+
+/// Soft backpressure, not hard memory admission. Pending skips this entirely.
+/// cancel-safe: yes — durable observation and drainer nudges mutate no commit state.
+pub(crate) async fn apply_backpressure_with_budget(
+    repo: &RepoInstance,
+    gate: &shamir_tx::RepoTxGate,
+    high: u64,
+    deadline: Option<tokio::time::Instant>,
+) {
     // Fast path: cheap atomic loads, the overwhelmingly common case.
     let gap = gate
         .last_committed()
@@ -708,7 +803,10 @@ pub(crate) async fn apply_backpressure(repo: &RepoInstance, high: u64) {
          parking committer on durable progress"
     );
 
-    let start = std::time::Instant::now();
+    let start = tokio::time::Instant::now();
+    let deadline = deadline
+        .unwrap_or(start + BACKPRESSURE_MAX_WAIT)
+        .min(start + BACKPRESSURE_MAX_WAIT);
     loop {
         // Nudge the drainer every iteration: it may have gone idle (its
         // `notify_one` permit already consumed by a prior pass).
@@ -719,6 +817,7 @@ pub(crate) async fn apply_backpressure(repo: &RepoInstance, high: u64) {
         // the park (no lost wakeup).
         let notified = gate.durable_notified();
         tokio::pin!(notified);
+        notified.as_mut().enable();
 
         let gap = gate
             .last_committed()
@@ -735,7 +834,7 @@ pub(crate) async fn apply_backpressure(repo: &RepoInstance, high: u64) {
         // wall-clock budget it is stuck (durable write faulted). Proceed without
         // backpressure rather than hang the committer forever — RAM grows, data
         // is unaffected (already committed + observable).
-        if start.elapsed() >= BACKPRESSURE_MAX_WAIT {
+        if tokio::time::Instant::now() >= deadline {
             log::warn!(
                 "tx backpressure ABANDONED after {:?}: undrained gap still {gap} > low {low} — \
                  drain appears stuck; proceeding (overlay bound relaxed, data unaffected)",
@@ -747,14 +846,15 @@ pub(crate) async fn apply_backpressure(repo: &RepoInstance, high: u64) {
         // Park on durable progress, but cap each park with a short sleep so a
         // single missed signal (or a drainer that needs re-nudging) cannot
         // stall the whole budget — we loop, re-wake, re-check.
+        let park_until = (tokio::time::Instant::now() + BACKPRESSURE_PARK_SLICE).min(deadline);
         tokio::select! {
             _ = &mut notified => {}
-            _ = tokio::time::sleep(BACKPRESSURE_PARK_SLICE) => {}
+            _ = tokio::time::sleep_until(park_until) => {}
         }
     }
 }
 
-/// Wall-clock ceiling on a single [`apply_backpressure`] call. Past this the
+/// Wall-clock ceiling on a single soft backpressure call. Past this the
 /// brake is abandoned (drain presumed stuck) and the committer proceeds — a
 /// RAM-vs-hang trade that always favours liveness. Generous enough that a
 /// healthy-but-slow disk drains within it under normal bursts.

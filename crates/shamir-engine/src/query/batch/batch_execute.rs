@@ -155,6 +155,35 @@ pub(super) async fn plan_and_validate_batch(
     scope: &ExecScope,
 ) -> Result<BatchPlan, BatchError> {
     let effective = request.limits.clamped_to(scope.limits());
+    if !request.transactional
+        && matches!(
+            request.visibility_wait,
+            Some(shamir_query_types::batch::VisibilityWait::Bounded { .. })
+        )
+    {
+        return Err(BatchError::QueryError {
+            alias: String::new(),
+            message: "bounded visibility requires a receipt-bearing transactional batch".into(),
+            code: Some("validation".into()),
+        });
+    }
+    for visit in shamir_query_types::batch::BatchTreeVisitor::new(&request.queries) {
+        let nested_wait = match &visit.entry.op {
+            BatchOp::Batch(sub) => sub.batch.visibility_wait,
+            BatchOp::ForEach(fe) => fe.batch.visibility_wait,
+            _ => None,
+        };
+        if matches!(
+            nested_wait,
+            Some(shamir_query_types::batch::VisibilityWait::Bounded { .. })
+        ) {
+            return Err(BatchError::QueryError {
+                alias: visit.alias.to_owned(),
+                message: "bounded visibility is unsupported by nested batch bodies".into(),
+                code: Some("validation".into()),
+            });
+        }
+    }
     // 4.C: cross-repo guard for transactional batches.
     if request.transactional {
         let repos = shamir_query_types::batch::distinct_repos(&request.queries);
@@ -369,6 +398,18 @@ pub(super) fn execute_planned_batch_impl<'a>(
         scope.check()?;
 
         // 3. Execute — branch on transactional.
+        // Planned execution discards TransactionInfo (ForEach body results).
+        if matches!(
+            request.visibility_wait,
+            Some(shamir_query_types::batch::VisibilityWait::Bounded { .. })
+        ) {
+            return Err(BatchError::QueryError {
+                alias: String::new(),
+                message: "bounded visibility is unsupported by outcome-discarding planned batches"
+                    .into(),
+                code: Some("validation".into()),
+            });
+        }
         let (all_results, _tx_info) = if request.transactional {
             execute_transactional_impl(
                 request,
@@ -768,6 +809,23 @@ pub(super) async fn execute_transactional_impl(
             code: None,
         })?;
 
+    let visibility_wait = request
+        .visibility_wait
+        .unwrap_or_else(|| repo.commit_visibility_wait());
+    // Nested and planned bodies cannot expose a top-level commit receipt.
+    if depth > 0
+        && matches!(
+            visibility_wait,
+            shamir_query_types::batch::VisibilityWait::Bounded { .. }
+        )
+    {
+        return Err(BatchError::QueryError {
+            alias: String::new(),
+            message: "bounded visibility is unsupported by nested transactional batches".into(),
+            code: Some("validation".into()),
+        });
+    }
+
     // Parse isolation.
     let iso = match request.isolation.as_deref() {
         Some("serializable") => shamir_tx::IsolationLevel::Serializable,
@@ -862,7 +920,7 @@ pub(super) async fn execute_transactional_impl(
         }
         Ok(results) => {
             // Commit.
-            match repo.commit_tx(tx).await {
+            match repo.commit_tx_with_options(tx, visibility_wait).await {
                 Ok(outcome) => {
                     // Thread the commit's materialization state to the
                     // client. `Complete` → materialized=true (projections

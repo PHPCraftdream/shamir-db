@@ -6,6 +6,7 @@ use crate::query::batch::BatchError;
 use crate::query::write::WriteResult;
 use crate::table::interner_manager::InternerManager;
 use crate::tx::CommitTailBarrier;
+use shamir_query_types::batch::VisibilityWait;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{fully_unwrap_store, Repo, Store};
 use shamir_types::access::Actor;
@@ -30,6 +31,7 @@ const JOURNAL_CONFIRM_BUDGET: Duration = Duration::from_secs(1);
 /// Manages a single repository and its tables
 pub struct RepoInstance {
     name: String,
+    commit_visibility_wait: VisibilityWait,
     repo: BoxRepo,
     configs: Arc<TDashMap<String, TableConfig>>,
     tables: Arc<TDashMap<String, Arc<OnceCell<TableManager>>>>,
@@ -147,6 +149,7 @@ impl Clone for RepoInstance {
     fn clone(&self) -> Self {
         Self {
             name: self.name.clone(),
+            commit_visibility_wait: self.commit_visibility_wait,
             repo: self.repo.clone(),
             configs: Arc::clone(&self.configs),
             tables: Arc::clone(&self.tables),
@@ -209,6 +212,7 @@ impl RepoInstance {
 
         Self {
             name,
+            commit_visibility_wait: VisibilityWait::Strict,
             repo,
             configs: Arc::new(configs_map),
             tables: Arc::new(tables),
@@ -1161,7 +1165,40 @@ impl RepoInstance {
         &self,
         tx: shamir_tx::TxContext,
     ) -> Result<crate::tx::TxOutcome, crate::tx::CommitError> {
-        crate::tx::commit_tx(tx, self).await
+        self.commit_tx_with_options(tx, self.commit_visibility_wait())
+            .await
+    }
+
+    /// Select the default for receipt-bearing transaction commits at construction.
+    /// Configure before sharing this handle; subsequent clones copy this policy.
+    /// This is handle-local configuration, not shared mutable repository state:
+    /// changing one clone leaves existing clones (including registered handles)
+    /// unchanged even though they share the same gate and storage.
+    /// Value-only implicit commits remain Strict until VIS-4 provides receipts.
+    pub fn with_commit_visibility_wait(mut self, wait: VisibilityWait) -> Self {
+        self.commit_visibility_wait = wait;
+        self
+    }
+
+    pub fn commit_visibility_wait(&self) -> VisibilityWait {
+        self.commit_visibility_wait
+    }
+
+    /// Commit with an explicit acknowledgement policy, resolved before the pipeline.
+    /// The bounded budget excludes inner execution and starts at its known outcome.
+    /// cancel-safe: partial — same inner commit ownership as commit_tx; dropping
+    /// only acknowledgement cannot abort materialization or discharge recovery.
+    pub async fn commit_tx_with_options(
+        &self,
+        tx: shamir_tx::TxContext,
+        wait: VisibilityWait,
+    ) -> Result<crate::tx::TxOutcome, crate::tx::CommitError> {
+        crate::tx::commit::commit_tx_with_options(tx, self, wait).await
+    }
+
+    /// Borrow rather than clone the retained gate on the acknowledgement fast path.
+    pub(crate) fn initialized_tx_gate(&self) -> Option<&shamir_tx::RepoTxGate> {
+        self.tx_gate.get().map(|gate| gate.as_ref())
     }
 
     /// cancel-safe: NO — multi-step state mutation (local version
@@ -1383,7 +1420,10 @@ impl RepoInstance {
         tx: shamir_tx::TxContext,
         alias: &str,
     ) -> Result<(), BatchError> {
-        match self.commit_tx(tx).await {
+        match self
+            .commit_tx_with_options(tx, VisibilityWait::Strict)
+            .await
+        {
             Ok(_outcome) => Ok(()),
             Err(commit_err) => {
                 let (message, code) = match commit_err {
