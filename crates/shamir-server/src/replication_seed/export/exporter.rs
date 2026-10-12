@@ -10,14 +10,16 @@ use shamir_db::ShamirDb;
 use shamir_types::core::interner::InternerKey;
 use shamir_types::types::value::QueryValue;
 
-use super::artifact_writer::{publish_manifest, sync_directory, ArtifactWriter, FILE_LIMIT};
-use super::codec::{digest, referenced, CHUNK_LIMIT, METADATA_LIMIT};
-use super::encode_bounded::encode_bounded;
-use super::error::invalid;
-use super::maintenance_open::MaintenanceOpen;
-use super::schema_as_names::schema_as_names;
-use super::schema_digest::schema_digest;
-use super::{Manifest, SeedError, TableRecord};
+use crate::replication_seed::artifact_writer::{
+    publish_manifest, sync_directory, ArtifactWriter, FILE_LIMIT,
+};
+use crate::replication_seed::codec::{digest, referenced, CHUNK_LIMIT, METADATA_LIMIT};
+use crate::replication_seed::encode_bounded::encode_bounded;
+use crate::replication_seed::error::invalid;
+use crate::replication_seed::maintenance_open::MaintenanceOpen;
+use crate::replication_seed::schema_as_names::schema_as_names;
+use crate::replication_seed::schema_digest::schema_digest;
+use crate::replication_seed::{Manifest, SeedError, TableRecord};
 
 pub async fn export(
     data_dir: &Path,
@@ -223,9 +225,9 @@ pub(crate) async fn export_open_with_index_limit(
                         serde_bytes::Bytes::new(&key),
                         serde_bytes::Bytes::new(&payload),
                     ),
-                    super::codec::FRAME_LIMIT,
+                    crate::replication_seed::codec::FRAME_LIMIT,
                 )?;
-                if frame.len() > super::codec::FRAME_LIMIT {
+                if frame.len() > crate::replication_seed::codec::FRAME_LIMIT {
                     return Err(invalid("row frame exceeds 16 MiB"));
                 }
                 let frame_bytes = frame.len() as u64 + 4;
@@ -369,7 +371,7 @@ pub(crate) async fn export_open_with_index_limit(
     let bytes = encode_bounded(&manifest, remaining_metadata(metadata_bytes)?)?;
     let hash = digest(&bytes);
     publish_manifest(&staging, &bytes, &hash, || Ok(()))?;
-    if super::verify(&staging)? != hash {
+    if crate::replication_seed::verify(&staging)? != hash {
         return Err(invalid("final artifact verification mismatch"));
     }
     if staging.join("tables").exists() {
