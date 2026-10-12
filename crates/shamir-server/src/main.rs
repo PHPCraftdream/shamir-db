@@ -95,7 +95,22 @@ enum Subcmd {
         out: PathBuf,
     },
     /// Verify a seed artifact without opening a repository.
-    ReplicationSeedVerify { dir: PathBuf },
+    ReplicationSeedVerify {
+        dir: PathBuf,
+        #[arg(long)]
+        manifest_digest: Option<String>,
+    },
+    /// Install into an isolated new repository; never activate replication.
+    ReplicationSeedInstall {
+        #[arg(long)]
+        db: String,
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        artifact: PathBuf,
+        #[arg(long)]
+        manifest_digest: String,
+    },
 
     /// Snapshot `data_dir` (from --config) into `<to>/<UTC-timestamp>/`.
     /// **Server should be stopped first** for a fully consistent snapshot.
@@ -270,10 +285,36 @@ async fn run_async(cli: Cli) -> anyhow::Result<u8> {
             println!("manifest sha256: {digest}");
             return Ok(0);
         }
-        Some(Subcmd::ReplicationSeedVerify { dir }) => {
+        Some(Subcmd::ReplicationSeedInstall {
+            db,
+            repo,
+            artifact,
+            manifest_digest,
+        }) => {
+            let receipt = shamir_server::replication_seed::install(
+                &config.data_dir,
+                &db,
+                &repo,
+                &artifact,
+                &manifest_digest,
+            )
+            .await?;
+            println!("installed manifest sha256: {}", receipt.artifact_digest);
+            return Ok(0);
+        }
+        Some(Subcmd::ReplicationSeedVerify {
+            dir,
+            manifest_digest,
+        }) => {
             let digest =
                 tokio::task::spawn_blocking(move || shamir_server::replication_seed::verify(&dir))
                     .await??;
+            if manifest_digest
+                .as_ref()
+                .is_some_and(|expected| expected != &digest)
+            {
+                anyhow::bail!("trusted manifest digest mismatch");
+            }
             println!("manifest sha256: {digest}");
             return Ok(0);
         }

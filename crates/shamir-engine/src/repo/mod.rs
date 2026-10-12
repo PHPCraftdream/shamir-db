@@ -9,7 +9,9 @@ pub mod prepare_seed;
 pub mod repo_config;
 pub mod repo_instance;
 pub mod repo_types;
+mod seed_install;
 mod seed_metadata;
+pub use seed_install::{SeedImageWriter, SeedInstallState, SeedReceipt, SeedTable};
 pub mod version_provider;
 
 #[cfg(test)]
