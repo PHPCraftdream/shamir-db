@@ -84,8 +84,10 @@
 //!  - [`RepoTxGate::mark_durable`] — advance the durable watermark so the
 //!    freshly-written history entry is reported as durable (matches the
 //!    post-cutover drainer contract).
-//!  - `persist_markers` (Phase 6.5 recovery markers) — best-effort persist
-//!    of `last_committed` so a follower restart re-seeds its gate floor.
+//!  - A flushed allocation upper bound BEFORE history writes. Even writes
+//!    persisting before their flush cannot survive above the restart floor.
+//!    History flush then bookmark set+flush are one pair per pull batch;
+//!    reservation requires a separate metadata flush.
 //!
 //!  - SKIPPED: `promote_vectors` (no staged vectors in a record-level
 //!    event).
@@ -106,10 +108,13 @@ use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::RecordView;
 use shamir_types::types::value::InnerValue;
 
+use crate::meta::recovery_marker::{
+    load_last_committed, load_next_tx_id_snapshot, save_last_committed_flushed,
+    save_next_tx_id_snapshot,
+};
 use crate::repo::RepoInstance;
 use crate::table::table_manager::table_token_for;
 use crate::table::RecordCounter;
-use crate::tx::commit_phases::persist_markers;
 use crate::tx::publish_journaled::publish_journaled;
 
 /// The local outcome of applying one replicated [`ChangelogEvent`].
@@ -209,12 +214,34 @@ pub async fn apply_replicated(
     applied_watermark: u64,
     policy: ApplyPolicy,
 ) -> DbResult<ApplyOutcome> {
+    let mut prepared =
+        match prepare_event(repo, event, field_bindings, applied_watermark, policy).await? {
+            Ok(prepared) => prepared,
+            Err(outcome) => return Ok(outcome),
+        };
+    apply_prepared(repo, &mut prepared, None, false).await
+}
+
+struct PreparedEvent {
+    event: ChangelogEvent,
+    tables: Vec<PreparedTable>,
+    guard: Option<shamir_tx::VersionGuard>,
+    version: Option<u64>,
+}
+
+async fn prepare_event(
+    repo: &RepoInstance,
+    event: &ChangelogEvent,
+    field_bindings: &[(u64, String)],
+    applied_watermark: u64,
+    policy: ApplyPolicy,
+) -> DbResult<Result<PreparedEvent, ApplyOutcome>> {
     // V4 §4 idempotency: O(1) watermark check, no per-record scan. A
     // re-delivered event (at-most-once transport with redelivery) is a
     // silent no-op. Strictly-greater-than so an exact re-delivery of the
     // last applied version is also a skip.
     if event.commit_version <= applied_watermark {
-        return Ok(ApplyOutcome::Skipped);
+        return Ok(Err(ApplyOutcome::Skipped));
     }
 
     if event
@@ -222,9 +249,9 @@ pub async fn apply_replicated(
         .iter()
         .any(|change| !repo.has_table(&change.table))
     {
-        return Ok(ApplyOutcome::Rejected {
+        return Ok(Err(ApplyOutcome::Rejected {
             reason: ApplyRejectReason::UnknownTable,
-        });
+        }));
     }
 
     let mut bindings = shamir_collections::TFxMap::default();
@@ -233,9 +260,9 @@ pub async fn apply_replicated(
         if bindings.insert(*id, name).is_some_and(|old| old != name)
             || names.insert(name, *id).is_some_and(|old| old != *id)
         {
-            return Ok(ApplyOutcome::Rejected {
+            return Ok(Err(ApplyOutcome::Rejected {
                 reason: ApplyRejectReason::ConflictingFieldBinding,
-            });
+            }));
         }
     }
     let mut referenced = shamir_collections::TFxMap::default();
@@ -245,24 +272,24 @@ pub async fn apply_replicated(
         let op = match change.op {
             ChangeOp::Put => {
                 let Some(value) = change.value.as_ref() else {
-                    return Ok(ApplyOutcome::Rejected {
+                    return Ok(Err(ApplyOutcome::Rejected {
                         reason: ApplyRejectReason::MissingValue,
-                    });
+                    }));
                 };
                 if policy == ApplyPolicy::ValidatePayload
                     && RecordView::new(value).is_err()
                     && InnerValue::from_bytes(value).is_err()
                 {
-                    return Ok(ApplyOutcome::Rejected {
+                    return Ok(Err(ApplyOutcome::Rejected {
                         reason: ApplyRejectReason::UndecodablePayload,
-                    });
+                    }));
                 }
                 let decoded = match InnerValue::from_bytes(value) {
                     Ok(decoded) => decoded,
                     Err(_) => {
-                        return Ok(ApplyOutcome::Rejected {
+                        return Ok(Err(ApplyOutcome::Rejected {
                             reason: ApplyRejectReason::UndecodablePayload,
-                        });
+                        }));
                     }
                 };
                 collect_referenced_ids(&decoded, &mut referenced);
@@ -274,9 +301,9 @@ pub async fn apply_replicated(
     }
 
     if referenced.keys().any(|id| !bindings.contains_key(id)) {
-        return Ok(ApplyOutcome::Rejected {
+        return Ok(Err(ApplyOutcome::Rejected {
             reason: ApplyRejectReason::MissingFieldBinding,
-        });
+        }));
     }
 
     let mut prepared: Vec<PreparedTable> = Vec::with_capacity(by_table.len());
@@ -284,9 +311,9 @@ pub async fn apply_replicated(
         let table = match repo.get_table(&table_name).await {
             Ok(table) => table,
             Err(DbError::NotFound(_)) => {
-                return Ok(ApplyOutcome::Rejected {
+                return Ok(Err(ApplyOutcome::Rejected {
                     reason: ApplyRejectReason::UnknownTable,
-                });
+                }));
             }
             Err(error) => return Err(error),
         };
@@ -320,21 +347,21 @@ pub async fn apply_replicated(
                 .map(|descriptor| descriptor.name.clone())
         };
         if let Some(index) = index_name {
-            return Ok(ApplyOutcome::Rejected {
+            return Ok(Err(ApplyOutcome::Rejected {
                 reason: ApplyRejectReason::IndexedTable {
                     table: table_name,
                     index,
                 },
-            });
+            }));
         }
         let token = table_token_for(&table_name);
         let Some(mvcc) = repo
             .per_table_mvcc()
             .read_sync(&token, |_, mvcc| Arc::clone(mvcc))
         else {
-            return Ok(ApplyOutcome::Rejected {
+            return Ok(Err(ApplyOutcome::Rejected {
                 reason: ApplyRejectReason::NoMvccStore,
-            });
+            }));
         };
         prepared.push(PreparedTable {
             name: table_name,
@@ -393,6 +420,26 @@ pub async fn apply_replicated(
             .ok_or_else(|| DbError::Codec("missing preflighted table".into()))?;
     }
 
+    Ok(Ok(PreparedEvent {
+        event: rewritten_event,
+        tables: prepared,
+        guard: None,
+        version: None,
+    }))
+}
+
+async fn apply_prepared(
+    repo: &RepoInstance,
+    prepared: &mut PreparedEvent,
+    reserved: Option<shamir_tx::VersionGuard>,
+    batched: bool,
+) -> DbResult<ApplyOutcome> {
+    let PreparedEvent {
+        event: rewritten_event,
+        tables: prepared,
+        ..
+    } = prepared;
+    let event = &rewritten_event;
     let gate = repo.tx_gate().await?;
 
     // Single-hop R1: the follower allocates a LOCAL commit version via its
@@ -404,8 +451,24 @@ pub async fn apply_replicated(
     // write, switch Drop to fail closed: there is no follower WAL replay owner.
     // This protects history, counters, subsequent pre-images and journal
     // preparation awaits against cancellation as well as explicit errors.
-    let mut version_guard = gate.assign_next_version_guarded();
+    if gate.requires_reopen() {
+        return Err(DbError::RepoRequiresReopen(repo.name().to_string()));
+    }
+    let mut version_guard = reserved.unwrap_or_else(|| gate.assign_next_version_guarded());
     let local_version = version_guard.version();
+    // Reserve BEFORE history can survive (even an unflushed set may persist).
+    // This extra metadata barrier is indispensable for a WAL-less writer.
+    if let Err(error) = async {
+        if !batched {
+            reserve_floor(repo, local_version).await?;
+        }
+        Ok::<(), DbError>(())
+    }
+    .await
+    {
+        gate.set_requires_reopen();
+        return Err(DbError::RepoRequiresReopen(error.to_string()));
+    }
 
     let mut any_failed: Option<(u64, DbError)> = None;
     let mut any_visible = false;
@@ -415,7 +478,7 @@ pub async fn apply_replicated(
         mvcc,
         counter,
         ops,
-    } in prepared
+    } in std::mem::take(prepared)
     {
         // Count only the final operation for each key against ACTUAL current
         // state, not a leader footprint or a snapshot captured for all tables.
@@ -480,6 +543,10 @@ pub async fn apply_replicated(
             event.tx_id,
             token
         );
+        if any_visible {
+            gate.set_requires_reopen();
+            return Err(DbError::RepoRequiresReopen(e.to_string()));
+        }
         return Err(e);
     }
 
@@ -491,7 +558,7 @@ pub async fn apply_replicated(
     // Resolve only after the last failure exit: an aborted apply must enqueue
     // nothing and must not mark a changefeed gap. Preserve translated bytes,
     // actor and timestamp, but key downstream replication on the local version.
-    let downstream_event = reproject_for_downstream(&rewritten_event, repo.name(), local_version);
+    let downstream_event = reproject_for_downstream(rewritten_event, repo.name(), local_version);
     let prepared = repo.prepare_journal_event(Some(downstream_event)).await;
 
     // A12: discharge the VersionGuard's terminal-mark obligation by calling
@@ -511,27 +578,28 @@ pub async fn apply_replicated(
     // `durable_watermark_tests::mixed_tx_and_nontx_durable_equals_visibility_at_end`).
     // S5b-4: enqueue-or-gap and guard.commit() are one synchronous pair.
     let downstream_event = publish_journaled(repo, version_guard, prepared);
+    let mut durability = BatchDurabilityGuard {
+        gate: Arc::clone(&gate),
+        armed: !batched,
+    };
 
-    // mark_durable: history was written inline by `apply_committed_ops`,
-    // so the version is now durable. Advance the durable watermark so
-    // `durable_watermark()` tracks `last_committed()` on a follower that
-    // only ingests via replication.
-    gate.mark_durable(local_version);
-
-    // Phase 6.5 recovery markers (best-effort): persist `last_committed`
-    // so a follower restart re-seeds its gate floor above this version.
-    // A failure here is logged and does NOT fail the apply — same contract
-    // as the commit-path's `post_publish_cleanup` (the gate's in-memory
-    // floor is authoritative; the marker is a restart optimization).
-    if let Err(e) = persist_markers(repo, &gate, local_version).await {
-        log::warn!(
-            "apply_replicated: persist_markers for local_version {} \
-             (leader_v {} tx {}) failed: {e}; in-memory gate floor is still correct",
-            local_version,
-            event.commit_version,
-            event.tx_id
-        );
+    // History must cross its durability boundary before Applied authorizes
+    // the caller to persist a bookmark. A failed barrier is terminal.
+    if let Err(error) = async {
+        if !batched {
+            repo.flush_all_history().await?;
+        }
+        Ok::<(), DbError>(())
     }
+    .await
+    {
+        gate.set_requires_reopen();
+        return Err(DbError::RepoRequiresReopen(error.to_string()));
+    }
+    if !batched {
+        gate.mark_durable(local_version);
+    }
+    durability.armed = false;
 
     // Live only: the same Arc was already journaled before publication.
     #[cfg(test)]
@@ -539,6 +607,124 @@ pub async fn apply_replicated(
     repo.broadcast_changefeed_event(downstream_event);
 
     Ok(ApplyOutcome::Applied { local_version })
+}
+
+struct BatchDurabilityGuard {
+    gate: Arc<shamir_tx::RepoTxGate>,
+    armed: bool,
+}
+
+impl Drop for BatchDurabilityGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.gate.set_requires_reopen();
+        }
+    }
+}
+
+/// Apply an entire decoded pull batch. Reserve a flushed upper version floor
+/// BEFORE any history write: a backend may persist unflushed writes at any time.
+/// One history flush pass precedes one bookmark set+flush per batch. The floor
+/// reservation needs one additional metadata flush. Standalone apply retains
+/// its own history/floor durability boundary before returning Applied.
+/// cancel-safe: NO — abandonment after reservation fail-stops the gate.
+pub async fn apply_replicated_batch(
+    repo: &RepoInstance,
+    events: &[crate::tx::ReplicatedEvent],
+    bookmark: u64,
+    policy: ApplyPolicy,
+) -> DbResult<ApplyOutcome> {
+    let info = repo.tx_info_store().await?;
+    apply_batch_with_info(repo, events, bookmark, policy, &info).await
+}
+
+pub(crate) async fn apply_batch_with_info(
+    repo: &RepoInstance,
+    events: &[crate::tx::ReplicatedEvent],
+    bookmark: u64,
+    policy: ApplyPolicy,
+    info: &Arc<dyn shamir_storage::types::Store>,
+) -> DbResult<ApplyOutcome> {
+    let gate = repo.tx_gate().await?;
+    if gate.requires_reopen() {
+        return Err(DbError::RepoRequiresReopen(repo.name().to_string()));
+    }
+    // Retain the already-required preparation objects, not a second guard
+    // vector, and translate each event exactly once.
+    let mut prepared = Vec::with_capacity(events.len());
+    for event in events {
+        match prepare_event(repo, &event.event, &event.field_bindings, bookmark, policy).await? {
+            Ok(event) => prepared.push(event),
+            Err(ApplyOutcome::Skipped) => {}
+            Err(rejected) => return Ok(rejected),
+        }
+    }
+    if prepared.is_empty() {
+        return Ok(ApplyOutcome::Skipped);
+    }
+    // Preparation awaited I/O; check admission again immediately before
+    // allocation, with no intervening await.
+    if gate.requires_reopen() {
+        return Err(DbError::RepoRequiresReopen(repo.name().to_string()));
+    }
+    for event in &mut prepared {
+        let guard = gate.assign_next_version_guarded();
+        event.version = Some(guard.version());
+        event.guard = Some(guard);
+    }
+    let floor = gate.version_allocation_high_water_mark();
+    let mut durability = BatchDurabilityGuard {
+        gate: Arc::clone(&gate),
+        armed: true,
+    };
+    reserve_floor_in(repo, info, floor)
+        .await
+        .map_err(|error| DbError::RepoRequiresReopen(error.to_string()))?;
+    let mut leader_floor = bookmark;
+    for event in &mut prepared {
+        let guard = event.guard.take();
+        leader_floor = leader_floor.max(event.event.commit_version);
+        apply_prepared(repo, event, guard, true).await?;
+    }
+    repo.flush_all_history()
+        .await
+        .map_err(|error| DbError::RepoRequiresReopen(error.to_string()))?;
+    for event in &prepared {
+        if let Some(version) = event.version {
+            gate.mark_durable(version);
+        }
+    }
+    crate::meta::repl_bookmark::save_replication_bookmark(info, leader_floor)
+        .await
+        .map_err(|error| DbError::RepoRequiresReopen(error.to_string()))?;
+    durability.armed = false;
+    Ok(ApplyOutcome::Applied {
+        local_version: floor,
+    })
+}
+
+/// Persist an allocation upper bound before a WAL-less history write.
+async fn reserve_floor(repo: &RepoInstance, version: u64) -> DbResult<()> {
+    let info = repo.tx_info_store().await?;
+    reserve_floor_in(repo, &info, version).await
+}
+
+async fn reserve_floor_in(
+    repo: &RepoInstance,
+    info: &Arc<dyn shamir_storage::types::Store>,
+    version: u64,
+) -> DbResult<()> {
+    let _guard = repo.marker_write_mutex().lock().await;
+    let floor = load_last_committed(info).await?.unwrap_or(0).max(version);
+    // Normal commit persist_markers uses the same mutex and only writes a
+    // larger stored floor, so an unpublished reservation cannot regress.
+    let gate = repo.tx_gate().await?;
+    let next_tx_id = load_next_tx_id_snapshot(info)
+        .await?
+        .unwrap_or(1)
+        .max(gate.peek_next_tx_id());
+    save_next_tx_id_snapshot(info, next_tx_id).await?;
+    save_last_committed_flushed(info, floor).await
 }
 
 /// Re-project a leader-originated [`ChangelogEvent`] for the follower's

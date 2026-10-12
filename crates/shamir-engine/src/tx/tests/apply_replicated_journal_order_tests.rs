@@ -158,7 +158,10 @@ async fn follower_failed_history_requires_reopen_without_journal_event_or_gap() 
     let error = apply_replicated(&follower, &event, &[], 0, ApplyPolicy::Trusted)
         .await
         .expect_err("history persistence must fail");
-    assert!(matches!(&error, DbError::Storage(_)), "{error:?}");
+    assert!(
+        matches!(&error, DbError::RepoRequiresReopen(_)),
+        "{error:?}"
+    );
     // History failure follows overlay publication, so this is not an abort.
     assert!(gate.requires_reopen());
     assert_eq!(gate.version_allocation_high_water_mark(), 1);

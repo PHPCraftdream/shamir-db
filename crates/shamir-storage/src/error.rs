@@ -28,6 +28,10 @@ pub enum DbError {
     #[error("Storage backend error: {0}")]
     Storage(String),
 
+    /// A WAL-less apply failed or was interrupted; new writes require reopen.
+    #[error("Repository requires reopen: {0}")]
+    RepoRequiresReopen(String),
+
     /// An error related to configuration.
     #[error("Configuration error: {0}")]
     Config(String),
@@ -114,6 +118,7 @@ impl DbError {
     /// codes instead of regex-matching messages.
     pub fn code(&self) -> Option<&'static str> {
         match self {
+            DbError::RepoRequiresReopen(_) => Some("repo_requires_reopen"),
             DbError::AsOfFutureVersion { .. } => Some("as_of_future_version"),
             DbError::AsOfReopenRequired { .. } => Some("as_of_reopen_required"),
             DbError::MigrationFrozen { .. } => Some("table_migrating"),

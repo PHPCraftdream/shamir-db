@@ -10,6 +10,13 @@
 //! row's `state`; the supervisor's [`reconcile`](Self::reconcile) converges
 //! the running loops to that declarative state.
 //!
+//! # Destination ownership and terminal state
+//!
+//! Catalogue lifecycle operations serialize under an async cold-path mutex.
+//! Each registered destination has one owner, including while its stopped task
+//! is being joined. No concurrent-map guard crosses an await. Terminal apply
+//! failures persist `reopen_required`; admission refuses a still-dead gate.
+//!
 //! # Registry (lock-free, §ideology)
 //!
 //! Active loops live in a [`scc::HashMap`] keyed by subscription name, hashed
@@ -102,6 +109,7 @@ struct SubHandle {
     cancel: CancellationToken,
     joins: Vec<JoinHandle<()>>,
     profile: String,
+    targets: Vec<(String, String)>,
 }
 
 impl SubHandle {
@@ -134,6 +142,8 @@ pub struct SubscriptionSupervisor {
     /// Long-poll budget forwarded to each `pull` (ms).
     poll_wait_ms: u32,
     validate_replicated_payload: bool,
+    // Cold catalogue lifecycle serialization; no follower write lock.
+    reconcile_lock: tokio::sync::Mutex<()>,
 }
 
 impl SubscriptionSupervisor {
@@ -153,6 +163,7 @@ impl SubscriptionSupervisor {
             max_iterations: None,
             poll_wait_ms: 5000,
             validate_replicated_payload: false,
+            reconcile_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -208,6 +219,7 @@ impl SubscriptionSupervisor {
     ///   rebound to a different profile → stop it (and, on rebind, the next
     ///   pass restarts it under the new profile).
     pub async fn reconcile(&self) {
+        let _lifecycle = self.reconcile_lock.lock().await;
         let subs = match self.read_subscriptions().await {
             Ok(s) => s,
             Err(e) => {
@@ -230,6 +242,9 @@ impl SubscriptionSupervisor {
         for name in to_stop {
             if let Some((_, handle)) = self.registry.remove_sync(&name) {
                 handle.stop();
+                for join in handle.joins {
+                    let _ = join.await;
+                }
                 info!(subscription = %name, "supervisor: stopped follower loop");
             }
         }
@@ -247,6 +262,7 @@ impl SubscriptionSupervisor {
 
     /// Stop every running loop and clear the registry (shutdown).
     pub async fn stop_all(&self) {
+        let _lifecycle = self.reconcile_lock.lock().await;
         let mut names: Vec<String> = Vec::new();
         self.registry.iter_sync(|name, _| {
             names.push(name.clone());
@@ -255,6 +271,9 @@ impl SubscriptionSupervisor {
         for name in names {
             if let Some((_, handle)) = self.registry.remove_sync(&name) {
                 handle.stop();
+                for join in handle.joins {
+                    let _ = join.await;
+                }
             }
         }
     }
@@ -272,8 +291,11 @@ impl SubscriptionSupervisor {
 
     /// Resolve `sub`'s profile → `pull` streams, then spawn one follower loop
     /// per `pull` stream targeting `(scope.db, scope.repo)`.
-    async fn start_subscription(&self, sub: &Subscription) -> Result<(), String> {
-        let streams = self.resolve_profile_streams(&sub.profile).await?;
+    async fn start_subscription(&self, sub: &Subscription) -> Result<(), ReplError> {
+        let streams = self
+            .resolve_profile_streams(&sub.profile)
+            .await
+            .map_err(ReplError::Start)?;
         let pull_targets: Vec<(String, String)> = streams
             .iter()
             .filter(|st| matches!(st.direction, ReplDirection::Pull))
@@ -281,17 +303,68 @@ impl SubscriptionSupervisor {
             .collect();
 
         if pull_targets.is_empty() {
-            return Err(format!(
+            return Err(ReplError::Start(format!(
                 "profile '{}' has no pull streams with a (db, repo) scope",
                 sub.profile
-            ));
+            )));
         }
 
+        for (index, (db, repo)) in pull_targets.iter().enumerate() {
+            let mut owner = None;
+            self.registry.iter_sync(|name, handle| {
+                if handle
+                    .targets
+                    .iter()
+                    .any(|(target_db, target_repo)| target_db == db && target_repo == repo)
+                {
+                    owner = Some(name.clone());
+                    return false;
+                }
+                true
+            });
+            if pull_targets[..index].contains(&(db.clone(), repo.clone())) {
+                owner = Some(sub.name.clone());
+            }
+            if let Some(owner) = owner {
+                let error = ReplError::DuplicateOwner {
+                    db: db.clone(),
+                    repo: repo.clone(),
+                    owner,
+                };
+                self.local
+                    .mark_subscription_terminal(&sub.name, "duplicate_owner", &error.to_string())
+                    .await
+                    .map_err(|error| ReplError::Start(error.to_string()))?;
+                return Err(error);
+            }
+            if let Some(destination) = self.local.get_db(db).and_then(|db| db.get_repo(repo)) {
+                let gate = destination
+                    .tx_gate()
+                    .await
+                    .map_err(|error| ReplError::Start(error.to_string()))?;
+                if gate.requires_reopen() {
+                    let error = ReplError::ReopenRequired {
+                        db: db.clone(),
+                        repo: repo.clone(),
+                        detail: "Resume refused until destination is reopened".into(),
+                    };
+                    self.local
+                        .mark_subscription_terminal(
+                            &sub.name,
+                            "reopen_required",
+                            &error.to_string(),
+                        )
+                        .await
+                        .map_err(|error| ReplError::Start(error.to_string()))?;
+                    return Err(error);
+                }
+            }
+        }
         let source = (self.factory)(sub);
         let cancel = CancellationToken::new();
         let mut joins = Vec::with_capacity(pull_targets.len());
 
-        for (db, repo) in pull_targets {
+        for (db, repo) in pull_targets.iter().cloned() {
             let mut cfg = FollowerLoopConfig::new(self.node_id.clone(), db, repo)
                 .with_poll_wait_ms(self.poll_wait_ms)
                 .with_validate_replicated_payload(self.validate_replicated_payload);
@@ -334,6 +407,22 @@ impl SubscriptionSupervisor {
                             "follower loop terminated; subscription marked resync_required"
                         );
                     }
+                    Err(e @ ReplError::ReopenRequired { .. }) => {
+                        if let Err(error) = local
+                            .mark_subscription_terminal(
+                                &sub_name,
+                                "reopen_required",
+                                &e.to_string(),
+                            )
+                            .await
+                        {
+                            warn!(
+                                subscription = %sub_name,
+                                error = %error,
+                                "failed to persist reopen_required"
+                            );
+                        }
+                    }
                     Err(e) => {
                         warn!(subscription = %sub_name, error = %e, "follower loop terminated");
                     }
@@ -346,6 +435,7 @@ impl SubscriptionSupervisor {
             cancel,
             joins,
             profile: sub.profile.clone(),
+            targets: pull_targets,
         };
         // A racing reconcile may have inserted already; if so, stop the loops
         // we just spawned rather than leak them.
