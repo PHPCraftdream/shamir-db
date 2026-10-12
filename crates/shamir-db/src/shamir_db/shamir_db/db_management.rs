@@ -375,24 +375,8 @@ impl ShamirDb {
             .map(|t| (t.name.clone(), t.enable_indexes))
             .collect();
 
+        // DbInstance recovers and certifies before registry insertion.
         db.add_repo(config).await?;
-
-        // CRIT-A: run V2 WAL crash recovery before the repo is reachable
-        // by callers. For a freshly created repo `list_inflight` is empty
-        // so this is a cheap no-op; for a *re-attached* on-disk repo it
-        // replays any inflight tx left by a prior crash. Recovery failure
-        // is propagated — a repo that cannot recover must not be served.
-        if let Some(repo) = db.get_repo(&repo_name) {
-            let recovered = repo.recover_v2_inflight().await?;
-            if recovered > 0 {
-                log::info!(
-                    "recovered {} inflight transactions for repo '{}/{}'",
-                    recovered,
-                    db_name,
-                    repo_name
-                );
-            }
-        }
 
         let meta = ResourceMeta::owned_enforced(actor.clone());
 
@@ -640,6 +624,8 @@ impl ShamirDb {
 
     /// `timeout` is ONE budget shared by every repo: wedged tails must not
     /// stack per-repo waits past the server's outer shutdown deadline.
+    /// cancel-safe: NO — an admitted journal checkpoint can finish backend
+    /// I/O after cancellation; no cancelled caller reports shutdown complete.
     pub(crate) async fn flush_all_with_quiesce_timeout(&self, timeout: Duration) -> DbResult<()> {
         let deadline = Instant::now() + timeout;
         let mut first_err: Option<DbError> = None;
@@ -654,15 +640,7 @@ impl ShamirDb {
                 };
 
                 let remaining = deadline.saturating_duration_since(Instant::now());
-                if let Err(e) = repo.quiesce_commits(remaining).await {
-                    log::warn!(
-                        "flush_all: {}/{}: {}; continuing with best-effort flush",
-                        db_name,
-                        repo_name,
-                        e
-                    );
-                }
-                if let Err(e) = repo.flush_buffers().await {
+                if let Err(e) = repo.shutdown_clean(remaining).await {
                     log::warn!("flush_all: {}/{}: {}", db_name, repo_name, e);
                     if first_err.is_none() {
                         first_err = Some(e);
