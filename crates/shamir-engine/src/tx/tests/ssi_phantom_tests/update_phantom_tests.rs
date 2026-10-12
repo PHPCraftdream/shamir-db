@@ -71,7 +71,7 @@ async fn phantom_via_update_into_range_aborts() {
         commit_version: upd_commit_v,
         per_table,
     });
-    gate.publish_committed(upd_commit_v);
+    gate.publish_committed_max(upd_commit_v);
 
     // Stage a write so the tx is non-empty.
     tbl.insert_tx(&InnerValue::Str("dummy".into()), Some(&mut tx1))

@@ -20,7 +20,7 @@ fn min_alive_without_pins_uses_completion_watermark() {
     assert_eq!(parked.version(), 10);
     assert_eq!(later.version(), 11);
     later.commit();
-    gate.publish_committed_max(11);
+    gate.raise_published(11);
 
     assert!(gate.active_snapshots_empty());
     assert_eq!(gate.completion().watermark(), 9);
@@ -39,7 +39,7 @@ async fn min_alive_keeps_pin_older_than_completion_watermark() {
         assert_eq!(guard.version(), expected);
         guard.commit();
     }
-    gate.publish_committed_max(12);
+    gate.raise_published(12);
 
     assert_eq!(older.version(), 5);
     assert_eq!(gate.completion().watermark(), 9);
@@ -53,9 +53,9 @@ async fn min_alive_keeps_pin_older_than_completion_watermark() {
 async fn min_alive_eager_pin_above_watermark_does_not_raise_floor() {
     let gate = RepoTxGate::new(9, 1);
     let parked = gate.assign_next_version_guarded();
-    gate.publish_committed_max(11);
+    gate.raise_published(11);
     // Index-build-style eager pin; snapshot assignment is not changed here.
-    let eager = gate.open_snapshot().await;
+    let eager = gate.open_snapshot_at(11).await;
 
     assert_eq!(eager.version(), 11);
     assert_eq!(gate.completion().watermark(), 9);
@@ -68,7 +68,7 @@ async fn min_alive_eager_pin_above_watermark_does_not_raise_floor() {
 #[test]
 fn min_alive_opening_barrier_still_protects_watermark_floor() {
     let gate = RepoTxGate::new(9, 1);
-    gate.publish_committed_max(12);
+    gate.raise_published(12);
     let opening = gate.test_hold_opening_barrier();
     assert_eq!(gate.min_alive(), 0);
     drop(opening);
@@ -126,14 +126,7 @@ async fn parked_v10_nontx_v11_v12_preserve_key_at_watermark() {
     assert_eq!(mvcc.version_of(b"K"), 12);
     mvcc.gc().await.unwrap();
 
-    // Explicitly register the old snapshot at W using the existing plain
-    // publisher seam. Restore the eager publisher after registration; do not
-    // change production register_snapshot as part of this GC-only leaf.
-    let eager = gate.last_committed();
-    let watermark = gate.completion().watermark();
-    gate.publish_committed(watermark);
     let snapshot = gate.open_snapshot().await;
-    gate.publish_committed_max(eager);
     assert_eq!(snapshot.version(), 9);
     // Red before SNAP-2: the v12 L6 vacuum deleted deferred K@5.
     assert_eq!(
@@ -209,7 +202,7 @@ async fn scan_vacuum_keeps_watermark_anchor_without_live_snapshots() {
         min_count: None,
     })
     .unwrap();
-    gate.publish_committed_max(12);
+    gate.raise_published(12);
     for expected in 11..=12 {
         assert_eq!(
             mvcc.set_versioned(
@@ -250,16 +243,15 @@ async fn ssi_v11_footprint_survives_gc_without_snapshots_and_conflicts_at_waterm
         )]),
     });
     later.commit();
-    gate.publish_committed_max(11);
+    gate.raise_published(11);
     assert_eq!(gate.completion().watermark(), 9);
     assert!(gate.active_snapshots_empty());
 
     mvcc.gc().await.unwrap();
     // Mirror the engine GC tick's SSI prune call, with no registered snapshot.
     gate.prune_commit_log_below(gate.min_alive());
-    gate.publish_committed(9);
     let transaction = gate.open_snapshot_serializable().await;
-    gate.publish_committed_max(11);
+    gate.raise_published(11);
     assert_eq!(transaction.version(), 9);
     let deps = [PredicateDep::TableScan { table_token: 42 }];
     // Red before SNAP-2: floor 11 pruned B's entire conflict footprint.

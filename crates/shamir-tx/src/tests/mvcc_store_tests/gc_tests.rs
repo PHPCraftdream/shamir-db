@@ -122,7 +122,7 @@ async fn gc_evicts_stale_version_cache_entries() {
     for version in 1..=min_alive_target {
         gate.completion().mark(version, State::Materialized);
     }
-    gate.publish_committed(min_alive_target);
+    gate.publish_committed_max(min_alive_target);
     assert_eq!(gate.min_alive(), min_alive_target);
 
     // GC. The history threshold here is irrelevant to cache pruning,
@@ -183,7 +183,7 @@ async fn gc_keeps_version_cache_entry_at_min_alive_boundary() {
 
     // Set min_alive EXACTLY to cv: entry must survive (cv >= min_alive).
     drop(guard);
-    gate.publish_committed(cv);
+    gate.publish_committed_max(cv);
     assert_eq!(gate.min_alive(), cv);
 
     mvcc.gc().await.unwrap();
@@ -221,7 +221,7 @@ async fn gc_preserves_visibility_for_live_snapshot_below_cached_version() {
 
     // Publish v1 so a snapshot can open AT v1, then open it: this snapshot
     // is the live reader that still needs v1 after v2 lands.
-    gate.publish_committed(v1);
+    gate.publish_committed_max(v1);
     let reader_snap = gate.open_snapshot().await;
     assert_eq!(reader_snap.version(), v1);
     // Now drop the v0 bootstrap so the reader at v1 is the oldest snapshot.
@@ -241,7 +241,7 @@ async fn gc_preserves_visibility_for_live_snapshot_below_cached_version() {
     for version in 1..=v2 + 50 {
         gate.completion().mark(version, State::Materialized);
     }
-    gate.publish_committed(v2 + 50);
+    gate.publish_committed_max(v2 + 50);
     assert_eq!(
         gate.min_alive(),
         v1,
@@ -303,7 +303,7 @@ async fn gc_evicted_key_read_at_boundary_snapshot_returns_main() {
     for version in 1..=v2 + 1 {
         gate.completion().mark(version, State::Materialized);
     }
-    gate.publish_committed(v2 + 1);
+    gate.publish_committed_max(v2 + 1);
     assert_eq!(gate.min_alive(), v2 + 1);
 
     mvcc.gc().await.unwrap();

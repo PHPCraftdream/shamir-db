@@ -31,7 +31,7 @@ fn assign_next_version_monotonic() {
 fn publish_updates_last_committed() {
     let gate = RepoTxGate::fresh();
     assert_eq!(gate.last_committed(), 0);
-    gate.publish_committed(5);
+    gate.publish_committed_max(5);
     assert_eq!(gate.last_committed(), 5);
 }
 
@@ -58,7 +58,7 @@ async fn min_alive_with_snapshots() {
     for version in 11..=15 {
         gate.completion().mark(version, State::Materialized);
     }
-    gate.publish_committed(15);
+    gate.publish_committed_max(15);
     let _g2 = gate.open_snapshot().await; // v=15
     assert_eq!(gate.min_alive(), 10);
 }
@@ -152,7 +152,7 @@ fn commit_log_window_scan_excludes_at_or_below_snapshot() {
     gate.record_commit_writes(mk(15, 42));
     // Publish through v=15 so all three records are within
     // `(snapshot, last_committed]` for appropriate snapshot values.
-    gate.publish_committed(15);
+    gate.publish_committed_max(15);
 
     // snapshot=10 -> only records with v>10 (i.e. v=15) are visible.
     assert!(gate.predicate_conflicts(&PredicateDep::TableScan { table_token: 42 }, 10));
@@ -182,7 +182,7 @@ fn batch_conflicts_matches_per_dep_loop() {
     gate.record_commit_writes(mk(5, 42));
     gate.record_commit_writes(mk(10, 7));
     gate.record_commit_writes(mk(15, 42));
-    gate.publish_committed(15);
+    gate.publish_committed_max(15);
 
     // Multiple deps: one conflicts on table 42, one on table 99 (no
     // record writes there), one on table 7.
@@ -309,7 +309,7 @@ fn commit_log_index_range_intersects_posting_key() {
     };
     gate.record_commit_writes(rec);
     // Publish through v=7 so the record is in the window `(0, 7]`.
-    gate.publish_committed(7);
+    gate.publish_committed_max(7);
 
     // Range covering only the LOW key.
     let hits_low = PredicateDep::IndexRange {
@@ -402,7 +402,7 @@ fn a10_min_alive_barrier_protects_commit_log() {
     for version in 1..=5 {
         gate.completion().mark(version, State::Materialized);
     }
-    gate.publish_committed(5);
+    gate.publish_committed_max(5);
     assert_eq!(gate.commit_log_len(), 5);
 
     // Without barrier: min_alive = last_committed = 5, snapshots are empty.
@@ -465,7 +465,7 @@ fn prune_commit_write_log_drops_only_at_or_below_min() {
     for version in 1..=5 {
         gate.completion().mark(version, State::Materialized);
     }
-    gate.publish_committed(5);
+    gate.publish_committed_max(5);
     assert_eq!(gate.commit_log_len(), 5);
 
     // Prune with floor=3: entries 1,2,3 dropped, 4,5 remain.
@@ -588,7 +588,7 @@ async fn record_commit_writes_concurrent_no_loss() {
         handles.push(tokio::spawn(async move {
             let _lock = g.commit_lock().await;
             let v = g.assign_next_version();
-            g.publish_committed(v);
+            g.publish_committed_max(v);
             g.record_commit_writes(CommitWriteRecord {
                 commit_version: v,
                 per_table: TFxMap::from_iter([(

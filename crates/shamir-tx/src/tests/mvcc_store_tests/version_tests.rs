@@ -487,7 +487,7 @@ async fn mvcc2_fast_path_version_cache_not_updated() {
     );
 
     // Now publish and open a snapshot.
-    gate.publish_committed(v);
+    gate.publish_committed_max(v);
     let snap = gate.open_snapshot().await;
     let snap_v = snap.version();
     assert_eq!(snap_v, v, "snapshot must open at the published version");
@@ -527,7 +527,7 @@ async fn mvcc2_simulated_toctou_snapshot_sees_phantom() {
         .await
         .unwrap();
     assert!(v_old > 0);
-    gate.publish_committed(v_old);
+    gate.publish_committed_max(v_old);
 
     // Step 2: open a snapshot at v_old — from its perspective NEW has
     // not happened yet.

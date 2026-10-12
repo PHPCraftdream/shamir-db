@@ -586,7 +586,22 @@ pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
 /// drain is needed (HIGH-6).
 pub async fn commit_tx(tx: TxContext, repo: &RepoInstance) -> Result<TxOutcome, TxError> {
     match commit_tx_inner(tx, repo).await {
-        Ok(outcome) => {
+        Ok(mut outcome) => {
+            // The inner driver has settled its own version and released all locks.
+            // Cancelling this read-only wait cannot undo or interrupt the commit.
+            // A commit that allocated a version is strictly above its snapshot
+            // (snapshots read at W <= the allocation counter); the read-only and
+            // empty-footprint fast paths return commit_version == snapshot_version
+            // and allocated nothing, so there is nothing to wait for (and waiting
+            // on a never-allocated version would never resolve).
+            if outcome.commit_version > outcome.snapshot_version {
+                let gate = repo.tx_gate().await?;
+                if gate.await_visible(outcome.commit_version).await
+                    == shamir_tx::repo_tx_gate::VisibleOutcome::ReopenRequired
+                {
+                    outcome.materialization = MaterializationState::Deferred;
+                }
+            }
             // D2 P1e — soft backpressure. The ack-path published only the
             // in-memory overlay; the value is durable in `history` only after
             // the background drainer replays its WAL entry. Under sustained
@@ -600,7 +615,21 @@ pub async fn commit_tx(tx: TxContext, repo: &RepoInstance) -> Result<TxOutcome, 
             apply_backpressure(repo, MAX_UNDRAINED_VERSIONS).await;
             Ok(outcome)
         }
-        Err(e) => {
+        Err(mut e) => {
+            if let TxError::WalDurability {
+                commit_version,
+                materialization,
+                ..
+            } = &mut e
+            {
+                let gate = repo.tx_gate().await?;
+                if gate.await_visible(*commit_version).await
+                    == shamir_tx::repo_tx_gate::VisibleOutcome::ReopenRequired
+                {
+                    *materialization = MaterializationState::Deferred;
+                }
+                apply_backpressure(repo, MAX_UNDRAINED_VERSIONS).await;
+            }
             if let TxError::Storage(_) = &e {
                 repo.tx_metrics().on_tx_aborted_storage();
             }

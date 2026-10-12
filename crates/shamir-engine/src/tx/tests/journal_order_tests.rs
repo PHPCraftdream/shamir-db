@@ -43,8 +43,8 @@ async fn parked_commit_hides_later_journal_event(name: &str, visibility: CommitV
             && tx_b.footprint_tokens.is_empty(),
         "B must not acquire the commit lock held by AsyncIndex A",
     );
-    let outcome_b = repo.commit_tx(tx_b).await.unwrap();
-    let version_b = outcome_b.commit_version;
+    let (version_b, task_b) =
+        super::snapshot_visibility_park_tests::spawn_settled_commit(&repo, tx_b).await;
     assert_eq!(version_b, version_a + 1);
     for _ in 0..10_000 {
         if feed.last_persisted_version() >= version_b {
@@ -62,6 +62,8 @@ async fn parked_commit_hides_later_journal_event(name: &str, visibility: CommitV
     // leave the parked committer detached inside the test runtime.
     hook.resume.notify_one();
     let mut outcome_a = task_a.await.unwrap().unwrap();
+    let outcome_b = task_b.await.unwrap().unwrap();
+    assert_eq!(outcome_b.commit_version, version_b);
     if visibility == CommitVisibility::AsyncIndex {
         assert!(
             outcome_a.background.is_some(),
