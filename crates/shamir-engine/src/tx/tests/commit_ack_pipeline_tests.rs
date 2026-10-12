@@ -405,12 +405,13 @@ async fn async_durability_error_tail_is_outside_acknowledgement_budget() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn nested_bounded_override_rejected_before_any_outer_write() {
+async fn nested_bounded_override_in_transactional_outer_rejected_before_any_write() {
     let (repo, _) = fixture("ack_nested_reject").await;
     let mut inner = Batch::new();
     inner.transactional().visibility_wait(STATUS);
     inner.insert("inner", write::insert("b").row(doc().set("name", "inner")));
     let mut outer = Batch::new();
+    outer.transactional();
     outer.insert("outer", write::insert("a").row(doc().set("name", "outer")));
     outer.sub_batch_no_bind("nested", inner.build());
     let result = execute_batch_unchecked(
@@ -438,16 +439,47 @@ async fn nested_bounded_override_rejected_before_any_outer_write() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn non_transactional_bounded_batch_rejected_before_writes() {
-    let (repo, _) = fixture("ack_batch_reject").await;
+async fn nested_bounded_override_in_implicit_outer_commits_with_receipts() {
+    let (repo, _) = fixture("ack_nested_implicit").await;
+    let mut inner = Batch::new();
+    inner.transactional().visibility_wait(STATUS);
+    inner.insert("inner", write::insert("b").row(doc().set("name", "inner")));
+    let mut outer = Batch::new();
+    outer.insert("outer", write::insert("a").row(doc().set("name", "outer")));
+    outer.sub_batch_no_bind("nested", inner.build());
+    let response = execute_batch_unchecked(
+        &outer.build(),
+        &Resolver(repo.clone()),
+        None,
+        None,
+        Actor::System,
+        "test",
+    )
+    .await
+    .unwrap();
+    let receipt = response.results["outer"].receipt.as_ref().unwrap();
+    assert!(receipt.is_committed(), "{receipt:?}");
+    assert!(matches!(receipt.visibility, Some(VisibilityState::Visible)));
+    assert!(
+        repo.tx_gate()
+            .await
+            .unwrap()
+            .version_allocation_high_water_mark()
+            >= 1
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn non_transactional_bounded_batch_returns_alias_receipt() {
+    let (repo, _) = fixture("ack_batch_receipt").await;
     let mut batch = Batch::new();
     batch.visibility_wait(STATUS);
     batch.insert(
         "written",
-        write::insert("b").row(doc().set("name", "must-not-write")),
+        write::insert("b").row(doc().set("name", "implicit")),
     );
     let request = batch.build();
-    let result = execute_batch_unchecked(
+    let response = execute_batch_unchecked(
         &request,
         &Resolver(repo.clone()),
         None,
@@ -455,16 +487,16 @@ async fn non_transactional_bounded_batch_rejected_before_writes() {
         Actor::System,
         "test",
     )
-    .await;
+    .await
+    .unwrap();
+    let receipt = response.results["written"].receipt.as_ref().unwrap();
+    assert!(receipt.is_committed(), "{receipt:?}");
+    assert!(matches!(receipt.visibility, Some(VisibilityState::Visible)));
     assert!(
-        matches!(&result, Err(crate::query::batch::BatchError::QueryError { code: Some(code), .. }) if code == "validation"),
-        "{result:?}"
-    );
-    assert_eq!(
         repo.tx_gate()
             .await
             .unwrap()
-            .version_allocation_high_water_mark(),
-        0
+            .version_allocation_high_water_mark()
+            >= 1
     );
 }

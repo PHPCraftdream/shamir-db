@@ -695,21 +695,25 @@ scrape_configs:
 
 | Setting | Default | Meaning |
 |---|---:|---|
-| `visibility_ack_mode` | `"strict"` | Strict commit acknowledgement; `"bounded"` parses but startup rejects it in this build |
-| `visibility_ack_timeout_ms` | `5000` | Budget only when bounded acknowledgement is selected; no effect on Strict. Reserved default while bounded startup mode is disabled; explicit Bounded carries its own budget. At most `max_visibility_wait_ms` |
+| `visibility_ack_mode` | `"strict"` | Strict by default; `"bounded"` is accepted at startup and returns committed receipts |
+| `visibility_ack_timeout_ms` | `5000` | Default Bounded commit budget; no effect on Strict. At most `max_visibility_wait_ms` |
 | `max_visibility_wait_ms` | `30000` | Maximum explicit Bounded commit/reconciliation wait, including nested overrides; excessive requests fail before writes, never clamp |
 | `allow_strict_visibility_wait` | `true` | Permit explicit Strict commit/reconciliation waits; does not forbid the configured Strict default when the commit override is absent |
 | `read_visibility_timeout_ms` | `5000` | Allocated-version AsOf wait, capped by remaining execution budget |
 
 All millisecond values accept zero (immediate predicate check, never infinity)
 and must fit `0..=4294967295`. Strict waits intentionally retain indefinite-wait
-risk. Per-request Bounded is accepted on TxCommit and top-level transactional
-Execute, including zero; non-transactional/implicit and nested Batch/ForEach
-paths fail closed. For connection-resource liveness, prefer explicit Bounded
-transactional receipts and handle Pending as committed, not a retry signal.
+risk. Bounded applies to explicit and implicit DML batches, including nested
+Batch/ForEach and multi-repository batches. Inspect every write alias's `receipt`,
+even when row results are suppressed. Receipt-less Call/admin writes fail closed.
+For connection-resource liveness, prefer Bounded and handle Pending as committed,
+not a retry signal. Dependent read aliases report `visibility_dependency_pending`
+in their `value`, with the awaited position and `skipped: true`, without executing
+the read. Data-flow consumers also stop; unrelated operations inside nested
+bodies and across ForEach iterations continue. Same-connection order is not a fence.
 The budget excludes inner commit (including async-index durability-error tail
 awaits), admission and network backpressure; post-ack soft pressure is not a
 hard memory admission guarantee. Reconcile Pending with WaitForVisibility and
-open a new snapshot for reads. Bounded server defaults remain rejected pending
-VIS-4/VIS-5 end-to-end propagation and SDK adoption.
+open a new snapshot for reads. Materialization is independent of visibility.
+Protocol v3 gating is unchanged; supported SDK adoption remains VIS-5 work.
 Ktav uses `transactions: { visibility_ack_mode: strict ... }` with the same keys.

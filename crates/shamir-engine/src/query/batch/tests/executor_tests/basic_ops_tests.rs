@@ -178,9 +178,11 @@ async fn test_return_only() {
         .await
         .unwrap();
 
-    // Only "read" returned
-    assert_eq!(resp.results.len(), 1);
+    // "read" is returned in full; the suppressed write alias is retained only as
+    // a row-less shell so its commit receipt is never lost (VIS-4b).
+    assert_eq!(resp.results.len(), 2);
     assert!(resp.results.contains_key("read"));
+    assert!(resp.results["insert"].records.is_empty());
 }
 
 // ============================================================================
@@ -205,9 +207,11 @@ async fn test_return_result_false() {
         .await
         .unwrap();
 
-    // "setup" has return_result=false, "read" has return_result=true (default)
-    assert_eq!(resp.results.len(), 1);
+    // "setup" has return_result=false: kept as a row-less shell for its receipt;
+    // "read" has return_result=true (default) and is returned in full.
+    assert_eq!(resp.results.len(), 2);
     assert!(resp.results.contains_key("read"));
+    assert!(resp.results["setup"].records.is_empty());
 }
 
 // ============================================================================

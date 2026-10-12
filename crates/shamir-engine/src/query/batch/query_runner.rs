@@ -8,19 +8,16 @@ use crate::query::batch::batch_execute::{
 };
 use crate::query::batch::exec_scope::ExecScope;
 use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
+use crate::query::batch::receipts::write_result_to_query_result_with_encoding;
 use crate::query::batch::result_size::ResultSize;
 use crate::query::batch::{BatchError, BatchOp, QueryEntry};
 use crate::query::filter::FilterContext;
-use crate::query::read::{QueryRecord, QueryResult, QueryStats};
-use crate::query::write::WriteResult;
+use crate::query::read::QueryResult;
 use crate::query::TableRef;
-use serde_bytes::ByteBuf;
 use shamir_collections::TFxSet;
 use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_query_types::batch::{BatchLimits, ResultEncoding};
 use shamir_types::access::{trace_access, Action, Actor, ResourcePath};
-use shamir_types::codecs::interned::query_value_to_storage_bytes_into;
-use shamir_types::core::interner::Interner;
 use shamir_types::types::common::{new_map, new_map_wc, TMap};
 use shamir_types::types::value::{InnerValue, QueryValue};
 
@@ -619,14 +616,19 @@ impl<'a> QueryRunner<'a> {
     /// authorized. Do not remove the outer `authorize_access` call under
     /// the impression that the `trace_access` calls below are doing the
     /// enforcement — they never have.
-    pub async fn run(
+    pub(super) async fn run_with_wait(
         &mut self,
         alias: &str,
         entry: &QueryEntry,
         resolved_refs: &TMap<String, QueryResult>,
+        wait: Option<shamir_query_types::batch::VisibilityWait>,
     ) -> Result<QueryResult, BatchError> {
-        // Sub-batch — handle before is_admin() so we can recurse rather
-        // than delegating to AdminExecutor (which has no recursion seam).
+        if let Some(position) = super::receipts::required(entry) {
+            return super::receipts::failure_result(position);
+        }
+        let inherited = super::receipts::inherit(entry, wait);
+        let entry = inherited.as_ref();
+        // Sub-batch — recurse rather than delegating to AdminExecutor.
         if let BatchOp::Batch(sub) = &entry.op {
             // Guard: transactional sub-batch inside an already-open tx
             // is not supported (two-phase commit across a shared TxContext
@@ -799,7 +801,7 @@ impl<'a> QueryRunner<'a> {
                 versions: None,
                 corrupt_records: Vec::new(),
                 op_id: None,
-                ddl_status: None,
+                ..QueryResult::default()
             });
         }
 
@@ -1365,13 +1367,7 @@ impl<'a> QueryRunner<'a> {
                                 code: None,
                             })?
                     }
-                    // F4b-1: "everything is a transaction" — a non-tx insert is
-                    // routed through the tx commit pipeline as an implicit
-                    // single-op BATCH transaction (Snapshot isolation, so SSI
-                    // never aborts → preserves non-tx last-writer-wins). This
-                    // folds data + index postings + counter into ONE
-                    // `WalEntryV2` and consumes ONE commit_version for the whole
-                    // batch, matching tx-batch semantics.
+                    // Non-tx INSERT publishes one implicit commit and retains its receipt.
                     None => {
                         let repo =
                             self.resolver
@@ -1417,8 +1413,19 @@ impl<'a> QueryRunner<'a> {
                                 message: e.to_string(),
                                 code: None,
                             })?;
-                        repo.commit_implicit_batch_tx(tx, alias).await?;
-                        wr
+                        let receipt = super::receipts::commit_implicit(
+                            &repo,
+                            tx,
+                            alias,
+                            wait.unwrap_or_else(|| repo.commit_visibility_wait()),
+                        )
+                        .await?;
+                        return Ok(super::receipts::attach(
+                            wr,
+                            self.result_encoding,
+                            interner,
+                            receipt,
+                        ));
                     }
                 };
                 Ok(write_result_to_query_result_with_encoding(
@@ -1553,7 +1560,7 @@ impl<'a> QueryRunner<'a> {
                             FkParentOpKind::Update,
                         )
                         .await;
-                        retry_on_tx_conflict(|| async {
+                        return retry_on_tx_conflict(|| async {
                             let (mut tx, _guard) = repo
                                 .begin_implicit_batch_tx_with_isolation(
                                     self.actor.clone(),
@@ -1606,10 +1613,21 @@ impl<'a> QueryRunner<'a> {
                                     message: e.to_string(),
                                     code: e.code().map(str::to_owned),
                                 })?;
-                            repo.commit_implicit_batch_tx(tx, alias).await?;
-                            Ok(wr)
+                            let receipt = super::receipts::commit_implicit(
+                                &repo,
+                                tx,
+                                alias,
+                                wait.unwrap_or_else(|| repo.commit_visibility_wait()),
+                            )
+                            .await?;
+                            Ok(super::receipts::attach(
+                                wr,
+                                self.result_encoding,
+                                interner,
+                                receipt,
+                            ))
                         })
-                        .await?
+                        .await;
                     }
                 };
                 Ok(write_result_to_query_result_with_encoding(
@@ -1718,7 +1736,7 @@ impl<'a> QueryRunner<'a> {
                             FkParentOpKind::Delete,
                         )
                         .await;
-                        retry_on_tx_conflict(|| async {
+                        return retry_on_tx_conflict(|| async {
                             let (mut tx, _guard) = repo
                                 .begin_implicit_batch_tx_with_isolation(
                                     self.actor.clone(),
@@ -1769,10 +1787,21 @@ impl<'a> QueryRunner<'a> {
                                     message: e.to_string(),
                                     code: e.code().map(str::to_owned),
                                 })?;
-                            repo.commit_implicit_batch_tx(tx, alias).await?;
-                            Ok(wr)
+                            let receipt = super::receipts::commit_implicit(
+                                &repo,
+                                tx,
+                                alias,
+                                wait.unwrap_or_else(|| repo.commit_visibility_wait()),
+                            )
+                            .await?;
+                            Ok(super::receipts::attach(
+                                wr,
+                                self.result_encoding,
+                                interner,
+                                receipt,
+                            ))
                         })
-                        .await?
+                        .await;
                     }
                 };
                 Ok(write_result_to_query_result_with_encoding(
@@ -1870,8 +1899,19 @@ impl<'a> QueryRunner<'a> {
                                 message: e.to_string(),
                                 code: None,
                             })?;
-                        repo.commit_implicit_batch_tx(tx, alias).await?;
-                        wr
+                        let receipt = super::receipts::commit_implicit(
+                            &repo,
+                            tx,
+                            alias,
+                            wait.unwrap_or_else(|| repo.commit_visibility_wait()),
+                        )
+                        .await?;
+                        return Ok(super::receipts::attach(
+                            wr,
+                            self.result_encoding,
+                            interner,
+                            receipt,
+                        ));
                     }
                 };
                 Ok(write_result_to_query_result_with_encoding(
@@ -1890,6 +1930,7 @@ impl<'a> QueryRunner<'a> {
 /// Execute a single query/operation entry.
 ///
 /// Thin wrapper around [`QueryRunner`] with `tx: None`.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_single_impl(
     alias: &str,
@@ -1918,62 +1959,6 @@ pub(super) async fn execute_single_impl(
         scope,
     };
     runner.run(alias, entry, resolved_refs).await
-}
-
-/// Convert WriteResult to QueryResult for BatchResponse compatibility.
-///
-/// C1: fold each already-built [`InsertedRecord`] straight into a
-/// [`QueryRecord::Inserted`] — no re-materialisation.
-/// The old path serialised every row a SECOND time (per-record map
-/// allocation) just to wrap it in `QueryRecord::Inserted`;
-/// `QueryRecord::Inserted` serialises via the same `InsertedRecord` impl, so
-/// the wire bytes are byte-identical while the duplicate build is gone.
-///
-/// When `encoding == ResultEncoding::Id`, each RETURNING row is re-encoded
-/// into [`QueryRecord::IdBytes`] (id-keyed storage msgpack) via the table's
-/// interner — matching the Id-encoded read path.  Keys that fail to intern
-/// (unknown field names) are silently skipped; if encoding fails for a row
-/// it falls back to `QueryRecord::Inserted` so no data is lost.
-pub(super) fn write_result_to_query_result_with_encoding(
-    wr: WriteResult,
-    encoding: ResultEncoding,
-    interner: &Interner,
-) -> QueryResult {
-    let records: Vec<QueryRecord> =
-        if matches!(encoding, ResultEncoding::Id) && !wr.records.is_empty() {
-            let mut scratch = Vec::new();
-            wr.records
-                .into_iter()
-                .map(|rec| {
-                    // Re-encode the name-keyed fields to id-keyed storage bytes.
-                    // `get_ind` returns None for unknown keys — those are silently
-                    // omitted, consistent with the read-path projection behaviour.
-                    let intern_fn = |key: &str| {
-                        interner.get_ind(key).ok_or_else(|| {
-                            shamir_types::codecs::CodecError::Decode(format!(
-                                "write_result_to_query_result_with_encoding: unknown field '{key}'"
-                            ))
-                        })
-                    };
-                    match query_value_to_storage_bytes_into(&rec.fields, &intern_fn, &mut scratch) {
-                        Ok(bytes) => QueryRecord::IdBytes(ByteBuf::from(bytes.as_ref())),
-                        // Encoding failed (e.g. non-map value) — fall back gracefully.
-                        Err(_) => QueryRecord::from(rec),
-                    }
-                })
-                .collect()
-        } else {
-            wr.records.into_iter().map(QueryRecord::from).collect()
-        };
-    QueryResult::with_stats(
-        records,
-        QueryStats {
-            index_used: None,
-            records_scanned: wr.affected,
-            records_returned: wr.affected,
-            execution_time_us: wr.execution_time_us,
-        },
-    )
 }
 
 /// Recursively walks a filter tree and returns `Some("variant_name")` for the

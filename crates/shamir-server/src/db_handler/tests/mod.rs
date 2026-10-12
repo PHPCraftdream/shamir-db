@@ -7,6 +7,7 @@ pub mod cursor_handler_tests;
 pub mod node_mode_tests;
 pub mod p1064_ddl_op_status_acl_tests;
 pub mod pull_cap_tests;
+mod receipts;
 pub mod repl_handler_tests;
 pub mod rowwise_response_budget_tests;
 pub mod seed_identity_tests;
@@ -16,5 +17,4 @@ pub mod session_actor_tests;
 pub mod subscribe_handler_tests;
 pub mod tx_execute_budget_seam_tests;
 pub mod tx_execute_lifecycle_tests;
-
 pub mod visibility_handler_tests;

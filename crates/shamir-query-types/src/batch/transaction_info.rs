@@ -34,13 +34,8 @@ pub struct TransactionInfo {
     /// secondary indexes, HNSW graph) materialized inline on the commit
     /// path.
     ///
-    /// - `true` (the common case): every projection landed before the
-    ///   response — the committed version is fully observable now.
-    /// - `false`: the commit is published (its WAL entry IS the commit),
-    ///   but at least one projection was deferred to crash-recovery,
-    ///   which re-applies it idempotently on the next open. The data
-    ///   WILL appear — this is restart-bounded eventual consistency, not
-    ///   an abort.
+    /// Inline projections do not establish repository-prefix visibility.
+    /// Inspect `visibility` independently, including on reopen.
     ///
     /// Only meaningful when `status == "committed"`. Defaults to `true`
     /// so payloads serialized before this field existed (and clients

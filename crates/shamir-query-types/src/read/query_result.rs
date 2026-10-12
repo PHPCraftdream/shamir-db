@@ -118,6 +118,10 @@ mod id_as_base58_string {
 /// purely mechanical, not a behavioural change.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct QueryResult {
+    /// Known implicit commit outcome, retained even when row data is suppressed.
+    /// The position is scoped to the write alias's repository, never a retry signal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<crate::batch::TransactionInfo>,
     /// Result records.
     pub records: Vec<QueryRecord>,
     /// Execution statistics
@@ -208,6 +212,7 @@ impl QueryResult {
     /// no explain, not skipped, no versions, no corrupt records.
     pub fn with_value(value: QueryValue) -> Self {
         Self {
+            receipt: None,
             records: Vec::new(),
             stats: None,
             pagination: None,
@@ -227,6 +232,7 @@ impl QueryResult {
     /// no value, not skipped, no versions, no corrupt records.
     pub fn with_explain(plan: ExplainPlan) -> Self {
         Self {
+            receipt: None,
             records: Vec::new(),
             stats: None,
             pagination: None,
@@ -250,6 +256,7 @@ impl QueryResult {
     /// ```
     pub fn with_stats(records: Vec<QueryRecord>, stats: QueryStats) -> Self {
         Self {
+            receipt: None,
             records,
             stats: Some(stats),
             pagination: None,
@@ -268,6 +275,7 @@ impl QueryResult {
     /// All other fields are set to their defaults. This is primarily useful for test fixtures.
     pub fn records_only(records: Vec<QueryRecord>) -> Self {
         Self {
+            receipt: None,
             records,
             stats: None,
             pagination: None,
@@ -305,6 +313,7 @@ impl QueryResult {
     /// no value, no explain, no versions, no corrupt records.
     pub fn skipped() -> Self {
         Self {
+            receipt: None,
             records: Vec::new(),
             stats: None,
             pagination: None,

@@ -212,13 +212,16 @@ async fn zero_bounded_transactional_execute_returns_pending_receipt_over_wire() 
 }
 
 #[test]
-fn bounded_server_default_remains_rejected() {
+fn bounded_server_default_is_enabled() {
     let config = TransactionsConfig {
         visibility_ack_mode: "bounded".into(),
         ..TransactionsConfig::default()
     };
-    assert!(config.validate().is_err());
-    assert!(config.resolve_commit_wait(None).is_err());
+    config.validate().unwrap();
+    assert_eq!(
+        config.resolve_commit_wait(None).unwrap(),
+        VisibilityWait::Bounded { timeout_ms: 5000 },
+    );
 }
 
 // Red before the server policy fix: excessive/forbidden waits were ignored and wrote.
@@ -258,7 +261,7 @@ async fn execute_validates_all_overrides_before_writes_and_default_strict_is_not
 }
 
 #[tokio::test]
-async fn bounded_nontransactional_and_recursive_body_overrides_fail_closed_before_writes() {
+async fn recursive_body_invalid_overrides_fail_closed_before_writes() {
     let (handler, session) = fixture().await;
     let repo = handler
         .db()
@@ -267,9 +270,7 @@ async fn bounded_nontransactional_and_recursive_body_overrides_fail_closed_befor
         .get_repo("main")
         .unwrap();
     let gate = repo.tx_gate().await.unwrap();
-    invalid(send(&handler, &session, execute(writes(Some(STATUS), false))).await);
     for wait in [
-        STATUS,
         VisibilityWait::Strict,
         VisibilityWait::Bounded { timeout_ms: 1 },
     ] {

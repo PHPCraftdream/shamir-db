@@ -19,7 +19,7 @@ fn query_result_backward_compat_without_ddl_fields() {
         versions: None,
         corrupt_records: vec![],
         op_id: None,
-        ddl_status: None,
+        ..QueryResult::default()
     })
     .expect("serialize new shape");
 
@@ -75,6 +75,7 @@ fn query_result_round_trip_with_ddl_fields() {
         corrupt_records: vec![],
         op_id: Some(op_id),
         ddl_status: Some(ddl_status.clone()),
+        ..QueryResult::default()
     };
 
     let bytes = rmp_serde::to_vec_named(&original).expect("serialize");
@@ -102,7 +103,7 @@ fn query_result_skip_serializing_if_none() {
         versions: None,
         corrupt_records: vec![],
         op_id: None,
-        ddl_status: None,
+        ..QueryResult::default()
     };
 
     let bytes = rmp_serde::to_vec_named(&query_result).expect("serialize");

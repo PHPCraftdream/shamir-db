@@ -7,8 +7,10 @@ use crate::query::batch::batch_validate::{
 use crate::query::batch::exec_scope::ExecScope;
 use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
 use crate::query::batch::op_watchdog::register_op_watchdog;
+#[cfg(test)]
+use crate::query::batch::query_runner::execute_single_impl;
 use crate::query::batch::query_runner::{
-    build_resolved_refs, execute_single_impl, resolve_skip, skipped_query_result, QueryRunner,
+    build_resolved_refs, resolve_skip, skipped_query_result, QueryRunner,
 };
 use crate::query::batch::result_size::ResultSize;
 use crate::query::batch::{
@@ -94,7 +96,7 @@ pub async fn execute_batch(
 ) -> Result<BatchResponse, BatchError> {
     let scope = auth.root_scope();
     let (request, actor, db_name) = auth.into_parts();
-    execute_batch_impl(
+    super::receipts::scope(execute_batch_impl(
         request,
         resolver,
         admin,
@@ -104,7 +106,7 @@ pub async fn execute_batch(
         0,
         &new_map(),
         &scope,
-    )
+    ))
     .await
 }
 
@@ -154,29 +156,20 @@ pub(super) async fn plan_and_validate_batch(
     resolver: &dyn TableResolver,
     scope: &ExecScope,
 ) -> Result<BatchPlan, BatchError> {
+    super::receipts::validate(request, resolver).await?;
     let effective = request.limits.clamped_to(scope.limits());
-    if !request.transactional
-        && matches!(
-            request.visibility_wait,
-            Some(shamir_query_types::batch::VisibilityWait::Bounded { .. })
-        )
-    {
-        return Err(BatchError::QueryError {
-            alias: String::new(),
-            message: "bounded visibility requires a receipt-bearing transactional batch".into(),
-            code: Some("validation".into()),
-        });
-    }
     for visit in shamir_query_types::batch::BatchTreeVisitor::new(&request.queries) {
         let nested_wait = match &visit.entry.op {
             BatchOp::Batch(sub) => sub.batch.visibility_wait,
             BatchOp::ForEach(fe) => fe.batch.visibility_wait,
             _ => None,
         };
-        if matches!(
-            nested_wait,
-            Some(shamir_query_types::batch::VisibilityWait::Bounded { .. })
-        ) {
+        if request.transactional
+            && matches!(
+                nested_wait,
+                Some(shamir_query_types::batch::VisibilityWait::Bounded { .. })
+            )
+        {
             return Err(BatchError::QueryError {
                 alias: visit.alias.to_owned(),
                 message: "bounded visibility is unsupported by nested batch bodies".into(),
@@ -314,7 +307,7 @@ pub(super) fn execute_batch_impl<'a>(
             )
             .await?
         } else {
-            let r = execute_plan_impl(
+            let r = super::receipts::execute_plan(
                 &mut plan,
                 &request.queries,
                 resolver,
@@ -326,6 +319,7 @@ pub(super) fn execute_batch_impl<'a>(
                 params,
                 request.result_encoding,
                 scope,
+                request.visibility_wait,
             )
             .await?;
             (r, None)
@@ -337,7 +331,7 @@ pub(super) fn execute_batch_impl<'a>(
         flush_if_synced_durability(request, resolver, db_name).await?;
 
         // 4. Filter results for response
-        let results = filter_results(all_results, request);
+        let results = super::receipts::filter(all_results, request);
 
         let elapsed = start.elapsed();
 
@@ -398,18 +392,6 @@ pub(super) fn execute_planned_batch_impl<'a>(
         scope.check()?;
 
         // 3. Execute — branch on transactional.
-        // Planned execution discards TransactionInfo (ForEach body results).
-        if matches!(
-            request.visibility_wait,
-            Some(shamir_query_types::batch::VisibilityWait::Bounded { .. })
-        ) {
-            return Err(BatchError::QueryError {
-                alias: String::new(),
-                message: "bounded visibility is unsupported by outcome-discarding planned batches"
-                    .into(),
-                code: Some("validation".into()),
-            });
-        }
         let (all_results, _tx_info) = if request.transactional {
             execute_transactional_impl(
                 request,
@@ -426,7 +408,7 @@ pub(super) fn execute_planned_batch_impl<'a>(
             )
             .await?
         } else {
-            let r = execute_plan_impl(
+            let r = super::receipts::execute_plan(
                 plan,
                 &request.queries,
                 resolver,
@@ -438,6 +420,7 @@ pub(super) fn execute_planned_batch_impl<'a>(
                 params,
                 request.result_encoding,
                 scope,
+                request.visibility_wait,
             )
             .await?;
             (r, None)
@@ -447,7 +430,7 @@ pub(super) fn execute_planned_batch_impl<'a>(
         flush_if_synced_durability(request, resolver, db_name).await?;
 
         // 4. Filter results for response
-        Ok(filter_results(all_results, request))
+        Ok(super::receipts::filter(all_results, request))
     }) // end Box::pin
 }
 
@@ -546,6 +529,7 @@ fn and_combine(
 /// future opt. See
 /// `docs/dev-artifacts/design/oql-01-stage-parallelism-adr.md` for the
 /// decision record.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_plan_impl(
     plan: &mut BatchPlan,
@@ -812,19 +796,6 @@ pub(super) async fn execute_transactional_impl(
     let visibility_wait = request
         .visibility_wait
         .unwrap_or_else(|| repo.commit_visibility_wait());
-    // Nested and planned bodies cannot expose a top-level commit receipt.
-    if depth > 0
-        && matches!(
-            visibility_wait,
-            shamir_query_types::batch::VisibilityWait::Bounded { .. }
-        )
-    {
-        return Err(BatchError::QueryError {
-            alias: String::new(),
-            message: "bounded visibility is unsupported by nested transactional batches".into(),
-            code: Some("validation".into()),
-        });
-    }
 
     // Parse isolation.
     let iso = match request.isolation.as_deref() {
@@ -882,6 +853,7 @@ pub(super) async fn execute_transactional_impl(
     let plan_result = plan_result.and_then(|results| {
         scope.check()?;
         scope.check_work(0)?;
+        super::receipts::reserve(&results, &request.queries, depth, scope)?;
         Ok(results)
     });
 
@@ -935,12 +907,18 @@ pub(super) async fn execute_transactional_impl(
                         outcome.materialized(),
                     )
                     .with_visibility(outcome.visibility);
-                    Ok((results, Some(info)))
+                    Ok((
+                        super::receipts::stamp(results, &request.queries, &info, depth),
+                        Some(info),
+                    ))
                 }
                 Err(commit_err) => {
                     let info = commit_err.into_transaction_info(tx_id, snapshot_version);
                     if info.is_committed() {
-                        Ok((results, Some(info)))
+                        Ok((
+                            super::receipts::stamp(results, &request.queries, &info, depth),
+                            Some(info),
+                        ))
                     } else {
                         Ok((new_map(), Some(info)))
                     }
@@ -957,12 +935,16 @@ pub(super) fn filter_results(
 ) -> TMap<String, QueryResult> {
     if let Some(ref only) = request.return_only {
         let keep: TFxSet<String> = only.iter().cloned().collect();
-        all_results.retain(|alias, _| keep.contains(alias));
+        all_results
+            .retain(|alias, result| super::receipts::has_receipt(result) || keep.contains(alias));
         return all_results;
     }
 
     if !request.return_all {
-        all_results.retain(|alias, _| request.queries.get(alias).is_some_and(|e| e.return_result));
+        all_results.retain(|alias, result| {
+            super::receipts::has_receipt(result)
+                || request.queries.get(alias).is_some_and(|e| e.return_result)
+        });
     }
 
     all_results

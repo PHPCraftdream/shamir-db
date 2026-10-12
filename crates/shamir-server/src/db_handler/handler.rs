@@ -539,10 +539,12 @@ impl ShamirDbHandler {
                 };
                 if let Some(nested) = nested {
                     self.transactions.resolve_wait(nested)?;
-                    if matches!(
-                        nested,
-                        shamir_query_types::batch::VisibilityWait::Bounded { .. }
-                    ) {
+                    if batch.transactional
+                        && matches!(
+                            nested,
+                            shamir_query_types::batch::VisibilityWait::Bounded { .. }
+                        )
+                    {
                         return Err(shamir_db::DbError::VisibilityWaitInvalid {
                             reason:
                                 "bounded visibility is unsupported by nested Batch/ForEach bodies"
@@ -550,17 +552,6 @@ impl ShamirDbHandler {
                         });
                     }
                 }
-            }
-            if !batch.transactional
-                && matches!(
-                    wait,
-                    shamir_query_types::batch::VisibilityWait::Bounded { .. }
-                )
-            {
-                return Err(shamir_db::DbError::VisibilityWaitInvalid {
-                    reason: "bounded visibility requires a receipt-bearing transactional batch"
-                        .into(),
-                });
             }
             Ok(wait)
         })();
