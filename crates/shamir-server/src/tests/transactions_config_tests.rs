@@ -71,10 +71,12 @@ fn transactions_legacy_defaults_zero_and_bounded_rejection() {
         .unwrap_err()
         .to_string()
         .contains("not enabled in this build"));
-    let mut zero = TransactionsConfig::default();
-    zero.visibility_ack_timeout_ms = 0;
-    zero.max_visibility_wait_ms = 0;
-    zero.read_visibility_timeout_ms = 0;
+    let mut zero = TransactionsConfig {
+        visibility_ack_timeout_ms: 0,
+        max_visibility_wait_ms: 0,
+        read_visibility_timeout_ms: 0,
+        ..TransactionsConfig::default()
+    };
     zero.validate().unwrap();
     assert_eq!(
         zero.resolve_wait(VisibilityWait::Bounded { timeout_ms: 0 })
@@ -104,8 +106,10 @@ fn transactions_legacy_defaults_zero_and_bounded_rejection() {
 
 #[test]
 fn transactions_validation_rejects_invalid_mode_cap_and_each_overflow() {
-    let mut config = TransactionsConfig::default();
-    config.visibility_ack_mode = "typo".into();
+    let mut config = TransactionsConfig {
+        visibility_ack_mode: "typo".into(),
+        ..TransactionsConfig::default()
+    };
     assert!(config
         .validate()
         .unwrap_err()
