@@ -1,32 +1,65 @@
+use std::collections::BTreeMap;
+
+use serde::Serialize;
+
+use crate::admin::types::repl_ops::SeedRepositoryStatus;
 use crate::admin::{CreatePublicationOp, CreateSubscriptionOp, ReplScope};
 use crate::wire::repl::{ReplRepoInfo, ReplResponse};
 
-/// Wire-format test: raw JSON is the independent old-protocol fixture, not a query.
+/// Old-protocol fixtures: the shapes peers sent before the additive fields.
+#[derive(Serialize)]
+struct LegacyRepo {
+    db: &'static str,
+    repo: &'static str,
+    current_version: u64,
+    journal_floor: u64,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "repl_kind", rename_all = "snake_case")]
+enum LegacyResponse {
+    Hello {
+        leader_epoch: u64,
+        repos: Vec<LegacyRepo>,
+    },
+}
+
+#[derive(Serialize)]
+struct LegacySubscription {
+    create_subscription: &'static str,
+    upstream: &'static str,
+    publication: &'static str,
+    profile: &'static str,
+}
+
+/// Serde round-trip test: the subject is the wire format itself.
 #[test]
 fn legacy_hello_and_subscription_decode_defaults_and_new_metadata_roundtrips() {
-    let old: ReplResponse = serde_json::from_str(
-        r#"{
-        "repl_kind": "hello",
-        "leader_epoch": 1,
-        "repos": [{"db": "app", "repo": "main", "current_version": 10, "journal_floor": 0}]
-    }"#,
-    )
-    .unwrap();
+    let legacy = LegacyResponse::Hello {
+        leader_epoch: 1,
+        repos: vec![LegacyRepo {
+            db: "app",
+            repo: "main",
+            current_version: 10,
+            journal_floor: 0,
+        }],
+    };
+    let old: ReplResponse =
+        rmp_serde::from_slice(&rmp_serde::to_vec_named(&legacy).unwrap()).unwrap();
     let ReplResponse::Hello { repos, .. } = old else {
         panic!("Hello");
     };
     assert!(repos[0].schema_digest.is_none());
     assert!(repos[0].settled_version.is_none());
     assert!(repos[0].publications.is_empty());
-    let subscription: CreateSubscriptionOp = serde_json::from_str(
-        r#"{
-        "create_subscription": "sub",
-        "upstream": "peer",
-        "publication": "pub",
-        "profile": "prof"
-    }"#,
-    )
-    .unwrap();
+    let legacy = LegacySubscription {
+        create_subscription: "sub",
+        upstream: "peer",
+        publication: "pub",
+        profile: "prof",
+    };
+    let subscription: CreateSubscriptionOp =
+        rmp_serde::from_slice(&rmp_serde::to_vec_named(&legacy).unwrap()).unwrap();
     assert!(!subscription.paused);
     let paused = CreateSubscriptionOp {
         paused: true,
@@ -57,13 +90,11 @@ fn legacy_hello_and_subscription_decode_defaults_and_new_metadata_roundtrips() {
             }],
         }],
     };
-    let status: crate::admin::types::repl_ops::SeedRepositoryStatus =
-        serde_json::from_str("{}").unwrap();
-    assert_eq!(
-        status,
-        crate::admin::types::repl_ops::SeedRepositoryStatus::default()
-    );
-    let status = crate::admin::types::repl_ops::SeedRepositoryStatus {
+    let empty = BTreeMap::<String, String>::new();
+    let status: SeedRepositoryStatus =
+        rmp_serde::from_slice(&rmp_serde::to_vec_named(&empty).unwrap()).unwrap();
+    assert_eq!(status, SeedRepositoryStatus::default());
+    let status = SeedRepositoryStatus {
         upstream_bookmark: Some(73),
         next_pull_version: Some(74),
         local_baseline_version: Some(1),
@@ -73,8 +104,7 @@ fn legacy_hello_and_subscription_decode_defaults_and_new_metadata_roundtrips() {
     };
     let bytes = rmp_serde::to_vec_named(&status).unwrap();
     assert_eq!(
-        rmp_serde::from_slice::<crate::admin::types::repl_ops::SeedRepositoryStatus>(&bytes)
-            .unwrap(),
+        rmp_serde::from_slice::<SeedRepositoryStatus>(&bytes).unwrap(),
         status
     );
     let bytes = rmp_serde::to_vec_named(&info).unwrap();

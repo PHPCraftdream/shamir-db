@@ -101,6 +101,37 @@ pub(super) fn binding(record: &mut QueryValue, receipt: &SeedReceipt) {
 }
 
 impl ShamirDb {
+    /// Offline filesystem-authorized profile step of a seed install. An existing
+    /// profile is accepted only when its streams are exactly `streams`.
+    pub async fn install_seed_profile(&self, name: &str, streams: &[ReplStream]) -> DbResult<()> {
+        let wanted = super::super::helpers::to_qv(&streams);
+        let records = rows(self, "replication_profiles").await?;
+        if let Some(existing) = records
+            .iter()
+            .find(|row| row["name"].as_str() == Some(name))
+        {
+            if existing.get("streams") != Some(&wanted) {
+                return Err(crate::DbError::Validation(format!(
+                    "{}: existing profile differs",
+                    SeedRefusal::WrongScope.code()
+                )));
+            }
+            return self.flush_seed_catalogue().await;
+        }
+        let mut fields = crate::types::common::new_map();
+        fields.insert("name".into(), QueryValue::Str(name.to_owned()));
+        fields.insert("streams".into(), wanted);
+        let table = self.system_store().replication_profiles_table().await?;
+        let op = SetOp {
+            set: crate::query::TableRef::new("replication_profiles"),
+            key: mpack!({"name": @(QueryValue::Str(name.to_owned()))}),
+            value: QueryValue::Map(fields),
+        };
+        self.system_store().set_via_implicit_tx(&table, &op).await?;
+        table.interner().persist().await?;
+        self.flush_seed_catalogue().await
+    }
+
     /// Offline filesystem-authorized final install step. Exact retry never pauses an active row.
     pub async fn install_seed_subscription(
         &self,
