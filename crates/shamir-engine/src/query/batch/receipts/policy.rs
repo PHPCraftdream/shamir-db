@@ -38,27 +38,25 @@ pub(in crate::query::batch) async fn validate(
         });
         if wait.is_none() && unsupported {
             for repo_name in shamir_query_types::batch::distinct_repos(&body.queries) {
-                let repo = resolver
-                    .resolve_repo(&repo_name)
-                    .await
-                    .map_err(|e| BatchError::query_coded("", "validation", e.to_string()))?;
-                bounded |= matches!(
-                    repo.commit_visibility_wait(),
-                    VisibilityWait::Bounded { .. }
-                );
+                // An unresolvable repository has no commit policy to inherit:
+                // execution reports the real error where it always did.
+                if let Ok(repo) = resolver.resolve_repo(&repo_name).await {
+                    bounded |= matches!(
+                        repo.commit_visibility_wait(),
+                        VisibilityWait::Bounded { .. }
+                    );
+                }
             }
         }
         for entry in body.queries.values() {
             if let BatchOp::Call(call) = &entry.op {
                 if wait.is_none() {
-                    let repo = resolver
-                        .resolve_repo(&call.repo)
-                        .await
-                        .map_err(|e| BatchError::query_coded("", "validation", e.to_string()))?;
-                    bounded |= matches!(
-                        repo.commit_visibility_wait(),
-                        VisibilityWait::Bounded { .. }
-                    );
+                    if let Ok(repo) = resolver.resolve_repo(&call.repo).await {
+                        bounded |= matches!(
+                            repo.commit_visibility_wait(),
+                            VisibilityWait::Bounded { .. }
+                        );
+                    }
                 }
             }
         }
