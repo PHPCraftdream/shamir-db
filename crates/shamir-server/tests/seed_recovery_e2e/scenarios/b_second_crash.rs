@@ -48,7 +48,6 @@ async fn seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues() {
     let digest1 = child::cli_export(&leader.config_path, &seed1).await;
     let bytes = std::fs::read(seed1.join("manifest.mpack")).expect("manifest");
     let manifest1: Manifest = rmp_serde::from_slice(&bytes).expect("decode manifest");
-    let v1 = manifest1.version;
 
     // -- Seed #1 into home-1 and converge. --
     let home1_cfg = child::write_home_config(&home1, addr);
@@ -67,7 +66,7 @@ async fn seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues() {
     wire::update_row(&admin, "audit", "a0", 77).await;
     child::kill(&mut leader).await;
     let mut leader = child::spawn_leader(&leader_dir, addr).await;
-    let admin = child::connect_admin(&leader).await;
+    drop(child::connect_admin(&leader).await);
     let cert = wire::gap_certificate(addr).await;
     let horizon = cert.gap_through.expect("reopen certifies a new horizon");
     assert!(
@@ -132,7 +131,7 @@ async fn seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues() {
     // -- Opposite branch: crash with NO new writes (horizon == bookmark). --
     child::kill(&mut leader).await;
     let mut leader = child::spawn_leader(&leader_dir, addr).await;
-    let admin = child::connect_admin(&leader).await;
+    drop(child::connect_admin(&leader).await);
     let cert = wire::gap_certificate(addr).await;
     assert_eq!(
         cert.gap_through,

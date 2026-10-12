@@ -126,7 +126,7 @@ pub async fn connect_admin(leader: &LeaderChild) -> Client {
     wait_listening(leader.addr).await;
     let deadline = tokio::time::Instant::now() + BOOT_DEADLINE;
     loop {
-        match connect(leader.addr, ADMIN, ADMIN_PW).await {
+        match Client::connect(admin_options(leader.addr, ADMIN, ADMIN_PW)).await {
             Ok(client) => return client,
             Err(error) => {
                 assert!(
@@ -158,7 +158,13 @@ async fn wait_listening(addr: SocketAddr) {
 
 /// TLS + SCRAM login as `user` (spec-floor-fast KDF comes from the config).
 pub async fn connect(addr: SocketAddr, user: &str, password: &str) -> Client {
-    let opts = ConnectOptions {
+    Client::connect(admin_options(addr, user, password))
+        .await
+        .expect("client connect")
+}
+
+fn admin_options(addr: SocketAddr, user: &str, password: &str) -> ConnectOptions {
+    ConnectOptions {
         addr,
         server_name: "localhost".to_string(),
         username: user.to_string(),
@@ -167,8 +173,7 @@ pub async fn connect(addr: SocketAddr, user: &str, password: &str) -> Client {
         trusted_pin: None,
         connect_timeout: Some(Duration::from_secs(15)),
         request_timeout: Some(Duration::from_secs(35)),
-    };
-    Client::connect(opts).await.expect("client connect")
+    }
 }
 
 /// SIGKILL the leader and reap it. Advisory file locks (maintenance,

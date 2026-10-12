@@ -53,7 +53,7 @@ async fn seed_e2e_a_kill_resync_offline_seed_resume_converges() {
     // -- Unclean kill, reopen: the recovery gap is certified. --
     child::kill(&mut leader).await;
     let mut leader = child::spawn_leader(&leader_dir, addr).await;
-    let admin = child::connect_admin(&leader).await;
+    drop(child::connect_admin(&leader).await);
     let cert = wire::gap_certificate(addr).await;
     let gap_through = cert.gap_through.expect("reopen certifies a gap horizon");
     assert!(gap_through >= 1, "the certified horizon covers the writes");
