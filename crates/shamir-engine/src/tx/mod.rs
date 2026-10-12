@@ -1,3 +1,4 @@
+pub(crate) mod ack;
 pub mod apply_replicated;
 pub mod commit;
 pub(crate) mod commit_driver;

@@ -32,7 +32,7 @@ fn valid_catalogue_maintenance_owner_blocks_second_open() {
         let source = ShamirDb::init(SystemStoreConfig::Fjall(meta))
             .await
             .unwrap();
-        source.flush_all().await.unwrap();
+        source.flush_seed_catalogue().await.unwrap();
     });
     drop(runtime);
     let runtime = tokio::runtime::Builder::new_current_thread()
