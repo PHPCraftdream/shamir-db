@@ -132,14 +132,7 @@ async fn catalogue_only_retry_requires_matching_image_and_never_overwrites_table
         home.system_store.load_tables().await.unwrap(),
         vec![conflicting]
     );
-    image
-        .changefeed()
-        .await
-        .unwrap()
-        .feed
-        .shutdown_and_wait()
-        .await
-        .unwrap();
+    image.stop_journal_writer_for_test().await.unwrap();
 }
 
 #[tokio::test]

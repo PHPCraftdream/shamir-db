@@ -82,7 +82,7 @@ impl ShamirDb {
                     .cloned()
                     .or_else(|| self.get_db(db).and_then(|database| database.get_repo(repo)))
                 {
-                    Some(image) => image.repo.clone(),
+                    Some(image) => image.seed_backing_repo(),
                     None => BoxRepoFactory::fjall_raw(path).create().await?,
                 };
                 let info = backing.store_get("__tx__").await?;
@@ -128,7 +128,7 @@ impl ShamirDb {
             return Err(DbError::Storage("publication requires Complete".into()));
         }
         let tables = SeedTable::load_inventory(&info).await?;
-        let schemas = image.repo.store_get("__seed_schema__").await?;
+        let schemas = image.seed_schema_store().await?;
         let records = load_schema_records(&schemas).await?;
         if records.len() != tables.len()
             || tables.iter().zip(&records).any(|(table, record)| {

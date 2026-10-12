@@ -4,7 +4,7 @@ use shamir_engine::meta::MetaEnvelope;
 use shamir_engine::repo::RepoInstance;
 use shamir_engine::validator::schema::SchemaValidator;
 use shamir_engine::validator::{RecordValidator, ValidatorBinding, WriteOp};
-use shamir_storage::types::{RecordKey, Repo, Store};
+use shamir_storage::types::{RecordKey, Store};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
@@ -95,7 +95,7 @@ impl ShamirDb {
             let record = QueryValue::Map(fields);
             records.push(record);
         }
-        let store = repo.repo.store_get("__seed_schema__").await?;
+        let store = repo.seed_schema_store().await?;
         let bytes = MetaEnvelope::new(records)
             .encode()
             .map_err(|e| DbError::Codec(e.to_string()))?;
