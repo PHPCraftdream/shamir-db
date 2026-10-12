@@ -98,8 +98,8 @@ Ordering rules:
 2. If `initial: true`, all snapshot `event` frames precede the single `ready` frame.
 3. Live `event` frames follow `ready` for initial snapshots. Journal delivery
    has nondecreasing commit versions per repo; several frames may share one
-   transaction version. The pre-snapshot completion cut permits duplicate
-   snapshot rows until N1L-4 (see §13).
+   transaction version. Initial snapshots use a consistent cut per repo and
+   do not replay snapshot-covered versions in live delivery (see §13).
 4. `seq` is monotonic per subscription. It is only advanced on **successful** push, so
    the client never observes a hole from transient push backpressure: the same frame
    is retried, or the subscription is terminated rather than silently skipping it.
@@ -402,10 +402,11 @@ Semantics:
 - A journal-reported `gap_at` emits `gap` then terminates the subscription;
   read errors also terminate. No ordinary suffix follows a known gap.
 - Live-only activation excludes history through the completion cut sampled
-  when receivers are attached. With `initial: true`, that cut is sampled before
-  snapshot queries, not bumped after them. Snapshot frames retain version zero
-  and precede `ready`; duplicates at the snapshot/live handoff remain possible
-  until consistent snapshot-cut support (N1L-4).
+  when receivers are attached. With `initial: true`, all targets of each repo
+  read in one read-only Snapshot transaction at its completion cut S. Snapshot
+  frames retain version zero and precede `ready`; live journal delivery starts
+  strictly after S, without handoff duplicates. Snapshot/transaction failures
+  terminate with `closed` and no `ready`.
 - Journal-writer latency is added to delivery. There is no delivery
   acknowledgement or exactly-once guarantee across disconnects/client loss;
   a crash can still lose the journal tail (S5c).

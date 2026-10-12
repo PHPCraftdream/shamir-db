@@ -230,8 +230,8 @@ pub(crate) async fn bridge_task(
             .iter()
             .map(|(_, _, _, filter)| filter.as_ref().map(|_| ArcSwapOption::empty()))
             .collect();
-        // Sample the completion cut BEFORE any snapshot query. Independent
-        // snapshots can include later rows: handoff is at-least-once until N1L-4.
+        // The activation W remains the live-only floor; initial snapshots
+        // replace it with their pinned transaction cut before live delivery.
         let source = DbJournalSource {
             db: &db,
             name: &db_name,
@@ -420,51 +420,104 @@ pub(crate) async fn bridge_task(
 
         // Initial snapshot: read existing records for subscribed tables.
         if initial {
-            for (target_repo, target_table, _mask, filter) in &targets {
-                let mut query =
-                    Query::with_repo(target_repo.as_str(), target_table.as_str()).build();
-                if filter.is_some() {
-                    query.r#where = filter.clone();
-                }
-                let mut batch = Batch::new();
-                batch.query("_snapshot", query);
-                batch.return_all();
-                let find_req = batch.build();
+            #[cfg(test)]
+            super::tests::bridge_snapshot_cut_tests::pause(0, 0).await;
+            for (ri, repo) in repos.iter().enumerate() {
+                let (mut tx, guard) = match db
+                    .tx_begin_as(actor.clone(), &db_name, repo, "snapshot")
+                    .await
+                {
+                    Ok(open) => open,
+                    Err(error) => {
+                        tracing::warn!(sub_id, %error, "initial snapshot begin failed");
+                        return;
+                    }
+                };
+                let cut = tx.snapshot_version;
+                #[cfg(test)]
+                super::tests::bridge_snapshot_cut_tests::pause(1, cut).await;
+                for (_target_idx, (target_repo, target_table, _mask, filter)) in
+                    targets.iter().enumerate()
+                {
+                    if target_repo != repo {
+                        continue;
+                    }
+                    let mut query =
+                        Query::with_repo(target_repo.as_str(), target_table.as_str()).build();
+                    if filter.is_some() {
+                        query.r#where = filter.clone();
+                    }
+                    let mut batch = Batch::new();
+                    batch.query("_snapshot", query);
+                    batch.return_all();
+                    // Match the existing server-owned reactive-read limits policy.
+                    // Each target read has its own cooperative execution budget.
+                    batch.limits(query_limits.clone());
+                    let find_req = batch.build();
 
-                match db.execute_as(actor.clone(), &db_name, &find_req).await {
-                    Ok(response) => {
-                        for qr in response.results.values() {
-                            for record in &qr.records {
-                                let record_val = record.as_value();
-                                let key_qv: QueryValue =
-                                    record_val.get("_id").cloned().unwrap_or(QueryValue::Null);
-                                let value_qv: QueryValue = record_val.into_owned();
-                                #[derive(serde::Serialize)]
-                                struct SnapshotEvent<'x> {
-                                    table: &'x str,
-                                    op: &'x str,
-                                    key: &'x QueryValue,
-                                    value: &'x QueryValue,
-                                    commit_version: u64,
-                                }
-                                let obj = SnapshotEvent {
-                                    table: target_table,
-                                    op: "put",
-                                    key: &key_qv,
-                                    value: &value_qv,
-                                    commit_version: 0,
-                                };
-                                let data = rmp_serde::to_vec_named(&obj).unwrap_or_default();
-                                if !try_push_event(&push, sub_id, &seq, &data).await {
-                                    return;
+                    match db
+                        .tx_execute_as(actor.clone(), &db_name, &find_req, &mut tx)
+                        .await
+                    {
+                        Ok(response) => {
+                            for qr in response.results.values() {
+                                for record in &qr.records {
+                                    let record_val = record.as_value();
+                                    let key_qv: QueryValue =
+                                        record_val.get("_id").cloned().unwrap_or(QueryValue::Null);
+                                    let value_qv: QueryValue = record_val.into_owned();
+                                    #[derive(serde::Serialize)]
+                                    struct SnapshotEvent<'x> {
+                                        table: &'x str,
+                                        op: &'x str,
+                                        key: &'x QueryValue,
+                                        value: &'x QueryValue,
+                                        commit_version: u64,
+                                    }
+                                    let obj = SnapshotEvent {
+                                        table: target_table,
+                                        op: "put",
+                                        key: &key_qv,
+                                        value: &value_qv,
+                                        commit_version: 0,
+                                    };
+                                    let data = match rmp_serde::to_vec_named(&obj) {
+                                        Ok(data) => data,
+                                        Err(error) => {
+                                            tracing::warn!(
+                                                sub_id,
+                                                %error,
+                                                "snapshot serialization failed",
+                                            );
+                                            return;
+                                        }
+                                    };
+                                    if !try_push_event(&push, sub_id, &seq, &data).await {
+                                        return;
+                                    }
                                 }
                             }
                         }
+                        Err(e) => {
+                            tracing::warn!(
+                                sub_id,
+                                table = %target_table,
+                                "initial snapshot failed: {e}",
+                            );
+                            return;
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!(sub_id, table = %target_table, "initial snapshot failed: {e}");
+                    #[cfg(test)]
+                    if _target_idx == 0 {
+                        super::tests::bridge_snapshot_cut_tests::pause(2, cut).await;
                     }
                 }
+                // Read-only rollback is synchronous: TxContext drops staged
+                // state without I/O; SnapshotGuard removes the GC pin on every
+                // exit, including query/push failure and task cancellation.
+                drop(tx);
+                drop(guard);
+                states[ri].cursor = states[ri].cursor.max(cut);
             }
 
             let s = seq.load(Ordering::Relaxed);
