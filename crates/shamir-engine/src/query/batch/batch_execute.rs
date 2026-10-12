@@ -874,7 +874,8 @@ pub(super) async fn execute_transactional_impl(
                         outcome.snapshot_version,
                         outcome.commit_version,
                         outcome.materialized(),
-                    );
+                    )
+                    .with_visibility(outcome.visibility);
                     Ok((results, Some(info)))
                 }
                 Err(commit_err) => {

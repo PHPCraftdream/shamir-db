@@ -146,6 +146,8 @@ fn tx_execute_bytes(tx_handle: u64, n: usize) -> Vec<u8> {
 
 fn tx_commit_bytes(tx_handle: u64) -> Vec<u8> {
     encode(&DbRequest::TxCommit {
+        query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
+        visibility_wait: None,
         db: "app".into(),
         tx_handle,
     })

@@ -10,14 +10,13 @@
 //! The leader epoch is a configurable field (default `1`); tests that need
 //! epoch-fencing regressions mutate it via [`InProcessReplSource::set_epoch`].
 //!
-//! `hello` returns an empty repo advertisement — the loop only uses it to
-//! seed the max-seen epoch.
+//! `hello` advertises durable identity and certified intervals for every repo.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use shamir_db::ShamirDb;
-use shamir_query_types::wire::repl::ReplResponse;
+use shamir_query_types::wire::repl::{ReplRepoInfo, ReplResponse};
 use tokio::sync::Mutex;
 
 use super::error::ReplError;
@@ -74,12 +73,41 @@ impl InProcessReplSource {
 #[async_trait]
 impl ReplSource for InProcessReplSource {
     async fn hello(&self, _node_id: &str) -> Result<ReplResponse, ReplError> {
-        // Return an empty repo advertisement — the loop only needs the
-        // epoch here. Advertising the real repos would require listing dbs
-        // + repos and is not needed for the single-(db,repo) loop tests.
+        let mut repos = Vec::new();
+        for db in self.leader.list_dbs() {
+            let Some(database) = self.leader.get_db(&db) else {
+                continue;
+            };
+            for repo in database.list_repos() {
+                let Some(instance) = database.get_repo(&repo) else {
+                    continue;
+                };
+                let identity = instance
+                    .repo_identity()
+                    .await
+                    .map_err(|e| ReplError::Transport(e.to_string()))?;
+                let gap = instance
+                    .certified_gap_interval()
+                    .await
+                    .map_err(|e| ReplError::Transport(e.to_string()))?;
+                repos.push(ReplRepoInfo {
+                    db: db.clone(),
+                    repo,
+                    current_version: instance
+                        .current_commit_version()
+                        .await
+                        .map_err(|e| ReplError::Transport(e.to_string()))?,
+                    journal_floor: 0,
+                    repo_lineage_id: Some(identity.lineage_id),
+                    history_epoch: Some(identity.history_epoch),
+                    gap_first: gap.map(|(first, _)| first),
+                    gap_through: gap.map(|(_, through)| through),
+                });
+            }
+        }
         Ok(ReplResponse::Hello {
             leader_epoch: self.epoch(),
-            repos: Vec::new(),
+            repos,
         })
     }
 
@@ -93,27 +121,26 @@ impl ReplSource for InProcessReplSource {
     ) -> Result<ReplResponse, ReplError> {
         let _guard = self._pull_lock.lock().await;
 
+        let Some(instance) = self.leader.get_db(db).and_then(|db| db.get_repo(repo)) else {
+            return Ok(ReplResponse::Error {
+                leader_epoch: self.epoch(),
+                code: "unknown_repo".into(),
+                message: format!("repository '{db}/{repo}' not found"),
+            });
+        };
         // Reuse the same journal-read path as the wire handler.
         // Effective limit floor of 1, mirroring `handle_pull`.
         let effective_limit = limit.clamp(1, MAX_PULL_EVENTS) as usize;
-        let mut jr = match self
-            .leader
-            .read_changelog_for_replication(db, repo, from_version, effective_limit)
+        let mut jr = match instance
+            .read_changelog_for_replication(from_version, effective_limit)
             .await
         {
-            Ok(Some(jr)) => jr,
+            Ok(jr) => jr,
             Err(error) => {
                 return Ok(ReplResponse::Error {
                     leader_epoch: self.epoch(),
                     code: "replication_read_error".into(),
                     message: error.to_string(),
-                });
-            }
-            Ok(None) => {
-                return Ok(ReplResponse::Error {
-                    leader_epoch: self.epoch(),
-                    code: "unknown_repo".into(),
-                    message: format!("repository '{db}/{repo}' not found or journal unavailable"),
                 });
             }
         };
@@ -134,13 +161,11 @@ impl ReplSource for InProcessReplSource {
                         let remaining = deadline - now;
                         let step = remaining.min(std::time::Duration::from_millis(50));
                         tokio::time::sleep(step).await;
-                        match self
-                            .leader
-                            .read_changelog_for_replication(db, repo, from_version, effective_limit)
+                        match instance
+                            .read_changelog_for_replication(from_version, effective_limit)
                             .await
                         {
-                            Ok(Some(fresh)) => jr = fresh,
-                            Ok(None) => break,
+                            Ok(fresh) => jr = fresh,
                             Err(error) => {
                                 return Ok(ReplResponse::Error {
                                     leader_epoch: self.epoch(),
@@ -157,15 +182,35 @@ impl ReplSource for InProcessReplSource {
         let events_bytes = rmp_serde::to_vec_named(&jr.0)
             .map_err(|e| ReplError::Transport(format!("encode events: {e}")))?;
 
-        let current_version = self
-            .leader
-            .current_commit_version(db, repo)
+        let current_version = instance
+            .current_commit_version()
             .await
             .unwrap_or(from_version);
+
+        let metadata = async {
+            let identity = instance.repo_identity().await?;
+            let gap = instance.certified_gap_interval().await?;
+            Ok::<_, shamir_db::DbError>((identity, gap))
+        }
+        .await;
+        let (identity, gap) = match metadata {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                return Ok(ReplResponse::Error {
+                    leader_epoch: self.epoch(),
+                    code: "replication_read_error".into(),
+                    message: error.to_string(),
+                });
+            }
+        };
 
         Ok(ReplResponse::Pull {
             leader_epoch: self.epoch(),
             events: events_bytes,
+            repo_lineage_id: Some(identity.lineage_id),
+            history_epoch: Some(identity.history_epoch),
+            gap_first: gap.map(|(first, _)| first),
+            gap_through: gap.map(|(_, through)| through),
             gap_at: jr.1,
             current_version,
         })

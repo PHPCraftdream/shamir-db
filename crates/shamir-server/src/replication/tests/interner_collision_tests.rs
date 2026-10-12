@@ -45,6 +45,10 @@ impl ReplSource for EmittedSource {
         assert!(limit > 0);
         assert_eq!(wait_ms, Some(0));
         Ok(ReplResponse::Pull {
+            repo_lineage_id: None,
+            history_epoch: None,
+            gap_first: None,
+            gap_through: None,
             leader_epoch: self.leader.epoch(),
             events: rmp_serde::to_vec_named(std::slice::from_ref(&self.event)).unwrap(),
             gap_at: None,

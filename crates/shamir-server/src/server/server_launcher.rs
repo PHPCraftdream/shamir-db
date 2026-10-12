@@ -372,6 +372,12 @@ impl ServerLauncher {
                 .with_principal_resolver(resolver),
         );
 
+        // Consume only repos loaded from the restored catalogue, before new
+        // default repos, handlers, listeners, or replication tasks can exist.
+        crate::restore::consume_restore_marker(&config.data_dir, &shamir)
+            .await
+            .map_err(|e| BootError::ShamirDbInit(format!("restore history epoch: {e}")))?;
+
         // F-15: opt into the experimental online storage-migration API when
         // the operator explicitly set `security.enable_experimental_migration_api`
         // in the config file. This single `Arc<ShamirDb>` (via its internal
