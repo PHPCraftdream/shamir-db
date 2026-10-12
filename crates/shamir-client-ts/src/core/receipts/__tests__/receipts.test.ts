@@ -144,12 +144,15 @@ describe('implicit batch receipts (VIS-5b)', () => {
       const batch = f.client.db('db').batch().add('w1', insert('items', [{ id: 1 }])).build();
       const run = f.client.executeWithReceipts('db', batch);
       await f.nextRequest();
-      await vi.advanceTimersByTimeAsync(50);
-      await expect(run).rejects.toMatchObject({
+      // Attach the rejection handler BEFORE the timer fires, otherwise the
+      // rejection is reported as unhandled while time advances.
+      const rejected = expect(run).rejects.toMatchObject({
         code: 'client_timeout',
         retryable: false,
         acknowledgement: 'unknown',
       });
+      await vi.advanceTimersByTimeAsync(50);
+      await rejected;
       expect(f.requests.map((r) => r.op)).toEqual(['execute']);
     } finally { await f.client.close(); vi.useRealTimers(); }
   });

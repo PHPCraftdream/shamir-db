@@ -45,7 +45,7 @@ pub enum ChangeOpKind {
 mod bytes_as_bin {
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S: Serializer>(v: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
         s.serialize_bytes(v)
     }
 

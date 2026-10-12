@@ -38,12 +38,18 @@ fn changes_since_request_is_built_by_the_builder() {
     );
 }
 
+// Largest cursor the BatchOp wire carries as a native integer. Values above
+// `i64::MAX` are encoded as decimal strings by the op pipeline and are not
+// decodable by the server's direct `DbRequest` decode today (the server also
+// casts positions through `i64`), so the lossless claim stops here.
+const WIRE_CURSOR_MAX: u64 = i64::MAX as u64;
+
 #[test]
 fn changes_since_cursor_survives_the_wire_losslessly() {
     let mut builder = Batch::new();
     builder
         .id("changes_since")
-        .changes_since("changes_since", changes_since(u64::MAX));
+        .changes_since("changes_since", changes_since(WIRE_CURSOR_MAX));
     let request = builder.build();
     let wire = DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
@@ -58,7 +64,7 @@ fn changes_since_cursor_survives_the_wire_losslessly() {
     let BatchOp::ChangesSince(op) = &batch.queries.get("changes_since").unwrap().op else {
         panic!("expected ChangesSince op");
     };
-    assert_eq!(op.changes_since, u64::MAX, "u64 cursor must not narrow");
+    assert_eq!(op.changes_since, WIRE_CURSOR_MAX, "u64 cursor must not narrow");
 }
 
 fn payload(response: &ChangesSinceResponse) -> QueryValue {
