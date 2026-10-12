@@ -144,9 +144,32 @@ impl CompletionTracker {
         self.waiter_registrations.load(Ordering::Relaxed)
     }
 
-    #[cfg(test)]
-    pub(crate) fn waiter_count(&self) -> usize {
+    /// Current registered visibility waits, including cancellation-safe RAII owners.
+    pub fn waiter_count(&self) -> usize {
         self.waiters.load(Ordering::SeqCst)
+    }
+
+    /// Best-effort counts in `(watermark, high_water]`: unsettled, explicit
+    /// Pending, and missing slots. Scans only sparse entries, never H-W slots.
+    /// Concurrent settlement/compaction can skew these telemetry-only counts.
+    pub(crate) fn unsettled_counts(&self, watermark: u64, high_water: u64) -> (u64, u64, u64) {
+        let span = high_water.saturating_sub(watermark);
+        let mut terminal = 0_u64;
+        let mut pending = 0_u64;
+        self.states.iter_sync(|version, state| {
+            if *version > watermark && *version <= high_water {
+                match state {
+                    State::Pending => pending = pending.saturating_add(1),
+                    State::Materialized | State::Aborted => {
+                        terminal = terminal.saturating_add(1);
+                    }
+                }
+            }
+            true
+        });
+        let unsettled = span.saturating_sub(terminal);
+        let pending = pending.min(unsettled);
+        (unsettled, pending, unsettled.saturating_sub(pending))
     }
 
     /// Try to advance the watermark by walking contiguous completed versions.
