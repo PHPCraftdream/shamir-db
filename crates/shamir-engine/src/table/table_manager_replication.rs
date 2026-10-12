@@ -166,7 +166,11 @@ impl TableManager {
                 // task #532: `iter_stream` yields `RecordKey` keys and
                 // `set_versioned_many` is now `RecordKey`-keyed too — feed the
                 // batch straight through, no `RecordKey`→`Bytes` round-trip.
-                mvcc.set_versioned_many(items).await?;
+                // commit_migration in admin_migration holds the destination
+                // barrier/UWL across seeding and index finalisation. Waiting
+                // here cycles: ack -> lower orphan -> drainer Phase B posting
+                // replay -> this barrier -> ack. This cutover bridge is no-wait.
+                mvcc.set_versioned_many_no_wait(items).await?;
             }
         }
         Ok(())

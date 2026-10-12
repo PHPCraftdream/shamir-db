@@ -770,7 +770,34 @@ impl MvccStore {
     ///
     /// Returns the monotonic version assigned to this write (from the
     /// shared `RepoTxGate` counter).
+    ///
+    /// Cancelling the acknowledgement wait after commit does not undo or
+    /// reapply the write; it only forfeits acknowledgement. Observe the
+    /// committed version before deciding whether to retry.
+    ///
     pub async fn set_versioned(&self, key: RecordKey, value: Bytes) -> DbResult<u64> {
+        self.set_versioned_inner(key, value, true).await
+    }
+
+    /// Finish a guarded engine non-tx operation after releasing all writer
+    /// drain, unique-write and barrier guards. `version` is the maximum minted
+    /// version (zero for a no-op). Reopen is logged, not a retryable write error.
+    /// cancel-safe: yes — abandons acknowledgement, never undoes or reapplies
+    /// the already committed data or the caller's completed index updates.
+    #[doc(hidden)]
+    pub async fn await_non_tx_ack(&self, version: u64) {
+        self.gate.await_non_tx_ack(version).await;
+    }
+
+    /// Guarded engine callers only: do not wait for W while holding a writer
+    /// drain guard or unique-write lock. A lower post-WAL orphan may need
+    /// that same barrier to replay its index postings and settle.
+    #[doc(hidden)]
+    pub async fn set_versioned_no_wait(&self, key: RecordKey, value: Bytes) -> DbResult<u64> {
+        self.set_versioned_inner(key, value, false).await
+    }
+
+    async fn set_versioned_inner(&self, key: RecordKey, value: Bytes, wait: bool) -> DbResult<u64> {
         // Single log append: every prior version is already in the log from
         // when it was written as current. No other store is written.
         //
@@ -835,6 +862,9 @@ impl MvccStore {
         // versions beyond the retention bound (floor: min_alive). old_v is the
         // prior version captured before publish_cell — enables targeted remove.
         self.vacuum_key(&key_snapshot, old_v).await;
+        if wait {
+            self.gate.await_non_tx_ack(new_v).await;
+        }
         Ok(new_v)
     }
 
@@ -857,7 +887,28 @@ impl MvccStore {
     /// Returns the maximum version assigned across the batch (one
     /// version per record). The returned value is the commit-version a
     /// changefeed event should carry.
+    ///
+    /// Cancelling only the post-commit acknowledgement wait preserves every
+    /// committed batch version; do not blindly retry the batch.
     pub async fn set_versioned_many(&self, items: Vec<(RecordKey, Bytes)>) -> DbResult<u64> {
+        self.set_versioned_many_inner(items, true).await
+    }
+
+    /// Guarded engine/migration callers only; avoids the lower-orphan
+    /// posting-replay barrier cycle described by [`Self::set_versioned_no_wait`].
+    #[doc(hidden)]
+    pub async fn set_versioned_many_no_wait(
+        &self,
+        items: Vec<(RecordKey, Bytes)>,
+    ) -> DbResult<u64> {
+        self.set_versioned_many_inner(items, false).await
+    }
+
+    async fn set_versioned_many_inner(
+        &self,
+        items: Vec<(RecordKey, Bytes)>,
+        wait: bool,
+    ) -> DbResult<u64> {
         if items.is_empty() {
             // No records written — return 0. The caller should not emit
             // a changefeed event for an empty batch.
@@ -941,6 +992,9 @@ impl MvccStore {
         for (key, &old_v) in keys.iter().zip(old_versions.iter()) {
             self.vacuum_key(key, old_v).await;
         }
+        if wait {
+            self.gate.await_non_tx_ack(max_v).await;
+        }
         Ok(max_v)
     }
 
@@ -969,9 +1023,31 @@ impl MvccStore {
     ///     `vacuum_needs_scan` if accumulated versions exist from prior
     ///     snapshot epochs), but defeats the targeted-remove optimization
     ///     for that key: the old version accumulates until the next full scan.
+    ///
+    /// cancel-safe: NO before commit, as for [`Self::set_versioned_many`].
+    /// Cancelling the post-commit acknowledgement wait preserves the batch.
     pub async fn set_versioned_many_append_only(
         &self,
         items: Vec<(RecordKey, Bytes)>,
+    ) -> DbResult<u64> {
+        self.set_versioned_many_append_only_inner(items, true).await
+    }
+
+    /// Guarded engine callers only; avoids the lower-orphan posting-replay
+    /// barrier cycle described by [`Self::set_versioned_no_wait`].
+    #[doc(hidden)]
+    pub async fn set_versioned_many_append_only_no_wait(
+        &self,
+        items: Vec<(RecordKey, Bytes)>,
+    ) -> DbResult<u64> {
+        self.set_versioned_many_append_only_inner(items, false)
+            .await
+    }
+
+    async fn set_versioned_many_append_only_inner(
+        &self,
+        items: Vec<(RecordKey, Bytes)>,
+        wait: bool,
     ) -> DbResult<u64> {
         if items.is_empty() {
             return Ok(0);
@@ -1029,6 +1105,9 @@ impl MvccStore {
         for key in &keys {
             self.vacuum_key(key, 0).await;
         }
+        if wait {
+            self.gate.await_non_tx_ack(max_v).await;
+        }
         Ok(max_v)
     }
 
@@ -1039,7 +1118,21 @@ impl MvccStore {
     ///
     /// Returns the monotonic version assigned to this delete (always
     /// allocated — see [`set_versioned`] for rationale).
+    ///
+    /// Cancelling only the post-commit acknowledgement wait does not undo
+    /// the tombstone or apply it again; observe before retrying.
     pub async fn delete_versioned(&self, key: RecordKey) -> DbResult<u64> {
+        self.delete_versioned_inner(key, true).await
+    }
+
+    /// Guarded engine callers only; avoids the lower-orphan posting-replay
+    /// barrier cycle described by [`Self::set_versioned_no_wait`].
+    #[doc(hidden)]
+    pub async fn delete_versioned_no_wait(&self, key: RecordKey) -> DbResult<u64> {
+        self.delete_versioned_inner(key, false).await
+    }
+
+    async fn delete_versioned_inner(&self, key: RecordKey, wait: bool) -> DbResult<u64> {
         // Single log append: a tombstone (empty value) is written for the
         // delete version. The prior version is already in the log from when
         // it was written as current.
@@ -1089,6 +1182,9 @@ impl MvccStore {
         // versions beyond the retention bound (floor: min_alive). old_v is the
         // prior version captured before publish_cell — enables targeted remove.
         self.vacuum_key(&key, old_v).await;
+        if wait {
+            self.gate.await_non_tx_ack(new_v).await;
+        }
         Ok(new_v)
     }
 
