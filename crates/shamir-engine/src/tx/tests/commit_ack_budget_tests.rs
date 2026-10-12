@@ -107,9 +107,9 @@ async fn strict_waits_then_returns_visible() {
     assert_eq!(gate.completion().waiter_count(), 0);
 }
 
-// Red before VIS-3: reopen used to overwrite Complete with Deferred.
+// Reopen keeps the established Deferred marker; visible wins over reopen.
 #[tokio::test(start_paused = true)]
-async fn reopen_is_orthogonal_and_visible_wins_over_reopen() {
+async fn reopen_keeps_deferred_marker_and_visible_wins_over_reopen() {
     let (repo, _) = fixture("ack_reopen").await;
     let gate = repo.tx_gate().await.unwrap();
     let lower = gate.assign_next_version_guarded();
@@ -127,7 +127,7 @@ async fn reopen_is_orthogonal_and_visible_wins_over_reopen() {
             reason: VisibilityPendingReason::ReopenRequired,
         }
     );
-    assert_eq!(receipt.materialization, MaterializationState::Complete);
+    assert_eq!(receipt.materialization, MaterializationState::Deferred);
     lower.commit();
     let receipt = acknowledge_known_outcome(outcome(target), &repo, &gate, BOUNDED, u64::MAX)
         .await

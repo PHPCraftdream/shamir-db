@@ -321,7 +321,8 @@ async fn invalid_commit_policy_consumes_owned_handle_but_version_and_owner_gates
         assert!(matches!(send(&handler, &session, legacy).await,
             DbResponse::Error { code, .. } if code == "unsupported_query_version"));
         assert!(!gate.active_snapshots_empty());
-        let stranger = Session::new(
+        // Session::new leaves session_id zeroed; ownership is keyed by it.
+        let mut stranger = Session::new(
             [84; 16],
             "stranger".into(),
             SessionPermissions::new(false, false, vec![]),
@@ -330,6 +331,7 @@ async fn invalid_commit_policy_consumes_owned_handle_but_version_and_owner_gates
             [0; 32],
             0,
         );
+        stranger.session_id = [84; 32];
         assert!(
             matches!(send(&handler, &stranger, commit(handle, Some(wait))).await,
             DbResponse::Error { code, .. } if code == "tx_forbidden")

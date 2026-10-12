@@ -21,7 +21,7 @@ The response variant alone is not proof of success: inspect `status`, then
 | `error` | **Additive, optional** published-commit error; omitted when absent. Does not change `status` or set `reason`. |
 | `snapshot_version` | Read snapshot version; present for committed outcomes. |
 | `commit_version` | Published version; present for committed outcomes, absent for aborted outcomes. |
-| `materialized` | Inline projection outcome, independent of visibility and WAL durability. Timeout/reopen acknowledgement does not change it. Only meaningful for committed outcomes. Deserialization defaults to `true` for older payloads. |
+| `materialized` | Inline projection outcome, independent of visibility and WAL durability. A timeout acknowledgement does not change it; a reopen-required acknowledgement reports `false` (`Deferred`), as before. Only meaningful for committed outcomes. Deserialization defaults to `true` for older payloads. |
 
 (Source: `crates/shamir-query-types/src/batch/transaction_info.rs`.)
 
@@ -131,7 +131,7 @@ The Bounded budget starts only after the inner commit returns a known outcome
 (success or a published `wal_durability` warning). Strict waits for W to reach
 the commit version; Bounded checks W immediately, waits at most its budget, and
 re-samples W at expiry so visibility wins. Reopen before visibility yields
-Pending with `reason: "reopen_required"`, without changing materialization.
+Pending with `reason: "reopen_required"` and `materialized: false` (`Deferred`).
 Read-only/no-allocation commits already at their snapshot position are Visible.
 Pre-commit aborts and indeterminate WAL outcomes keep their existing classification;
 a timeout never manufactures committed metadata for them.
@@ -165,8 +165,9 @@ VIS-5 work.
 `materialized` describes the projection outcome, **not a visibility field**.
 `false` (`Deferred`) can mean a projection was deferred to idempotent online
 orphan replay or cold recovery on repository open. A visibility acknowledgement
-that expires or observes `ReopenRequired` leaves materialization untouched,
-even if this commit's own projections succeeded. It is **not an abort**, nor a
+that expires leaves materialization untouched; one that observes
+`ReopenRequired` reports `Deferred`, even if this commit's own projections
+succeeded. It is **not an abort**, nor a
 next-open-only or bounded visibility guarantee. Do not replay the transaction
 to repair it. A
 `wal_durability` error remains a durability warning regardless of this flag;

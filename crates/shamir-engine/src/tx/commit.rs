@@ -693,11 +693,31 @@ pub(crate) async fn acknowledge_known_outcome(
             }
         }
     };
+    // A reopen-required wait keeps the established Deferred marker.
+    let reopen = matches!(
+        visibility,
+        VisibilityState::Pending {
+            reason: VisibilityPendingReason::ReopenRequired,
+            ..
+        }
+    );
     match &mut result {
-        Ok(outcome) => outcome.visibility = visibility,
+        Ok(outcome) => {
+            outcome.visibility = visibility;
+            if reopen {
+                outcome.materialization = MaterializationState::Deferred;
+            }
+        }
         Err(TxError::WalDurability {
-            visibility: state, ..
-        }) => *state = visibility,
+            visibility: state,
+            materialization,
+            ..
+        }) => {
+            *state = visibility;
+            if reopen {
+                *materialization = MaterializationState::Deferred;
+            }
+        }
         Err(_) => unreachable!("only known outcomes reach acknowledgement"),
     }
     if visibility == VisibilityState::Visible {
