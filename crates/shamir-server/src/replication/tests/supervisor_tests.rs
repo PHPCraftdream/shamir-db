@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::Stream;
+use futures_util::stream::Stream;
 use shamir_db::access::{principal64_from_username, Actor};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::table_manager::table_token_for;
