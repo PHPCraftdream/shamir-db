@@ -222,6 +222,24 @@ Embedded `ExecPolicy::EMBEDDED` и WASM `FacadeDbGateway` → `execute_as`
 `crates/shamir-query-types/src/batch/exec_policy.rs`,
 `crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs`).
 
+Embedded direct CRUD: `TableManager::{insert, insert_many, delete, set}_with_receipt`
+принимает explicit `VisibilityWait` и возвращает must-use `WriteOutcome<T>`:
+value + `commit_version: Option<u64>` + visibility. `set` сохраняет `bool`
+(created), не unit. Missing delete / empty insert-many / non-MVCC не выдают
+позицию 0: version = `None`, без таймера. Bounded Pending — committed, **не retry**;
+reconcile на той же incarnation repo, затем открыть новый snapshot. Старые
+value-only методы — explicit Strict adapters, даже при bounded repo policy;
+reopen-before-visible возвращает `WriteCommittedVisibilityPending`
+(`write_committed_visibility_pending`) с committed version, sampled W и reason,
+не обычный retryable write failure. Direct CRUD остаётся best-effort/no-WAL,
+не transactional atomicity / crash-durability и unsafe to cancel mid-sequence;
+отмена только observer освобождает waiter, не отменяет write/recovery. Guards
+освобождаются до observation. Аналогичные MVCC receipt APIs используют local
+storage/tx visibility types. Implicit batch propagation — VIS-4b; bounded server
+default / SDK rollout всё ещё gated. Полный контракт:
+[Transaction outcomes](../client-server-protocol-spec/TRANSACTION_OUTCOMES.md).
+
+
 При включённом enforcement (`ExecPolicy { enforce_result_size: true, … }`) общий root
 budget означает **«bytes materialized by this execution»**, а не длину
 MessagePack, allocator capacity или live RSS. `ResultSize` детерминированно

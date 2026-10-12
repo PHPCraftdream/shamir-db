@@ -1220,15 +1220,6 @@ impl RepoTxGate {
         }
     }
 
-    /// Non-tx acknowledgement only: the version is already committed and
-    /// durable. Reopen cannot turn it into a retryable write failure.
-    /// cancel-safe: yes — cancellation only abandons the read-only wait.
-    pub(crate) async fn await_non_tx_ack(&self, version: u64) {
-        if self.await_visible(version).await == VisibleOutcome::ReopenRequired {
-            log::warn!("non-tx write committed but visibility requires reopen: version={version}",);
-        }
-    }
-
     /// Access the completion tracker (P1a scaffolding; abort-path wired in P1b).
     pub fn completion(&self) -> &CompletionTracker {
         &self.completion

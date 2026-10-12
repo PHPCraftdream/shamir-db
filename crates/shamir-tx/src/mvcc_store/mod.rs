@@ -21,6 +21,7 @@ pub mod mvcc_history;
 pub mod mvcc_locks;
 pub mod retention;
 pub mod version_entry;
+pub mod write_receipt;
 
 pub use key_lock::{KeyLock, LockMode};
 pub use retention::Retention;
@@ -779,16 +780,6 @@ impl MvccStore {
         self.set_versioned_inner(key, value, true).await
     }
 
-    /// Finish a guarded engine non-tx operation after releasing all writer
-    /// drain, unique-write and barrier guards. `version` is the maximum minted
-    /// version (zero for a no-op). Reopen is logged, not a retryable write error.
-    /// cancel-safe: yes — abandons acknowledgement, never undoes or reapplies
-    /// the already committed data or the caller's completed index updates.
-    #[doc(hidden)]
-    pub async fn await_non_tx_ack(&self, version: u64) {
-        self.gate.await_non_tx_ack(version).await;
-    }
-
     /// Guarded engine callers only: do not wait for W while holding a writer
     /// drain guard or unique-write lock. A lower post-WAL orphan may need
     /// that same barrier to replay its index postings and settle.
@@ -863,7 +854,7 @@ impl MvccStore {
         // prior version captured before publish_cell — enables targeted remove.
         self.vacuum_key(&key_snapshot, old_v).await;
         if wait {
-            self.gate.await_non_tx_ack(new_v).await;
+            self.strict_ack(new_v).await?;
         }
         Ok(new_v)
     }
@@ -993,7 +984,7 @@ impl MvccStore {
             self.vacuum_key(key, old_v).await;
         }
         if wait {
-            self.gate.await_non_tx_ack(max_v).await;
+            self.strict_ack(max_v).await?;
         }
         Ok(max_v)
     }
@@ -1106,7 +1097,7 @@ impl MvccStore {
             self.vacuum_key(key, 0).await;
         }
         if wait {
-            self.gate.await_non_tx_ack(max_v).await;
+            self.strict_ack(max_v).await?;
         }
         Ok(max_v)
     }
@@ -1183,7 +1174,7 @@ impl MvccStore {
         // prior version captured before publish_cell — enables targeted remove.
         self.vacuum_key(&key, old_v).await;
         if wait {
-            self.gate.await_non_tx_ack(new_v).await;
+            self.strict_ack(new_v).await?;
         }
         Ok(new_v)
     }
