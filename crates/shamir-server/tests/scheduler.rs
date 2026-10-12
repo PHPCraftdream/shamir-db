@@ -156,7 +156,7 @@ async fn spawn_creates_tasks_then_shutdown_joins_them() {
     scheduler.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn counter_gc_runs_at_interval() {
     let counters_concrete: Arc<CountingCounterStore> = Arc::new(CountingCounterStore::default());
     let counters: Arc<dyn ConsumedCounterStore> = counters_concrete.clone();
@@ -179,7 +179,7 @@ async fn counter_gc_runs_at_interval() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn lockout_gc_runs_at_interval() {
     let counters: Arc<dyn ConsumedCounterStore> = Arc::new(InMemoryConsumedCounters::new());
     let lockout_concrete: Arc<CountingLockoutStore> = Arc::new(CountingLockoutStore::default());
@@ -201,7 +201,7 @@ async fn lockout_gc_runs_at_interval() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn audit_checkpoint_runs_at_interval() {
     let counters: Arc<dyn ConsumedCounterStore> = Arc::new(InMemoryConsumedCounters::new());
     let lockout: Arc<dyn LockoutStore> = Arc::new(InMemoryLockoutStore::new());
@@ -223,7 +223,7 @@ async fn audit_checkpoint_runs_at_interval() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn rate_limit_gc_runs_at_interval() {
     let counters: Arc<dyn ConsumedCounterStore> = Arc::new(InMemoryConsumedCounters::new());
     let lockout: Arc<dyn LockoutStore> = Arc::new(InMemoryLockoutStore::new());

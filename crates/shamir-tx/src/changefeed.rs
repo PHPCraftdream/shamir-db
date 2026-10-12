@@ -18,9 +18,10 @@
 //!    equals numeric order). The commit-path hands the event to a bounded
 //!    [`tokio::sync::mpsc`] channel via `try_send` (NEVER blocks); a
 //!    background task batches pending events and writes them durably to
-//!    the changelog store. [`RepoChangefeed::read_from`] range-reads the
-//!    journal from a given version (resumable pull). A late subscriber
-//!    catches up via `read_from`, then switches to the live broadcast.
+//!    the changelog store. Engine pulls use `RepoInstance::read_changelog_from`
+//!    to confirm a writer barrier and range-read only the settled version prefix.
+//!    The lower-level [`RepoChangefeed::read_from`] is unbounded and does not
+//!    itself establish that ordering guarantee.
 //!
 //! NEITHER track blocks the hot commit-path. The projection is done once
 //! and reused for both tracks; a commit with an empty footprint emits
@@ -28,25 +29,37 @@
 //!
 //! ## Durability trade-off (journal)
 //!
-//! The journal write is asynchronous: `try_send` enqueues the event and
-//! returns immediately, and the background writer persists it shortly
-//! after. There is therefore a small window after a commit acks during
-//! which a process crash loses the not-yet-flushed journal tail. This is
-//! by design — the journal must never sit on the commit's critical path.
-//! The committed DATA itself is durable independently (Phase 4 WAL); the
-//! journal is an *observability/replication* feed, not a source of truth.
-//! On channel overflow (a sustained burst faster than the writer drains)
-//! the event is dropped with a `log::warn!` rather than growing memory
-//! unboundedly — see [`RepoChangefeed::emit`].
+//! Local commits and replicated applies enqueue (or mark a gap) immediately
+//! before version publication, without an await or fallible step between them.
+//! Engine journal pulls capture the contiguous completion watermark W (every
+//! version through W is settled), then confirm the preceding channel prefix
+//! with a writer barrier before reading events at or below the confirmed bound.
+//! Confirmation has a bounded budget; timeout returns an older safe prefix.
+//! A version still committing holds back the prefix rather than being skipped.
+//!
+//! Persistence remains asynchronous: a crash can lose the unflushed journal
+//! tail without a gap marker; cold WAL recovery does not check the journal.
+//! Queue overflow/closure, write failures and corrupt records mark known gaps.
+//! Gap metadata is persisted asynchronously and restored on reopen once durable;
+//! marker-write failures retain dirty state for retry. This does not eliminate
+//! the crash window before persistence. The journal is an observability and
+//! replication feed, not the data's source of truth.
+//!
+//! Live broadcast occurs after publication in commit-completion order, not
+//! necessarily version order. A consumer that discards versions at or below
+//! its last delivered version can skip a late lower-version event. Use bounded
+//! engine journal pulls for ordered history, and handle reported gaps.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use shamir_storage::error::{DbError, DbResult};
 use shamir_types::access::Actor;
-use tokio::sync::{broadcast, mpsc, Notify};
+use tokio::sync::{broadcast, mpsc, oneshot, Notify};
 use tokio::time::{sleep_until, timeout_at, Instant};
 
 /// One record-level change inside a committed transaction.
@@ -81,10 +94,11 @@ pub enum ChangeOp {
 
 /// One committed transaction, projected for the changefeed.
 ///
-/// Ordered by `commit_version` (monotonic per repo). Emitted from the
-/// commit-path AFTER `gate.publish_committed`, so by the time a subscriber
-/// (or journal reader) observes it the version is already visible to
-/// readers.
+/// Journal keys order events by `commit_version` (monotonic per repo), but
+/// enqueue and live-broadcast order need not match version order. The engine
+/// enqueues immediately BEFORE version publication and broadcasts AFTER it.
+/// Engine journal pulls confirm and bound the settled prefix before exposing
+/// events; live subscribers observe published versions in completion order.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangelogEvent {
     /// Repository name this commit belongs to.
@@ -165,6 +179,10 @@ pub trait ChangelogStore: Send + Sync {
 enum JournalMsg {
     Event(Arc<ChangelogEvent>),
     Barrier(u64),
+    RecoveryGap {
+        interval: (u64, u64),
+        ack: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 /// Per-repo changefeed: live broadcast + durable journal writer.
@@ -193,7 +211,7 @@ pub struct RepoChangefeed {
     /// against the highest emitted version to detect a stalled/dead writer.
     /// `0` means "nothing persisted yet".
     last_persisted_version: Arc<AtomicU64>,
-    /// CF-1: shared minimum known hole and writer wakeup.
+    /// Shared conservative hole interval and writer wakeup.
     gap: Arc<GapMarker>,
     confirmed_through: Arc<AtomicU64>,
     barrier_notify: Arc<Notify>,
@@ -202,10 +220,9 @@ pub struct RepoChangefeed {
 
 /// Result of a [`RepoChangefeed::read_from`] call.
 ///
-/// `gap_at` is `Some(v)` when a known-dropped version `v` lies at or after
-/// `from_version` — the journal is NOT contiguous from that point and the
-/// consumer should perform a full snapshot resync rather than trusting the
-/// journal for an unbroken history.
+/// `gap_at` is `Some(max(from_version, first_missing))` while the cursor is
+/// at or before the invalidation horizon. The consumer must snapshot resync
+/// rather than trusting the journal for an unbroken history.
 pub struct JournalRead {
     /// Events read from the journal.
     pub events: Vec<ChangelogEvent>,
@@ -225,7 +242,7 @@ impl std::fmt::Debug for RepoChangefeed {
                 "last_persisted_version",
                 &self.last_persisted_version.load(Ordering::Relaxed),
             )
-            .field("first_gap_version", &self.gap.first.load(Ordering::Relaxed))
+            .field("gap_interval", &self.gap.current.load_full())
             .finish()
     }
 }
@@ -240,11 +257,24 @@ impl RepoChangefeed {
         Self::new_with_gap(store, 0)
     }
 
-    /// Build after loading the durable marker at repo init. `0` means absent.
+    /// Seed only a loaded or flushed point marker; `0` means absent.
     /// Existing `new` callers must only use it for stores without a prior marker.
     /// Exactly one live feed may own a given store's marker writer at a time;
     /// stop/drain the old writer before re-opening the same store.
     pub fn new_with_gap(store: Arc<dyn ChangelogStore>, restored_gap: u64) -> Arc<Self> {
+        Self::new_with_gap_interval(
+            store,
+            (restored_gap != 0).then_some((restored_gap, restored_gap)),
+        )
+    }
+
+    /// Seed ONLY an interval loaded from durable storage or successfully flushed
+    /// before construction. Exactly one live feed owns the store's marker writer.
+    pub fn new_with_gap_interval(
+        store: Arc<dyn ChangelogStore>,
+        restored_gap: Option<(u64, u64)>,
+    ) -> Arc<Self> {
+        assert!(restored_gap.is_none_or(|(first, through)| first != 0 && through >= first));
         let (live, _) = broadcast::channel(BROADCAST_CAPACITY);
         let (journal_tx, journal_rx) = mpsc::channel(JOURNAL_CHANNEL_CAPACITY);
         let notify = Arc::new(Notify::new());
@@ -253,8 +283,8 @@ impl RepoChangefeed {
         let confirmed_through = Arc::new(AtomicU64::new(0));
         let barrier_notify = Arc::new(Notify::new());
         let gap = Arc::new(GapMarker {
-            first: AtomicU64::new(restored_gap),
-            persisted: AtomicU64::new(restored_gap),
+            current: ArcSwap::from_pointee(restored_gap),
+            persisted: ArcSwap::from_pointee(restored_gap),
             notify: Arc::clone(&notify),
         });
 
@@ -349,7 +379,9 @@ impl RepoChangefeed {
                     self.mark_gap(ev.commit_version);
                 }
                 mpsc::error::TrySendError::Full(JournalMsg::Barrier(_))
-                | mpsc::error::TrySendError::Closed(JournalMsg::Barrier(_)) => {
+                | mpsc::error::TrySendError::Closed(JournalMsg::Barrier(_))
+                | mpsc::error::TrySendError::Full(JournalMsg::RecoveryGap { .. })
+                | mpsc::error::TrySendError::Closed(JournalMsg::RecoveryGap { .. }) => {
                     unreachable!("journal_enqueue only sends events");
                 }
             }
@@ -419,14 +451,42 @@ impl RepoChangefeed {
         self.last_persisted_version.load(Ordering::Acquire)
     }
 
-    /// Record a known hole, keeping the minimum non-zero version.
+    /// Record a known point hole, monotonically widening the interval.
     /// Version zero (a read starting before the first commit) maps to one.
-    /// Safe on non-runtime threads: only atomics and a writer notification.
+    /// Safe on non-runtime threads: only RCU/CAS and a writer notification.
     /// RAM visibility is immediate; durability follows asynchronously. Failed
     /// marker writes retain dirty state and retry on writer activity, explicit
     /// flush hints, repeated marks, and shutdown (no busy retry loop).
     pub fn mark_gap(&self, version: u64) {
         self.gap.mark_gap(version);
+    }
+
+    /// Durably certify recovery invalidation through the sole marker writer.
+    /// Admission awaits capacity in the existing bounded queue; commits still
+    /// only try_send. Success includes marker put + flush and all runtime marks
+    /// observed during that put. Failures never publish a speculative repair.
+    /// Cancellation before admission does nothing; after admission the writer
+    /// completes independently, so cancellation is not a durability acknowledgement.
+    pub async fn record_recovery_gap(
+        &self,
+        first_missing: u64,
+        affected_through: u64,
+    ) -> DbResult<()> {
+        if first_missing == 0 || affected_through < first_missing {
+            return Err(DbError::Storage("invalid recovery gap interval".into()));
+        }
+        let (ack, result) = oneshot::channel();
+        self.journal_tx
+            .send(JournalMsg::RecoveryGap {
+                interval: (first_missing, affected_through),
+                ack,
+            })
+            .await
+            .map_err(|_| DbError::Storage("changefeed writer closed".into()))?;
+        result
+            .await
+            .map_err(|_| DbError::Storage("changefeed repair acknowledgement lost".into()))?
+            .map_err(DbError::Storage)
     }
 
     /// CF-1: the lowest known journal hole; zero means none.
@@ -436,7 +496,7 @@ impl RepoChangefeed {
     /// from a version at or before this value cannot trust it for an unbroken
     /// history and should perform a full snapshot resync.
     pub fn first_gap_version(&self) -> u64 {
-        self.gap.first.load(Ordering::Acquire)
+        (*self.gap.current.load_full()).map_or(0, |(first, _)| first)
     }
 
     /// Wake the writer and ask it to drain + stop. Used at shutdown so the
@@ -509,11 +569,10 @@ impl RepoChangefeed {
         }
         // CF-1: signal if any known-dropped version lies at/after from_version.
         // Conservative over-signal is acceptable; silent omission is not.
-        let g = self.gap.first.load(Ordering::Acquire);
-        let gap_at = if g != 0 && g >= from_version {
-            Some(g)
-        } else {
-            corrupt_gap
+        let interval = *self.gap.current.load_full();
+        let gap_at = match interval {
+            Some((first, through)) if from_version <= through => Some(from_version.max(first)),
+            _ => corrupt_gap,
         };
         JournalRead { events, gap_at }
     }
@@ -525,44 +584,104 @@ pub fn gap_marker_key() -> Bytes {
     Bytes::from_static(b"\0")
 }
 
-/// Shared atomic state; only the journal writer performs marker I/O.
+/// Encode a valid conservative interval. Point markers retain the legacy BE u64
+/// encoding; ranges append a BE u64 upper endpoint (16 bytes total).
+pub fn encode_gap_marker((first, through): (u64, u64)) -> Bytes {
+    assert!(first != 0 && through >= first);
+    if first == through {
+        return version_key(first);
+    }
+    let mut bytes = Vec::with_capacity(16);
+    bytes.extend_from_slice(&first.to_be_bytes());
+    bytes.extend_from_slice(&through.to_be_bytes());
+    Bytes::from(bytes)
+}
+
+/// Decode legacy point metadata or the extended interval, rejecting corruption.
+pub fn decode_gap_marker(bytes: &[u8]) -> Result<(u64, u64), String> {
+    if bytes.len() != 8 && bytes.len() != 16 {
+        return Err("invalid gap marker length".into());
+    }
+    let first = u64::from_be_bytes(bytes[..8].try_into().map_err(|_| "invalid first")?);
+    let through = if bytes.len() == 8 {
+        first
+    } else {
+        u64::from_be_bytes(bytes[8..].try_into().map_err(|_| "invalid through")?)
+    };
+    if first == 0 || through < first {
+        return Err("invalid gap marker interval".into());
+    }
+    Ok((first, through))
+}
+
+fn merge_gap(current: Option<(u64, u64)>, (first, through): (u64, u64)) -> (u64, u64) {
+    current.map_or((first, through), |(old_first, old_through)| {
+        (old_first.min(first), old_through.max(through))
+    })
+}
+
+/// Shared atomic snapshots; only the journal writer performs marker I/O.
 struct GapMarker {
-    first: AtomicU64,
-    persisted: AtomicU64,
+    // Publish the pair with one CAS/RCU snapshot: independent endpoint atomics
+    // could expose a torn interval. Allocation/CAS occurs only on gap events,
+    // never healthy commits, and readers take no Mutex/RwLock.
+    current: ArcSwap<Option<(u64, u64)>>,
+    persisted: ArcSwap<Option<(u64, u64)>>,
     notify: Arc<Notify>,
 }
 
 impl GapMarker {
+    fn merge(&self, interval: (u64, u64)) {
+        self.current
+            .rcu(|current| Some(merge_gap(**current, interval)));
+    }
+
     fn mark_gap(&self, version: u64) {
         let version = version.max(1);
-        let _ = self
-            .first
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                if current == 0 || version < current {
-                    Some(version)
-                } else {
-                    None
-                }
-            });
+        self.merge((version, version));
         // Also wake for unchanged marks: a prior marker put may have failed.
         self.notify.notify_one();
     }
 
     async fn persist(&self, store: &Arc<dyn ChangelogStore>) {
-        loop {
-            let version = self.first.load(Ordering::Acquire);
-            if version == 0 || version == self.persisted.load(Ordering::Acquire) {
-                return;
-            }
-            if let Err(e) = store.put(gap_marker_key(), version_key(version)).await {
-                log::warn!("changefeed gap marker put failed at {version}: {e}");
-                return;
-            }
-            self.persisted.store(version, Ordering::Release);
-            // A lower mark may have arrived during the put. Finish it before
-            // sleeping. A single writer prevents older puts completing last
-            // and regressing the durable minimum; callers never spawn I/O.
+        if let Err(e) = self.persist_current(store).await {
+            log::warn!("changefeed gap marker put failed: {e}");
         }
+    }
+
+    async fn persist_current(&self, store: &Arc<dyn ChangelogStore>) -> Result<(), String> {
+        loop {
+            let current = *self.current.load_full();
+            if current == *self.persisted.load_full() {
+                return Ok(());
+            }
+            let Some(interval) = current else {
+                return Ok(());
+            };
+            store
+                .put(gap_marker_key(), encode_gap_marker(interval))
+                .await?;
+            self.persisted.store(Arc::new(Some(interval)));
+            // Finish marks arriving during put before sleeping or acknowledging.
+            // The sole writer never completes an older put after a newer one.
+        }
+    }
+
+    async fn persist_recovery(
+        &self,
+        store: &Arc<dyn ChangelogStore>,
+        interval: (u64, u64),
+    ) -> Result<(), String> {
+        let merged = merge_gap(*self.current.load_full(), interval);
+        // Do NOT put the proposed repair into RAM until put's flush succeeds.
+        // On error the store may have staged bytes, but no speculative repair
+        // can be retried by the runtime writer or exposed to readers.
+        store
+            .put(gap_marker_key(), encode_gap_marker(merged))
+            .await?;
+        self.persisted.store(Arc::new(Some(merged)));
+        self.merge(merged);
+        self.persist_current(store).await
     }
 }
 
@@ -842,6 +961,11 @@ async fn process_journal_msg(
 ) {
     match msg {
         JournalMsg::Event(ev) => persist_one(store, &ev, last_persisted_version, gap).await,
+        JournalMsg::RecoveryGap { interval, ack } => {
+            let result = gap.persist_recovery(store, interval).await;
+            // A cancelled caller no longer wants the ack; the repair still finishes.
+            let _ = ack.send(result);
+        }
         JournalMsg::Barrier(w) => {
             confirmed_through.fetch_max(w, Ordering::Release);
             barrier_notify.notify_waiters();

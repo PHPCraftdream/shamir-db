@@ -9,6 +9,7 @@ pub mod hybrid_table_open_tests;
 pub mod per_table_mvcc_attach_collision_tests;
 pub mod per_table_mvcc_token_names_deadlock_tests;
 pub mod prealloc_bounds_tests;
+pub mod recovery_gap_marker_tests;
 pub mod repl_bookmark_tests;
 pub mod repo_config_tests;
 pub mod repo_instance_tests;
