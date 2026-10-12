@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{FileRecord, TableRecord};
+use crate::replication_seed::{FileRecord, TableRecord};
 
 /// SEED-2 v1: named MessagePack fields, ordered tables/files, no timestamps.
 /// Digest is SHA-256 of `to_vec_named(self)`; Complete contains that digest.
