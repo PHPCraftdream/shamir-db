@@ -16,13 +16,13 @@
 use crate::access::{Action, ResourcePath};
 use crate::query::admin::{
     AlterSubscriptionOp, CreatePublicationOp, CreateReplicationProfileOp, CreateSubscriptionOp,
-    DropPublicationOp, DropReplicationProfileOp, DropSubscriptionOp, ReplDirection, ReplStream,
-    SubAction,
+    DropPublicationOp, DropReplicationProfileOp, DropSubscriptionOp, ReplStream, SubAction,
 };
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
 use crate::types::value::QueryValue;
 use crate::{DbResult, ShamirDb};
+use shamir_query_types::admin::ReplDirection;
 use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
@@ -435,7 +435,7 @@ impl ShamirAdminExecutor {
                             ));
                         }
                     }
-                    m.remove("status_message");
+                    m.shift_remove("status_message");
                     m.insert("state".to_string(), QueryValue::Str("active".to_string()));
                 }
                 SubAction::SetProfile(p) => {
