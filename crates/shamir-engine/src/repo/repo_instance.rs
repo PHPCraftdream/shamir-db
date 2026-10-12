@@ -879,16 +879,25 @@ impl RepoInstance {
             .cloned()
     }
 
-    /// cancel-safe: yes — read-only `recover()` replay over the repo's
-    /// WAL; cancellation drops the future with no state change.
+    /// Returns the eager latest-state publication floor for this repo.
     ///
-    /// Returns the current (last committed) version for this repo.
+    /// Lower allocated versions may still be unsettled. Keep this value for
+    /// latest-state/replication diagnostics, not snapshot positions or seeds;
+    /// use [`consistent_version`](Self::consistent_version) for those.
     ///
-    /// This is the highest `commit_version` that has been fully committed
-    /// and published. Useful for seeding subscription watermarks.
+    /// cancel-safe: yes — delegates to cancellation-safe gate initialization.
     pub async fn current_commit_version(&self) -> DbResult<u64> {
         let gate = self.tx_gate().await?;
         Ok(gate.last_committed())
+    }
+
+    /// Highest contiguous settled version, suitable for snapshot positions.
+    /// Every version through this position is materialized or aborted.
+    ///
+    /// cancel-safe: yes — delegates to cancellation-safe gate initialization.
+    pub async fn consistent_version(&self) -> DbResult<u64> {
+        let gate = self.tx_gate().await?;
+        Ok(gate.visible_floor())
     }
 
     /// Highest `commit_version` across all durable inflight V2 WAL

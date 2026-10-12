@@ -2,6 +2,7 @@ pub mod bounded_journal_read_tests;
 pub mod box_repo_tests;
 pub mod changelog_gap_marker_tests;
 pub mod changelog_store_tests;
+pub mod current_version_tests;
 #[cfg(feature = "fjall")]
 pub mod hybrid_repo_tests;
 #[cfg(feature = "fjall")]
