@@ -19,7 +19,7 @@
 //! - `cond_expr_eval/expr_add_two_fields_1000` — `$expr` `add` over two
 //!   `$ref` field values (`age + score`).
 //!
-//! ## Measured results (this machine, `CARGO_TARGET_DIR=D:/dev/rust/.cargo-target-bench
+//! ## Measured results (this machine, `CARGO_TARGET_DIR='<dedicated bench target dir>'
 //! cargo bench -p shamir-engine --bench cond_expr_eval`, QUICK/JIT-calibrated
 //! iteration counts — actual run output, 1000 records/iter):
 //!
@@ -92,7 +92,7 @@
 //! not opt in (WHERE, `when`, `for_each`'s `over`, write-value resolution)
 //! still pays — by design, #643 leaves this path byte-for-byte unchanged.
 //!
-//! Re-run (`CARGO_TARGET_DIR=D:/dev/rust/.cargo-target-bench cargo bench -p
+//! Re-run (`CARGO_TARGET_DIR='<dedicated bench target dir>' cargo bench -p
 //! shamir-engine --bench cond_expr_eval`, post-#643, same 1000
 //! records/iter):
 //!
