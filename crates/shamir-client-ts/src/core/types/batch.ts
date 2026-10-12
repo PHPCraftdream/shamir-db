@@ -24,6 +24,7 @@
  * PLATFORM-AGNOSTIC.
  */
 
+import type { VisibilityWait, VisibilityState } from '../visibility/types.js';
 import type { WireValue } from './write.js';
 import type { ReadQuery, ExplainPlan } from './query.js';
 import type { InsertOp, UpdateOp, SetOp, DeleteOp } from './write.js';
@@ -283,22 +284,7 @@ export interface QueryResult {
   ddl_status?: DdlOpState;
 }
 
-export type VisibilityWait =
-  | { mode: 'strict' }
-  | { mode: 'bounded'; timeout_ms: number | bigint };
-
-export type VisibilityPendingReason = 'timeout' | 'reopen_required';
-
-/** Independent settled-prefix observation; positions retain lossless u64s. */
-export type VisibilityState =
-  | { state: 'visible' }
-  | {
-      state: 'pending';
-      visible_through: number | bigint;
-      blocking_version: number | bigint;
-      reason: VisibilityPendingReason;
-    };
-
+export type { VisibilityWait, VisibilityPendingReason, VisibilityState } from '../visibility/types.js';
 /** Transaction metadata (present on transactional batches). */
 export interface TransactionInfo {
   tx_id: number;
@@ -306,8 +292,9 @@ export interface TransactionInfo {
   reason?: string;
   /** Published commit error; status remains committed, never retry the writes. */
   error?: string;
-  snapshot_version?: number;
-  commit_version?: number;
+  /** Lossless wire dual: small integers decode as safe numbers; SDK normalizes to bigint. */
+  snapshot_version?: number | bigint;
+  commit_version?: number | bigint;
   materialized: boolean;
   /** Required when committed; absent when aborted. Never defaults to visible. */
   visibility?: VisibilityState;

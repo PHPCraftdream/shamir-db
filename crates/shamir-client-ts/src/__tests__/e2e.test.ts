@@ -878,12 +878,12 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
     it('db.tx: insert committed; row visible after commit', async () => {
       const app = client!.db(txWrapDb);
-      await app.tx(async (t) => {
+      const receipt = await app.tx(async (t) => {
         await t.run(write.insert('acct', [{ id: 'a', bal: 100 }]));
       });
 
-      const rows = await app.query('acct').rows();
-      expect(rows.map((r) => r.id)).toContain('a');
+      expect(receipt).toMatchObject({ status: 'committed', state: 'visible' });
+      expect((await app.query('acct').rows()).map((r) => r.id)).toContain('a');
     });
 
     it('db.tx: rollback on throw; row not visible', async () => {

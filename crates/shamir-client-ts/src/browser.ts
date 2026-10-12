@@ -17,6 +17,8 @@ export async function connect(opts: ConnectOptions): Promise<ShamirClient> {
   return ShamirClient.connect(BrowserPlatform, opts);
 }
 
+export { VisibilityError } from './core/visibility/errors.js';
+export type { TransactionResult, TransactionOptions } from './core/visibility/types.js';
 export { ShamirClient };
 export {
   ShamirDbError,

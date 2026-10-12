@@ -102,16 +102,17 @@ const resp = await db.batch()
 ```ts
 const db = client.db('my_app');
 
-// Auto-commit on resolve, auto-rollback on throw
-await db.tx(async (t) => {
+// Auto-commit on resolve; rollback only for callback failure
+const receipt = await db.tx(async (t) => {
   await t.run(write.insert('acct', [{ id: 'a', bal: 100 }]));
   await t.run(write.update('acct').where(filter.eq('id', 'a')).set({ bal: 90 }));
   const rows = await t.query('acct').rows();   // reads inside the tx
 });
-// committed automatically; on any throw → rolled back + error rethrown
+// Inspect receipt.state and receipt.transaction.error; pending is committed.
+// Rollback only on callback failure, never after a commit attempt.
 
 // With options
-await db.tx(async (t) => { /* ... */ }, { isolation: 'serializable', repo: 'main' });
+const serializableReceipt = await db.tx(async (t) => { /* ... */ }, { isolation: 'serializable', repo: 'main' });
 ```
 
 The callback receives a `Tx` handle whose operations route through `txExecute`. If the server reports `status === 'aborted'` at commit time, the wrapper throws an error carrying the reason.
