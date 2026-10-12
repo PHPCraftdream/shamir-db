@@ -31,6 +31,22 @@ impl ShamirDb {
                     && stream.scope.db == db
                     && stream.scope.repo.as_deref() == Some(repo)
             }) {
+                let bound = subscription.get("seed_receipt");
+                let destination = self.get_db(db).and_then(|db| db.get_repo(repo));
+                if let (Some(bound), Some(destination)) = (bound, destination) {
+                    let info = destination.tx_info_store().await?;
+                    if let Some(shamir_engine::repo::SeedInstallState::Complete(receipt)) =
+                        shamir_engine::repo::SeedInstallState::load(&info).await?
+                    {
+                        let bytes = rmp_serde::to_vec_named(&receipt)
+                            .map_err(|e| DbError::Codec(e.to_string()))?;
+                        let expected: QueryValue = rmp_serde::from_slice(&bytes)
+                            .map_err(|e| DbError::Codec(e.to_string()))?;
+                        if bound == &expected {
+                            continue;
+                        }
+                    }
+                }
                 return Err(DbError::Storage(
                     "existing destination subscription binding".into(),
                 ));

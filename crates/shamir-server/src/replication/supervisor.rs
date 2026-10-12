@@ -155,6 +155,7 @@ impl SubscriptionSupervisor {
         factory: ReplSourceFactory,
         node_id: impl Into<String>,
     ) -> Self {
+        super::source::seed::fence::install_probe(&local, &factory);
         Self {
             local,
             factory,
@@ -310,6 +311,8 @@ impl SubscriptionSupervisor {
         }
 
         for (index, (db, repo)) in pull_targets.iter().enumerate() {
+            super::source::seed::admission::admit(&self.local, &sub.name, &streams, db, repo)
+                .await?;
             let mut owner = None;
             self.registry.iter_sync(|name, handle| {
                 if handle
@@ -424,6 +427,8 @@ impl SubscriptionSupervisor {
                         }
                     }
                     Err(e) => {
+                        super::source::seed::terminal::persist_terminal(&local, &sub_name, &e)
+                            .await;
                         warn!(subscription = %sub_name, error = %e, "follower loop terminated");
                     }
                 }

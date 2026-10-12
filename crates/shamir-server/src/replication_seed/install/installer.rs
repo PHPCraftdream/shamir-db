@@ -18,9 +18,34 @@ pub async fn install(
     manifest_digest: &str,
 ) -> Result<SeedReceipt, SeedError> {
     #[cfg(test)]
-    return install_with(data_dir, db, repo, artifact, manifest_digest, |_| Ok(())).await;
+    return install_inner(data_dir, db, repo, artifact, manifest_digest, None, |_| {
+        Ok(())
+    })
+    .await;
     #[cfg(not(test))]
-    install_inner(data_dir, db, repo, artifact, manifest_digest).await
+    install_inner(data_dir, db, repo, artifact, manifest_digest, None).await
+}
+
+pub async fn install_subscription(
+    data_dir: &Path,
+    db: &str,
+    repo: &str,
+    artifact: &Path,
+    manifest_digest: &str,
+    subscription: &super::subscription::SeedSubscriptionArgs,
+) -> Result<SeedReceipt, SeedError> {
+    subscription.validate()?;
+    install_inner(
+        data_dir,
+        db,
+        repo,
+        artifact,
+        manifest_digest,
+        Some(subscription),
+        #[cfg(test)]
+        |_| Ok(()),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -32,7 +57,16 @@ pub(super) async fn install_with(
     manifest_digest: &str,
     boundary: impl Fn(u8) -> Result<(), SeedError>,
 ) -> Result<SeedReceipt, SeedError> {
-    install_inner(data_dir, db, repo, artifact, manifest_digest, boundary).await
+    install_inner(
+        data_dir,
+        db,
+        repo,
+        artifact,
+        manifest_digest,
+        None,
+        boundary,
+    )
+    .await
 }
 
 async fn install_inner(
@@ -41,6 +75,7 @@ async fn install_inner(
     repo: &str,
     artifact: &Path,
     manifest_digest: &str,
+    subscription: Option<&super::subscription::SeedSubscriptionArgs>,
     #[cfg(test)] boundary: impl Fn(u8) -> Result<(), SeedError>,
 ) -> Result<SeedReceipt, SeedError> {
     let root = artifact.to_owned();
@@ -158,5 +193,8 @@ async fn install_inner(
     home.register_seed_image(&image, &receipt, &target).await?;
     #[cfg(test)]
     boundary(5)?;
+    if let Some(subscription) = subscription {
+        subscription.persist(&home, &image, &receipt).await?;
+    }
     Ok(receipt)
 }
