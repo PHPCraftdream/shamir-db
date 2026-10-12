@@ -1,0 +1,180 @@
+# Reviewed selection; iteration counts come from the committed control bench-iters.txt.
+# Scale 1 is intentional: one-iteration cells are smoke only, never certification.
+version = 1
+scale = 1
+
+[thresholds.cpu]
+hosted = 15.0
+dedicated = 10.0
+[thresholds.async]
+hosted = 20.0
+dedicated = 15.0
+[thresholds.contention]
+hosted = 35.0
+dedicated = 25.0
+[thresholds.io]
+hosted = 40.0
+dedicated = 25.0
+
+[[benches]]
+rank = 1
+crate = "shamir-engine"
+bench = "group_by_keys"
+class = "cpu"
+cells = ["apply_group_by/by_int_100_groups", "apply_group_by/by_str_10_groups", "apply_group_by/by_str_int_composite", "apply_group_by/multi_aggregate_5_funcs"]
+[[benches]]
+rank = 1
+crate = "shamir-engine"
+bench = "batch_stage_parallelism"
+class = "async"
+cells = ["batch_stage/reads_10", "batch_stage/reads_50"]
+[[benches]]
+rank = 1
+crate = "shamir-engine"
+bench = "select_pipeline"
+class = "cpu"
+cells = ["apply_select_value/5_fields_1000_records", "apply_order_by_qv/single_int_1000", "apply_pagination/limit_10_from_1000"]
+[[benches]]
+rank = 2
+crate = "shamir-engine"
+bench = "for_each_eval"
+class = "async"
+cells = ["for_each/flat_batch_10", "for_each/flat_batch_50", "for_each/flat_loop_50", "for_each/loop_over_flat_10", "for_each/loop_over_flat_50", "for_each/nested_5x10", "for_each/over_literal_10", "for_each/over_query_ref_10"]
+[[benches]]
+rank = 2
+crate = "shamir-engine"
+bench = "select_pipeline"
+class = "async"
+cells = ["read_limit_pushdown/pushdown_active_N=2000", "read_limit_pushdown/pushdown_disabled_N=2000"]
+optional = true
+# Exact source-shape evidence for the generated N=2000 registrations on both sides.
+[benches.source_prerequisites]
+"read_limit_pushdown/pushdown_active_N=2000" = ['for\s+&n\s+in\s+&\[\s*2_000usize\s*,\s*5_000usize\s*\]', 'h\.bench_async\(\s*&format!\("read_limit_pushdown/pushdown_active_N=\{n\}"\)']
+"read_limit_pushdown/pushdown_disabled_N=2000" = ['for\s+&n\s+in\s+&\[\s*2_000usize\s*,\s*5_000usize\s*\]', 'h\.bench_async\(\s*&format!\("read_limit_pushdown/pushdown_disabled_N=\{n\}"\)']
+[[benches]]
+rank = 3
+crate = "shamir-engine"
+bench = "tx_pipeline"
+class = "async"
+cells = ["tx_overhead/single_insert/non_tx", "tx_overhead/single_insert/tx_staged", "tx_overhead/batch_pipeline/non_tx/100", "tx_overhead/batch_pipeline/tx/100", "commit_tx/phases/baseline_empty", "commit_tx/phases/ssi_validate/100", "commit_tx/phases/write_100_keys/1_tables"]
+[[benches]]
+rank = 3
+crate = "shamir-engine"
+bench = "tx_concurrent"
+class = "contention"
+cells = ["disjoint_inserts/n_1", "hot_key_snapshot/n_2", "hot_key_serializable/n_2"]
+[[benches]]
+rank = 3
+crate = "shamir-engine"
+bench = "tx_concurrent"
+class = "contention"
+cells = ["disjoint_inserts/n_4", "disjoint_inserts/n_8"]
+optional = true
+# Deliberately require a reviewed unconditional 1/4/8 ladder immediately
+# feeding this registration. A cached n_4/n_8 count is not fixture evidence.
+[benches.source_prerequisites]
+"disjoint_inserts/n_4" = ['for\s+&n\s+in\s+&\[\s*1usize\s*,\s*4\s*,\s*8\s*\]\s*\{\s*let\s+iter_ctr\s*=\s*Arc::clone\(&iter_ctr\);\s*h\.bench_batched_async\(\s*&format!\("disjoint_inserts/n_\{n\}"\)']
+"disjoint_inserts/n_8" = ['for\s+&n\s+in\s+&\[\s*1usize\s*,\s*4\s*,\s*8\s*\]\s*\{\s*let\s+iter_ctr\s*=\s*Arc::clone\(&iter_ctr\);\s*h\.bench_batched_async\(\s*&format!\("disjoint_inserts/n_\{n\}"\)']
+[[benches]]
+rank = 4
+crate = "shamir-engine"
+bench = "read_path_matrix"
+class = "async"
+cells = ["fast_path/1000", "fast_path/3000", "s2_no_index/1000", "s2_no_index/3000", "s3_range_and/1000", "s3_range_and/3000"]
+[[benches]]
+rank = 4
+crate = "shamir-db"
+bench = "changelog_read"
+class = "async"
+cells = ["changelog_read_from/from_depth_100_lim_100"]
+[[benches]]
+rank = 5
+crate = "shamir-server"
+bench = "subscription_throughput"
+class = "contention"
+cells = ["subscription_bridge_throughput/single_sub_filtered_insert_1"]
+[[benches]]
+rank = 5
+crate = "shamir-server"
+bench = "subscription_delivery"
+class = "contention"
+cells = ["subscription_reactive/reactive_batch_insert_1", "subscription_snapshot/n_100"]
+[[benches]]
+rank = 5
+crate = "shamir-server"
+bench = "subscription_fanout"
+class = "contention"
+cells = ["subscription_fanout/n_1"]
+[[benches]]
+rank = 6
+crate = "shamir-wal"
+bench = "wal_append"
+class = "async"
+cells = ["wal_append/mem/n_1", "wal_append/mem/n_4", "wal_append/mem/n_16", "wal_append/mem/n_64"]
+[[benches]]
+rank = 6
+crate = "shamir-wal"
+bench = "wal_append"
+class = "io"
+cells = ["wal_append/file_buffered/n_1", "wal_append/file_buffered/n_4", "wal_append/file_buffered/n_16", "wal_append/file_buffered/n_64", "wal_append/file_synced/n_1"]
+[[benches]]
+rank = 7
+crate = "shamir-engine"
+bench = "drain_cost_vs_depth"
+class = "io"
+cells = ["fjall/1000"]
+[[benches]]
+rank = 7
+crate = "shamir-engine"
+bench = "tx_pipeline"
+class = "io"
+cells = ["commit_tx/phase5c_indexed_fjall/100"]
+[[benches]]
+rank = 7
+crate = "shamir-engine"
+bench = "durable_concurrent_commit"
+class = "io"
+cells = ["disjoint_tables/n_1", "same_table/n_1"]
+optional = true
+[benches.source_prerequisites]
+"disjoint_tables/n_1" = ['let levels: &\[usize\] = if wide \{ &\[1, 8, 32\] \} else \{ &\[1\] \};', 'for\s+&n\s+in\s+levels\s*\{\s*let ctr = Arc::new\(AtomicU64::new\(0\)\);\s*h\.bench_batched_async\(\s*&format!\("disjoint_tables/n_\{n\}"\)']
+"same_table/n_1" = ['let levels: &\[usize\] = if wide \{ &\[1, 8, 32\] \} else \{ &\[1\] \};', 'for\s+&n\s+in\s+levels\s*\{\s*let ctr = Arc::new\(AtomicU64::new\(0\)\);\s*h\.bench_batched_async\(\s*&format!\("same_table/n_\{n\}"\)']
+
+# Future fixture targets require explicit reviewed cells and source prerequisites.
+[[benches]]
+rank = 4
+crate = "shamir-engine"
+bench = "read_path_matrix"
+class = "async"
+cells = []
+optional = true
+coverage_only = true
+[[benches]]
+rank = 3
+crate = "shamir-engine"
+bench = "replication_apply"
+class = "async"
+cells = []
+optional = true
+
+[[benches]]
+rank = 5
+crate = "shamir-server"
+bench = "subscription_delivery"
+class = "contention"
+cells = []
+optional = true
+coverage_only = true
+
+[[unsupported]]
+cell = "read_path_matrix::s1_asof"
+reason = "Standalone fixture lacks the required repo gate; needs frozen compatibility adapters."
+[[unsupported]]
+cell = "transactional snapshot/serializable and exact vector ranking"
+reason = "No reviewed cross-revision fixture/counts; adapter vector_search is not end-to-end coverage."
+[[unsupported]]
+cell = "subscription_delivery rejecting-sink"
+reason = "Accepting sinks do not exercise retry/backpressure; future fixture needs reviewed cross-revision adapters."
+[[unsupported]]
+cell = "detach-on-drop, subscription scaling and dedicated disk stability"
+reason = "Default success-path/headless smoke cells do not discharge these debts."
