@@ -158,7 +158,9 @@ async fn seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues() {
     child::kill(&mut leader).await;
 }
 
-/// Poll until the follower's rows match the leader's on every table.
+/// Poll until the follower's rows match the leader's on every table AND its
+/// bookmark reached the leader's version (the bookmark is persisted after the
+/// rows become visible, so sampling it right after the rows is racy).
 async fn wait_converged(home: &Arc<ShamirDb>, admin: &Client) {
     for table in wire::TABLES {
         let expected = wire::read_rows(admin, table).await;
@@ -172,4 +174,13 @@ async fn wait_converged(home: &Arc<ShamirDb>, admin: &Client) {
         })
         .await;
     }
+    let version = wire::current_version(admin).await;
+    follower::wait_until("bookmark reaches the leader version", WAIT, {
+        let home = home.clone();
+        move || {
+            let home = home.clone();
+            async move { follower::bookmark(&home).await >= version }
+        }
+    })
+    .await;
 }
