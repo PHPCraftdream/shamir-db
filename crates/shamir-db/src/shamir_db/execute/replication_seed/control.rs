@@ -109,8 +109,14 @@ pub(super) async fn check_owners(
         if row["name"].as_str() == Some(name) {
             continue;
         }
-        let profile = row["profile"].as_str().ok_or(SeedRefusal::WrongScope)?;
-        for stream in streams(home, profile).await? {
+        // A row whose profile is missing or unresolved owns no stream.
+        let Some(profile) = row["profile"].as_str() else {
+            continue;
+        };
+        let Ok(owned) = streams(home, profile).await else {
+            continue;
+        };
+        for stream in owned {
             if stream.direction == ReplDirection::Pull
                 && stream.scope.db == receipt.source_db
                 && (stream.scope.repo.is_none()
@@ -136,7 +142,8 @@ impl ShamirDb {
             if row["profile"].as_str() != Some(profile) {
                 continue;
             }
-            for stream in streams(self, profile).await? {
+            // A profile that does not exist yet has no current streams to protect.
+            for stream in streams(self, profile).await.unwrap_or_default() {
                 let Some(name) = stream.scope.repo else {
                     continue;
                 };
@@ -213,7 +220,12 @@ impl ShamirDb {
         record: &QueryValue,
     ) -> Result<(), SeedRefusal> {
         let profile = record["profile"].as_str().ok_or(SeedRefusal::WrongScope)?;
-        let scope = streams(self, profile).await?;
+        let scope = match streams(self, profile).await {
+            Ok(scope) => scope,
+            // An unresolved profile of an unbound legacy row keeps its ordinary behaviour.
+            Err(_) if record.get("seed_receipt").is_none() => return Ok(()),
+            Err(reason) => return Err(reason),
+        };
         if let Some(bound) = record.get("seed_receipt") {
             let bytes =
                 rmp_serde::to_vec_named(bound).map_err(|_| SeedRefusal::ConflictingBinding)?;
