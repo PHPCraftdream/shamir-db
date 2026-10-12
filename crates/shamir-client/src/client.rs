@@ -1290,13 +1290,7 @@ impl Client {
         let payload = await_pending_response(rx, self.request_timeout, &self.pending, rid).await?;
 
         let response: DbResponse = rmp_serde::from_slice(&payload)?;
-        if let DbResponse::Error { code, message } = &response {
-            return Err(ClientError::Db {
-                code: code.clone(),
-                message: message.clone(),
-            });
-        }
-        Ok(response)
+        crate::visibility::map_response(response)
     }
 
     /// Close the TLS write half cleanly and abort the reader task.

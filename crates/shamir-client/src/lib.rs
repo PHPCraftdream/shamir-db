@@ -40,9 +40,13 @@ mod tests;
 
 pub use client::{Client, ConnectLocalOptions, ConnectOptions, ResumeOptions};
 pub use cursor_stream::CursorStream;
+pub mod visibility;
 pub use error::ClientError;
 pub use interner_cache::{FieldMap, InternerCacheRegistry};
 pub use subscription::SubscriptionHandle;
+pub use visibility::{
+    CommitResult, TransactionInfo, VisibilityPendingReason, VisibilityState, VisibilityWait,
+};
 
 // Re-export the wire payloads so callers don't need to depend on
 // `shamir-query-types` directly.
