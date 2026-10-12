@@ -2,10 +2,10 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use super::codec::{hash_reader, ARTIFACT_LIMIT, METADATA_LIMIT};
-use super::encode_bounded::encode_bounded;
-use super::error::invalid;
-use super::{FileRecord, SeedError};
+use crate::replication_seed::codec::{hash_reader, ARTIFACT_LIMIT, METADATA_LIMIT};
+use crate::replication_seed::encode_bounded::encode_bounded;
+use crate::replication_seed::error::invalid;
+use crate::replication_seed::{FileRecord, SeedError};
 
 pub(crate) const FILE_LIMIT: usize = 65_536;
 

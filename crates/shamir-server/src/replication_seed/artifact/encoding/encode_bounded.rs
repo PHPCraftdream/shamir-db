@@ -2,8 +2,8 @@ use std::io::{self, Write};
 
 use serde::Serialize;
 
-use super::error::invalid;
-use super::SeedError;
+use crate::replication_seed::error::invalid;
+use crate::replication_seed::SeedError;
 
 /// Serialization refuses before extending the buffer beyond its byte budget.
 struct BoundedBuffer {

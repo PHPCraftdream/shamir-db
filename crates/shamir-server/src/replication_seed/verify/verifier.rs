@@ -8,13 +8,13 @@ use std::os::windows::fs::MetadataExt;
 
 use shamir_types::types::value::QueryValue;
 
-use super::codec::{
+use crate::replication_seed::codec::{
     decode, digest, encode, hash_reader, referenced, ARTIFACT_LIMIT, CHUNK_LIMIT, FRAME_LIMIT,
     METADATA_LIMIT,
 };
-use super::error::invalid;
-use super::schema_digest::schema_digest;
-use super::{Manifest, SeedError, TableRecord};
+use crate::replication_seed::error::invalid;
+use crate::replication_seed::schema_digest::schema_digest;
+use crate::replication_seed::{Manifest, SeedError, TableRecord};
 
 /// Verify a static, operator-owned tree. No repository is opened. SHA-256 is
 /// integrity, not provenance; the printed digest needs a trusted operator channel.
@@ -65,7 +65,7 @@ pub fn verify(root: &Path) -> Result<String, SeedError> {
     let mut binding_names = BTreeSet::new();
     let mut binding_page = 0u64;
     let mut schema_seen = false;
-    let mut row_files: BTreeMap<u32, Vec<&super::FileRecord>> = BTreeMap::new();
+    let mut row_files: BTreeMap<u32, Vec<&crate::replication_seed::FileRecord>> = BTreeMap::new();
     let mut names = BTreeSet::new();
     for (id, table) in manifest.tables.iter().enumerate() {
         if !names.insert(&table.name) || table.follower_enable_indexes || table.name.is_empty() {

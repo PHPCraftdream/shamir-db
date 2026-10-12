@@ -3,8 +3,8 @@ use std::path::Path;
 
 use shamir_db::{ShamirDb, SystemStoreConfig};
 
-use super::error::invalid;
-use super::SeedError;
+use crate::replication_seed::error::invalid;
+use crate::replication_seed::SeedError;
 
 /// Offline ownership through the server's database initialization/recovery path.
 /// Repository-internal WAL, drainer and changefeed owners are intentional; no

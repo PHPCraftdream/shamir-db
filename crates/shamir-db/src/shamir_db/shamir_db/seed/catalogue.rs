@@ -1,0 +1,215 @@
+use std::path::Path;
+use std::sync::Arc;
+
+#[cfg(feature = "fjall")]
+use shamir_engine::repo::{BoxRepoFactory, RepoFactory};
+use shamir_engine::repo::{RepoInstance, SeedInstallState, SeedReceipt, SeedTable};
+use shamir_storage::types::{RecordKey, Repo, Store};
+use shamir_types::types::value::QueryValue;
+
+use crate::access::{Actor, ResourceMeta};
+use crate::{DbError, DbResult, ShamirDb};
+
+use super::records_codec::decode_schema_records;
+
+impl ShamirDb {
+    pub async fn check_seed_target(
+        &self,
+        db: &str,
+        repo: &str,
+        path: &Path,
+        receipt: &SeedReceipt,
+    ) -> DbResult<()> {
+        self.check_seed_target_inner(db, repo, path, receipt, None)
+            .await
+    }
+
+    async fn check_seed_target_inner(
+        &self,
+        db: &str,
+        repo: &str,
+        path: &Path,
+        receipt: &SeedReceipt,
+        image: Option<&RepoInstance>,
+    ) -> DbResult<()> {
+        #[cfg(not(feature = "fjall"))]
+        let _ = image;
+        receipt.validate()?;
+        if receipt.source_db != db || receipt.source_repo != repo {
+            return Err(DbError::Storage(
+                "seed destination names differ from receipt".into(),
+            ));
+        }
+        let registered = self.system_store.load_repository_record(db, repo).await?;
+        if let Some(record) = &registered {
+            if record["engine"].as_str() != Some("fjall")
+                || record["path"].as_str() != path.to_str()
+                || !path.join(".seed-install").is_file()
+            {
+                return Err(DbError::Storage(
+                    "existing ordinary or conflicting repository".into(),
+                ));
+            }
+        }
+        let databases = self.system_store.load_databases().await?;
+        let database = databases
+            .iter()
+            .find(|row| row["name"].as_str() == Some(db));
+        if database.is_some_and(|row| {
+            row["seed_artifact_digest"].as_str() != Some(receipt.artifact_digest.as_str())
+        }) {
+            return Err(DbError::Storage(
+                "existing ordinary destination database".into(),
+            ));
+        }
+        let tables = self.system_store.load_tables().await?;
+        let existing = tables
+            .iter()
+            .filter(|row| row["db_name"].as_str() == Some(db))
+            .collect::<Vec<_>>();
+        if registered.is_some()
+            || databases.iter().any(|row| row["name"].as_str() == Some(db))
+            || !existing.is_empty()
+        {
+            // Only a matching completed image can justify a catalogue-only retry.
+            #[cfg(not(feature = "fjall"))]
+            return Err(DbError::Storage("seed publication requires fjall".into()));
+            #[cfg(feature = "fjall")]
+            {
+                if !path.join(".seed-install").is_file() {
+                    return Err(DbError::Storage("existing destination database".into()));
+                }
+                let backing = match image
+                    .cloned()
+                    .or_else(|| self.get_db(db).and_then(|database| database.get_repo(repo)))
+                {
+                    Some(image) => image.seed_backing_repo(),
+                    None => BoxRepoFactory::fjall_raw(path).create().await?,
+                };
+                let info = backing.store_get("__tx__").await?;
+                let completed = SeedInstallState::require_complete(&info, true).await?;
+                if completed.as_ref() != Some(receipt) {
+                    return Err(DbError::Storage("existing destination database".into()));
+                }
+                let schemas = backing.store_get("__seed_schema__").await?;
+                let records = load_schema_records(&schemas).await?;
+                let repositories = self.system_store.load_repositories().await?;
+                let unrelated_repository = repositories.iter().any(|row| {
+                    row["db_name"].as_str() == Some(db) && row["repo_name"].as_str() != Some(repo)
+                });
+                let conflicting_table = existing
+                    .iter()
+                    .any(|row| !records.iter().any(|record| record == *row));
+                if unrelated_repository || conflicting_table {
+                    return Err(DbError::Storage("conflicting destination catalogue".into()));
+                }
+            }
+        }
+        self.check_seed_subscriptions(db, repo).await
+    }
+
+    /// Register metadata durably; the authoritative repository row is LAST.
+    /// No serving registry insertion or subscription is performed here.
+    pub async fn register_seed_image(
+        &self,
+        image: &RepoInstance,
+        receipt: &SeedReceipt,
+        path: &Path,
+    ) -> DbResult<()> {
+        self.check_seed_target_inner(
+            &receipt.source_db,
+            &receipt.source_repo,
+            path,
+            receipt,
+            Some(image),
+        )
+        .await?;
+        let info = image.tx_info_store().await?;
+        if !SeedInstallState::completed_retry(&info, receipt).await? {
+            return Err(DbError::Storage("publication requires Complete".into()));
+        }
+        let tables = SeedTable::load_inventory(&info).await?;
+        let schemas = image.seed_schema_store().await?;
+        let records = load_schema_records(&schemas).await?;
+        if records.len() != tables.len()
+            || tables.iter().zip(&records).any(|(table, record)| {
+                record["db_name"].as_str() != Some(receipt.source_db.as_str())
+                    || record["repo_name"].as_str() != Some(receipt.source_repo.as_str())
+                    || record["table_name"].as_str() != Some(table.name.as_str())
+            })
+        {
+            return Err(DbError::Storage("seed schema inventory mismatch".into()));
+        }
+        let existing = self.system_store.load_tables().await?;
+        for record in &records {
+            if existing.iter().any(|row| {
+                row["db_name"] == record["db_name"]
+                    && row["repo_name"] == record["repo_name"]
+                    && row["table_name"] == record["table_name"]
+                    && row != record
+            }) {
+                return Err(DbError::Storage("conflicting table metadata".into()));
+            }
+        }
+        if self
+            .system_store
+            .load_repository_record(&receipt.source_db, &receipt.source_repo)
+            .await?
+            .is_some()
+        {
+            return self.flush_seed_catalogue().await;
+        }
+        let meta = ResourceMeta::owned_enforced(Actor::System);
+        if self
+            .system_store
+            .load_database(&receipt.source_db)
+            .await?
+            .is_none()
+        {
+            let mut fields = shamir_types::types::common::new_map();
+            fields.insert("name".into(), QueryValue::Str(receipt.source_db.clone()));
+            fields.insert(
+                "seed_artifact_digest".into(),
+                QueryValue::Str(receipt.artifact_digest.clone()),
+            );
+            self.system_store
+                .save_database(&receipt.source_db, &QueryValue::Map(fields), &meta)
+                .await?;
+        }
+        for record in &records {
+            if !existing.contains(record) {
+                self.system_store.save_table_meta(record).await?;
+            }
+        }
+        self.flush_seed_catalogue().await?;
+        let path = path
+            .to_str()
+            .ok_or_else(|| DbError::Storage("seed path is not UTF-8".into()))?;
+        self.system_store
+            .save_repository(
+                &receipt.source_db,
+                &receipt.source_repo,
+                "fjall",
+                Some(path),
+                &meta,
+            )
+            .await?;
+        self.flush_seed_catalogue().await
+    }
+}
+
+async fn load_schema_records(store: &Arc<dyn Store>) -> DbResult<Vec<QueryValue>> {
+    let bytes = store.get(RecordKey::from_slice(b"schemas")).await?;
+    if bytes.len() > 64 * 1024 * 1024 {
+        return Err(DbError::Codec(
+            "seed schema metadata budget exceeded".into(),
+        ));
+    }
+    let records = decode_schema_records(&bytes)?;
+    if records.len() > 65_536 {
+        return Err(DbError::Codec(
+            "seed schema inventory count exceeded".into(),
+        ));
+    }
+    Ok(records)
+}

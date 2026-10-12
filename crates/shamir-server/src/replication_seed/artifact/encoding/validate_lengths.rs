@@ -1,5 +1,5 @@
-use super::error::invalid;
-use super::SeedError;
+use crate::replication_seed::error::invalid;
+use crate::replication_seed::SeedError;
 
 /// Validate every MessagePack prefix before serde can reserve a container.
 /// Each array element needs one remaining byte; each map pair needs two.

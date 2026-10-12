@@ -1,7 +1,7 @@
 use shamir_types::types::value::QueryValue;
 
-use super::codec::{digest, encode};
-use super::{SeedError, TableRecord};
+use crate::replication_seed::codec::{digest, encode};
+use crate::replication_seed::{SeedError, TableRecord};
 
 /// Data counts and excluded index state do not participate in the DDL digest.
 pub(crate) fn schema_digest(tables: &[TableRecord]) -> Result<String, SeedError> {

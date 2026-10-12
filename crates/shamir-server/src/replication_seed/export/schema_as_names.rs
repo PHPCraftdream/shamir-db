@@ -1,8 +1,8 @@
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::types::value::QueryValue;
 
-use super::error::invalid;
-use super::SeedError;
+use crate::replication_seed::error::invalid;
+use crate::replication_seed::SeedError;
 
 /// Schema metadata, not a constructed query. Numeric path values need semantic
 /// conversion independently of record-map key translation.

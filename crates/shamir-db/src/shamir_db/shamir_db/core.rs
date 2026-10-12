@@ -258,6 +258,7 @@ impl ShamirDb {
                     }
                     // Fail closed, before registry insertion, including J load
                     // and gap/J persistence failures. Do not silently skip repos.
+                    shamir.seed_boot_gate(engine, path).await?;
                     db.add_repo(config).await?;
                 }
             }

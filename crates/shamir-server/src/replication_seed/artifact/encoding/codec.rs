@@ -7,8 +7,8 @@ use shamir_collections::TFxMap;
 use shamir_tx::collect_referenced_ids;
 use shamir_types::types::value::InnerValue;
 
-use super::error::invalid;
-use super::SeedError;
+use crate::replication_seed::error::invalid;
+use crate::replication_seed::SeedError;
 
 pub(crate) const FRAME_LIMIT: usize = 16 * 1024 * 1024;
 pub(crate) const METADATA_LIMIT: u64 = 64 * 1024 * 1024;
@@ -23,7 +23,7 @@ pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, SeedError> 
     if bytes.len() as u64 > METADATA_LIMIT {
         return Err(invalid("decoder byte budget exceeded"));
     }
-    super::validate_lengths::validate_lengths(bytes)?;
+    crate::replication_seed::validate_lengths::validate_lengths(bytes)?;
     let mut decoder = rmp_serde::Deserializer::new(Cursor::new(bytes));
     decoder.set_max_depth(64);
     let value = T::deserialize(&mut decoder).map_err(|e| invalid(e.to_string()))?;
@@ -42,7 +42,7 @@ pub(crate) fn referenced(bytes: &[u8]) -> Result<TFxMap<u64, ()>, SeedError> {
     if bytes.len() > FRAME_LIMIT {
         return Err(invalid("row exceeds 16 MiB"));
     }
-    decode::<super::record_shape::RecordShape>(bytes)?;
+    decode::<crate::replication_seed::record_shape::RecordShape>(bytes)?;
     let value: InnerValue = decode(bytes)?;
     if !matches!(value, InnerValue::Map(_)) {
         return Err(invalid("record payload is not a map"));
