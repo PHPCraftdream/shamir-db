@@ -21,7 +21,7 @@ The response variant alone is not proof of success: inspect `status`, then
 | `error` | **Additive, optional** published-commit error; omitted when absent. Does not change `status` or set `reason`. |
 | `snapshot_version` | Read snapshot version; present for committed outcomes. |
 | `commit_version` | Published version; present for committed outcomes, absent for aborted outcomes. |
-| `materialized` | Inline projection outcome, not a visibility watermark; may also be forced to `false` when the acknowledgement wait requires reopen. Only meaningful for committed outcomes. Deserialization defaults to `true` for older payloads. |
+| `materialized` | Inline projection outcome, independent of visibility and WAL durability. A timeout acknowledgement does not change it; a reopen-required acknowledgement reports `false` (`Deferred`), as before. Only meaningful for committed outcomes. Deserialization defaults to `true` for older payloads. |
 
 (Source: `crates/shamir-query-types/src/batch/transaction_info.rs`.)
 
@@ -34,7 +34,8 @@ The response variant alone is not proof of success: inspect `status`, then
   "error": "wal_durability",
   "snapshot_version": 40,
   "commit_version": 41,
-  "materialized": true
+  "materialized": true,
+  "visibility": { "state": "visible" }
 }
 ```
 
@@ -60,7 +61,7 @@ current metadata mapping reports `status: "aborted"`,
 write is absent on disk (source: `crates/shamir-engine/src/tx/commit.rs`,
 `wal_completion` and the commit-entry reopen gates).
 
-### VIS-1: query v3 visibility contract
+### Query v3: transactional visibility acknowledgement
 
 Query version **3** requires explicit opt-in on `Execute`, `TxBegin`,
 `TxExecute`, and `TxCommit`. Older, future, or omitted versions return
@@ -75,13 +76,19 @@ is unchanged.
 - `{ "mode": "bounded", "timeout_ms": 0 }` describes an immediate predicate
   check, never infinity. All millisecond values are unsigned u64s. The policy
   validation helper rejects forbidden strict requests and above-cap bounded
-  requests without clamping; operator policy/configuration is a later stage.
-- Absence selects the existing strict default. `TxExecute` rejects this
-  commit-only override with `validation`, rather than silently ignoring it.
+  requests without clamping; the server applies `[transactions]` policy before
+  admission or writes and reports `visibility_wait_invalid` on rejection.
+- Absence selects the configured Strict default even when explicit Strict
+  overrides are forbidden. `TxExecute` rejects this commit-only override
+  (including nested bodies) with `validation`, rather than silently ignoring it.
 
-**This stage defines and carries the option only. It does not implement a
-bounded wait or enable bounded mode. Existing commits keep their existing
-strict wait/materialization behaviour and populate `visible`.**
+Per-request Bounded is supported on `TxCommit` and top-level transactional
+`Execute`. Non-transactional Execute (including implicit writes) and nested
+Batch/ForEach bodies cannot return the required commit receipt and reject
+Bounded before writes. The server checks caps and Strict permission recursively
+for every explicit override, including bodies that might not execute. Server
+startup still rejects `visibility_ack_mode = "bounded"` pending VIS-4/VIS-5;
+per-request support does not enable a bounded server default.
 
 Every committed `TransactionInfo` in v3 includes `visibility`; aborted metadata
 omits it. Missing/null committed visibility, visibility on an abort, invalid
@@ -116,33 +123,68 @@ first position outside the sampled contiguous settled prefix; it is **not** a
 claim that this position is wedged, its owner known, or it is the only obstacle.
 Overflow cannot describe a valid pending observation. Visible establishes only
 prefix settlement, not stronger WAL durability, materialization or async-index
-completion. Pending production, reconciliation and SDK receipt APIs belong to
-later stages; this subsection does not promise a bounded end-to-end response.
+completion. Pending is a known committed decision, **not a retryable failure**.
+
+#### Acknowledgement budget and reconciliation
+
+The Bounded budget starts only after the inner commit returns a known outcome
+(success or a published `wal_durability` warning). Strict waits for W to reach
+the commit version; Bounded checks W immediately, waits at most its budget, and
+re-samples W at expiry so visibility wins. Reopen before visibility yields
+Pending with `reason: "reopen_required"` and `materialized: false` (`Deferred`).
+Read-only/no-allocation commits already at their snapshot position are Visible.
+Pre-commit aborts and indeterminate WAL outcomes keep their existing classification;
+a timeout never manufactures committed metadata for them.
+
+**Contractual exclusions:** this is not a bound on inner commit execution,
+execution/admission time, WAL uncertainty, response encoding, channel/socket
+backpressure, or end-to-end network response time. In async-index mode the
+inner driver awaits its spawned materialization tail on a durability error;
+that await is inside the inner commit and is excluded from the visibility budget.
+A disconnect or client round-trip timeout is unknown acknowledgement, not proof
+of Pending, abort, or absence of writes.
+
+Pending skips post-ack soft backpressure. A bounded Visible acknowledgement
+uses only the remaining budget for that soft brake; Strict retains its existing
+five-second soft-pressure ceiling. This is soft pressure, **not a hard memory
+admission guarantee**. Dropping only the visibility observer does not cancel
+materialization, settle the blocking version, or remove recovery obligations.
+
+Do not retry or roll back Pending writes. Reconcile with `WaitForVisibility`
+against the same repository and returned `commit_version`; Bounded zero is an
+immediate status check. Visible proves settlement through the position, not
+whether an unknown transaction committed (aborted versions also settle). Do not
+use a receipt against a deleted/recreated repository. After reconciliation, open
+a **new snapshot/transaction** for reads: an old snapshot is not advanced by
+waiting. On `reopen_required`, reopen/reconcile first; visibility observation
+never repairs projections or upgrades durability. SDK receipt adoption remains
+VIS-5 work.
 
 ### Materialization is not durability
 
 `materialized` describes the projection outcome, **not a visibility field**.
 `false` (`Deferred`) can mean a projection was deferred to idempotent online
-orphan replay or cold recovery on repository open; it can also be forced when
-an acknowledgement wait returns `ReopenRequired`, even if this commit's own
-projections succeeded. It is **not an abort**, nor a next-open-only or bounded
-visibility guarantee. Do not replay the transaction to repair it. A
+orphan replay or cold recovery on repository open. A visibility acknowledgement
+that expires leaves materialization untouched; one that observes
+`ReopenRequired` reports `Deferred`, even if this commit's own projections
+succeeded. It is **not an abort**, nor a
+next-open-only or bounded visibility guarantee. Do not replay the transaction
+to repair it. A
 `wal_durability` error remains a durability warning regardless of this flag;
 do not infer guaranteed crash recovery from `materialized` alone. Sources:
 `crates/shamir-engine/src/tx/materialize.rs:255-273`,
 `crates/shamir-engine/src/tx/drainer.rs:1190-1211`,
 `crates/shamir-engine/src/tx/recovery.rs:413-430`,
-`crates/shamir-engine/src/tx/commit.rs:597-603,619-629`.
+`crates/shamir-engine/src/tx/commit.rs`.
 
-For commits that allocate a version, the acknowledgement waits for the
+For commits that allocate a version, Strict acknowledgement waits for the
 contiguous completion watermark W to reach it (all versions through it must
 materialize or abort). Read-only/empty commits skip this wait. A stuck lower
-version can delay all higher acknowledgements in that repository indefinitely;
-the warning/recheck timers do not impose a give-up timeout. Reopen ends the
-visibility wait with `Deferred`, not proof of visibility. Non-transactional
-write acknowledgement instead logs `ReopenRequired` and returns normally,
-without a typed deferred outcome. Sources:
-`crates/shamir-engine/src/tx/commit.rs:587-604`,
+version can delay Strict acknowledgements indefinitely. Bounded expiry or
+reopen returns Pending, not Deferred or proof of visibility. Non-transactional
+write acknowledgement still logs `ReopenRequired` and returns normally,
+without a typed visibility receipt (VIS-4). Sources:
+`crates/shamir-engine/src/tx/commit.rs`,
 `crates/shamir-tx/src/repo_tx_gate.rs:1049-1116`,
 `crates/shamir-tx/src/mvcc_store/mod.rs:788-790`.
 
@@ -234,8 +276,10 @@ Other direct interactive codes: `tx_already_open` (one open tx per session),
 `unsupported_query_version` or `permission_denied`; destructive-op HMAC gate
 codes are forwarded. These gates do not apply the budget-error removal rule.
 `TxCommit` removes a valid, correctly addressed handle **before** attempting
-commit, regardless of its eventual committed/aborted outcome. Rollback also
-removes it (source: `crates/shamir-server/src/db_handler/tx_handlers.rs`).
+commit, regardless of Visible, Pending, aborted or error outcome, including an
+invalid commit policy. Pending releases snapshot ownership normally and never
+re-registers the handle. Version/ownership/address gates still precede removal.
+Rollback also removes it (source: `crates/shamir-server/src/db_handler/tx_handlers.rs`).
 
 ## Commit outcome reasons and retry decisions
 

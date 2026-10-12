@@ -65,6 +65,21 @@ impl TransactionsConfig {
         Ok(())
     }
 
+    /// Resolve commit policy before writes. Strict permission applies only to
+    /// explicit network overrides, not the server-owned Strict default.
+    pub fn resolve_commit_wait(
+        &self,
+        wait: Option<VisibilityWait>,
+    ) -> Result<VisibilityWait, DbError> {
+        match wait {
+            Some(wait) => self.resolve_wait(wait),
+            None if self.visibility_ack_mode == "strict" => Ok(VisibilityWait::Strict),
+            None => Err(DbError::VisibilityWaitInvalid {
+                reason: "bounded default acknowledgement is not enabled in this build".into(),
+            }),
+        }
+    }
+
     /// Resolve a network override without silently weakening or clamping it.
     pub fn resolve_wait(&self, wait: VisibilityWait) -> Result<VisibilityWait, DbError> {
         wait.validate(

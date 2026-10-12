@@ -1,6 +1,6 @@
 use shamir_connect::server::session::Session;
 use shamir_db::query::batch::{BatchError, BatchRequest};
-use shamir_query_types::batch::BatchTreeVisitor;
+use shamir_query_types::batch::{BatchTreeVisitor, VisibilityWait};
 
 use crate::tx_registry::{InteractiveTx, TxRegistryError};
 
@@ -249,6 +249,17 @@ impl ShamirDbHandler {
         db_name: &str,
         tx_handle: u64,
     ) -> DbResponse {
+        self.tx_commit_with_options(session, db_name, tx_handle, None)
+            .await
+    }
+
+    pub(super) async fn tx_commit_with_options(
+        &self,
+        session: &Session,
+        db_name: &str,
+        tx_handle: u64,
+        wait: Option<VisibilityWait>,
+    ) -> DbResponse {
         let it = match self.tx_registry.get_owned(tx_handle, &session.session_id) {
             Ok(it) => it,
             Err(TxRegistryError::TxNotFound) => {
@@ -275,11 +286,27 @@ impl ShamirDbHandler {
         // start committing.
         self.tx_registry.remove(tx_handle);
 
+        // Invalid commit policy consumes a correctly addressed owned handle too.
+        // Dropping `it` releases the snapshot and rolls back staged writes.
+        let wait = match self.transactions.resolve_commit_wait(wait) {
+            Ok(wait) => wait,
+            Err(e) => {
+                drop(it);
+                return DbResponse::Error {
+                    code: "visibility_wait_invalid".into(),
+                    message: e.to_string(),
+                };
+            }
+        };
         let repo = it.repo().to_string();
         let actor = super::handler::session_actor(session);
         let tx = it.ctx().lock().await.take();
         let commit = match tx {
-            Some(tx) => self.db.tx_commit_as(actor, db_name, &repo, tx).await,
+            Some(tx) => {
+                self.db
+                    .tx_commit_as_with_options(actor, db_name, &repo, tx, wait)
+                    .await
+            }
             None => Err(BatchError::QueryError {
                 alias: String::new(),
                 message: "transaction is already committed or rolled back".into(),

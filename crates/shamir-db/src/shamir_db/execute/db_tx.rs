@@ -13,12 +13,12 @@
 
 use std::time::{Duration, Instant};
 
-use shamir_query_types::batch::ExecPolicy;
+use shamir_query_types::batch::{ExecPolicy, VisibilityWait};
 
 use crate::access::{Action, Actor, ResourcePath};
 use crate::query::batch::{
-    commit_interactive_tx, execute_in_open_tx, open_interactive_tx, Authorized, BatchError,
-    BatchRequest, BatchResponse, TransactionInfo,
+    execute_in_open_tx, open_interactive_tx, Authorized, BatchError, BatchRequest, BatchResponse,
+    TransactionInfo,
 };
 
 use super::super::shamir_db::ShamirDb;
@@ -207,6 +207,43 @@ impl ShamirDb {
         repo_name: &str,
         tx: crate::engine::tx::TxContext,
     ) -> Result<TransactionInfo, BatchError> {
+        self.tx_commit_resolved(actor, db_name, repo_name, tx, None)
+            .await
+    }
+
+    /// COMMIT with an explicit post-known-outcome visibility budget.
+    pub async fn tx_commit_with_options(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        tx: crate::engine::tx::TxContext,
+        wait: VisibilityWait,
+    ) -> Result<TransactionInfo, BatchError> {
+        self.tx_commit_as_with_options(Actor::System, db_name, repo_name, tx, wait)
+            .await
+    }
+
+    /// COMMIT with an explicit actor and visibility policy.
+    pub async fn tx_commit_as_with_options(
+        &self,
+        actor: Actor,
+        db_name: &str,
+        repo_name: &str,
+        tx: crate::engine::tx::TxContext,
+        wait: VisibilityWait,
+    ) -> Result<TransactionInfo, BatchError> {
+        self.tx_commit_resolved(actor, db_name, repo_name, tx, Some(wait))
+            .await
+    }
+
+    async fn tx_commit_resolved(
+        &self,
+        actor: Actor,
+        db_name: &str,
+        repo_name: &str,
+        tx: crate::engine::tx::TxContext,
+        wait: Option<VisibilityWait>,
+    ) -> Result<TransactionInfo, BatchError> {
         self.authorize_access(
             &actor,
             &ResourcePath::Database {
@@ -230,7 +267,8 @@ impl ShamirDb {
             })?;
         let tx_id = tx.tx_id.0;
         let snapshot_version = tx.snapshot_version;
-        match commit_interactive_tx(&repo, tx).await {
+        let wait = wait.unwrap_or_else(|| repo.commit_visibility_wait());
+        match repo.commit_tx_with_options(tx, wait).await {
             Ok(outcome) => Ok(TransactionInfo::committed(
                 outcome.tx_id,
                 outcome.snapshot_version,
