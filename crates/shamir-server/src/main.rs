@@ -85,6 +85,18 @@ enum Subcmd {
         service: bool,
     },
 
+    /// Export one stopped repository as a logical replication seed.
+    ReplicationSeedExport {
+        #[arg(long)]
+        db: String,
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Verify a seed artifact without opening a repository.
+    ReplicationSeedVerify { dir: PathBuf },
+
     /// Snapshot `data_dir` (from --config) into `<to>/<UTC-timestamp>/`.
     /// **Server should be stopped first** for a fully consistent snapshot.
     /// Fjall is journal-based: a copy racing an in-flight append loses
@@ -252,6 +264,19 @@ async fn run_async(cli: Cli) -> anyhow::Result<u8> {
     // Subcommand dispatch — `backup` / `access-tree` exit without booting
     // the server.
     match cli.command {
+        Some(Subcmd::ReplicationSeedExport { db, repo, out }) => {
+            let digest =
+                shamir_server::replication_seed::export(&config.data_dir, &db, &repo, &out).await?;
+            println!("manifest sha256: {digest}");
+            return Ok(0);
+        }
+        Some(Subcmd::ReplicationSeedVerify { dir }) => {
+            let digest =
+                tokio::task::spawn_blocking(move || shamir_server::replication_seed::verify(&dir))
+                    .await??;
+            println!("manifest sha256: {digest}");
+            return Ok(0);
+        }
         Some(Subcmd::Backup { to }) => {
             let report = backup::backup(&config.data_dir, &to)?;
             println!(

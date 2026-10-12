@@ -30,7 +30,7 @@ const JOURNAL_CONFIRM_BUDGET: Duration = Duration::from_secs(1);
 /// Manages a single repository and its tables
 pub struct RepoInstance {
     name: String,
-    repo: BoxRepo,
+    pub(super) repo: BoxRepo,
     configs: Arc<TDashMap<String, TableConfig>>,
     tables: Arc<TDashMap<String, Arc<OnceCell<TableManager>>>>,
     /// Lazy-initialized RepoTxGate. Created on first call to `tx_gate()`.

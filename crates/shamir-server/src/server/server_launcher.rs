@@ -111,27 +111,7 @@ impl ServerLauncher {
         // (and the kernel releases on crash). This prevents two servers
         // from opening the same data_dir and corrupting/contending the
         // redb stores.
-        let lock_path = config.data_dir.join(".shamir.lock");
-        let data_dir_lock = {
-            use fs4::fs_std::FileExt;
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(&lock_path)?;
-            file.try_lock_exclusive()
-                .map_err(|_| BootError::AlreadyRunning(config.data_dir.clone()))?;
-            // Best-effort: write the current pid for operator diagnostics.
-            // The lock, not the contents, is authoritative.
-            let _ = (|| -> std::io::Result<()> {
-                use std::io::Write;
-                let mut f = &file;
-                f.write_all(std::process::id().to_string().as_bytes())?;
-                f.flush()
-            })();
-            file
-        };
+        let data_dir_lock = crate::maintenance_lock::acquire_server(&config.data_dir)?;
 
         let meta = Arc::new(
             ServerMetaStore::open_or_init(config.data_dir.join("server_meta"))

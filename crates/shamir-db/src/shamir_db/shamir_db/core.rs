@@ -149,6 +149,19 @@ impl ShamirDb {
         config: SystemStoreConfig,
         policy: EnvPolicy,
     ) -> DbResult<Self> {
+        Self::init_inner(config, policy, false).await
+    }
+
+    /// The normal server init/recovery path with a catalogue allocation budget.
+    pub async fn init_seed(config: SystemStoreConfig) -> DbResult<Self> {
+        Self::init_inner(config, EnvPolicy::default(), true).await
+    }
+
+    async fn init_inner(
+        config: SystemStoreConfig,
+        policy: EnvPolicy,
+        seed: bool,
+    ) -> DbResult<Self> {
         // Derive data_root BEFORE `config` is moved into SystemStore::init.
         let data_root: Option<std::path::PathBuf> = match &config {
             SystemStoreConfig::InMemory => None,
@@ -190,6 +203,9 @@ impl ShamirDb {
             experimental_migration_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
+        if seed {
+            shamir.check_seed_catalogue().await?;
+        }
         // Load existing databases from system store
         let db_records = shamir.system_store.load_databases().await?;
         for record in &db_records {
