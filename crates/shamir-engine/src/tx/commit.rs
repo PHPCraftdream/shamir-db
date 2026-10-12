@@ -949,6 +949,7 @@ async fn commit_tx_inner_legacy_async(
     let prepared_journal = repo.prepare_journal_event(changefeed_event).await;
 
     apply_data_phase(&mut tx, repo, commit_version).await;
+    let data_visible = !tx.async_prefix_failed;
     #[cfg(test)]
     fire_post_wal_pre_publish_test_hook(repo, false).await;
     // SSI fix S2 — Phase 5a (`apply_data_phase` → `apply_committed_visible`)
@@ -983,13 +984,10 @@ async fn commit_tx_inner_legacy_async(
     // before any cancellable materialization. Both normal publish and orphan
     // replay therefore expose a version whose footprint is already recorded.
 
-    // P0a: consume the RAII VersionGuard → mark(Materialized) + advance
-    // last_committed_version from the watermark (fetch_max). Replaces the
-    // prior manual mark + sync_last_committed_from_watermark +
-    // publish_committed_max trio (identical watermark semantics). Closes H1:
-    // a panic between WAL-durable and here registers an orphan for replay.
+    // Settle Phase 5a success, or transfer failed data visibility to orphan
+    // replay. WAL acceptance alone must not let the snapshot watermark pass.
     let changefeed_event =
-        super::publish_journaled::publish_journaled(repo, version_guard, prepared_journal);
+        super::materialize::settle_visible(repo, version_guard, prepared_journal, data_visible);
 
     // A4 (fix a): release Level-3 pessimistic locks AFTER the publish step
     // (`apply_data_phase` + `version_guard.commit()` above) is complete,

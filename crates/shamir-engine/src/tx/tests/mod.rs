@@ -23,6 +23,7 @@ pub mod index_rollback_tests;
 pub mod interner_checkpoint_tests;
 pub mod journal_order_tests;
 pub mod journal_publish_order_tests;
+pub mod materialized_means_visible_tests;
 pub mod non_tx_mvcc_routing_tests;
 pub mod oracle_stress_tests;
 pub mod p1096_tx_aware_unique_check_tests;

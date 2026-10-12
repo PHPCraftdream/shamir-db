@@ -31,11 +31,10 @@
 //! durably and feeds it back as `applied_watermark`). Local-version
 //! allocation is what lets the follower emit its OWN changefeed event
 //! downstream (chain replication) and keeps its gate / MVCC floor internally
-//! consistent. The guarded allocator ensures every allocated version is
-//! terminally marked exactly once in the gate's completion (visibility)
-//! tracker — `Materialized` on success, `Aborted` on any failure / early
-//! return — so the contiguous visibility watermark can never wedge at an
-//! untracked version (audit A12).
+//! consistent. The guarded allocator settles visibility on success and aborts
+//! pure failures before any row is published (A12). Once visibility starts,
+//! failure or cancellation leaves both trackers unsettled and requires reopen:
+//! this path has no local WAL entry for the drainer to replay.
 //!
 //! ## Idempotency (V4, §4)
 //!
@@ -196,7 +195,13 @@ struct PreparedTable {
 /// is allocated (a skip consumes no version), so the gate floor is
 /// untouched. `Rejected` is terminal and also consumes no version. Neither a
 /// rejection nor an error permits advancing `applied_watermark`. Storage
-/// errors remain retryable with a fresh local version.
+/// errors before visibility remain retryable with a fresh local version.
+/// After visibility starts, errors or cancellation require reopen; neither
+/// watermark advances across partial state, and no follower orphan is queued.
+///
+/// cancel-safe: NO — history, counters, later pre-images and journal preparation
+/// can suspend after overlay publication. The guard requires reopen on such a
+/// cancellation; it does not roll back or replay partially applied data.
 pub async fn apply_replicated(
     repo: &RepoInstance,
     event: &ChangelogEvent,
@@ -395,22 +400,15 @@ pub async fn apply_replicated(
     // only; the local version is what the follower's MVCC log, gate floor,
     // and downstream changefeed key on.
     //
-    // A12: allocate via the GUARDED allocator (`assign_next_version_guarded`)
-    // so the version's terminal-mark obligation in the gate's `completion`
-    // (visibility) tracker is owned by RAII — the guard's `commit()` marks
-    // it `Materialized` on the success path and `Drop` marks it `Aborted` on
-    // ANY early return / panic / failure path. The BARE `assign_next_version`
-    // previously used here left the completion tracker with NO entry for the
-    // version on the success path (only `mark_durable_aborted` ran on
-    // failure, and it touches the SEPARATE `durable_completion` tracker),
-    // which permanently clogged the contiguous watermark at `version - 1`
-    // until a restart re-seeded the floor. Holding the guard across every
-    // exit path is compiler-enforced (no `Default`/`Clone`; `Drop` is the
-    // only terminal transition aside from `commit()`).
-    let version_guard = gate.assign_next_version_guarded();
+    // A12: pure pre-image failures abort via RAII. Before the first overlay
+    // write, switch Drop to fail closed: there is no follower WAL replay owner.
+    // This protects history, counters, subsequent pre-images and journal
+    // preparation awaits against cancellation as well as explicit errors.
+    let mut version_guard = gate.assign_next_version_guarded();
     let local_version = version_guard.version();
 
     let mut any_failed: Option<(u64, DbError)> = None;
+    let mut any_visible = false;
     for PreparedTable {
         name,
         token,
@@ -454,7 +452,13 @@ pub async fn apply_replicated(
         };
         // The overlay is first-writer-wins at (key, version). Collapse the
         // data batch too, so repeated keys actually expose the final op.
-        let ops = final_ops.into_values().collect();
+        let ops: Vec<KvOp> = final_ops.into_values().collect();
+        // apply_committed_ops publishes its entire overlay BEFORE the fallible
+        // history write. Even Err can therefore leave this table visible.
+        if !ops.is_empty() {
+            version_guard.visibility_started_without_wal();
+            any_visible = true;
+        }
         if let Err(error) = mvcc.apply_committed_ops(ops, local_version).await {
             any_failed = Some((token, error));
             break;
@@ -467,20 +471,11 @@ pub async fn apply_replicated(
     }
 
     if let Some((token, e)) = any_failed {
-        // Roll back the version allocation: the `VersionGuard` held in
-        // `version_guard` is NOT committed here, so its `Drop` (firing at
-        // the `return` below) marks the version `Aborted` in BOTH the
-        // visibility tracker (`completion`) AND the durable tracker
-        // (`durable_completion`), advancing both contiguous watermarks past
-        // the hole. This subsumes the previous explicit
-        // `gate.mark_durable_aborted(local_version)` call (which marked only
-        // the durable tracker) AND adds the previously-missing visibility-
-        // tracker terminal mark — closing the A12 clog. The caller does NOT
-        // advance its applied watermark; re-delivery retries with a fresh
-        // local version.
+        // Drop aborts only before visibility starts; otherwise it requires
+        // reopen without settling either tracker or inventing a WAL orphan.
         log::warn!(
             "apply_replicated: event leader_v {} tx {} failed on table token {}: \
-             {e}; marking local_version {local_version} aborted",
+             {e}; local_version {local_version}, partial visibility {any_visible}",
             event.commit_version,
             event.tx_id,
             token
