@@ -144,6 +144,9 @@ impl TableManager {
     }
 
     // ---- public CRUD surface ----
+    // MVCC primitives must not wait inside validate -> write -> index updates:
+    // lower post-WAL orphan posting replay needs our writer drain/UWL barrier.
+    // Acknowledge only at the end, after explicitly releasing both branches.
 
     /// Insert an InnerValue, returns RecordId (with counter and index update)
     ///
@@ -181,10 +184,10 @@ impl TableManager {
         // atomics; see `writer_drain_barrier`'s proof). If the flag is up
         // (slow path), exit the drain set and take `unique_write_lock` instead
         // — the lock serializes us, not the counter.
-        let drain_guard = self.writer_drain.enter_writer();
+        let mut drain_guard = Some(self.writer_drain.enter_writer());
         let needs_barrier = self.needs_write_barrier();
         let _guard = if needs_barrier {
-            drop(drain_guard);
+            drop(drain_guard.take());
             let guard = self.unique_write_lock.lock().await;
             if self
                 .write_barrier_flags
@@ -224,7 +227,7 @@ impl TableManager {
             // inline from the rid (alloc-free for the 16-byte shape) instead of
             // the prior `id.to_bytes()` heap `Bytes` that the store then had to
             // convert back to `RecordKey` internally.
-            mvcc.set_versioned(RecordKey::from_slice(id.as_bytes()), bytes)
+            mvcc.set_versioned_no_wait(RecordKey::from_slice(id.as_bytes()), bytes)
                 .await?
         } else {
             self.table
@@ -252,6 +255,11 @@ impl TableManager {
             .unwrap_or_default();
         self.record_nontx_ssi_footprint(version, &ssi_ops);
 
+        drop(_guard);
+        drop(drain_guard);
+        if let Some(mvcc) = &self.mvcc_store {
+            mvcc.await_non_tx_ack(version).await;
+        }
         Ok((id, version))
     }
 
@@ -291,10 +299,10 @@ impl TableManager {
         //
         // F-48 (#859): bump the drain counter BEFORE reading the barrier flag.
         // See `writer_drain_barrier` for the memory-model rationale.
-        let drain_guard = self.writer_drain.enter_writer();
+        let mut drain_guard = Some(self.writer_drain.enter_writer());
         let needs_barrier = self.needs_write_barrier();
         let _guard = if needs_barrier {
-            drop(drain_guard);
+            drop(drain_guard.take());
             let guard = self.unique_write_lock.lock().await;
             if self
                 .write_barrier_flags
@@ -380,7 +388,7 @@ impl TableManager {
                 items.push((RecordKey::from_slice(rid.as_bytes()), bytes));
                 ids.push(rid);
             }
-            let ver = mvcc.set_versioned_many_append_only(items).await?;
+            let ver = mvcc.set_versioned_many_append_only_no_wait(items).await?;
             (ids, ver)
         } else {
             let ids = self.table.insert_many(values).await?;
@@ -429,6 +437,11 @@ impl TableManager {
         // live caller (query_runner non-tx branch) routes through that tx. The
         // redundant `record_nontx_ssi_footprint` call was removed here.
 
+        drop(_guard);
+        drop(drain_guard);
+        if let Some(mvcc) = &self.mvcc_store {
+            mvcc.await_non_tx_ack(batch_version).await;
+        }
         Ok((ids, batch_version))
     }
 
@@ -460,10 +473,10 @@ impl TableManager {
         //
         // F-48 (#859): bump the drain counter BEFORE reading the barrier flag.
         // See `writer_drain_barrier` for the memory-model rationale.
-        let drain_guard = self.writer_drain.enter_writer();
+        let mut drain_guard = Some(self.writer_drain.enter_writer());
         let needs_barrier = self.needs_write_barrier();
         let _guard = if needs_barrier {
-            drop(drain_guard);
+            drop(drain_guard.take());
             let guard = self.unique_write_lock.lock().await;
             if self
                 .write_barrier_flags
@@ -489,7 +502,7 @@ impl TableManager {
             if old_value.is_some() {
                 // task #532: `delete_versioned` is `RecordKey`-keyed — inline.
                 let v = mvcc
-                    .delete_versioned(RecordKey::from_slice(id.as_bytes()))
+                    .delete_versioned_no_wait(RecordKey::from_slice(id.as_bytes()))
                     .await?;
                 (true, v)
             } else {
@@ -514,6 +527,11 @@ impl TableManager {
             // SSI footprint: delete touches the table (coarse TableScan
             // detection). No new index postings for a delete.
             self.record_nontx_ssi_footprint(version, &[]);
+        }
+        drop(_guard);
+        drop(drain_guard);
+        if let Some(mvcc) = &self.mvcc_store {
+            mvcc.await_non_tx_ack(version).await;
         }
         Ok((removed, version))
     }
@@ -547,10 +565,10 @@ impl TableManager {
         //
         // F-48 (#859): bump the drain counter BEFORE reading the barrier flag.
         // See `writer_drain_barrier` for the memory-model rationale.
-        let drain_guard = self.writer_drain.enter_writer();
+        let mut drain_guard = Some(self.writer_drain.enter_writer());
         let needs_barrier = self.needs_write_barrier();
         let _guard = if needs_barrier {
-            drop(drain_guard);
+            drop(drain_guard.take());
             let guard = self.unique_write_lock.lock().await;
             if self
                 .write_barrier_flags
@@ -596,7 +614,7 @@ impl TableManager {
             // inline from the rid (alloc-free for the 16-byte shape) instead of
             // the prior `id.to_bytes()` heap `Bytes` that the store then had to
             // convert back to `RecordKey` internally.
-            mvcc.set_versioned(RecordKey::from_slice(id.as_bytes()), bytes)
+            mvcc.set_versioned_no_wait(RecordKey::from_slice(id.as_bytes()), bytes)
                 .await?
         } else {
             self.table
@@ -641,6 +659,11 @@ impl TableManager {
         // SSI footprint: record this non-tx write so Serializable txs see it.
         self.record_nontx_ssi_footprint(version, &ssi_ops);
 
+        drop(_guard);
+        drop(drain_guard);
+        if let Some(mvcc) = &self.mvcc_store {
+            mvcc.await_non_tx_ack(version).await;
+        }
         Ok((created, version))
     }
 
