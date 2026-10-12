@@ -5,7 +5,7 @@ use shamir_tunables::instance_defaults::INTERNER_CHECKPOINT_INTERVAL;
 use shamir_tx::{IndexWriteOp, TxContext};
 
 use crate::meta::recovery_marker::{
-    load_last_committed, save_last_committed, save_next_tx_id_snapshot,
+    load_last_committed, load_next_tx_id_snapshot, save_last_committed, save_next_tx_id_snapshot,
 };
 use crate::repo::RepoInstance;
 use crate::tx::tx_outcome::MaterializationState;
@@ -965,8 +965,14 @@ pub(crate) async fn persist_markers(
         if should_write {
             save_last_committed(&info_store, candidate).await?;
         }
+        // Share the reservation lock with WAL-less follower allocation. Do
+        // not regress transaction-id evidence with a delayed commit tail.
+        let next_tx_id = load_next_tx_id_snapshot(&info_store)
+            .await?
+            .unwrap_or(1)
+            .max(gate.peek_next_tx_id());
+        save_next_tx_id_snapshot(&info_store, next_tx_id).await?;
     }
-    save_next_tx_id_snapshot(&info_store, gate.peek_next_tx_id()).await?;
     Ok(())
 }
 

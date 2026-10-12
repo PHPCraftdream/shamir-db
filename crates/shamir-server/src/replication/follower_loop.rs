@@ -18,17 +18,17 @@
 //!        events in that same reply (the supervisor marks the subscription
 //!        `resync_required`; full automated snapshot reseed is R2);
 //!      - decode the events payload (`Vec<ReplicatedEvent>`);
-//!      - for each event in order: `apply_replicated(event, bookmark)` →
-//!        on `Applied`, `advance_replication_bookmark(event.commit_version)`
-//!        (the LEADER version, not the follower-local one); on `Skipped`,
-//!        no-op (idempotent re-delivery);
+//!      - apply the decoded batch through `apply_replicated_batch`: reserve
+//!        a flushed local-version upper bound before any history write, then
+//!        flush history once before the covering bookmark set+flush;
+//!      - no cursor advancement or acknowledgement precedes bookmark flush;
 //!      - if no events were returned, the leader already long-polled
 //!        `wait_ms`, so a small backoff is optional but harmless.
 //!
 //! **§5.6 invariant:** this is a background task. It holds NO follower locks
 //! and never blocks the follower's own commits. Transient transport errors
-//! are logged + retried with backoff; only [`ReplError::StaleLeaderEpoch`]
-//! terminates the loop.
+//! are logged + retried with backoff. Epoch/gap/rejection and reopen-required
+//! errors terminate the loop; a dead destination gate is never retried.
 
 use std::sync::Arc;
 
@@ -223,6 +223,17 @@ pub async fn run_follower_loop(
                 continue;
             }
         };
+        let gate = repo_instance
+            .tx_gate()
+            .await
+            .map_err(|error| ReplError::Bookmark(error.to_string()))?;
+        if gate.requires_reopen() {
+            return Err(ReplError::ReopenRequired {
+                db: db_name.clone(),
+                repo: repo.clone(),
+                detail: "destination gate requires reopen".into(),
+            });
+        }
         let bookmark = match repo_instance.replication_bookmark().await {
             Ok(v) => v,
             Err(e) => {
@@ -248,7 +259,8 @@ pub async fn run_follower_loop(
             .await
         {
             Ok(r) => r,
-            Err(e @ ReplError::StaleLeaderEpoch { .. }) => return Err(e),
+            Err(e @ ReplError::StaleLeaderEpoch { .. })
+            | Err(e @ ReplError::ReopenRequired { .. }) => return Err(e),
             Err(e) => {
                 warn!(node_id = %node_id, error = %e, "follower_loop: pull failed, backing off");
                 sleep_backoff(&cancel, &mut backoff_ms).await;
@@ -348,62 +360,35 @@ pub async fn run_follower_loop(
             continue;
         }
 
-        for ev in &events {
-            match repo_instance
-                .apply_replicated(&ev.event, &ev.field_bindings, bookmark, apply_policy)
-                .await
-            {
-                Ok(ApplyOutcome::Applied { .. }) => {
-                    // Advance the durable bookmark to the LEADER commit
-                    // version (not the follower-local version). This is the
-                    // idempotency key for re-delivery.
-                    if let Err(e) = repo_instance
-                        .advance_replication_bookmark(ev.event.commit_version)
-                        .await
-                    {
-                        // Bookmark persist failed — log and stop advancing
-                        // this batch. The next iteration re-reads the old
-                        // bookmark and re-applies (idempotently) the events
-                        // whose bookmark didn't advance. Do NOT advance the
-                        // in-memory `bookmark` cursor past the failure.
-                        warn!(
-                            node_id = %node_id,
-                            leader_version = ev.event.commit_version,
-                            error = %e,
-                            "follower_loop: advance_replication_bookmark failed; \
-                             will retry on next iteration (idempotent)"
-                        );
-                        break;
-                    }
-                }
-                Ok(ApplyOutcome::Skipped) => {
-                    // Idempotent re-delivery — already applied. No bookmark
-                    // change needed (the event's commit_version is <= the
-                    // current bookmark by construction).
-                    debug!(
-                        node_id = %node_id,
-                        leader_version = ev.event.commit_version,
-                        "follower_loop: event skipped (already applied)"
-                    );
-                }
-                Ok(ApplyOutcome::Rejected { reason }) => {
-                    return Err(ReplError::ApplyRejected {
-                        leader_version: ev.event.commit_version,
-                        reason,
+        match shamir_db::engine::tx::apply_replicated::apply_replicated_batch(
+            &repo_instance,
+            &events,
+            bookmark,
+            apply_policy,
+        )
+        .await
+        {
+            Ok(ApplyOutcome::Applied { .. } | ApplyOutcome::Skipped) => {}
+            Ok(ApplyOutcome::Rejected { reason }) => {
+                return Err(ReplError::ApplyRejected {
+                    leader_version: events[0].event.commit_version,
+                    reason,
+                });
+            }
+            Err(e) => {
+                let gate = repo_instance
+                    .tx_gate()
+                    .await
+                    .map_err(|error| ReplError::Bookmark(error.to_string()))?;
+                if gate.requires_reopen() {
+                    return Err(ReplError::ReopenRequired {
+                        db: db_name.clone(),
+                        repo: repo.clone(),
+                        detail: e.to_string(),
                     });
                 }
-                Err(e) => {
-                    let re = ReplError::Apply {
-                        leader_version: ev.event.commit_version,
-                        source: e,
-                    };
-                    warn!(node_id = %node_id, error = %re, "follower_loop: apply failed, backing off");
-                    sleep_backoff(&cancel, &mut backoff_ms).await;
-                    // Break out of the event loop; the next iteration
-                    // re-reads the bookmark (which did NOT advance past
-                    // this event) and retries the same event idempotently.
-                    break;
-                }
+                warn!(error = %e, "follower_loop: batch apply failed, backing off");
+                sleep_backoff(&cancel, &mut backoff_ms).await;
             }
         }
     }

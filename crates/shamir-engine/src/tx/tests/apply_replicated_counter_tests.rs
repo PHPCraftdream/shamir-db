@@ -168,10 +168,10 @@ async fn repeated_ops_per_key_use_only_the_last_operation() {
 }
 
 // Fail the second table's pre-image I/O, before its data apply. This is a
-// real retryable storage error, without the apply primitive's overlay-first
-// history-failure semantics (which cannot be repaired in this scope).
+// terminal partial apply: the first table is published without local WAL.
+// A retry must be refused without spending another local version.
 #[tokio::test]
-async fn second_table_failure_then_retry_keeps_exact_counts() {
+async fn second_table_failure_requires_reopen_and_refuses_retry() {
     let repo = follower(&["items", "other"]);
     let gate = repo.tx_gate().await.unwrap();
     let changes = event(
@@ -213,7 +213,7 @@ async fn second_table_failure_then_retry_keeps_exact_counts() {
     let error = apply_replicated(&repo, &changes, &[], 0, ApplyPolicy::Trusted)
         .await
         .unwrap_err();
-    assert!(matches!(error, DbError::Storage(_)));
+    assert!(matches!(error, DbError::RepoRequiresReopen(_)));
     assert!(
         !fail.load(Ordering::Acquire),
         "second table failure was reached",
@@ -235,17 +235,15 @@ async fn second_table_failure_then_retry_keeps_exact_counts() {
         downstream.try_recv(),
         Err(tokio::sync::broadcast::error::TryRecvError::Empty)
     ));
-    apply(&repo, &changes).await;
-    count(&repo, first, 1).await;
-    assert!(second_mvcc
-        .get_current_bytes(&second_key)
+    assert!(gate.requires_reopen());
+    let allocated = gate.version_allocation_high_water_mark();
+    let retry = apply_replicated(&repo, &changes, &[], 0, ApplyPolicy::Trusted)
         .await
-        .unwrap()
-        .is_some());
-    count(&repo, second, 1).await;
-    apply(&repo, &changes).await;
+        .unwrap_err();
+    assert!(matches!(retry, DbError::RepoRequiresReopen(_)));
+    assert_eq!(gate.version_allocation_high_water_mark(), allocated);
     count(&repo, first, 1).await;
-    count(&repo, second, 1).await;
+    count(&repo, second, 0).await;
 }
 
 type HistoryStream = Pin<Box<dyn Stream<Item = DbResult<Vec<(RecordKey, Bytes)>>> + Send>>;
