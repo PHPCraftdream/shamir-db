@@ -76,6 +76,10 @@ kdf_defaults: {{
 
 argon2_concurrent_max: 4
 
+observability: {{
+    addr: 127.0.0.1:0
+}}
+
 listeners: [
     {{
         kind: tcp
