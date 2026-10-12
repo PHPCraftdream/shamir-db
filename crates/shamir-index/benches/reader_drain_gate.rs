@@ -34,7 +34,7 @@
 //! "as if there were no gate". This mirrors `posting_cache_hit.rs`'s own precedent
 //! for honest measurement when the historical baseline cannot be re-run.
 //!
-//! Run: `CARGO_TARGET_DIR=D:/dev/rust/.cargo-target-bench cargo bench -p shamir-index --bench reader_drain_gate`
+//! Run: `CARGO_TARGET_DIR='<dedicated bench target dir>' cargo bench -p shamir-index --bench reader_drain_gate`
 //! (uses the isolated bench target dir per the workspace convention).
 
 use std::hint::black_box;
