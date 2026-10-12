@@ -24,10 +24,10 @@ export async function runTransaction<T>(
     }
     const visibility = transaction.visibility;
     if (visibility === undefined) throw new Error('missing committed visibility');
-    switch (visibility.state) {
-      case 'visible': return { status: 'committed', state: 'visible', value, transaction, visibility };
-      case 'pending': return { status: 'committed', state: 'pending', value, transaction, visibility };
+    if (visibility.state === 'pending') {
+      return { status: 'committed', state: 'pending', value, transaction, visibility };
     }
+    return { status: 'committed', state: 'visible', value, transaction, visibility };
   } finally {
     if (!commitAttempted) await client.txRollback(db, opened.tx_handle).catch(() => {});
   }
