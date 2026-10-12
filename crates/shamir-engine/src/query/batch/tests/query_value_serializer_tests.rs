@@ -285,7 +285,7 @@ fn skipped_true_emitted() {
         versions: None,
         corrupt_records: Vec::new(),
         op_id: None,
-        ddl_status: None,
+        ..QueryResult::default()
     };
     let m = results_map([("a", res_false), ("b", res_true)]);
     assert_parity("skipped true/false", &m);

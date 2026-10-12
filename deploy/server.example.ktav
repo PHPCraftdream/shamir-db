@@ -117,7 +117,7 @@ observability: {
     addr: 127.0.0.1:9090
 }
 
-## Visibility acknowledgement remains strict in this build; bounded is rejected.
+## Visibility acknowledgement defaults to strict; bounded returns committed receipts.
 transactions: {
     visibility_ack_mode: strict
     visibility_ack_timeout_ms: 5000
