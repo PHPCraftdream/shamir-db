@@ -1,6 +1,6 @@
 /**
  * `Db` / `Tx` — Layer-2 bound database handle and interactive-transaction
- * wrapper. Created via `client.db('my_app')`.
+ * wrapper. Transactions return `value`, `transaction`, and visibility.
  *
  * Captures the client + database name so callers never re-thread the
  * connection. Provides convenience methods (`run`, `query`, `batch`,
@@ -9,8 +9,10 @@
  * PLATFORM-AGNOSTIC.
  */
 
+import { runTransaction } from './visibility/transaction.js';
+import type { TransactionOptions, TransactionResult } from './visibility/types.js';
 import type { ShamirClient } from './client.js';
-import type { BatchResponse, QueryResult, TransactionInfo } from './types/batch.js';
+import type { BatchResponse, QueryResult } from './types/batch.js';
 import type { WireValue } from './types/write.js';
 import type { ReadQuery } from './types/query.js';
 import type { ExecCtx } from './exec-ctx.js';
@@ -144,46 +146,16 @@ export class Db {
   /**
    * Execute an auto-managed interactive transaction. The callback receives
    * a `Tx` handle whose operations route through `txExecute`. If the
-   * callback resolves, the transaction is committed; if it throws (or the
-   * commit reports `status === 'aborted'`), the error is rethrown. Rollback
-   * is only attempted before a finalizing commit response. A committed
-   * response carrying `error` throws an Error with `transaction` and
-   * `commit_version` metadata; its writes must not be retried.
+   * callback resolves, commit is attempted. Callback failure rolls back.
+   * Returns the callback value and committed visibility/durability receipt.
+   * Pending and durability warnings never throw or replay. After a commit
+   * attempt, transport uncertainty never triggers rollback.
    */
   async tx<T>(
     fn: (t: Tx) => Promise<T>,
-    opts?: { repo?: string; isolation?: 'snapshot' | 'serializable' },
-  ): Promise<T> {
-    const opened = await this.client.txBegin(
-      this.name,
-      opts?.repo ?? 'main',
-      opts?.isolation,
-    );
-    let finalized = false;
-    try {
-      const out = await fn(new Tx(this.client, this.name, opened.tx_handle));
-      const info = await this.client.txCommit(this.name, opened.tx_handle);
-      // The commit attempt FINALISES the tx server-side (committed OR aborted) —
-      // either way the handle is gone, so no rollback is needed past this point.
-      finalized = true;
-      if (info.status === 'aborted') {
-        throw new Error(`transaction aborted: ${info.reason ?? 'unknown'}`);
-      }
-      if (info.error !== undefined) {
-        // Published, not aborted: retain the exact metadata for reconciliation.
-        throw Object.assign(new Error(`transaction committed with error: ${info.error}`), {
-          transaction: info,
-          commit_version: info.commit_version,
-        });
-      }
-      return out;
-    } finally {
-      // Rollback only when we never reached a finalising commit — i.e. `fn`
-      // threw, or `txCommit` itself failed (transport error, tx may still be open).
-      if (!finalized) {
-        await this.client.txRollback(this.name, opened.tx_handle).catch(() => {});
-      }
-    }
+    opts?: TransactionOptions,
+  ): Promise<TransactionResult<T>> {
+    return runTransaction(this.client, this.name, fn, opts);
   }
 
   // ── HMAC convenience wrappers (client IS the signer; dbInUse = this.name) ─

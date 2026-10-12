@@ -291,11 +291,62 @@ retry, дождитесь завершения/отмены и заново ра
 
 `wal_requires_reopen` требует reopen/reconciliation, новые commits отказаны.
 `status: committed` с `error: wal_durability` — уже опубликованные writes,
-**не retry и не rollback**, даже если TS `db.tx()` бросил Error.
+**не retry и не rollback**: TS `db.tx()` сохраняет warning в committed receipt.
 `materialized: false` не означает abort: проекции отложены до recovery на
 следующем open; при durability error нельзя обещать crash-durability.
 Полный wire contract и cleanup/retry table:
 [Transaction outcomes](../client-server-protocol-spec/TRANSACTION_OUTCOMES.md).
+
+### Client visibility receipts (VIS-5a)
+
+Pending is **committed**, never an instruction to resend. Rust exposes
+`CommitResult::Committed { transaction, visibility }` from `tx_commit` and
+`execute_transactional`; TS `db.tx()` returns `{ status: 'committed', state,
+value, transaction, visibility }`. Published `wal_durability` warnings remain
+in `transaction.error`, independently of pending/visible. Aborts and
+`wal_requires_reopen` remain errors with their original reason; indeterminate
+WAL is not proof that writes are absent. No value-only transaction convenience
+hides these outcomes.
+
+```ts
+const receipt = await db.tx(async (tx) => {
+  await tx.run(write.insert('items', [{ id: 'receipt-example' }]));
+  return 'saved';
+}, { repo: 'main', visibilityWait: { mode: 'bounded', timeout_ms: 0 } });
+if (receipt.state === 'pending') {
+  const version = receipt.transaction.commit_version;
+  if (version === undefined) throw new Error('missing commit position');
+  const observed = await client.waitForVisibility(
+    db.name, 'main', BigInt(version), { mode: 'bounded', timeout_ms: 0 },
+  );
+  if (observed.state === 'visible') {
+    // A fresh builder read opens a NEW snapshot; an old transaction never advances.
+    const rows = await db.query('items').rows();
+  }
+}
+// Inspect receipt.transaction.error even when state is visible.
+```
+
+Rust reconciliation is `client.wait_for_visibility(db, repo, version,
+VisibilityWait::Bounded { timeout_ms: 0 }).await?`. Zero is an immediate
+predicate check, not infinity. Strict is explicit and may wait indefinitely.
+Use the SAME repository incarnation; names cannot detect deletion/recreation.
+Observation proves settlement through a position, not whether an unknown write
+committed, and upgrades neither durability nor async-index readiness.
+
+Rust positions stay `u64`; TS reconciliation/prefix positions are `bigint`.
+Transaction version fields accept a documented lossless wire dual (`number |
+bigint`); SDK decoding normalizes present versions to bigint. MessagePack
+preserves 2^53+1 and u64::MAX without JSON or Number conversion. Transport
+timeouts/disconnects mean UNKNOWN acknowledgement, not pending/abort proof.
+Never rollback or replay after a commit attempt; reconcile externally without
+assuming settlement proves an unknown transaction committed.
+
+Current wire limitation: only `as_of_visibility_timeout` carries structured
+`requested`, `visible_through`, `blocking_version`. Other visibility codes
+carry code/message only; typed client mappings do not parse diagnostics or
+invent missing positions. Implicit/non-transactional per-alias receipts are
+VIS-5b, not this API.
 
 ### Валидация при старте
 

@@ -24,6 +24,29 @@ pub enum ClientError {
     #[error("db error [{code}]: {message}")]
     Db { code: String, message: String },
 
+    #[error("transaction not known committed: {0:?}")]
+    TransactionOutcome(Box<shamir_query_types::batch::TransactionInfo>),
+
+    #[error("{message}")]
+    AsOfVisibilityTimeout {
+        code: String,
+        message: String,
+        requested: u64,
+        visible_through: u64,
+        blocking_version: u64,
+    },
+    // These wire errors carry only code/message, not structured positions.
+    #[error("as_of_future_version: {message}")]
+    AsOfFutureVersion { message: String },
+    #[error("as_of_reopen_required: {message}")]
+    AsOfReopenRequired { message: String },
+    #[error("visibility_future_version: {message}")]
+    VisibilityFutureVersion { message: String },
+    #[error("visibility_wait_invalid: {message}")]
+    VisibilityWaitInvalid { message: String },
+    #[error("write committed; never resend: {message}")]
+    WriteCommittedVisibilityPending { message: String },
+
     /// Server returned a request_id that doesn't match what we sent.
     #[error("request_id mismatch: sent {sent:?}, got {got:?}")]
     RequestIdMismatch { sent: Option<u32>, got: Option<u32> },

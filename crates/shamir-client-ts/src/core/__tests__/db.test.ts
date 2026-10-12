@@ -504,9 +504,9 @@ describe('Db.tx() (unit)', () => {
     const fc = fakeTxClient(calls);
     const db = new Db(asClient(fc), 'test_db');
 
-    await db.tx(async (t) => {
+    await expect(db.tx(async (t) => {
       await t.run(write.insert('x', [{ a: 1 }]));
-    });
+    })).resolves.toMatchObject({ state: 'visible' });
 
     expect(calls.length).toBe(3);
     expect(calls[0]).toEqual({ method: 'txBegin', args: ['test_db', 'main', undefined] });
@@ -524,7 +524,7 @@ describe('Db.tx() (unit)', () => {
     const fc = fakeTxClient(calls);
     const db = new Db(asClient(fc), 'test_db');
 
-    await db.tx(async () => {});
+    await expect(db.tx(async () => {})).resolves.toMatchObject({ status: 'committed', state: 'visible' });
 
     const methods = calls.map((c) => c.method);
     expect(methods).not.toContain('txRollback');
@@ -551,7 +551,7 @@ describe('Db.tx() (unit)', () => {
     const fc = fakeTxClient(calls);
     const db = new Db(asClient(fc), 'test_db');
 
-    await db.tx(async () => {}, { isolation: 'serializable' });
+    await expect(db.tx(async () => {}, { isolation: 'serializable' })).resolves.toMatchObject({ state: 'visible' });
 
     expect(calls[0]).toEqual({
       method: 'txBegin',
@@ -564,7 +564,7 @@ describe('Db.tx() (unit)', () => {
     const fc = fakeTxClient(calls);
     const db = new Db(asClient(fc), 'test_db');
 
-    await db.tx(async () => {}, { repo: 'archive' });
+    await expect(db.tx(async () => {}, { repo: 'archive' })).resolves.toMatchObject({ state: 'visible' });
 
     expect(calls[0]).toEqual({
       method: 'txBegin',
@@ -591,14 +591,10 @@ describe('Db.tx() (unit)', () => {
       await t.run(write.insert('x', [{ a: 1 }]));
       return 'callback-result';
     });
-    await expect(result).rejects.toThrow('transaction committed with error: wal_durability');
-    await expect(result).rejects.toMatchObject({
-      transaction: info,
-      commit_version: 47,
+    await expect(result).resolves.toMatchObject({
+      status: 'committed', state: 'visible', value: 'callback-result', transaction: info,
     });
-    const error = await result.catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error & { transaction: typeof info }).transaction).toBe(info);
+    expect((await result).transaction).toBe(info);
     expect(info.reason).toBeUndefined();
     expect(callbacks).toBe(1);
     expect(calls.map((c) => c.method)).toEqual(['txBegin', 'txExecute', 'txCommit']);
@@ -632,9 +628,9 @@ describe('Db.tx() (unit)', () => {
     const fc = fakeTxClient(calls);
     const db = new Db(asClient(fc), 'test_db');
 
-    await db.tx(async (t) => {
+    await expect(db.tx(async (t) => {
       await t.query('x').rows();
-    });
+    })).resolves.toMatchObject({ state: 'visible' });
 
     const methods = calls.map((c) => c.method);
     expect(methods).toContain('txExecute');
@@ -651,9 +647,9 @@ describe('Db.tx() (unit)', () => {
     const txCalls: TxCall[] = [];
     const fc2 = fakeTxClient(txCalls);
     const db2 = new Db(asClient(fc2), 'test_db');
-    await db2.tx(async (t) => {
+    await expect(db2.tx(async (t) => {
       await t.run(write.insert('x', [{ a: 1 }]));
-    });
+    })).resolves.toMatchObject({ state: 'visible' });
     const txBatch = txCalls[1].args[2]; // [db, handle, batch]
 
     expect(dbBatch).toEqual(txBatch);

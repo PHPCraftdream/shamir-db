@@ -835,7 +835,7 @@ const resp = await db.batch()
 
 resp.transaction?.status;         // 'committed'
 resp.transaction?.tx_id;          // number
-resp.transaction?.commit_version; // number
+resp.transaction?.commit_version; // bigint after SDK decoding
 
 // Serializable
 const resp2 = await db.batch()
@@ -847,12 +847,13 @@ const resp2 = await db.batch()
 **Auto-managed multi-op transactions:**
 
 ```ts
-await db.tx(async (t) => {
+const receipt = await db.tx(async (t) => {
   await t.run(write.insert('acct', [{ id: 'a', bal: 100 }]));
   await t.run(write.update('acct').where(filter.eq('id', 'a')).set({ bal: 90 }));
   const rows = await t.query('acct').rows();   // reads inside the tx
 });
-// committed automatically; on any throw → rolled back + error rethrown
+// Inspect receipt.state and receipt.transaction.error; never resend pending writes.
+// Only callback failure (before commit attempt) triggers rollback.
 ```
 
 **Interactive (multi-call) transactions:**
