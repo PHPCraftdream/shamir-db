@@ -13,6 +13,7 @@ use std::net::TcpListener;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use tokio::process::Child;
@@ -24,12 +25,17 @@ use zeroize::Zeroizing;
 /// The binary under test — resolved by cargo for integration targets.
 pub const SERVER_BIN: &str = env!("CARGO_BIN_EXE_shamir-server");
 
+/// Log of the most recently spawned leader of this test process, so a
+/// failed client login can show why the server dropped it.
+static LAST_LEADER_LOG: Mutex<Option<PathBuf>> = Mutex::new(None);
+
 pub const ADMIN: &str = "admin";
 pub const ADMIN_PW: &str = "admin-password-e2e";
 pub const REPLICATOR: &str = "replicator";
 pub const REPLICATOR_PW: &str = "repl-secret-e2e";
 
 const BOOT_DEADLINE: Duration = Duration::from_secs(90);
+const CONNECT_ATTEMPTS: u32 = 5;
 
 /// A running leader child process on a fixed loopback port.
 pub struct LeaderChild {
@@ -112,6 +118,7 @@ pub async fn spawn_leader(data_dir: &Path, addr: SocketAddr) -> LeaderChild {
         .open(&log_path)
         .expect("open leader log");
     let log_err = log.try_clone().expect("clone leader log handle");
+    *LAST_LEADER_LOG.lock().expect("log path lock") = Some(log_path.clone());
     let child = tokio::process::Command::new(SERVER_BIN)
         .arg("--config")
         .arg(&config_path)
@@ -185,10 +192,31 @@ leader log tail:
 }
 
 /// TLS + SCRAM login as `user` (spec-floor-fast KDF comes from the config).
+///
+/// A handshake dropped by a heavily loaded server (a few CPU-starved children
+/// share one runner) is retried a bounded number of times; a dead server still
+/// fails with the child's own log.
 pub async fn connect(addr: SocketAddr, user: &str, password: &str) -> Client {
-    Client::connect(admin_options(addr, user, password))
-        .await
-        .expect("client connect")
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match Client::connect(admin_options(addr, user, password)).await {
+            Ok(client) => return client,
+            Err(error) if attempt < CONNECT_ATTEMPTS => {
+                eprintln!("client connect attempt {attempt} failed: {error:?}; retrying");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Err(error) => {
+                let log = LAST_LEADER_LOG.lock().expect("log path lock").clone();
+                let tail = log.as_deref().map(log_tail).unwrap_or_default();
+                panic!(
+                    "client connect failed after {attempt} attempts: {error:?}
+leader log tail:
+{tail}"
+                );
+            }
+        }
+    }
 }
 
 fn admin_options(addr: SocketAddr, user: &str, password: &str) -> ConnectOptions {
