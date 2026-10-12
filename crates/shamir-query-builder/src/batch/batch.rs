@@ -29,6 +29,7 @@ pub struct Batch {
     name: Option<String>,
     transactional: bool,
     isolation: Option<String>,
+    visibility_wait: Option<shamir_query_types::batch::VisibilityWait>,
     durability: Option<String>,
     pub(crate) queries: TMap<String, QueryEntry>,
     return_all: bool,
@@ -52,6 +53,7 @@ impl Batch {
             name: None,
             transactional: false,
             isolation: None,
+            visibility_wait: None,
             durability: None,
             queries: new_map(),
             return_all: true,
@@ -92,6 +94,15 @@ impl Batch {
     /// Set the isolation level.
     pub fn isolation(&mut self, iso: Isolation) -> &mut Self {
         self.isolation = Some(iso.as_str().to_owned());
+        self
+    }
+
+    /// Carry a commit-only visibility policy (strict behaviour in VIS-1).
+    pub fn visibility_wait(
+        &mut self,
+        wait: shamir_query_types::batch::VisibilityWait,
+    ) -> &mut Self {
+        self.visibility_wait = Some(wait);
         self
     }
 
@@ -889,6 +900,7 @@ impl Batch {
             name: self.name.clone(),
             transactional: self.transactional,
             isolation: self.isolation.clone(),
+            visibility_wait: self.visibility_wait,
             durability: self.durability.clone(),
             queries: self.queries.clone(),
             return_all: self.return_all,

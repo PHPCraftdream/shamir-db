@@ -21,8 +21,13 @@ fn handshake_v0_or_future_rejected() {
 }
 
 #[test]
-fn query_lang_v1_accepted() {
-    assert!(check_query_lang(1).is_ok());
+fn query_lang_legacy_rejected() {
+    for requested in [1, 2] {
+        assert!(matches!(
+            check_query_lang(requested),
+            Err(VersionError::UnsupportedQueryLang { requested: actual, .. }) if actual == requested
+        ));
+    }
 }
 
 #[test]

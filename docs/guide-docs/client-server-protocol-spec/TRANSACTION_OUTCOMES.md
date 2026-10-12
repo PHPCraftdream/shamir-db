@@ -60,6 +60,65 @@ current metadata mapping reports `status: "aborted"`,
 write is absent on disk (source: `crates/shamir-engine/src/tx/commit.rs`,
 `wal_completion` and the commit-entry reopen gates).
 
+### VIS-1: query v3 visibility contract
+
+Query version **3** requires explicit opt-in on `Execute`, `TxBegin`,
+`TxExecute`, and `TxCommit`. Older, future, or omitted versions return
+`DbResponse.Error { code: "unsupported_query_version", ... }` before database
+execution or interactive commit consumes a handle. Omission is legacy version
+0, not implicit support for new outcome semantics. The auth handshake version
+is unchanged.
+
+`BatchRequest.visibility_wait` and `TxCommit.visibility_wait` are optional:
+
+- `{ "mode": "strict" }` means strict settled-prefix acknowledgement.
+- `{ "mode": "bounded", "timeout_ms": 0 }` describes an immediate predicate
+  check, never infinity. All millisecond values are unsigned u64s. The policy
+  validation helper rejects forbidden strict requests and above-cap bounded
+  requests without clamping; operator policy/configuration is a later stage.
+- Absence selects the existing strict default. `TxExecute` rejects this
+  commit-only override with `validation`, rather than silently ignoring it.
+
+**This stage defines and carries the option only. It does not implement a
+bounded wait or enable bounded mode. Existing commits keep their existing
+strict wait/materialization behaviour and populate `visible`.**
+
+Every committed `TransactionInfo` in v3 includes `visibility`; aborted metadata
+omits it. Missing/null committed visibility, visibility on an abort, invalid
+state/reason tags, and invalid sampled-prefix arithmetic are malformed, never
+inferred to be visible. `is_committed()` remains a commit-decision predicate;
+`is_visible()` independently checks committed status and `state: "visible"`.
+
+The named-field MessagePack shapes are illustrated as JSON:
+
+```json
+{
+  "tx_id": 7,
+  "status": "committed",
+  "snapshot_version": 40,
+  "commit_version": 43,
+  "materialized": true,
+  "error": "wal_durability",
+  "visibility": {
+    "state": "pending",
+    "visible_through": 41,
+    "blocking_version": 42,
+    "reason": "timeout"
+  }
+}
+```
+
+The other observation is `{ "state": "visible" }`. Pending reasons are
+`"timeout"` and `"reopen_required"`. Pending remains committed, with no abort
+`reason`; a WAL durability warning is independent and retained. Do not resend
+writes on pending. `blocking_version` is exactly `visible_through + 1`, the
+first position outside the sampled contiguous settled prefix; it is **not** a
+claim that this position is wedged, its owner known, or it is the only obstacle.
+Overflow cannot describe a valid pending observation. Visible establishes only
+prefix settlement, not stronger WAL durability, materialization or async-index
+completion. Pending production, reconciliation and SDK receipt APIs belong to
+later stages; this subsection does not promise a bounded end-to-end response.
+
 ### Materialization is not durability
 
 `materialized: true` means projections (main store, counters, secondary indexes,
