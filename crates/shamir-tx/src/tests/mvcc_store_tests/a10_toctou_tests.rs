@@ -133,7 +133,7 @@ async fn a10_concurrent_vacuum_during_open_snapshot() {
         .await
         .unwrap();
     let v1 = mvcc.version_of(&key);
-    gate.publish_committed(v1);
+    gate.publish_committed_max(v1);
 
     // Arm: the NEXT history.transact (the v2 write) will pause after
     // the cell is bumped but before the physical write. This gives us

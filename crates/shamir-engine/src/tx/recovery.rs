@@ -674,7 +674,7 @@ async fn seed_version_cache_for_entry(
     // fetch_max — safe to call redundantly.
     if v > 0 {
         if let Ok(gate) = repo.tx_gate().await {
-            gate.publish_committed_max(v);
+            gate.raise_published(v);
         }
     }
     Ok(())

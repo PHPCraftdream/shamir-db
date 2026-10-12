@@ -101,7 +101,7 @@ async fn hammer(gate: Arc<RepoTxGate>, stop: Arc<AtomicBool>) {
 async fn active_snapshots_concurrent_open_close_no_deadlock() {
     let gate = Arc::new(RepoTxGate::fresh());
     // Pin the floor so EVERY opener targets the same single bucket.
-    gate.publish_committed(1);
+    gate.publish_committed_max(1);
 
     let stop = Arc::new(AtomicBool::new(false));
 
@@ -147,7 +147,7 @@ async fn active_snapshots_concurrent_open_close_no_deadlock() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn active_snapshots_concurrent_serializable_open_close_no_deadlock() {
     let gate = Arc::new(RepoTxGate::fresh());
-    gate.publish_committed(1);
+    gate.publish_committed_max(1);
 
     let stop = Arc::new(AtomicBool::new(false));
 
@@ -200,7 +200,7 @@ async fn active_snapshots_concurrent_serializable_open_close_no_deadlock() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn active_snapshots_min_alive_scan_vs_open_close_no_deadlock() {
     let gate = Arc::new(RepoTxGate::fresh());
-    gate.publish_committed(1);
+    gate.publish_committed_max(1);
 
     let stop = Arc::new(AtomicBool::new(false));
 

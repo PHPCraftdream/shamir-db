@@ -128,11 +128,14 @@ async fn orphan_postings_are_key_scoped_and_survive_backpressure_and_pruning() {
             owner: None,
         },
     ));
-    let later = repo.commit_tx(tx).await.unwrap().commit_version;
+    let (later, later_task) =
+        super::snapshot_visibility_park_tests::spawn_settled_commit(&repo, tx).await;
+    assert!(!later_task.is_finished());
     drop(snapshot);
     assert!(later > orphan);
     assert!(repo.drainer().window_entry(later).is_none());
     assert_eq!(repo.drainer().drain_step(&repo).await.unwrap(), 1);
+    assert_eq!(later_task.await.unwrap().unwrap().commit_version, later);
     assert_eq!(gate.durable_watermark(), orphan);
     assert_eq!(
         repo.drainer().posting_version_for_test(token, &key),

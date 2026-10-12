@@ -126,7 +126,7 @@ async fn eager_vacuum_race_open_snapshot() {
         .await
         .unwrap();
     let v_seed = mvcc.version_of(&key);
-    gate.publish_committed(v_seed);
+    gate.publish_committed_max(v_seed);
 
     // Arm: the next `history.set` (inside the NEW write) will pause BEFORE
     // the physical log write. The write sequence is:
@@ -492,7 +492,7 @@ async fn retention_race_open_snapshot_with_count() {
         .await
         .unwrap();
     let v_seed = mvcc.version_of(&key);
-    gate.publish_committed(v_seed);
+    gate.publish_committed_max(v_seed);
 
     // Arm: the next `history.set` (inside the NEW write) will pause.
     // The write sequence is:

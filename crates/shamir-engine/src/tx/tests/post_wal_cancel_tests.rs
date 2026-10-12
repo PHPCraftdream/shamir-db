@@ -105,13 +105,15 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         .insert_tx(&InnerValue::Str("later".into()), Some(&mut tx))
         .await
         .unwrap();
-    let later_outcome = within("commit_tx@71", repo.commit_tx(tx)).await.unwrap();
+    let (later_version, later_task) =
+        super::snapshot_visibility_park_tests::spawn_settled_commit(&repo, tx).await;
+    assert!(!later_task.is_finished());
     drop(later_snapshot);
     assert_eq!(active_version, gate.durable_watermark() + 1);
-    assert_eq!(later_outcome.commit_version, active_version + 1);
+    assert_eq!(later_version, active_version + 1);
     // The ack path published the later version, so the visible floor is past the
     // still-active one while the durable prefix is not: the drain must scan beyond it.
-    assert_eq!(gate.last_committed(), later_outcome.commit_version);
+    assert_eq!(gate.last_committed(), later_version);
     assert!(gate.last_committed() > gate.durable_watermark());
     assert_eq!(gate.orphan_max(), 0);
 
@@ -129,10 +131,10 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     assert!(orphan_task.await.unwrap_err().is_panic());
     drop(orphan_snapshot);
     let scan_orphan_version = gate.orphan_max();
-    assert_eq!(scan_orphan_version, later_outcome.commit_version + 1);
+    assert_eq!(scan_orphan_version, later_version + 1);
     assert!(gate.is_orphaned_post_wal(scan_orphan_version));
-    assert!(!gate.is_active_post_wal(later_outcome.commit_version));
-    assert!(!gate.is_orphaned_post_wal(later_outcome.commit_version));
+    assert!(!gate.is_active_post_wal(later_version));
+    assert!(!gate.is_orphaned_post_wal(later_version));
     assert!(gate.is_active_post_wal(active_version));
     assert_eq!(active_version, gate.durable_watermark() + 1);
     assert!(repo.drainer().window_entry(active_version).is_some());
@@ -149,6 +151,8 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         .await
         .unwrap()
         .unwrap();
+    let later_outcome = within("later ack", later_task).await.unwrap().unwrap();
+    assert_eq!(later_outcome.commit_version, later_version);
     drop(snapshot);
     assert_eq!(drained, 0);
     // Red before B1: the empty prefix caused a full WAL recovery here.
@@ -244,7 +248,13 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         .insert_tx(&InnerValue::Str("C".into()), Some(&mut tx))
         .await
         .unwrap();
-    let outcome = within("commit_tx@198", repo.commit_tx(tx)).await.unwrap();
+    let (later_version, later_task) =
+        super::snapshot_visibility_park_tests::spawn_settled_commit(&repo, tx).await;
+    within("drain orphan before ack", repo.drainer().drain_all(&repo))
+        .await
+        .unwrap();
+    let outcome = later_task.await.unwrap().unwrap();
+    assert_eq!(outcome.commit_version, later_version);
     drop(snapshot);
     within("drain_all@200", repo.drainer().drain_all(&repo))
         .await

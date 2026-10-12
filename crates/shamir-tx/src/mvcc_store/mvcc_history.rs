@@ -309,7 +309,7 @@ impl MvccStore {
     ///
     /// Then: ONE `self.history.transact(history_ops)`.
     /// Then: per-(key,v) `publish_cell` (idempotent -- needed for cold recovery).
-    /// Then: `gate.publish_committed_max(max_v)`.
+    /// Then: `gate.raise_published(max_v)`.
     pub async fn write_committed_batch_to_history(
         &self,
         pass: &[(u64, Vec<KvOp>)],
@@ -404,7 +404,7 @@ impl MvccStore {
 
         // R3: advance the reader-visible floor to the max version in the batch.
         if let Some((max_v, _)) = pass.last() {
-            self.gate.publish_committed_max(*max_v);
+            self.gate.raise_published(*max_v);
         }
 
         Ok(())
@@ -519,7 +519,7 @@ impl MvccStore {
         // `current_stream` see the materialized version. In the tx commit path
         // the caller (`commit_tx`) ALSO publishes via the watermark; this
         // monotonic fetch_max is safe to call redundantly.
-        self.gate.publish_committed_max(commit_version);
+        self.gate.raise_published(commit_version);
     }
 
     /// D2 P1d-2b — DRAIN/RECOVERY-path history half. Write the committed batch
@@ -630,7 +630,7 @@ impl MvccStore {
         // R3: advance the reader-visible floor (monotonic fetch_max). On the
         // ack-driven flow the floor is already at/above this; on cold recovery
         // this lifts it.
-        self.gate.publish_committed_max(commit_version);
+        self.gate.raise_published(commit_version);
         Ok(())
     }
 }

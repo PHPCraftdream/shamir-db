@@ -58,7 +58,7 @@ async fn phase_2bis_aborts_armed_predicate_on_concurrent_write() {
         commit_version: tx1_commit_v,
         per_table,
     });
-    gate.publish_committed(tx1_commit_v);
+    gate.publish_committed_max(tx1_commit_v);
 
     // --- Arm tx2's predicate_set: covers age >= 30.
     let dep = PredicateDep::IndexRange {
@@ -136,7 +136,7 @@ async fn phase_2bis_allows_non_conflicting_predicate() {
         commit_version: tx1_commit_v,
         per_table,
     });
-    gate.publish_committed(tx1_commit_v);
+    gate.publish_committed_max(tx1_commit_v);
 
     // Arm tx2's predicate: age >= 30 — tx1's age=25 is outside.
     let dep = PredicateDep::IndexRange {
@@ -184,7 +184,7 @@ async fn phase_2bis_table_scan_aborts_on_any_concurrent_write() {
         commit_version: tx1_commit_v,
         per_table,
     });
-    gate.publish_committed(tx1_commit_v);
+    gate.publish_committed_max(tx1_commit_v);
 
     tx2.predicate_set
         .push(PredicateDep::TableScan { table_token });

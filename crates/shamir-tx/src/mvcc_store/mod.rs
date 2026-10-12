@@ -655,9 +655,13 @@ impl MvccStore {
     /// `version` and CLEAR the reservation, in one `entry`.
     ///
     /// Called on the publish path (S2: Phase 5a) AFTER the committer has won
-    /// its claim and the write is becoming visible. Sets `version = version`
-    /// and `reserved_by = 0`. If the cell is somehow Vacant (defensive — a
-    /// claim should have inserted it), insert `RecordCell { version,
+    /// its claim and the write is becoming visible. Sets
+    /// `version = max(current_version, version)` and `reserved_by = 0`.
+    /// Invariant: finalizing a lower or equal version must never regress the
+    /// cell's version, even when materialization completes out of order;
+    /// reservation clearing still happens unconditionally under `entry_sync`.
+    /// If the cell is somehow Vacant (defensive — a claim should have inserted
+    /// it), insert `RecordCell { version,
     /// reserved_by: 0 }` so the published version is never lost.
     ///
     /// S2 wires this into the publish path (`apply_committed_visible`,
@@ -666,9 +670,10 @@ impl MvccStore {
     pub(crate) fn finalize_reservation(&self, key: RecordKey, version: u64) {
         match self.cells.entry_sync(key) {
             scc::hash_map::Entry::Occupied(mut e) => {
-                let cell = e.get_mut();
-                cell.version = version;
-                cell.reserved_by = 0;
+                if version > e.get().version {
+                    e.get_mut().version = version;
+                }
+                e.get_mut().reserved_by = 0;
             }
             scc::hash_map::Entry::Vacant(e) => {
                 e.insert_entry(RecordCell {
@@ -777,7 +782,7 @@ impl MvccStore {
         // SAME CompletionTracker as tx commits. The guard owns the terminal
         // mark obligation (Materialized on `commit()`, Aborted on any early
         // return / `?`-propagated error / panic before commit). This is the
-        // H5 unification: the watermark — not a direct `publish_committed_max`
+        // H5 unification: the watermark — not a direct `raise_published`
         // — is the single source of truth for visibility.
         // L6: capture old_v BEFORE publish_cell bumps the cell — this is the
         // prior version that targeted vacuum will remove.
@@ -816,7 +821,7 @@ impl MvccStore {
         self.overlay.insert(key.clone(), new_v, value);
         // Mark the version Materialized and advance the reader-visible floor
         // from the resulting watermark (mirrors the tx commit path). This
-        // replaces the direct `publish_committed_max(new_v)`.
+        // replaces the direct `raise_published(new_v)`.
         guard.commit();
         // P1d-1: the history write above is the durable-history landing for
         // this version (synchronous inline path); mark durable AFTER the
@@ -918,7 +923,7 @@ impl MvccStore {
         // from the watermark. Commit order does not matter: each `mark` lands
         // in the tracker's states-map and `try_advance` resolves contiguity,
         // so the floor ends at the batch's `max_v`. Replaces the direct
-        // `publish_committed_max(max_v)`.
+        // `raise_published(max_v)`.
         for guard in guards {
             guard.commit();
         }
@@ -1074,7 +1079,7 @@ impl MvccStore {
         // window (history holds the tombstone in the interim).
         self.overlay.insert(key.clone(), new_v, Bytes::new());
         // Mark Materialized and advance the reader-visible floor from the
-        // watermark (replaces the direct `publish_committed_max(new_v)`).
+        // watermark (replaces the direct `raise_published(new_v)`).
         guard.commit();
         // P1d-1: the tombstone is durable in history (inline write above);
         // mark durable AFTER the visibility commit. Same rationale as

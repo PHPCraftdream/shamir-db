@@ -76,6 +76,8 @@ async fn park_before_broadcast(visibility: CommitVisibility) {
     let owned = repo.clone();
     let task_a = tokio::spawn(async move { owned.commit_tx(tx_a).await });
     within(hook.reached.notified()).await;
+    // Broadcast hook follows guard.commit(): W already covers A, so B
+    // cannot wait on A here (unlike the pre-publish journal-order fixture).
     let v_a = repo.tx_gate().await.unwrap().completion().watermark();
     let (mut tx_b, pin_b) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     tx_b.set_visibility(visibility);

@@ -179,7 +179,7 @@ async fn mvcc2_real_interleaving_toctou_characterization() {
     assert!(v_seed > 0);
     // Publish so a snapshot can capture the current committed version.
     let v_after_seed = gate.assign_next_version();
-    gate.publish_committed(v_after_seed);
+    gate.publish_committed_max(v_after_seed);
 
     // The seed write published its version into the cell.
     assert_eq!(

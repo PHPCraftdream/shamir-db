@@ -55,7 +55,7 @@ async fn ssi_phantom_indexed_range_aborts_second_commit() {
         commit_version: tx1_commit_v,
         per_table,
     });
-    gate.publish_committed(tx1_commit_v);
+    gate.publish_committed_max(tx1_commit_v);
 
     // Execute a query with WHERE age >= 30 under tx2.
     let filter = crate::query::filter::Filter::Gte {
@@ -131,7 +131,7 @@ async fn ssi_phantom_between_range_aborts() {
         commit_version: tx1_commit_v,
         per_table,
     });
-    gate.publish_committed(tx1_commit_v);
+    gate.publish_committed_max(tx1_commit_v);
 
     let filter = crate::query::filter::Filter::Between {
         field: vec!["age".into()],
@@ -193,7 +193,7 @@ async fn ssi_phantom_disjoint_indexed_ranges_both_commit() {
         commit_version: tx1_commit_v,
         per_table,
     });
-    gate.publish_committed(tx1_commit_v);
+    gate.publish_committed_max(tx1_commit_v);
 
     let filter = crate::query::filter::Filter::Lt {
         field: vec!["age".into()],
@@ -245,7 +245,7 @@ async fn ssi_phantom_no_index_records_table_scan_and_aborts() {
         commit_version: tx1_commit_v,
         per_table,
     });
-    gate.publish_committed(tx1_commit_v);
+    gate.publish_committed_max(tx1_commit_v);
 
     let filter = crate::query::filter::Filter::Gte {
         field: vec!["age".into()],
@@ -306,7 +306,7 @@ async fn ssi_phantom_other_table_does_not_conflict() {
         commit_version: tx1_commit_v,
         per_table,
     });
-    gate.publish_committed(tx1_commit_v);
+    gate.publish_committed_max(tx1_commit_v);
 
     // tx2 does a full table scan on "users" (TableScan dep).
     tx2.record_predicate_shared(PredicateDep::TableScan {

@@ -398,18 +398,11 @@ impl RepoTxGate {
     /// runs); since callers always await this to completion or never call
     /// it, in practice this is cancel-safe.
     ///
-    /// Register a snapshot at the current `last_committed` version and
-    /// return a RAII guard. On drop the snapshot is removed (refcount-
-    /// decremented).
-    ///
-    /// TOCTOU fix (A10): registration happens BEFORE the snapshot version is
-    /// finalised, then the floor is re-checked. If `last_committed` advanced
-    /// between the initial read and the registration completing, a SECOND
-    /// registration at the new floor is inserted BEFORE the stale one is
-    /// removed, so there is never a zero-registration window during which a
-    /// racing vacuum could observe `active_snapshots_empty() == true` and
-    /// delete a version this reader is about to pin. The guard carries ALL
-    /// registered versions and cleans them up on drop.
+    /// Register Snapshot/Serializable reads at the contiguous completion watermark W.
+    /// Eager publication can skip unsettled versions, which would later appear
+    /// inside a snapshot. Latest-state reads still use `last_committed`.
+    /// Registration is protected by the A10 opening barrier and rechecked
+    /// before returning the RAII guard.
     ///
     /// Use [`open_snapshot_serializable`](Self::open_snapshot_serializable)
     /// when the transaction's isolation level is `Serializable`.
@@ -481,7 +474,7 @@ impl RepoTxGate {
     /// an in-flight barrier.
     ///
     /// The in-flight barrier (`active_snapshots_opening`) is incremented
-    /// BEFORE the first `last_committed()` read and decremented AFTER the
+    /// BEFORE the first `completion().watermark()` read and decremented AFTER the
     /// final registration completes. While the counter is non-zero, vacuum's
     /// fast path defers ALL physical deletion — closing the race for an
     /// unbounded number of writer cycles (a stalled reader's floor version
@@ -494,7 +487,7 @@ impl RepoTxGate {
     /// fast path.
     ///
     /// After registration:
-    /// 1. Read the floor `v0 = last_committed()`.
+    /// 1. Read the floor `v0 = completion().watermark()`.
     /// 2. Atomically bump the refcount for `v0` in `active_snapshots`.
     /// 3. Re-read the floor. If it advanced to `v1 > v0`, register `v1`
     ///    too (the stale `v0` entry is left for the guard's Drop to clean
@@ -505,16 +498,16 @@ impl RepoTxGate {
     async fn register_snapshot(&self) -> Vec<u64> {
         // A10 barrier: increment BEFORE reading the floor. The AcqRel
         // store ensures vacuum's Acquire load sees the increment before
-        // the reader's subsequent Acquire load of `last_committed()`.
+        // the reader's subsequent Acquire load of `completion().watermark()`.
         let _barrier = OpeningBarrier::new(&self.active_snapshots_opening);
 
         const MAX_RETRIES: usize = 4;
         let mut registered = Vec::with_capacity(2);
-        let mut current = self.last_committed();
+        let mut current = self.completion().watermark();
         loop {
             self.bump_refcount(current).await;
             registered.push(current);
-            let next = self.last_committed();
+            let next = self.completion().watermark();
             if next == current || registered.len() >= MAX_RETRIES {
                 break;
             }
@@ -601,6 +594,7 @@ impl RepoTxGate {
     /// matching `Release` (or `AcqRel`) on the writer. This was the exact
     /// gap in this task's own round-1 delivery: the doc comment there
     /// claimed the pairing was sound while the store stayed `Relaxed`.
+    #[doc(hidden)] // External engine tests and tx_overhead bench use the bare allocator.
     pub fn assign_next_version(&self) -> u64 {
         self.version_counter.fetch_add(1, Ordering::AcqRel) + 1
     }
@@ -729,30 +723,23 @@ impl RepoTxGate {
 
     /// Publish: update `last_committed_version` atomically.
     ///
-    /// Must be called under `commit_lock` on the tx commit path, where
-    /// monotonic ordering is guaranteed by the lock. Both tx commits and
-    /// non-tx writes now advance `last_committed` via
-    /// [`publish_committed_max`](Self::publish_committed_max) (the monotonic
-    /// fetch_max CAS), so every committed version becomes visible to
-    /// subsequently-opened snapshots. Prefer `publish_committed_max` for any
-    /// new publish site; this plain store is retained for the
-    /// `commit_lock`-guarded tx path where strict monotonicity already holds.
+    /// Legacy plain-store fixture hook; does not settle completion. Production
+    /// publishers use `raise_published`, and transaction snapshots read W.
     pub fn publish_committed(&self, version: u64) {
         self.last_committed_version
             .store(version, Ordering::Release);
     }
 
-    /// Publish: advance `last_committed_version` to `version` if it is
-    /// currently lower, using an atomic compare-and-swap loop.
-    ///
-    /// Safe to call without `commit_lock` because it only moves the counter
-    /// forwards — it never moves it backwards even if concurrent tx commits
-    /// or other non-tx writes race with this call. Both the non-tx write path
-    /// (`MvccStore::set_versioned` / `set_versioned_many` /
-    /// `delete_versioned`) and the tx commit path call this, so every
-    /// committed version advances the reader-visible floor and becomes visible
-    /// to snapshots/txs opened afterwards.
+    /// Test/bench seam: force-settle every version through `version`, then publish.
+    /// Never use on a production write path: it closes pending and missing slots.
+    #[doc(hidden)]
     pub fn publish_committed_max(&self, version: u64) {
+        self.completion.settle_through(version);
+        self.raise_published(version);
+    }
+
+    /// Eager, non-contiguous floor for latest-state reads, NOT a snapshot source.
+    pub fn raise_published(&self, version: u64) {
         // Relaxed load is fine as the initial guess — the CAS will re-read
         // on conflict. We only need Release on a successful store so the
         // new value is visible to Acquire loads in `last_committed()`.
@@ -777,11 +764,11 @@ impl RepoTxGate {
     ///
     /// Called after `completion.mark(version, Materialized)` on the tx commit
     /// path. The watermark is monotonic, so this only ever advances the atomic.
-    /// Uses `publish_committed_max` (CAS loop) to coexist safely with non-tx
+    /// Uses `raise_published` (CAS loop) to coexist safely with non-tx
     /// writes that also advance the atomic independently.
     pub fn sync_last_committed_from_watermark(&self) {
         let wm = self.completion.watermark();
-        self.publish_committed_max(wm);
+        self.raise_published(wm);
     }
 
     /// Minimum GC floor: `min(active snapshots U {completion watermark})`.

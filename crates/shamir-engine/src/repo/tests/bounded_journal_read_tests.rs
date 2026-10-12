@@ -121,7 +121,7 @@ async fn parked_a_below_b_uses_completion_not_latest() {
     let gate = repo.tx_gate().await.unwrap();
     // Leave version 2 missing/unsettled: mark inserts rather than updates slots.
     feed.emit_journal_only(event(3));
-    gate.publish_committed_max(3);
+    gate.raise_published(3);
     gate.completion().mark(3, State::Materialized);
     assert_eq!(feed.confirm_through(3, Duration::from_secs(1)).await, 3);
     let page = repo.read_changelog_bounded(1, 10).await.unwrap();
