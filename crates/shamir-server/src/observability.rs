@@ -443,7 +443,7 @@ pub async fn spawn_with_byte_budget(
     let shutdown_for_poller = shutdown.clone();
     let tx_metrics_clone = tx_metrics;
     let byte_budget_clone = byte_budget;
-    let shamir_db_clone = shamir_db;
+    let shamir_db_clone = shamir_db.clone();
     let poller_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         // Burn the immediate first tick — we already collected once.
@@ -486,6 +486,7 @@ pub async fn spawn_with_byte_budget(
     let app_state = AppState {
         state: state.clone(),
         prom: prom_handle,
+        db: shamir_db,
     };
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -543,6 +544,7 @@ struct AppState {
     /// `None` when `install_recorder = false` AND no prior install
     /// happened — `/metrics` then returns `503`.
     prom: Option<PrometheusHandle>,
+    db: Option<Arc<shamir_db::ShamirDb>>,
 }
 
 // --------------------------------------------------------------------------
@@ -564,7 +566,12 @@ async fn readyz(State(s): State<AppState>) -> Response {
 
 async fn metrics_handler(State(s): State<AppState>) -> Response {
     match &s.prom {
-        Some(h) => (StatusCode::OK, h.render()).into_response(),
+        Some(h) => {
+            if let Some(db) = &s.db {
+                sample_gate_metrics(db);
+            }
+            (StatusCode::OK, h.render()).into_response()
+        }
         None => (
             StatusCode::SERVICE_UNAVAILABLE,
             "metrics recorder not installed\n",
@@ -578,6 +585,7 @@ struct InfoBody {
     uptime_seconds: u64,
     bound_addrs: Vec<String>,
     ready: bool,
+    visibility_stalls: Vec<String>,
 }
 
 async fn info_handler(State(s): State<AppState>) -> Response {
@@ -591,6 +599,12 @@ async fn info_handler(State(s): State<AppState>) -> Response {
             .map(|a| a.to_string())
             .collect(),
         ready: s.state.ready.load(Ordering::Acquire),
+        visibility_stalls: s.db.as_ref().map_or_else(Vec::new, |db| {
+            open_gate_snapshots(db)
+                .into_iter()
+                .filter_map(|(db, repo, snapshot)| visibility_stall(&db, &repo, &snapshot))
+                .collect()
+        }),
     };
     let bytes = rmp_serde::to_vec_named(&body).unwrap_or_default();
     (
@@ -599,4 +613,131 @@ async fn info_handler(State(s): State<AppState>) -> Response {
         bytes,
     )
         .into_response()
+}
+
+// Gate age is a lower bound since first diagnostics, not allocation time.
+// Operator-only /info follows the existing bind opt-in policy; never exposes
+// replay error text (which can include application data or storage paths).
+const VISIBILITY_STALL_THRESHOLD: Duration = Duration::from_secs(30);
+
+pub(crate) fn visibility_stall(
+    db: &str,
+    repo: &str,
+    snapshot: &shamir_tx::GateDiagnostics,
+) -> Option<String> {
+    let blocker = snapshot.oldest_blocker?;
+    (blocker.age > VISIBILITY_STALL_THRESHOLD).then(|| {
+        format!(
+            "{db}/{repo}: visibility stalled by version {} ({}, {:.1}s)",
+            blocker.version,
+            blocker_class(blocker.class),
+            blocker.age.as_secs_f64(),
+        )
+    })
+}
+
+fn blocker_class(class: shamir_tx::GateBlockerClass) -> &'static str {
+    match class {
+        shamir_tx::GateBlockerClass::ActiveTail => "active_tail",
+        shamir_tx::GateBlockerClass::OrphanAwaitingReplay => "orphan_awaiting_replay",
+        shamir_tx::GateBlockerClass::UnresolvedTicket => "unresolved_ticket",
+        shamir_tx::GateBlockerClass::PendingUnclassified => "pending_unclassified",
+        _ => "unknown",
+    }
+}
+
+fn open_gate_snapshots(
+    db: &shamir_db::ShamirDb,
+) -> Vec<(String, String, shamir_tx::GateDiagnostics)> {
+    let mut snapshots = Vec::new();
+    for db_name in db.list_dbs() {
+        let Some(instance) = db.get_db(&db_name) else {
+            continue;
+        };
+        for repo_name in instance.list_repos() {
+            let Some(repo) = instance.get_repo(&repo_name) else {
+                continue;
+            };
+            snapshots.push((db_name.clone(), repo_name, repo.diagnostics()));
+        }
+    }
+    snapshots
+}
+
+pub(crate) fn sample_gate_metrics(db: &shamir_db::ShamirDb) {
+    for (db_name, repo, snapshot) in open_gate_snapshots(db) {
+        record_gate_metrics(&db_name, &repo, &snapshot);
+    }
+}
+
+pub(crate) fn record_gate_metrics(db: &str, repo: &str, s: &shamir_tx::GateDiagnostics) {
+    // Separate db label avoids collisions between identically named repos.
+    // Only registered/open repository names enter this label space.
+    for (name, value) in [
+        (
+            "shamir_gate_allocation_high_water",
+            s.allocation_high_water as f64,
+        ),
+        ("shamir_gate_visible_floor", s.visible_floor as f64),
+        ("shamir_gate_last_committed", s.last_committed as f64),
+        ("shamir_gate_durable_watermark", s.durable_watermark as f64),
+        (
+            "shamir_gate_requires_reopen",
+            u8::from(s.requires_reopen) as f64,
+        ),
+        (
+            "shamir_gate_visibility_waiters",
+            s.visibility_waiters as f64,
+        ),
+        (
+            "shamir_gate_unsettled_versions",
+            s.unsettled_versions as f64,
+        ),
+        ("shamir_gate_pending_versions", s.pending_versions as f64),
+        ("shamir_gate_missing_versions", s.missing_versions as f64),
+        (
+            "shamir_gate_oldest_blocker_age_seconds",
+            s.oldest_blocker.map_or(0.0, |b| b.age.as_secs_f64()),
+        ),
+        (
+            "shamir_gate_oldest_blocker_version",
+            s.oldest_blocker.map_or(0.0, |b| b.version as f64),
+        ),
+        (
+            "shamir_gate_orphan_replay_consecutive_failures",
+            s.orphan_replay_consecutive_failures as f64,
+        ),
+    ] {
+        metrics::gauge!(name, "db" => db.to_owned(), "repo" => repo.to_owned()).set(value);
+    }
+    for class in [
+        "none",
+        "active_tail",
+        "orphan_awaiting_replay",
+        "unresolved_ticket",
+        "pending_unclassified",
+        "unknown",
+    ] {
+        let current = s.oldest_blocker.map_or("none", |b| blocker_class(b.class));
+        metrics::gauge!(
+            "shamir_gate_oldest_blocker_class",
+            "db" => db.to_owned(), "repo" => repo.to_owned(), "class" => class,
+        )
+        .set(u8::from(current == class) as f64);
+    }
+    // metrics 0.24.6 Counter::absolute raises to max(current, observed), so
+    // overlapping scrapes never double-count or regress a cumulative value.
+    // Reopening/replacing a repo under the same db/repo labels resets its
+    // drainer totals, but not this recorder's counter: lower observations are
+    // hidden until they exceed the old maximum (or the recorder is restarted).
+    metrics::counter!(
+        "shamir_orphan_replay_failures_total",
+        "db" => db.to_owned(), "repo" => repo.to_owned(),
+    )
+    .absolute(s.orphan_replay_failures_total);
+    metrics::counter!(
+        "shamir_gate_orphan_replay_attempts_total",
+        "db" => db.to_owned(), "repo" => repo.to_owned(),
+    )
+    .absolute(s.orphan_replay_attempts_total);
 }
