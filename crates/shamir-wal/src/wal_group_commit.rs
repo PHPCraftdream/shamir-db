@@ -354,7 +354,7 @@ impl WalGroupCommit {
             let sync_ok = if write_ok && needs_fsync {
                 // Synced appends share the same cancellation-independent
                 // worker as timer and pull demands; never call sink.sync here.
-                self.sync_now().await.is_ok()
+                self.sync_window().await.is_ok()
             } else {
                 write_ok
             };

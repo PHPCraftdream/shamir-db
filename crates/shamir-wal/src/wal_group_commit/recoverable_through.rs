@@ -355,17 +355,22 @@ impl WalGroupCommit {
 
     /// cancel-safe: yes â€” dropping the waiter cannot cancel its cycle.
     pub async fn sync_now(&self) -> DbResult<u64> {
+        self.sync.demand().await
+    }
+
+    /// The group-commit window's own fsync. A Mem sink has nothing to
+    /// coalesce and no detached worker: finish in the leader's poll
+    /// (current-thread commit atomicity; R follows W via `memory_completed`).
+    /// File sinks share the coalesced worker with timer and pull demands.
+    pub(super) async fn sync_window(&self) -> DbResult<()> {
         if self.is_mem_sink() {
-            // Mem sink: nothing to coalesce and no detached worker. Finish in
-            // the caller's own poll (current-thread commit atomicity); R
-            // follows W through `memory_completed`, not through this path.
             let res = self.sink.sync().await;
             self.sync.rounds.fetch_add(1, Ordering::Relaxed);
             if res.is_ok() {
                 self.sync.dirty_since_sync.store(false, Ordering::Release);
             }
-            return res.map(|()| self.recoverable_through());
+            return res;
         }
-        self.sync.demand().await
+        self.sync.demand().await.map(|_| ())
     }
 }
