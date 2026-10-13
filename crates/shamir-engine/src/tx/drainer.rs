@@ -562,6 +562,7 @@ impl Drainer {
                 WalTicketState::Failed => {
                     if gate.take_unresolved(version).is_some() {
                         gate.abort_unwritten(version);
+                        repo.settle_unwritten_version(version).await;
                     }
                 }
                 WalTicketState::Pending => {

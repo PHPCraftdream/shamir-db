@@ -458,6 +458,10 @@ async fn apply_prepared(
     let local_version = version_guard.version();
     // Reserve BEFORE history can survive (even an unflushed set may persist).
     // This extra metadata barrier is indispensable for a WAL-less writer.
+    // B3: coverage for this WAL-less version is provided by the follower's
+    // durable-history flush below (not a WAL sync) — that flush `settle`s
+    // the version into the recoverability prefix R (see the settle site at
+    // the `mark_durable` call below).
     if let Err(error) = async {
         if !batched {
             reserve_floor(repo, local_version).await?;
@@ -547,6 +551,15 @@ async fn apply_prepared(
             gate.set_requires_reopen();
             return Err(DbError::RepoRequiresReopen(e.to_string()));
         }
+        // B3 contiguity: this WAL-less writer's version failed BEFORE any
+        // visibility/history write — it is proven to never receive WAL
+        // coverage. Settle it so the recoverability prefix R never wedges
+        // below this hole. (The `any_visible` path above is fail-stop
+        // requires-reopen: state is ambiguous, so R must NOT be advanced
+        // past it.)
+        if let Ok(group) = repo.wal_group().await {
+            group.settle(local_version);
+        }
         return Err(e);
     }
 
@@ -598,6 +611,14 @@ async fn apply_prepared(
     }
     if !batched {
         gate.mark_durable(local_version);
+        // B3 contiguity: this WAL-less writer covers its version through the
+        // durable-history flush above (its own durability boundary), NOT a
+        // WAL sync — settle this exact version so R may pass it once all
+        // predecessors are also covered. This WAL-less apply does not get
+        // coverage from a Mem WAL append.
+        if let Ok(group) = repo.wal_group().await {
+            group.settle(local_version);
+        }
     }
     durability.armed = false;
 
@@ -686,12 +707,18 @@ pub(crate) async fn apply_batch_with_info(
         leader_floor = leader_floor.max(event.event.commit_version);
         apply_prepared(repo, event, guard, true).await?;
     }
+    // PR1: follower apply is WAL-less; backend capability is independent
+    // of the node's follower role. Settle the exact applied versions only
+    // after this history flush, not on the basis of a WAL sync. An in-memory
+    // backend still provides no restart persistence.
     repo.flush_all_history()
         .await
         .map_err(|error| DbError::RepoRequiresReopen(error.to_string()))?;
+    let group = repo.wal_group().await?;
     for event in &prepared {
         if let Some(version) = event.version {
             gate.mark_durable(version);
+            group.settle(version);
         }
     }
     crate::meta::repl_bookmark::save_replication_bookmark(info, leader_floor)

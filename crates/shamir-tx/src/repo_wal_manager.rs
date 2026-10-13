@@ -146,7 +146,7 @@ impl RepoWalManager {
     /// Force a durable `fsync` of the WAL (level 2 → level 3). For the
     /// `Mem` sink this is a no-op.
     pub async fn sync_wal(&self) -> DbResult<()> {
-        self.group.sync_now().await
+        self.group.sync_now().await.map(|_| ())
     }
 
     /// Commit a transaction. No-op: there are no per-entry markers to

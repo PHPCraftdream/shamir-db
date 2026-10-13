@@ -87,6 +87,8 @@ impl ServerLauncher {
     pub async fn launch(self) -> Result<ServerHandle, BootError> {
         let ServerLauncher { config, bootstrap } = self;
         config.validate()?;
+        let durability = config.durability.resolve_policy()?;
+        config.durability.warn_unimplemented_retention();
 
         // Root shutdown token — the single source of truth for "the server
         // is stopping". Every long-lived task (accept loops, meta-snapshot,
@@ -345,7 +347,7 @@ impl ServerLauncher {
         let (port, resolver) =
             DirectoryPorts::new(user_dir.clone(), kdf_for_bootstrap).into_trait_objects();
         let shamir = Arc::new(
-            ShamirDb::init(SystemStoreConfig::Fjall(meta_path))
+            ShamirDb::init_with_durability(SystemStoreConfig::Fjall(meta_path), durability)
                 .await
                 .map_err(|e| BootError::ShamirDbInit(e.to_string()))?
                 .with_user_admin_port(port)

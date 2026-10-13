@@ -15,6 +15,10 @@
 //! PURELY ADDITIVE (F6a): wired into nothing yet — production still runs a
 //! single [`WalSegment`] via `WalSink::File`. F6b cuts `repo_instance` over.
 
+mod sync_snapshot;
+#[cfg(test)]
+mod sync_test_seam;
+
 use std::fs::remove_file;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -36,6 +40,7 @@ struct SealedMeta {
     /// `0` means "no versioned record" (legacy / non-versioned) and pins the
     /// segment: it is NEVER truncated by version (I5).
     max_version: u64,
+    synced: bool,
 }
 
 /// Mutable state guarded by the single coarse `Mutex`. Sealed-list mutation
@@ -62,6 +67,10 @@ pub struct SegmentSet {
     dir: PathBuf,
     max_bytes: u64,
     inner: Mutex<Inner>,
+    // Cold sync/rotation exclusion only; ordinary appends never acquire it.
+    pub(crate) sync_gate: Arc<tokio::sync::Mutex<()>>,
+    #[cfg(test)]
+    pub(crate) sync_test: sync_test_seam::SyncTestSeam,
 }
 
 /// Format a segment file name from its seq: `NNNNNNNN.wal` (zero-padded 8).
@@ -117,6 +126,9 @@ impl SegmentSet {
             return Ok(Self {
                 dir,
                 max_bytes,
+                sync_gate: Arc::new(tokio::sync::Mutex::new(())),
+                #[cfg(test)]
+                sync_test: sync_test_seam::SyncTestSeam::default(),
                 inner: Mutex::new(Inner {
                     sealed: Vec::new(),
                     active,
@@ -160,6 +172,7 @@ impl SegmentSet {
                 seq,
                 path,
                 max_version,
+                synced: false,
             });
         }
         let active_path = dir.join(seg_file_name(active_seq));
@@ -197,6 +210,9 @@ impl SegmentSet {
         Ok(Self {
             dir,
             max_bytes,
+            sync_gate: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(test)]
+            sync_test: sync_test_seam::SyncTestSeam::default(),
             inner: Mutex::new(Inner {
                 sealed,
                 active,
@@ -324,6 +340,7 @@ impl SegmentSet {
             seq: sealed_seq,
             path: sealed_path,
             max_version: sealed_max,
+            synced: false,
         });
         g.active = new_active;
         g.active_seq = next_seq;
@@ -364,7 +381,10 @@ impl SegmentSet {
         // the lock (it is an fsync syscall). This also underpins truncation
         // crash-safety (F6c): a sealed segment's records are crash-durable, so
         // a power-loss before they are drained to `history` still replays them.
-        sealing.sync().await?;
+        {
+            let _sync = self.sync_gate.lock().await;
+            self.sync_active(&sealing).await?;
+        }
 
         // Task #500: now that the segment's data is durably fsync'd, write its
         // `max_version` sidecar so a future `open` skips the full replay. This
@@ -399,6 +419,7 @@ impl SegmentSet {
             seq: sealed_seq,
             path: sealed_path,
             max_version: sealed_max,
+            synced: true,
         });
         g.active = new_active;
         g.active_seq = next_seq;
@@ -573,10 +594,17 @@ impl SegmentSet {
 
     /// fsync the active segment (sealed segments are already fully on disk).
     pub async fn sync(&self) -> DbResult<()> {
+        let _sync = self.sync_gate.lock().await;
         let active = {
             let g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
             Arc::clone(&g.active)
         };
+        self.sync_active(&active).await
+    }
+
+    pub(crate) async fn sync_active(&self, active: &WalSegment) -> DbResult<()> {
+        #[cfg(test)]
+        let _flight = self.sync_test.sync().await;
         active.sync().await
     }
 

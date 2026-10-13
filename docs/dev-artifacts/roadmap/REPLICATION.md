@@ -14,6 +14,38 @@
 
 ---
 
+## PR1: актуальный durability contract (дополняет исторический дизайн)
+
+Ниже остаётся research/design 2026-06-30, не перечень shipped API.
+PR1 добавляет серверный `durability` default: `wal_commit: buffered`,
+retention 1 GiB, overflow `refuse_writes`, `replication_serve: durable`.
+Файловый `buffered` ack — локальный WAL write; process crash и power loss
+различаются. 250 мс — номинальный background fsync timer, не максимальное
+окно потерь (storage errors/scheduler/I/O могут его растянуть). `synced`
+ждёт coalesced WAL fsync. Mem/hybrid не persistent: tier игнорируется с
+одним warn при open. Retention floor проверяет общий `resolve`:
+`>= 2 × effective segment size`, включая env override
+`SHAMIR_WAL_SEGMENT_MAX_BYTES`; cap/action только parsed до PR2,
+`declare_gap` пока предупреждает, не evicts.
+
+Durable Pull bound = `min(confirmed, W, R)`, R — **непрерывный префикс
+recoverability**, не максимальная fsynced версия. Если R недостаточен,
+pull создаёт coalesced demand sync и ограниченно ждёт продвижения R;
+ошибка/таймаут оставляет старый safe bound. Это не ожидание очередного
+250 мс tick и не ожидание follower на commit path. Локальный WAL ack
+и разрешение безопасной выдачи follower — разные границы.
+`completed_reseed` отвергается до init с точной причиной
+`completed_reseed is not available yet (planned: epoch bump + universal fencing)`;
+fast serve, epoch bump и universal fencing не реализованы этой настройкой.
+
+Метрики, реально зарегистрированные сейчас: `shamir_wal_synced_lag_versions`,
+`shamir_wal_sync_now_calls`, `shamir_wal_sync_errors`,
+`shamir_replication_pull_held_back_ns` и `..._held_back_count`
+(total-ns/count, не histogram). Series имеют labels db/repo и repo-owned
+источники. Sync calls учитываются сразу; rounds после завершения, duration
+включает snapshot replay и sync. Это не атомарный certificate. Таблица §6.2
+ниже — дизайн follower telemetry, не свидетельство наличия всех series.
+
 ## 1. Академический фундамент
 
 ### 1.1 Модель: passive replication / log shipping
@@ -549,9 +581,9 @@ edge-collect в R2+ не потребовал пересмотра инвари�
 удлинять критический путь коммита и задерживать возврат результата
 пользователю. На коммите событие **мгновенно (неблокирующе) кладётся в
 очередь**, а фоновая задача уже отдаёт его ресиверам/follower'ам. Commit
-подтверждается пользователю ровно тогда, когда версия опубликована и
-durable-путь запущен — доставка репликации к этому моменту отношения не
-имеет.
+подтверждается по локальной политике WAL (`buffered` — write, `synced` —
+успешный coalesced fsync); доставка follower к этому моменту отношения не
+имеет. Запуск durable-пути сам по себе не заменяет synced ack.
 
 Это уже выполняется базовой механикой changefeed и не требует нового
 кода на commit-пути:
@@ -598,7 +630,7 @@ reconnect_backoff_ms = { min = 200, max = 30_000 }   # + jitter
 
 Тумблеры — в `shamir-tunables` (рядом с `JOURNAL_BACKFILL_LIMIT = 10_000`).
 
-### 6.2 Метрики (Prometheus — exporter уже стоит)
+### 6.2 Метрики (план follower telemetry; exporter уже стоит)
 
 | Метрика | Смысл |
 |---|---|

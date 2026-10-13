@@ -4,6 +4,8 @@ mod changelog;
 mod core;
 mod db_gateway;
 mod db_management;
+#[path = "seed/tests/durability_init.rs"]
+mod durability_init;
 mod function_management;
 pub(crate) mod schema_management;
 mod seed;

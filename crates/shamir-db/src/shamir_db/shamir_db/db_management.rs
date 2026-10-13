@@ -381,7 +381,8 @@ impl ShamirDb {
             .collect();
 
         // DbInstance recovers and certifies before registry insertion.
-        db.add_repo(config).await?;
+        db.add_repo_with_durability(config, self.durability_policy)
+            .await?;
 
         let meta = ResourceMeta::owned_enforced(actor.clone());
 

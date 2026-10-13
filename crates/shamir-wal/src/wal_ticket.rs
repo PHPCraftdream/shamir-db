@@ -104,6 +104,13 @@ impl WalTicket {
         if !self.done.load(Ordering::Acquire) {
             self.state.store(state as u8, Ordering::Release);
             self.done.store(true, Ordering::Release);
+            // Wake EVERY registered awaiter: the batched API (`append_many`)
+            // shares one ticket among several awaiters, and `notify_one`
+            // would wake only one of them. ALSO store one permit for a
+            // late registrant (poll-based completion futures create their
+            // `Notified` after `complete`, and `notify_waiters` stores no
+            // permit); every awaiter re-reads `done` after a wake.
+            self.notify.notify_waiters();
             self.notify.notify_one();
         }
     }
