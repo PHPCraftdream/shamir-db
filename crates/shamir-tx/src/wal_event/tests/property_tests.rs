@@ -68,7 +68,7 @@ fn derived_event_matches_projection_for_random_write_sets() {
                 let key: Vec<u8> = if non_record {
                     format!("sys:{t}:{o}").into_bytes()
                 } else {
-                    rid((o as u8) ^ (t as u8) * 7).as_bytes().to_vec()
+                    rid((o as u8) ^ ((t as u8) * 7)).as_bytes().to_vec()
                 };
                 if remove {
                     staging.remove(RecordKey::from_slice(&key));
