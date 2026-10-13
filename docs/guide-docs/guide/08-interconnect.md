@@ -35,6 +35,16 @@
 * Gap markers (`gap_at`) and a persistence watermark exist, but gap
   detection is incomplete; see the replication limitations below.
 * E2E-тесты: `shamir-db/tests/changefeed_e2e.rs`.
+* **Журнальное событие выводится из WAL-записи (S5c-X, инвариант I1).**
+  WAL-запись формата версии 3 несёт заголовок события
+  (`shamir_wal::WalEventHeader`: repo, actor, публичный tx_id — 0 для
+  implicit-записи, timestamp, имена таблиц, редкие изменения с
+  не-`RecordId` ключами). Единственная функция
+  `shamir_tx::event_from_wal_entry` строит `ChangelogEvent` из записи;
+  live-коммит использует именно её. Записи старых форматов (версии 1-2)
+  декодируются без заголовка — событие из них вывести нельзя, recovery
+  трактует такие коммиты консервативно (GAP). Неизвестная будущая версия
+  — ошибка декодирования, никогда не молчаливый пропуск.
 
 Начиналось как **локальный** механизм (внутри одного процесса). Сейчас
 поверх него уже построен network-транспорт — pull API по wire-протоколу

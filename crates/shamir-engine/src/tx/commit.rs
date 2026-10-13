@@ -774,6 +774,9 @@ async fn commit_tx_inner_legacy_async(
         }
     };
     // Op #2 Stage 2: offer the persisted WAL entry to the drainer window.
+    // S5c-X I1: the event below is derived FROM THIS ENTRY (one projection,
+    // `shamir_tx::event_from_wal_entry`) - an `Arc` clone, no data copy.
+    let wal_entry_for_event = wal_entry_arc.clone();
     repo.drainer().offer(wal_entry_arc);
     // SSI fix S2 — still-armed cell-reservation guards from pre_commit_locked
     // (WAL begin already succeeded inside it). Disarmed after the inline Phase 5a
@@ -782,7 +785,9 @@ async fn commit_tx_inner_legacy_async(
 
     let snapshot_version = tx.snapshot_version;
     let tx_id_u64 = tx.tx_id.0;
-    let changefeed_event = shamir_tx::project_event(&tx, repo.name(), commit_version);
+    // S5c-X I1: derive the journal event from the WAL entry, not from the
+    // tx (ONE projection for live commits and recovery).
+    let changefeed_event = shamir_tx::event_from_wal_entry(wal_entry_for_event.as_ref());
     let prepared_journal = repo.prepare_journal_event(changefeed_event).await;
 
     apply_data_phase(&mut tx, repo, commit_version).await;
@@ -1068,6 +1073,9 @@ async fn commit_tx_lockfree(
     };
 
     // Op #2 Stage 2: offer the persisted WAL entry to the drainer window.
+    // S5c-X I1: the event below is derived FROM THIS ENTRY (one projection,
+    // `shamir_tx::event_from_wal_entry`) - an `Arc` clone, no data copy.
+    let wal_entry_for_event = validated.wal_entry_arc.clone();
     repo.drainer().offer(validated.wal_entry_arc);
 
     maybe_crash("phase4", repo).await;
@@ -1080,7 +1088,9 @@ async fn commit_tx_lockfree(
     // Phases 5–7: materialize OUTSIDE any global lock, gated by uwl_guards.
     let snapshot_version = tx.snapshot_version;
     let tx_id_u64 = tx.tx_id.0;
-    let changefeed_event = shamir_tx::project_event(&tx, repo.name(), commit_version);
+    // S5c-X I1: derive the journal event from the WAL entry, not from the
+    // tx (ONE projection for live commits and recovery).
+    let changefeed_event = shamir_tx::event_from_wal_entry(wal_entry_for_event.as_ref());
     let prepared_journal = repo.prepare_journal_event(changefeed_event).await;
 
     let (post_publish, changefeed_event) = materialize(

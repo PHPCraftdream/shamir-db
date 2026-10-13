@@ -17,6 +17,7 @@ fn entry(version: u64) -> Arc<WalEntryV2> {
             delta: 3,
         }],
         interner_delta: vec![(9, "field".to_owned(), 11)],
+        event: None,
     })
 }
 

@@ -33,12 +33,20 @@ use serde::{Deserialize, Serialize};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_types::types::record_id::RecordId;
 
-pub const WAL_V2_MAGIC: [u8; 4] = *b"WAL2";
-/// Current version written by `encode`. Bumped from 1 → 2 to carry
-/// `interner_delta` (WAL v3 scaffolding, Stage A2).
-pub const WAL_V2_VERSION: u8 = 2;
+use crate::event_header::WalEventHeader;
 
-/// Previous version — decoded for backward compatibility.
+pub const WAL_V2_MAGIC: [u8; 4] = *b"WAL2";
+/// Current version written by `encode`. Bumped from 2 to 3 to carry the
+/// journal-event header (`event`, S5c-X I1): every journal event is a pure
+/// function of the entry via `shamir_tx::event_from_wal_entry`.
+/// (Version 2 had bumped from 1 to carry `interner_delta` — Stage A2.)
+pub const WAL_V2_VERSION: u8 = 3;
+
+/// Version 2 - decoded for backward compatibility (no `event` field;
+/// carries `interner_delta`, Stage A2).
+pub(crate) const WAL_V2_VERSION_PRE_EVENT: u8 = 2;
+
+/// Version 1 - decoded for backward compatibility (no `interner_delta`).
 pub(crate) const WAL_V2_VERSION_LEGACY: u8 = 1;
 
 /// One mutating operation buffered inside a transactional WAL entry.
@@ -157,6 +165,25 @@ pub struct WalEntryV2 {
     /// plumbs the delta from `commit_interner_overlay`.
     #[serde(default)]
     pub interner_delta: Vec<(u64, String, u64)>,
+    /// Journal-event header (format version 3+). `None` for legacy
+    /// entries (versions 1-2): no journal event can be derived from them
+    /// (`shamir_tx::event_from_wal_entry` returns `None`; recovery treats
+    /// the commit conservatively as "unknown").
+    #[serde(default)]
+    pub event: Option<WalEventHeader>,
+}
+
+/// Version 2 shape - no `event` field. Used only for decoding old entries.
+#[derive(Debug, Deserialize)]
+struct WalEntryV2PreEvent {
+    pub txn_id: u64,
+    pub repo_id_interned: u64,
+    pub started_at_ns: u64,
+    #[serde(default)]
+    pub commit_version: u64,
+    pub ops: Vec<WalOpV2>,
+    #[serde(default)]
+    pub interner_delta: Vec<(u64, String, u64)>,
 }
 
 /// Legacy shape (version 1) — no `interner_delta` field. Used only for
@@ -191,7 +218,16 @@ impl WalEntryV2 {
             commit_version: 0,
             ops,
             interner_delta: vec![],
+            event: None,
         }
+    }
+
+    /// Builder-style setter for the journal-event header (format version
+    /// 3+). The commit pipeline stamps this BEFORE persisting the entry so
+    /// the journal event stays derivable from the WAL alone (S5c-X I1).
+    pub fn with_event_header(mut self, event: WalEventHeader) -> Self {
+        self.event = Some(event);
+        self
     }
 
     /// Builder-style setter for `commit_version`. Used by the
@@ -222,8 +258,10 @@ impl WalEntryV2 {
 
     /// Decode from `[magic][version][bincode body]`.
     ///
-    /// Supports version 1 (legacy, no interner_delta) and version 2
-    /// (current, with interner_delta). Unknown versions are rejected.
+    /// Supports versions 1 (legacy, no interner_delta), 2 (no event
+    /// header) and 3 (current, with the journal-event header). Unknown
+    /// versions are rejected (fail-closed decode error, never a silent
+    /// skip).
     pub fn decode(bytes: &[u8]) -> DbResult<Self> {
         if bytes.len() < 5 {
             return Err(DbError::Internal("wal_v2 decode: too short".into()));
@@ -246,10 +284,24 @@ impl WalEntryV2 {
                     commit_version: legacy.commit_version,
                     ops: legacy.ops,
                     interner_delta: vec![],
+                    event: None,
+                })
+            }
+            WAL_V2_VERSION_PRE_EVENT => {
+                let pre: WalEntryV2PreEvent = bincode::deserialize(&bytes[5..])
+                    .map_err(|e| DbError::Internal(format!("wal_v2 decode v2: {e}")))?;
+                Ok(Self {
+                    txn_id: pre.txn_id,
+                    repo_id_interned: pre.repo_id_interned,
+                    started_at_ns: pre.started_at_ns,
+                    commit_version: pre.commit_version,
+                    ops: pre.ops,
+                    interner_delta: pre.interner_delta,
+                    event: None,
                 })
             }
             WAL_V2_VERSION => bincode::deserialize(&bytes[5..])
-                .map_err(|e| DbError::Internal(format!("wal_v2 decode v2: {e}"))),
+                .map_err(|e| DbError::Internal(format!("wal_v2 decode v3: {e}"))),
             _ => Err(DbError::Internal(format!(
                 "wal_v2 decode: unsupported version {version}"
             ))),
