@@ -40,7 +40,7 @@ tls: {
 
 #[test]
 fn unknown_top_level_section_is_rejected() {
-    let src = format!("{minimal_valid}\ndurabilty = {{}}\n");
+    let src = format!("{}\ndurabilty = {{}}\n", minimal_valid());
     let err = ktav::from_str::<Config>(&src).expect_err("typo section must fail at parse time");
     let msg = err.to_string();
     assert!(
@@ -51,7 +51,7 @@ fn unknown_top_level_section_is_rejected() {
 
 #[test]
 fn unknown_top_level_key_is_rejected() {
-    let src = format!("{minimal_valid}\nmax_connections: 10\n");
+    let src = format!("{}\nmax_connections: 10\n", minimal_valid());
     let err = ktav::from_str::<Config>(&src).expect_err("unknown key must fail at parse time");
     assert!(
         err.to_string().contains("max_connections"),
