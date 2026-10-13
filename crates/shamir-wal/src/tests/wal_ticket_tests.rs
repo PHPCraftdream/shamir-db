@@ -1,5 +1,6 @@
 use std::future::{poll_fn, Future};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::Poll;
 
@@ -222,11 +223,19 @@ async fn completion_wakes_every_awaiter_of_a_shared_ticket() {
     let ticket = Arc::new(WalTicket::detached_for_test(WalTicketState::Pending));
 
     // Mirrors `drive_and_wait`'s park loop: enable-before-check, no deadline.
-    async fn await_terminal(ticket: Arc<WalTicket>) -> WalAppendError {
+    async fn await_terminal(
+        ticket: Arc<WalTicket>,
+        registered: Arc<AtomicUsize>,
+    ) -> WalAppendError {
+        let mut announced = false;
         loop {
             let notified = ticket.notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
+            if !announced {
+                registered.fetch_add(1, Ordering::SeqCst);
+                announced = true;
+            }
             if let Some(outcome) = ticket.outcome() {
                 return outcome.expect_err("fixture completes as Failed, not Ok");
             }
@@ -234,19 +243,19 @@ async fn completion_wakes_every_awaiter_of_a_shared_ticket() {
         }
     }
 
+    let registered = Arc::new(AtomicUsize::new(0));
     let mut waiters = Vec::new();
     for _ in 0..3 {
         let ticket = Arc::clone(&ticket);
-        waiters.push(tokio::spawn(async move { await_terminal(ticket).await }));
+        let registered = Arc::clone(&registered);
+        waiters.push(tokio::spawn(async move {
+            await_terminal(ticket, registered).await
+        }));
     }
-    // First-poll every task so each waiter's `Notified` is registered BEFORE
-    // completion fires; the bounded poll proves each is alive and parked.
-    for waiter in &mut waiters {
-        poll_fn(|cx| {
-            let _ = waiter.poll(cx);
-            Poll::Ready(())
-        })
-        .await;
+    // Wait for the CONDITION: every waiter has registered its `Notified`
+    // BEFORE completion fires (a missed wakeup would otherwise be untestable).
+    while registered.load(Ordering::SeqCst) < 3 {
+        tokio::task::yield_now().await;
     }
 
     ticket.complete_detached_for_test(WalTicketState::Failed);
