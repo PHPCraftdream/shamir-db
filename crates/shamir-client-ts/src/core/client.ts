@@ -19,7 +19,7 @@ import {
   DEFAULT_REQUEST_TIMEOUT_MS,
   DEFAULT_CONNECT_TIMEOUT_MS,
 } from './types/connection.js';
-import type { BatchResponse, TransactionInfo } from './types/batch.js';
+import type { BatchResponse, TransactionInfo, IsolationLevel } from './types/batch.js';
 import type { WireValue } from './types/write.js';
 import type { ReadQuery } from './types/query.js';
 import type {
@@ -947,7 +947,7 @@ export class ShamirClient {
   async txBegin(
     db: string,
     repo: string,
-    isolation?: 'snapshot' | 'serializable',
+    isolation?: IsolationLevel,
   ): Promise<TxOpened> {
     const r = await this.sendDbRequest({
       op: 'tx_begin',

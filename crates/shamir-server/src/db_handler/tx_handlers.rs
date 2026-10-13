@@ -1,6 +1,6 @@
 use shamir_connect::server::session::Session;
 use shamir_db::query::batch::{BatchError, BatchRequest};
-use shamir_query_types::batch::{BatchTreeVisitor, VisibilityWait};
+use shamir_query_types::batch::{BatchTreeVisitor, IsolationLevel, VisibilityWait};
 
 use crate::tx_registry::{InteractiveTx, TxRegistryError};
 
@@ -16,7 +16,7 @@ impl ShamirDbHandler {
         query_version: u32,
         db_name: &str,
         repo_name: &str,
-        isolation: Option<String>,
+        isolation: Option<IsolationLevel>,
     ) -> DbResponse {
         if let Err(e) = crate::version::check_query_lang(query_version) {
             return DbResponse::Error {
@@ -24,10 +24,15 @@ impl ShamirDbHandler {
                 message: e.to_string(),
             };
         }
-        let iso = isolation.unwrap_or_else(|| "snapshot".to_string());
+        let iso = isolation.unwrap_or(IsolationLevel::Snapshot);
 
         let actor = super::handler::session_actor(session);
-        let begin = self.db.tx_begin_as(actor, db_name, repo_name, &iso).await;
+        // `ShamirDb::tx_begin_as` still speaks the wire-string vocabulary;
+        // `IsolationLevel::as_str` is exactly that vocabulary (v4 enum).
+        let begin = self
+            .db
+            .tx_begin_as(actor, db_name, repo_name, iso.as_str())
+            .await;
         let (tx, guard) = match begin {
             Ok(pair) => pair,
             Err(e) => {
@@ -62,7 +67,7 @@ impl ShamirDbHandler {
             Ok(_) => DbResponse::TxOpened {
                 tx_handle: handle,
                 snapshot_version,
-                isolation: iso,
+                isolation: iso.as_str().to_string(),
             },
         }
     }

@@ -22,7 +22,7 @@ fn handshake_v0_or_future_rejected() {
 
 #[test]
 fn query_lang_legacy_rejected() {
-    for requested in [1, 2] {
+    for requested in [1, 2, 3] {
         assert!(matches!(
             check_query_lang(requested),
             Err(VersionError::UnsupportedQueryLang { requested: actual, .. }) if actual == requested
@@ -40,6 +40,11 @@ fn query_lang_unknown_rejected() {
         check_query_lang(99),
         Err(VersionError::UnsupportedQueryLang { requested: 99, .. })
     ));
+}
+
+#[test]
+fn query_lang_v4_accepted() {
+    assert!(check_query_lang(4).is_ok());
 }
 
 #[test]

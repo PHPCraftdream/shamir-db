@@ -51,6 +51,7 @@ fn batch_with(op: BatchOp) -> BatchRequest {
         isolation: None,
         visibility_wait: None,
         durability: None,
+        index_visibility: None,
         queries,
         return_all: true,
         return_only: None,

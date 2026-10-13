@@ -82,8 +82,16 @@ impl ShamirDb {
                 code: None,
             })?;
         let iso = match isolation {
+            "snapshot" => crate::engine::tx::IsolationLevel::Snapshot,
             "serializable" => crate::engine::tx::IsolationLevel::Serializable,
-            _ => crate::engine::tx::IsolationLevel::Snapshot,
+            "pessimistic" => crate::engine::tx::IsolationLevel::Pessimistic,
+            other => {
+                return Err(BatchError::query_coded(
+                    "",
+                    "invalid_request",
+                    format!("unknown isolation '{other}'"),
+                ));
+            }
         };
         let (mut tx, guard) =
             open_interactive_tx(&repo, iso)
