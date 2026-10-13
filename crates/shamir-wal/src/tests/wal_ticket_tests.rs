@@ -7,7 +7,7 @@ use std::task::Poll;
 use crate::wal_entry_v2::WalEntryV2;
 use crate::wal_group_commit::{WalDurability, WalGroupCommit};
 use crate::wal_sink::WalSink;
-use crate::wal_ticket::{WalAppendError, WalTicketState};
+use crate::wal_ticket::{WalAppendError, WalTicket, WalTicketState};
 
 fn payload(id: u64) -> Vec<u8> {
     WalEntryV2::new(id, 7, Vec::new())
@@ -212,14 +212,10 @@ async fn uncontended_mem_append_finishes_in_one_poll() {
 // path (`append_many` shares one ticket across all frames' awaiters). With
 // `notify_waiters` every awaiter registered BEFORE completion is woken, and
 // each re-checks `done` (enable-before-check), so late registrants observe
-// the terminal state instead of waiting. Bounded first-polls register all
-// three waiters deterministically; no sleeps; every task is joined.
+// the terminal state instead of waiting. A registered-waiter counter makes
+// all three registrations deterministic; no sleeps; every task is joined.
 #[tokio::test]
 async fn completion_wakes_every_awaiter_of_a_shared_ticket() {
-    use std::future::Future;
-
-    use crate::wal_ticket::WalTicket;
-
     let ticket = Arc::new(WalTicket::detached_for_test(WalTicketState::Pending));
 
     // Mirrors `drive_and_wait`'s park loop: enable-before-check, no deadline.
