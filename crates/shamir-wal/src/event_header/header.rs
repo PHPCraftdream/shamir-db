@@ -60,7 +60,7 @@ pub struct WalExtraChange {
 
 mod serde_bytes_bytes {
     use bytes::Bytes;
-    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn serialize<S: Serializer>(b: &Bytes, s: S) -> Result<S::Ok, S::Error> {
         serde_bytes::Bytes::new(b.as_ref()).serialize(s)
