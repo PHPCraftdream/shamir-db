@@ -415,7 +415,8 @@ export interface PurgeHistoryOp {
 }
 
 export interface ChangesSinceOp {
-  changes_since: number;
+  /** u64 cursor; `bigint` for values above 2^53 (MessagePack keeps it lossless). */
+  changes_since: number | bigint;
   repo: string;
   limit?: number;
 }

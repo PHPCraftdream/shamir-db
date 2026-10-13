@@ -345,8 +345,54 @@ assuming settlement proves an unknown transaction committed.
 Current wire limitation: only `as_of_visibility_timeout` carries structured
 `requested`, `visible_through`, `blocking_version`. Other visibility codes
 carry code/message only; typed client mappings do not parse diagnostics or
-invent missing positions. Implicit/non-transactional per-alias receipts are
-VIS-5b, not this API.
+invent missing positions.
+
+### Клиентские квитанции неявных батчей и changes_since (VIS-5b)
+
+Не-транзакционный батч с записями возвращает квитанцию на КАЖДЫЙ write-алиас
+в `QueryResult.receipt`. Квитанция — это ИЗВЕСТНОЕ committed-решение:
+`pending` — не ошибка и не команда на повторную отправку. Rust:
+`client.execute_with_receipts(db, batch, visibility_wait)` возвращает ответ и
+`Vec<AliasReceipt>` (alias, transaction, visibility, repo); репозиторий
+выводится из table-ref запроса. Если репозиторий вывести однозначно нельзя
+(алиас внутри вложенного sub-batch/for-each) — `repo: None`, и
+`reconcile_receipts` ОТКАЗЫВАЕТСЯ угадывать типизированной ошибкой.
+TS: `client.executeWithReceipts(db, batch, visibilityWait?)` — то же самое;
+подавленный алиас (`return_result: false`) приходит «оболочкой» без строк, но
+с квитанцией — читайте её из оболочки, а не из строк.
+
+Reconciliation группирует pending-квитанции по репозиторию и делает ОДНО
+наблюдение на репозиторий на максимальном pending-позиции; ни одной записи
+не отправляется повторно, циклов нет. Позиции привязаны к ТЕКУЩЕЙ инкарнации
+репозитория: удаление и повторное создание под тем же именем — это другой
+репозиторий, wire этого не различает — не мирите квитанцию через
+delete/recreate. После наблюдения открывайте НОВЫЙ снапшот.
+
+```ts
+const { receipts } = await client.executeWithReceipts('db', batch, { mode: 'bounded', timeout_ms: 0 });
+const pending = receipts.filter((r) => r.visibility.state === 'pending');
+// один вызов waitForVisibility на репозиторий, на максимальном позиции:
+for (const r of pending) {
+  if (r.repo === null) throw new Error('cannot derive repository; refusing to guess');
+}
+```
+
+`changes_since` теперь типизирован: Rust `client.changes_since(db, repo,
+cursor, limit)` (запрос строит query-builder) и TS
+`client.changesSince(db, repo, cursor, limit?)` возвращают
+`{ changes_since, events, gap_at, visible_through }`. Клиент декодирует u64
+точно (`u64` в Rust DTO — включая десятично-строковую форму
+`QueryValue::Big`; `bigint` в TS; курсор принимает `number | bigint`,
+значения выше 2^53 — только `bigint`). ОГОВОРКА: сервер сегодня семплирует
+и кастирует эти позиции через `i64`, поэтому значения выше `i64::MAX` он
+сейчас не производит — lossless-декодирование это клиентская гарантия, а не
+свойство текущего wire. `visible_through` — выборка settled-префикса W ДО чтения
+журнала: это образец settlement, а НЕ сертификат покрытия. Пустой `events` —
+не доказательство abort/vanish pending-записи; подтверждение журнала может
+отставать от W; события по-прежнему ограничены cursor/limit/gaps/retention.
+НЕ двигайте курсор событий до `visible_through` только на основании этого
+поля; `WaitForVisibility` остаётся основным reconciliation-API, `gap_at` и
+retention требуют ресинхронизации.
 
 ### Валидация при старте
 

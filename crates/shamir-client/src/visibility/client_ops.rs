@@ -14,14 +14,14 @@ impl Client {
         version: u64,
         wait: VisibilityWait,
     ) -> Result<VisibilityState, ClientError> {
-        let request = DbRequest::WaitForVisibility {
-            query_version: CURRENT_QUERY_LANG_VERSION,
-            db: db.into(),
-            repo: repo.into(),
+        crate::receipts::wait_for_visibility_via(
+            |req| async move { self.roundtrip(&req).await },
+            db,
+            repo,
             version,
-            visibility_wait: wait,
-        };
-        super::observe_once(version, self.roundtrip(&request)).await
+            wait,
+        )
+        .await
     }
 
     /// No replay or rollback on pending, durability warnings or unknown acknowledgements.

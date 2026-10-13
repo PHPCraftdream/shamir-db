@@ -11,6 +11,7 @@ import type { VisibilityWait, VisibilityState } from './visibility/types.js';
 import { validateTransactionVisibility, normalizeWait } from './visibility/positions.js';
 import { commitTransaction } from './visibility/commit.js';
 import { waitForVisibility } from './visibility/wait.js';
+import { executeWithReceipts, requestChangesSince, type AliasReceipt, type ChangesSinceResult } from './receipts/index.js';
 import { responseError } from './visibility/errors.js';
 import type { Platform } from './platform.js';
 import type { ConnectOptions, ConnectLocalOptions, ResumeOptions } from './types/index.js';
@@ -996,6 +997,9 @@ export class ShamirClient {
   async txCommit(db: string, txHandle: number, visibilityWait?: VisibilityWait): Promise<TransactionInfo> {
     return commitTransaction((req) => this.sendDbRequest(req), db, txHandle, visibilityWait);
   }
+
+  executeWithReceipts(db: string, batch: object, visibilityWait?: VisibilityWait): Promise<{ response: BatchResponse; receipts: AliasReceipt[] }> { return executeWithReceipts(this, db, batch, visibilityWait); }
+  changesSince(db: string, repo: string, cursor: number | bigint, limit?: number): Promise<ChangesSinceResult> { return requestChangesSince(this, db, repo, cursor, limit); }
 
   /** Roll back (abort) an open interactive transaction. */
   async txRollback(db: string, txHandle: number): Promise<void> {

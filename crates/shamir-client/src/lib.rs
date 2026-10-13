@@ -32,6 +32,7 @@ pub mod cursor_stream;
 mod error;
 pub mod interner_cache;
 mod interner_cache_ops;
+mod receipts;
 pub mod subscription;
 mod wire_frames;
 
@@ -43,6 +44,8 @@ pub use cursor_stream::CursorStream;
 pub mod visibility;
 pub use error::ClientError;
 pub use interner_cache::{FieldMap, InternerCacheRegistry};
+pub use receipts::{extract_receipts, reconcile_receipts, AliasReceipt, RepoObservation};
+pub use shamir_query_types::admin::ChangesSinceResponse;
 pub use subscription::SubscriptionHandle;
 pub use visibility::{
     CommitResult, TransactionInfo, VisibilityPendingReason, VisibilityState, VisibilityWait,

@@ -1,6 +1,7 @@
 //! Admin (DDL) operation types.
 
 pub mod buffer_config;
+pub mod changes_since_response;
 pub mod db_ops;
 pub mod fk_action;
 pub mod function_ops;
@@ -17,6 +18,9 @@ pub mod validator_ops;
 
 pub use buffer_config::{
     AlterBufferConfigOp, BufferConfigDto, BufferConfigPatch, GetBufferConfigOp, SetBufferConfigOp,
+};
+pub use changes_since_response::{
+    ChangeOpKind, ChangesSinceEvent, ChangesSinceRecordChange, ChangesSinceResponse,
 };
 pub use db_ops::{CreateDbOp, DropDbOp};
 pub use fk_action::FkAction;

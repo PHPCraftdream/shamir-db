@@ -106,9 +106,20 @@ async fn seed_e2e_d_reopen_at_install_resume_and_first_batch_boundaries() {
         }
     })
     .await;
+    // The follower persists the bookmark only after the applied rows are
+    // durable, so the rows can be visible a moment before the bookmark moves:
+    // wait for the bookmark itself instead of sampling it right after the rows.
+    follower::wait_until("first batch advances the bookmark", WAIT, {
+        let home = home.clone();
+        move || {
+            let home = home.clone();
+            async move { follower::bookmark(&home).await > v }
+        }
+    })
+    .await;
+    supervisor.stop_all().await;
     let bookmark = follower::bookmark(&home).await;
     assert!(bookmark > v, "first batch advanced the bookmark");
-    supervisor.stop_all().await;
     drop(supervisor);
     drop(home);
     let home = Arc::new(follower::open_home(&home_dir).await);
