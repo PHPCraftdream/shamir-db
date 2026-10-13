@@ -3,8 +3,29 @@ name: numa
 on:
   push:
     branches: [master]
+    # Path gating: a change that cannot touch NUMA behaviour does not queue
+    # these jobs (a filtered push/PR does not start the workflow at all —
+    # intended).
+    paths:
+      - 'crates/shamir-numa/**'
+      - 'crates/shamir-tunables/**'
+      - 'Cargo.lock'
+      - '.github/workflows/numa.yml'
   pull_request:
     branches: [master]
+    # ready_for_review starts the run when a draft is promoted.
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'crates/shamir-numa/**'
+      - 'crates/shamir-tunables/**'
+      - 'Cargo.lock'
+      - '.github/workflows/numa.yml'
+
+# A newer push to the same PR cancels the older (superseded) run; master
+# pushes are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -23,6 +44,8 @@ jobs:
   tier1-mock:
     name: numa tier1 mock (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Draft pushes are covered by the fast tier in ci.yml, not here.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     strategy:
       fail-fast: false
       matrix:
@@ -47,7 +70,7 @@ jobs:
   tier3-qemu:
     name: numa tier3 qemu emulation (opt-in)
     runs-on: ubuntu-latest
-    if: contains(github.event.head_commit.message, '[numa-qemu]')
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && contains(github.event.head_commit.message, '[numa-qemu]')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install QEMU + numactl

@@ -44,10 +44,21 @@ name: supply-chain
 #    This job is retained for between-release / on-demand SBOM generation.
 
 on:
+  # Push to master stays UNFILTERED — the lockfile gate must cover every
+  # commit that lands, regardless of which paths it touches.
   push:
     branches: [master]
   pull_request:
     branches: [master]
+    # ready_for_review starts the run when a draft is promoted. Path-gated:
+    # a PR that cannot change the dependency graph does not queue these jobs
+    # (a filtered PR does not start the workflow at all — intended).
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'deny.toml'
+      - '.github/workflows/supply-chain.yml'
   schedule:
     # Sundays 03:17 UTC — picked off the top/bottom of the hour to ease load on
     # the shared GitHub Actions runner pool. Weekly matches the dependabot
@@ -55,6 +66,12 @@ on:
     # arrive in the same weekly window.
     - cron: "17 3 * * 0"
   workflow_dispatch: {}
+
+# A newer push to the same PR cancels the older (superseded) run; master
+# pushes, scheduled and manual runs are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -72,6 +89,8 @@ jobs:
   deny:
     name: cargo deny check
     runs-on: ubuntu-latest
+    # Draft pushes are covered by the fast tier in ci.yml, not here.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       # `cargo deny check` needs a Cargo.lock to resolve the graph; it does not
