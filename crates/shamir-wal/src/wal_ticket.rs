@@ -104,17 +104,14 @@ impl WalTicket {
         if !self.done.load(Ordering::Acquire) {
             self.state.store(state as u8, Ordering::Release);
             self.done.store(true, Ordering::Release);
-            // WAKE EVERY REGISTERED AWAITER, not one. `notify_one` is only
-            // safe for a strictly single-waiter ticket; the batched API
-            // (`append_many` / `begin_grouped_many`) hands the SAME ticket
-            // to every frame's awaiter, and `drive_and_wait` parks each of
-            // them on this Notify with NO deadline. With `notify_one`,
-            // exactly one of N concurrent awaiters is woken and the other
-            // N-1 park FOREVER — a lost wakeup that manifests as a hung
-            // commit. `notify_waiters` wakes every already-registered
-            // Notified; late registrants are covered by the enable()-
-            // before-check re-read of `done` in `drive_and_wait`.
+            // Wake EVERY registered awaiter: the batched API (`append_many`)
+            // shares one ticket among several awaiters, and `notify_one`
+            // would wake only one of them. ALSO store one permit for a
+            // late registrant (poll-based completion futures create their
+            // `Notified` after `complete`, and `notify_waiters` stores no
+            // permit); every awaiter re-reads `done` after a wake.
             self.notify.notify_waiters();
+            self.notify.notify_one();
         }
     }
 
