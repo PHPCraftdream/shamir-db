@@ -1,9 +1,12 @@
+#[path = "durability_policy/durability_policy/repo_impl.rs"]
+mod durability_impl;
 use super::super::table::{TableConfig, TableManager};
 use super::fk_reverse_cache::FkReverseCache;
 use super::group_commit::GroupCommit;
 use super::repo_types::{BoxRepo, BoxRepoFactory, RepoFactory};
 use crate::query::batch::BatchError;
 use crate::query::write::WriteResult;
+use crate::repo::durability_policy::{DurabilityMetrics, DurabilityPolicy};
 use crate::table::interner_manager::InternerManager;
 use crate::tx::CommitTailBarrier;
 use shamir_query_types::batch::VisibilityWait;
@@ -39,6 +42,8 @@ pub struct RepoInstance {
     tx_gate: Arc<OnceCell<Arc<shamir_tx::RepoTxGate>>>,
     /// Lazy-initialized RepoWalManager. Created on first call to `repo_wal()`.
     repo_wal: Arc<OnceCell<Arc<shamir_tx::RepoWalManager>>>,
+    /// Shared initialized WAL coordinator for durable replication pulls.
+    wal_group: Arc<OnceCell<Arc<shamir_wal::WalGroupCommit>>>,
     /// Per-table MvccStore map for SSI version provider. Populated
     /// on demand when `create_table_context` instantiates a
     /// TableManager — both share the same data_store reference.
@@ -134,6 +139,11 @@ pub struct RepoInstance {
     #[cfg(test)]
     pub(crate) table_init_hook:
         Arc<arc_swap::ArcSwapOption<super::tests::table_init_retry_tests::TableInitHook>>,
+    /// Shared policy installed before recovery and observed by every clone.
+    durability: Arc<arc_swap::ArcSwap<DurabilityPolicy>>,
+    durability_metrics: Arc<DurabilityMetrics>,
+    /// Captured once at construction; validation and rotation use the same size.
+    wal_segment_bytes: u64,
 }
 
 /// Bundle of the per-repo changefeed and the store it journals into.
@@ -175,6 +185,10 @@ impl Clone for RepoInstance {
             fk_reverse_cache: Arc::clone(&self.fk_reverse_cache),
             #[cfg(test)]
             table_init_hook: Arc::clone(&self.table_init_hook),
+            wal_group: Arc::clone(&self.wal_group),
+            durability: Arc::clone(&self.durability),
+            durability_metrics: Arc::clone(&self.durability_metrics),
+            wal_segment_bytes: self.wal_segment_bytes,
         }
     }
 }
@@ -210,6 +224,7 @@ impl RepoInstance {
 
         let tables: TDashMap<String, Arc<OnceCell<TableManager>>> = new_dash_map_wc(100);
 
+        let policy = DurabilityPolicy::default().for_wal_backend(wal_dir.is_some());
         Self {
             name,
             commit_visibility_wait: VisibilityWait::Strict,
@@ -238,6 +253,10 @@ impl RepoInstance {
             fk_reverse_cache: Arc::new(FkReverseCache::new()),
             #[cfg(test)]
             table_init_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            wal_group: Arc::new(OnceCell::new()),
+            durability_metrics: Arc::new(DurabilityMetrics::default()),
+            durability: Arc::new(arc_swap::ArcSwap::from_pointee(policy)),
+            wal_segment_bytes: super::durability_policy::effective_wal_segment_bytes(),
         }
     }
 
@@ -332,20 +351,8 @@ impl RepoInstance {
         factory: BoxRepoFactory,
         configs: Vec<TableConfig>,
     ) -> DbResult<Self> {
-        #[cfg(test)]
-        let fixture = super::tests::recovery_gap_marker_tests::take_open_fixture(&name);
-        #[cfg(test)]
-        let instance = match fixture {
-            Some(instance) => instance,
-            None => Self::from_factory_unrecovered(name, factory, configs).await?,
-        };
-        #[cfg(not(test))]
-        let instance = Self::from_factory_unrecovered(name, factory, configs).await?;
-        // Exclusive factory open initializes legacy identity before registry
-        // publication. All later cloned handles share marker_write_mutex.
-        instance.repo_identity().await?;
-        instance.recover_v2_inflight().await?;
-        Ok(instance)
+        Self::from_factory_with_durability(name, factory, configs, DurabilityPolicy::default())
+            .await
     }
 
     /// Unrecovered disk handle solely for tests that explicitly exercise replay
@@ -410,12 +417,17 @@ impl RepoInstance {
 
     /// Read the unchanged journal, attaching name bindings only for Pull.
     /// The tuple retains the journal's gap metadata; translation errors propagate.
+    ///
+    /// Replication-only R clamp; ordinary changefeeds retain completion W.
     pub async fn read_changelog_for_replication(
         &self,
         from_version: u64,
         limit: usize,
     ) -> DbResult<(Vec<crate::tx::ReplicatedEvent>, Option<u64>)> {
-        let journal = self.read_changelog_from(from_version, limit).await?;
+        let journal = self
+            .read_changelog_replication_page(from_version, limit)
+            .await?
+            .read;
         let manager = self.repo_interner().await?;
         let interner = manager.get().await?;
         let mut events = Vec::with_capacity(journal.events.len());
@@ -949,9 +961,15 @@ impl RepoInstance {
                 // construction — recovery (which propagates errors) runs
                 // separately on the open path.
                 let max_inflight = self.max_inflight_commit_version().await.unwrap_or(0);
-                let last_committed = marker.max(max_inflight);
+                let checkpoint =
+                    super::durability_policy::checkpoint_allocation_floor(self).await?;
+                let last_committed = marker.max(max_inflight).max(checkpoint);
 
                 let gate = shamir_tx::RepoTxGate::new(last_committed, next_tx_id);
+                let group = self.wal_group().await?;
+                if let Some(coverage) = group.coverage_observer() {
+                    gate.completion().install_abort_coverage(coverage);
+                }
                 Ok::<Arc<shamir_tx::RepoTxGate>, DbError>(Arc::new(gate))
             })
             .await
@@ -1056,18 +1074,17 @@ impl RepoInstance {
                         // rotation+seal so truncation/growth-limit tests can
                         // reach segment boundaries without huge data volumes),
                         // NOT a debug-only seam — left live in every build, but
-                        // the default is always the const. One `env::var` per
-                        // repo open is negligible.
-                        let seg_max_bytes = std::env::var("SHAMIR_WAL_SEGMENT_MAX_BYTES")
-                            .ok()
-                            .and_then(|v| v.parse::<u64>().ok())
-                            .unwrap_or(shamir_tunables::instance_defaults::WAL_SEGMENT_MAX_BYTES);
+                        // Captured at construction so validation and rotation
+                        // cannot observe different environment values.
+                        let seg_max_bytes = self.wal_segment_bytes;
                         let segset =
                             shamir_wal::SegmentSet::open(wal_dir.clone(), seg_max_bytes).await?;
                         let sink = shamir_wal::WalSink::File(segset);
                         let group = Arc::new(shamir_wal::WalGroupCommit::new(Arc::new(sink)));
-                        // RF1: background fsync bounds the power-loss window for
-                        // Buffered (level 2) commits. 250 ms = max data-at-risk.
+                        super::durability_policy::install_empty_coverage(&group)?;
+                        // RF1: 250 ms is the nominal background fsync timer,
+                        // not a hard power-loss bound; I/O errors and scheduling
+                        // delays can extend the unsynced window.
                         const WAL_BG_FSYNC_MS: u64 = 250;
                         group.spawn_background_fsync(std::time::Duration::from_millis(
                             WAL_BG_FSYNC_MS,
@@ -1075,11 +1092,20 @@ impl RepoInstance {
                         group
                     }
                     None => {
+                        // Successful OnceCell initialization logs once, never per commit.
+                        log::warn!(
+                            "repo '{}': Mem WAL sink is not durable — wal_commit policy tier is ignored for this in-memory/hybrid backend",
+                            self.name
+                        );
                         let sink = shamir_wal::WalSink::mem();
-                        Arc::new(shamir_wal::WalGroupCommit::new(Arc::new(sink)))
+                        let group = Arc::new(shamir_wal::WalGroupCommit::new(Arc::new(sink)));
+                        super::durability_policy::install_empty_coverage(&group)?;
+                        group
                     }
                 };
-                let mgr = shamir_tx::RepoWalManager::new(initial_txn_id, group);
+                let mgr = shamir_tx::RepoWalManager::new(initial_txn_id, Arc::clone(&group));
+                // Publish the group for the replication read path's R bound.
+                let _ = self.wal_group.set(group);
 
                 // Anti-collision safeguard: floor next_txn_id above any
                 // inflight txn_id replayed from the WAL, so a fresh
@@ -1606,7 +1632,7 @@ impl RepoInstance {
         limit: usize,
     ) -> DbResult<shamir_tx::JournalRead> {
         Ok(self
-            .read_changelog_bounded_impl(from_version, limit, false)
+            .read_changelog_bounded_impl(from_version, limit, false, None)
             .await?
             .read)
     }
@@ -1621,15 +1647,18 @@ impl RepoInstance {
         from_version: u64,
         limit: usize,
     ) -> DbResult<super::BoundedJournalRead> {
-        self.read_changelog_bounded_impl(from_version, limit, true)
+        self.read_changelog_bounded_impl(from_version, limit, true, None)
             .await
     }
 
-    async fn read_changelog_bounded_impl(
+    pub(super) async fn read_changelog_bounded_impl(
         &self,
         from_version: u64,
         limit: usize,
         preserve_errors: bool,
+        // PR1: replication-only extra clamp (`R`). `None` everywhere else —
+        // changefeed subscribers keep the completion-watermark bound.
+        r_clamp: Option<u64>,
     ) -> DbResult<super::BoundedJournalRead> {
         let sampled_w = self.tx_gate().await?.completion().watermark();
         let h = self.changefeed().await?;
@@ -1637,7 +1666,8 @@ impl RepoInstance {
             .feed
             .confirm_through(sampled_w, JOURNAL_CONFIRM_BUDGET)
             .await
-            .min(sampled_w);
+            .min(sampled_w)
+            .min(r_clamp.unwrap_or(u64::MAX));
         let observed = preserve_errors.then(|| {
             Arc::new(super::bounded_journal_read::ErrorPreservingJournalStore::new(h.store.clone()))
         });
@@ -1891,18 +1921,9 @@ impl RepoInstance {
     /// Conservative, not exact: even a complete journal invalidates (J, H].
     /// Followers at/below H stop with JournalGap/resync_required; automated
     /// reseeding is not supported. A legacy directory without J certifies once.
-    /// H is the existing marker/surviving-WAL gate floor, NOT a history maximum.
+    /// H is the marker/surviving-WAL/clean-checkpoint floor, NOT a history maximum.
     pub(crate) async fn certify_cold_start(&self) -> DbResult<()> {
-        let gate = self.tx_gate().await?;
-        let h = gate.version_allocation_high_water_mark();
-        let handle = self.changefeed().await?;
-        let j = handle.feed.clean_horizon();
-        if h > j {
-            // h > j proves j + 1 cannot overflow.
-            handle.feed.record_recovery_gap(j + 1, h).await?;
-            handle.feed.record_clean_horizon(h).await?;
-        }
-        Ok(())
+        super::durability_policy::certify_recovered_open(self).await
     }
 
     /// Caller MUST stop commit/apply admission before calling this method.
@@ -2104,7 +2125,11 @@ impl RepoInstance {
     /// Force a durable `fsync` of this repo's file WAL (level 2 → level 3).
     /// In-memory repos have no file WAL — this is a no-op there.
     pub async fn sync_wal(&self) -> DbResult<()> {
-        self.repo_wal().await?.sync_wal().await
+        let wal = self.repo_wal().await?;
+        if self.initialized_mem_wal() {
+            return Ok(());
+        }
+        wal.sync_wal().await
     }
 
     /// Spawn a background task that runs GC periodically.

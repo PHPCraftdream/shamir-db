@@ -57,11 +57,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::byte_budget::ByteBudget;
 
+mod durability_export;
 mod visibility_export;
 
 #[cfg(test)]
 mod tests;
 
+use durability_export::{record_durability_metrics, register_durability_metrics};
 use visibility_export::{record_visibility_metrics, register_visibility_metrics};
 
 /// Live state shared between the HTTP handlers and the boot path.
@@ -445,6 +447,8 @@ pub async fn spawn_with_byte_budget(
 
     // VIS-4c: visibility acknowledgement/reconciliation family, zero-touch.
     register_visibility_metrics();
+    // Amendment B2: WAL sync lag / sync_now / replication held-back family.
+    register_durability_metrics();
 
     // 4. Background poller: refresh process metrics every 5 s. Cheap
     // (~30-50 µs of work). The first collect() is invoked synchronously
@@ -693,6 +697,11 @@ fn open_gate_snapshots(db: &shamir_db::ShamirDb) -> Vec<GateSample> {
 pub(crate) fn sample_gate_metrics(db: &shamir_db::ShamirDb) {
     for (db_name, repo, snapshot, visibility) in open_gate_snapshots(db) {
         record_gate_metrics(&db_name, &repo, &snapshot, visibility.as_ref());
+        if let Some(instance) = db.get_db(&db_name) {
+            if let Some(handle) = instance.get_repo(&repo) {
+                record_durability_metrics(&db_name, &repo, &handle.durability_metrics_snapshot());
+            }
+        }
     }
 }
 

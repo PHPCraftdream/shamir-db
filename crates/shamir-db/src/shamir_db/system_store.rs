@@ -13,7 +13,7 @@ use shamir_types::types::value::QueryValue;
 
 use crate::engine::db_instance::db_instance::DbInstance;
 use crate::engine::repo::repo_types::BoxRepoFactory;
-use crate::engine::repo::{RepoConfig, RepoInstance};
+use crate::engine::repo::{DurabilityPolicy, RepoConfig, RepoInstance};
 use crate::engine::table::{TableConfig, TableManager};
 use crate::{DbError, DbResult};
 
@@ -89,6 +89,14 @@ fn qv_map2(k1: &str, v1: QueryValue, k2: &str, v2: QueryValue) -> QueryValue {
 impl SystemStore {
     /// Initialize system store with the given config.
     pub async fn init(config: SystemStoreConfig) -> DbResult<Self> {
+        Self::init_with_durability(config, DurabilityPolicy::default()).await
+    }
+
+    /// Open the metadata repository with the same policy as user repositories.
+    pub(crate) async fn init_with_durability(
+        config: SystemStoreConfig,
+        policy: DurabilityPolicy,
+    ) -> DbResult<Self> {
         let db = DbInstance::new();
 
         let factory = match config {
@@ -112,7 +120,7 @@ impl SystemStore {
             .add_table(TableConfig::new(TABLE_SUBSCRIPTIONS));
 
         // DbInstance recovers/certifies before exposing the system repo.
-        db.add_repo(repo_config).await?;
+        db.add_repo_with_durability(repo_config, policy).await?;
 
         Ok(Self { db })
     }

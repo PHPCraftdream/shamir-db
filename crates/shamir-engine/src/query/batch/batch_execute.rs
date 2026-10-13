@@ -236,6 +236,11 @@ async fn flush_if_synced_durability(
         // committed entries reach level 3 (the WAL is the source of
         // truth; data-store flush above is derived). No-op for
         // in-memory repos.
+        //
+        // PR1: `sync_wal` demands a coalesced sync round that captures
+        // coverage before fsync. Success covers that captured generation;
+        // R advances only through covered predecessors. Successful sync
+        // alone does not guarantee immediate replication serving across holes.
         repo.sync_wal().await.map_err(|e| BatchError::QueryError {
             alias: String::new(),
             message: format!("synced wal {}/{}: {}", db_name, repo_name, e),

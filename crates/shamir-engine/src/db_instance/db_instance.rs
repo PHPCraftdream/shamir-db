@@ -1,5 +1,5 @@
 use super::super::table::{TableConfig, TableManager};
-use crate::repo::{RepoConfig, RepoInstance};
+use crate::repo::{DurabilityPolicy, RepoConfig, RepoInstance};
 use dashmap::DashMap;
 use shamir_funclib::scalar_resolver::UserScalarLayer;
 use shamir_storage::error::{DbError, DbResult};
@@ -50,9 +50,24 @@ impl DbInstance {
 
     /// Add a new repository asynchronously
     pub async fn add_repo(&self, config: RepoConfig) -> DbResult<()> {
+        self.add_repo_with_durability(config, DurabilityPolicy::default())
+            .await
+    }
+
+    /// Validate and install the policy before recovery and registry publication.
+    pub async fn add_repo_with_durability(
+        &self,
+        config: RepoConfig,
+        policy: DurabilityPolicy,
+    ) -> DbResult<()> {
         let name = config.name.clone();
-        let instance =
-            RepoInstance::from_factory(name.clone(), config.factory, config.tables).await?;
+        let instance = RepoInstance::from_factory_with_durability(
+            name.clone(),
+            config.factory,
+            config.tables,
+            policy,
+        )
+        .await?;
         // The async constructor recovers/certifies before returning a handle.
         // Includes facade, config-driven and system-store callers.
         self.repos.insert(name, instance);

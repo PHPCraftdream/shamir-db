@@ -58,6 +58,33 @@ reported journal gap, and `current_version` for lag calculation. A missing
 `gap_at` does not prove a complete journal; no snapshot/reseed is available.
 Dispatcher: `crates/shamir-server/src/db_handler/repl_handler.rs`.
 
+### PR1: локальный WAL и replication lag
+
+Durable Pull ограничен `min(confirmed, W, R)`; R — **непрерывный префикс
+recoverability**, а не максимальная версия, прошедшая fsync. При нехватке
+R pull запрашивает coalesced demand sync и ограниченно ждёт продвижения R;
+на ошибке/таймауте остаётся старый безопасный bound. Lag — не обязательное
+ожидание 250 мс фонового tick: journal confirmation, WAL recoverability и
+скорость follower apply — разные источники отставания. Не продвигайте
+bookmark по одному лишь `current_version` вместо реально применённых событий.
+
+Серверный `durability.wal_commit: buffered` подтверждает локальный WAL write
+на файловом backend; process crash ≠ power loss. Номинальные 250 мс
+background fsync не hard maximum (storage errors и задержки могут растянуть
+окно). `synced` ждёт coalesced fsync, но не follower. Mem/hybrid не persistent,
+tier игнорируется с одним warn при open. Retention budget/action parsed only
+до PR2; `declare_gap` не включает эвикцию. `replication_serve` только `durable`:
+`completed_reseed is not available yet (planned: epoch bump + universal fencing)`.
+
+`shamir_wal_synced_lag_versions`, `shamir_wal_sync_now_calls`,
+`shamir_replication_pull_held_back_ns` и `..._held_back_count` существуют в
+exporter с labels `db` и `repo`; источники принадлежат repo/WAL instance.
+Sync calls учитываются сразу при demand, rounds — после завершения;
+duration включает snapshot replay и sync, не только fsync syscall. Подробнее:
+[durability](./02-durability.md) и [operations](./07-operations.md).
+PR1 не превращает экспериментальную репликацию в HA/failover и не заменяет
+проверки identity/schema/gaps при seeded Resume.
+
 ### Leader-follower репликация — реализовано (Experimental)
 
 Follower-цикл, супервизор и источники (`InProcess`/`Wire`) живут в

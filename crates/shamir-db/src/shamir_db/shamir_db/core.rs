@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::engine::migration::MigrationCoordinator;
-use crate::engine::repo::{BoxRepoFactory, RepoConfig};
+use crate::engine::repo::{BoxRepoFactory, DurabilityPolicy, RepoConfig};
 use crate::engine::table::TableConfig;
 
 use super::super::ports::{PrincipalResolver, UserAdminPort};
@@ -136,6 +136,8 @@ pub struct ShamirDb {
     /// so all `ShamirDb` clones observe the toggle (matches the
     /// established `Arc<...>` shared-state pattern on this struct).
     pub(super) experimental_migration_enabled: Arc<std::sync::atomic::AtomicBool>,
+    /// Server-default policy, validated at initialization and each repository open.
+    pub(super) durability_policy: DurabilityPolicy,
 }
 
 impl ShamirDb {
@@ -144,7 +146,13 @@ impl ShamirDb {
     /// # Arguments
     /// * `config` — system store config (InMemory for tests, Redb(path) for production)
     pub async fn init(config: SystemStoreConfig) -> DbResult<Self> {
-        Self::init_with_env_policy(config, EnvPolicy::default()).await
+        Self::init_inner(
+            config,
+            EnvPolicy::default(),
+            false,
+            DurabilityPolicy::default(),
+        )
+        .await
     }
 
     /// Initialize ShamirDb with a system store and an explicit env-seeding policy.
@@ -155,26 +163,35 @@ impl ShamirDb {
         config: SystemStoreConfig,
         policy: EnvPolicy,
     ) -> DbResult<Self> {
-        Self::init_inner(config, policy, false).await
+        Self::init_inner(config, policy, false, DurabilityPolicy::default()).await
     }
 
     /// The normal server init/recovery path with a catalogue allocation budget.
     pub async fn init_seed(config: SystemStoreConfig) -> DbResult<Self> {
-        Self::init_inner(config, EnvPolicy::default(), true).await
+        Self::init_inner(
+            config,
+            EnvPolicy::default(),
+            true,
+            DurabilityPolicy::default(),
+        )
+        .await
     }
 
-    async fn init_inner(
+    /// Shared initialization preserving the supplied environment-seeding policy.
+    pub(super) async fn init_inner(
         config: SystemStoreConfig,
         policy: EnvPolicy,
         seed: bool,
+        durability: DurabilityPolicy,
     ) -> DbResult<Self> {
+        let durability = Self::resolve_durability(durability)?;
         // Derive data_root BEFORE `config` is moved into SystemStore::init.
         let data_root: Option<std::path::PathBuf> = match &config {
             SystemStoreConfig::InMemory => None,
             SystemStoreConfig::Fjall(p) => p.parent().map(|d| d.to_path_buf()),
         };
 
-        let system_store = SystemStore::init(config).await?;
+        let system_store = SystemStore::init_with_durability(config, durability).await?;
 
         let dbs = Arc::new(DashMap::with_hasher(THasher::default()));
         let admin_user_locks = Arc::new(DashMap::with_hasher(THasher::default()));
@@ -209,6 +226,7 @@ impl ShamirDb {
             user_admin_port: None,
             principal_resolver: None,
             experimental_migration_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            durability_policy: durability,
         };
 
         if seed {
@@ -267,7 +285,8 @@ impl ShamirDb {
                     // Fail closed, before registry insertion, including J load
                     // and gap/J persistence failures. Do not silently skip repos.
                     shamir.seed_boot_gate(engine, path).await?;
-                    db.add_repo(config).await?;
+                    db.add_repo_with_durability(config, shamir.durability_policy)
+                        .await?;
                 }
             }
         }
@@ -482,6 +501,12 @@ impl ShamirDb {
     /// Initialize with in-memory system store (convenience for tests).
     pub async fn init_memory() -> DbResult<Self> {
         Self::init(SystemStoreConfig::InMemory).await
+    }
+
+    /// The server-default policy supplied to repository opens.
+    /// See [`Self::init_with_durability`].
+    pub fn durability_policy(&self) -> DurabilityPolicy {
+        self.durability_policy
     }
 
     /// Get the system store.
