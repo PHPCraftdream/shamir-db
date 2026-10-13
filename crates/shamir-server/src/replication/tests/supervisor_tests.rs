@@ -348,10 +348,8 @@ struct AlwaysGapReplSource {
 #[async_trait]
 impl ReplSource for AlwaysGapReplSource {
     async fn hello(&self, _node_id: &str) -> Result<ReplResponse, ReplError> {
-        Ok(ReplResponse::Hello {
-            leader_epoch: 1,
-            repos: Vec::new(),
-        })
+        // Exercise first-Pull adoption: no successful Hello in this fixture.
+        Err(ReplError::Transport("fixture starts with Pull".into()))
     }
 
     async fn pull(
@@ -364,8 +362,8 @@ impl ReplSource for AlwaysGapReplSource {
     ) -> Result<ReplResponse, ReplError> {
         Ok(ReplResponse::Pull {
             schema_digest: None,
-            repo_lineage_id: None,
-            history_epoch: None,
+            repo_lineage_id: Some([1; 16]),
+            history_epoch: Some(0),
             gap_first: None,
             gap_through: None,
             leader_epoch: 1,
@@ -622,10 +620,8 @@ struct PartialSource {
 #[async_trait]
 impl ReplSource for PartialSource {
     async fn hello(&self, _node: &str) -> Result<ReplResponse, ReplError> {
-        Ok(ReplResponse::Hello {
-            leader_epoch: 1,
-            repos: Vec::new(),
-        })
+        // Exercise first-Pull adoption: no successful Hello in this fixture.
+        Err(ReplError::Transport("fixture starts with Pull".into()))
     }
 
     async fn pull(
@@ -639,8 +635,8 @@ impl ReplSource for PartialSource {
         self.pulls.fetch_add(1, Ordering::AcqRel);
         Ok(ReplResponse::Pull {
             schema_digest: None,
-            repo_lineage_id: None,
-            history_epoch: None,
+            repo_lineage_id: Some([1; 16]),
+            history_epoch: Some(0),
             gap_first: None,
             gap_through: None,
             leader_epoch: 1,
