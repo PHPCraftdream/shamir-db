@@ -24,6 +24,7 @@
 //! = `min(confirmed, W, R)`.
 
 mod durability_metrics;
+#[allow(clippy::module_inception)] // the policy type lives in the file of the same name
 mod durability_policy;
 mod replication_bound;
 mod resolve;
