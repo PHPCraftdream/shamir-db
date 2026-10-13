@@ -5,6 +5,16 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+    # ready_for_review is what starts the FULL tier when a draft is promoted.
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch: {}
+
+# A newer push to the same PR cancels the older (superseded) run so it stops
+# hogging the shared runner pool. Master pushes, scheduled and manual runs
+# are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,15 +29,93 @@ permissions:
   contents: read
 
 jobs:
+  # FAST tier — draft pull requests only. ONE ubuntu job with a shared
+  # cargo cache: cargo fmt, the affected-crates selector's unit tests, then
+  # clippy + lib tests limited to the crates the PR can affect
+  # (scripts/ci/affected_crates.py). Compile/lint errors surface in minutes
+  # without queueing the 17-job full matrix. It never silently skips: a diff
+  # the selector cannot bound runs --workspace; a docs-only diff runs fmt +
+  # the selector's unit tests only. The FULL tier below (the merge gate)
+  # runs for ready PRs, master pushes and workflow_dispatch.
+  fast:
+    name: fast tier (draft PRs)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # full history: the affected-crates script diffs against origin/master
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - run: cargo fmt --all -- --check
+      - name: affected_crates.py unit tests
+        run: python3 -I -m unittest discover -s scripts/ci/tests
+      - name: Determine affected crates
+        id: affected
+        run: |
+          set -euo pipefail
+          args="$(python3 scripts/ci/affected_crates.py --base origin/master)"
+          if [ -n "$args" ] && [ "$args" != "--workspace" ]; then
+            set -- $args
+            if [ $(( $# % 2 )) -ne 0 ]; then
+              echo "affected_crates.py produced unexpected output: $args" >&2
+              exit 1
+            fi
+            while [ $# -gt 0 ]; do
+              if [ "$1" != "-p" ]; then
+                echo "affected_crates.py produced unexpected token: $1" >&2
+                exit 1
+              fi
+              shift 2
+            done
+          fi
+          echo "args=$args" >> "$GITHUB_OUTPUT"
+          if [ -z "$args" ]; then
+            echo "::notice::docs-only diff: clippy and lib tests are deliberately skipped in the fast tier"
+          fi
+      - name: cargo clippy (affected crates)
+        if: steps.affected.outputs.args != ''
+        env:
+          AFFECTED: ${{ steps.affected.outputs.args }}
+        run: |
+          if [ "$AFFECTED" = "--workspace" ]; then
+            cargo clippy --workspace --all-targets --locked -- -D warnings
+          else
+            cargo clippy --locked --all-targets $AFFECTED -- -D warnings
+          fi
+      # Same pinned nextest as the `test` job (see its comment above for the
+      # perimeter-guard rationale).
+      - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af  # v2.87.11
+        if: steps.affected.outputs.args != ''
+        with:
+          tool: nextest@0.9.137
+      - name: lib tests (affected crates)
+        if: steps.affected.outputs.args != ''
+        env:
+          AFFECTED: ${{ steps.affected.outputs.args }}
+        shell: bash
+        run: |
+          if [ "$AFFECTED" = "--workspace" ]; then
+            ./scripts/test.sh --locked
+          else
+            ./scripts/test.sh --locked $AFFECTED
+          fi
+
   fmt:
     name: cargo fmt
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+      - name: affected_crates.py unit tests
+        run: python3 -I -m unittest discover -s scripts/ci/tests
 
   # Lint on every supported OS. Crucial for cross-platform correctness:
   # `#[cfg(windows)]` / `#[cfg(target_os = "macos")]` branches (service
@@ -36,6 +124,7 @@ jobs:
   clippy:
     name: cargo clippy (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     strategy:
       fail-fast: false
       matrix:
@@ -59,6 +148,7 @@ jobs:
   test:
     name: cargo test lib (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     strategy:
       fail-fast: false
       matrix:
@@ -127,6 +217,7 @@ jobs:
   integration:
     name: cargo test integration (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     strategy:
       fail-fast: false
       matrix:
@@ -173,9 +264,29 @@ jobs:
   ts-unit:
     name: ts unit (shamir-client-ts)
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+      # Path gate: on pull_request, run the payload steps only when the TS
+      # package (or this workflow) changed. Non-PR events always run (the
+      # output is empty then). No third-party action needed.
+      - name: Did the TS package change?
+        id: ts_changes
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"
+          changed=true
+          if files="$(git diff --name-only "$base...HEAD" -- crates/shamir-client-ts .github/workflows/ci.yml)"; then
+            if [ -z "$files" ]; then
+              changed=false
+            fi
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        if: steps.ts_changes.outputs.changed != 'false'
         with:
           # Node 22 = active LTS. `shamir-client-ts/package.json` declares
           # no `engines` floor; `shamir-client-node`'s is `>=18`, so 22
@@ -184,6 +295,7 @@ jobs:
           cache: npm
           cache-dependency-path: crates/shamir-client-ts/package-lock.json
       - run: npm ci && npm run typecheck && npm test
+        if: steps.ts_changes.outputs.changed != 'false'
         working-directory: crates/shamir-client-ts
 
   # Supply-chain cooldown gate (RFC 3923, fail-closed) — fails the PR if
@@ -195,6 +307,7 @@ jobs:
   cooldown:
     name: dependency cooldown (30d)
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
@@ -239,6 +352,7 @@ jobs:
   loom-model:
     name: loom model (writer_drain_barrier)
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
