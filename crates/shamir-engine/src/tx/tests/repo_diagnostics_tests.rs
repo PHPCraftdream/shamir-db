@@ -192,6 +192,7 @@ async fn orphan_gap_init_failure_is_observed_and_retry_clears_error() {
             commit_version: 1,
             ops: Vec::new(),
             interner_delta: Vec::new(),
+            event: None,
         }),
     );
     let hook = Arc::new(JournalPublishHook::default());

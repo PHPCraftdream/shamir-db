@@ -47,6 +47,7 @@ fn sample_entry() -> WalEntryV2 {
             },
         ],
         interner_delta: vec![],
+        event: None,
     }
 }
 
@@ -136,9 +137,10 @@ fn round_trip_v2_with_interner_delta() {
             body: Bytes::from_static(b"x"),
         }],
         interner_delta: vec![(3, "email".into(), 100), (3, "score".into(), 101)],
+        event: None,
     };
     let encoded = entry.encode().unwrap();
-    assert_eq!(encoded[4], WAL_V2_VERSION); // version 2
+    assert_eq!(encoded[4], WAL_V2_VERSION); // current version
     let decoded = WalEntryV2::decode(&encoded).unwrap();
     assert_eq!(entry, decoded);
     assert_eq!(decoded.interner_delta.len(), 2);

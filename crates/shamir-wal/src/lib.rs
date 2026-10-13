@@ -44,6 +44,7 @@
 mod tests;
 
 pub mod active_key;
+pub mod event_header;
 pub mod segment_meta;
 pub mod segment_set;
 pub mod wal_entry_v2;
@@ -53,6 +54,7 @@ pub mod wal_sink;
 pub mod wal_ticket;
 
 pub use active_key::WalActiveKey;
+pub use event_header::{WalEventHeader, WalExtraChange};
 pub use segment_set::SegmentSet;
 pub use wal_entry_v2::{WalEntryV2, WalOpV2, WAL_V2_MAGIC, WAL_V2_VERSION};
 pub use wal_group_commit::{WalDurability, WalGroupCommit};

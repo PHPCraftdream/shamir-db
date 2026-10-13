@@ -59,6 +59,7 @@ async fn aborted_lower_pre_wal_and_failed_ticket_do_not_stall_higher_visibility(
         commit_version: failed.version(),
         ops: vec![],
         interner_delta: vec![],
+        event: None,
     });
     failed.wal_queued(Arc::clone(&ticket), entry);
     assert_eq!(ticket.state(), WalTicketState::Failed);

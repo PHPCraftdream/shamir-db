@@ -31,6 +31,7 @@ fn entry(version: u64) -> Arc<WalEntryV2> {
         commit_version: version,
         ops: Vec::new(),
         interner_delta: Vec::new(),
+        event: None,
     })
 }
 

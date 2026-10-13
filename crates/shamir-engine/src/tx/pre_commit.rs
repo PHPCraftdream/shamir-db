@@ -2573,6 +2573,11 @@ pub(super) async fn pre_commit_locked_validate(
     let mut wal_entry = shamir_wal::WalEntryV2::new(tx.tx_id.0, tx.repo_id, wal_ops)
         .with_commit_version(commit_version);
     wal_entry.interner_delta = interner_delta;
+    // S5c-X I1: stamp the journal-event header BEFORE the WAL append so the
+    // journal event stays a pure function of the entry
+    // (`shamir_tx::event_from_wal_entry`). One code path for the live commit
+    // and (PR4) recovery.
+    wal_entry.event = Some(shamir_tx::event_header_from_tx(tx, repo.name()));
     // Op #2 Stage 2: wrap in Arc for drainer window offer. `begin_grouped`
     // borrows, so no clone is needed for WAL persistence — both the WAL
     // serialize and the drainer offer read from this Arc.
@@ -2769,6 +2774,10 @@ pub(super) async fn pre_commit_locked(
     let mut entry =
         WalEntryV2::new(tx.tx_id.0, tx.repo_id, wal_ops).with_commit_version(commit_version);
     entry.interner_delta = interner_delta;
+    // S5c-X I1: same header stamping as `pre_commit_locked_validate` - the
+    // AsyncIndex visibility path builds its entry through the same
+    // event-from-entry contract.
+    entry.event = Some(shamir_tx::event_header_from_tx(tx, repo.name()));
     // Op #2 Stage 2: wrap the entry in Arc BEFORE persisting so the same
     // logical entry is shared between the WAL and the drainer window.
     // `begin_grouped` borrows the entry, so we serialize from the Arc borrow

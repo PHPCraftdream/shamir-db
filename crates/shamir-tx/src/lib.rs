@@ -54,6 +54,7 @@ pub mod version_guard;
 pub mod version_provider;
 pub mod versioned_overlay;
 pub mod visibility_metrics;
+pub mod wal_event;
 
 pub use cell_reservation_guard::CellReservationGuard;
 pub use changefeed::{
@@ -89,3 +90,4 @@ pub use visibility_metrics::{
     AckMode, AckResult, PendingKind, PendingReason, VisibilityMetrics, VisibilityMetricsSnapshot,
     BUCKET_BOUNDS_MS, BUCKET_COUNT,
 };
+pub use wal_event::{event_from_wal_entry, event_header_from_tx};
