@@ -44,10 +44,14 @@ impl ReplSource for EmittedSource {
         assert!(from_version <= self.event.event.commit_version);
         assert!(limit > 0);
         assert_eq!(wait_ms, Some(0));
+        let ReplResponse::Hello { repos, .. } = self.leader.hello("metadata").await? else {
+            return Err(ReplError::Transport("expected Hello".into()));
+        };
+        let identity = &repos[0];
         Ok(ReplResponse::Pull {
             schema_digest: None,
-            repo_lineage_id: None,
-            history_epoch: None,
+            repo_lineage_id: identity.repo_lineage_id,
+            history_epoch: identity.history_epoch,
             gap_first: None,
             gap_through: None,
             leader_epoch: self.leader.epoch(),

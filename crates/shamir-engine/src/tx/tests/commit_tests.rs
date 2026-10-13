@@ -825,3 +825,149 @@ async fn wal_ops_non_empty_overlay_produces_interner_merge_op() {
         assert_eq!(entries.len(), 2, "both overlay entries must be captured");
     }
 }
+
+// ---------------------------------------------------------------------------
+// S5c-X I1: the live commit path derives its journal event from the WAL
+// entry (`shamir_tx::event_from_wal_entry`), and the entry carries the
+// event header (`shamir_tx::event_header_from_tx` stamped in
+// `pre_commit_locked_validate`).
+// ---------------------------------------------------------------------------
+
+/// PROPERTY: for randomized write-sets, the event derived from the entry
+/// built by the LIVE path (`wal_ops_from_tx` + `event_header_from_tx`) —
+/// after a full encode/decode round trip — equals the reference
+/// projection (`shamir_tx::project_event`). Deterministic seeded PRNG; no
+/// wall clock beyond the two timestamp samples (compared with the
+/// monotonicity rule, not equality).
+#[tokio::test]
+async fn live_entry_derives_the_projected_event_for_random_write_sets() {
+    use shamir_storage::types::RecordKey;
+    use shamir_types::access::Actor;
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545F4914F6CDD1D)
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+    let mut rng = Rng(0xABCD_5C5C_EF01_0002);
+
+    for case in 0..200u32 {
+        let mut tx = TxContext::new(TxId::new(case as u64 + 1), 0, 0, IsolationLevel::Snapshot);
+        tx.actor = match rng.below(3) {
+            0 => Actor::System,
+            1 => Actor::Admin(rng.below(50)),
+            _ => Actor::User(rng.below(50)),
+        };
+        tx.implicit = rng.below(2) == 0;
+        let n_tables = rng.below(4);
+        for t in 0..n_tables {
+            let token = 10 + t;
+            tx.table_tokens.insert(token, format!("tbl_{t}"));
+            let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+            let mut staging = StagingStore::new(data_store);
+            for o in 0..rng.below(6) {
+                let non_record = rng.below(4) == 0;
+                let key: Vec<u8> = if non_record {
+                    format!("sys:{t}:{o}").into_bytes()
+                } else {
+                    let mut a = [0u8; 16];
+                    a[14] = t as u8;
+                    a[15] = o as u8;
+                    a.to_vec()
+                };
+                if rng.below(3) == 0 {
+                    staging.remove(RecordKey::from_slice(&key));
+                } else {
+                    staging.set(
+                        RecordKey::from_slice(&key),
+                        Bytes::from(format!("v{case}:{t}:{o}")),
+                    );
+                }
+            }
+            tx.write_set.insert(token, staging);
+        }
+
+        // The entry EXACTLY as `pre_commit_locked_validate` builds it.
+        let wal_ops = crate::tx::wal_ops_from_tx(&tx).await;
+        let version = 500 + case as u64;
+        let entry = shamir_wal::WalEntryV2::new(tx.tx_id.0, 0, wal_ops)
+            .with_commit_version(version)
+            .with_event_header(shamir_tx::event_header_from_tx(&tx, "test"));
+        let decoded = shamir_wal::WalEntryV2::decode(&entry.encode().unwrap()).unwrap();
+        let derived = shamir_tx::event_from_wal_entry(&decoded);
+        let expected = shamir_tx::project_event(&tx, "test", version);
+
+        match expected {
+            None => assert!(
+                derived.is_none(),
+                "case {case}: eventless commit must derive no event"
+            ),
+            Some(mut expected) => {
+                let proj_ts = expected.timestamp_ns;
+                expected.timestamp_ns = derived.as_ref().unwrap().timestamp_ns;
+                assert!(
+                    derived.as_ref().unwrap().timestamp_ns <= proj_ts + 1,
+                    "case {case}: header timestamp must not drift ahead of the \
+                     projection's sampling moment"
+                );
+                assert_eq!(
+                    derived,
+                    Some(expected),
+                    "case {case}: live entry must derive exactly the projected \
+                     event (order, fields, values)"
+                );
+            }
+        }
+    }
+}
+
+/// LIVE PATH: a real `commit_tx` persists a WAL entry whose header yields
+/// the commit's journal event; recovery (`wal.recover()`) decodes the new
+/// format and the event is derivable from the recovered entry alone.
+#[tokio::test]
+async fn committed_wal_entry_carries_a_derivable_event() {
+    let repo = make_repo();
+    let mut tx = TxContext::new(TxId::new(31), 0, 0, IsolationLevel::Snapshot);
+    let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let mut staging = StagingStore::new(data_store);
+    let mut rid_bytes = [0u8; 16];
+    rid_bytes[15] = 9;
+    staging.set(
+        shamir_storage::types::RecordKey::from_slice(&rid_bytes),
+        Bytes::from_static(b"payload"),
+    );
+    tx.table_tokens.insert(4, "items".to_string());
+    tx.write_set.insert(4, staging);
+
+    let outcome = commit_tx(tx, &repo).await.unwrap();
+
+    let wal = repo.repo_wal().await.unwrap();
+    let inflight = wal.recover().await.unwrap();
+    let entry = inflight
+        .iter()
+        .find(|e| e.commit_version == outcome.commit_version)
+        .expect("the committed entry must be recoverable from the WAL");
+
+    let header = entry.event.as_ref().expect("v3 entry carries the header");
+    assert_eq!(header.repo, "test");
+    let event =
+        shamir_tx::event_from_wal_entry(entry).expect("the committed event must be derivable");
+    assert_eq!(event.commit_version, outcome.commit_version);
+    assert_eq!(event.tx_id, 31);
+    assert_eq!(event.changes.len(), 1);
+    assert_eq!(event.changes[0].table, "items");
+    assert_eq!(event.changes[0].key.as_ref(), &rid_bytes);
+    assert_eq!(
+        event.changes[0].value.as_deref(),
+        Some(b"payload".as_slice())
+    );
+}

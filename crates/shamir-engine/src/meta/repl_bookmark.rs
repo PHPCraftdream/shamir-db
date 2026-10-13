@@ -1,63 +1,85 @@
-//! R1-b — durable per-(db,repo) follower replication bookmark.
-//!
-//! The bookmark is the highest LEADER `commit_version` the follower has
-//! durably recorded as applied on this (db, repo). It is stored in the
-//! repo's `__tx__` info-store under [`MetaKey::ReplicationBookmark`],
-//! using the exact same [`MetaEnvelope`] codec as
-//! [`LastCommittedVersion`](MetaKey::LastCommittedVersion) and
-//! [`NextTxId`](MetaKey::NextTxId) (see `crate::meta::recovery_marker`).
-//!
-//! ## Why a separate marker from `LastCommittedVersion`
-//!
-//! `LastCommittedVersion` tracks the follower's LOCAL commit-version floor
-//! (used by `RepoTxGate` to seed its monotonic counter on restart). The
-//! replication bookmark tracks the LEADER's version space — a different
-//! numbering domain (the follower allocates its own local version for each
-//! applied event, per the R1-a version-allocation model). Conflating the two
-//! would break either the gate's monotonicity invariant or the follower's
-//! idempotency gating against the leader's sequence.
-//!
-//! ## Consumers
-//!
-//!  - [`crate::repo::RepoInstance::replication_bookmark`] /
-//!    [`crate::repo::RepoInstance::advance_replication_bookmark`] — the
-//!    repo-level wrappers a follower's pull-loop calls.
-//!  - [`crate::tx::apply_replicated`] consumes the bookmark as its
-//!    `applied_watermark` parameter (R1-a) for O(1) idempotent re-delivery
-//!    gating.
+//! Durable follower bookmark and pinned upstream identity in ONE store value.
+//! Legacy u64 bookmarks adopt an identity on the next successful contact.
 
 use std::sync::Arc;
 
-use shamir_storage::error::DbResult;
-use shamir_storage::types::Store;
+use bytes::Bytes;
+use serde::{Deserialize, Serialize};
+use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::types::{RecordKey, Store};
 
-use crate::meta::recovery_marker::{load_u64, save_u64};
-use crate::meta::MetaKey;
+use crate::meta::recovery_marker::save_u64;
+use crate::meta::repo_identity::RepoIdentity;
+use crate::meta::{MetaEnvelope, MetaKey};
 
-/// Load the durable replication bookmark from the info_store.
-///
-/// Returns `0` if the marker has never been written (fresh repo). Returns
-/// `Err` only on real storage / decode failures. The `0` default matches
-/// [`crate::tx::apply_replicated`]'s `applied_watermark` semantics: a fresh
-/// follower applies every event whose `commit_version > 0` (i.e. every
-/// real leader commit — version 0 is the bootstrap floor and never carries
-/// a real event).
-pub async fn load_replication_bookmark(info_store: &Arc<dyn Store>) -> DbResult<u64> {
-    Ok(load_u64(info_store, MetaKey::ReplicationBookmark)
-        .await?
-        .unwrap_or(0))
+/// The advancing bookmark and its upstream incarnation are inseparable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FenceRecord {
+    pub bookmark: u64,
+    pub lineage_id: [u8; 16],
+    pub history_epoch: u64,
+    pub observed_identity: Option<RepoIdentity>,
 }
 
-/// Persist AND explicitly flush the replication bookmark. Callers must flush
-/// every covered history write first; a set alone is not a durability boundary.
-///
-/// This is the LOW-LEVEL store helper; callers that need monotonicity
-/// protection against out-of-order delivery should prefer
-/// [`crate::repo::RepoInstance::advance_replication_bookmark`], which
-/// compares-then-swaps. Direct callers MUST ensure they never persist a
-/// value smaller than the current one (the bookmark is a high-water mark,
-/// not a free variable).
-pub async fn save_replication_bookmark(info_store: &Arc<dyn Store>, version: u64) -> DbResult<()> {
-    save_u64(info_store, MetaKey::ReplicationBookmark, version).await?;
-    info_store.flush().await
+fn key() -> RecordKey {
+    RecordKey::from_slice(MetaKey::ReplicationBookmark.as_record_id().as_bytes())
+}
+
+async fn load(info: &Arc<dyn Store>) -> DbResult<(u64, Option<FenceRecord>)> {
+    let bytes = match info.get(key()).await {
+        Ok(bytes) => bytes,
+        Err(DbError::NotFound(_)) => return Ok((0, None)),
+        Err(error) => return Err(error),
+    };
+    // The legacy fixed-width envelope is 14 header bytes + one u64.
+    if bytes.len() == 22 {
+        let bookmark = MetaEnvelope::open(&bytes)
+            .map_err(|e| DbError::Storage(format!("replication bookmark codec: {e}")))?;
+        return Ok((bookmark, None));
+    }
+    let (version, record): (u16, FenceRecord) = MetaEnvelope::open(&bytes)
+        .map_err(|e| DbError::Storage(format!("replication bookmark codec: {e}")))?;
+    let expected_len = if record.observed_identity.is_some() {
+        73
+    } else {
+        49
+    };
+    if version != 1 || bytes.len() != expected_len {
+        return Err(DbError::Storage(
+            "invalid replication bookmark record".into(),
+        ));
+    }
+    Ok((record.bookmark, Some(record)))
+}
+
+/// Load the cursor, including legacy bookmarks; absent means zero.
+pub async fn load_replication_bookmark(info: &Arc<dyn Store>) -> DbResult<u64> {
+    Ok(load(info).await?.0)
+}
+
+/// Load the identity bound to the current bookmark, if adopted.
+pub async fn load_fence_record(info: &Arc<dyn Store>) -> DbResult<Option<FenceRecord>> {
+    Ok(load(info).await?.1)
+}
+
+/// One atomic set and flush contains BOTH identity and current cursor.
+/// Callers serialize subscription ownership and flush covered history first.
+pub async fn save_fence_record(info: &Arc<dyn Store>, record: FenceRecord) -> DbResult<()> {
+    let bytes = MetaEnvelope::new((1u16, record))
+        .encode()
+        .map_err(|e| DbError::Storage(format!("replication bookmark codec: {e}")))?;
+    info.set(key(), Bytes::from(bytes)).await?;
+    info.flush().await
+}
+
+/// Persist and flush the advancing cursor, preserving its pinned identity.
+/// Covered history must be flushed first; callers enforce monotonicity.
+pub async fn save_replication_bookmark(info: &Arc<dyn Store>, version: u64) -> DbResult<()> {
+    if let Some(mut record) = load_fence_record(info).await? {
+        record.bookmark = version;
+        save_fence_record(info, record).await
+    } else {
+        save_u64(info, MetaKey::ReplicationBookmark, version).await?;
+        info.flush().await
+    }
 }

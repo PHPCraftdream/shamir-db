@@ -425,6 +425,28 @@ ReplStatus   { node_id, applied: [{db, repo, version}] }
 - Promote нового лидера (R3) обязателен с epoch-bump'ом; старый лидер при
   виде большего epoch самодемотируется в follower.
 
+### 5.2a Универсальный identity-fence (S5c-X PR7)
+
+Помимо epoch-fencing действует обязательный identity-fence на КАЖДОЙ
+подписке, независимо от наличия seed-квитанции: при первом успешном
+Hello/Pull follower записывает идентичность лидера `(repo lineage,
+history epoch)` в один durable record со своим bookmark (один атомарный
+`set`+`flush` того же значения bookmark в `__tx__`; каждый advance
+сохраняет identity). Каждый последующий Hello и
+каждый Pull сверяется с записанным ДО применения каких-либо событий;
+расхождение lineage или epoch — терминальная остановка с типизированной
+причиной (`seed_wrong_identity` / `seed_wrong_history_epoch`) и
+структурированными `recorded_identity`/`observed_identity` в
+per-repository `ReplicationStatus`;
+счётчик `shamir_repl_identity_mismatch_total` (также для seeded).
+Отсутствующая identity запрещает первый контакт; production disable-switch
+нет. Seed schema-check остаётся строже, но решение об отказе одно. Подписки без seed-квитанции,
+созданные до этого изменения, принимают первую наблюдаемую идентичность
+ровно один раз (одна WARN-строка в логе). Лидеры на `in_memory`/`hybrid`
+хранят `__tx__` только в RAM, поэтому каждый старт процесса порождает НОВЫЙ
+lineage — перезапущенный лидер честно останавливает своих followers; durable
+(`fjall`) лидеры сохраняют идентичность между рестартами.
+
 ### 5.3 Wire-выбор: pull как база, stream как ускорение
 
 Kafka-урок: pull-модель делает flow-control тривиальным (follower тянет

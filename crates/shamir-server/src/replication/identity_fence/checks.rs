@@ -1,0 +1,216 @@
+//! Mandatory per-response identity decision; seed receipts also pin schema.
+
+use std::sync::Arc;
+
+use shamir_db::engine::meta::repl_bookmark::load_replication_bookmark;
+use shamir_db::engine::meta::repo_identity::RepoIdentity;
+use shamir_db::engine::repo::SeedReceipt;
+use shamir_db::storage::types::Store;
+use shamir_db::{SeedRefusal, ShamirDb};
+use shamir_query_types::wire::repl::ReplResponse;
+
+use super::recorded::{self, FenceRecord};
+use crate::replication::error::ReplError;
+
+/// Re-establish durability once per loop start, before any leader contact.
+/// A failed/cancelled set+flush may be readable without having reached disk.
+/// Checks return on persistence errors, so no later response in that loop can
+/// trust such a write; a restarted loop must pass this barrier again.
+/// Cancellation may leave the flush incomplete; repeating this is idempotent.
+pub(crate) async fn prepare_existing(info: &Arc<dyn Store>) -> Result<(), ReplError> {
+    if recorded::load(info)
+        .await
+        .map_err(|e| ReplError::Bookmark(e.to_string()))?
+        .is_some()
+    {
+        info.flush()
+            .await
+            .map_err(|e| ReplError::Bookmark(e.to_string()))?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn prepare_subscription(
+    db: &ShamirDb,
+    db_name: &str,
+    repo_name: &str,
+    #[cfg(test)] info_override: Option<&Arc<dyn Store>>,
+) -> Result<(), ReplError> {
+    #[cfg(test)]
+    if let Some(info) = info_override {
+        return prepare_existing(info).await;
+    }
+    let repo = db
+        .get_db(db_name)
+        .and_then(|d| d.get_repo(repo_name))
+        .ok_or_else(|| ReplError::UnknownFollowerRepo {
+            db: db_name.into(),
+            repo: repo_name.into(),
+        })?;
+    let info = repo
+        .tx_info_store()
+        .await
+        .map_err(|e| ReplError::Bookmark(e.to_string()))?;
+    prepare_existing(&info).await
+}
+
+pub(crate) fn hex_lineage(lineage: &[u8; 16]) -> String {
+    lineage.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Requires `prepare_subscription` once at loop start. Any persistence error
+/// ends that loop; retrying requires a fresh startup durability barrier.
+pub(crate) async fn fence_hello_recorded(
+    db: &ShamirDb,
+    db_name: &str,
+    repo_name: &str,
+    response: &ReplResponse,
+    receipt: Option<&SeedReceipt>,
+) -> Result<(), ReplError> {
+    let repo = db
+        .get_db(db_name)
+        .and_then(|d| d.get_repo(repo_name))
+        .ok_or_else(|| ReplError::UnknownFollowerRepo {
+            db: db_name.into(),
+            repo: repo_name.into(),
+        })?;
+    let info = repo
+        .tx_info_store()
+        .await
+        .map_err(|e| ReplError::Bookmark(e.to_string()))?;
+    fence_hello_identity(&info, db_name, repo_name, response, receipt).await
+}
+
+/// Hello decision against the same identity store used by startup and Pull.
+pub(crate) async fn fence_hello_identity(
+    info: &Arc<dyn Store>,
+    db_name: &str,
+    repo_name: &str,
+    response: &ReplResponse,
+    receipt: Option<&SeedReceipt>,
+) -> Result<(), ReplError> {
+    let ReplResponse::Hello { repos, .. } = response else {
+        return Err(SeedRefusal::MissingIdentity.into());
+    };
+    let advertised = repos
+        .iter()
+        .find(|r| r.db == db_name && r.repo == repo_name)
+        .ok_or(SeedRefusal::MissingIdentity)?;
+    decide(
+        info,
+        advertised.repo_lineage_id,
+        advertised.history_epoch,
+        advertised.schema_digest.as_deref(),
+        receipt,
+    )
+    .await
+}
+
+/// Requires the startup durability barrier; persistence failures end the loop.
+/// cancel-safe: NO — a set may survive an abandoned flush; the next loop start
+/// must reflush the existing record before trusting matching metadata.
+pub(crate) async fn fence_pull_identity(
+    info: &Arc<dyn Store>,
+    response: &ReplResponse,
+    receipt: Option<&SeedReceipt>,
+) -> Result<(), ReplError> {
+    let ReplResponse::Pull {
+        repo_lineage_id,
+        history_epoch,
+        schema_digest,
+        ..
+    } = response
+    else {
+        // Error envelopes make no identity statement and apply no events.
+        return Ok(());
+    };
+    decide(
+        info,
+        *repo_lineage_id,
+        *history_epoch,
+        schema_digest.as_deref(),
+        receipt,
+    )
+    .await
+}
+
+async fn decide(
+    info: &Arc<dyn Store>,
+    lineage: Option<[u8; 16]>,
+    epoch: Option<u64>,
+    schema: Option<&str>,
+    receipt: Option<&SeedReceipt>,
+) -> Result<(), ReplError> {
+    let existing = recorded::load(info)
+        .await
+        .map_err(|e| ReplError::Bookmark(e.to_string()))?;
+    let (Some(lineage_id), Some(history_epoch)) = (lineage, epoch) else {
+        if let Some(mut record) = existing {
+            record.observed_identity = None;
+            recorded::save(info, record)
+                .await
+                .map_err(|e| ReplError::Bookmark(e.to_string()))?;
+        }
+        return Err(SeedRefusal::MissingIdentity.into());
+    };
+    let observed = RepoIdentity {
+        lineage_id,
+        history_epoch,
+    };
+    let bookmark = load_replication_bookmark(info)
+        .await
+        .map_err(|e| ReplError::Bookmark(e.to_string()))?;
+    let expected = existing
+        .map(|r| RepoIdentity {
+            lineage_id: r.lineage_id,
+            history_epoch: r.history_epoch,
+        })
+        .or_else(|| receipt.map(|r| r.source_identity))
+        .unwrap_or(observed);
+    let mut record = existing.unwrap_or(FenceRecord {
+        bookmark,
+        lineage_id: expected.lineage_id,
+        history_epoch: expected.history_epoch,
+        observed_identity: None,
+    });
+    let reason = if expected.lineage_id != observed.lineage_id {
+        Some(SeedRefusal::WrongIdentity)
+    } else if expected.history_epoch != observed.history_epoch {
+        Some(SeedRefusal::WrongHistoryEpoch)
+    } else {
+        receipt.and_then(|r| shamir_db::fence_metadata(r, lineage, epoch, schema).err())
+    };
+    // Persist observed metadata even on a refusal, without advancing the cursor.
+    // Repeated matching responses need no extra write/flush.
+    if existing.is_none() || record.observed_identity != Some(observed) {
+        record.observed_identity = Some(observed);
+        recorded::save(info, record)
+            .await
+            .map_err(|e| ReplError::Bookmark(e.to_string()))?;
+    }
+    if let Some(code) = reason {
+        if matches!(
+            code,
+            SeedRefusal::WrongIdentity | SeedRefusal::WrongHistoryEpoch
+        ) {
+            metrics::counter!("shamir_repl_identity_mismatch_total", "reason" => code.code())
+                .increment(1);
+            if receipt.is_none() {
+                return Err(ReplError::IdentityMismatch {
+                    code,
+                    recorded: hex_lineage(&expected.lineage_id),
+                    recorded_epoch: expected.history_epoch,
+                    observed: hex_lineage(&observed.lineage_id),
+                    observed_epoch: observed.history_epoch,
+                });
+            }
+        }
+        return Err(code.into());
+    }
+    if existing.is_none() && receipt.is_none() {
+        tracing::warn!(bookmark, lineage = %hex_lineage(&observed.lineage_id),
+            history_epoch = observed.history_epoch,
+            "replication identity fence: adopted first observed leader identity (legacy migration occurs once)");
+    }
+    Ok(())
+}
