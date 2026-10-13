@@ -277,6 +277,9 @@ fn cold_reopen_gap_stops_consumer_and_supervisor_but_not_beyond_h() {
         let journal = rebuilt_repo.read_changelog_bounded(1, 100).await.unwrap();
         assert!(journal.confirmed, "rebuilt journal must confirm its prefix");
         assert_eq!(journal.bound, head);
+        // The original GAP run recorded its leader identity even at bookmark 0.
+        // Full replay of a rebuilt lineage requires a new follower.
+        let fresh = open(None).await;
         run(&fresh, &rebuilt).await.unwrap();
         assert_eq!(repo(&fresh).replication_bookmark().await.unwrap(), head);
         assert_eq!(rows(&fresh).await, authoritative);

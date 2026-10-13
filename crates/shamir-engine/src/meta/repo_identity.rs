@@ -9,6 +9,15 @@ use std::sync::Arc;
 
 use crate::meta::{MetaEnvelope, MetaKey};
 
+/// S5c-X PR7 (leader-side honesty): the lineage id identifies a DURABLE
+/// incarnation of the repository. `in_memory` and `hybrid` repositories keep
+/// `__tx__` (and therefore this record) in RAM only (`repo_types.rs`'s
+/// ephemeral-store routing), so every process start mints a NEW random
+/// lineage at epoch 0 — a follower's identity fence then correctly treats the
+/// restarted leader as a different history instead of silently continuing.
+/// This is deliberate: a NEW lineage (not an epoch bump) is the honest SEED-1
+/// reading, because nothing of the previous incarnation survives. Durable
+/// (`fjall`) repositories keep their identity across restarts unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoIdentity {
     pub lineage_id: [u8; 16],

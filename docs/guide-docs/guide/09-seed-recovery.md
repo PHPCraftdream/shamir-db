@@ -110,6 +110,33 @@ Resume is issued as an admin operation (`ALTER SUBSCRIPTION app-main
 RESUME` through the admin/query interface with root `Manage`), the same
 way ordinary subscriptions are managed (see `08-interconnect.md`).
 
+### 3.1 The identity fence is universal (S5c-X PR7)
+
+The identity fence is NOT limited to seeded subscriptions. Every
+subscription — seeded or ordinary — records the leader's
+`(source_lineage_id, source_history_epoch)` at its first successful
+Hello (or Pull if Hello failed) in the SAME durable `__tx__` bookmark
+value (one atomic `set` + `flush`). Every advance preserves the pinned
+identity; this is not a separate record carrying a stale cursor. Every
+later Hello and Pull is compared with that record BEFORE
+any event of the response is applied. A different lineage or epoch stops
+the loop terminally: nothing from that response is applied, the
+subscription shows `seed_wrong_identity` / `seed_wrong_history_epoch` with
+structured `recorded_identity` and `observed_identity` fields in
+per-repository `ReplicationStatus`, and the
+loop is not restarted automatically. Subscriptions created before this
+change adopt the first observed identity exactly once (one WARN line in
+the follower log) and then fence like any other. Leaders on `in_memory`
+and `hybrid` engines keep `__tx__` in RAM only, so every process start
+mints a NEW lineage: a restarted ephemeral leader stops its followers by
+design, while durable (`fjall`) leaders keep their identity across
+restarts. Seeded subscriptions keep their stricter SEED-4 checks; the
+identity and receipt schema checks form one decision, with one typed error.
+Identity mismatches increment `shamir_repl_identity_mismatch_total` for
+seeded and ordinary subscriptions. Missing identity fails closed even on
+first contact (`seed_missing_identity`). There is no production disable
+switch. Fresh ordinary bookmarks use the same one-WARN adoption rule.
+
 ## 4. Failure boundaries during install
 
 Durability order (SEED-3): data + schema + interner + counters + local
@@ -136,13 +163,16 @@ with a typed code and NO state change.
 
 ## 5. Status and refusal codes
 
-Per-repository status (admin status/list surface) reports, for seeded
+Per-repository status (`ReplicationStatus`; `ListSubscriptions` lists
+catalogue rows) reports, for seeded
 repositories: `installation_state`, `artifact_digest`, `source_db`,
 `source_repo`, `source_lineage_id`, `source_history_epoch`,
 `seed_source_version`, `upstream_bookmark`, `next_pull_version`,
 `local_baseline_version`, `local_consistent_version`, `schema_digest`,
 `certified_gap_first`, `certified_gap_through`, `subscription_state`,
-`last_terminal_reason`.
+`last_terminal_reason`. Every repository also exposes `recorded_identity`
+and `observed_identity`: objects with `lineage_id` (16-byte array) and
+`history_epoch`, or null before contact.
 
 Note the two version domains: `upstream_bookmark`/`next_pull_version`/
 `seed_source_version` count LEADER versions; `local_baseline_version`/
@@ -160,8 +190,8 @@ Refusal codes (they appear in admin errors, terminal
 | `seed_wrong_scope` | subscription/profile scope does not match the receipt, or the publication covers a different scope | fix the publication/profile to cover exactly the receipt's `(db, repo)` |
 | `seed_wrong_publication` | the upstream does not advertise the subscribed publication | create/restore the publication on the leader |
 | `seed_missing_identity` | the upstream did not advertise lineage/epoch (older peer or repo missing) | upgrade/repair the leader; do NOT bypass |
-| `seed_wrong_identity` | the leader repository was RECREATED (new lineage) | the old replication relationship is dead: re-export and reseed into a new repository |
-| `seed_wrong_history_epoch` | leader history was restored/rewound (epoch advanced) | same as above: reseed |
+| `seed_wrong_identity` | the leader repository was RECREATED or regenerated (new lineage) — checked on EVERY subscription, seeded or not (§3.1) | the old replication relationship is dead: re-export and reseed into a new repository |
+| `seed_wrong_history_epoch` | leader history was restored/rewound (epoch advanced) — checked on EVERY subscription, seeded or not (§3.1) | same as above: reseed |
 | `seed_wrong_schema` | leader schema diverged after the export (DDL is not replicated) | re-export and reseed (§8) |
 | `seed_horizon_above_bookmark` | a NEW crash certified a gap above the follower bookmark | repeat this runbook: export again, seed into ANOTHER new repository |
 | `seed_source_regression` | leader settled version regressed below the seed position | leader inconsistency — investigate before trusting it |

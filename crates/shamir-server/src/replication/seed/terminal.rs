@@ -3,16 +3,17 @@ use shamir_db::{SeedRefusal, ShamirDb};
 use crate::replication::ReplError;
 
 /// Preserve the typed seed refusal code instead of leaving an identity/schema
-/// failure as a log line only. Other terminal errors keep their prior handling.
+/// failure as a log line only. The S5c-X PR7 universal identity fence
+/// (`ReplError::IdentityMismatch`) is persisted the same way, so the recorded
+/// and observed identities remain available in per-repository ReplicationStatus.
+/// Other terminal errors keep their prior handling.
 pub(crate) async fn persist_terminal(home: &ShamirDb, name: &str, error: &ReplError) {
-    let ReplError::Seed(reason) = error else {
-        return;
+    let (state, message) = match error {
+        ReplError::Seed(reason) => (reason.code(), error.to_string()),
+        ReplError::IdentityMismatch { code, .. } => (code.code(), error.to_string()),
+        _ => return,
     };
-    let state = reason.code();
-    if let Err(mark_error) = home
-        .mark_subscription_terminal(name, state, &error.to_string())
-        .await
-    {
+    if let Err(mark_error) = home.mark_subscription_terminal(name, state, &message).await {
         tracing::warn!(error = %mark_error, "failed to persist terminal replication reason");
     }
 }

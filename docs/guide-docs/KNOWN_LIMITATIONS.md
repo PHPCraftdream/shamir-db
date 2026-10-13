@@ -667,6 +667,20 @@ artifact).
   automatic reseed, promotion, or full-server recovery. The CI
   certification kills leader PROCESSES (SIGKILL) and proves process-crash
   behaviour only — not power-loss guarantees.
+- **The identity fence is universal but is detection, not repair.** Since
+  S5c-X PR7 every subscription (seeded or not) records the leader's
+  `(lineage, history epoch)` at first contact and stops terminally
+  (`seed_wrong_identity` / `seed_wrong_history_epoch`, recorded and
+  observed identities as structured `recorded_identity` / `observed_identity`
+  in per-repository `ReplicationStatus`) when a later Hello/Pull reports
+  a different one — including a restarted `in_memory`/`hybrid` leader,
+  which mints a new lineage at every start because its `__tx__` is
+  RAM-only. This stops silent history swaps; it does NOT repair the
+  follower's data — recovery stays the operator runbook above. Pre-PR7
+  subscriptions adopt the first observed identity once (one WARN line).
+  Identity lives in the actual advancing bookmark value and is preserved on
+  every advance. Missing identity fails closed even on first contact; no
+  production disable switch exists. Seed receipts retain stricter schema checks.
 - **Duplicate loops and bookmark crash risk.** Two subscriptions for the
   same `(db, repo)` start two loops; bookmark advancement is not atomic.
   The bookmark is stored in `__tx__` without flush ordering against follower

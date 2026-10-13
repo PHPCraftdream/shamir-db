@@ -84,6 +84,30 @@ pub enum ReplError {
         reason: ApplyRejectReason,
     },
 
+    /// S5c-X PR7 — the universal leader-identity fence tripped: the leader's
+    /// `(lineage, history_epoch)` differs from the identity recorded at this
+    /// subscription's first contact (or a seed receipt). **Terminal**: the
+    /// loop stops, NOTHING from the offending response is applied, and the
+    /// supervisor persists the typed reason plus the recorded and observed
+    /// identities on the subscription row. Recovery is an operator step
+    /// (reseed); the loop never retries blindly against a changed identity.
+    #[error(
+        "leader identity mismatch ({code}): recorded ({recorded}, history epoch {recorded_epoch}), observed ({observed}, history epoch {observed_epoch}); stopping the follower loop - operator action (verify the leader history, then reseed) required"
+    )]
+    IdentityMismatch {
+        /// Which comparison tripped (`seed_wrong_identity` for a lineage
+        /// change, `seed_wrong_history_epoch` for an epoch change).
+        code: shamir_db::SeedRefusal,
+        /// Recorded lineage id, hex.
+        recorded: String,
+        /// Recorded history epoch.
+        recorded_epoch: u64,
+        /// Observed lineage id, hex.
+        observed: String,
+        /// Observed history epoch.
+        observed_epoch: u64,
+    },
+
     /// Transport-level failure (connection drop, decode error, wire error
     /// envelope). Transient — the loop backs off and retries.
     #[error("replication transport error: {0}")]

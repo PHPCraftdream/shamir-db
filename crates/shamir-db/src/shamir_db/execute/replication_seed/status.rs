@@ -1,3 +1,5 @@
+use shamir_engine::meta::repo_identity::RepoIdentity;
+
 use crate::types::value::QueryValue;
 use crate::{DbResult, ShamirDb};
 
@@ -33,6 +35,23 @@ impl ShamirDb {
                 fields.insert(
                     "last_terminal_reason".into(),
                     record["last_terminal_reason"].clone(),
+                );
+                let identity = shamir_engine::meta::repl_bookmark::load_fence_record(
+                    &repo.tx_info_store().await?,
+                )
+                .await?;
+                fields.insert(
+                    "recorded_identity".into(),
+                    super::super::helpers::to_qv(&identity.map(|record| RepoIdentity {
+                        lineage_id: record.lineage_id,
+                        history_epoch: record.history_epoch,
+                    })),
+                );
+                fields.insert(
+                    "observed_identity".into(),
+                    super::super::helpers::to_qv(
+                        &identity.and_then(|record| record.observed_identity),
+                    ),
                 );
                 let bookmark = repo.replication_bookmark().await?;
                 fields.insert(

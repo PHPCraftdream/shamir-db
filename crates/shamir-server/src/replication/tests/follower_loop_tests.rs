@@ -372,10 +372,8 @@ struct GapReplSource {
 #[async_trait]
 impl ReplSource for GapReplSource {
     async fn hello(&self, _node_id: &str) -> Result<ReplResponse, ReplError> {
-        Ok(ReplResponse::Hello {
-            leader_epoch: 1,
-            repos: Vec::new(),
-        })
+        // Exercise first-Pull adoption: no successful Hello in this fixture.
+        Err(ReplError::Transport("fixture starts with Pull".into()))
     }
 
     async fn pull(
@@ -388,8 +386,8 @@ impl ReplSource for GapReplSource {
     ) -> Result<ReplResponse, ReplError> {
         Ok(ReplResponse::Pull {
             schema_digest: None,
-            repo_lineage_id: None,
-            history_epoch: None,
+            repo_lineage_id: Some([1; 16]),
+            history_epoch: Some(0),
             gap_first: None,
             gap_through: None,
             leader_epoch: 1,

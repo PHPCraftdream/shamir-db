@@ -86,6 +86,20 @@ shamir-server service install
 продвижения bookmark. `ListSubscriptions` и `ReplicationStatus` показывают
 `resync_required`; это состояние каталога, не измерение lag.
 
+Дополнительно действует универсальный identity-fence (S5c-X PR7) на КАЖДОЙ
+подписке — с сидом и без: follower записывает `(lineage, history epoch)`
+лидера при первом успешном Hello/Pull в один durable record со своим
+bookmark; каждое продвижение bookmark сохраняет identity. Отсутствующая
+identity запрещает даже первый контакт; отключения fence в production нет.
+Старый bookmark без identity принимает её один раз с WARN. Follower терминально останавливается с `seed_wrong_identity` /
+`seed_wrong_history_epoch` (структурированные `recorded_identity` и `observed_identity`
+в `ReplicationStatus`),
+если позже лидер ответит другой lineage или epoch. Перезапущенный
+`in_memory`/`hybrid` лидер получает новый lineage (его `__tx__` живёт
+только в RAM) и потому останавливает подписки; durable (`fjall`) лидер
+сохраняет идентичность. Ремонт — операторский: проверить историю лидера и
+пересидировать (см. `guide/09-seed-recovery.md`).
+
 1. Остановите replication и writes; сохраните **offline** backup лидера и
    followers. Не копируйте живой data_dir: backup — stop-and-copy, не online
    consistent snapshot.

@@ -8,6 +8,7 @@
 //!      - read the durable `replication_bookmark` for `(db, repo)` on the
 //!        follower;
 //!      - `pull(db, repo, bookmark+1, limit, wait_ms=poll_wait_ms)`;
+//!      - verify/adopt upstream identity FIRST, before leader-epoch fencing;
 //!      - **epoch-fence (§5.2):** if the reply's epoch is strictly lower
 //!        than the max seen, terminate with [`ReplError::StaleLeaderEpoch`];
 //!        otherwise record the new max;
@@ -79,6 +80,11 @@ pub struct FollowerLoopConfig {
     /// batch (REPLICATION §5.1).
     pub poll_wait_ms: u32,
     pub validate_replicated_payload: bool,
+    /// S5c-X PR7: the universal leader-identity fence on every Hello/Pull.
+    /// `true` in production; tests may disable it through this explicit seam
+    /// to exercise the unprotected path (negative control).
+    #[cfg(test)]
+    pub(crate) identity_fence: bool,
     /// Test/bound hook: if `Some(n)`, the loop exits cleanly after `n`
     /// iterations. `None` = run forever (until `cancel` fires). Production
     /// callers pass `None`; tests pass a small cap to avoid relying on
@@ -96,6 +102,8 @@ impl FollowerLoopConfig {
             repo: repo.into(),
             poll_wait_ms: 5000,
             validate_replicated_payload: false,
+            #[cfg(test)]
+            identity_fence: true,
             max_iterations: None,
         }
     }
@@ -113,12 +121,48 @@ impl FollowerLoopConfig {
         self
     }
 
+    /// Disable the universal identity fence (negative-control tests only).
+    #[must_use]
+    #[cfg(test)]
+    pub(crate) fn with_identity_fence(mut self, enabled: bool) -> Self {
+        self.identity_fence = enabled;
+        self
+    }
+
     /// Set the iteration cap (mainly for tests).
     #[must_use]
     pub fn with_max_iterations(mut self, n: usize) -> Self {
         self.max_iterations = Some(n);
         self
     }
+}
+
+/// Overrides only identity persistence for full-loop durability regressions.
+#[cfg(test)]
+pub(crate) struct IdentityStoreOverride {
+    pub(crate) info: Arc<dyn shamir_db::storage::types::Store>,
+    pub(crate) startup_reflush: bool,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for IdentityStoreOverride {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdentityStoreOverride")
+            .field("startup_reflush", &self.startup_reflush)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Run the complete production loop body with a test-only identity store.
+#[cfg(test)]
+pub(crate) async fn run_follower_loop_with_identity_store(
+    db: Arc<ShamirDb>,
+    source: Arc<dyn ReplSource>,
+    cfg: FollowerLoopConfig,
+    cancel: CancellationToken,
+    identity_store: IdentityStoreOverride,
+) -> Result<(), ReplError> {
+    run_follower_loop_internal(db, source, cfg, cancel, Some(identity_store)).await
 }
 
 /// Run the follower replication pull-loop for one `(db, repo)` against
@@ -147,14 +191,36 @@ pub async fn run_follower_loop(
     cfg: FollowerLoopConfig,
     cancel: CancellationToken,
 ) -> Result<(), ReplError> {
+    run_follower_loop_internal(
+        db,
+        source,
+        cfg,
+        cancel,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+async fn run_follower_loop_internal(
+    db: Arc<ShamirDb>,
+    source: Arc<dyn ReplSource>,
+    cfg: FollowerLoopConfig,
+    cancel: CancellationToken,
+    #[cfg(test)] identity_store: Option<IdentityStoreOverride>,
+) -> Result<(), ReplError> {
     let FollowerLoopConfig {
         node_id,
         db: db_name,
         repo,
         poll_wait_ms,
         validate_replicated_payload,
+        #[cfg(test)]
+        identity_fence,
         max_iterations,
     } = cfg;
+    #[cfg(not(test))]
+    let identity_fence = true;
     let apply_policy = if validate_replicated_payload {
         ApplyPolicy::ValidatePayload
     } else {
@@ -162,10 +228,61 @@ pub async fn run_follower_loop(
     };
     // 1. hello → seed max-seen epoch (§5.2).
     let seed_receipt = super::source::seed::fence::load_receipt(&db, &db_name, &repo).await?;
+    #[cfg(test)]
+    let startup_reflush = identity_store
+        .as_ref()
+        .is_none_or(|store| store.startup_reflush);
+    #[cfg(not(test))]
+    let startup_reflush = true;
+    if identity_fence && startup_reflush {
+        super::identity_fence::checks::prepare_subscription(
+            &db,
+            &db_name,
+            &repo,
+            #[cfg(test)]
+            identity_store.as_ref().map(|store| &store.info),
+        )
+        .await?;
+    }
     let mut max_seen_epoch = match source.hello(&node_id).await {
-        Ok(resp) => super::source::seed::fence::fence_hello(seed_receipt.as_ref(), &resp)?,
+        Ok(resp) => {
+            // S5c-X PR7: universal identity fence — verify the recorded
+            // (lineage, history_epoch) on EVERY Hello, before any pull.
+            if identity_fence {
+                #[cfg(test)]
+                let override_info = identity_store.as_ref().map(|store| &store.info);
+                #[cfg(not(test))]
+                let override_info: Option<
+                    &Arc<dyn shamir_db::storage::types::Store>,
+                > = None;
+                if let Some(info) = override_info {
+                    super::identity_fence::checks::fence_hello_identity(
+                        info,
+                        &db_name,
+                        &repo,
+                        &resp,
+                        seed_receipt.as_ref(),
+                    )
+                    .await?;
+                } else {
+                    super::identity_fence::checks::fence_hello_recorded(
+                        &db,
+                        &db_name,
+                        &repo,
+                        &resp,
+                        seed_receipt.as_ref(),
+                    )
+                    .await?;
+                }
+            } else {
+                super::source::seed::fence::fence_hello(seed_receipt.as_ref(), &resp)?;
+            }
+            super::source::leader_epoch_of(&resp)
+        }
         // A hello that already trips fencing is fatal — propagate.
-        Err(e @ ReplError::StaleLeaderEpoch { .. }) => return Err(e),
+        Err(e @ ReplError::StaleLeaderEpoch { .. })
+        | Err(e @ ReplError::Seed(_))
+        | Err(e @ ReplError::IdentityMismatch { .. }) => return Err(e),
         Err(e) => {
             // A transient hello failure: we cannot seed the epoch, so treat
             // it as a backoff-worthy transport error and let the loop's
@@ -264,6 +381,7 @@ pub async fn run_follower_loop(
             Ok(r) => r,
             Err(e @ ReplError::StaleLeaderEpoch { .. })
             | Err(e @ ReplError::ReopenRequired { .. })
+            | Err(e @ ReplError::IdentityMismatch { .. })
             | Err(e @ ReplError::Seed(_)) => return Err(e),
             Err(e) => {
                 warn!(node_id = %node_id, error = %e, "follower_loop: pull failed, backing off");
@@ -271,6 +389,29 @@ pub async fn run_follower_loop(
                 continue;
             }
         };
+
+        // S5c-X PR7: universal identity fence — verify (or adopt at first
+        // contact) on EVERY Pull, BEFORE any event of this response is
+        // applied. Terminal on mismatch: nothing below runs.
+        if identity_fence {
+            #[cfg(test)]
+            let info = match identity_store.as_ref() {
+                Some(store) => store.info.clone(),
+                None => repo_instance
+                    .tx_info_store()
+                    .await
+                    .map_err(|error| ReplError::Bookmark(error.to_string()))?,
+            };
+            #[cfg(not(test))]
+            let info = repo_instance
+                .tx_info_store()
+                .await
+                .map_err(|error| ReplError::Bookmark(error.to_string()))?;
+            super::identity_fence::checks::fence_pull_identity(&info, &resp, seed_receipt.as_ref())
+                .await?;
+        } else {
+            super::source::seed::fence::fence_pull(seed_receipt.as_ref(), &resp)?;
+        }
 
         // 4. epoch-fence (§5.2) — check BEFORE touching the payload.
         let resp_epoch = leader_epoch_of(&resp);
@@ -295,7 +436,6 @@ pub async fn run_follower_loop(
         backoff_ms = INITIAL_BACKOFF_MS;
 
         // 5. dispatch on the reply payload.
-        super::source::seed::fence::fence_pull(seed_receipt.as_ref(), &resp)?;
         let (events_bytes, gap_at) = match resp {
             ReplResponse::Pull { events, gap_at, .. } => (events, gap_at),
             ReplResponse::Error { code, message, .. } => {
@@ -356,6 +496,9 @@ pub async fn run_follower_loop(
         };
 
         if events.is_empty() {
+            if max_iterations.is_some_and(|cap| iter >= cap) {
+                return Ok(());
+            }
             // The leader already long-polled `poll_wait_ms`; a tiny extra
             // backoff keeps us polite but is not required.
             tokio::select! {
