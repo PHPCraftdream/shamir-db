@@ -12,7 +12,8 @@ use shamir_wal::{WalEntryV2, WalOpV2};
 use std::sync::Arc;
 
 use crate::staging_store::StagingStore;
-use crate::tx_context::{TxContext, TxId};
+use crate::tx_context::TxContext;
+use crate::types::TxId;
 use crate::wal_event::{event_from_wal_entry, event_header_from_tx};
 
 /// Deterministic xorshift64* PRNG (no external dependency).

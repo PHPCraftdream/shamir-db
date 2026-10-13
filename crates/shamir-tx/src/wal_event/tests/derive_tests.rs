@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use crate::changefeed::{ChangeOp, RecordChange};
 use crate::staging_store::StagingStore;
-use crate::tx_context::{TxContext, TxId};
+use crate::tx_context::TxContext;
+use crate::types::TxId;
 use crate::wal_event::{event_from_wal_entry, event_header_from_tx};
 
 fn rid(n: u8) -> RecordId {
@@ -72,7 +73,7 @@ fn entry_from(tx: &TxContext, version: u64) -> WalEntryV2 {
 }
 
 fn kv_set(key: Vec<u8>, val: &[u8]) -> KvOp {
-    KvOp::Set(RecordKey::from_slice(&key), Bytes::from_static(val))
+    KvOp::Set(RecordKey::from_slice(&key), Bytes::copy_from_slice(val))
 }
 
 #[test]
