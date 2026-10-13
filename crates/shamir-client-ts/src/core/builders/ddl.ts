@@ -866,7 +866,7 @@ export function purgeHistory(
 
 /** One-shot "changes since version V" read. */
 export function changesSince(
-  cursor: number,
+  cursor: number | bigint,
   opts?: { repo?: string; limit?: number },
 ): ChangesSinceOp {
   const op: ChangesSinceOp = {

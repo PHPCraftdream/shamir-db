@@ -12,7 +12,8 @@ pub use access::{
 };
 pub use types::{
     AddSchemaRuleOp, AlterBufferConfigOp, AlterSubscriptionOp, BindValidatorOp, BufferConfigDto,
-    BufferConfigPatch, ChangesSinceOp, CommitMigrationOp, CompareDto, ConstraintsDto, CreateDbOp,
+    BufferConfigPatch, ChangesSinceEvent, ChangesSinceOp, ChangesSinceRecordChange,
+    ChangesSinceResponse, CommitMigrationOp, CompareDto, ConstraintsDto, CreateDbOp,
     CreateFunctionFolderOp, CreateFunctionOp, CreateIndexOp, CreatePublicationOp,
     CreateReplicationProfileOp, CreateRepoOp, CreateSubscriptionOp, CreateTableOp,
     CreateValidatorOp, DescribeTableOp, DropDbOp, DropFunctionOp, DropIndexOp, DropPublicationOp,

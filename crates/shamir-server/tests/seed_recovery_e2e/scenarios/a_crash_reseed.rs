@@ -188,6 +188,15 @@ async fn seed_e2e_a_kill_resync_offline_seed_resume_converges() {
         })
         .await;
     }
+    // The bookmark is persisted after the rows become visible: wait for it.
+    follower::wait_until("bookmark advances past the seed version", WAIT, {
+        let home = home.clone();
+        move || {
+            let home = home.clone();
+            async move { follower::bookmark(&home).await > v }
+        }
+    })
+    .await;
     let post = follower::bookmark(&home).await;
     assert!(post > v, "bookmark advanced past seed V ({post} > {v})");
     seeded_loop.stop_all().await;

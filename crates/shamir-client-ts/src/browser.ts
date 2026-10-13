@@ -19,6 +19,19 @@ export async function connect(opts: ConnectOptions): Promise<ShamirClient> {
 
 export { VisibilityError } from './core/visibility/errors.js';
 export type { TransactionResult, TransactionOptions } from './core/visibility/types.js';
+export {
+  extractReceipts,
+  reconcileReceipts,
+  executeWithReceipts,
+  decodeChangesSince,
+} from './core/receipts/index.js';
+export type {
+  AliasReceipt,
+  ChangesSinceEvent,
+  ChangesSinceRecordChange,
+  ChangesSinceResult,
+  RepoObservation,
+} from './core/receipts/index.js';
 export { ShamirClient };
 export {
   ShamirDbError,

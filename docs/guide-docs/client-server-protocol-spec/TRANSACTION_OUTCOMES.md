@@ -174,7 +174,12 @@ use a receipt against a deleted/recreated repository. After reconciliation, open
 a **new snapshot/transaction** for reads: an old snapshot is not advanced by
 waiting. On `reopen_required`, reopen/reconcile first; visibility observation
 never repairs projections or upgrades durability. Rust/TS transactional SDK
-receipts are adopted in VIS-5a; implicit per-alias SDK receipts remain VIS-5b.
+receipts are adopted in VIS-5a; VIS-5b adds the implicit per-alias SDK
+receipts (`extract_receipts` / `reconcile_receipts`, `executeWithReceipts`
+plus a `reconcileReceipts` helper — grouped per repository, one observation
+at the highest pending position, no resend, and a typed refusal when the
+alias's repository cannot be derived unambiguously) and the typed
+`changes_since` read (`Client::changes_since` / `client.changesSince`).
 
 ### Embedded direct-write receipts (VIS-4a)
 
@@ -213,7 +218,8 @@ neither transactional atomicity, fsync/crash durability, async-index completion,
 nor bounded end-to-end latency. Direct writes add no independent post-ack brake;
 existing transactional soft backpressure and execution/admission limits are
 unchanged. Implicit/network batch receipts are described above; supported SDK
-receipt adoption remains VIS-5 work.
+receipt adoption covers transactional batches since VIS-5a and implicit
+per-alias receipts plus the typed `changes_since` read since VIS-5b.
 
 ### Materialization is not durability
 
@@ -420,6 +426,16 @@ Semantics:
 - `gap_at` / retention truncation still require a full resynchronisation;
   `changes_since` is not the primary reconciliation API and its sample is not
   a visibility receipt.
+- Supported SDKs decode the payload with a typed DTO
+  (`shamir_query_types::admin::ChangesSinceResponse`; TS
+  `client.changesSince` returns `{ changes_since, events, gap_at,
+  visible_through }`). Clients decode u64 positions exactly (`u64` DTO
+  fields accepting every `QueryValue` form, including the decimal-string
+  `Big` encoding above `i64::MAX`; `bigint` in TS; the cursor accepts
+  `number | bigint`). CAVEAT: the server currently SAMPLES and CASTS these
+  positions through `i64`, so values above `i64::MAX` are not producible
+  by the server today — the lossless decode is a client-side guarantee,
+  not an end-to-end wire property yet.
 
 For operators: the acknowledgement side of the same mechanism is exported as
 the `shamir_visibility_*` metrics with structured, rate-limited expiry logs
