@@ -71,7 +71,7 @@ async fn durability_metrics_are_shared_by_clones_and_isolated_between_repos() {
 }
 
 #[tokio::test]
-async fn hybrid_reopen_preserves_identity_but_not_table_data() {
+async fn hybrid_reopen_starts_a_new_lineage_and_keeps_no_table_data() {
     use crate::repo::{BoxRepoFactory, RepoInstance};
     use crate::table::TableConfig;
     let dir = tempfile::TempDir::new().unwrap();
@@ -119,7 +119,10 @@ async fn hybrid_reopen_preserves_identity_but_not_table_data() {
     )
     .await
     .unwrap();
-    assert_eq!(reopened.repo_identity().await.unwrap(), identity);
+    // PR #160 lineage fence: hybrid repositories mint a NEW lineage at every
+    // process start (nothing survives a restart), so the reopened identity
+    // must differ from the first incarnation's.
+    assert_ne!(reopened.repo_identity().await.unwrap(), identity);
     assert!(reopened.wal_group().await.unwrap().is_mem_sink());
     assert_eq!(
         reopened

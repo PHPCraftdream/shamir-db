@@ -1,4 +1,7 @@
-//! Real factory reopen regressions. Paused time, no sleeps or detached spawns.
+//! Real factory reopen regressions. Paused time, no detached spawns. The
+//! one exception to "no sleeps" is the bounded reopen retry below, mirroring
+//! `tx/tests/recovery_tests.rs::reopen_disk_repo` (lazy Windows file-lock
+//! release after `drop`).
 
 use std::path::Path;
 
@@ -57,7 +60,35 @@ async fn next_commit_is_servable(repo: &RepoInstance, h: u64) {
     assert_eq!(events[0].event.commit_version, v);
 }
 
-#[tokio::test(start_paused = true)]
+/// Bounded-retry reopen, mirroring `tx/tests/recovery_tests.rs::reopen_disk_repo`:
+/// after an instance that performed real commits and truncation is dropped,
+/// Windows releases the fjall file lock lazily, so the first reopen attempt
+/// can fail with `FjallError: Locked` even though every background task has
+/// exited (this same test's FIRST reopen, after three real commits, succeeds
+/// with a plain `open` — no production task leaks the instance).
+async fn open_retry(backing: &Path, name: &str) -> RepoInstance {
+    let mut last_err = None;
+    for _attempt in 0..10 {
+        match RepoInstance::from_factory(
+            name.into(),
+            BoxRepoFactory::fjall_raw(backing.to_path_buf()),
+            vec![TableConfig::new("items")],
+        )
+        .await
+        {
+            Ok(repo) => return repo,
+            Err(e) => {
+                last_err = Some(e);
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+    }
+    panic!("reopen of {name:?} failed after 10 retries: {:?}", last_err);
+}
+
+// Not `start_paused`: the reopen retry below needs REAL wall time for the
+// OS to release the fjall file lock (see `open_retry`).
+#[tokio::test]
 async fn reopened_checkpointed_truncated_history_allows_next_commit() {
     let DiskFixture {
         repo,
@@ -101,7 +132,7 @@ async fn reopened_checkpointed_truncated_history_allows_next_commit() {
     drop(wal);
     repo.stop_journal_writer_for_test().await.unwrap();
     drop(repo);
-    let reopened = open(&backing, "truncated").await;
+    let reopened = open_retry(&backing, "truncated").await;
     assert_eq!(reopened.wal_group().await.unwrap().recoverable_through(), 4);
     next_commit_is_servable(&reopened, 4).await;
     reopened.stop_journal_writer_for_test().await.unwrap();

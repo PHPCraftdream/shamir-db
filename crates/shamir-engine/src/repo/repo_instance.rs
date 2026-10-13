@@ -966,9 +966,14 @@ impl RepoInstance {
                 let last_committed = marker.max(max_inflight).max(checkpoint);
 
                 let gate = shamir_tx::RepoTxGate::new(last_committed, next_tx_id);
-                let group = self.wal_group().await?;
-                if let Some(coverage) = group.coverage_observer() {
-                    gate.completion().install_abort_coverage(coverage);
+                // Best-effort: a WAL-init failure must NOT fail the gate
+                // init. The old contract (see commit_wal_init_failure tests)
+                // keeps the repo_wal OnceCell uninitialised and retryable —
+                // the failure surfaces only at commit_tx's repo_wal() call.
+                if let Ok(group) = self.wal_group().await {
+                    if let Some(coverage) = group.coverage_observer() {
+                        gate.completion().install_abort_coverage(coverage);
+                    }
                 }
                 Ok::<Arc<shamir_tx::RepoTxGate>, DbError>(Arc::new(gate))
             })
