@@ -280,3 +280,59 @@ fn completed_reseed_is_rejected_with_exact_message() {
         ReplicationServe::Durable
     );
 }
+
+/// Hang canary (default current-thread runtime, no paused time): ONE plain
+/// buffered commit on a FILE-backed repo must complete well inside the nextest
+/// kill budget. Every PR1 wake link the commit touches (ticket completion, the
+/// completion-watermark advance through the coverage observer, the strict
+/// visibility wait) is exercised; if any link loses a wakeup, this future
+/// never finishes and nextest fails the test — the post-condition is the wait.
+#[tokio::test]
+async fn buffered_commit_completes_on_default_runtime_file_wal() {
+    let fx = helpers::disk_repo("canary_buffered_commit_file").await;
+    let repo = &fx.repo;
+    let table = repo.get_table("items").await.unwrap();
+    let (mut tx, pin) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    table
+        .insert_tx(&InnerValue::Str("buffered".into()), Some(&mut tx))
+        .await
+        .unwrap();
+    let info = repo
+        .commit_tx_with_options(tx, VisibilityWait::Strict)
+        .await
+        .unwrap();
+    drop(pin);
+    assert_eq!(
+        info.visibility,
+        shamir_query_types::batch::VisibilityState::Visible,
+        "a settled commit must ack visible on the strict wait"
+    );
+    assert!(
+        repo.wal_group().await.unwrap().max_committed_version() >= info.commit_version,
+        "the buffered window must have written the commit version"
+    );
+}
+
+/// Hang canary, in-memory variant: the same single buffered commit through the
+/// Mem WAL sink on the default current-thread runtime. The commit/ack code is
+/// shared across backends (ticket completion, completion-watermark advance,
+/// visibility observation), so this pins the backend-independent half.
+#[tokio::test]
+async fn buffered_commit_completes_on_default_runtime_mem_wal() {
+    let repo = helpers::mem_repo("canary_buffered_commit_mem");
+    let table = repo.get_table("items").await.unwrap();
+    let (mut tx, pin) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    table
+        .insert_tx(&InnerValue::Str("buffered".into()), Some(&mut tx))
+        .await
+        .unwrap();
+    let info = repo
+        .commit_tx_with_options(tx, VisibilityWait::Strict)
+        .await
+        .unwrap();
+    drop(pin);
+    assert_eq!(
+        info.visibility,
+        shamir_query_types::batch::VisibilityState::Visible
+    );
+}

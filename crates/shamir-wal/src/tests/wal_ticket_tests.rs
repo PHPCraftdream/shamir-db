@@ -204,3 +204,56 @@ async fn uncontended_mem_append_finishes_in_one_poll() {
     }
     assert_eq!(sink.replay().await.unwrap().len(), 2);
 }
+
+// Red before the fix: `complete()` used `notify_one`, so of N awaiters parked
+// on ONE shared ticket exactly one was woken and the other N-1 stayed parked
+// forever on a deadline-less select — a lost wakeup on the batched append
+// path (`append_many` shares one ticket across all frames' awaiters). With
+// `notify_waiters` every awaiter registered BEFORE completion is woken, and
+// each re-checks `done` (enable-before-check), so late registrants observe
+// the terminal state instead of waiting. Bounded first-polls register all
+// three waiters deterministically; no sleeps; every task is joined.
+#[tokio::test]
+async fn completion_wakes_every_awaiter_of_a_shared_ticket() {
+    use std::future::Future;
+
+    use crate::wal_ticket::WalTicket;
+
+    let ticket = Arc::new(WalTicket::detached_for_test(WalTicketState::Pending));
+
+    // Mirrors `drive_and_wait`'s park loop: enable-before-check, no deadline.
+    async fn await_terminal(ticket: Arc<WalTicket>) -> WalAppendError {
+        loop {
+            let notified = ticket.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(outcome) = ticket.outcome() {
+                return outcome.expect_err("fixture completes as Failed, not Ok");
+            }
+            notified.await;
+        }
+    }
+
+    let mut waiters = Vec::new();
+    for _ in 0..3 {
+        let ticket = Arc::clone(&ticket);
+        waiters.push(tokio::spawn(async move { await_terminal(ticket).await }));
+    }
+    // First-poll every task so each waiter's `Notified` is registered BEFORE
+    // completion fires; the bounded poll proves each is alive and parked.
+    for waiter in &mut waiters {
+        poll_fn(|cx| {
+            let _ = waiter.poll(cx);
+            Poll::Ready(())
+        })
+        .await;
+    }
+
+    ticket.complete_detached_for_test(WalTicketState::Failed);
+
+    for waiter in waiters {
+        let error = waiter.await.unwrap();
+        assert_eq!(error, WalAppendError::NotWritten);
+    }
+    assert_eq!(ticket.state(), WalTicketState::Failed);
+}
