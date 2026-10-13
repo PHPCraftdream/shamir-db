@@ -321,6 +321,25 @@ Bypass in emergencies only — `git push --no-verify` (or
 `SHAMIR_SKIP_PREPUSH=1 git push`). The hook is a fast safety net, not a
 substitute for running the gate yourself before committing.
 
+### 🚦 CI tiers (draft PR vs full matrix)
+
+CI is segmented into two tiers to keep the shared runner pool responsive
+(see `.github/workflows/ci.yml`):
+
+* **FAST tier — draft PR pushes.** One ubuntu job (`fast`): `cargo fmt
+  --check`, the `scripts/ci/affected_crates.py` unit tests, then clippy and
+  lib tests (`./scripts/test.sh`) limited to the AFFECTED crates (changed
+  crate + its workspace dependents). Falls back to `--workspace` when the
+  diff cannot be bounded (lockfile, toolchain, `.github/`, scripts, …) and
+  to fmt-only for docs-only diffs.
+* **FULL tier — the merge gate.** `gh pr ready` (ready_for_review), master
+  pushes and `workflow_dispatch` run the full matrix (fmt, clippy ×3 OS,
+  test ×3, integration ×3, ts-unit, cooldown, loom) plus the path-gated
+  numa and supply-chain workflows. Windows/macOS-only failures surface only
+  here, at ready.
+* All three workflows cancel superseded PR runs via `concurrency`.
+* Force the full tier on a draft: `gh workflow run ci.yml --ref <branch>`.
+
 ### 📐 Layout limits (MANDATORY for new and changed code)
 
 * **At most 7 direct entries per folder** (files plus subfolders, `mod.rs`
