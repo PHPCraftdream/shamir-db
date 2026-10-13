@@ -2790,7 +2790,11 @@ pub(super) async fn pre_commit_locked(
         wal.begin_grouped_ticketed(&entry_arc, super::commit::commit_wal_durability(repo))?;
     version_guard.attach_metrics(repo.tx_metrics().clone());
     version_guard.wal_queued(ticket, entry_arc.clone());
-    let durability_failed = super::commit::wal_completion(gate, completion.await)?;
+    let (wc_result, proven_not_written) = super::commit::wal_completion(gate, completion.await);
+    if proven_not_written {
+        repo.settle_unwritten_version(commit_version).await;
+    }
+    let durability_failed = wc_result?;
     // SSI fix S2: WAL begin succeeded — the tx is COMMITTED. The claims stay
     // armed and are handed to the caller via `PreCommit`; the caller `disarm`s
     // them once the publisher has finalized every claim (`finalize_reservation`

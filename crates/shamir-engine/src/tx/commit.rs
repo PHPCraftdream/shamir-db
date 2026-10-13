@@ -424,39 +424,11 @@ impl From<TxError> for DbError {
     }
 }
 
+#[path = "../repo/durability_policy/durability_policy/commit_policy.rs"]
+mod durability_completion;
 #[cfg(test)]
-pub(crate) static TEST_SYNCED_WAL_REPO: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-pub(super) fn commit_wal_durability(repo: &RepoInstance) -> shamir_wal::WalDurability {
-    #[cfg(test)]
-    if TEST_SYNCED_WAL_REPO
-        .get()
-        .is_some_and(|name| name == repo.name())
-    {
-        return shamir_wal::WalDurability::Synced;
-    }
-    let _ = repo;
-    shamir_wal::WalDurability::Buffered
-}
-
-pub(super) fn wal_completion(
-    gate: &shamir_tx::RepoTxGate,
-    result: Result<(), WalAppendError>,
-) -> Result<bool, TxError> {
-    match result {
-        Ok(()) => Ok(false),
-        Err(WalAppendError::WrittenNotDurable) => Ok(true),
-        Err(WalAppendError::NotWritten) => Err(TxError::Storage(WalAppendError::NotWritten.into())),
-        Err(WalAppendError::Unknown | WalAppendError::Indeterminate) => {
-            gate.set_requires_reopen();
-            Err(TxError::WalRequiresReopen)
-        }
-        Err(_) => {
-            gate.set_requires_reopen();
-            Err(TxError::WalRequiresReopen)
-        }
-    }
-}
+pub(crate) use durability_completion::TEST_SYNCED_WAL_REPO;
+pub(super) use durability_completion::{commit_wal_durability, wal_completion};
 
 /// cancel-safe: yes — read-only over `&TxContext`. The only `.await`
 /// is `interner_overlay.scan_async` which is itself cancel-safe (the
@@ -1057,12 +1029,17 @@ async fn commit_tx_lockfree(
     let (ticket, completion) = match queued {
         Ok(queued) => queued,
         Err(e) => {
+            repo.settle_unwritten_version(commit_version).await;
             release_pessimistic_locks(&tx, repo).await;
             return Err(e.into());
         }
     };
     version_guard.wal_queued(ticket, validated.wal_entry_arc.clone());
-    let durability_failed = match wal_completion(gate, completion.await) {
+    let (wc_result, proven_not_written) = wal_completion(gate, completion.await);
+    if proven_not_written {
+        repo.settle_unwritten_version(commit_version).await;
+    }
+    let durability_failed = match wc_result {
         Ok(failed) => failed,
         Err(e) => {
             drop(version_guard);

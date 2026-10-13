@@ -41,6 +41,7 @@ fn make_config_with_public_metrics(
 ) -> Config {
     let data_dir: PathBuf = temp.path().to_path_buf();
     Config {
+        durability: Default::default(),
         transactions: Default::default(),
         data_dir: data_dir.clone(),
         logging: LoggingConfig {

@@ -408,6 +408,67 @@ cursor, limit)` (запрос строит query-builder) и TS
 поля; `WaitForVisibility` остаётся основным reconciliation-API, `gap_at` и
 retention требуют ресинхронизации.
 
+### Серверная durability и диагностика replication lag (PR1)
+
+Блок `durability` задаёт серверный default (см. [Этаж 2](./02-durability.md)):
+`wal_commit: buffered`, `wal_retention_max_bytes: 1073741824`,
+`on_wal_retention_exceeded: refuse_writes`, `replication_serve: durable`.
+`wal_commit: synced` ждёт coalesced WAL fsync; клиентский `buffered` его
+не ослабляет. Для файлового WAL `buffered` ack — локальный WAL write:
+падение процесса не равно потере питания. Фоновый таймер 250 мс номинальный,
+**не hard maximum**; проверяйте storage errors и задержки scheduler/I/O.
+In-memory/hybrid WAL не persistent; tier игнорируется с одним warn при open.
+
+Boot проверяет enum/неизвестные вложенные ключи и retention floor
+`>= 2 × effective segment bytes` через общий resolver, включая env override
+`SHAMIR_WAL_SEGMENT_MAX_BYTES`, до init базы. Верхнеуровневый детектор
+похожих на durability опечаток не добавлен. `completed_reseed` отвергается:
+`completed_reseed is not available yet (planned: epoch bump + universal fencing)`.
+Retention budget и overflow action **только parsed/validated до PR2**:
+не считайте 1 GiB enforced лимитом диска, `declare_gap` пока только warns.
+
+Durable Pull ограничен `min(confirmed, W, R)`, где R — непрерывный префикс
+recoverability (не max fsynced version). Pull запрашивает coalesced sync
+по требованию и ограниченно ждёт продвижения R; ошибки/таймауты сохраняют
+старый safe bound. Lag может включать journal confirmation, uncovered WAL
+prefix и собственно скорость apply follower; это разные причины.
+
+В текущем exporter все durability series имеют **только labels `db` и `repo`**.
+Источники принадлежат конкретному repo и его WAL; clones разделяют одно
+состояние. `shamir_wal_effective_commit` сохраняет configured tier
+(0 buffered, 1 synced), несмотря на историческое имя: Mem WAL игнорирует
+configured Synced и использует effective Buffered без sync demands.
+`shamir_replication_serve` (0 durable) и
+`shamir_wal_backend_mem` (1 для initialized Mem WAL, 0 для
+file/uninitialized) семплируются при scrape, без открытия WAL или stores.
+`shamir_wal_synced_lag_versions` и `shamir_wal_pending_versions` —
+**span W − R**, не количество sparse coverage entries.
+`shamir_wal_first_pending_version` — R + 1 при ненулевом span, иначе 0;
+`shamir_wal_first_pending_age_ns` — нижняя оценка возраста с первого
+наблюдения этой позиции scrape, **не** время allocation/commit. Смена
+первой uncovered позиции сбрасывает её observed age.
+
+`shamir_wal_sync_now_calls` считает demands сразу при регистрации, включая
+already-covered и cancelled calls. `shamir_wal_sync_rounds` считает
+завершённые rounds; `shamir_wal_sync_coalesced` — demands, наблюдавшие
+активного worker до своего start (не calls − rounds и не размер очереди).
+`shamir_wal_sync_errors` включает failed rounds и unwind/cancellation worker;
+`shamir_wal_sync_duration_ns` — cumulative время snapshot replay и sink sync,
+не только syscall fsync. Pending demands уже включены в calls.
+`shamir_replication_pull_held_back_ns` и
+`shamir_replication_pull_held_back_count` — total-ns/count ожиданий R,
+включая cancelled waits, **не latency histogram**.
+
+`shamir_wal_watermark_w`, `shamir_wal_recoverable_through` — текущие
+наблюдения initialized WAL; `shamir_replication_confirmed_bound` и
+`shamir_replication_served_bound` — последний pre-clamp/served sample pull
+этого repo. Разные gauges/counters не являются единым атомарным снимком
+и не заменяют fencing/coverage certificate. Counters экспортируются через
+`absolute`, поэтому повторный scrape не удваивает totals. При reopen или
+замене repo с теми же labels source totals сбрасываются, но recorder хранит
+старый максимум: меньшие totals скрыты, пока не превысят его (или до restart
+recorder). Старые labelled series могут оставаться после удаления repo.
+
 ### Валидация при старте
 
 `Config::validate()` проверяет: `kdf_defaults` (и per-listener override) не

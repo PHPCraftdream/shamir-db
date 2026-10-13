@@ -36,6 +36,7 @@ pub mod admin;
 pub mod auth;
 pub mod batch;
 pub mod call;
+pub mod durability;
 pub mod filter;
 #[cfg(feature = "crypto")]
 pub mod hmac;
@@ -51,5 +52,6 @@ mod tests;
 
 pub use batch::ResultEncoding;
 pub use call::CallOp;
+pub use durability::{DurabilityOverride, ReplicationServe, RetentionOverflow, WalCommitTier};
 pub use table_ref::TableRef;
 pub use validator::{ValidationError, WriteOp};

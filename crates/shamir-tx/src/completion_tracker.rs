@@ -24,6 +24,9 @@ pub enum State {
 pub struct CompletionTracker {
     /// Highest watermark already published — version V where ∀k≤V:
     /// state(k) ∈ {Materialized, Aborted}.
+    /// Aborted marks are individual proofs, forwarded before compaction.
+    abort_coverage:
+        std::sync::OnceLock<std::sync::Arc<dyn shamir_wal::wal_group_commit::WalCoverage>>,
     watermark: AtomicU64,
     /// Sparse map of version → state for versions above the watermark.
     /// Versions ≤ watermark are forgotten (compaction).
@@ -52,6 +55,7 @@ impl CompletionTracker {
     /// Create a new tracker with watermark at 0.
     pub fn new() -> Self {
         Self {
+            abort_coverage: std::sync::OnceLock::new(),
             watermark: AtomicU64::new(0),
             states: scc::HashMap::with_hasher(THasher::default()),
             waiters: AtomicUsize::new(0),
@@ -67,6 +71,7 @@ impl CompletionTracker {
     /// Used on repo open when `last_committed` is recovered from durable state.
     pub fn with_watermark(initial: u64) -> Self {
         Self {
+            abort_coverage: std::sync::OnceLock::new(),
             watermark: AtomicU64::new(initial),
             states: scc::HashMap::with_hasher(THasher::default()),
             waiters: AtomicUsize::new(0),
@@ -80,7 +85,19 @@ impl CompletionTracker {
 
     /// Mark version V as Materialized or Aborted, then try to advance the
     /// watermark. Marking a version ≤ current watermark is a no-op.
+    pub fn install_abort_coverage(
+        &self,
+        coverage: std::sync::Arc<dyn shamir_wal::wal_group_commit::WalCoverage>,
+    ) {
+        let _ = self.abort_coverage.set(coverage);
+    }
+
     pub fn mark(&self, version: u64, state: State) {
+        if state == State::Aborted {
+            if let Some(coverage) = self.abort_coverage.get() {
+                coverage.settle(version);
+            }
+        }
         let current_wm = self.watermark.load(Ordering::Acquire);
         if version <= current_wm {
             return; // already compacted
@@ -204,6 +221,9 @@ impl CompletionTracker {
                         Ordering::Acquire,
                     ) {
                         Ok(_) => {
+                            if let Some(coverage) = self.abort_coverage.get() {
+                                coverage.memory_completed(next);
+                            }
                             // If registration preceded this load, broadcast to
                             // enabled waiters. Otherwise their SeqCst recheck
                             // observes this CAS; neither side can miss the other.

@@ -6,6 +6,8 @@ mod clean_horizon_tests;
 mod coverage_matrix_tests;
 mod curl_gateway_tests;
 mod durability_levels_tests;
+#[path = "../shamir_db/seed/tests/durability_policy_tests.rs"]
+mod durability_policy_tests;
 mod durable_repo_tests;
 mod enforcement_tests;
 mod execute_tests;

@@ -12,6 +12,24 @@
 ## Schema is documented in `crates/shamir-server/src/config.rs`.
 
 data_dir: /var/lib/shamir-db
+
+## Server-default WAL policy (PR1). buffered: ack after local WAL write;
+## process crash != power loss. Background fsync has a nominal 250 ms timer,
+## NOT a hard maximum: scheduler/storage delays and errors can extend it.
+## synced: ack after coalesced WAL fsync (subject to honest storage).
+## Retention budget/action are parsed ONLY until PR2; no cap enforcement yet.
+## Budget must be >= 2 x effective segment size, including
+## SHAMIR_WAL_SEGMENT_MAX_BYTES. declare_gap warns; it does not evict yet.
+## durable pulls serve min(confirmed, W, R), R = contiguous recoverability;
+## on-demand sync is coalesced with bounded waiting, not a timer-only stall.
+## completed_reseed is rejected (planned: epoch bump + universal fencing).
+## In-memory/hybrid WALs do not persist; commit tier is ignored, warned once at open.
+durability: {
+    wal_commit: buffered
+    wal_retention_max_bytes: 1073741824
+    on_wal_retention_exceeded: refuse_writes
+    replication_serve: durable
+}
 ## replication: { validate_replicated_payload: true }
 
 logging: {

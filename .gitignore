@@ -48,3 +48,7 @@ devrust.cargo-target-bench/
 /pre-history-rewrite-*.patch
 # Agent and developer scratch space is local-only.
 /.scratch/
+
+# python bytecode (scripts/ci)
+__pycache__/
+*.pyc

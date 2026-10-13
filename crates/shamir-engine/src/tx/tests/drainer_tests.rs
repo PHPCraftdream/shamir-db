@@ -1266,17 +1266,21 @@ async fn ticket_unknown_halts_at_predecessor_and_rejects_commit_before_allocatio
 #[test]
 fn written_durability_failure_is_not_an_abort_or_fail_stop() {
     let gate = shamir_tx::RepoTxGate::fresh();
-    assert!(wal_completion(&gate, Err(WalAppendError::WrittenNotDurable)).unwrap());
+    assert!(
+        wal_completion(&gate, Err(WalAppendError::WrittenNotDurable))
+            .0
+            .unwrap()
+    );
     assert!(!gate.requires_reopen());
-    assert!(matches!(
-        wal_completion(&gate, Err(WalAppendError::NotWritten)),
-        Err(TxError::Storage(_)),
-    ));
+    // NotWritten additionally reports proven_not_written = true (the B3
+    // settle trigger); the fail-stop outcomes report false.
+    let (res, proven_not_written) = wal_completion(&gate, Err(WalAppendError::NotWritten));
+    assert!(matches!(res, Err(TxError::Storage(_))));
+    assert!(proven_not_written);
     assert!(!gate.requires_reopen());
-    assert!(matches!(
-        wal_completion(&gate, Err(WalAppendError::Indeterminate)),
-        Err(TxError::WalRequiresReopen),
-    ));
+    let (res, proven_not_written) = wal_completion(&gate, Err(WalAppendError::Indeterminate));
+    assert!(matches!(res, Err(TxError::WalRequiresReopen)));
+    assert!(!proven_not_written);
     assert!(gate.requires_reopen());
 }
 

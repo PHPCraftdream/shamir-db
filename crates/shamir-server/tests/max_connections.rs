@@ -35,6 +35,7 @@ fn fast_kdf() -> KdfConfig {
 fn make_config(temp: &TempDir, max_conns: usize) -> Config {
     let data_dir: PathBuf = temp.path().to_path_buf();
     Config {
+        durability: Default::default(),
         transactions: Default::default(),
         data_dir: data_dir.clone(),
         logging: LoggingConfig {

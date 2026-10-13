@@ -1,12 +1,53 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use shamir_storage::error::DbResult;
-#[cfg(test)]
 use tokio::sync::Notify;
 
 use crate::segment_set::SegmentSet;
 use crate::wal_entry_v2::WalEntryV2;
+use crate::wal_segment::WalSegment;
+
+// ---- Test-only FILE-sink sync pause (B3 coalescing test) ----
+// Mirrors MemSink's pause handshake for the File arm so an engine-level test
+// can park a coalesced sync_now round mid-fsync deterministically. Compiled
+// unconditionally (like `arm_fail_next_sync_for_test`) because the consumer
+// is a CROSS-CRATE test (shamir-engine), where this crate's `cfg(test)` is
+// off; the flag is never armed outside tests, so production cost is one
+// relaxed load per fsync.
+static FILE_FAIL_NEXT_SYNC: AtomicBool = AtomicBool::new(false);
+static FILE_PAUSE_NEXT_SYNC: AtomicBool = AtomicBool::new(false);
+static FILE_SYNC_PAUSED: Notify = Notify::const_new();
+static FILE_SYNC_RESUME: Notify = Notify::const_new();
+
+async fn file_sync_pause_point() {
+    if FILE_PAUSE_NEXT_SYNC.swap(false, Ordering::AcqRel) {
+        FILE_SYNC_PAUSED.notify_one();
+        FILE_SYNC_RESUME.notified().await;
+    }
+}
+
+impl WalSink {
+    /// Test-only: park the next File-sink `sync()` until
+    /// [`Self::resume_file_sync`]. Cross-crate test seam (see the statics
+    /// above for why this is not `cfg(test)`).
+    #[doc(hidden)]
+    pub fn arm_pause_next_file_sync() {
+        FILE_PAUSE_NEXT_SYNC.store(true, Ordering::Release);
+    }
+
+    /// Test-only: wait until a File-sink `sync()` is parked.
+    #[doc(hidden)]
+    pub async fn wait_file_sync_paused() {
+        FILE_SYNC_PAUSED.notified().await;
+    }
+
+    /// Test-only: release the parked File-sink `sync()`.
+    #[doc(hidden)]
+    pub fn resume_file_sync() {
+        FILE_SYNC_RESUME.notify_one();
+    }
+}
 
 /// In-RAM WAL sink — mirrors [`WalSegment`]'s interface but stores frames
 /// in a `Vec` instead of a file. Used by in-memory repos so the
@@ -181,7 +222,7 @@ impl WalSink {
     pub fn arm_fail_next_sync(&self) {
         match self {
             Self::Mem(mem) => mem.fail_next_sync.store(true, Ordering::Release),
-            Self::File(_) => panic!("arm_fail_next_sync is Mem-only"),
+            Self::File(_) => FILE_FAIL_NEXT_SYNC.store(true, Ordering::Release),
         }
     }
 
@@ -223,9 +264,49 @@ impl WalSink {
         }
     }
 
+    /// Worker-only exact snapshot; pin the captured active file for its fsync.
+    pub(crate) async fn sync_snapshot(
+        &self,
+    ) -> DbResult<(Vec<WalEntryV2>, Option<Arc<WalSegment>>)> {
+        match self {
+            Self::File(segments) => {
+                let (entries, active) = segments.sync_snapshot().await?;
+                Ok((entries, Some(active)))
+            }
+            Self::Mem(_) => Ok((self.replay().await?, None)),
+        }
+    }
+
+    pub(crate) async fn sync_captured(&self, active: Option<&WalSegment>) -> DbResult<()> {
+        if let Some(active) = active {
+            file_sync_pause_point().await;
+            if FILE_FAIL_NEXT_SYNC.swap(false, Ordering::AcqRel) {
+                return Err(shamir_storage::error::DbError::Storage(
+                    "File sink injected sync failure".into(),
+                ));
+            }
+            match self {
+                Self::File(segments) => segments.sync_active(active).await,
+                Self::Mem(_) => Err(shamir_storage::error::DbError::Internal(
+                    "captured file requires File sink".into(),
+                )),
+            }
+        } else {
+            self.sync().await
+        }
+    }
+
     pub async fn sync(&self) -> DbResult<()> {
         match self {
-            Self::File(seg) => seg.sync().await,
+            Self::File(seg) => {
+                file_sync_pause_point().await;
+                if FILE_FAIL_NEXT_SYNC.swap(false, Ordering::AcqRel) {
+                    return Err(shamir_storage::error::DbError::Storage(
+                        "File sink injected sync failure".into(),
+                    ));
+                }
+                seg.sync().await
+            }
             Self::Mem(_m) => {
                 #[cfg(test)]
                 {

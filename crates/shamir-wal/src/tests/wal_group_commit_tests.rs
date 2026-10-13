@@ -11,8 +11,11 @@ use crate::wal_entry_v2::{WalEntryV2, WalOpV2};
 use crate::wal_group_commit::{WalDurability, WalGroupCommit};
 use crate::wal_sink::WalSink;
 
-/// Large per-segment cap (64 MiB) so these tests — none of which are about
-/// rotation — keep the single-segment behaviour they had pre-F6b.
+#[path = "wal_group_commit/recoverability_tests.rs"]
+mod recoverability_tests;
+use recoverability_tests::tracked_group;
+
+/// Large per-segment cap (64 MiB) keeps legacy single-segment fixtures stable.
 const BIG_SEG: u64 = 64 * 1024 * 1024;
 
 fn rid(n: u8) -> RecordId {
@@ -63,7 +66,7 @@ async fn open_sink(dir: &TempDir) -> WalSink {
 async fn buffered_append_durable() {
     let dir = TempDir::new().unwrap();
     let sink = Arc::new(open_sink(&dir).await);
-    let gc = WalGroupCommit::new(Arc::clone(&sink));
+    let gc = tracked_group(Arc::clone(&sink));
 
     gc.append(entry(1, 10).encode().unwrap(), 10, WalDurability::Buffered)
         .await
@@ -78,7 +81,7 @@ async fn buffered_append_durable() {
 async fn synced_append_durable() {
     let dir = TempDir::new().unwrap();
     let sink = Arc::new(open_sink(&dir).await);
-    let gc = WalGroupCommit::new(Arc::clone(&sink));
+    let gc = tracked_group(Arc::clone(&sink));
 
     gc.append(entry(1, 10).encode().unwrap(), 10, WalDurability::Synced)
         .await
@@ -94,7 +97,7 @@ async fn synced_append_durable() {
 async fn concurrent_mixed_tiers_all_durable() {
     let dir = TempDir::new().unwrap();
     let sink = Arc::new(open_sink(&dir).await);
-    let gc = Arc::new(WalGroupCommit::new(Arc::clone(&sink)));
+    let gc = Arc::new(tracked_group(Arc::clone(&sink)));
 
     let mut handles = Vec::new();
     // txn_ids 1..=32 Buffered, 33..=64 Synced — all distinct.
@@ -126,7 +129,7 @@ async fn concurrent_mixed_tiers_all_durable() {
 async fn synced_fsyncs_are_batched() {
     let dir = TempDir::new().unwrap();
     let sink = Arc::new(open_sink(&dir).await);
-    let gc = Arc::new(WalGroupCommit::new(Arc::clone(&sink)));
+    let gc = Arc::new(tracked_group(Arc::clone(&sink)));
 
     let mut handles = Vec::new();
     for i in 1..=32u64 {
@@ -160,7 +163,7 @@ async fn synced_fsyncs_are_batched() {
 async fn buffered_only_window_issues_no_fsync() {
     let dir = TempDir::new().unwrap();
     let sink = Arc::new(open_sink(&dir).await);
-    let gc = Arc::new(WalGroupCommit::new(Arc::clone(&sink)));
+    let gc = Arc::new(tracked_group(Arc::clone(&sink)));
 
     // A workload of ONLY Buffered appends — no matter how the windows
     // form, none of them carry a Synced waiter, so no fsync is ever
@@ -191,7 +194,7 @@ async fn buffered_only_window_issues_no_fsync() {
 #[tokio::test]
 async fn mem_append_returns_ok_and_replays() {
     let sink = Arc::new(WalSink::mem());
-    let gc = WalGroupCommit::new(Arc::clone(&sink));
+    let gc = tracked_group(Arc::clone(&sink));
 
     gc.append(entry(1, 10).encode().unwrap(), 10, WalDurability::Buffered)
         .await
@@ -206,7 +209,7 @@ async fn mem_append_returns_ok_and_replays() {
 #[tokio::test]
 async fn mem_sync_returns_ok() {
     let sink = Arc::new(WalSink::mem());
-    let gc = WalGroupCommit::new(Arc::clone(&sink));
+    let gc = tracked_group(Arc::clone(&sink));
 
     // Mem sync is a no-op; a Synced append still succeeds.
     gc.append(entry(1, 10).encode().unwrap(), 10, WalDurability::Synced)
@@ -223,7 +226,7 @@ async fn background_fsync_fires_for_buffered() {
 
     let dir = TempDir::new().unwrap();
     let sink = Arc::new(open_sink(&dir).await);
-    let gc = Arc::new(WalGroupCommit::new(Arc::clone(&sink)));
+    let gc = Arc::new(tracked_group(Arc::clone(&sink)));
 
     gc.spawn_background_fsync(Duration::from_millis(30));
 
@@ -254,7 +257,7 @@ async fn background_fsync_skips_when_idle() {
 
     let dir = TempDir::new().unwrap();
     let sink = Arc::new(open_sink(&dir).await);
-    let gc = Arc::new(WalGroupCommit::new(Arc::clone(&sink)));
+    let gc = Arc::new(tracked_group(Arc::clone(&sink)));
 
     gc.spawn_background_fsync(Duration::from_millis(30));
 
@@ -271,7 +274,7 @@ async fn background_fsync_exits_on_drop() {
 
     let dir = TempDir::new().unwrap();
     let sink = Arc::new(open_sink(&dir).await);
-    let gc = Arc::new(WalGroupCommit::new(Arc::clone(&sink)));
+    let gc = Arc::new(tracked_group(Arc::clone(&sink)));
 
     gc.spawn_background_fsync(Duration::from_millis(20));
 
@@ -285,16 +288,12 @@ async fn background_fsync_exits_on_drop() {
 /// flag so the next tick retries, instead of silently losing the unflushed
 /// Buffered entries (unbounded data-at-risk window on a quiescent system).
 ///
-/// This test exercises the EXACT contract the fix enforces: after
-/// `take_dirty()` clears the flag and `sync_now()` fails, the dirty flag
-/// must be restored. We simulate the failed-sync branch by calling
-/// `take_dirty()` then manually restoring (mirroring the fix), and also
-/// verify the happy path clears the flag through `sync_now()`.
+/// A real failed sync after timer admission must re-arm dirty for retry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dirty_flag_restored_after_failed_fsync() {
     let dir = TempDir::new().unwrap();
     let sink = Arc::new(open_sink(&dir).await);
-    let gc = Arc::new(WalGroupCommit::new(Arc::clone(&sink)));
+    let gc = Arc::new(tracked_group(Arc::clone(&sink)));
 
     // Append a Buffered entry → dirty flag is set.
     gc.append(entry(1, 10).encode().unwrap(), 10, WalDurability::Buffered)
@@ -309,26 +308,22 @@ async fn dirty_flag_restored_after_failed_fsync() {
         "successful sync_now must clear the dirty flag"
     );
 
-    // Simulate the failed-background-fsync contract: take_dirty() clears the
-    // flag (as the background loop does BEFORE attempting sync), then a
-    // failed sync must restore it. We set dirty, take it, and verify the
-    // fix's restore path (store(true) on sync error) re-arms it.
-    gc.set_dirty();
-    assert!(gc.take_dirty(), "take_dirty must return the set flag");
+    // New bytes require a new generation, rather than already-covered sync.
+    gc.append(entry(2, 11).encode().unwrap(), 11, WalDurability::Buffered)
+        .await
+        .unwrap();
     assert!(
-        !gc.is_dirty(),
-        "take_dirty must clear the flag before the sync attempt"
+        gc.take_dirty(),
+        "timer admission clears dirty before demand"
     );
-    // The fix: on sync error, restore the dirty flag. We simulate the error
-    // branch (sync_now on a Mem/File sink succeeds, so we can't trigger a
-    // real failure here) by directly applying the restore the fix performs.
-    // This asserts the observable post-condition: dirty is re-armed.
-    // (The background task itself runs this exact restore on Err.)
-    gc.set_dirty(); // mirrors `dirty_since_sync.store(true, ...)` on Err
+    sink.arm_fail_next_sync();
+    assert!(gc.sync_now().await.is_err());
     assert!(
         gc.is_dirty(),
-        "after a failed sync the dirty flag MUST be restored so the next tick retries"
+        "failed shared work must re-arm timer admission"
     );
+    gc.sync_now().await.unwrap();
+    assert!(!gc.is_dirty(), "successful retry clears dirty");
 }
 
 /// Audit §1.6 regression: `append_many` must write all payloads in ONE
@@ -341,7 +336,7 @@ async fn dirty_flag_restored_after_failed_fsync() {
 async fn append_many_is_atomic_all_entries_land() {
     let dir = TempDir::new().unwrap();
     let sink = Arc::new(open_sink(&dir).await);
-    let gc = WalGroupCommit::new(Arc::clone(&sink));
+    let gc = tracked_group(Arc::clone(&sink));
 
     // A batch of 5 entries (txn_ids 1..=5) — all must land together.
     let entries: Vec<(Vec<u8>, u64)> = (1..=5u64)
@@ -377,7 +372,7 @@ async fn append_many_is_atomic_all_entries_land() {
 #[tokio::test]
 async fn append_many_write_failure_leaves_zero_entries() {
     let sink = Arc::new(WalSink::mem());
-    let gc = WalGroupCommit::new(Arc::clone(&sink));
+    let gc = tracked_group(Arc::clone(&sink));
 
     // Arm the NEXT append_batch (the batch's single leader write) to fail.
     sink.arm_fail_next_append();
@@ -427,7 +422,7 @@ async fn append_many_write_failure_leaves_zero_entries() {
 #[tokio::test]
 async fn append_many_empty_is_noop() {
     let sink = Arc::new(WalSink::mem());
-    let gc = WalGroupCommit::new(Arc::clone(&sink));
+    let gc = tracked_group(Arc::clone(&sink));
 
     gc.append_many(Vec::new(), WalDurability::Buffered)
         .await
@@ -448,7 +443,7 @@ async fn background_fsync_clears_dirty_on_success() {
 
     let dir = TempDir::new().unwrap();
     let sink = Arc::new(open_sink(&dir).await);
-    let gc = Arc::new(WalGroupCommit::new(Arc::clone(&sink)));
+    let gc = Arc::new(tracked_group(Arc::clone(&sink)));
 
     gc.spawn_background_fsync(Duration::from_millis(30));
 

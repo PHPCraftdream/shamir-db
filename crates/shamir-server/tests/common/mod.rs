@@ -51,6 +51,7 @@ pub fn fast_kdf() -> KdfConfig {
 pub fn make_test_config(temp: &TempDir, addr: &str) -> Config {
     let data_dir: PathBuf = temp.path().to_path_buf();
     Config {
+        durability: Default::default(),
         transactions: Default::default(),
         data_dir: data_dir.clone(),
         logging: LoggingConfig {
@@ -110,6 +111,7 @@ pub fn ipc_test_addr(temp: &TempDir) -> String {
 /// Build a minimal single-`kind: unix`-listener `Config` rooted at `temp`.
 pub fn make_ipc_test_config(temp: &TempDir, addr: &str) -> Config {
     Config {
+        durability: Default::default(),
         listeners: vec![ListenerConfig {
             kind: ListenerKind::Unix,
             addr: addr.to_string(),
@@ -153,6 +155,7 @@ pub async fn spawn_ipc_with_password(
 /// `addr` — pass e.g. `"127.0.0.1:0"`.
 pub fn make_plain_test_config(temp: &TempDir, addr: &str) -> Config {
     Config {
+        durability: Default::default(),
         listeners: vec![ListenerConfig {
             kind: ListenerKind::Tcp,
             addr: addr.to_string(),

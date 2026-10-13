@@ -67,7 +67,7 @@
 //! append, replay, truncate, and sync call through it — it is the
 //! production commit path (W3/W4 landed), not an unwired scaffold.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -76,6 +76,12 @@ use tokio::sync::{Mutex, Notify};
 
 use crate::wal_sink::WalSink;
 use crate::wal_ticket::{WalAppendError, WalTicket, WalTicketState};
+
+mod history_coverage;
+mod recoverable_through;
+mod wal_coverage;
+pub use recoverable_through::SyncCoordinator;
+pub use wal_coverage::WalCoverage;
 
 /// Durability tier for a single WAL append.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -127,22 +133,23 @@ pub struct WalGroupCommit {
     flushing: AtomicBool,
     indeterminate: AtomicBool,
     stopped: Notify,
-    // Count of fsyncs this coordinator issued (for the batching test).
-    fsync_count: AtomicU64,
     // RF1: true when a Buffered append completed but no fsync has run since.
-    dirty_since_sync: AtomicBool,
+    // R = contiguous RECOVERABILITY prefix + coalesced-fsync state. All
+    // logic in `wal_group_commit/recoverable_through.rs` (lock-free:
+    // atomics + Notify). R advances only over contiguous covered runs —
+    // never skips a hole (amendment B3 point 1).
+    sync: Arc<SyncCoordinator>,
 }
 
 impl WalGroupCommit {
     pub fn new(sink: Arc<WalSink>) -> Self {
         Self {
-            sink,
+            sink: Arc::clone(&sink),
             pending: Mutex::new(Vec::new()),
             flushing: AtomicBool::new(false),
             indeterminate: AtomicBool::new(false),
             stopped: Notify::new(),
-            fsync_count: AtomicU64::new(0),
-            dirty_since_sync: AtomicBool::new(false),
+            sync: Arc::new(SyncCoordinator::new(sink)),
         }
     }
 
@@ -329,7 +336,9 @@ impl WalGroupCommit {
                 for (_, ticket) in &guard.metas {
                     ticket.written();
                 }
-                self.dirty_since_sync.store(true, Ordering::Release);
+                self.sync.written_generation.fetch_add(1, Ordering::Release);
+                self.sync.dirty_since_sync.store(true, Ordering::Release);
+                self.sync.done.notify_waiters();
             }
             for (tier, w) in &guard.metas {
                 if *tier == WalDurability::Buffered {
@@ -343,12 +352,9 @@ impl WalGroupCommit {
             // One fsync for the window iff any Synced waiter is present.
             let needs_fsync = guard.metas.iter().any(|(t, _)| *t == WalDurability::Synced);
             let sync_ok = if write_ok && needs_fsync {
-                self.fsync_count.fetch_add(1, Ordering::Relaxed);
-                let ok = self.sink.sync().await.is_ok();
-                if ok {
-                    self.dirty_since_sync.store(false, Ordering::Release);
-                }
-                ok
+                // Synced appends share the same cancellation-independent
+                // worker as timer and pull demands; never call sink.sync here.
+                self.sync_window().await.is_ok()
             } else {
                 write_ok
             };
@@ -391,7 +397,7 @@ impl WalGroupCommit {
     /// count reclaimed. The caller (drainer) is responsible for flushing
     /// history before this (I2).
     pub async fn truncate_below(&self, durable: u64) -> DbResult<usize> {
-        self.sink.truncate_below(durable).await
+        history_coverage::truncate(self, durable).await
     }
 
     /// F6b: cheap probe gating the drainer's history-flush + truncate so it
@@ -400,26 +406,20 @@ impl WalGroupCommit {
         self.sink.has_truncatable(durable)
     }
 
-    /// Force a durable `fsync` of the sink (level 2 → level 3). Used by the
-    /// `synced` durability tier at batch granularity.
-    pub async fn sync_now(&self) -> DbResult<()> {
-        let res = self.sink.sync().await;
-        if res.is_ok() {
-            self.dirty_since_sync.store(false, Ordering::Release);
-        }
-        self.fsync_count.fetch_add(1, Ordering::Relaxed);
-        res
-    }
+    // `sync_now` (coalesced) lives in
+    // `wal_group_commit/recoverable_through.rs`, alongside the `R` prefix it
+    // publishes.
 
     /// Atomically read and clear the dirty flag. Returns `true` if a
     /// Buffered append happened since the last fsync.
     pub fn take_dirty(&self) -> bool {
-        self.dirty_since_sync.swap(false, Ordering::AcqRel)
+        self.sync.dirty_since_sync.swap(false, Ordering::AcqRel)
     }
 
     /// Spawn a background task that fsyncs the WAL every `interval` IFF a
-    /// Buffered append happened since the last sync, bounding the power-loss
-    /// window for level-2 (Buffered) commits. Weak-ref lifecycle: the task
+    /// Buffered append happened since the last sync. The timer is nominal,
+    /// not a hard power-loss bound: scheduling, I/O and errors can extend it.
+    /// Weak-ref lifecycle: the task
     /// exits when the last `Arc<WalGroupCommit>` is dropped (no leak —
     /// mirrors MemBufferStore's flusher). No-op sinks make `sync_now()` cheap.
     ///
@@ -445,7 +445,7 @@ impl WalGroupCommit {
                                 // Restore the dirty flag so the next tick
                                 // retries the fsync instead of silently
                                 // abandoning the unflushed Buffered entries.
-                                g.dirty_since_sync.store(true, Ordering::Release);
+                                g.sync.dirty_since_sync.store(true, Ordering::Release);
                                 log::error!(
                                     "WalGroupCommit background fsync failed: {e}; \
                                      dirty flag restored — will retry next tick"
@@ -461,7 +461,7 @@ impl WalGroupCommit {
 
     #[cfg(test)]
     pub(crate) fn fsync_count(&self) -> u64 {
-        self.fsync_count.load(Ordering::Relaxed)
+        self.sync.rounds.load(Ordering::Relaxed)
     }
 
     /// Test-only: is the dirty flag currently set? Used by the §1.5
@@ -469,14 +469,7 @@ impl WalGroupCommit {
     /// failed sync (rather than silently losing it).
     #[cfg(test)]
     pub(crate) fn is_dirty(&self) -> bool {
-        self.dirty_since_sync.load(Ordering::Acquire)
-    }
-
-    /// Test-only: set the dirty flag directly (simulates a Buffered append
-    /// landing without going through the full append path).
-    #[cfg(test)]
-    pub(crate) fn set_dirty(&self) {
-        self.dirty_since_sync.store(true, Ordering::Release);
+        self.sync.dirty_since_sync.load(Ordering::Acquire)
     }
 }
 

@@ -47,6 +47,7 @@ fn make_config(temp: &TempDir) -> Config {
             file: None,
             flush_interval_ms: 2000,
         },
+        durability: Default::default(),
         transactions: Default::default(),
         kdf_defaults: fast_kdf(),
         argon2_concurrent_max: 4,

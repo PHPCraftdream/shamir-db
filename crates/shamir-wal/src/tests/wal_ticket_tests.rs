@@ -1,12 +1,13 @@
 use std::future::{poll_fn, Future};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::Poll;
 
 use crate::wal_entry_v2::WalEntryV2;
 use crate::wal_group_commit::{WalDurability, WalGroupCommit};
 use crate::wal_sink::WalSink;
-use crate::wal_ticket::{WalAppendError, WalTicketState};
+use crate::wal_ticket::{WalAppendError, WalTicket, WalTicketState};
 
 fn payload(id: u64) -> Vec<u8> {
     WalEntryV2::new(id, 7, Vec::new())
@@ -203,4 +204,61 @@ async fn uncontended_mem_append_finishes_in_one_poll() {
         assert_eq!(ticket.state(), WalTicketState::Acked);
     }
     assert_eq!(sink.replay().await.unwrap().len(), 2);
+}
+
+// Red before the fix: `complete()` used `notify_one`, so of N awaiters parked
+// on ONE shared ticket exactly one was woken and the other N-1 stayed parked
+// forever on a deadline-less select — a lost wakeup on the batched append
+// path (`append_many` shares one ticket across all frames' awaiters). With
+// `notify_waiters` every awaiter registered BEFORE completion is woken, and
+// each re-checks `done` (enable-before-check), so late registrants observe
+// the terminal state instead of waiting. A registered-waiter counter makes
+// all three registrations deterministic; no sleeps; every task is joined.
+#[tokio::test]
+async fn completion_wakes_every_awaiter_of_a_shared_ticket() {
+    let ticket = Arc::new(WalTicket::detached_for_test(WalTicketState::Pending));
+
+    // Mirrors `drive_and_wait`'s park loop: enable-before-check, no deadline.
+    async fn await_terminal(
+        ticket: Arc<WalTicket>,
+        registered: Arc<AtomicUsize>,
+    ) -> WalAppendError {
+        let mut announced = false;
+        loop {
+            let notified = ticket.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !announced {
+                registered.fetch_add(1, Ordering::SeqCst);
+                announced = true;
+            }
+            if let Some(outcome) = ticket.outcome() {
+                return outcome.expect_err("fixture completes as Failed, not Ok");
+            }
+            notified.await;
+        }
+    }
+
+    let registered = Arc::new(AtomicUsize::new(0));
+    let mut waiters = Vec::new();
+    for _ in 0..3 {
+        let ticket = Arc::clone(&ticket);
+        let registered = Arc::clone(&registered);
+        waiters.push(tokio::spawn(async move {
+            await_terminal(ticket, registered).await
+        }));
+    }
+    // Wait for the CONDITION: every waiter has registered its `Notified`
+    // BEFORE completion fires (a missed wakeup would otherwise be untestable).
+    while registered.load(Ordering::SeqCst) < 3 {
+        tokio::task::yield_now().await;
+    }
+
+    ticket.complete_detached_for_test(WalTicketState::Failed);
+
+    for waiter in waiters {
+        let error = waiter.await.unwrap();
+        assert_eq!(error, WalAppendError::NotWritten);
+    }
+    assert_eq!(ticket.state(), WalTicketState::Failed);
 }
