@@ -157,6 +157,7 @@ async fn recovery_round_trip_all_op_variants() {
             },
         ],
         interner_delta: vec![],
+        event: None,
     };
 
     mgr.begin_grouped(&entry, WalDurability::Buffered)
