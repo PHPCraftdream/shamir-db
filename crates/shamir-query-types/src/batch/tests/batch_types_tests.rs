@@ -7,7 +7,7 @@ use crate::admin::{GroupRef, ResourceRef};
 use crate::admin::{ReplDirection, ReplMode, SubAction};
 use crate::batch::{
     BatchLimits, BatchOp, BatchRequest, BatchResponse, EdgeKind, ForEachOp, InternerDelta,
-    QueryEntry, ResultEncoding, SubBatchOp, TransactionInfo,
+    IsolationLevel, QueryEntry, RequestDurability, ResultEncoding, SubBatchOp, TransactionInfo,
 };
 use crate::filter::FilterValue;
 
@@ -116,7 +116,7 @@ fn batch_request_parses_isolation_field() {
     });
     let req: BatchRequest = from_qv(qv);
     assert!(req.transactional);
-    assert_eq!(req.isolation, Some("serializable".to_string()));
+    assert_eq!(req.isolation, Some(IsolationLevel::Serializable));
 }
 
 #[test]
@@ -138,7 +138,7 @@ fn batch_request_parses_durability_field() {
         "queries": {}
     });
     let req: BatchRequest = from_qv(qv);
-    assert_eq!(req.durability, Some("synced".to_string()));
+    assert_eq!(req.durability, Some(RequestDurability::Synced));
 }
 
 #[test]
