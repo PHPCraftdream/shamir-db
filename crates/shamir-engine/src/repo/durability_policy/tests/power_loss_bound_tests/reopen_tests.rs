@@ -46,7 +46,7 @@ async fn next_commit_is_servable(repo: &RepoInstance, h: u64) {
             .await
             .unwrap();
         drop(pin);
-        info.commit_version.unwrap()
+        info.commit_version
     });
     let v = task.await.unwrap();
     assert_eq!(v, h + 1);

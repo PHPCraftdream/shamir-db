@@ -41,7 +41,7 @@ async fn mem_sink_keeps_r_equal_w_regardless_of_policy() {
         .await
         .unwrap();
     let info = repo.commit_tx_with_options(tx, STATUS).await.unwrap();
-    let version = info.commit_version.unwrap();
+    let version = info.commit_version;
     drop(pin);
     assert_eq!(group.instance_sync_calls(), 0);
     assert_eq!(group.instance_sync_rounds(), 0);
@@ -103,7 +103,7 @@ async fn hybrid_reopen_preserves_identity_but_not_table_data() {
     assert!(group.is_mem_sink());
     assert_eq!(group.instance_sync_calls(), 0);
     assert_eq!(group.instance_sync_rounds(), 0);
-    assert_eq!(group.recoverable_through(), info.commit_version.unwrap());
+    assert_eq!(group.recoverable_through(), info.commit_version);
     repo.shutdown_clean(std::time::Duration::from_secs(10))
         .await
         .unwrap();

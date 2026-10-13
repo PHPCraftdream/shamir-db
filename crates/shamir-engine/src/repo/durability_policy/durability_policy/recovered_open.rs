@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use shamir_storage::error::DbResult;
+use shamir_storage::types::Repo;
 use shamir_wal::WalGroupCommit;
 
 use super::RecoverabilityCoverage;

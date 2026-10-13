@@ -67,7 +67,7 @@ async fn synced_policy_commit_leaves_s_at_the_commit_version() {
         .await
         .unwrap();
     let info = repo.commit_tx_with_options(tx, STATUS).await.unwrap();
-    let version = info.commit_version.unwrap();
+    let version = info.commit_version;
     drop(pin);
     assert_eq!(
         repo.wal_group().await.unwrap().recoverable_through(),
