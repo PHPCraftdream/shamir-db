@@ -176,8 +176,14 @@ fn batch_config_full() {
     assert_eq!(req.name, Some("my_batch".to_string()));
     assert_eq!(req.id, QueryValue::Int(42));
     assert!(req.transactional);
-    assert_eq!(req.isolation, Some("serializable".to_string()));
-    assert_eq!(req.durability, Some("synced".to_string()));
+    assert_eq!(
+        req.isolation,
+        Some(shamir_query_types::batch::IsolationLevel::Serializable)
+    );
+    assert_eq!(
+        req.durability,
+        Some(shamir_query_types::batch::RequestDurability::Synced)
+    );
     assert!(!req.return_all);
     assert_eq!(req.return_only, Some(vec!["x".to_string()]));
 }
@@ -197,14 +203,20 @@ fn batch_config_return_all_resets_return_only() {
 fn batch_isolation_snapshot() {
     let mut b = Batch::new();
     b.isolation(Isolation::Snapshot);
-    assert_eq!(b.build().isolation, Some("snapshot".to_string()));
+    assert_eq!(
+        b.build().isolation,
+        Some(shamir_query_types::batch::IsolationLevel::Snapshot)
+    );
 }
 
 #[test]
 fn batch_durability_buffered() {
     let mut b = Batch::new();
     b.durability(Durability::Buffered);
-    assert_eq!(b.build().durability, Some("buffered".to_string()));
+    assert_eq!(
+        b.build().durability,
+        Some(shamir_query_types::batch::RequestDurability::Buffered)
+    );
 }
 
 // ============================================================================

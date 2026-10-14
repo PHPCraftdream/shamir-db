@@ -8,4 +8,5 @@ pub mod limit_model_tests;
 pub mod planner_tests;
 pub mod static_tree_gate_tests;
 pub mod tree_visitor_tests;
+pub mod typed_options_tests;
 pub mod visibility_tests;

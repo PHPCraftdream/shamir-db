@@ -1,7 +1,9 @@
 use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
-use crate::batch::{TransactionInfo, VisibilityPendingReason, VisibilityState, VisibilityWait};
+use crate::batch::{
+    IsolationLevel, TransactionInfo, VisibilityPendingReason, VisibilityState, VisibilityWait,
+};
 use crate::read::ReadQuery;
 use crate::wire::cursor_id::CursorId;
 use crate::wire::db_message::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
@@ -17,9 +19,10 @@ fn from_qv<T: serde::de::DeserializeOwned>(qv: QueryValue) -> T {
 }
 
 #[test]
-fn current_query_lang_version_is_three() {
-    // v3: committed visibility metadata requires explicit opt-in.
-    assert_eq!(CURRENT_QUERY_LANG_VERSION, 3);
+fn current_query_lang_version_is_four() {
+    // v4: typed request options (`durability`, NEW `index_visibility`,
+    // strict `isolation`); unknown BatchRequest keys rejected.
+    assert_eq!(CURRENT_QUERY_LANG_VERSION, 4);
 }
 
 #[test]
@@ -28,7 +31,7 @@ fn tx_begin_request_roundtrip_and_tag() {
         query_version: CURRENT_QUERY_LANG_VERSION,
         db: "app".into(),
         repo: "main".into(),
-        isolation: Some("serializable".into()),
+        isolation: Some(IsolationLevel::Serializable),
     };
     let v = to_qv(&req);
     assert_eq!(v.get("op").and_then(QueryValue::as_str), Some("tx_begin"));
@@ -478,7 +481,7 @@ fn visibility_request_response_roundtrip_and_tags() {
         VisibilityWait::Bounded { timeout_ms: 30000 },
     ] {
         let request = DbRequest::WaitForVisibility {
-            query_version: 3,
+            query_version: CURRENT_QUERY_LANG_VERSION,
             db: "app".into(),
             repo: "main".into(),
             // QueryValue holds i64; the u64 extreme is covered by the direct codec below.
@@ -495,13 +498,13 @@ fn visibility_request_response_roundtrip_and_tags() {
             DbRequest::WaitForVisibility {
                 version: 9_223_372_036_854_775_807,
                 visibility_wait,
-                query_version: 3,
+                query_version: CURRENT_QUERY_LANG_VERSION,
                 ..
             } if visibility_wait == wait,
         ));
     }
     let extreme = DbRequest::WaitForVisibility {
-        query_version: 3,
+        query_version: CURRENT_QUERY_LANG_VERSION,
         db: "app".into(),
         repo: "main".into(),
         version: u64::MAX,

@@ -38,10 +38,10 @@ export const SUPPORTED_VERSION = 0x01;
  * Query-language wire version the client emits in every
  * `query_version`-carrying DbRequest envelope (`execute`, `tx_begin`,
  * `tx_execute`, `tx_commit`). MUST track `CURRENT_QUERY_LANG_VERSION` in
- * `crates/shamir-query-types/src/wire/db_message.rs` — v3 opts into required
- * committed visibility metadata and retains v2 id-keyed pass-through.
+ * `crates/shamir-query-types/src/wire/db_message.rs` — v4 opts into required
+ * committed visibility metadata and adds typed transaction options.
  */
-export const CURRENT_QUERY_LANG_VERSION = 3;
+export const CURRENT_QUERY_LANG_VERSION = 4;
 
 /** KDF parameters as carried in the server `challenge`. */
 export interface KdfParams {

@@ -354,8 +354,17 @@ impl RequestHandler for ShamirDbHandler {
         conn: &'a ConnectionServices,
     ) -> shamir_connect::server::dispatch::HandlerFuture<'a> {
         Box::pin(async move {
-            let request: DbRequest =
-                rmp_serde::from_slice(req).map_err(|e| format!("invalid_request: {}", e))?;
+            let request: DbRequest = match rmp_serde::from_slice(req) {
+                Ok(request) => request,
+                Err(e) => {
+                    let response = DbResponse::Error {
+                        code: "invalid_request".into(),
+                        message: e.to_string(),
+                    };
+                    return rmp_serde::to_vec_named(&response)
+                        .map_err(|encode_err| format!("response encode: {}", encode_err));
+                }
+            };
 
             let response = match request {
                 DbRequest::Ping => DbResponse::Pong,

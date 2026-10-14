@@ -108,7 +108,7 @@ fn execute_bytes_with_durability(i: usize, durability: Option<&str>) -> Vec<u8> 
     if let Some(d) = durability {
         match d {
             "async_index" => {
-                b.durability(shamir_query_builder::batch::Durability::AsyncIndex);
+                b.index_visibility(shamir_query_builder::batch::IndexVisibility::Async);
             }
             "synced" => {
                 b.durability(shamir_query_builder::batch::Durability::Synced);

@@ -221,6 +221,62 @@ fn vector_quantization_sq8_round_trip() {
     assert_eq!(back, op);
 }
 
+#[test]
+fn valid_fts_tokenizer_dsl_values_remain_accepted() {
+    for tokenizer in ["whitespace", "unicode", "ngram", "ngram12", "stemmed_en"] {
+        let mut value = mpack!({
+            "create_index": "idx",
+            "table": "docs",
+            "fields": [["body"]],
+            "index_type": "fts"
+        });
+        let QueryValue::Map(ref mut fields) = value else {
+            unreachable!("mpack! map produces a QueryValue::Map");
+        };
+        fields.insert(
+            "fts_tokenizer".to_string(),
+            QueryValue::Str(tokenizer.into()),
+        );
+        let bytes = rmp_serde::to_vec_named(&value).expect("encode valid tokenizer");
+        let parsed: CreateIndexOp = rmp_serde::from_slice(&bytes)
+            .unwrap_or_else(|error| panic!("{tokenizer} must remain valid: {error}"));
+        assert_eq!(parsed.fts_tokenizer.as_deref(), Some(tokenizer));
+    }
+}
+
+#[test]
+fn invalid_index_option_values_are_rejected() {
+    for (field, invalid, index_type) in [
+        ("fts_tokenizer", "tokenizer_typo", "fts"),
+        ("vector_metric", "metric_typo", "vector"),
+        ("vector_quantization", "quantization_typo", "vector"),
+    ] {
+        let mut value = mpack!({
+            "create_index": "idx",
+            "table": "docs",
+            "fields": [["value"]],
+            "vector_dim": 128
+        });
+        let QueryValue::Map(ref mut fields) = value else {
+            unreachable!("mpack! map produces a QueryValue::Map");
+        };
+        fields.insert("index_type".to_string(), QueryValue::Str(index_type.into()));
+        fields.insert(field.to_string(), QueryValue::Str(invalid.into()));
+        let bytes = rmp_serde::to_vec_named(&value).expect("encode malformed index option");
+        let error = rmp_serde::from_slice::<CreateIndexOp>(&bytes)
+            .expect_err("unknown option value must be rejected")
+            .to_string();
+        assert!(
+            error.contains(field),
+            "expected field hint {field:?}: {error}"
+        );
+        assert!(
+            error.contains(invalid),
+            "expected invalid value {invalid:?}: {error}"
+        );
+    }
+}
+
 /// `vector_quantization` absent → NOT in serialized output
 /// (skip_serializing_if = "Option::is_none").
 #[test]

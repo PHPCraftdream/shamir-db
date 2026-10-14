@@ -4,7 +4,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::batch::{BatchRequest, BatchResponse, TransactionInfo, VisibilityState, VisibilityWait};
+use crate::batch::options::deserialize_optional_field;
+
+use crate::batch::{
+    BatchRequest, BatchResponse, IsolationLevel, TransactionInfo, VisibilityState, VisibilityWait,
+};
 use crate::read::{QueryResult, ReadQuery};
 use crate::wire::cursor_id::CursorId;
 use crate::wire::repl::{ReplRequest, ReplResponse};
@@ -19,8 +23,18 @@ use crate::wire::repl::{ReplRequest, ReplResponse};
 /// `WireResumeOkWire.server_query_version`; clients opt in only when
 /// they see `server_query_version >= 2`.
 /// v3: committed outcomes require explicit visibility metadata and opt-in.
-pub const CURRENT_QUERY_LANG_VERSION: u32 = 3;
+/// v4: request options are typed (`durability: buffered|synced` enum, NEW
+/// `index_visibility: sync|async` replacing the old
+/// `durability: "async_index"` string, `isolation` strict enum); unknown
+/// `BatchRequest` keys are rejected; v3 and older are rejected by the server.
+pub const CURRENT_QUERY_LANG_VERSION: u32 = 4;
 
+fn deserialize_tx_isolation<'de, D>(deserializer: D) -> Result<Option<IsolationLevel>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_field(deserializer, "isolation")
+}
 fn default_query_version() -> u32 {
     // Missing version is legacy, never an implicit opt-in to v3.
     0
@@ -105,10 +119,14 @@ pub enum DbRequest {
         db: String,
         /// The single repo the transaction is scoped to.
         repo: String,
-        /// `"snapshot"` (default) | `"serializable"` — same vocabulary as
+        /// Isolation level (typed enum, v4) — same vocabulary as
         /// [`crate::batch::BatchRequest::isolation`].
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        isolation: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_tx_isolation"
+        )]
+        isolation: Option<IsolationLevel>,
     },
     /// Run a batch inside an already-open interactive transaction. The tx is
     /// NOT committed — state accumulates in the parked transaction. The
@@ -349,6 +367,10 @@ pub enum DbResponse {
         ///
         /// - Auth / routing: `permission_denied`, `access_denied`,
         ///   `read_only_replica`, `bad_role`, `unsupported_query_version`.
+        /// - Wire / decode-level rejection: `invalid_request` — malformed
+        ///   msgpack, unknown `BatchRequest` key (`deny_unknown_fields`), or
+        ///   bad enum value (e.g. `durability: "syncedd"`); the offending
+        ///   field is named in the message.
         /// - Destructive-op HMAC gate: `hmac_required`, `hmac_mismatch`.
         /// - Batch / planner: `limits`, `validation`, `query`, `timeout`,
         ///   `lock_timeout`, `nesting_too_deep`, `unknown_db`, `not_supported`,

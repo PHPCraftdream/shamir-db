@@ -12,7 +12,11 @@ fn default_repo() -> String {
 }
 
 /// Create a new repository within the current database.
+///
+/// Strictly typed on the wire: unknown keys are rejected at decode time
+/// (a typo like `tablez` fails with `invalid_request`, not silently).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateRepoOp {
     pub create_repo: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

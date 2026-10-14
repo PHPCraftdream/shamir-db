@@ -11,6 +11,7 @@ mod batch;
 mod build_error;
 mod durability;
 mod handle;
+mod index_visibility;
 mod into_batch_op;
 mod isolation;
 #[path = "repo_admin.rs"]
@@ -23,6 +24,7 @@ pub use batch::*;
 pub use build_error::*;
 pub use durability::*;
 pub use handle::*;
+pub use index_visibility::*;
 pub use into_batch_op::*;
 pub use isolation::*;
 pub use subscribe::{SourceBuilder, Subscribe};
