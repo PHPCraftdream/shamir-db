@@ -2,7 +2,7 @@ use shamir_storage::error::DbResult;
 use shamir_storage::types::Store;
 use std::sync::Arc;
 
-use crate::repo::RepoInstance;
+use super::RepoInstance;
 
 impl RepoInstance {
     #[cfg(test)]
