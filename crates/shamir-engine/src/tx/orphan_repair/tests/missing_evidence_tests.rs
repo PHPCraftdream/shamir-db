@@ -47,7 +47,7 @@ async fn missing_evidence_does_not_settle_version_present_in_window() {
         WalEntryV2::new(version, 0, Vec::new()).with_commit_version(version),
     ));
     let drainer = repo.drainer();
-    settle_missing_evidence(drainer, &repo, &gate)
+    settle_missing_evidence(&drainer, &repo, &gate)
         .await
         .unwrap();
     assert!(gate.is_orphaned_post_wal(version));
@@ -66,7 +66,7 @@ async fn missing_evidence_does_not_settle_non_contiguous_orphan() {
     drop(second);
 
     let drainer = repo.drainer();
-    settle_missing_evidence(drainer, &repo, &gate)
+    settle_missing_evidence(&drainer, &repo, &gate)
         .await
         .unwrap();
     assert!(gate.is_orphaned_post_wal(second_version));
