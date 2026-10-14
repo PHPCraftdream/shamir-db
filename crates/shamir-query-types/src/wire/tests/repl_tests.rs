@@ -43,6 +43,7 @@ fn repl_hello_request_roundtrip() {
     let inner = ReplRequest::Hello {
         proto_ver: 1,
         node_id: "follower-7".into(),
+        capabilities: None,
     };
     let req = DbRequest::Repl(inner.clone());
     let back = roundtrip_db_request(&req);
@@ -60,6 +61,7 @@ fn repl_hello_request_roundtrip() {
         ReplRequest::Hello {
             proto_ver: 1,
             node_id: "follower-7".into(),
+            capabilities: None,
         }
     );
 }
@@ -72,6 +74,7 @@ fn repl_pull_request_roundtrip_with_wait() {
         from_version: 100,
         limit: 256,
         wait_ms: Some(500),
+        capabilities: None,
     });
     match roundtrip_db_request(&req) {
         DbRequest::Repl(ReplRequest::Pull {
@@ -99,6 +102,7 @@ fn repl_pull_request_roundtrip_without_wait() {
         from_version: 0,
         limit: 10,
         wait_ms: None,
+        capabilities: None,
     });
     match roundtrip_db_request(&req) {
         DbRequest::Repl(ReplRequest::Pull { wait_ms, .. }) => {
@@ -225,5 +229,54 @@ fn repl_error_response_roundtrip() {
             assert_eq!(message, "repo 'ghost' not found");
         }
         other => panic!("expected Repl(Error), got {other:?}"),
+    }
+}
+
+/// S5c-X 2c: the `capabilities` field is additive. A Hello serialized by an
+/// OLD peer (no `capabilities` key) decodes with `capabilities == None`, and
+/// a new-shape Hello round-trips the capability list. Also pins the
+/// `REPL_CAP_IDENTITY_FENCE` constant value (wire contract).
+#[test]
+fn repl_hello_capabilities_additive_serde() {
+    use crate::wire::repl::REPL_CAP_IDENTITY_FENCE;
+    use serde::Serialize;
+
+    assert_eq!(REPL_CAP_IDENTITY_FENCE, "identity_fence");
+
+    // Wire shape of a Hello written by an OLD build: no `capabilities` key.
+    #[derive(Serialize)]
+    struct OldHello {
+        repl_op: &'static str,
+        proto_ver: u32,
+        node_id: String,
+    }
+    let bytes = rmp_serde::to_vec_named(&OldHello {
+        repl_op: "hello",
+        proto_ver: 1,
+        node_id: "legacy-follower".into(),
+    })
+    .expect("serialize old-shape hello");
+    match rmp_serde::from_slice::<ReplRequest>(&bytes).expect("decode old-shape hello") {
+        ReplRequest::Hello { capabilities, .. } => {
+            assert_eq!(capabilities, None, "missing key must decode as None");
+        }
+        other => panic!("expected Hello, got {other:?}"),
+    }
+
+    // New shape: capability list survives a full round-trip.
+    let req = ReplRequest::Hello {
+        proto_ver: 1,
+        node_id: "follower-7".into(),
+        capabilities: Some(vec![REPL_CAP_IDENTITY_FENCE.to_string()]),
+    };
+    let bytes = rmp_serde::to_vec_named(&req).expect("serialize new-shape hello");
+    match rmp_serde::from_slice::<ReplRequest>(&bytes).expect("decode new-shape hello") {
+        ReplRequest::Hello { capabilities, .. } => {
+            assert_eq!(
+                capabilities,
+                Some(vec![REPL_CAP_IDENTITY_FENCE.to_string()])
+            );
+        }
+        other => panic!("expected Hello, got {other:?}"),
     }
 }

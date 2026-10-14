@@ -55,6 +55,7 @@ async fn hello_pull_identity_and_true_certified_interval_both_sources() {
             ReplRequest::Hello {
                 proto_ver: 1,
                 node_id: "follower".into(),
+                capabilities: None,
             },
         )
         .await;
@@ -80,6 +81,7 @@ async fn hello_pull_identity_and_true_certified_interval_both_sources() {
                 from_version: 1,
                 limit: 10,
                 wait_ms: None,
+                capabilities: None,
             },
         )
         .await;

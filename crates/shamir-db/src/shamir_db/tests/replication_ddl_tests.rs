@@ -343,6 +343,171 @@ async fn mark_resync_required_on_missing_subscription_is_a_noop() {
         .expect("missing subscription must not error the caller");
 }
 
+/// S5c-X 2b: publishing an EPHEMERAL backend (in-memory repo, no persistent
+/// WAL) requires an explicit `replication_serve: completed_reseed` durability
+/// override. A plain in-memory repo + publication fails with the typed code
+/// `ephemeral_backend_requires_completed_reseed` and leaves NO publication
+/// row (the check runs before any store write); a second in-memory repo with
+/// the explicit override publishes fine.
+#[tokio::test]
+async fn publication_over_ephemeral_backend_requires_completed_reseed() {
+    use shamir_query_builder::ddl::create_repo;
+    use shamir_query_types::durability::{DurabilityOverride, ReplicationServe};
+
+    let shamir = setup().await;
+    let err_code = |error: &crate::query::batch::BatchError| match error {
+        crate::query::batch::BatchError::QueryError { code, .. } => code.as_deref(),
+        _ => None,
+    };
+
+    // Plain in-memory repo under the default durable policy.
+    let mut b = Batch::new();
+    b.id(1);
+    b.op("cr", create_repo("r1"));
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    // Publication covering it → typed refusal.
+    let mut b = Batch::new();
+    b.id(2);
+    b.op(
+        "cp",
+        publication("pub_x").scope(repl_scope("testdb").repo("r1").build()),
+    );
+    let error = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err_code(&error),
+        Some("ephemeral_backend_requires_completed_reseed"),
+        "error: {error}"
+    );
+    assert!(error.to_string().contains("testdb/r1"), "{error}");
+    assert!(
+        error.to_string().contains("completed_reseed"),
+        "message must name the required explicit value: {error}"
+    );
+
+    // No partial write: the catalogue has no publication row.
+    let mut b = Batch::new();
+    b.id(3);
+    b.op("lp", list_publications());
+    let resp = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    let pubs = result_value(&resp, "lp");
+    assert!(pubs
+        .get("publications")
+        .and_then(|v| v.as_array())
+        .unwrap()
+        .is_empty());
+
+    // Second in-memory repo with the EXPLICIT completed_reseed override.
+    let mut b = Batch::new();
+    b.id(4);
+    b.op(
+        "cr",
+        create_repo("r2").durability(DurabilityOverride {
+            replication_serve: Some(ReplicationServe::CompletedReseed),
+            ..Default::default()
+        }),
+    );
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    let mut b = Batch::new();
+    b.id(5);
+    b.op(
+        "cp",
+        publication("pub_y").scope(repl_scope("testdb").repo("r2").build()),
+    );
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .expect("explicit completed_reseed override must allow publication");
+
+    let mut b = Batch::new();
+    b.id(6);
+    b.op("lp", list_publications());
+    let resp = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    let pubs = result_value(&resp, "lp")
+        .get("publications")
+        .and_then(|v| v.as_array())
+        .unwrap()
+        .clone();
+    assert_eq!(pubs.len(), 1);
+    assert_eq!(pubs[0].get("name").and_then(|v| v.as_str()), Some("pub_y"));
+}
+
+/// S5c-X 2e: `has_resync_required_subscription_covering` — a subscription in
+/// `state = "resync_required"` whose profile has a Pull stream over the repo
+/// makes the predicate true for the covered (db, repo) and false for an
+/// uncovered one; with no subscriptions at all it is false (the leader serve
+/// path must NOT refuse subscription-free nodes).
+#[tokio::test]
+async fn resync_required_subscription_covering_predicate() {
+    let shamir = setup().await;
+
+    // No subscriptions → false for anything (regression guard).
+    assert!(!shamir
+        .has_resync_required_subscription_covering("testdb", "main")
+        .await
+        .unwrap());
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.op(
+        "crp",
+        replication_profile("cluster").stream(
+            repl_scope("testdb").repo("main").build(),
+            ReplDirection::Pull,
+            ReplMode::ReadOnly,
+        ),
+    );
+    b.op(
+        "cs",
+        subscription("sub_a", "tcp://leader:9000", "pub_a", "cluster"),
+    );
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    // An ACTIVE subscription does not block serving.
+    assert!(!shamir
+        .has_resync_required_subscription_covering("testdb", "main")
+        .await
+        .unwrap());
+
+    shamir
+        .mark_subscription_resync_required("sub_a", 100, 42)
+        .await
+        .unwrap();
+
+    // Covered repo → true; uncovered repo/db → false.
+    assert!(shamir
+        .has_resync_required_subscription_covering("testdb", "main")
+        .await
+        .unwrap());
+    assert!(!shamir
+        .has_resync_required_subscription_covering("testdb", "other")
+        .await
+        .unwrap());
+    assert!(!shamir
+        .has_resync_required_subscription_covering("otherdb", "main")
+        .await
+        .unwrap());
+}
+
 /// Read one field of the stored subscription record from the system store.
 async fn sub_field(shamir: &ShamirDb, name: &str, field: &str) -> Option<String> {
     let table = shamir.system_store().subscriptions_table().await.unwrap();

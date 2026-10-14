@@ -250,18 +250,20 @@ impl RepoInstance {
     }
 
     /// Open-time unclean bump (called from `tx::recovery` AFTER
-    /// `certify_cold_start`): under `CompletedReseed` serving, an Armed
-    /// lifecycle record with no later Clean certificate costs a history-epoch
-    /// bump — followers must re-seed. The armed record is left as-is: the
-    /// obligation persists until the next clean shutdown. Under `durable`
-    /// mode the record is inert (a stale Armed from an earlier fast period is
-    /// deliberately NOT erased). A failed bump/flush propagates and blocks
-    /// admission (`?` at the caller).
+    /// `certify_cold_start`): an Armed lifecycle record with no later Clean
+    /// certificate costs a history-epoch bump — followers must re-seed. The
+    /// CURRENT serve mode is deliberately NOT consulted (review finding 2a):
+    /// the Armed obligation survives a configuration change — a repo that
+    /// served speculatively and was switched to `durable` still loses its
+    /// served tail on an unclean restart, and under durable serving an
+    /// old-epoch follower bookmark is inert, so fencing REQUIRES the bump.
+    /// The armed record is left as-is: the obligation persists until the next
+    /// clean shutdown. A failed bump/flush propagates and blocks admission
+    /// (`?` at the caller).
     pub(crate) async fn note_unclean_open_bump(&self) -> DbResult<()> {
-        let mode: ReplicationServe = self.durability_policy().replication_serve();
         let store = self.tx_info_store().await?;
         let record = crate::meta::repo_identity::load_state(&store).await?;
-        if !crate::meta::repo_identity::requires_unclean_bump(mode, record) {
+        if !crate::meta::repo_identity::requires_unclean_bump(record) {
             return Ok(());
         }
         // Negative-control seam: constant-false in production, branch elided.

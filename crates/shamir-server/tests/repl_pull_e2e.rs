@@ -314,6 +314,7 @@ fn repl_hello(node_id: &str) -> DbRequest {
     DbRequest::Repl(ReplRequest::Hello {
         proto_ver: 1,
         node_id: node_id.into(),
+        capabilities: None,
     })
 }
 
@@ -331,6 +332,7 @@ fn repl_pull(
         from_version,
         limit,
         wait_ms,
+        capabilities: None,
     })
 }
 

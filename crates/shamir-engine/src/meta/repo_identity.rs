@@ -15,7 +15,6 @@
 
 use rand::TryRngCore;
 use serde::{Deserialize, Serialize};
-use shamir_query_types::ReplicationServe;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{RecordKey, Store};
 use std::sync::Arc;
@@ -69,7 +68,11 @@ impl RepoIdentity {
             .history_epoch
             .checked_add(1)
             .ok_or_else(|| DbError::Storage("repository history epoch overflow".into()))?;
-        Self::save_record(store, identity, operation.or(receipt)).await?;
+        // Negative-control seam (see `SKIP_BUMP_FLUSH_FOR_TEST`): constant-true
+        // in production, branch elided under cfg!(test) when unset.
+        let flush =
+            !(cfg!(test) && SKIP_BUMP_FLUSH_FOR_TEST.load(std::sync::atomic::Ordering::Acquire));
+        Self::save_record_inner(store, identity, operation.or(receipt), flush).await?;
         Ok(identity)
     }
 
@@ -118,6 +121,18 @@ impl RepoIdentity {
         identity: Self,
         receipt: Option<[u8; 16]>,
     ) -> DbResult<()> {
+        Self::save_record_inner(store, identity, receipt, true).await
+    }
+
+    /// Inner save with a caller-controlled flush: `save_record` (public
+    /// behaviour) always flushes; only the `bump` path may skip it, and only
+    /// via the negative-control seam below.
+    async fn save_record_inner(
+        store: &Arc<dyn Store>,
+        identity: Self,
+        receipt: Option<[u8; 16]>,
+        flush: bool,
+    ) -> DbResult<()> {
         // One atomic store value includes the bump AND its operation receipt.
         let bytes = MetaEnvelope::new((1u16, identity, receipt))
             .encode()
@@ -128,7 +143,10 @@ impl RepoIdentity {
                 bytes::Bytes::from(bytes),
             )
             .await?;
-        store.flush().await
+        if flush {
+            store.flush().await?;
+        }
+        Ok(())
     }
 }
 
@@ -138,6 +156,35 @@ impl RepoIdentity {
 /// compiled; production reads are gated by a constant-false `cfg!(test)` so
 /// the branch is elided and no `unused` warning fires on any platform.
 pub(crate) static SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Negative-control seam for tests ONLY: when set, `ensure_armed` performs
+/// the store `set` but SKIPS the `flush`, so an unclean process end loses the
+/// Armed record. Exists solely so the crash tests can prove the arming flush
+/// is load-bearing (without it, reopening finds no record and no bump fires).
+/// Always compiled; the read site is gated by a constant-false `cfg!(test)`
+/// so the branch is elided in production and no `unused` warning fires on any
+/// platform. nextest runs each test in its own process, so setting it cannot
+/// race any other test.
+pub(crate) static SKIP_ARMING_FLUSH_FOR_TEST: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Negative-control seam for tests ONLY: when set, `mark_clean` performs the
+/// store `set` but SKIPS the `flush`, so an unclean process end loses the
+/// Clean certificate. Exists solely so the crash tests can prove the
+/// clean-certificate flush is load-bearing (without it, a "Clean" shutdown
+/// still costs the reopened repo an epoch bump). Same cfg!(test)/nextest
+/// story as `SKIP_ARMING_FLUSH_FOR_TEST`.
+pub(crate) static SKIP_CLEAN_FLUSH_FOR_TEST: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Negative-control seam for tests ONLY: when set, the actual-bump path of
+/// [`RepoIdentity::bump`] skips the flush inside the record save (the
+/// idempotent-receipt early return is unaffected), so the bumped epoch can be
+/// lost by an unclean process end. Exists solely so the crash tests can prove
+/// a torn/lost bump converges (the next open re-derives and re-bumps) instead
+/// of corrupting. Same cfg!(test)/nextest story as `SKIP_ARMING_FLUSH_FOR_TEST`.
+pub(crate) static SKIP_BUMP_FLUSH_FOR_TEST: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// Arm/Clean certificate state of the speculative-serve period.
@@ -151,14 +198,16 @@ pub enum LifecycleState {
 }
 
 /// Pure decision helper (unit-testable without IO): the open-time recovery
-/// hook must bump the history epoch iff the repo serves `CompletedReseed`
-/// AND the loaded record is `Armed` (no valid clean certificate after it).
+/// hook must bump the history epoch iff the loaded record is `Armed` (no
+/// valid clean certificate after it). The CURRENT serve mode is deliberately
+/// NOT consulted (review finding 2a): an Armed obligation must survive a
+/// configuration change — if a repo served speculatively, was switched to
+/// `durable`, and then restarts uncleanly, the served tail is gone and the
+/// epoch MUST still bump (under durable serving an old-epoch follower
+/// bookmark is inert, so fencing requires the bump, not the mode).
 /// `None` (no record) means nothing was ever served speculatively.
-pub(crate) fn requires_unclean_bump(
-    mode: ReplicationServe,
-    record: Option<LifecycleState>,
-) -> bool {
-    mode == ReplicationServe::CompletedReseed && record == Some(LifecycleState::Armed)
+pub(crate) fn requires_unclean_bump(record: Option<LifecycleState>) -> bool {
+    record == Some(LifecycleState::Armed)
 }
 
 async fn load_lifecycle_record(store: &Arc<dyn Store>) -> DbResult<Option<LifecycleState>> {
@@ -182,6 +231,16 @@ async fn load_lifecycle_record(store: &Arc<dyn Store>) -> DbResult<Option<Lifecy
 /// One atomic store value; `set` then `flush` so the state never survives a
 /// crash half-written.
 async fn save_lifecycle_record(store: &Arc<dyn Store>, state: LifecycleState) -> DbResult<()> {
+    save_lifecycle_record_inner(store, state, true).await
+}
+
+/// Inner save with a caller-controlled flush; only the negative-control seams
+/// below may pass `flush: false`.
+async fn save_lifecycle_record_inner(
+    store: &Arc<dyn Store>,
+    state: LifecycleState,
+    flush: bool,
+) -> DbResult<()> {
     let bytes = MetaEnvelope::new((1u16, state))
         .encode()
         .map_err(|e| DbError::Storage(format!("lifecycle record codec: {e}")))?;
@@ -191,7 +250,10 @@ async fn save_lifecycle_record(store: &Arc<dyn Store>, state: LifecycleState) ->
             bytes::Bytes::from(bytes),
         )
         .await?;
-    store.flush().await
+    if flush {
+        store.flush().await?;
+    }
+    Ok(())
 }
 
 /// Idempotent arm: `Some(Armed)` already → no write; otherwise write Armed
@@ -201,13 +263,21 @@ pub(crate) async fn ensure_armed(store: &Arc<dyn Store>) -> DbResult<()> {
     if load_lifecycle_record(store).await? == Some(LifecycleState::Armed) {
         return Ok(());
     }
-    save_lifecycle_record(store, LifecycleState::Armed).await
+    // Negative-control seam (see `SKIP_ARMING_FLUSH_FOR_TEST`): constant-true
+    // in production, branch elided under cfg!(test) when unset.
+    let flush =
+        !(cfg!(test) && SKIP_ARMING_FLUSH_FOR_TEST.load(std::sync::atomic::Ordering::Acquire));
+    save_lifecycle_record_inner(store, LifecycleState::Armed, flush).await
 }
 
 /// Unconditional clean certificate overwrite + flush. Must be called only
 /// after the clean-shutdown steps it certifies (see module doc).
 pub(crate) async fn mark_clean(store: &Arc<dyn Store>) -> DbResult<()> {
-    save_lifecycle_record(store, LifecycleState::Clean).await
+    // Negative-control seam (see `SKIP_CLEAN_FLUSH_FOR_TEST`): constant-true
+    // in production, branch elided under cfg!(test) when unset.
+    let flush =
+        !(cfg!(test) && SKIP_CLEAN_FLUSH_FOR_TEST.load(std::sync::atomic::Ordering::Acquire));
+    save_lifecycle_record_inner(store, LifecycleState::Clean, flush).await
 }
 
 /// Read the current state; `None` if no record was ever written.

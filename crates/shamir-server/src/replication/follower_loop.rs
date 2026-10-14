@@ -439,8 +439,20 @@ async fn run_follower_loop_internal(
         let (events_bytes, gap_at) = match resp {
             ReplResponse::Pull { events, gap_at, .. } => (events, gap_at),
             ReplResponse::Error { code, message, .. } => {
-                // The leader returned a structured error (e.g. denied_repo,
-                // unknown_repo). Treat as transient — log + backoff.
+                // S5c-X 2c: the leader refuses to serve a completed_reseed
+                // repo to a legacy follower. New enough to understand the
+                // refusal → map it to the typed, terminal identity refusal
+                // (the supervisor's quarantine arm marks `resync_required`).
+                // NOTE the asymmetry: a truly OLD follower that cannot parse
+                // this semantic keeps retrying with backoff below — but the
+                // leader still refuses to serve it every time (fail closed at
+                // the leader); the typed quarantine only applies to followers
+                // that understand the refusal code.
+                if code == "legacy_follower_refused" {
+                    return Err(ReplError::Seed(shamir_db::SeedRefusal::MissingIdentity));
+                }
+                // Any other structured error (e.g. denied_repo,
+                // unknown_repo): treat as transient — log + backoff.
                 warn!(
                     node_id = %node_id,
                     code = %code,

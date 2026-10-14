@@ -461,23 +461,39 @@ async fn completed_reseed_seam_suppresses_unclean_epoch_bump() {
     SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST.store(false, Ordering::Release);
 }
 
-/// DURABLE control: the same loss reopened under the default `durable`
-/// serve mode does NOT bump, even though the Armed record from an earlier
-/// completed-reseed period survives on disk — a stale Armed record is
-/// deliberately inert under durable serving.
+/// Review finding 2a: the unclean-open bump decision no longer depends on
+/// the CURRENT serve mode. The Armed record left over from the earlier
+/// completed-reseed period survives the switch to `durable` serving, and the
+/// unclean durable reopen MUST bump (the served tail is gone; under durable
+/// serving an old-epoch follower bookmark is inert, so fencing requires the
+/// bump, not the mode).
 #[tokio::test(start_paused = true)]
-async fn durable_mode_reopen_after_loss_does_not_bump_epoch() {
+async fn durable_reopen_after_fast_period_loss_bumps_epoch_armed_survives_config_change() {
     let (before, backing) = arm_serve_and_lose_speculative_tail("spec-tail-dur").await;
+    // `open()` reopens under the default `durable` serve mode — the record
+    // decision is mode-independent, so the hook bumps exactly once.
     let reopened = open(&backing, "spec-tail-dur").await;
     let identity = reopened.repo_identity().await.unwrap();
-    assert_eq!(identity.lineage_id, before.lineage_id);
-    assert_eq!(identity.history_epoch, before.history_epoch);
+    assert_eq!(
+        identity.lineage_id, before.lineage_id,
+        "the bump must NEVER change the lineage"
+    );
+    assert_eq!(
+        identity.history_epoch,
+        before.history_epoch + 1,
+        "an Armed record must bump even though the CURRENT mode is durable"
+    );
     let store = reopened.tx_info_store().await.unwrap();
     assert_eq!(
         load_state(&store).await.unwrap(),
         Some(LifecycleState::Armed),
-        "durable mode must not erase the stale Armed record"
+        "the obligation persists until the next clean shutdown"
     );
-    assert_eq!(reopened.durability_metrics_snapshot().counters[7], 0);
+    drop(store);
+    assert_eq!(
+        reopened.durability_metrics_snapshot().counters[7],
+        1,
+        "exactly one unclean bump on the durable reopen"
+    );
     reopened.stop_journal_writer_for_test().await.unwrap();
 }
