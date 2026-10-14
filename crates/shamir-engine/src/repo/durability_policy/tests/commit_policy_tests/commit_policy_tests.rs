@@ -19,7 +19,7 @@ use crate::repo::RepoInstance;
 use crate::table::TableManager;
 use shamir_query_types::{DurabilityOverride, ReplicationServe, RetentionOverflow};
 
-use super::helpers;
+use super::super::helpers;
 
 const STATUS: VisibilityWait = VisibilityWait::Bounded { timeout_ms: 0 };
 
