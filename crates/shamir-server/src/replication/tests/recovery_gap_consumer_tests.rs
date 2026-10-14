@@ -10,7 +10,7 @@ use shamir_db::engine::table::TableConfig;
 use shamir_db::engine::tx::apply_replicated::{ApplyOutcome, ApplyPolicy};
 use shamir_db::engine::tx::ReplicatedEvent;
 use shamir_db::storage::storage_fjall::FjallRepo;
-use shamir_db::storage::types::{RecordKey, Repo, Store};
+use shamir_db::storage::types::{RecordKey, Repo};
 use shamir_db::types::value::QueryValue;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
