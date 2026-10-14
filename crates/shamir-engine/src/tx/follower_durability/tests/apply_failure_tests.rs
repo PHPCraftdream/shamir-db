@@ -48,7 +48,7 @@ async fn open(path: &Path, name: &str) -> RepoInstance {
 }
 
 fn repo_name(tag: &str, path: &Path) -> String {
-    format!("{tag}-{}", path.display().replace('\\', "_"))
+    format!("{tag}-{}", path.display().to_string().replace('\\', "_"))
 }
 
 async fn close(repo: RepoInstance) {

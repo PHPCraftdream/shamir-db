@@ -69,7 +69,7 @@ async fn close(repo: RepoInstance) {
 
 #[cfg(feature = "fjall")]
 fn repo_name(tag: &str, path: &Path) -> String {
-    format!("{tag}-{}", path.display().replace('\\', "_"))
+    format!("{tag}-{}", path.display().to_string().replace('\\', "_"))
 }
 
 #[cfg(feature = "fjall")]

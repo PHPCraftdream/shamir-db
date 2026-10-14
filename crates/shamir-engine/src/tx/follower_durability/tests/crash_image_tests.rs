@@ -43,7 +43,7 @@ struct SnapshotStore {
 impl Store for SnapshotStore {
     async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
         let key = RecordKey::from_slice(&(self.records.lock().unwrap().len() as u64).to_be_bytes());
-        self.set(key, value).await?;
+        self.set(key.clone(), value).await?;
         Ok(key)
     }
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
@@ -88,7 +88,7 @@ impl Store for SnapshotStore {
 impl Store for DiskImage {
     async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
         let key = RecordKey::from_slice(&(self.pending.lock().unwrap().len() as u64).to_be_bytes());
-        self.set(key, value).await?;
+        self.set(key.clone(), value).await?;
         Ok(key)
     }
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
