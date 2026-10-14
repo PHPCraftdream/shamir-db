@@ -9,7 +9,7 @@
 //! This module is a codec only — no production path writes or reads
 //! receipts in this PR; PR6b-2 activates the writer/reader.
 
-use crate::meta::{MetaEnvelope, ENVELOPE_MAGIC};
+use crate::meta::{MetaEnvelope, ENVELOPE_MAGIC, ENVELOPE_VERSION};
 use rustc_hash::FxHasher;
 use serde::{Deserialize, Serialize};
 use shamir_storage::error::{DbError, DbResult};
@@ -183,8 +183,34 @@ pub fn decode_receipt(id: &[u8; 16], bytes: &[u8]) -> DbResult<ReplicationReceip
             "replication receipt codec: bad envelope magic".into(),
         ));
     }
-    let (version, receipt): (u16, ReplicationReceipt) = MetaEnvelope::open(bytes)
+    let envelope: MetaEnvelope<(u16, ReplicationReceipt)> = bincode::deserialize(bytes)
         .map_err(|e| DbError::Storage(format!("replication receipt codec: {e}")))?;
+    if envelope.magic != ENVELOPE_MAGIC {
+        return Err(DbError::Storage(
+            "replication receipt codec: bad envelope magic".into(),
+        ));
+    }
+    if envelope.version != ENVELOPE_VERSION {
+        return Err(DbError::Storage(format!(
+            "replication receipt codec: bad envelope version {}",
+            envelope.version
+        )));
+    }
+    // bincode::deserialize allows trailing bytes (bincode 1.3 default
+    // options); re-encoding the decoded envelope is deterministic, so it
+    // reproduces the input length IFF nothing trailed. This rejects torn /
+    // appended records.
+    if envelope
+        .encode()
+        .map_err(|e| DbError::Storage(format!("replication receipt codec: {e}")))?
+        .len()
+        != bytes.len()
+    {
+        return Err(DbError::Storage(
+            "replication receipt codec: trailing bytes after envelope".into(),
+        ));
+    }
+    let (version, receipt) = envelope.payload;
     if version != 1 {
         return Err(DbError::Storage(format!(
             "replication receipt codec: unsupported version {version}"

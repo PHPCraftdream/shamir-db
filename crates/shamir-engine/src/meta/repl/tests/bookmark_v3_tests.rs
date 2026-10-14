@@ -133,3 +133,16 @@ async fn v3_consistency_check_rejects_mismatched_fence() {
         Err(DbError::Storage(_))
     ));
 }
+
+#[tokio::test]
+async fn v3_rejects_trailing_bytes() {
+    let record = BookmarkV3 {
+        fence: None,
+        bookmark: 5,
+        clean_through: None,
+        outstanding_receipt: None,
+    };
+    let mut bytes = encode_bookmark_v3(&record).unwrap();
+    bytes.push(0);
+    assert!(decode_bookmark_v3(&bytes).is_err());
+}

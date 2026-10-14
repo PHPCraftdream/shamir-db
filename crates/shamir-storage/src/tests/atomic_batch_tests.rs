@@ -1,5 +1,6 @@
 //! Repository-wide atomic-batch tests (PR6b-1): in-memory + fjall backends.
 
+use crate::error::DbError;
 use crate::storage_cached::CachedStore;
 use crate::storage_in_memory::InMemoryRepo;
 use crate::types::{AtomicCommitOutcome, RecordKey, Repo, Store};
@@ -34,7 +35,7 @@ async fn atomic_batch_stages_and_commits_across_stores() {
 }
 
 #[tokio::test]
-async fn atomic_batch_invalid_store_name_is_all_or_nothing() {
+async fn atomic_batch_invalid_store_name_fails_at_staging() {
     let repo = InMemoryRepo::new();
     let mut batch = repo.begin_atomic_batch().await.unwrap();
 
@@ -42,19 +43,31 @@ async fn atomic_batch_invalid_store_name_is_all_or_nothing() {
     batch
         .set("valid", k.clone(), Bytes::from_static(b"v1"))
         .unwrap();
-    batch
+
+    // Contract: staging-time validation is defense-in-depth, duplicated in
+    // `exec_atomic_commit` before any write; an invalid store name is
+    // rejected eagerly at `set` and never enters the batch.
+    let err = batch
         .set(
             "",
             Bytes::from_static(b"k2").into(),
             Bytes::from_static(b"v2"),
         )
-        .unwrap();
+        .unwrap_err();
+    assert!(
+        matches!(err, DbError::Validation(_)),
+        "expected Validation error at staging: {err:?}"
+    );
 
-    assert!(batch.commit().await.is_err());
+    // The invalid op was never staged, so the batch holds ONLY the valid op
+    // and commit succeeds.
+    let outcome = batch.commit().await.unwrap();
+    assert_eq!(outcome, AtomicCommitOutcome::Committed);
 
-    // Nothing visible on the valid store staged alongside.
+    // The valid op landed; the refused op has no partial state to observe
+    // (an empty store name cannot be fetched).
     let store = repo.store_get("valid").await.unwrap();
-    assert!(store.get(k).await.is_err());
+    assert_eq!(store.get(k).await.unwrap().as_ref(), b"v1");
 }
 
 #[tokio::test]
@@ -123,6 +136,11 @@ mod fjall {
         assert!(s1.get(key(b"k3")).await.is_err());
         let s2 = repo.store_get("s2").await.unwrap();
         assert_eq!(s2.get(key(b"k2")).await.unwrap().as_ref(), b"v2");
+        // No store handle may outlive `drop(repo)` across a `reopen`:
+        // `FjallStore` holds an `Arc<Database>` clone that keeps the
+        // fjall lock-file alive.
+        drop(s1);
+        drop(s2);
         drop(repo);
 
         // Second reopen: assert again.
@@ -132,6 +150,8 @@ mod fjall {
         assert!(s1.get(key(b"k3")).await.is_err());
         let s2 = repo.store_get("s2").await.unwrap();
         assert_eq!(s2.get(key(b"k2")).await.unwrap().as_ref(), b"v2");
+        drop(s1);
+        drop(s2);
         drop(repo);
 
         fs::remove_dir_all(path).ok();
@@ -158,6 +178,9 @@ mod fjall {
         let repo = FjallRepo::new(path).unwrap();
         let s1 = repo.store_get("s1").await.unwrap();
         s1.set(key(b"k"), Bytes::from_static(b"old")).await.unwrap();
+        // The handle must be released before the later `reopen`: it keeps an
+        // `Arc<Database>` (and thus the fjall lock) alive.
+        drop(s1);
 
         let mut batch = repo.begin_atomic_batch().await.unwrap();
         batch
@@ -178,6 +201,8 @@ mod fjall {
         assert_eq!(s1.get(key(b"k")).await.unwrap().as_ref(), b"old");
         let s2 = repo.store_get("s2").await.unwrap();
         assert!(s2.get(key(b"k")).await.is_err());
+        drop(s1);
+        drop(s2);
         drop(repo);
 
         fs::remove_dir_all(path).ok();
@@ -192,6 +217,10 @@ mod fjall {
         let _seam = SeamGuard;
 
         let repo = FjallRepo::new(path).unwrap();
+        // Invariant: no store handle may outlive `drop(repo)` across a
+        // `reopen`, because `FjallStore` holds an `Arc<Database>` clone that
+        // keeps the fjall lock-file (and thus the lock) alive. This test
+        // reopens before taking any store handles, so it complies.
         let mut batch = repo.begin_atomic_batch().await.unwrap();
         batch
             .set("u1", key(b"k"), Bytes::from_static(b"v"))
