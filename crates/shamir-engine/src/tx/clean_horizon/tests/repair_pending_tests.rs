@@ -80,7 +80,7 @@ fn park_store() -> Arc<ParkStore> {
 }
 
 fn journal_handle(store: &Arc<ParkStore>) -> ChangefeedHandle {
-    let journal: Arc<dyn ChangelogStore> = Arc::clone(&store) as Arc<dyn ChangelogStore>;
+    let journal: Arc<dyn ChangelogStore> = Arc::clone(store) as Arc<dyn ChangelogStore>;
     ChangefeedHandle {
         feed: RepoChangefeed::new(Arc::clone(&journal)),
         store: journal,
