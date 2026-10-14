@@ -155,15 +155,14 @@ fn public_policy_setter_rejects_invalid_modes_without_changing_clones() {
     let repo = helpers::mem_repo("setter-validation");
     let clone = repo.clone();
     let before = **clone.durability_policy();
-    for invalid in [DurabilityPolicy::new(
+    let invalid = DurabilityPolicy::new(
         WalCommitTier::Synced,
         1,
         RetentionOverflow::RefuseWrites,
         ReplicationServe::Durable,
-    )] {
-        assert!(repo.set_durability(invalid).is_err());
-        assert_eq!(**clone.durability_policy(), before);
-    }
+    );
+    assert!(repo.set_durability(invalid).is_err());
+    assert_eq!(**clone.durability_policy(), before);
 }
 
 /// Amendment B2 (3): `resolve` — defaults pass; each override field wins;

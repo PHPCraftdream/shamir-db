@@ -355,10 +355,13 @@ async fn publication_over_ephemeral_backend_requires_completed_reseed() {
     use shamir_query_types::durability::{DurabilityOverride, ReplicationServe};
 
     let shamir = setup().await;
-    let err_code = |error: &crate::query::batch::BatchError| match error {
-        crate::query::batch::BatchError::QueryError { code, .. } => code.as_deref(),
-        _ => None,
-    };
+    // A fn item (not a closure) so the returned `&str` borrows from the argument.
+    fn err_code(error: &crate::query::batch::BatchError) -> Option<&str> {
+        match error {
+            crate::query::batch::BatchError::QueryError { code, .. } => code.as_deref(),
+            _ => None,
+        }
+    }
 
     // Plain in-memory repo under the default durable policy.
     let mut b = Batch::new();
