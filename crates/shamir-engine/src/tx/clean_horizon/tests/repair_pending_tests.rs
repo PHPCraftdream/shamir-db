@@ -26,6 +26,7 @@ use crate::repo::changelog_store::StoreChangelog;
 use crate::repo::repo_instance::ChangefeedHandle;
 use crate::repo::{BoxRepo, BoxRepoFactory, DurabilityPolicy, RepoInstance};
 use crate::table::TableConfig;
+use crate::tx::clean_horizon::checkpoint::{checkpoint_before_truncate, test_seam};
 use crate::tx::clean_horizon::repair_pending_drain::drain_repair_pending;
 
 const MAX_KEY: u64 = u64::MAX;
@@ -634,4 +635,236 @@ async fn interleaved_normal_commits_keep_order() {
          ascending sequence"
     );
     feed.shutdown_and_wait().await.unwrap();
+}
+
+// (h) PERSISTENT retention gate (fjall repo + real file WAL + production
+// checkpoint path): the clamp holds the truncation below the still-pending
+// version until the repaired event is durably checkpointed, and the lossy
+// unclamped outcome is certified as a durable GAP across restart. The
+// ParkStore's backing journal is IN-MEMORY BY DESIGN: J / event artifacts
+// written through it are ephemeral, so the reopen rounds below exercise the
+// cold WAL→journal rebuild against the repo's REAL changelog store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persistent_retention_gate_holds_until_checkpointed_reopens() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let path = temp.path().join("rp_persist_retention");
+    let v = {
+        let store = park_store();
+        // Seam BEFORE open: a disk repo's cold reconciliation lazily
+        // initialises its own feed, so `install_journal_for_test` (which
+        // asserts the OnceCell is unset) cannot be used post-open.
+        let seam = journal_handle(&store);
+        crate::repo::tests::test_journal_seam::install("rp_persist_retention".into(), seam.clone());
+        let repo = open_disk("rp_persist_retention", &path).await.unwrap();
+        let live = repo.changefeed().await.unwrap();
+        // Sanity: the SEAM feed is live — if the seam had failed, cold
+        // reconciliation would have initialised its own feed and the park
+        // below would never produce a pending version on it.
+        assert!(Arc::ptr_eq(&live.feed, &seam.feed));
+        assert_eq!(live.feed.repair_pending_depth(), 0);
+        let feed = live.feed.clone();
+        let table = repo.get_table("t").await.unwrap();
+        park_writer(&feed, &store).await;
+        let v = commit_row(&repo, &table, "held").await;
+        assert_eq!(feed.repair_pending_depth(), 1);
+        assert_eq!(feed.first_gap_version(), 0);
+        let mut last = v;
+        for index in 0..4 {
+            last = commit_row(&repo, &table, &format!("seal-{index}")).await;
+        }
+        assert_eq!(feed.repair_pending_depth(), 5);
+
+        let group = repo.wal_group().await.unwrap();
+        // A5 interner gate first (crash-matrix precedent): persist the
+        // interner so its delta cannot pin the truncation ceiling. Cheap
+        // no-op when the rows carry no deltas.
+        repo.repo_interner().await.unwrap().persist().await.unwrap();
+
+        // Clamp load-bearing proof, captured BEFORE the pass (256-byte
+        // segments seal well below `last`).
+        assert!(
+            group.has_truncatable(last),
+            "sealed segments at or below the seal watermark must be \
+             truncatable but for the clamp — otherwise this test proves nothing"
+        );
+
+        // Clamped pass. On the FILE sink `has_truncatable(v - 1)` is TRUE
+        // (segments seal below the ceiling), so the un-bypassed checkpoint
+        // inside `drain_all` would block its `record_clean_horizon` send
+        // behind the PARKED writer (full bounded channel) — a guaranteed
+        // hang. The checkpoint bypass isolates the actual subject, the
+        // repair-pending CEILING clamp: truncation still runs, but must
+        // stop below the pending version.
+        test_seam::with_state(&repo, |state| state.bypass_checkpoint = true);
+        repo.drainer().drain_all(&repo).await.unwrap();
+        test_seam::with_state(&repo, |state| state.bypass_checkpoint = false);
+        assert!(
+            group
+                .replay()
+                .await
+                .unwrap()
+                .iter()
+                .any(|entry| entry.commit_version == v),
+            "the clamped ceiling must retain the WAL entry of the pending version"
+        );
+        assert!(
+            feed.clean_horizon() < v,
+            "the clean horizon must not pass the pending hole"
+        );
+        assert_eq!(feed.first_gap_version(), 0);
+
+        // Release: the channel drains, the direct repair pass admits ALL
+        // five pending versions (v + 4 seals) through the now-empty
+        // channel — exactly one put each.
+        store.release_filler.notify_one();
+        wait_persisted(&feed, BACKLOG_KEY).await;
+        drain_repair_pending(&repo).await.unwrap();
+        assert_eq!(feed.repair_pending_depth(), 0);
+        wait_event_stored(&store, v).await;
+        assert_eq!(
+            put_count(&store, v),
+            1,
+            "the repair must produce exactly one put of the repaired version"
+        );
+        assert_eq!(feed.repair_pending().repaired_total(), 5);
+        // NO `drain_all` here: it would truncate v's WAL segment while the
+        // repaired events live only in the ephemeral ParkStore journal —
+        // the "until checkpointed" release is observed via a DIRECT
+        // checkpoint instead (the channel now has room, so
+        // `record_clean_horizon` is admitted).
+        assert!(checkpoint_before_truncate(&repo).await);
+        assert!(
+            feed.clean_horizon() >= v,
+            "the checkpoint must lift the clean horizon past the repaired version"
+        );
+
+        // Shutdown, then drop EVERY store handle (fjall releases its
+        // LOCK_FILE only when the last `Database` handle drops).
+        feed.shutdown_and_wait().await.unwrap();
+        drop(group);
+        drop(table);
+        drop(store);
+        drop(repo);
+        v
+    };
+
+    for round in 0..2 {
+        let repo = open_retry("rp_persist_retention", &path).await;
+        repo.disable_background_drainer_for_test();
+        // Mechanism: on reopen the REAL journal is empty (j_real = 0 —
+        // every event went through the ephemeral ParkStore), so h > j and
+        // the cold reconciliation rebuilds v's event from the INTACT WAL
+        // (no step above truncated at or above v) via `put_event_if_missing`.
+        let feed = repo.changefeed().await.unwrap().feed;
+        let (events, gap) = repo.read_changelog_for_replication(v, 64).await.unwrap();
+        assert_eq!(gap, None, "round {round}");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event.commit_version == v)
+                .count(),
+            1,
+            "round {round}: the rebuilt event must appear exactly once"
+        );
+        assert_eq!(feed.first_gap_version(), 0, "round {round}");
+        feed.shutdown_and_wait().await.unwrap();
+        drop(repo);
+    }
+}
+
+// (i) PERSISTENT negative control: with no repair-pending clamp left to
+// hold, the truncation destroys the pending version's WAL evidence and the
+// loss is certified as a DURABLE GAP at restart. HONEST CLASSIFICATION:
+// with a dead writer the J-checkpoint itself fails closed (the
+// `record_clean_horizon` send hits the closed channel), so the clamp is not
+// the only guard — the clamp-isolation negative control remains the
+// in-memory test (b). This persistent control proves the END-TO-END LOSS
+// outcome the brief demands: evidence destroyed + durable gap after restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persistent_negative_control_unclamped_truncation_yields_gap() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let path = temp.path().join("rp_persist_negative");
+    let v = {
+        let store = park_store();
+        let seam = journal_handle(&store);
+        crate::repo::tests::test_journal_seam::install("rp_persist_negative".into(), seam.clone());
+        let repo = open_disk("rp_persist_negative", &path).await.unwrap();
+        let live = repo.changefeed().await.unwrap();
+        assert!(Arc::ptr_eq(&live.feed, &seam.feed));
+        let feed = live.feed.clone();
+        let table = repo.get_table("t").await.unwrap();
+        park_writer(&feed, &store).await;
+        let v = commit_row(&repo, &table, "lost").await;
+        assert_eq!(feed.repair_pending_depth(), 1);
+        let mut last = v;
+        for index in 0..2 {
+            last = commit_row(&repo, &table, &format!("seal-{index}")).await;
+        }
+        assert_eq!(feed.repair_pending_depth(), 3);
+        repo.repo_interner().await.unwrap().persist().await.unwrap();
+
+        // Release + drain the PARKED writer first: a writer parked inside
+        // the filler put can never observe the shutdown flag, so
+        // `shutdown_and_wait` would block forever. The pending versions
+        // were never ENQUEUED (channel full), so they are NOT persisted —
+        // the ParkStore journal lacks them, exactly the dead-writer state
+        // the Closed arm consumes.
+        store.release_filler.notify_one();
+        wait_persisted(&feed, BACKLOG_KEY).await;
+        feed.shutdown_and_wait().await.unwrap();
+        assert_eq!(feed.repair_pending_depth(), 3);
+
+        // Dead writer: the repair cannot admit v — `journal_enqueue_tracked`
+        // hits Closed → `mark_gap(v)` + in-band retire — so the ceiling
+        // clamp has nothing left to hold. Bypass the checkpoint (which
+        // would now fail closed on the closed channel — the second guard)
+        // exactly like `checkpoint_seam_tests.rs`, to reach the unclamped
+        // truncation and prove the end-to-end loss.
+        test_seam::with_state(&repo, |state| state.bypass_checkpoint = true);
+        repo.drainer().drain_all(&repo).await.unwrap();
+        assert_eq!(feed.repair_pending_depth(), 0);
+        assert_eq!(
+            feed.first_gap_version(),
+            v,
+            "the Closed arm must have declared the gap in-RAM"
+        );
+        let group = repo.wal_group().await.unwrap();
+        assert!(
+            !group
+                .replay()
+                .await
+                .unwrap()
+                .iter()
+                .any(|entry| entry.commit_version == v),
+            "the unclamped truncation must destroy v's WAL segment"
+        );
+        drop(group);
+        drop(table);
+        drop(store);
+        drop(repo);
+        v
+    };
+
+    for round in 0..2 {
+        let repo = open_retry("rp_persist_negative", &path).await;
+        repo.disable_background_drainer_for_test();
+        // Round 0: cold reconcile finds no WAL entry and no journal event
+        // for v → `missing_intervals` → `record_recovery_gap(v, v)`,
+        // durably persisted through the repo's own real feed. Round 1: the
+        // persisted gap marker is re-read (`previous_gap`) and the same gap
+        // is re-certified.
+        let feed = repo.changefeed().await.unwrap().feed;
+        let (events, gap) = repo.read_changelog_for_replication(v, 64).await.unwrap();
+        assert_eq!(gap, Some(v), "round {round}: the durable gap covers v");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event.commit_version == v)
+                .count(),
+            0,
+            "round {round}: the destroyed version must have no journal event"
+        );
+        feed.shutdown_and_wait().await.unwrap();
+        drop(repo);
+    }
 }
