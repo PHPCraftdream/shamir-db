@@ -9,6 +9,7 @@ pub mod envelope;
 pub mod namespace;
 pub mod recovery_marker;
 pub mod repl_bookmark;
+pub mod repl_receipt;
 pub mod repo_identity;
 
 pub use envelope::{MetaEnvelope, MetaError, ENVELOPE_MAGIC, ENVELOPE_VERSION};

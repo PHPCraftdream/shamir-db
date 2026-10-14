@@ -1,3 +1,4 @@
+pub mod atomic_batch;
 pub mod types_tests;
 
 pub mod storage_cached_tests;

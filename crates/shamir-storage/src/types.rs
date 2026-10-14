@@ -286,6 +286,16 @@ pub trait Store: Send + Sync {
         false
     }
 
+    /// Whether this backend supports a repository-wide atomic batch
+    /// ([`Repo::begin_atomic_batch`]) writing through the RAW backend by
+    /// store name — such a batch bypasses any wrapper cache, so wrapper
+    /// backends (`CachedStore`, `MemBufferStore`, `MirroredStore`) keep the
+    /// default `false` = unsupported and persistent-follower activation can
+    /// reject such stacks. Raw fjall / in-memory backends report `true`.
+    fn supports_atomic_batch(&self) -> bool {
+        false
+    }
+
     /// Returns an async stream that yields batches of records.
     /// Like PHP generators but with batching - yields Vec of size batch_size.
     /// Uses concurrent prefetching: while yielding current batch, fetches next batch in background.
@@ -501,4 +511,56 @@ pub trait Repo: Send + Sync {
         }
         Ok(())
     }
+
+    /// Whether this repository implements [`Self::begin_atomic_batch`] with
+    /// real all-or-nothing semantics. Default: false.
+    fn supports_atomic_batch(&self) -> bool {
+        false
+    }
+
+    /// Begin a repository-wide atomic batch over named stores. Default:
+    /// unsupported (typed `DbError::AtomicBatchUnsupported`). Persistent
+    /// backends that cannot honour wrapper-cache coherence must report
+    /// `supports_atomic_batch() == false` so callers can reject before
+    /// allocating anything.
+    async fn begin_atomic_batch(&self) -> DbResult<Box<dyn AtomicBatch>> {
+        let _ = self;
+        Err(DbError::AtomicBatchUnsupported(
+            "backend does not implement repository-wide atomic batches".into(),
+        ))
+    }
+}
+
+/// The outcome of an [`AtomicBatch::commit`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AtomicCommitOutcome {
+    /// The batch was applied and is durable per the backend's policy; on
+    /// reopen the repository observes the FULL pre- or post-batch state.
+    Committed,
+
+    /// The commit path failed at a point where the batch MAY have been
+    /// applied. The outcome is unknowable from the caller's side: the caller
+    /// MUST reconcile by reading back — never blindly re-apply, never assume
+    /// absence.
+    Uncertain {
+        /// Human-readable detail of where the commit path failed.
+        detail: String,
+    },
+}
+
+/// A pending repository-wide atomic batch over SEVERAL named stores of one
+/// repository. Ops are staged in memory and applied in ONE atomic commit
+/// (`commit`). Stores are addressed by NAME (the `Repo::store_get` key).
+#[async_trait]
+pub trait AtomicBatch: Send {
+    /// Stage a set. Fails (before any state change) on an invalid store name.
+    fn set(&mut self, store: &str, key: RecordKey, value: Bytes) -> DbResult<()>;
+
+    /// Stage a delete.
+    fn delete(&mut self, store: &str, key: RecordKey) -> DbResult<()>;
+
+    /// Commit atomically. See `AtomicCommitOutcome` for the error/uncertain
+    /// contract: a plain `Err` means NOTHING was applied; `Ok(Uncertain{..})`
+    /// means the outcome is unknowable and the caller must reconcile.
+    async fn commit(self: Box<Self>) -> DbResult<AtomicCommitOutcome>;
 }

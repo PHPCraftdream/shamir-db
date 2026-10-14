@@ -8,6 +8,7 @@ pub mod layered_interner_tests;
 pub mod mvcc_store_tests;
 pub mod non_tx_ack_wait_tests;
 pub mod predicate_set_tests;
+pub mod publication_bound;
 pub mod repo_tx_gate_tests;
 pub mod repo_wal_manager_tests;
 pub mod snapshot_watermark_tests;
