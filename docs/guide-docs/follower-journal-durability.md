@@ -1,0 +1,10 @@
+# Follower journal durability boundary (PR6)
+
+A WAL-less follower publishes each translated batch into its local journal, confirms FIFO writer progress, verifies the expected event bytes and gap state, then explicitly flushes the journal store and history before advancing the upstream bookmark. A single versioned bookmark record stores both the upstream bookmark and follower-local clean horizon J; legacy u64 and v1 records have unknown J and retain conservative recovery behavior.
+
+The durable record deliberately does not contain a resumable apply receipt. If apply becomes visible and a later barrier or persistence step fails, the follower gate remains `requires-reopen`; retry-safe recovery of partial batches and exactly-once counter updates are deferred to PR6b. The PR4 cold-certification integration must load J using `meta::repl_bookmark::load_clean_horizon` and use `tx::apply_replicated::follower_durability::in_flight_range(Some(J), recovered_in_flight_end)`. If J is unknown, defer to the original conservative cold clean-horizon fallback; do not silently substitute an unchanged `[1, recovered_end]` range.
+
+The bounded crash-image matrix and negative control are implemented in `tx/follower_durability/tests/crash_image_tests.rs`. They exercise the production verification/flush helper and public bookmark/horizon metadata APIs against a dropping-unflushed fake Store; they do not exercise full engine replay or establish exactly-once application. The PR4 cold-certification wiring remains pending.
+
+The production-path failure tests in `tx/follower_durability/tests/apply_failure_tests.rs` and `apply_crash_tests.rs` exercise injected barrier failures and phase pauses around history writes, journal flush, and bookmark persistence against Fjall, followed by graceful writer shutdown and repeated reopen checks. These are not abrupt power-loss simulations; the dropping-unflushed fake-Store crash-image tests above are the only power-cut model. PR4 cold-certification wiring remains deferred.
+
