@@ -406,6 +406,10 @@ impl WalGroupCommit {
         self.sink.has_truncatable(durable)
     }
 
+    pub async fn sealed_retained_bytes(&self) -> DbResult<u64> {
+        self.sink.sealed_retained_bytes().await
+    }
+
     // `sync_now` (coalesced) lives in
     // `wal_group_commit/recoverable_through.rs`, alongside the `R` prefix it
     // publishes.

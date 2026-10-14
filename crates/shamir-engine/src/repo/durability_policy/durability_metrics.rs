@@ -41,6 +41,7 @@ pub struct DurabilityMetrics {
 pub struct DurabilityMetricsSnapshot {
     pub gauges: [u64; 11],
     pub counters: [u64; 7],
+    pub journal: [u64; 6],
 }
 
 impl Default for DurabilityMetrics {
@@ -135,6 +136,7 @@ impl DurabilityMetrics {
                 self.held_ns.load(Ordering::Relaxed),
                 self.held_count.load(Ordering::Relaxed),
             ],
+            journal: [0; 6],
         }
     }
 }

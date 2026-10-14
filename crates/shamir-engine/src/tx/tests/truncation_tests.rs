@@ -48,7 +48,11 @@ fn make_mem_repo() -> RepoInstance {
 
 /// Retry-reopen a disk-backed repo (Windows releases file locks lazily
 /// after `drop`). Mirrors the helper in `recovery_tests.rs`.
-async fn reopen_disk_repo(name: &str, path: PathBuf, tables: Vec<TableConfig>) -> RepoInstance {
+pub(crate) async fn reopen_disk_repo(
+    name: &str,
+    path: PathBuf,
+    tables: Vec<TableConfig>,
+) -> RepoInstance {
     let mut last_err = None;
     for _attempt in 0..10 {
         match RepoInstance::from_factory(
@@ -182,7 +186,7 @@ async fn truncate_only_when_truncatable_not_per_commit() {
 }
 
 /// Count `*.wal` segment files in a repo's `<name>.shamirwal/` directory.
-fn shamirwal_seg_count(repo_dir: &std::path::Path) -> usize {
+pub(crate) fn shamirwal_seg_count(repo_dir: &std::path::Path) -> usize {
     // `repo_instance::repo_wal` builds the WAL dir as a SIBLING of the backing
     // dir: `<file_name>.shamirwal`. For a `sled_raw(<dir>)` repo the backing
     // dir IS `<dir>`, so the WAL lives at `<dir>.shamirwal`.

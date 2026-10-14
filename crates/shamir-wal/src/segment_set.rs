@@ -15,6 +15,7 @@
 //! PURELY ADDITIVE (F6a): wired into nothing yet — production still runs a
 //! single [`WalSegment`] via `WalSink::File`. F6b cuts `repo_instance` over.
 
+mod sealed_retained_bytes;
 mod sync_snapshot;
 #[cfg(test)]
 mod sync_test_seam;
@@ -580,6 +581,10 @@ impl SegmentSet {
         g.sealed
             .iter()
             .any(|m| m.max_version > 0 && m.max_version <= durable_version)
+    }
+
+    pub async fn sealed_retained_bytes(&self) -> DbResult<u64> {
+        sealed_retained_bytes::measure(self).await
     }
 
     /// Test-only (task #531): clone the active segment's `Arc<WalSegment>` so
