@@ -1,5 +1,6 @@
 pub(crate) mod ack;
 pub mod apply_replicated;
+pub(crate) mod clean_horizon;
 pub mod commit;
 pub(crate) mod commit_driver;
 pub mod commit_phases;

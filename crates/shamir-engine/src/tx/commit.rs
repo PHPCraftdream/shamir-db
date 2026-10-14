@@ -319,6 +319,12 @@ pub(super) async fn maybe_crash(_phase: &str, _repo: &RepoInstance) {}
 pub enum TxError {
     #[error("WAL outcome indeterminate; repository must be reopened")]
     WalRequiresReopen,
+    /// PR2 S5c-X: the retention gate is refusing writes — the retained
+    /// sealed WAL exceeded `wal_retention_max_bytes` under `RefuseWrites`.
+    /// Admission retries succeed once the drainer's declare-gap/truncate
+    /// pass brings retention back under the cap.
+    #[error("WAL retention limit exceeded; writes are refused until the journal catches up")]
+    WalRetentionExceeded,
     #[error("commit {commit_version} published but WAL durability failed")]
     WalDurability {
         commit_version: u64,
@@ -395,6 +401,7 @@ impl TxError {
             // FG-7: commit-time CAS failures retain the staging-time code.
             Self::CasConflict { .. } => "version_conflict".to_string(),
             Self::WalRequiresReopen => "wal_requires_reopen".to_string(),
+            Self::WalRetentionExceeded => "wal_retention_exceeded".to_string(),
             Self::Storage(e) => format!("storage: {}", e),
             Self::Expired { elapsed, max } => {
                 format!("tx expired: elapsed {:?} > max {:?}", elapsed, max)
@@ -407,9 +414,9 @@ impl TxError {
 impl From<TxError> for DbError {
     fn from(error: TxError) -> Self {
         match error {
-            error @ (TxError::WalRequiresReopen | TxError::WalDurability { .. }) => {
-                DbError::Storage(error.to_string())
-            }
+            error @ (TxError::WalRequiresReopen
+            | TxError::WalRetentionExceeded
+            | TxError::WalDurability { .. }) => DbError::Storage(error.to_string()),
             TxError::Storage(error) => error,
             TxError::MigrationFrozen { table } => DbError::MigrationFrozen { table },
             error @ (TxError::SsiConflict { .. }
@@ -622,6 +629,12 @@ pub(super) async fn commit_tx_inner(
     if gate.requires_reopen() {
         release_pessimistic_locks(&tx, repo).await;
         return Err(TxError::WalRequiresReopen);
+    }
+    // PR2 S5c-X: retention refusal — the ENTIRE hot-path cost is this one
+    // atomic load (plus the pre-existing lock release on the early exit).
+    if repo.wal_retention_refuse_writes() {
+        release_pessimistic_locks(&tx, repo).await;
+        return Err(TxError::WalRetentionExceeded);
     }
     let wal = match repo.repo_wal().await {
         Ok(w) => w,

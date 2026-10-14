@@ -23,12 +23,17 @@
  * - `tx_conflict` — MVCC/SSI write-conflict; retry the transaction.
  * - `read_only_replica` — the write hit a read-only node; retry against the
  *   leader (a redirect, semantically retryable).
+ * - `wal_retention_exceeded` — commit admission refused while the retained
+ *   sealed WAL exceeds `durability.wal_retention_max_bytes` under mode
+ *   `refuse_writes`; the refusal clears by itself once the drainer truncates
+ *   the WAL, then a retried commit succeeds.
  */
 export const RETRYABLE_ERROR_CODES: ReadonlySet<string> = new Set([
   'timeout',
   'lock_timeout',
   'tx_conflict',
   'read_only_replica',
+  'wal_retention_exceeded',
 ]);
 
 /** `true` if `code` is a transient failure worth retrying. */

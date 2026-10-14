@@ -525,9 +525,10 @@ impl RepoChangefeed {
         self.clean_horizon.load(Ordering::Acquire)
     }
 
-    /// Checkpoint a settled prefix through the sole writer. The store's clean
-    /// metadata put MUST flush preceding events before setting J, then flush J.
-    /// Call only at exclusive startup or after admission stops and work settles.
+    /// J is also advanced at runtime before WAL truncation, so clean stop is
+    /// not the only checkpoint boundary. A checkpoint covers only the sampled
+    /// settled prefix; newer events may arrive while the write is in flight and
+    /// can still require conservative GAP certification after a crash.
     /// cancel-safe: NO — after admission the writer owns the request. A closed
     /// acknowledgement suppresses a not-yet-started J put, but an in-flight
     /// backend write may finish; cancellation never acknowledges durability.

@@ -768,7 +768,9 @@ impl ShamirDbHandler {
 /// Classification of a [`BatchError`] for the wire `code` tag.
 ///
 /// When the error carries a structured `code` (DDL / admin errors set one
-/// since §5 error-codes), that code is returned verbatim. Unclassified
+/// since §5 error-codes; the engine's implicit-commit receipt mapping sets
+/// the commit-admission codes `wal_requires_reopen` /
+/// `wal_retention_exceeded`), that code is returned verbatim. Unclassified
 /// errors fall back to heuristic string-matching for backward compat.
 pub(super) fn error_code(e: &BatchError) -> &str {
     match e {

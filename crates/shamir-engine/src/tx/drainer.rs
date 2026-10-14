@@ -96,6 +96,8 @@ use shamir_wal::{WalEntryV2, WalOpV2, WalTicketState};
 use tokio::sync::{Mutex, Notify};
 
 use crate::repo::RepoInstance;
+#[cfg(test)]
+use crate::tx::clean_horizon::checkpoint::test_seam;
 use crate::tx::materialize::interner_delta_safe_to_truncate;
 
 /// Test-only injection: when set to a non-zero `table_id`, the Phase B
@@ -1527,15 +1529,44 @@ impl Drainer {
         // NOT `flush_buffers`, which would re-enter `drain_all` and
         // recurse) so a power-loss after the unlink cannot lose the data
         // (I2). Then delete the segments.
+        let settled = gate.completion().watermark();
+        let checkpoint_ceiling = ceiling.min(settled);
         let wal = repo.repo_wal().await?;
-        if wal.has_truncatable(ceiling) {
+        let _retention_action =
+            crate::tx::clean_horizon::retention::enforce_retention(repo, checkpoint_ceiling)
+                .await?;
+        if wal.has_truncatable(checkpoint_ceiling) {
+            // PR2 S5c-X crash seam: BEFORE the clean-horizon checkpoint. A
+            // HARD crash here leaves every sealed segment on disk — nothing
+            // checkpointed, nothing unlinked.
+            crate::tx::commit::maybe_crash("pre_checkpoint", repo).await;
+            // PR2 S5c-X: checkpoint the changefeed journal through the
+            // ceiling BEFORE any unlink (I2). On failure the counter is
+            // bumped inside; skip truncation this pass — the next pass
+            // retries.
+            if !crate::tx::clean_horizon::checkpoint::checkpoint_before_truncate(repo).await {
+                log::warn!(
+                    "drain_step: clean-horizon checkpoint failed at ceiling {ceiling}; \
+                     truncation deferred to the next pass"
+                );
+                return Ok(());
+            }
+            // PR2 S5c-X crash seam: AFTER the checkpoint, BEFORE the
+            // history-flush + unlink — recovery must observe the durable J.
+            crate::tx::commit::maybe_crash("post_checkpoint", repo).await;
             // F6c crash seam: BEFORE history-flush + unlink. A HARD crash
             // here leaves EVERY sealed segment on disk (nothing unlinked
             // yet) — recovery replays all of them idempotently and loses
             // nothing (the data is also already in `history`).
             crate::tx::commit::maybe_crash("pre_truncate", repo).await;
             repo.flush_all_history().await?;
-            let removed = wal.truncate_below(ceiling).await?;
+            let removed = wal.truncate_below(checkpoint_ceiling).await?;
+            #[cfg(test)]
+            test_seam::record(repo, "truncate");
+            // Recheck actual retained bytes after unlink; clear admission refusal only below cap.
+            let _retention_action =
+                crate::tx::clean_horizon::retention::enforce_retention(repo, checkpoint_ceiling)
+                    .await?;
             // F6c crash seam: AFTER a successful truncate. The unlinked
             // segments are durable in `history` (flushed above, I2), so
             // recovery from the survivors is correct and complete.

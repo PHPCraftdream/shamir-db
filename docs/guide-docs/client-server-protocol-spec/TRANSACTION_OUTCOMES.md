@@ -61,6 +61,14 @@ current metadata mapping reports `status: "aborted"`,
 write is absent on disk (source: `crates/shamir-engine/src/tx/commit.rs`,
 `wal_completion` and the commit-entry reopen gates).
 
+`wal_retention_exceeded` is a transient admission refusal, not a durability
+outcome: the commit was refused before admission because the retained sealed
+WAL exceeds `durability.wal_retention_max_bytes` under mode
+`on_wal_retention_exceeded: refuse_writes`. The refusal clears by itself once
+the drainer truncates the WAL back under the cap; a retried commit then
+succeeds. Nothing was published — retry the same writes (new transaction)
+after the retention gate releases.
+
 ## Typed batch options (query v4)
 
 The current wire options are typed fields: `durability` accepts `buffered` or
@@ -368,6 +376,7 @@ Commit errors are mapped to transaction metadata, not necessarily to a top-level
 | `reason: "unique_violation"` | Unique constraint failure. Not retryable without changing input/state. |
 | `reason: "table_migrating"` | Source table is frozen for migration. Wait for migration completion/cancellation and resolve the active table before submitting a new write. |
 | `reason: "wal_requires_reopen"` | Indeterminate WAL outcome; reopen/reconcile first, no blind retry. |
+| `reason: "wal_retention_exceeded"` | Retained sealed WAL exceeded `durability.wal_retention_max_bytes` under `on_wal_retention_exceeded: refuse_writes`. Retryable: transient admission refusal; clears once the drainer truncates, then a retried commit succeeds. |
 | `reason` beginning `storage: ` | Storage diagnostic, not a stable retry code. Investigate the underlying failure. |
 | `reason` beginning `tx expired: elapsed ` | Engine commit lifetime check failed; diagnostic includes elapsed/max durations, **not** the literal code `tx_expired`. Begin a new transaction. |
 | `error: "wal_durability"` with committed status | Published writes; **not retryable**, no rollback. |
