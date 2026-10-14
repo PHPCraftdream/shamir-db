@@ -31,7 +31,9 @@ Use this runbook when ALL of these hold:
   version intersects a residual certified recovery gap, or you are
   bootstrapping a new follower against a source with such a gap. Cold open
   rebuilds derivable v3 events from surviving WAL before serving; it does
-  not turn every unclean restart into a gap. A seed is needed only when the
+  not turn every unclean restart into a gap. A follower's own cold start
+  certifies through the journal horizon stored in its bookmark record (PR6c),
+  leaving only the in-flight batch uncertain. A seed is needed only when the
   residual gap reaches the follower's cursor (or another unrecoverable
   divergence requires replacing the follower's state).
 * You can STOP the leader for the export window (minutes for typical
