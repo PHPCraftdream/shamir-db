@@ -2,9 +2,9 @@ use bytes::Bytes;
 use std::sync::Arc;
 use tokio::sync::Barrier;
 
-#[cfg(feature = "fjall")]
-use crate::meta::lifecycle_record::{load_state, LifecycleState};
 use crate::meta::repo_identity::RepoIdentity;
+#[cfg(feature = "fjall")]
+use crate::meta::repo_identity::{load_state, LifecycleState};
 use crate::meta::{MetaEnvelope, MetaKey};
 #[cfg(feature = "fjall")]
 use crate::repo::durability_policy::{

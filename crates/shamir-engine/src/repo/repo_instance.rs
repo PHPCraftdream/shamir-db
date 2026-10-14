@@ -146,10 +146,7 @@ pub struct RepoInstance {
     /// Shared policy installed before recovery and observed by every clone.
     durability: Arc<arc_swap::ArcSwap<DurabilityPolicy>>,
     durability_metrics: Arc<DurabilityMetrics>,
-    /// Per-open cache for the completed-reseed lifecycle record: the atomic
-    /// fast path avoids a store read on every replication page; the Armed
-    /// store write happens at most once per open (cold path). Shared across
-    /// clones like every other field.
+    /// Per-open cache for the completed-reseed lifecycle record (see `repo_impl.rs`).
     replication_armed: Arc<std::sync::atomic::AtomicBool>,
     /// PR2 S5c-X — lock-free WAL retention gate (refuse flag + counters);
     /// shared across clones like every other field.
@@ -1975,30 +1972,7 @@ impl RepoInstance {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         tokio::time::timeout(remaining, async {
             self.flush_buffers().await?;
-            let gate = self.tx_gate().await?;
-            let h = gate.version_allocation_high_water_mark();
-            // Settled includes aborted allocations, unlike last_committed.
-            // After stopped admission + quiescence + drain, W must equal H;
-            // unresolved allocation holes refuse a clean certificate.
-            if gate.completion().watermark() != h {
-                return Err(DbError::Storage(
-                    "unsettled versions at clean shutdown".into(),
-                ));
-            }
-            let handle = self.changefeed().await?;
-            if tokio::time::Instant::now() >= deadline {
-                return Err(DbError::Storage(
-                    "clean shutdown timed out before checkpoint".into(),
-                ));
-            }
-            handle.feed.record_clean_horizon(h).await?;
-            // PR8 completed_reseed chunk 2: the Clean lifecycle certificate is
-            // written ONLY after every step it certifies has already landed
-            // durably — journal (record_clean_horizon), allocation settle
-            // (watermark == H), data buffers (flush_buffers) and WAL evidence
-            // — so a surviving Clean implies all of them. Under `durable`
-            // serving this is a no-op (no speculative period to close).
-            self.write_clean_certificate_if_armed_mode().await
+            self.finish_clean_shutdown(deadline).await
         })
         .await
         .map_err(|_| DbError::Storage("clean shutdown timed out".into()))?

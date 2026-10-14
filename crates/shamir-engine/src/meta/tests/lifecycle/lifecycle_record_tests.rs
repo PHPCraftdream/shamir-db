@@ -6,11 +6,11 @@
 //! same store value (the envelope decode path is what a crash boundary
 //! exercises — the store value is written atomically by `set` + `flush`).
 
-use crate::meta::lifecycle_record::{
+use crate::meta::repo_identity::RepoIdentity;
+use crate::meta::repo_identity::{
     ensure_armed, load_state, mark_clean, requires_unclean_bump, LifecycleState,
     SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST,
 };
-use crate::meta::repo_identity::RepoIdentity;
 use crate::repo::durability_policy::{
     DurabilityPolicy, ReplicationServe, RetentionOverflow, WalCommitTier,
     DEFAULT_WAL_RETENTION_MAX_BYTES,

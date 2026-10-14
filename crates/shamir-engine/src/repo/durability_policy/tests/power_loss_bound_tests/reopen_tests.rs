@@ -12,8 +12,8 @@ use shamir_types::types::value::InnerValue;
 use shamir_wal::{SegmentSet, WalDurability, WalEntryV2};
 
 use super::super::helpers::{self, DiskFixture};
-use crate::meta::lifecycle_record::{load_state, LifecycleState, SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST};
 use crate::meta::repo_identity::RepoIdentity;
+use crate::meta::repo_identity::{load_state, LifecycleState, SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST};
 use crate::repo::durability_policy::{
     DurabilityPolicy, ReplicationServe, RetentionOverflow, WalCommitTier,
     DEFAULT_WAL_RETENTION_MAX_BYTES,

@@ -54,11 +54,11 @@ pub enum MetaKey {
     RepoIdentity,
 
     /// Completed-reseed speculative-serve lifecycle certificate
-    /// ([`crate::meta::lifecycle_record`], versioned envelope body).
+    /// ([`crate::meta::repo_identity`], versioned envelope body).
     /// `Armed` before the first speculative replication page is served;
     /// `Clean` only after a clean shutdown certifies journal + allocation
     /// + data + WAL durability. An `Armed` record at open costs a
-    /// history-epoch bump (followers re-seed).
+    ///   history-epoch bump (followers re-seed).
     LifecycleRecord,
 
     /// Durable per-(db,repo) follower replication bookmark (`u64 BE` body).

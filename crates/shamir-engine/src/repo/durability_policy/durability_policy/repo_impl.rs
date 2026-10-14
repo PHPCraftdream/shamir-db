@@ -207,23 +207,46 @@ impl RepoInstance {
             return Ok(());
         }
         let store = self.tx_info_store().await?;
-        crate::meta::lifecycle_record::ensure_armed(&store).await?;
+        crate::meta::repo_identity::ensure_armed(&store).await?;
         self.replication_armed
             .store(true, std::sync::atomic::Ordering::Release);
         Ok(())
     }
 
-    /// Clean lifecycle certificate for `completed_reseed` serving. Called by
-    /// `shutdown_clean` AFTER record_clean_horizon / settle / flush_buffers —
-    /// the certificate therefore implies journal + allocation + data + WAL
-    /// evidence are durable. No-op under `durable` serving (nothing to close).
-    pub(crate) async fn write_clean_certificate_if_armed_mode(&self) -> DbResult<()> {
+    /// Tail of `shutdown_clean`, called (inside the shutdown timeout) after
+    /// `flush_buffers`. Settled includes aborted allocations, unlike
+    /// last_committed; after stopped admission + quiescence + drain, W must
+    /// equal H — unresolved allocation holes refuse a clean certificate.
+    /// PR8 completed_reseed chunk 2: the Clean lifecycle certificate is
+    /// written ONLY after every step it certifies has already landed
+    /// durably — journal (record_clean_horizon), allocation settle
+    /// (watermark == H), data buffers (flush_buffers) and WAL evidence —
+    /// so a surviving Clean implies all of them. Under `durable` serving
+    /// this is a no-op (no speculative period to close).
+    pub(crate) async fn finish_clean_shutdown(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> DbResult<()> {
+        let gate = self.tx_gate().await?;
+        let h = gate.version_allocation_high_water_mark();
+        if gate.completion().watermark() != h {
+            return Err(DbError::Storage(
+                "unsettled versions at clean shutdown".into(),
+            ));
+        }
+        let handle = self.changefeed().await?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(DbError::Storage(
+                "clean shutdown timed out before checkpoint".into(),
+            ));
+        }
+        handle.feed.record_clean_horizon(h).await?;
         let mode: ReplicationServe = self.durability_policy().replication_serve();
         if mode != ReplicationServe::CompletedReseed {
             return Ok(());
         }
         let store = self.tx_info_store().await?;
-        crate::meta::lifecycle_record::mark_clean(&store).await
+        crate::meta::repo_identity::mark_clean(&store).await
     }
 
     /// Open-time unclean bump (called from `tx::recovery` AFTER
@@ -237,13 +260,13 @@ impl RepoInstance {
     pub(crate) async fn note_unclean_open_bump(&self) -> DbResult<()> {
         let mode: ReplicationServe = self.durability_policy().replication_serve();
         let store = self.tx_info_store().await?;
-        let record = crate::meta::lifecycle_record::load_state(&store).await?;
-        if !crate::meta::lifecycle_record::requires_unclean_bump(mode, record) {
+        let record = crate::meta::repo_identity::load_state(&store).await?;
+        if !crate::meta::repo_identity::requires_unclean_bump(mode, record) {
             return Ok(());
         }
         // Negative-control seam: constant-false in production, branch elided.
         if cfg!(test)
-            && crate::meta::lifecycle_record::SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST
+            && crate::meta::repo_identity::SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST
                 .load(std::sync::atomic::Ordering::Acquire)
         {
             return Ok(());

@@ -28,7 +28,7 @@ struct PendingSample {
 /// PR8 `completed_reseed` chunk 2: count of unclean-open history-epoch
 /// bumps (one per reopen that finds an Armed lifecycle record with no
 /// later Clean certificate while serving `CompletedReseed`).
-
+///
 /// One value per repository, not a process-wide last-observed sample.
 pub struct DurabilityMetrics {
     pull: ArcSwap<PullSample>,
