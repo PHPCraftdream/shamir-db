@@ -1345,10 +1345,7 @@ impl Drainer {
                         }
                     }
                 }
-                if let Err(error) =
-                    orphan_repair::settle_event(self, repo, entry, &mut orphan_failed).await
-                {
-                    log::error!("drain_step: orphan {v} event repair failed: {error}");
+                if !orphan_repair::settle_event(self, repo, entry, &mut orphan_failed).await? {
                     break 'finalize;
                 }
                 gate.complete_orphaned_post_wal(*v);

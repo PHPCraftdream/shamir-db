@@ -1,6 +1,8 @@
+use std::sync::atomic::Ordering;
+
 use crate::repo::RepoInstance;
 use crate::tx::drainer::Drainer;
-use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::error::DbResult;
 use shamir_tx::RepoTxGate;
 
 /// Settle registered orphans whose replay evidence disappeared from RAM and
@@ -29,11 +31,19 @@ pub(in crate::tx::drainer) async fn settle_missing_evidence(
             continue;
         }
         log::warn!("orphan {version}: WAL replay evidence unavailable; recording minimal GAP");
-        if let Err(error) = repo.mark_changefeed_gap(version).await {
-            return Err(DbError::Storage(format!(
-                "orphan {version} missing-evidence GAP failed: {error}"
-            )));
-        }
+        drainer
+            .orphan_replay_attempts_total
+            .fetch_add(1, Ordering::Relaxed);
+        let mut failed = false;
+        repo.mark_changefeed_gap(version)
+            .await
+            .inspect_err(|error| {
+                drainer.record_orphan_failure(&mut failed, error);
+            })?;
+        drainer
+            .orphan_replay_consecutive_failures
+            .store(0, Ordering::Relaxed);
+        drainer.orphan_replay_last_error.store(None);
         gate.complete_orphaned_post_wal(version);
         gate.mark_durable(version);
         gate.forget_orphaned_post_wal(version);

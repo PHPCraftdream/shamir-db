@@ -8,13 +8,16 @@ pub(in crate::tx::drainer) async fn settle_event(
     repo: &RepoInstance,
     entry: &WalEntryV2,
     orphan_failed: &mut bool,
-) -> DbResult<()> {
+) -> DbResult<bool> {
     let version = entry.commit_version;
     let outcome = match repair_event(repo, entry).await {
         Ok(outcome) => outcome,
         Err(error) => {
             drainer.record_orphan_failure(orphan_failed, &error);
-            return Err(error);
+            log::warn!(
+                "drain_step: orphan {version} event repair failed: {error}; leaving pending"
+            );
+            return Ok(false);
         }
     };
     match outcome {
@@ -28,5 +31,5 @@ pub(in crate::tx::drainer) async fn settle_event(
             drainer.orphan_repair_metrics.gap();
         }
     }
-    Ok(())
+    Ok(true)
 }
