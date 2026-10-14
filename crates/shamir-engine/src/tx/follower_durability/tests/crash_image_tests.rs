@@ -163,7 +163,7 @@ async fn verification_and_flush_make_events_and_certificate_survive_two_reopens(
         )
         .await
         .unwrap();
-    verify_events_and_flush(&journal, &[item], 7, 7)
+    verify_events_and_flush(&journal, &[item], 7, 7, None)
         .await
         .unwrap();
     let metadata = Arc::new(DiskImage::default());
@@ -204,7 +204,7 @@ async fn omitting_flush_is_a_negative_control_and_loses_unflushed_journal() {
         )
         .await
         .unwrap();
-    verify_events_without_flush(&journal, &[event], 3, 3)
+    verify_events_without_flush(&journal, &[event], 3, 3, None)
         .await
         .unwrap();
     assert!(matches!(
@@ -219,7 +219,7 @@ async fn omitting_flush_is_a_negative_control_and_loses_unflushed_journal() {
 #[tokio::test]
 async fn missing_mismatched_and_failed_flush_refuse_certification() {
     let journal = DiskImage::default();
-    assert!(verify_events_and_flush(&journal, &[event(1)], 1, 1)
+    assert!(verify_events_and_flush(&journal, &[event(1)], 1, 1, None)
         .await
         .is_err());
     journal
@@ -229,7 +229,7 @@ async fn missing_mismatched_and_failed_flush_refuse_certification() {
         )
         .await
         .unwrap();
-    assert!(verify_events_and_flush(&journal, &[event(1)], 1, 1)
+    assert!(verify_events_and_flush(&journal, &[event(1)], 1, 1, None)
         .await
         .is_err());
     journal
@@ -240,7 +240,7 @@ async fn missing_mismatched_and_failed_flush_refuse_certification() {
         .await
         .unwrap();
     journal.fail_flush.store(true, Ordering::Release);
-    assert!(verify_events_and_flush(&journal, &[event(1)], 1, 1)
+    assert!(verify_events_and_flush(&journal, &[event(1)], 1, 1, None)
         .await
         .is_err());
 }
@@ -272,7 +272,7 @@ async fn five_phase_crash_images_keep_old_or_certified_horizon() {
                 .unwrap();
         }
         if phase >= 2 {
-            verify_events_and_flush(&journal, &[event(5)], 5, 5)
+            verify_events_and_flush(&journal, &[event(5)], 5, 5, None)
                 .await
                 .unwrap();
         }

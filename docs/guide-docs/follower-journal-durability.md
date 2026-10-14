@@ -6,5 +6,8 @@ The durable record deliberately does not contain a resumable apply receipt. If a
 
 The bounded crash-image matrix and negative control are implemented in `tx/follower_durability/tests/crash_image_tests.rs`. They exercise the production verification/flush helper and public bookmark/horizon metadata APIs against a dropping-unflushed fake Store; they do not exercise full engine replay or establish exactly-once application. The PR4 cold-certification wiring remains pending.
 
+
 The production-path failure tests in `tx/follower_durability/tests/apply_failure_tests.rs` and `apply_crash_tests.rs` exercise injected barrier failures and phase pauses around history writes, journal flush, and bookmark persistence against Fjall, followed by graceful writer shutdown and repeated reopen checks. These are not abrupt power-loss simulations; the dropping-unflushed fake-Store crash-image tests above are the only power-cut model. PR4 cold-certification wiring remains deferred.
+
+A certified GAP does not reject otherwise valid follower batches: the upstream bookmark advances while clean-history horizon J remains unchanged. Persisted gap intervals are read as a single snapshot; covered event versions may be absent, but bytes outside the interval are still verified. Runtime GAPs are flushed through the sole changefeed marker writer before acknowledgement, adding GAP-path I/O while leaving the healthy path at one journal flush. The v2 record stores an optional J with the bookmark when known; legacy u64 and v1 records have unknown J, and fence-only/no-horizon saves retain their legacy wire forms. The shared codec strictly rejects trailing bytes.
 

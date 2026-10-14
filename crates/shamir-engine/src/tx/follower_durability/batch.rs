@@ -39,11 +39,13 @@ pub(in crate::tx::apply_replicated) async fn finish_batch(
     #[cfg(test)]
     let (_, bypass_barrier) = super::test_seam::barrier_action(repo.name());
     #[cfg(test)]
-    if !bypass_barrier {
-        durable_journal_barrier(repo, &events, start.unwrap_or(floor), end).await?;
-    }
+    let journal_clean = if bypass_barrier {
+        true
+    } else {
+        durable_journal_barrier(repo, &events, start.unwrap_or(floor), end).await?
+    };
     #[cfg(not(test))]
-    durable_journal_barrier(repo, &events, start.unwrap_or(floor), end).await?;
+    let journal_clean = durable_journal_barrier(repo, &events, start.unwrap_or(floor), end).await?;
     #[cfg(test)]
     if !bypass_barrier {
         super::test_seam::phase(repo.name(), super::test_seam::Phase::AfterJournalFlush).await;
@@ -69,7 +71,7 @@ pub(in crate::tx::apply_replicated) async fn finish_batch(
             group.settle(version);
         }
     }
-    persist_batch_record(info, leader_floor, end).await?;
+    persist_batch_record(info, leader_floor, end, journal_clean).await?;
     #[cfg(test)]
     super::test_seam::phase(repo.name(), super::test_seam::Phase::BookmarkPersisted).await;
     Ok(end)

@@ -16,16 +16,19 @@ pub(crate) async fn single_barrier(
     version: u64,
 ) -> DbResult<()> {
     let events = event.cloned().into_iter().collect::<Vec<_>>();
-    durable_journal_barrier(repo, &events, version, version).await
+    durable_journal_barrier(repo, &events, version, version)
+        .await
+        .map(|_| ())
 }
 
-/// reject an overlapping gap, and flush the journal store once per batch.
+/// Persisted gaps prevent a clean-prefix certification, but do not reject applying
+/// an otherwise valid replicated batch. The returned flag permits clean-horizon advancement.
 pub(crate) async fn durable_journal_barrier(
     repo: &RepoInstance,
     events: &[Arc<ChangelogEvent>],
     start: u64,
     end: u64,
-) -> DbResult<()> {
+) -> DbResult<bool> {
     let handle = repo.changefeed().await?;
     #[cfg(test)]
     if super::test_seam::barrier_action(repo.name()).0 {
@@ -44,14 +47,18 @@ pub(crate) async fn durable_journal_barrier(
     super::test_seam::phase(repo.name(), super::test_seam::Phase::JournalConfirmed).await;
 
     let store = repo.follower_journal_store().await?;
-    if let Some((first, through)) = handle.feed.certified_gap_interval() {
-        if first <= end && through >= start {
-            return Err(DbError::Storage(format!(
-                "follower journal gap overlaps batch [{start}, {end}]"
-            )));
-        }
+    let first_gap = handle.feed.first_gap_version();
+    if first_gap != 0 && first_gap <= end {
+        // The sole writer persists the merged runtime interval and flushes it.
+        handle
+            .feed
+            .record_recovery_gap(first_gap, first_gap)
+            .await?;
     }
-    verify_events_and_flush(store.as_ref(), events, start, end).await
+    let gap = handle.feed.certified_gap_interval();
+    let can_advance_horizon = !gap.is_some_and(|(first, _)| first <= end);
+    verify_events_and_flush(store.as_ref(), events, start, end, gap).await?;
+    Ok(can_advance_horizon)
 }
 
 /// Verify the journal read-back and flush it as one batch-level certification.
@@ -60,8 +67,9 @@ pub(crate) async fn verify_events_and_flush(
     events: &[Arc<ChangelogEvent>],
     start: u64,
     end: u64,
+    gap: Option<(u64, u64)>,
 ) -> DbResult<()> {
-    verify_events(store, events, start, end).await?;
+    verify_events(store, events, start, end, gap).await?;
     store.flush().await
 }
 
@@ -71,8 +79,9 @@ pub(crate) async fn verify_events_without_flush(
     events: &[Arc<ChangelogEvent>],
     start: u64,
     end: u64,
+    gap: Option<(u64, u64)>,
 ) -> DbResult<()> {
-    verify_events(store, events, start, end).await
+    verify_events(store, events, start, end, gap).await
 }
 
 async fn verify_events(
@@ -80,6 +89,7 @@ async fn verify_events(
     events: &[Arc<ChangelogEvent>],
     start: u64,
     end: u64,
+    gap: Option<(u64, u64)>,
 ) -> DbResult<()> {
     for event in events {
         let version = event.commit_version;
@@ -87,6 +97,9 @@ async fn verify_events(
             return Err(DbError::Storage(format!(
                 "journal event version {version} is outside batch [{start}, {end}]"
             )));
+        }
+        if gap.is_some_and(|(first, through)| version >= first && version <= through) {
+            continue;
         }
         let expected = serialize_event(event)?;
         let key = RecordKey::from_slice(&version.to_be_bytes());
