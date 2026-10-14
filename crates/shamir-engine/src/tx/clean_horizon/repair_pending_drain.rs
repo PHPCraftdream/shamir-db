@@ -24,7 +24,7 @@
 use std::sync::Arc;
 
 use shamir_collections::TFxMap;
-use shamir_storage::error::DbResult;
+use shamir_storage::error::{DbError, DbResult};
 
 use crate::repo::RepoInstance;
 
