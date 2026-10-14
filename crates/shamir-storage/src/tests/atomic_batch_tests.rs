@@ -92,7 +92,7 @@ mod fjall {
         panic!("could not reopen fjall repo at {path} after 50 attempts");
     }
 
-    fn key(b: &[u8]) -> RecordKey {
+    fn key(b: &'static [u8]) -> RecordKey {
         Bytes::from_static(b).into()
     }
 

@@ -169,6 +169,6 @@ fn receipt_with_invalid_range_rejected() {
 
 #[test]
 fn size_bound_constants_are_sane() {
-    assert!(MAX_RECEIPT_OPS >= MAX_RECEIPT_EVENTS);
-    assert!(MAX_RECEIPT_EVENTS >= 1);
+    const { assert!(MAX_RECEIPT_OPS >= MAX_RECEIPT_EVENTS) };
+    const { assert!(MAX_RECEIPT_EVENTS >= 1) };
 }
