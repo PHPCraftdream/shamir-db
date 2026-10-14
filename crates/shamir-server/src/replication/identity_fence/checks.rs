@@ -12,6 +12,14 @@ use shamir_query_types::wire::repl::ReplResponse;
 use super::recorded::{self, FenceRecord};
 use crate::replication::error::ReplError;
 
+/// Negative-control seam for tests: when set, the supervisor skips the
+/// `resync_required` quarantine after an identity/epoch fence trip (mirrors
+/// `SKIP_S_CLAMP_FOR_TEST` in the engine's `replication_bound.rs`). Always
+/// compiled; the supervisor reads it behind `cfg!(test)` so the branch is
+/// elided in production and the static is never dead on any platform.
+pub(crate) static SKIP_FENCE_QUARANTINE_FOR_TEST: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Re-establish durability once per loop start, before any leader contact.
 /// A failed/cancelled set+flush may be readable without having reached disk.
 /// Checks return on persistence errors, so no later response in that loop can

@@ -8,6 +8,7 @@ describe('repository durability builders', () => {
     expect(createRepo('r', { durability })).toEqual({ create_repo: 'r', durability: { ...durability, wal_retention_max_bytes: '9223372036854775808' } });
     expect(createRepo('r', { durability: { wal_retention_max_bytes: 18446744073709551615n } })).toEqual({ create_repo: 'r', durability: { wal_retention_max_bytes: '18446744073709551615' } });
     expect(alterRepo('r', durability)).toEqual({ alter_repo: 'r', durability: { ...durability, wal_retention_max_bytes: '9223372036854775808' } });
+    expect(alterRepo('r', { durability: { replication_serve: 'completed_reseed' as const } })).toEqual({ alter_repo: 'r', durability: { replication_serve: 'completed_reseed' } });
     expect(describeRepo('r')).toEqual({ describe_repo: 'r' });
     const response = decode(encode({ durability: { wal_retention_max_bytes: 9223372036854775808n } })) as { durability: { wal_retention_max_bytes: string | bigint } };
     expect(response.durability.wal_retention_max_bytes).toBe(9223372036854775808n);

@@ -152,25 +152,22 @@ async fn retention_below_floor_fails_init() {
     );
 }
 
-/// (d) `replication_serve: completed_reseed` → init errors with the exact
-/// rejection message.
+/// (d) `replication_serve: completed_reseed` (PR8 chunk 1) inits cleanly on
+/// the in-memory system store and the policy is visible via the accessor.
 #[tokio::test]
-async fn completed_reseed_fails_init() {
+async fn completed_reseed_inits_on_mem_backend() {
     let policy = DurabilityPolicy::new(
         WalCommitTier::Buffered,
         DEFAULT_WAL_RETENTION_MAX_BYTES,
         RetentionOverflow::RefuseWrites,
         ReplicationServe::CompletedReseed,
     );
-    let err = ShamirDb::init_with_durability(SystemStoreConfig::InMemory, policy)
+    let shamir = ShamirDb::init_with_durability(SystemStoreConfig::InMemory, policy)
         .await
-        .err()
-        .expect("completed_reseed must be rejected");
-    assert!(
-        err.to_string().contains(
-            "completed_reseed is not available yet (planned: epoch bump + universal fencing)"
-        ),
-        "exact rejection message expected, got: {err}"
+        .expect("completed_reseed must be accepted");
+    assert_eq!(
+        shamir.durability_policy().replication_serve(),
+        ReplicationServe::CompletedReseed
     );
 }
 

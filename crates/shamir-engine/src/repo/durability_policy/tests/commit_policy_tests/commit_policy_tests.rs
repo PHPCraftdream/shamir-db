@@ -234,50 +234,56 @@ fn resolve_defaults_and_override_win_and_floor() {
     );
 }
 
-/// Amendment B3 (point 3): `replication_serve = completed_reseed` is
-/// REJECTED by `resolve` — from an override AND from a server default —
-/// with the EXACT planned-mode message; `durable` passes everywhere.
+/// PR8 chunk 1: `replication_serve = completed_reseed` RESOLVES — through
+/// a server default AND through a per-repo override — and the retention
+/// floor still fires for a `completed_reseed` policy under the minimum.
 #[test]
-fn completed_reseed_is_rejected_with_exact_message() {
-    const EXPECTED: &str =
-        "completed_reseed is not available yet (planned: epoch bump + universal fencing)";
-    let default = DurabilityPolicy::default();
+fn completed_reseed_resolves_through_server_default_and_override() {
+    let durable_default = DurabilityPolicy::default();
     let segment = 64 * 1024 * 1024_u64;
 
-    // (a) via the override.
-    let over = DurabilityOverride {
-        replication_serve: Some(ReplicationServe::CompletedReseed),
-        ..Default::default()
-    };
-    let err = resolve(&default, Some(&over), segment)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains(EXPECTED),
-        "exact rejection message required: {err}"
-    );
-
-    // (b) via the server default itself.
-    let bad_default = DurabilityPolicy::new(
+    // (a) via the server default itself.
+    let default_with_completed_reseed = DurabilityPolicy::new(
         WalCommitTier::Buffered,
         DEFAULT_WAL_RETENTION_MAX_BYTES,
         RetentionOverflow::RefuseWrites,
         ReplicationServe::CompletedReseed,
     );
-    let err = resolve(&bad_default, None, segment)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains(EXPECTED),
-        "exact rejection message required: {err}"
+    let resolved = resolve(&default_with_completed_reseed, None, segment).unwrap();
+    assert_eq!(
+        resolved.replication_serve(),
+        ReplicationServe::CompletedReseed
+    );
+    assert_eq!(
+        resolved.wal_retention_max_bytes(),
+        DEFAULT_WAL_RETENTION_MAX_BYTES
     );
 
-    // (c) `durable` (the default) passes.
+    // (b) via the override over a durable default.
+    let over = DurabilityOverride {
+        replication_serve: Some(ReplicationServe::CompletedReseed),
+        ..Default::default()
+    };
+    let resolved = resolve(&durable_default, Some(&over), segment).unwrap();
     assert_eq!(
-        resolve(&default, None, segment)
-            .unwrap()
-            .replication_serve(),
-        ReplicationServe::Durable
+        resolved.replication_serve(),
+        ReplicationServe::CompletedReseed
+    );
+    assert_eq!(resolved, default_with_completed_reseed);
+
+    // (c) the retention floor still fires for a completed_reseed policy.
+    let tiny = DurabilityPolicy::new(
+        WalCommitTier::Buffered,
+        3,
+        RetentionOverflow::RefuseWrites,
+        ReplicationServe::CompletedReseed,
+    );
+    let err = resolve(&tiny, None, segment).unwrap_err().to_string();
+    assert!(
+        err.contains("wal_retention_max_bytes")
+            && err.contains('3')
+            && err.contains(&(2 * segment).to_string()),
+        "retention floor error must name key, value and minimum: {err}"
     );
 }
 

@@ -3,7 +3,8 @@
 //!
 //! [`DurabilityPolicy`] is the value type every repo carries: which WAL
 //! commit tier commits ack at, what a replication pull may serve
-//! (`durability.replication_serve`, only `durable` in PR1), and (consumed
+//! (`durability.replication_serve`, `durable` clamps to `R`,
+//! `completed_reseed` serves the completed prefix), and (consumed
 //! in PR2) how much WAL the repo may retain and what to do when the
 //! retention cap is exceeded.
 //!
@@ -13,9 +14,9 @@
 //! engine-internal paths (and tests) keep a stable import site.
 //!
 //! [`resolve`] folds a server-default policy plus an optional
-//! `DurabilityOverride` into the effective policy, rejecting
-//! `completed_reseed` (not implemented in PR1) and enforcing the
-//! retention-vs-segment-size minimum.
+//! `DurabilityOverride` into the effective policy, accepting
+//! `completed_reseed` (PR8 chunk 1) and enforcing the retention-vs-
+//! segment-size minimum.
 //!
 //! The replication-bound helper [`replication_bound`] implements the I3
 //! invariant: a replication pull may never serve a version outside `R`, the

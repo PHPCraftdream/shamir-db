@@ -17,9 +17,9 @@ pub enum ReplicationServe {
     #[default]
     Durable,
     /// Serve completed-but-not-yet-covered versions, letting followers
-    /// re-seed from a snapshot if the WAL tail is lost. NOT IMPLEMENTED in
-    /// PR1: rejected by the engine's `resolve` with
-    /// "completed_reseed is not available yet (planned: epoch bump +
-    /// universal fencing)".
+    /// re-seed from a snapshot if the WAL tail is lost. Safe convergence,
+    /// not lossless replication: speculative observations may be retracted,
+    /// and an unclean restart conservatively costs a reseed (history-epoch
+    /// bump) even if the WAL bytes survived.
     CompletedReseed,
 }

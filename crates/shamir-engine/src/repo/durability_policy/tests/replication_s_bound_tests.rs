@@ -11,7 +11,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::super::replication_bound;
-use super::super::RecoverabilityCoverage;
+use super::super::RetentionOverflow;
+use super::super::DEFAULT_WAL_RETENTION_MAX_BYTES;
+use super::super::{DurabilityPolicy, RecoverabilityCoverage, ReplicationServe};
 use shamir_wal::wal_group_commit::WalCoverage;
 
 use super::helpers;
@@ -238,4 +240,113 @@ async fn abort_hole_wakes_waiter_without_another_sync() {
     assert_eq!(group.recoverable_through(), 2);
     assert_eq!(group.instance_sync_rounds(), rounds);
     fx.repo.stop_journal_writer_for_test().await.unwrap();
+}
+
+/// PR8 chunk 1: a `completed_reseed` policy changes ONLY the serve mode —
+/// the other accessors (`wal_commit`, `effective_wal_commit`, retention
+/// budget, overflow action) report exactly what was constructed.
+#[test]
+fn completed_reseed_policy_keeps_other_accessors_unchanged() {
+    let policy = DurabilityPolicy::new(
+        shamir_query_types::WalCommitTier::Synced,
+        DEFAULT_WAL_RETENTION_MAX_BYTES,
+        RetentionOverflow::DeclareGap,
+        ReplicationServe::CompletedReseed,
+    );
+    assert_eq!(
+        policy.replication_serve(),
+        ReplicationServe::CompletedReseed
+    );
+    assert_eq!(
+        policy.wal_commit(),
+        shamir_query_types::WalCommitTier::Synced
+    );
+    assert_eq!(
+        policy.effective_wal_commit(),
+        shamir_query_types::WalCommitTier::Synced
+    );
+    assert_eq!(
+        policy.wal_retention_max_bytes(),
+        DEFAULT_WAL_RETENTION_MAX_BYTES
+    );
+    assert_eq!(
+        policy.on_wal_retention_exceeded(),
+        RetentionOverflow::DeclareGap
+    );
+}
+
+/// PR8 chunk 3 fixture: journal with completion watermark W = 3, WAL
+/// containing ONLY v1 (fsynced) — so the recoverability prefix R = 1 is
+/// strictly below W = 3. The policy mode is set through `set_durability`
+/// with `wal_commit = buffered` (buffered is valid on a File backend and
+/// nothing in the read path depends on the commit tier).
+async fn serve_fixture(name: &str, mode: ReplicationServe) -> helpers::DiskFixture {
+    let fx = helpers::disk_repo(name).await;
+    helpers::seed_journal(&fx.repo, &[1, 2, 3]).await;
+    helpers::append_wal(&fx.repo, 1, WalDurability::Synced)
+        .await
+        .unwrap();
+    fx.repo
+        .set_durability(DurabilityPolicy::new(
+            shamir_query_types::WalCommitTier::Buffered,
+            DEFAULT_WAL_RETENTION_MAX_BYTES,
+            RetentionOverflow::DeclareGap,
+            mode,
+        ))
+        .unwrap();
+    fx
+}
+
+/// PR8 chunk 3 (`replication_serve = completed_reseed`): a pull is bounded
+/// by `min(confirmed, W)` — NO recoverability clamp — so it serves the
+/// journal completion prefix `1..=3` even though only v1 survives a power
+/// loss (R = 1). This test is the NEGATIVE CONTROL of
+/// [`durable_mode_still_clamps_to_recoverable_prefix`] (same fixture state,
+/// opposite mode): on the pre-chunk-3 code the mode is ignored and the
+/// durable R clamp holds this pull back to `[1]`, so the final assertion
+/// fails.
+#[tokio::test]
+async fn completed_reseed_serves_past_recoverable_prefix() {
+    let fx = serve_fixture("reseed_serves_past_r", ReplicationServe::CompletedReseed).await;
+    assert_eq!(fx.repo.wal_group().await.unwrap().recoverable_through(), 1);
+    let (events, gap) = fx
+        .repo
+        .read_changelog_for_replication(0, 100)
+        .await
+        .unwrap();
+    assert_eq!(gap, None);
+    let served = events
+        .iter()
+        .map(|e| e.event.commit_version)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        served,
+        vec![1, 2, 3],
+        "completed_reseed serves up to the confirm/W bound, past R"
+    );
+}
+
+/// PR8 chunk 3: `durable` (the default) serving is UNCHANGED — the same
+/// fixture state as [`completed_reseed_serves_past_recoverable_prefix`]
+/// (which is this test's negative control) under mode `Durable` stops
+/// exactly at the recoverability prefix R = 1. Pins today's behaviour.
+#[tokio::test]
+async fn durable_mode_still_clamps_to_recoverable_prefix() {
+    let fx = serve_fixture("durable_clamps_to_r", ReplicationServe::Durable).await;
+    assert_eq!(fx.repo.wal_group().await.unwrap().recoverable_through(), 1);
+    let (events, gap) = fx
+        .repo
+        .read_changelog_for_replication(0, 100)
+        .await
+        .unwrap();
+    assert_eq!(gap, None);
+    let served = events
+        .iter()
+        .map(|e| e.event.commit_version)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        served,
+        vec![1],
+        "durable serving still clamps to the recoverability prefix"
+    );
 }

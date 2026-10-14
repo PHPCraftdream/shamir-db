@@ -146,6 +146,11 @@ pub struct RepoInstance {
     /// Shared policy installed before recovery and observed by every clone.
     durability: Arc<arc_swap::ArcSwap<DurabilityPolicy>>,
     durability_metrics: Arc<DurabilityMetrics>,
+    /// Per-open cache for the completed-reseed lifecycle record: the atomic
+    /// fast path avoids a store read on every replication page; the Armed
+    /// store write happens at most once per open (cold path). Shared across
+    /// clones like every other field.
+    replication_armed: Arc<std::sync::atomic::AtomicBool>,
     /// PR2 S5c-X — lock-free WAL retention gate (refuse flag + counters);
     /// shared across clones like every other field.
     wal_retention_gate: Arc<crate::tx::clean_horizon::retention_gate::RetentionGate>,
@@ -198,6 +203,7 @@ impl Clone for RepoInstance {
             wal_group: Arc::clone(&self.wal_group),
             durability: Arc::clone(&self.durability),
             durability_metrics: Arc::clone(&self.durability_metrics),
+            replication_armed: Arc::clone(&self.replication_armed),
             wal_retention_gate: Arc::clone(&self.wal_retention_gate),
             #[cfg(test)]
             clean_horizon_test_state: Arc::clone(&self.clean_horizon_test_state),
@@ -270,6 +276,7 @@ impl RepoInstance {
             table_init_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             wal_group: Arc::new(OnceCell::new()),
             durability_metrics: Arc::new(DurabilityMetrics::default()),
+            replication_armed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             durability: Arc::new(arc_swap::ArcSwap::from_pointee(policy)),
             wal_retention_gate: Arc::new(
                 crate::tx::clean_horizon::retention_gate::RetentionGate::default(),
@@ -1984,7 +1991,14 @@ impl RepoInstance {
                     "clean shutdown timed out before checkpoint".into(),
                 ));
             }
-            handle.feed.record_clean_horizon(h).await
+            handle.feed.record_clean_horizon(h).await?;
+            // PR8 completed_reseed chunk 2: the Clean lifecycle certificate is
+            // written ONLY after every step it certifies has already landed
+            // durably — journal (record_clean_horizon), allocation settle
+            // (watermark == H), data buffers (flush_buffers) and WAL evidence
+            // — so a surviving Clean implies all of them. Under `durable`
+            // serving this is a no-op (no speculative period to close).
+            self.write_clean_certificate_if_armed_mode().await
         })
         .await
         .map_err(|_| DbError::Storage("clean shutdown timed out".into()))?

@@ -456,6 +456,12 @@ pub async fn recover_inflight_v2(repo: &RepoInstance) -> DbResult<usize> {
         );
     }
     repo.certify_cold_start(&entries).await?;
+    // PR8 completed_reseed chunk 2: cold-start history-epoch bump. Under
+    // completed-reseed serving, an Armed lifecycle record with no later
+    // Clean certificate means the previous serve period ended uncleanly —
+    // the bump costs followers a re-seed. A failed bump/flush propagates
+    // and blocks admission; under Durable mode this is a no-op.
+    repo.note_unclean_open_bump().await?;
     Ok(count)
 }
 

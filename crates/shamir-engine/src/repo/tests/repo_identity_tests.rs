@@ -2,8 +2,15 @@ use bytes::Bytes;
 use std::sync::Arc;
 use tokio::sync::Barrier;
 
+#[cfg(feature = "fjall")]
+use crate::meta::lifecycle_record::{load_state, LifecycleState};
 use crate::meta::repo_identity::RepoIdentity;
 use crate::meta::{MetaEnvelope, MetaKey};
+#[cfg(feature = "fjall")]
+use crate::repo::durability_policy::{
+    DurabilityPolicy, ReplicationServe, RetentionOverflow, WalCommitTier,
+    DEFAULT_WAL_RETENTION_MAX_BYTES,
+};
 #[cfg(feature = "fjall")]
 use crate::repo::BoxRepoFactory;
 use crate::repo::{BoxRepo, RepoInstance};
@@ -185,4 +192,81 @@ async fn identity_version_length_and_receipt_roundtrip_validation() {
             "corrupt record must not default"
         );
     }
+}
+
+/// Switching a repo with an ARMED lifecycle record to `durable` serving must
+/// NOT erase the obligation (no Clean certificate is written under durable
+/// mode), and the next open under `completed_reseed` serving then costs the
+/// history-epoch bump exactly once — lineage unchanged.
+#[cfg(feature = "fjall")]
+#[test]
+fn armed_record_survives_mode_switch_and_forces_bump_on_next_fast_open() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let policy = |serve| {
+        DurabilityPolicy::new(
+            WalCommitTier::Buffered,
+            DEFAULT_WAL_RETENTION_MAX_BYTES,
+            RetentionOverflow::RefuseWrites,
+            serve,
+        )
+    };
+    let open_reseed = || {
+        RepoInstance::from_factory_with_durability(
+            "main".into(),
+            BoxRepoFactory::fjall_raw(directory.path()),
+            vec![],
+            policy(ReplicationServe::CompletedReseed),
+        )
+    };
+    // Destroy the complete runtime between opens (Windows fjall lock),
+    // exactly like `identity_survives_disk_reopen_and_corruption_refuses_open`.
+    let runtime = || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    };
+    let before = runtime().block_on(async {
+        let repo = open_reseed().await.unwrap();
+        // Arm via a replication page read: under CompletedReseed serving the
+        // page path arms the lifecycle record BEFORE any byte is served.
+        let (_, gap) = repo.read_changelog_for_replication(0, 100).await.unwrap();
+        assert_eq!(gap, None);
+        let store = repo.tx_info_store().await.unwrap();
+        assert_eq!(
+            load_state(&store).await.unwrap(),
+            Some(LifecycleState::Armed)
+        );
+        // Switch to Durable: the Armed record must survive the switch.
+        repo.set_durability(policy(ReplicationServe::Durable))
+            .unwrap();
+        assert_eq!(
+            load_state(&store).await.unwrap(),
+            Some(LifecycleState::Armed),
+            "switching to durable must not erase an armed obligation"
+        );
+        // Clean shutdown under Durable serving writes NO Clean certificate
+        // (the certificate only closes a completed-reseed serve period), so
+        // the record stays Armed even after a graceful stop.
+        repo.shutdown_clean(std::time::Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(
+            load_state(&store).await.unwrap(),
+            Some(LifecycleState::Armed)
+        );
+        drop(store);
+        repo.repo_identity().await.unwrap()
+    });
+    // The next fast open under CompletedReseed finds Armed with no later
+    // Clean certificate and bumps the epoch exactly +1.
+    runtime().block_on(async {
+        let reopened = open_reseed().await.unwrap();
+        let identity = reopened.repo_identity().await.unwrap();
+        assert_eq!(
+            identity.lineage_id, before.lineage_id,
+            "the bump must NEVER change the lineage"
+        );
+        assert_eq!(identity.history_epoch, before.history_epoch + 1);
+    });
 }
