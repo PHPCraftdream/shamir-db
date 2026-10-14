@@ -87,7 +87,7 @@ async fn bounded_range_skips_metadata_and_delete_preserves_outside_records() {
         .await
         .unwrap();
 
-    // The inclusive range contains the low-valued metadata keys as well as events.
+    // The clean-horizon scan is separate from gap-marker key classification.
     let range = events_in_range(store.as_ref(), 0, u64::MAX, 2)
         .await
         .unwrap();

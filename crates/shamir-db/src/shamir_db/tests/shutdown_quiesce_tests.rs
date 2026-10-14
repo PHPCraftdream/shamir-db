@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use shamir_engine::tx::commit::{PostWalPrePublishHook, TEST_POST_WAL_PRE_PUBLISH_HOOK};
+use shamir_engine::tx::ChangeOp;
 use shamir_engine::tx::IsolationLevel;
 use shamir_query_builder::write::doc;
 #[cfg(feature = "fjall")]
@@ -159,8 +160,8 @@ fn flush_all_persists_detached_post_wal_tail() {
     drop(runtime);
 }
 
-// The original tail resumes only AFTER shutdown timed out. A mistaken late J
-// would hide the unclean interval on the next public-constructor hard reopen.
+// The failed shutdown leaves J absent; cold recovery certifies surviving WAL,
+// rather than declaring a blanket unclean gap.
 #[cfg(feature = "fjall")]
 #[test]
 fn quiescence_timeout_leaves_j_absent_and_hard_reopen_certifies() {
@@ -168,7 +169,7 @@ fn quiescence_timeout_leaves_j_absent_and_hard_reopen_certifies() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("repo");
     let runtime = Builder::new_current_thread().enable_all().build().unwrap();
-    let h = runtime.block_on(async {
+    let (h, rid) = runtime.block_on(async {
         let hook = hook();
         let shamir = ShamirDb::init_memory().await.unwrap();
         let db = shamir.create_db("app").await;
@@ -184,7 +185,7 @@ fn quiescence_timeout_leaves_j_absent_and_hard_reopen_certifies() {
         let value =
             query_value_to_inner(&doc().set("name", "late-tail").build(), interner).unwrap();
         let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
-        table.insert_tx(&value, Some(&mut tx)).await.unwrap();
+        let rid = table.insert_tx(&value, Some(&mut tx)).await.unwrap();
         hook.armed.store(true, Ordering::Release);
         let owned = repo.clone();
         let caller = tokio::spawn(async move { owned.commit_tx(tx).await });
@@ -198,12 +199,13 @@ fn quiescence_timeout_leaves_j_absent_and_hard_reopen_certifies() {
         // Drain data only; never retry clean shutdown after the failed attempt.
         repo.flush_buffers().await.unwrap();
         drop(snapshot);
-        repo.current_commit_version().await.unwrap()
+        (repo.current_commit_version().await.unwrap(), rid)
     });
     drop(runtime);
     let runtime = Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        // Inspect durable state before any opener can advance J.
+        // Inspect durable state before any opener can advance J. This proves
+        // the absent marker is the precondition, not a side effect of reopen.
         let backing = FjallRepo::new(&path).unwrap();
         let store = backing.store_get("__changelog__").await.unwrap();
         assert!(matches!(
@@ -223,14 +225,35 @@ fn quiescence_timeout_leaves_j_absent_and_hard_reopen_certifies() {
         )
         .await
         .unwrap();
-        assert!(h > 0);
+        assert_eq!(repo.clean_horizon().await.unwrap(), h);
         assert_eq!(
-            repo.read_changelog_from(h, 100).await.unwrap().gap_at,
-            Some(h),
+            h, 1,
+            "the single fresh commit advances runtime version once"
         );
+        assert_eq!(repo.current_commit_version().await.unwrap(), h);
+        assert_eq!(repo.consistent_version().await.unwrap(), h);
+        let from_h = repo.read_changelog_from(h, 100).await.unwrap();
+        assert_eq!(from_h.gap_at, None);
+        let beyond_h = repo.read_changelog_from(h + 1, 100).await.unwrap();
+        assert_eq!(beyond_h.gap_at, None);
+        assert!(beyond_h.events.is_empty());
+        assert_eq!(from_h.events.len(), 1);
+        assert_eq!(from_h.events[0].commit_version, h);
+        assert_eq!(from_h.events[0].changes.len(), 1);
+        assert_eq!(from_h.events[0].changes[0].op, ChangeOp::Put);
+        assert_eq!(from_h.events[0].changes[0].table, "items");
+        assert_eq!(from_h.events[0].changes[0].key.as_ref(), rid.as_bytes());
+        let table = repo.get_table("items").await.unwrap();
+        let reopened = table.get(rid).await.unwrap();
+        let reopened_bytes = reopened.to_bytes().unwrap();
         assert_eq!(
-            repo.read_changelog_from(h + 1, 100).await.unwrap().gap_at,
-            None,
+            from_h.events[0].changes[0].value.as_deref(),
+            Some(reopened_bytes.as_ref())
+        );
+        let interner = table.interner().get().await.unwrap();
+        assert_eq!(
+            inner_value_to_query_value(&reopened, interner).unwrap(),
+            doc().set("name", "late-tail").build()
         );
     });
     drop(runtime);

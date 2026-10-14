@@ -35,17 +35,13 @@
 //! Confirmation has a bounded budget; timeout returns an older safe prefix.
 //! A version still committing holds back the prefix rather than being skipped.
 //!
-//! Persistence remains asynchronous: a crash can lose the unflushed journal
-//! tail. At cold start, surviving WAL entries rebuild derivable events. Gaps
-//! are certified for missing version intervals or legacy entries whose event
-//! cannot be derived; when follower provenance exists, the unresolved (J, H]
-//! range is conservatively gapped because the in-flight range is unknown.
-//! H remains limited by the recovered gate floor. Queue overflow/closure,
-//! write failures and corrupt records also mark gaps. Gap metadata is persisted
-//! asynchronously and restored on reopen once durable; marker-write failures
-//! retain dirty state for retry. This does not eliminate the crash window before
-//! persistence. The journal is an observability and replication feed, not the
-//! data's source of truth.
+//! Persistence is asynchronous: crash may lose the unflushed tail; cold start
+//! rebuilds derivable events from surviving WAL. Missing/legacy entries and
+//! overflow, closure, write failures or corruption mark gaps. With follower
+//! provenance, unknown in-flight range makes unresolved (J, H] conservatively
+//! gapped; H is the recovered gate floor. Failed shutdown alone adds no blanket
+//! gap: WAL rebuilds through H. Gap metadata persists asynchronously; failed
+//! marker writes stay dirty for retry. The journal is not the source of truth.
 //!
 //! Live broadcast occurs after publication in commit-completion order, not
 //! necessarily version order. A consumer that discards versions at or below

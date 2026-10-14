@@ -201,7 +201,9 @@ fn cold_reopen_reconciles_events_for_consumer_and_supervisor() {
         supervisor.wait_for_subscription("sub").await;
         // The test join removes the task's handle after its configured pull iteration.
         assert_eq!(supervisor.active_count(), 0);
-        assert_admin_state(&supervised, "running").await;
+        // max_iterations=1 completes and joins the task; the catalog's active
+        // state is persisted subscription configuration, not a live-task count.
+        assert_admin_state(&supervised, "active").await;
         assert_eq!(repo(&supervised).replication_bookmark().await.unwrap(), h);
         assert_eq!(rows(&supervised).await, rows(&leader).await);
         supervisor.stop_all().await;

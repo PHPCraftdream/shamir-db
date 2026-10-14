@@ -49,6 +49,7 @@ use shamir_connect::common::username::NormalizedUsername;
 use shamir_transport_tcp::framing::{read_frame, write_frame, MAX_FRAME_SIZE_DEFAULT};
 use shamir_transport_tcp::tls::{extract_tls_exporter, make_client_config_no_ca};
 
+use shamir_engine::tx::ReplicatedEvent;
 use shamir_query_types::wire::repl::{ReplRequest, ReplResponse};
 use shamir_server::backup;
 use shamir_server::config::{
@@ -58,6 +59,7 @@ use shamir_server::config::{
 use shamir_server::db_handler::{DbRequest, DbResponse};
 use shamir_server::restore;
 use shamir_server::server::{BootstrapMode, ServerHandle, ServerLauncher};
+use shamir_tx::ChangeOp;
 
 #[derive(Serialize, Deserialize)]
 struct WireAuthInit {
@@ -314,16 +316,11 @@ fn read_req(table: &str) -> DbRequest {
     }
 }
 
-/// Offline backup of an unclean server lifecycle, not an unsupported live
-/// file copy. Child process teardown closes every store without calling the
-/// clean-checkpoint path; the parent copies only after process completion.
-/// Expected green today; omitting cold certification makes gap_at == None.
 #[test]
 fn backup_unclean_server_restore_certifies_before_serving_pull() {
     const CHILD_DIR: &str = "SHAMIR_RECOVERY_GAP_BACKUP_CHILD_DIR";
     const PASSWORD: &[u8] = b"recovery gap backup contract password";
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-
     if let Some(path) = std::env::var_os(CHILD_DIR) {
         let runtime = Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
@@ -372,8 +369,6 @@ fn backup_unclean_server_restore_certifies_before_serving_pull() {
         .status()
         .unwrap();
     assert!(status.success(), "unclean fixture child failed: {status:?}");
-    // All source writers are gone. J, GAP, history and WAL are copied from
-    // one stationary directory tree; no cross-file live snapshot is claimed.
     let snapshot = backup::backup(data.path(), destination.path()).unwrap();
     backup::verify_manifest(&snapshot.dest_dir).unwrap();
     let restored = restore::restore(&snapshot.dest_dir, data.path(), false).unwrap();
@@ -410,17 +405,22 @@ fn backup_unclean_server_restore_certifies_before_serving_pull() {
         let DbResponse::Repl(ReplResponse::Pull {
             gap_at,
             current_version,
+            events,
             ..
         }) = response
         else {
             panic!("expected restored replication Pull: {response:?}");
         };
         assert!(current_version >= 1, "restored committed horizon");
-        assert_eq!(
-            gap_at,
-            Some(1),
-            "cursor inside cold certificate must fail loud",
-        );
+        assert_eq!(gap_at, None, "surviving WAL commits are recoverable");
+        let decoded: Vec<ReplicatedEvent> = rmp_serde::from_slice(&events).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].event.commit_version, current_version);
+        assert_eq!(decoded[0].event.changes.len(), 1);
+        let change = &decoded[0].event.changes[0];
+        assert_eq!(change.table, "unclean_backup_items");
+        assert_eq!(change.op, ChangeOp::Put);
+        assert!(change.value.is_some());
         drop(w);
         drop(r);
         handle.shutdown().await;
