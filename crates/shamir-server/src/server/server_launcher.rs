@@ -339,7 +339,6 @@ impl ServerLauncher {
         //    is the durable target for application data.
         let meta_path = config.data_dir.join("shamir_db_meta.redb");
         let default_main_path = config.data_dir.join("shamir_db_default_main.redb");
-
         // Task #559: inject the identity-seam ports (PrincipalResolver +
         // UserAdminPort) over the real FjallUserDirectory BEFORE wrapping
         // ShamirDb in Arc. The builder methods consume Self and return
@@ -455,6 +454,7 @@ impl ServerLauncher {
                     tables_registry: Some(tables_registry.clone()),
                 },
             )
+            .with_audit_writer(audit_writer.clone())
             .with_slow_query(SlowQueryConfig::from_ms(
                 config.logging.slow_query_threshold_ms,
             ))

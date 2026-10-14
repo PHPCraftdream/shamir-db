@@ -51,7 +51,7 @@ import {
 } from './scram.js';
 import type { KdfParams } from './scram.js';
 import { signCanonical, canonicalCreateScramUser } from './hmac.js';
-import { setSuperuser, setReplicator } from './builders/admin.js';
+import { setSuperuser, setReplicator } from './builders/admin/index.js';
 import { listUsers } from './builders/ddl.js';
 import { Db } from './db.js';
 import { SubscriptionRouter } from './subscription-router.js';

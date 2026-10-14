@@ -721,6 +721,7 @@ async fn create_repo_with_explicit_path_is_rejected_not_silently_ignored() {
         path: Some("/somewhere/the/client/picked".to_string()),
         tables: Vec::new(),
         if_not_exists: false,
+        durability: None,
     });
     b.create_repo("cr", op);
     let result = shamir.execute("appdb", &b.to_request_via_msgpack()).await;

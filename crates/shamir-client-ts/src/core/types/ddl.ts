@@ -18,6 +18,35 @@
 
 import type { WireValue, WriteValue } from './write.js';
 
+export type WalCommit = 'buffered' | 'synced';
+export type WalRetentionExceeded = 'refuse_writes' | 'declare_gap';
+export type ReplicationServe = 'durable';
+/**
+ * Sparse durability override; accepts positive safe numbers, bigint, or canonical decimal strings. String is the explicit lossless form for values above i64::MAX.
+ */
+export type U64Decimal = string;
+export interface DurabilityOverride {
+  wal_commit?: WalCommit;
+  wal_retention_max_bytes?: number | bigint | U64Decimal;
+  on_wal_retention_exceeded?: WalRetentionExceeded;
+  replication_serve?: ReplicationServe;
+}
+/** Effective durability uses native integers up to i64::MAX, or decimal strings above i64::MAX; integer decoding yields number or bigint according to MessagePack width. */
+export interface EffectiveDurability {
+  wal_commit: WalCommit;
+  wal_retention_max_bytes: number | bigint | string;
+  on_wal_retention_exceeded: WalRetentionExceeded;
+  replication_serve: ReplicationServe;
+}
+export interface DescribeRepoResponse {
+  describe_repo: string;
+  repo: string;
+  engine: string;
+  path: string | null;
+  durability: EffectiveDurability;
+  durability_override: DurabilityOverride | null;
+}
+
 // ── Schema DTO types ────────────────────────────────────────────────
 
 /**
@@ -247,10 +276,20 @@ export interface CreateDbOp {
 
 export interface CreateRepoOp {
   create_repo: string;
+  durability?: DurabilityOverride;
   engine?: string;
   path?: string;
   tables?: string[];
   if_not_exists?: true;
+}
+
+export interface AlterRepoOp {
+  alter_repo: string;
+  durability?: DurabilityOverride;
+}
+
+export interface DescribeRepoOp {
+  describe_repo: string;
 }
 
 export interface CreateTableOp {
@@ -540,6 +579,8 @@ export type DdlOp =
   | CreateDbOp
   | DropDbOp
   | CreateRepoOp
+  | AlterRepoOp
+  | DescribeRepoOp
   | DropRepoOp
   | RenameRepoOp
   | RenameDbOp

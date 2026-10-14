@@ -1,5 +1,6 @@
 use shamir_query_types::admin::CreateRepoOp;
 use shamir_query_types::batch::BatchOp;
+use shamir_query_types::durability::DurabilityOverride;
 
 use crate::batch::IntoBatchOp;
 
@@ -53,6 +54,7 @@ pub fn create_repo(name: impl Into<String>) -> CreateRepo {
         engine: None,
         tables: Vec::new(),
         if_not_exists: false,
+        durability: None,
     }
 }
 
@@ -69,6 +71,7 @@ pub struct CreateRepo {
     engine: Option<String>,
     tables: Vec<String>,
     if_not_exists: bool,
+    durability: Option<DurabilityOverride>,
 }
 
 impl CreateRepo {
@@ -95,6 +98,13 @@ impl CreateRepo {
         self
     }
 
+    /// Set the sparse per-repo durability override applied on top of the
+    /// server-default durability policy.
+    pub fn durability(mut self, durability: impl Into<DurabilityOverride>) -> Self {
+        self.durability = Some(durability.into());
+        self
+    }
+
     /// Finalize into a [`BatchOp`].
     pub fn build(self) -> BatchOp {
         BatchOp::CreateRepo(CreateRepoOp {
@@ -105,6 +115,7 @@ impl CreateRepo {
             path: None,
             tables: self.tables,
             if_not_exists: self.if_not_exists,
+            durability: self.durability,
         })
     }
 }

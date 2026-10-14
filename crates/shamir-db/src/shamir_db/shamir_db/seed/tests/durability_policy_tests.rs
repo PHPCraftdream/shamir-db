@@ -38,6 +38,27 @@ async fn commit_one(shamir: &ShamirDb, db: &str, repo: &str, table: &str) -> u64
         .expect("transactional batch must report a commit version")
 }
 
+/// Re-open the system store with `synced_policy()`, retrying briefly while the
+/// previous session's store still holds the Fjall lock (it is released a few
+/// ms after the owning `ShamirDb` is dropped). Mirrors `reinit_with_retry` in
+/// `durable_repo_tests`.
+async fn reinit_synced_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
+    for _ in 0..100 {
+        match ShamirDb::init_with_durability(
+            SystemStoreConfig::Fjall(sys_path.clone()),
+            synced_policy(),
+        )
+        .await
+        {
+            Ok(shamir) => return shamir,
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+        }
+    }
+    ShamirDb::init_with_durability(SystemStoreConfig::Fjall(sys_path), synced_policy())
+        .await
+        .expect("system store still locked after retries")
+}
+
 /// (a) plain `init` (default policy) → a repo opened through the db reads
 /// back the Buffered defaults.
 #[tokio::test]
@@ -212,9 +233,7 @@ async fn boot_reopen_inherits_policy_and_recovered_prefix() {
     let version = commit_one(&shamir, "appdb", "data", "items").await;
     shamir.flush_all().await.unwrap();
     drop(shamir);
-    let reopened = ShamirDb::init_with_durability(SystemStoreConfig::Fjall(meta), synced_policy())
-        .await
-        .unwrap();
+    let reopened = reinit_synced_with_retry(meta).await;
     let repo = reopened.get_db("appdb").unwrap().get_repo("data").unwrap();
     assert_eq!(repo.durability_policy().wal_commit(), WalCommitTier::Synced);
     assert_eq!(

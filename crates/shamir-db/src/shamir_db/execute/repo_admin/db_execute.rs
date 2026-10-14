@@ -4,6 +4,7 @@ use shamir_query_types::batch::ExecPolicy;
 
 use crate::access::Actor;
 use crate::query::batch::{execute_batch, Authorized, BatchError, BatchRequest, BatchResponse};
+use crate::shamir_db::ports::RepoAdminObserver;
 
 use super::super::shamir_db::ShamirDb;
 use super::admin_dispatch::ShamirAdminExecutor;
@@ -51,6 +52,20 @@ impl ShamirDb {
         request: &BatchRequest,
         policy: ExecPolicy,
     ) -> Result<BatchResponse, BatchError> {
+        self.execute_with_policy_and_repo_observer(actor, db_name, request, policy, None)
+            .await
+    }
+
+    /// Execute under a server-owned policy and observe successful repo durability changes.
+    /// Each successful ALTER calls the observer synchronously after persistence and live swap.
+    pub async fn execute_with_policy_and_repo_observer(
+        &self,
+        actor: Actor,
+        db_name: &str,
+        request: &BatchRequest,
+        policy: ExecPolicy,
+        repo_admin_observer: Option<std::sync::Arc<dyn RepoAdminObserver>>,
+    ) -> Result<BatchResponse, BatchError> {
         let auth = Authorized::authorize(request, actor, db_name, self)
             .await?
             .with_policy(policy);
@@ -68,6 +83,7 @@ impl ShamirDb {
             shamir: self.clone(),
             db_name: db_name.to_string(),
             actor: auth.actor().clone(),
+            repo_admin_observer,
         };
 
         let invoker = ShamirFunctionInvoker {
