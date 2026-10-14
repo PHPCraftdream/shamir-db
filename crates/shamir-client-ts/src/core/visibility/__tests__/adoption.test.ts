@@ -13,7 +13,7 @@ describe('visibility wire adoption', () => {
       expect((await f.nextRequest()).op).toBe('tx_begin');
       f.respond({ kind: 'tx_opened', tx_handle: 7, snapshot_version: 1, isolation: 'snapshot' });
       const commit = await f.nextRequest();
-      expect(commit).toMatchObject({ op: 'tx_commit', query_version: 3,
+      expect(commit).toMatchObject({ op: 'tx_commit', query_version: 4,
         visibility_wait: { mode: 'bounded', timeout_ms: 0n } });
       f.respond({ kind: 'tx_committed', transaction: {
         tx_id: 7, status: 'committed', commit_version: version, snapshot_version: 1,
@@ -28,7 +28,7 @@ describe('visibility wire adoption', () => {
         blocking_version: version - 1n, reason: 'timeout' });
       expect(f.requests.map((r) => r.op)).toEqual(['tx_begin', 'tx_commit']);
       const observed = f.client.waitForVisibility('db', 'main', version, { mode: 'bounded', timeout_ms: 0 });
-      expect(await f.nextRequest()).toMatchObject({ op: 'wait_for_visibility', version, query_version: 3 });
+      expect(await f.nextRequest()).toMatchObject({ op: 'wait_for_visibility', version, query_version: 4 });
       f.respond({ kind: 'visibility_observed', version, visibility: { state: 'visible' } });
       expect(await observed).toEqual({ state: 'visible' });
     } finally { await f.client.close(); }

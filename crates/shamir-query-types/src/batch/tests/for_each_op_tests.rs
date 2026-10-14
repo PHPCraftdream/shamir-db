@@ -15,6 +15,7 @@ fn empty_inner_batch() -> BatchRequest {
         isolation: None,
         visibility_wait: None,
         durability: None,
+        index_visibility: None,
         queries: TMap::default(),
         return_all: true,
         return_only: None,

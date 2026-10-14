@@ -101,18 +101,12 @@ export type QueryEntry = BatchOpInput & {
 // ── Isolation / Durability ──────────────────────────────────────────
 
 /** Isolation level for transactional batches. */
-export type IsolationLevel = 'snapshot' | 'serializable';
+export type IsolationLevel = 'snapshot' | 'serializable' | 'pessimistic';
 
-/**
- * Per-request durability level (`batch_request.rs::durability`).
- *
- * - `'buffered'` (default) — ack after the in-memory MemBuffer.
- * - `'synced'` — flush durable backing of every touched repo before ack.
- * - `'async_index'` — ack after WAL fsync + data apply + MVCC publish; index
- *   posting apply / recovery markers / WAL cleanup / HNSW promote run on a
- *   background task. Only meaningful for `transactional: true` batches.
- */
-export type DurabilityLevel = 'buffered' | 'synced' | 'async_index';
+export type DurabilityLevel = 'buffered' | 'synced';
+
+/** Index visibility mode for requests. */
+export type IndexVisibility = 'sync' | 'async';
 
 // ── BatchLimits ─────────────────────────────────────────────────────
 
@@ -147,6 +141,7 @@ export interface BatchRequest {
   isolation?: IsolationLevel;
   visibility_wait?: VisibilityWait;
   durability?: DurabilityLevel;
+  index_visibility?: IndexVisibility;
   queries: Record<string, QueryEntry>;
   return_all?: false;
   return_only?: string[];

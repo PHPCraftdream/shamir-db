@@ -36,7 +36,13 @@ async fn exec_create(shamir: &ShamirDb, builder: ddl::CreateIndex) -> Result<(),
     let mut b = Batch::new();
     b.id(1);
     b.create_index("mk", builder);
-    let req: BatchRequest = b.to_request_via_msgpack();
+    // Strict typed decode may reject a malformed option before the server
+    // ever executes it; that rejection is the validation under test.
+    let bytes = b.to_msgpack().expect("msgpack encode");
+    let req: BatchRequest = match rmp_serde::from_slice(&bytes) {
+        Ok(req) => req,
+        Err(e) => return Err(e.to_string()),
+    };
     match shamir.execute("testdb", &req).await {
         Ok(_) => Ok(()),
         Err(e) => Err(e.to_string()),

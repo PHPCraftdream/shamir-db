@@ -188,28 +188,30 @@ describe('ShamirClient.resume (unit, fake WS socket)', () => {
     const { platform, socket } = platformWithSocket();
     // Push BEFORE awaiting resume(); the FakeSocket buffers until the framer
     // registers its onMessage handler inside resume().
-    socket.pushFrame(resumeOkFrame({ serverQueryVersion: 2 }));
+    socket.pushFrame(resumeOkFrame({ serverQueryVersion: 4 }));
 
     const client = await ShamirClient.resume(platform, makeResumeOpts());
     openedClients.push(client);
 
-    expect(client.serverQueryVersion()).toBe(2);
+    expect(client.serverQueryVersion()).toBe(4);
   });
 
-  it('defaults server_query_version to 0 when the field is absent (legacy server)', async () => {
+  it('preserves an unsupported server query version without client-side negotiation gating', async () => {
     const { platform, socket } = platformWithSocket();
-    // Pre-v2 server omits server_query_version: a 4-element array (no index 4).
-    // The client must default index 4 to 0.
-    socket.pushFrame(
-      encode([
-        new Uint8Array(32).fill(0x07),
-        BigInt('1830000000000000000'),
-      ]),
-    );
-
+    socket.pushFrame(resumeOkFrame({ serverQueryVersion: 3 }));
     const client = await ShamirClient.resume(platform, makeResumeOpts());
     openedClients.push(client);
+    expect(client.serverQueryVersion()).toBe(3);
+  });
 
+  it('preserves the default version when server_query_version is omitted', async () => {
+    const { platform, socket } = platformWithSocket();
+    socket.pushFrame(encode([
+      new Uint8Array(32).fill(0x07),
+      BigInt('1830000000000000000'),
+    ]));
+    const client = await ShamirClient.resume(platform, makeResumeOpts());
+    openedClients.push(client);
     expect(client.serverQueryVersion()).toBe(0);
   });
 });
@@ -224,7 +226,7 @@ describe('ShamirClient request envelopes carry CURRENT_QUERY_LANG_VERSION', () =
     socket: FakeSocket;
   }> {
     const { platform, socket } = platformWithSocket();
-    socket.pushFrame(resumeOkFrame({ serverQueryVersion: 2 }));
+    socket.pushFrame(resumeOkFrame({ serverQueryVersion: 4 }));
     const client = await ShamirClient.resume(platform, makeResumeOpts());
     openedClients.push(client);
     return { client, socket };
@@ -332,7 +334,7 @@ describe('ShamirClient — typed DbResponse::Error surface (Finding 2.1)', () =>
     socket: FakeSocket;
   }> {
     const { platform, socket } = platformWithSocket();
-    socket.pushFrame(resumeOkFrame({ serverQueryVersion: 2 }));
+    socket.pushFrame(resumeOkFrame({ serverQueryVersion: 4 }));
     const client = await ShamirClient.resume(platform, makeResumeOpts());
     openedClients.push(client);
     return { client, socket };
@@ -362,6 +364,13 @@ describe('ShamirClient — typed DbResponse::Error surface (Finding 2.1)', () =>
     // Message continuity: still carries the [code]: message form.
     expect(err.message).toContain('[validation]');
     expect(err.message).toContain('unknown alias');
+  });
+
+  it('preserves invalid_request field detail from the DB error envelope', async () => {
+    const { client, socket } = await resumeV2Client();
+    pushDbResponse(socket, 1, { kind: 'error', code: 'invalid_request', message: "field 'index_visibility': invalid value" });
+    const err = await client.execute('mydb', { id: 1, queries: {} }).then(() => null, (e) => e);
+    expect(err).toMatchObject({ code: 'invalid_request', detail: "field 'index_visibility': invalid value" });
   });
 
   it('classifies transient codes as retryable=true', async () => {
@@ -394,7 +403,7 @@ describe('ShamirClient — request/connect timeouts (Finding 2.2)', () => {
     vi.useFakeTimers();
     try {
       const { platform, socket } = platformWithSocket();
-      socket.pushFrame(resumeOkFrame({ serverQueryVersion: 2 }));
+      socket.pushFrame(resumeOkFrame({ serverQueryVersion: 4 }));
       const client = await ShamirClient.resume(platform, {
         ...makeResumeOpts(),
         requestTimeoutMs: 50,

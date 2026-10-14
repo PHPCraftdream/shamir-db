@@ -163,6 +163,7 @@ export type {
   QueryEntry,
   IsolationLevel,
   DurabilityLevel,
+  IndexVisibility,
   BatchLimits,
   BatchRequest,
   QueryStats,
