@@ -61,11 +61,23 @@ fn install_cli_final_step_is_paused_durable_and_exact_retry_idempotent() {
             &data, "app", "main", &artifact, &digest,
         ))
         .unwrap();
-    runtime
-        .block_on(install_subscription(
-            &data, "app", "main", &artifact, &digest, &args,
-        ))
-        .unwrap();
+    // `install` leaves its store handles to background tasks that only make
+    // progress while the runtime is polled, so the Fjall lock is released a
+    // few polls later: retry the open instead of racing the teardown.
+    runtime.block_on(async {
+        for _ in 0..100 {
+            if install_subscription(&data, "app", "main", &artifact, &digest, &args)
+                .await
+                .is_ok()
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        install_subscription(&data, "app", "main", &artifact, &digest, &args)
+            .await
+            .expect("seed store still locked after retries");
+    });
     drop(runtime);
     for _ in 0..2 {
         let runtime = Builder::new_current_thread().enable_all().build().unwrap();
