@@ -624,10 +624,15 @@ artifact).
   (`crates/shamir-engine/src/repo/repo_instance.rs:1852-1877`).
   GAP and J writes cross an explicit flush boundary; recording J first flushes
   earlier journal writes (`crates/shamir-engine/src/repo/changelog_store.rs:64-85`).
-  A crash can still lose the unflushed journal tail: certification detects
-  uncertainty, **not the exact missing events**, and does not reconstruct them.
-  The exact no-false-positive detector is not implemented; history-only
-  coverage beyond the recovered gate floor is not established by this policy.
+  During runtime, before each local sealed-WAL truncation, the drainer samples
+  settled W, reserves and flushes a recovery allocation floor at least J, then
+  flushes events/gaps and advances J. A checkpoint error prevents unlink. The
+  retained-byte cap is measured on sealed segments; `refuse_writes` rejects new
+  admissions until successful truncation brings retained bytes under the cap.
+  `declare_gap` persists a real GAP where possible but does not evict WAL whose
+  data/history is not known safe; a failed journal writer falls back to refusal.
+  Memory/hybrid WAL bypass these controls. Cold reconciliation of surviving WAL
+  entries remains PR4, so runtime J checkpoints do not eliminate all crash GAPs.
   Live subscriptions deliver from this same journal (broadcast is only a
   wake-up hint) and so inherit its caveats: a certified gap terminates the
   subscription and the journal tail lost in a crash is not reconstructed (see
@@ -641,8 +646,11 @@ artifact).
   See `crates/shamir-server/src/replication/follower_loop.rs:311-325`,
   `crates/shamir-server/src/replication/supervisor.rs:309-334` and
   `crates/shamir-db/src/shamir_db/execute/admin_replication.rs:413-467`.
-  There is **no automatic snapshot/reseed and no journal retention**. The
-  persisted recovery interval rejects requests at/below its affected horizon,
+  There is **no automatic snapshot/reseed**. Runtime clean-horizon checkpoints
+  bound the retained local WAL; retention enforcement follows the configured
+  refusal or conservative GAP policy. Cold reconciliation remains PR4, so a
+  crash can still require reseeding when exact event recovery is not yet
+  implemented. The persisted recovery interval rejects requests at/below its affected horizon,
   including a fresh follower's bookmark 0 (first pull from 1), even with a
   complete journal. `Resume`, clean shutdown and recreating the subscription
   do not clear it. Full replay from zero works only against a gap-free source

@@ -4,7 +4,23 @@ use super::*;
 use crate::repo::durability_policy::{resolve, DurabilityMetricsSnapshot};
 
 impl RepoInstance {
-    /// Open with a validated policy installed before identity and WAL recovery.
+    #[cfg(test)]
+    pub(crate) async fn from_factory_with_test_segment_bytes(
+        name: String,
+        factory: BoxRepoFactory,
+        configs: Vec<TableConfig>,
+        policy: DurabilityPolicy,
+        segment_bytes: u64,
+    ) -> DbResult<Self> {
+        let mut instance = Self::from_factory_unrecovered(name, factory, configs).await?;
+        instance.disable_background_drainer_for_test();
+        instance.set_wal_segment_bytes_for_test(segment_bytes);
+        instance.set_durability(policy)?;
+        instance.repo_identity().await?;
+        instance.recover_v2_inflight().await?;
+        Ok(instance)
+    }
+
     /// Retention is checked against the segment size captured for this open.
     pub async fn from_factory_with_durability(
         name: String,
@@ -43,7 +59,7 @@ impl RepoInstance {
 
     /// PR1 Chunk B, amendment B2: this repo's durability SHARED cell.
     /// Read with `.load()` (one atomic load — the commit seam does exactly
-    /// one per commit); retention fields are consumed in PR2.
+    /// one per commit).
     pub(crate) fn durability(&self) -> &Arc<arc_swap::ArcSwap<DurabilityPolicy>> {
         &self.durability
     }
@@ -51,10 +67,20 @@ impl RepoInstance {
     /// Scrape initialized WAL and repo-owned pull observations; never opens stores.
     #[must_use]
     pub fn durability_metrics_snapshot(&self) -> DurabilityMetricsSnapshot {
-        self.durability_metrics.snapshot(
+        let mut snapshot = self.durability_metrics.snapshot(
             &self.durability.load(),
             self.wal_group.get().map(Arc::as_ref),
-        )
+        );
+        let retention = self.wal_retention_metrics();
+        snapshot.journal = [
+            retention[0],
+            retention[1],
+            retention[2],
+            retention[3],
+            retention[4],
+            self.journal_dropped_total(),
+        ];
+        snapshot
     }
 
     /// Snapshot read of the shared policy; pins the value against concurrent stores.

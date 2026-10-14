@@ -38,6 +38,8 @@
 //! live from `info_store` — a non-zero hit means the tx's index postings
 //! were materialized. Both must move together (all-or-nothing): a crash
 //! before Phase 4 leaves zero of each; a crash at/after it recovers both.
+#[path = "clean_horizon/crash_matrix.rs"]
+mod clean_horizon_crash_matrix;
 
 use std::path::{Path, PathBuf};
 
@@ -691,20 +693,6 @@ async fn trunc_crash_then_recover(phase: &str) -> (usize, usize) {
          exit (status {status:?}) — the crash seam did not fire (not enough \
          sealed segments to truncate?)"
     );
-
-    // Reopen with the SAME tiny cap so `SegmentSet::open` reads the survivors.
-    std::env::set_var(SEG_MAX_BYTES_ENV, TRUNC_SEG_CAP);
-    // The child's sidecar holds the number of records it had DURABLY committed
-    // (WAL-fsync'd) at the instant it died — the zero-loss oracle. The write
-    // is atomic (temp + rename), so at every instant the path holds a COMPLETE
-    // value. A missing or EMPTY sidecar means the `wal_mid_delete` abort fired
-    // before the very first `write_sidecar(0)` could rename into place (the
-    // background drainer can cross the truncation boundary on the first
-    // commit) — in which case zero records were durably committed, the oracle
-    // is `0`, and the assertion below (`recovered >= committed`) still holds
-    // because recovery replays whatever survived. A present-but-unparseable
-    // value is a real corruption (impossible after the atomic-write fix) and
-    // must surface rather than be silently masked.
     let sidecar = repo_path.with_extension("childcount");
     let durably_committed = read_sidecar_committed(&sidecar);
 
@@ -712,7 +700,6 @@ async fn trunc_crash_then_recover(phase: &str) -> (usize, usize) {
     let _replayed = repo.recover_v2_inflight().await.expect("recovery");
     let tbl = repo.get_table(TABLE).await.unwrap();
     let data = store_record_count(&tbl).await;
-    std::env::remove_var(SEG_MAX_BYTES_ENV);
     (data, durably_committed)
 }
 

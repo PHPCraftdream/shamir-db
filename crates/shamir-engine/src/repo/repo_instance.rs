@@ -8,6 +8,8 @@ use crate::query::batch::BatchError;
 use crate::query::write::WriteResult;
 use crate::repo::durability_policy::{DurabilityMetrics, DurabilityPolicy};
 use crate::table::interner_manager::InternerManager;
+#[cfg(test)]
+use crate::tx::clean_horizon::checkpoint::test_seam;
 use crate::tx::CommitTailBarrier;
 use shamir_query_types::batch::VisibilityWait;
 use shamir_storage::error::{DbError, DbResult};
@@ -23,6 +25,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::OnceCell;
+
+#[path = "clean_horizon/repo_impl.rs"]
+mod clean_horizon_impl;
 
 use crate::table::table_manager::table_token_for;
 
@@ -142,7 +147,13 @@ pub struct RepoInstance {
     /// Shared policy installed before recovery and observed by every clone.
     durability: Arc<arc_swap::ArcSwap<DurabilityPolicy>>,
     durability_metrics: Arc<DurabilityMetrics>,
-    /// Captured once at construction; validation and rotation use the same size.
+    /// PR2 S5c-X — lock-free WAL retention gate (refuse flag + counters);
+    /// shared across clones like every other field.
+    wal_retention_gate: Arc<crate::tx::clean_horizon::retention_gate::RetentionGate>,
+    #[cfg(test)]
+    clean_horizon_test_state: Arc<std::sync::OnceLock<Arc<std::sync::Mutex<test_seam::State>>>>,
+    #[cfg(test)]
+    background_drainer_disabled: Arc<std::sync::atomic::AtomicBool>,
     wal_segment_bytes: u64,
 }
 
@@ -188,6 +199,11 @@ impl Clone for RepoInstance {
             wal_group: Arc::clone(&self.wal_group),
             durability: Arc::clone(&self.durability),
             durability_metrics: Arc::clone(&self.durability_metrics),
+            wal_retention_gate: Arc::clone(&self.wal_retention_gate),
+            #[cfg(test)]
+            clean_horizon_test_state: Arc::clone(&self.clean_horizon_test_state),
+            #[cfg(test)]
+            background_drainer_disabled: Arc::clone(&self.background_drainer_disabled),
             wal_segment_bytes: self.wal_segment_bytes,
         }
     }
@@ -256,6 +272,13 @@ impl RepoInstance {
             wal_group: Arc::new(OnceCell::new()),
             durability_metrics: Arc::new(DurabilityMetrics::default()),
             durability: Arc::new(arc_swap::ArcSwap::from_pointee(policy)),
+            wal_retention_gate: Arc::new(
+                crate::tx::clean_horizon::retention_gate::RetentionGate::default(),
+            ),
+            #[cfg(test)]
+            clean_horizon_test_state: Arc::new(std::sync::OnceLock::new()),
+            #[cfg(test)]
+            background_drainer_disabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             wal_segment_bytes: super::durability_policy::effective_wal_segment_bytes(),
         }
     }
@@ -321,6 +344,17 @@ impl RepoInstance {
     /// `OnceCell`. The commit path calls `repo.drainer().wake()` after
     /// publishing a version to nudge the loop.
     pub fn drainer(&self) -> Arc<crate::tx::drainer::Drainer> {
+        #[cfg(test)]
+        if self
+            .background_drainer_disabled
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Arc::clone(
+                self.drainer
+                    .get_or_init(|| Arc::new(crate::tx::drainer::Drainer::new())),
+            );
+        }
+
         Arc::clone(self.drainer.get_or_init(|| {
             let drainer = Arc::new(crate::tx::drainer::Drainer::new());
             // 50 ms backstop: prompt drain even if a wake is missed, cheap
@@ -1476,6 +1510,8 @@ impl RepoInstance {
     ///
     /// [`read_changelog_from`]: Self::read_changelog_from
     pub(crate) async fn changefeed(&self) -> DbResult<ChangefeedHandle> {
+        #[cfg(test)]
+        test_seam::record(self, "before_feed_init");
         let handle = self
             .changefeed
             .get_or_try_init(|| async {
@@ -1710,7 +1746,7 @@ impl RepoInstance {
     }
 
     /// Persisted clean horizon J of the replication journal: every version
-    /// through J had its journal event durably checkpointed by a clean stop.
+    /// through J is covered by the runtime clean checkpoint: journal events or persisted gaps.
     /// cancel-safe: yes — retryable lazy journal initialization, then an atomic read.
     pub async fn clean_horizon(&self) -> DbResult<u64> {
         Ok(self.changefeed().await?.feed.clean_horizon())
@@ -1927,6 +1963,9 @@ impl RepoInstance {
     /// Followers at/below H stop with JournalGap/resync_required; automated
     /// reseeding is not supported. A legacy directory without J certifies once.
     /// H is the marker/surviving-WAL/clean-checkpoint floor, NOT a history maximum.
+    /// Runtime checkpoints may advance J before WAL truncation; consumers must
+    /// account for checkpoint events and later gaps. Clean stop additionally
+    /// certifies the settled allocation range through H.
     pub(crate) async fn certify_cold_start(&self) -> DbResult<()> {
         super::durability_policy::certify_recovered_open(self).await
     }

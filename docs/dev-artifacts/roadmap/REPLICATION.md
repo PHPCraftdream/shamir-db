@@ -25,8 +25,7 @@ retention 1 GiB, overflow `refuse_writes`, `replication_serve: durable`.
 ждёт coalesced WAL fsync. Mem/hybrid не persistent: tier игнорируется с
 одним warn при open. Retention floor проверяет общий `resolve`:
 `>= 2 × effective segment size`, включая env override
-`SHAMIR_WAL_SEGMENT_MAX_BYTES`; cap/action только parsed до PR2,
-`declare_gap` пока предупреждает, не evicts.
+`SHAMIR_WAL_SEGMENT_MAX_BYTES`; PR2 применяет лимит и выбранное действие. `refuse_writes` отклоняет новые commits при превышении бюджета запечатанного WAL. `declare_gap` надёжно записывает GAP журнала и удаляет только WAL ниже безопасной границы history/interner; недоступный writer приводит к отказу в новых записях. После удаления объём запечатанного WAL измеряется заново. Runtime-checkpoint сначала сохраняет recovery floor не ниже J, затем продвигает J по settled-префиксу, покрытому событиями либо persisted GAP. Холодная сверка событий остаётся PR4: checkpoint не устраняет все GAP после сбоя. Для in-memory/hybrid без persistent WAL checkpoint и retention gate не применяются.
 
 Durable Pull bound = `min(confirmed, W, R)`, R — **непрерывный префикс
 recoverability**, не максимальная fsynced версия. Если R недостаточен,

@@ -394,6 +394,45 @@ describe('ShamirClient — typed DbResponse::Error surface (Finding 2.1)', () =>
     expect(err.code).toBe('tx_conflict');
     expect(err.retryable).toBe(true);
   });
+
+  it('preserves txCommit aborted WAL admission reason across the wire', async () => {
+    const { client, socket } = await resumeV2Client();
+    const pending = client.txCommit('mydb', 7);
+    pushDbResponse(socket, 1, {
+      kind: 'tx_committed',
+      transaction: { tx_id: 7, status: 'aborted', reason: 'wal_retention_exceeded', materialized: false },
+    });
+    await expect(pending).resolves.toMatchObject({
+      status: 'aborted',
+      reason: 'wal_retention_exceeded',
+      materialized: false,
+    });
+  });
+
+  it('classifies wal_retention_exceeded as retryable=true (S5c-X)', async () => {
+    const { client, socket } = await resumeV2Client();
+    // Commit admission refused while the retained sealed WAL exceeds
+    // `durability.wal_retention_max_bytes` under `refuse_writes`; the
+    // refusal clears by itself once the drainer truncates the WAL.
+    pushDbResponse(socket, 1, {
+      kind: 'error',
+      code: 'wal_retention_exceeded',
+      message: 'commit refused: retained sealed WAL exceeds limit',
+    });
+
+    const err = await client
+      .execute('mydb', { id: 1, queries: {} })
+      .then(
+        () => {
+          throw new Error('expected rejection');
+        },
+        (e) => e,
+      );
+
+    expect(err).toBeInstanceOf(ShamirDbError);
+    expect(err.code).toBe('wal_retention_exceeded');
+    expect(err.retryable).toBe(true);
+  });
 });
 
 // ─── Finding 2.2: request / connect timeouts ─────────────────────────────────

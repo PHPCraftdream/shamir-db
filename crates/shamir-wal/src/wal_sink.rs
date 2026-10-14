@@ -385,4 +385,11 @@ impl WalSink {
             }
         }
     }
+
+    pub async fn sealed_retained_bytes(&self) -> DbResult<u64> {
+        match self {
+            Self::File(segset) => segset.sealed_retained_bytes().await,
+            Self::Mem(_) => Ok(0),
+        }
+    }
 }

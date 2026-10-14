@@ -14,6 +14,7 @@ use shamir_connect::server::session::{Session, SessionPermissions};
 use shamir_db::access::{principal64, Actor};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
+use shamir_db::query::batch::BatchError;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::query::Query;
@@ -305,4 +306,27 @@ fn vis1_tx_execute_rejects_commit_only_override_without_staging() {
         }
         handler.tx_rollback(&session, "app", handle).await;
     });
+}
+
+// S5c-X: the engine's implicit-commit receipt mapping tags a retention-gate
+// refusal with the structured `code: Some("wal_retention_exceeded")`; the
+// server's `error_code` mapper must pass it verbatim to the wire (same shape
+// as `wal_requires_reopen`), not collapse it into the heuristic `"query"`.
+#[test]
+fn wal_retention_exceeded_query_error_passes_through_to_wire_code() {
+    use crate::db_handler::cursor_handlers::error_response;
+    use crate::db_handler::handler::error_code;
+
+    let e = BatchError::QueryError {
+        alias: "ins".into(),
+        message: "commit refused: retained sealed WAL exceeds wal_retention_max_bytes under \
+                  refuse_writes"
+            .into(),
+        code: Some("wal_retention_exceeded".into()),
+    };
+    assert_eq!(error_code(&e), "wal_retention_exceeded");
+    match error_response(&e) {
+        DbResponse::Error { code, .. } => assert_eq!(code, "wal_retention_exceeded"),
+        other => panic!("expected wire Error, got {other:?}"),
+    }
 }

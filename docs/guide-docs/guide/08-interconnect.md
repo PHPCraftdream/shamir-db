@@ -292,8 +292,12 @@ Current correctness limitations:
   a follower can silently miss an event under concurrent leader writes.
 * **Detected gaps stop the loop** with `ReplError::JournalGap` and mark the
   subscription `resync_required` (visible via
-  `ReplicationStatus`/`ListSubscriptions`). There is **no snapshot/reseed
-  and no journal retention**. If behind a gap, recreate the follower from
+  `ReplicationStatus`/`ListSubscriptions`). Runtime checkpoints retain WAL only
+  until the settled journal prefix is durably checkpointed; `refuse_writes`
+  blocks new admissions when the cap is exceeded, while `declare_gap` records a
+  durable GAP but never evicts history-unsafe WAL. There is still no automatic
+  snapshot/reseed, and cold reconciliation remains PR4, so crashes can leave
+  genuine gaps. If behind a gap, recreate the follower from
   scratch with bookmark 0 and full replay, only if the leader's journal has
   no hole; otherwise restore the follower from a backup. `Resume` only
   changes subscription state: it does not repair data or fix journal holes.

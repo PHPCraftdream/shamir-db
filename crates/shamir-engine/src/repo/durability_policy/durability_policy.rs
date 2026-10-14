@@ -24,9 +24,7 @@ pub const DEFAULT_WAL_RETENTION_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 ///
 /// `wal_commit` retains the configured tier for telemetry; the commit seam
 /// consumes `effective_wal_commit` from the same snapshot.
-/// The retention fields are **consumed in PR2** (WAL retention enforcement)
-/// and are carried here so the wiring lands once — their accessors keep
-/// them live (no dead code) until PR2 starts reading them.
+/// The retention fields are consumed by runtime enforcement.
 /// `replication_serve` is consumed by the replication bound (only
 /// `Durable` is accepted in PR1 — see `resolve`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
