@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::meta::repl_bookmark::{load_fence_record, load_replication_bookmark};
 use crate::repo::RepoInstance;
+use crate::tx::apply_replicated::follower_durability::in_flight_range;
 use crate::tx::clean_horizon::recovery_floor::reserve_recovery_floor;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::key_bytes::KeyBytes;
@@ -83,6 +84,10 @@ pub(super) async fn reconcile_with_hook(
     let bookmark = load_replication_bookmark(&info).await?;
     let follower_fence = load_fence_record(&info).await?;
     let follower_provenance = bookmark > 0 || follower_fence.is_some();
+    // PR6c: a follower record with a known journal horizon certifies every
+    // event through it; only the in-flight batch stays uncertain.
+    let certified_through =
+        super::follower::follower_certified_through(j, follower_provenance, &info).await?;
     let recovery_floor = reserve_recovery_floor(repo, &info, h.max(j)).await?;
     if recovery_floor > h {
         return Err(DbError::Storage(format!(
@@ -142,18 +147,23 @@ pub(super) async fn reconcile_with_hook(
         }
     }
 
-    for (first, through) in missing_intervals(&wal_versions, j, h) {
-        feed.record_recovery_gap(first, through).await?;
+    // Missing intervals cannot be separated into aborted allocations versus
+    // lost served commits with persisted state, so they remain conservative
+    // for a plain repository. A follower with a known record horizon already
+    // certified everything through it, so only its in-flight batch stays an
+    // uncertain GAP.
+    if follower_provenance {
+        if let Some(range) = in_flight_range(Some(certified_through), h) {
+            feed.record_recovery_gap(*range.start(), *range.end())
+                .await?;
+        }
+    } else {
+        for (first, through) in missing_intervals(&wal_versions, j, h) {
+            feed.record_recovery_gap(first, through).await?;
+        }
     }
     for version in legacy_versions {
         feed.record_recovery_gap(version, version).await?;
-    }
-    // Missing intervals cannot be separated into aborted allocations versus
-    // lost served commits with persisted state, so they remain conservative.
-    if follower_provenance && h > j {
-        // With upstream provenance, this repository may have an in-flight
-        // follower batch; PR6's narrower per-batch provenance is not available.
-        feed.record_recovery_gap(j + 1, h).await?;
     }
 
     hook("pre_flush")?;

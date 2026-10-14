@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::meta::recovery_marker::save_last_committed_flushed;
-use crate::meta::repl_bookmark::save_replication_bookmark;
+use crate::meta::repl_bookmark::{save_bookmark_and_clean_horizon, save_replication_bookmark};
 use crate::repo::{BoxRepoFactory, RepoFactory, RepoInstance};
 use crate::table::TableConfig;
 use shamir_storage::error::DbResult;
@@ -32,6 +32,37 @@ pub(super) async fn prepare_image(
     bookmark: Option<u64>,
     clean_horizon: u64,
 ) {
+    persist_image(path, entries, journal_events, bookmark, None, clean_horizon).await;
+}
+
+/// Follower fixture image: no surviving WAL entries, an upstream bookmark,
+/// and the PR6 record that may carry a known local journal horizon.
+pub(super) async fn prepare_follower_image(
+    path: &Path,
+    journal_events: &[ChangelogEvent],
+    bookmark: u64,
+    record_clean_through: Option<u64>,
+    clean_horizon: u64,
+) {
+    persist_image(
+        path,
+        &[],
+        journal_events,
+        Some(bookmark),
+        record_clean_through,
+        clean_horizon,
+    )
+    .await;
+}
+
+async fn persist_image(
+    path: &Path,
+    entries: &[WalEntryV2],
+    journal_events: &[ChangelogEvent],
+    bookmark: Option<u64>,
+    record_clean_through: Option<u64>,
+    clean_horizon: u64,
+) {
     let repo = open_unrecovered(path).await;
     let info = repo.tx_info_store().await.expect("tx info store");
     let top = entries
@@ -45,10 +76,14 @@ pub(super) async fn prepare_image(
     save_last_committed_flushed(&info, top)
         .await
         .expect("persist allocation floor");
-    if let Some(bookmark) = bookmark {
-        save_replication_bookmark(&info, bookmark)
+    match (bookmark, record_clean_through) {
+        (Some(bookmark), Some(known)) => save_bookmark_and_clean_horizon(&info, bookmark, known)
             .await
-            .expect("persist follower bookmark");
+            .expect("persist follower batch record"),
+        (Some(bookmark), None) => save_replication_bookmark(&info, bookmark)
+            .await
+            .expect("persist follower bookmark"),
+        (None, _) => {}
     }
     let wal = repo.repo_wal().await.expect("repo WAL");
     for entry in entries {
