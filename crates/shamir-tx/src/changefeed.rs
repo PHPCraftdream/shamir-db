@@ -36,8 +36,11 @@
 //! A version still committing holds back the prefix rather than being skipped.
 //!
 //! Persistence is asynchronous: crash may lose the unflushed tail; cold start
-//! rebuilds derivable events from surviving WAL. Missing/legacy entries and
-//! overflow, closure, write failures or corruption mark gaps. With follower
+//! rebuilds derivable events from surviving WAL. Missing/legacy entries,
+//! closure, write failures or corruption mark gaps; channel overflow instead
+//! defers the event to a repair-pending set (see `repair_pending`) for
+//! re-enqueue by the engine drainer, and only declares a gap when the writer
+//! is closed. With follower
 //! provenance, unknown in-flight range makes unresolved (J, H] conservatively
 //! gapped; H is the recovered gate floor. Failed shutdown alone adds no blanket
 //! gap: WAL rebuilds through H. Gap metadata persists asynchronously; failed
@@ -49,6 +52,11 @@
 //! engine journal pulls for ordered history, and handle reported gaps.
 
 pub mod cold;
+
+mod repair_pending;
+
+pub use repair_pending::RepairPending;
+use repair_pending::RepairPending as RepairPendingInner;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -209,8 +217,8 @@ pub struct RepoChangefeed {
     notify: Arc<Notify>,
     /// Set to stop the writer after it drains the channel.
     shutdown: Arc<std::sync::atomic::AtomicBool>,
-    /// Count of events dropped because the journal channel was full.
-    /// Observability only.
+    /// Count of events deferred because the journal channel was full
+    /// (recorded in the repair-pending set, NOT dropped). Observability only.
     journal_dropped: AtomicU64,
     /// CF-2 heartbeat/durability-watermark: the highest `commit_version`
     /// successfully persisted by the background writer (updated via
@@ -225,6 +233,8 @@ pub struct RepoChangefeed {
     writer_done: watch::Receiver<bool>,
     clean_horizon: Arc<AtomicU64>,
     confirm_timeouts: AtomicU64,
+    /// Channel-full deferrals awaiting re-enqueue by the engine drainer.
+    repair_pending: Arc<RepairPending>,
 }
 
 /// Result of a [`RepoChangefeed::read_from`] call.
@@ -311,6 +321,7 @@ impl RepoChangefeed {
             writer_done,
             clean_horizon: Arc::new(AtomicU64::new(0)),
             confirm_timeouts: AtomicU64::new(0),
+            repair_pending: Arc::new(RepairPendingInner::new()),
         });
 
         // fire-and-forget: detached by design; owns no feed and drains on shutdown.
@@ -324,6 +335,7 @@ impl RepoChangefeed {
                 gap,
                 confirmed_through,
                 barrier_notify,
+                Arc::clone(&me.repair_pending),
             )
             .await;
             // No waiter is required; channel closure also reports writer failure.
@@ -342,21 +354,14 @@ impl RepoChangefeed {
         self.live.subscribe()
     }
 
-    /// Number of live subscribers right now. Used by the commit-path to
-    /// decide whether the live broadcast is worth attempting (the journal
-    /// is fed unconditionally).
-    pub fn subscriber_count(&self) -> usize {
-        self.live.receiver_count()
-    }
-
     /// Emit one projected event down BOTH tracks. NEVER blocks and NEVER
     /// errors out to the caller.
     ///
     /// - Live: `broadcast::Sender::send` returns immediately; `Err` (no
     ///   subscribers) is ignored.
-    /// - Journal: `mpsc::Sender::try_send`; on `Full` the event is dropped
-    ///   with a warning and a counter bump (bounded memory beats unbounded
-    ///   growth — the data is durable via the WAL regardless).
+    /// - Journal: `mpsc::Sender::try_send`; on `Full` the event is deferred
+    ///   to the repair-pending set with a warning and a counter bump (the
+    ///   engine drainer re-enqueues it later; the WAL entry stays retained).
     ///
     /// The single `Arc<ChangelogEvent>` is shared by both tracks.
     pub fn emit(&self, event: ChangelogEvent) {
@@ -375,36 +380,10 @@ impl RepoChangefeed {
         self.journal_enqueue(&event);
     }
 
-    /// Enqueue without awaiting. Full drops are counted; Full and Closed mark a gap.
+    /// Enqueue without awaiting. Full defers to the repair-pending set;
+    /// Closed marks a gap.
     pub fn journal_enqueue(&self, event: &Arc<ChangelogEvent>) {
-        if let Err(e) = self
-            .journal_tx
-            .try_send(JournalMsg::Event(Arc::clone(event)))
-        {
-            match e {
-                mpsc::error::TrySendError::Full(JournalMsg::Event(ev)) => {
-                    let n = self.journal_dropped.fetch_add(1, Ordering::Relaxed) + 1;
-                    self.mark_gap(ev.commit_version);
-                    log::warn!(
-                        "changefeed journal channel full; dropped event for repo {} \
-                         commit_version {} (total dropped: {n})",
-                        ev.repo,
-                        ev.commit_version
-                    );
-                }
-                mpsc::error::TrySendError::Closed(JournalMsg::Event(ev)) => {
-                    self.mark_gap(ev.commit_version);
-                }
-                mpsc::error::TrySendError::Full(JournalMsg::Barrier(_))
-                | mpsc::error::TrySendError::Closed(JournalMsg::Barrier(_))
-                | mpsc::error::TrySendError::Full(JournalMsg::CleanHorizon { .. })
-                | mpsc::error::TrySendError::Closed(JournalMsg::CleanHorizon { .. })
-                | mpsc::error::TrySendError::Full(JournalMsg::RecoveryGap { .. })
-                | mpsc::error::TrySendError::Closed(JournalMsg::RecoveryGap { .. }) => {
-                    unreachable!("journal_enqueue only sends events");
-                }
-            }
-        }
+        self.journal_enqueue_impl(event);
     }
 
     /// Broadcast only, without enqueueing or waiting for subscribers.
@@ -450,12 +429,8 @@ impl RepoChangefeed {
         bound
     }
 
-    /// Total confirmation timeouts, including channel admission timeouts.
-    pub fn confirm_timeouts(&self) -> u64 {
-        self.confirm_timeouts.load(Ordering::Relaxed)
-    }
-
-    /// Total number of journal events dropped due to channel overflow.
+    /// Total number of journal events deferred due to channel overflow
+    /// (recorded in the repair-pending set, not dropped).
     pub fn journal_dropped(&self) -> u64 {
         self.journal_dropped.load(Ordering::Relaxed)
     }
@@ -519,10 +494,6 @@ impl RepoChangefeed {
         feed
     }
 
-    pub fn clean_horizon(&self) -> u64 {
-        self.clean_horizon.load(Ordering::Acquire)
-    }
-
     /// A checkpoint covers the sampled settled prefix. Any unresolved version
     /// in that prefix must already have a durable journal event or persisted
     /// gap before J advances.
@@ -545,11 +516,6 @@ impl RepoChangefeed {
             .map_err(DbError::Storage)
     }
 
-    /// Persisted/certified interval only; both endpoints from one RCU snapshot.
-    pub fn certified_gap_interval(&self) -> Option<(u64, u64)> {
-        *self.gap.persisted.load_full()
-    }
-
     /// CF-1: the lowest known journal hole; zero means none.
     ///
     /// A non-zero value means the durable journal has a gap: at least one
@@ -558,13 +524,6 @@ impl RepoChangefeed {
     /// history and should perform a full snapshot resync.
     pub fn first_gap_version(&self) -> u64 {
         (*self.gap.current.load_full()).map_or(0, |(first, _)| first)
-    }
-
-    /// Wake the writer and ask it to drain + stop. Used at shutdown so the
-    /// in-flight journal tail is flushed.
-    pub fn shutdown(&self) {
-        self.shutdown.store(true, Ordering::SeqCst);
-        self.notify.notify_one();
     }
 
     /// Stop the writer without recording J, then await its final drain.
@@ -579,11 +538,6 @@ impl RepoChangefeed {
             .await
             .map_err(|_| DbError::Storage("changefeed writer termination lost".into()))?;
         Ok(())
-    }
-
-    /// Wake the writer to flush promptly (used by tests / explicit flush).
-    pub fn flush_hint(&self) {
-        self.notify.notify_one();
     }
 
     /// Read up to `limit` journal events with `commit_version >=
@@ -923,6 +877,7 @@ async fn journal_writer_loop(
     gap: Arc<GapMarker>,
     confirmed_through: Arc<AtomicU64>,
     barrier_notify: Arc<Notify>,
+    repair_pending: Arc<RepairPendingInner>,
 ) {
     loop {
         gap.persist(&store).await;
@@ -938,6 +893,7 @@ async fn journal_writer_loop(
                 &gap,
                 &confirmed_through,
                 &barrier_notify,
+                &repair_pending,
             )
             .await;
             break;
@@ -957,6 +913,7 @@ async fn journal_writer_loop(
                     &gap,
                     &confirmed_through,
                     &barrier_notify,
+                    &repair_pending,
                 )
                 .await;
                 if shutdown.load(Ordering::SeqCst) {
@@ -976,6 +933,7 @@ async fn journal_writer_loop(
                 &gap,
                 &confirmed_through,
                 &barrier_notify,
+                &repair_pending,
             )
             .await;
             break;
@@ -988,6 +946,7 @@ async fn journal_writer_loop(
             &gap,
             &confirmed_through,
             &barrier_notify,
+            &repair_pending,
         )
         .await;
         // Opportunistically batch any already-queued events.
@@ -1002,6 +961,7 @@ async fn journal_writer_loop(
                         &gap,
                         &confirmed_through,
                         &barrier_notify,
+                        &repair_pending,
                     )
                     .await;
                     batched += 1;
@@ -1018,6 +978,7 @@ async fn journal_writer_loop(
                 &gap,
                 &confirmed_through,
                 &barrier_notify,
+                &repair_pending,
             )
             .await;
             break;
@@ -1033,6 +994,7 @@ async fn drain_and_persist(
     gap: &GapMarker,
     confirmed_through: &AtomicU64,
     barrier_notify: &Notify,
+    repair_pending: &RepairPendingInner,
 ) {
     while let Ok(ev) = rx.try_recv() {
         process_journal_msg(
@@ -1042,6 +1004,7 @@ async fn drain_and_persist(
             gap,
             confirmed_through,
             barrier_notify,
+            repair_pending,
         )
         .await;
     }
@@ -1055,6 +1018,7 @@ async fn process_journal_msg(
     gap: &GapMarker,
     confirmed_through: &AtomicU64,
     barrier_notify: &Notify,
+    repair_pending: &RepairPendingInner,
 ) {
     match msg {
         JournalMsg::Event(ev) => persist_one(store, &ev, last_persisted_version, gap).await,
@@ -1087,6 +1051,7 @@ async fn process_journal_msg(
             let _ = ack.send(result);
         }
         JournalMsg::Barrier(w) => {
+            let w = repair_pending.clamp_barrier(w);
             confirmed_through.fetch_max(w, Ordering::Release);
             barrier_notify.notify_waiters();
         }

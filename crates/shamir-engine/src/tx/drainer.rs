@@ -96,6 +96,7 @@ use shamir_wal::{WalEntryV2, WalOpV2, WalTicketState};
 use tokio::sync::{Mutex, Notify};
 
 use crate::repo::RepoInstance;
+use crate::tx::clean_horizon::repair_pending_drain::entry_interner_max_id;
 #[path = "orphan_repair/mod.rs"]
 mod orphan_repair;
 #[cfg(test)]
@@ -1463,6 +1464,11 @@ impl Drainer {
     /// under that guard and never acquires it again. The ceiling is recomputed
     /// from `pending_unsafe` and the current durable watermark on every pass.
     async fn settle_and_truncate(&self, repo: &RepoInstance) -> DbResult<()> {
+        // S5c-X PR5b: land repair-pending (channel-full deferred) journal
+        // events BEFORE computing the truncation ceiling — an admission here
+        // lifts its clamp below, and a still-pending version holds the WAL
+        // segment retained until its repaired event is durably checkpointed.
+        crate::tx::clean_horizon::repair_pending_drain::drain_repair_pending(repo).await?;
         let snapshot: Vec<(u64, u64)> = {
             let guard = scc::Guard::new();
             self.pending_unsafe
@@ -1499,6 +1505,16 @@ impl Drainer {
         let ceiling = match min_pending {
             Some(min_v) => min_v.saturating_sub(1).min(durable),
             None => durable,
+        };
+
+        // S5c-X PR5b (I2): never let the J-checkpoint or `truncate_below`
+        // cross a repair-pending version — the WAL segment holding the still
+        // deferred event stays retained until the repaired event is durably
+        // checkpointed (`checkpoint_before_truncate` is FIFO after any
+        // admitted repaired event, so J never passes an unflushed one).
+        let ceiling = match repo.changefeed().await?.feed.repair_pending_min() {
+            Some(min_repair) => ceiling.min(min_repair.saturating_sub(1)),
+            None => ceiling,
         };
 
         // F6b — every record with `commit_version <= ceiling` is BOTH
@@ -1693,22 +1709,6 @@ impl Drainer {
             }
         });
     }
-}
-
-/// Project a WAL entry's `interner_delta` (`Vec<(scope, name, id)>`) into the
-/// single max-id shape the A5 gate consumes (`Option<u64>`). Mirrors
-/// `materialize`'s `interner_delta_max_id` capture, sourced here from the
-/// durable WAL entry rather than the in-memory `TxContext`.
-///
-/// Stage I: the interner is per-REPO, so every triple's `id` shares one
-/// id-namespace — we just take the max across the whole delta. The first
-/// `u64` (the scope constant) is ignored.
-fn entry_interner_max_id(entry: &shamir_wal::WalEntryV2) -> Option<u64> {
-    entry
-        .interner_delta
-        .iter()
-        .map(|(_scope, _name, id)| *id)
-        .max()
 }
 
 /// A4-recovery keystone: apply an entry's interner delta BEFORE data ops.

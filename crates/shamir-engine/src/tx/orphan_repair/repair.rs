@@ -7,6 +7,10 @@ use shamir_wal::WalEntryV2;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::tx::drainer) enum Outcome {
     Repaired,
+    /// The journal channel was FULL: the event was deferred into the
+    /// repair-pending set (no gap, no failure). The drainer's repair-pending
+    /// drain lands it on a later pass; the orphan itself stays unresolved.
+    EnqueuePending,
     Gap(GapReason),
 }
 
@@ -82,10 +86,15 @@ pub(in crate::tx::drainer) async fn repair_event(
     }
 
     let event = Arc::new(event);
-    let previous_gap = feed.first_gap_version();
-    feed.journal_enqueue(&event);
-    if feed.first_gap_version() != previous_gap && feed.first_gap_version() == version {
-        return Ok(Outcome::Gap(GapReason::EnqueueFailed));
+    if !feed.journal_enqueue_tracked(&event) {
+        // Closed: the tracked enqueue already marked the exact gap (and
+        // retired its repair-pending record) — settle as before. Full: the
+        // event was deferred into the repair-pending set (PR5b — no gap, no
+        // counters); the repair-pending drain lands it on a later pass.
+        if feed.first_gap_version() == version {
+            return Ok(Outcome::Gap(GapReason::EnqueueFailed));
+        }
+        return Ok(Outcome::EnqueuePending);
     }
     if let Err(error) = feed.record_clean_horizon(safe_horizon).await {
         if is_closed_writer(&error) {
