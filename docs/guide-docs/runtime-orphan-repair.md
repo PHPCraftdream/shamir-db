@@ -1,0 +1,5 @@
+# Runtime orphan journal repair
+
+After post-WAL publication failure, the drainer derives the event from the retained WAL entry with the same derivation used by normal commits. It first places a FIFO clean-horizon acknowledgement at the current safe J, then checks for an existing event and enqueues only if missing. A second acknowledgement observes the enqueue's persistence or writer-recorded GAP. These background-only acknowledgements can flush/fsync the journal; the commit path is unchanged. They do not advance J past an unsettled allocation.
+
+Matching events are idempotent. A malformed or differing existing event is logged as an error and leaves the orphan unsettled. Eventless/legacy entries use conservative GAP fallback. Missing tables retain their in-memory orphan entry and retry after table registration. Closed/full queue or writer/persistence failure leaves a GAP and is logged/counted only after GAP marking. Tests currently cover retained in-memory orphan retries and an explicit clean-horizon checkpoint. Disk truncation/unlink behavior and a full enqueue channel are not covered here; CI validation is pending.

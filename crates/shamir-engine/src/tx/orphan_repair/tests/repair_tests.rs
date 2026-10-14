@@ -1,0 +1,178 @@
+use bytes::Bytes;
+use shamir_tx::IsolationLevel;
+use shamir_types::types::value::InnerValue;
+
+use super::super::repair_event;
+use crate::table::TableConfig;
+use crate::tx::tests::post_wal_orphan_ordering_tests::{fixture, panic_post_wal};
+use crate::tx::tests::snapshot_visibility_park_tests::spawn_settled_commit;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn orphan_is_repaired_and_bounded_pull_has_no_gap() {
+    let (repo, hook) = fixture("orphan_repair_event").await;
+    let table = repo.get_table("a").await.unwrap();
+    let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    table
+        .insert_tx(&InnerValue::Str("orphan".into()), Some(&mut tx))
+        .await
+        .unwrap();
+    let version = panic_post_wal(&repo, &hook, tx).await;
+    drop(snapshot);
+    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    let (events, gap) = repo
+        .read_changelog_for_replication(version, 10)
+        .await
+        .unwrap();
+    assert_eq!(gap, None);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event.commit_version, version);
+    assert!(repo.drainer().window_entry(version).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn existing_mismatch_is_error_and_orphan_is_preserved() {
+    let (repo, hook) = fixture("orphan_repair_mismatch").await;
+    let table = repo.get_table("a").await.unwrap();
+    let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    table
+        .insert_tx(&InnerValue::Str("source".into()), Some(&mut tx))
+        .await
+        .unwrap();
+    let version = panic_post_wal(&repo, &hook, tx).await;
+    drop(snapshot);
+    let entry = repo.drainer().window_entry(version).unwrap();
+    let handle = repo.changefeed().await.unwrap();
+    let mut wrong = shamir_tx::event_from_wal_entry(&entry).unwrap();
+    wrong.timestamp_ns = wrong.timestamp_ns.saturating_add(1);
+    handle
+        .store
+        .put(
+            shamir_tx::changefeed::version_key(version),
+            Bytes::from(rmp_serde::to_vec(&wrong).unwrap()),
+        )
+        .await
+        .unwrap();
+    assert!(repair_event(&repo, &entry)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("differs from WAL"));
+    assert!(repo.tx_gate().await.unwrap().is_orphaned_post_wal(version));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn double_repair_leaves_one_event() {
+    let (repo, hook) = fixture("orphan_repair_twice").await;
+    let table = repo.get_table("a").await.unwrap();
+    let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    table
+        .insert_tx(&InnerValue::Str("same".into()), Some(&mut tx))
+        .await
+        .unwrap();
+    let version = panic_post_wal(&repo, &hook, tx).await;
+    drop(snapshot);
+    let entry = repo.drainer().window_entry(version).unwrap();
+    let handle = repo.changefeed().await.unwrap();
+    repair_event(&repo, &entry).await.unwrap();
+    repair_event(&repo, &entry).await.unwrap();
+    let rows = handle
+        .store
+        .range_from(shamir_tx::changefeed::version_key(version), 1)
+        .await
+        .unwrap();
+    let events: Vec<_> = rows
+        .iter()
+        .filter_map(|bytes| rmp_serde::from_slice::<shamir_tx::ChangelogEvent>(bytes).ok())
+        .filter(|event| event.commit_version == version)
+        .collect();
+    assert_eq!(events.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_table_orphan_remains_retryable() {
+    let (repo, hook) = fixture("orphan_repair_table_missing").await;
+    let table = repo.get_table("a").await.unwrap();
+    let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    table
+        .insert_tx(&InnerValue::Str("missing".into()), Some(&mut tx))
+        .await
+        .unwrap();
+    let version = panic_post_wal(&repo, &hook, tx).await;
+    drop(snapshot);
+    assert!(repo.remove_table("a"));
+    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 0);
+    assert!(repo.drainer().window_entry(version).is_some());
+    assert!(repo.tx_gate().await.unwrap().is_orphaned_post_wal(version));
+    repo.add_table(TableConfig::new("a"));
+    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    assert!(repo
+        .read_changelog_for_replication(version, 1)
+        .await
+        .unwrap()
+        .1
+        .is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closed_writer_fallback_records_gap_after_gap_admission() {
+    let (repo, hook) = fixture("orphan_repair_closed_writer").await;
+    let table = repo.get_table("a").await.unwrap();
+    let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    table
+        .insert_tx(&InnerValue::Str("closed".into()), Some(&mut tx))
+        .await
+        .unwrap();
+    let version = panic_post_wal(&repo, &hook, tx).await;
+    drop(snapshot);
+    let handle = repo.changefeed().await.unwrap();
+    handle.feed.shutdown_and_wait().await.unwrap();
+    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    let (events, gap) = repo
+        .read_changelog_for_replication(version, 1)
+        .await
+        .unwrap();
+    assert!(events.is_empty());
+    assert_eq!(gap, Some(version));
+    assert!(!repo.tx_gate().await.unwrap().is_orphaned_post_wal(version));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn later_queued_event_cannot_be_served_before_repaired_orphan() {
+    let (repo, hook) = fixture("orphan_repair_order").await;
+    let table = repo.get_table("a").await.unwrap();
+    let (mut orphan_tx, orphan_snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    table
+        .insert_tx(&InnerValue::Str("orphan".into()), Some(&mut orphan_tx))
+        .await
+        .unwrap();
+    let orphan = panic_post_wal(&repo, &hook, orphan_tx).await;
+    drop(orphan_snapshot);
+    let (mut later_tx, later_snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    table
+        .insert_tx(&InnerValue::Str("later".into()), Some(&mut later_tx))
+        .await
+        .unwrap();
+    let (later, task) = spawn_settled_commit(&repo, later_tx).await;
+    drop(later_snapshot);
+    assert!(later > orphan);
+    let (events, gap_before) = repo
+        .read_changelog_for_replication(orphan, 10)
+        .await
+        .unwrap();
+    assert!(events.is_empty());
+    assert_eq!(gap_before, None);
+    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 2);
+    task.await.unwrap().unwrap();
+    let (events, gap) = repo
+        .read_changelog_for_replication(orphan, 10)
+        .await
+        .unwrap();
+    assert_eq!(gap, None);
+    assert_eq!(
+        events
+            .iter()
+            .map(|item| item.event.commit_version)
+            .collect::<Vec<_>>(),
+        vec![orphan, later]
+    );
+}
