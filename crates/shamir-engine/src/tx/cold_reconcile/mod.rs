@@ -1,5 +1,6 @@
 mod algorithm;
 mod classification;
+mod follower;
 
 #[cfg(test)]
 #[path = "tests/mod.rs"]

@@ -638,9 +638,11 @@ artifact).
   whose data/history is not known safe; a failed journal writer falls back to
   refusal. Memory/hybrid WAL bypass these controls. Runtime orphan replay and
   channel-full gap repair remain PR5 and are not implemented: such existing
-  gaps are not cleared by cold reconciliation. Followers have no WAL; their
-  conservative in-flight-batch recovery path remains PR6 and is not changed
-  by this cold-start repair. Live subscriptions deliver from this same journal
+  gaps are not cleared by cold reconciliation. Followers have no WAL: since PR6c their cold start certifies through the
+  journal horizon J in the bookmark record and marks only the in-flight batch
+  (`in_flight_range`) as an uncertain GAP; an unknown J keeps the conservative
+  whole-window fallback. Retry-safe batch receipts (PR6b) remain unimplemented,
+  so the in-flight batch still requires a reseed. Live subscriptions deliver from this same journal
   (broadcast is only a wake-up hint); a certified gap terminates a subscription
   (see the live-ordering bullet in section 4 and
   `crates/shamir-server/src/subscriptions/bridge.rs`).
