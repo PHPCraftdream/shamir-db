@@ -774,3 +774,12 @@ site-id в версии, (б) CRDT-семантики для конфликту�
 _Research 2026-06-30. Следующий шаг — verify-пункты §7.1, затем R0
 (network changefeed pull-API) — «cheapest next step; no new subsystem»
 (PLAN.md §2, Movement C step 1)._
+
+
+### Per-repository durability overrides (S5c-X PR1b)
+
+The server-level durability configuration remains the default for repositories. An optional sparse override may be supplied when creating a repository and changed at runtime through `ALTER REPO`. ALTER merges only non-null fields into the stored override; omitted fields retain their existing override, and fields never set continue to inherit the server default. The effective policy is live-swapped into the shared policy used by that repository and persisted under `durability` in its `system.repositories` record. Older records without this key decode as no override. On boot, a persisted override is resolved over the server default.
+
+`DESCRIBE REPO` exposes both effective `durability` and stored `durability_override`. Accepted settings are `wal_commit` (`buffered` or `synced`), positive `wal_retention_max_bytes`, `on_wal_retention_exceeded` (`refuse_writes` or `declare_gap`), and `replication_serve` (`durable`). Unknown fields and invalid enum values fail validation. Retention must be at least twice the effective WAL segment size. `completed_reseed` is rejected as unsupported. In-memory and hybrid WALs ignore `wal_commit`; this setting does not make them durable. Rust request DTOs always carry retention as a decimal string. TypeScript accepts positive safe numbers, bigint, or canonical decimal text and normalizes values above i64::MAX to strings. In effective responses, values through i64::MAX are native MessagePack integers and decode as number or bigint according to wire integer width; values above i64::MAX are decimal strings.
+
+Builder-only API examples belong in user guides, not this replication wire/protocol specification.

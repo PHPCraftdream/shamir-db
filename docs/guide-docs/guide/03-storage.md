@@ -62,10 +62,32 @@ await Batch.create('drop-db')
 ```ts
 const db = client.db('analytics');
 
-await db.run(ddl.createRepo('cold'));
+await db.run(ddl.createRepo('cold', { durability: { wal_commit: 'synced', wal_retention_max_bytes: 1073741824 } }));
 ```
 
 Ответ: `results.r.records[0].created_repo === "cold"`.
+
+`CREATE REPO` также принимает optional `durability` sparse override. Неуказанные поля наследуют серверную политику; для дальнейшего изменения используйте `ddl.alterRepo`, а для чтения — `ddl.describeRepo`.
+
+```ts
+await db.run(ddl.createRepo('cold', { durability: { wal_commit: 'synced', wal_retention_max_bytes: 1073741824 } }));
+```
+
+Поля политики, заданные в override, заменяют серверные defaults; отсутствующие поля наследуют значения сервера. Rust DTO запроса всегда представляет `wal_retention_max_bytes` десятичной строкой. TypeScript принимает положительные безопасные числа, `bigint` или канонические десятичные строки и нормализует значения выше `i64::MAX` в десятичный текст без потери точности. В эффективном ответе значения до `i64::MAX` включительно передаются как native MessagePack integer и декодируются в TypeScript как `number` или `bigint` согласно ширине wire integer; значения выше `i64::MAX` передаются строками. Поддерживаются поля и значения: `wal_commit: "buffered"|"synced"`; `wal_retention_max_bytes`; `on_wal_retention_exceeded: "refuse_writes"|"declare_gap"`; `replication_serve: "durable"`. Неизвестные поля и значения enum — ошибки. `completed_reseed` не поддерживается. Retention должен быть не меньше удвоенного effective WAL segment size.
+
+An override may be changed by `ALTER REPO`; this operation takes a sparse patch and merges present fields, preserving stored override fields omitted from the patch:
+
+```ts
+await db.run(ddl.alterRepo('cold', { on_wal_retention_exceeded: 'refuse_writes' }));
+```
+
+The change is validated, persisted, and applied live. `DESCRIBE REPO` returns effective settings separately from the sparse override:
+
+```ts
+const described = await db.run(ddl.describeRepo('cold'));
+```
+
+`DESCRIBE REPO` is issued as `ddl.describeRepo('cold')`. Its result includes `durability` (effective policy) and `durability_override` (only persisted override fields, or `null` when none). At boot, persisted overrides take precedence over server defaults; legacy repository records with no `durability` key mean no override. In-memory/hybrid WALs ignore `wal_commit` and do not become persistent when set to `synced`.
 
 **Durable по умолчанию — три движка на шкале durability.**
 

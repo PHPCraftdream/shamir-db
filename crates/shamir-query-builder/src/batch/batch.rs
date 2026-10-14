@@ -1,3 +1,4 @@
+use crate::filter::{and, not, or};
 use shamir_collections::{new_map, TMap};
 use shamir_query_types::batch::extract_base_alias;
 use shamir_query_types::batch::{
@@ -11,7 +12,8 @@ use shamir_query_types::read::{ReadQuery, Select, SelectItem};
 use shamir_query_types::subscribe::{SubscribeOp, UnsubscribeOp};
 use shamir_types::types::value::QueryValue;
 
-use crate::filter::{and, not, or};
+#[path = "into_batch_op/repo_admin.rs"]
+mod repo_admin;
 
 use super::build_error::BuildError;
 use super::durability::Durability;
@@ -1115,11 +1117,6 @@ impl Batch {
 
         handles
     }
-
-    fn add_entry(&mut self, alias: impl Into<String>, op: BatchOp, return_result: bool) -> Handle {
-        self.add_entry_after(alias, op, return_result, &[])
-    }
-
     fn add_entry_after(
         &mut self,
         alias: impl Into<String>,

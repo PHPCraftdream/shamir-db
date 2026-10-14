@@ -84,7 +84,7 @@ fn normal_boot_refuses_missing_and_installing_receipts_before_registry() {
                 .await
                 .unwrap();
             home.system_store
-                .save_repository("app", "main", "fjall", image.to_str(), &metadata)
+                .save_repository("app", "main", "fjall", image.to_str(), &metadata, None)
                 .await
                 .unwrap();
             home.flush_seed_catalogue().await.unwrap();

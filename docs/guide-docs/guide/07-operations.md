@@ -4,6 +4,10 @@
 
 **Когда подниматься:** выкатка в прод.
 
+## Repository durability changes
+
+Use `ALTER REPO` to patch a repository's durability override. Each successfully applied ALTER produces its own audit event, including operations inside sub-batches and loop bodies; row-result suppression does not suppress the event. Earlier successful operations remain audited if a later operation fails. Failed or suppressed operations do not generate success events.
+
 До этого этажа сервер запускался вручную: `shamir-server --config …` в
 терминале. Для разработки этого хватает. Но продакшен требует: сервисный
 режим (systemd / Windows service), observability (`/healthz`, `/metrics`),
@@ -74,6 +78,20 @@ shamir-server service install
 ### macOS / BSD
 
 `service install` генерирует launchd plist (macOS) или rc.d-скрипт (BSD).
+
+### Per-repository durability
+
+Repository durability can override the server default at creation or be patched while running with `ALTER REPO`. Overrides are sparse: unspecified fields inherit the server policy, and ALTER preserves previously stored fields not present in the patch. The policy is swapped live for the open repository and persisted in its `system.repositories` record; legacy records without a `durability` field mean no override. At boot, a stored override takes precedence over the server default.
+
+Use the query builder for these operations (builder examples are not protocol wire specifications):
+
+```ts
+const create = ddl.createRepo('archive', { durability: { wal_commit: 'synced' } });
+const alter = ddl.alterRepo('archive', { wal_retention_max_bytes: 1073741824 });
+const described = ddl.describeRepo('archive');
+```
+
+`DESCRIBE REPO` строится через `ddl.describeRepo('archive')` и сообщает эффективную `durability` и sparse `durability_override`. Rust DTO запроса всегда передаёт retention десятичной строкой. TypeScript принимает положительные безопасные числа, `bigint` или канонические десятичные строки и без потери точности нормализует значения выше `i64::MAX` в текст. В эффективном ответе значения до `i64::MAX` включительно — native MessagePack integer, декодируемый в TypeScript как `number` или `bigint` согласно ширине wire integer; значения выше `i64::MAX` — десятичные строки. Неизвестные поля и недопустимые значения enum отклоняются. Retention должен быть не меньше удвоенного effective WAL segment size. `completed_reseed` отклоняется как нереализованный режим; поддерживается только `durable`. In-memory и hybrid WAL игнорируют `wal_commit`; выбор `synced` не делает их persistent.
 
 ### After a leader crash
 
