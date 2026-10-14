@@ -7,9 +7,11 @@ use shamir_storage::types::Repo as _;
 use crate::meta::recovery_marker::load_last_committed;
 use crate::repo::{BoxRepoFactory, DurabilityPolicy, RepoFactory, RepoInstance};
 use crate::table::TableConfig;
+use crate::tx::clean_horizon::checkpoint::test_seam;
 use crate::tx::drainer::Drainer;
 use crate::tx::IsolationLevel;
 use futures::{pin_mut, StreamExt};
+use shamir_tx::changefeed::ChangelogEvent;
 use shamir_types::types::value::InnerValue;
 
 const CHILD: &str = "SHAMIR_CLEAN_HORIZON_CRASH_CHILD";
@@ -18,11 +20,12 @@ const CHILD_PHASE: &str = "SHAMIR_CLEAN_HORIZON_CRASH_PHASE";
 const PATH: &str = "SHAMIR_CLEAN_HORIZON_CRASH_PATH";
 const TABLE: &str = "crash_rows";
 const REPO_NAME: &str = "clean_horizon_crash";
-const PHASES: [&str; 4] = [
+const PHASES: [&str; 5] = [
     "pre_checkpoint",
     "post_checkpoint",
     "pre_truncate",
     "post_truncate",
+    "mid_checkpoint",
 ];
 const RECORDS: usize = 80;
 
@@ -114,12 +117,53 @@ async fn crash_child(path: PathBuf, phase: &str) {
     repo.flush_all_history()
         .await
         .expect("persist baseline history");
+    let journal_store = repo
+        .changelog_store_for_cold_reconcile()
+        .await
+        .expect("journal store");
+    journal_store.flush().await.expect("flush baseline journal");
+    drop(journal_store);
     let baseline = wal_file_count(&path);
     assert!(baseline > 1, "seed WAL baseline must include sealed WAL");
     let mut file =
         std::fs::File::create(path.with_extension("walbaseline")).expect("create baseline sidecar");
     write!(file, "{baseline}").expect("write baseline sidecar");
     file.sync_all().expect("sync baseline sidecar");
+    let journal = repo
+        .read_changelog_from(1, usize::MAX)
+        .await
+        .expect("baseline follower read");
+    assert!(journal.gap_at.is_none());
+    let baseline_entries = repo
+        .repo_wal()
+        .await
+        .expect("repo WAL")
+        .recover()
+        .await
+        .expect("recover WAL");
+    let journal_events: Vec<_> = baseline_entries
+        .iter()
+        .map(|entry| shamir_tx::event_from_wal_entry(entry).expect("derive baseline event"))
+        .collect();
+    assert_eq!(
+        journal.events, journal_events,
+        "persisted event oracle matches WAL derivation"
+    );
+    let mut oracle = std::fs::File::create(path.with_extension("events"))
+        .expect("create expected events oracle");
+    rmp_serde::encode::write(&mut oracle, &journal.events).expect("encode events oracle");
+    oracle.sync_all().expect("sync events oracle");
+    if phase == "mid_checkpoint" {
+        test_seam::on_sample_w(&repo, || {
+            let marker =
+                std::env::var_os("SHAMIR_CLEAN_HORIZON_REACHED").expect("reached marker path");
+            let mut file = std::fs::File::create(marker).expect("create checkpoint marker");
+            file.write_all(b"mid_checkpoint")
+                .expect("write checkpoint marker");
+            file.sync_all().expect("sync checkpoint marker");
+            std::process::abort();
+        });
+    }
     Drainer::new()
         .drain_all(&repo)
         .await
@@ -155,6 +199,11 @@ async fn run_phase(phase: &'static str, expect_checkpoint: bool) {
         .env(PATH, &repo_path)
         .env(PHASE, phase)
         .env(CHILD_PHASE, phase)
+        .env("SHAMIR_TEST_CRASH_AFTER", phase)
+        .env(
+            "SHAMIR_CLEAN_HORIZON_REACHED",
+            repo_path.with_extension("reached"),
+        )
         .kill_on_drop(true)
         .spawn()
         .expect("spawn crash child");
@@ -167,6 +216,13 @@ async fn run_phase(phase: &'static str, expect_checkpoint: bool) {
         }
     };
     assert!(!status.success(), "child must abort at {phase}");
+    if phase == "mid_checkpoint" {
+        assert_eq!(
+            std::fs::read_to_string(repo_path.with_extension("reached")).unwrap(),
+            phase,
+            "checkpoint callback reached"
+        );
+    }
     let baseline: usize = std::fs::read_to_string(repo_path.with_extension("walbaseline"))
         .expect("baseline sidecar")
         .trim()
@@ -190,6 +246,16 @@ async fn run_phase(phase: &'static str, expect_checkpoint: bool) {
         let table = repo.get_table(TABLE).await.expect("recovered table");
         let records = count_rows(&table).await;
         assert_eq!(records, RECORDS);
+        let page = repo
+            .read_changelog_from(1, usize::MAX)
+            .await
+            .expect("follower journal");
+        let expected: Vec<ChangelogEvent> = rmp_serde::from_slice(
+            &std::fs::read(repo_path.with_extension("events")).expect("expected event oracle"),
+        )
+        .expect("decode event oracle");
+        assert_eq!(page.gap_at, None, "follower gap on reopen {phase}");
+        assert_eq!(page.events, expected, "follower events on reopen {phase}");
         drop(table);
         repo.stop_journal_writer_for_test()
             .await
@@ -216,6 +282,11 @@ async fn crash_pre_truncate_preserves_image() {
 #[tokio::test(flavor = "current_thread")]
 async fn crash_post_truncate_recovers_baseline() {
     run_phase(PHASES[3], true).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn crash_mid_checkpoint_reopens_twice_without_follower_gap() {
+    run_phase(PHASES[4], false).await;
 }
 
 #[tokio::test]

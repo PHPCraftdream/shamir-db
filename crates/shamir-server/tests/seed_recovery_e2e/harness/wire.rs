@@ -44,7 +44,10 @@ pub async fn setup_leader(admin: &Client) {
     execute(admin, "default", batch).await;
     let mut batch = Batch::new();
     batch.id("setup-repo");
-    batch.create_repo("repo", ddl::create_repo(REPO).tables(TABLES));
+    batch.create_repo(
+        "repo",
+        ddl::create_repo(REPO).engine("fjall").tables(TABLES),
+    );
     execute(admin, DB, batch).await;
     // Open (0o777) db + repo + each table so the replicator-role session
     // gains Read via the normal Shomer DAC path (repl_pull_e2e pattern).

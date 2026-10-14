@@ -605,38 +605,44 @@ artifact).
   the bookmark across that event. Sources:
   `crates/shamir-engine/src/tx/apply_replicated.rs:220-228,284-290`,
   `crates/shamir-server/src/replication/follower_loop.rs:389-393`.
-- **Journal pulls preserve settled version order; cold recovery conservatively
-  invalidates uncertified history.** Pulls capture the contiguous completion
-  watermark W and confirm a writer barrier before returning ascending events
-  `<= W`; a stalled writer can return an older safe prefix
-  (`crates/shamir-engine/src/repo/repo_instance.rs:1587-1604`).
-  The persisted clean horizon J is loaded from `__changelog__`; absent J is
-  treated as zero, while read/decode errors fail the open
-  (`crates/shamir-engine/src/repo/changelog_store.rs:26-37`). After an unclean
-  stop, cold recovery durably certifies `[J + 1, H]` before serving when H > J,
-  even if all journal events survived. H is the recovered marker/surviving-WAL
-  gate floor, **not a scan of the history maximum**. It then records J = H,
-  so a pre-S5c directory certifies once on first start; another crash with
-  newer commits can widen the interval. Any certification error refuses open
-  (`crates/shamir-engine/src/repo/repo_instance.rs:1829-1844`,
-  `crates/shamir-engine/src/tx/recovery.rs:458`). Successful clean shutdown
-  quiesces commits, flushes data and records J only after W = H
-  (`crates/shamir-engine/src/repo/repo_instance.rs:1852-1877`).
-  GAP and J writes cross an explicit flush boundary; recording J first flushes
-  earlier journal writes (`crates/shamir-engine/src/repo/changelog_store.rs:64-85`).
+- **Journal pulls preserve settled version order; cold recovery reconciles
+  events from surviving WAL before serving.** Pulls capture the contiguous
+  completion watermark W and confirm a writer barrier before returning
+  ascending events `<= W`; a stalled writer can return an older safe prefix
+  (`crates/shamir-engine/src/repo/repo_instance.rs:1587-1604`). The persisted
+  clean horizon J is loaded from `__changelog__`; absent J is treated as zero,
+  while read/decode errors fail the open
+  (`crates/shamir-engine/src/repo/changelog_store.rs:26-37`). For each
+  surviving v3 WAL entry above J, cold reconciliation inserts its derived
+  event if absent; identical persisted bytes are idempotent, while differing
+  bytes fail closed. A v3 entry with an event header that derives no event is
+  eventless and creates no gap. Old-format/unknown entries and missing
+  evidence may require a minimal conservative gap; evidence may be
+  insufficient to distinguish an unserved lost commit from a version that
+  could have been served, and no granular downstream receipt proves otherwise.
+  H is the recovered marker/surviving-WAL gate floor, not a scan of history.
+  Cold recovery flushes journal changes and the recovery floor before
+  persisting J = H, and refuses open on reconciliation I/O/decode errors.
+  Therefore an unclean stop alone does not certify `[J + 1, H]` or require a
+  reseed. Successful clean shutdown quiesces commits, flushes data and records
+  J only after W = H
+  (`crates/shamir-engine/src/repo/repo_instance.rs:1852-1877`). GAP and J
+  writes cross an explicit flush boundary; recording J first flushes earlier
+  journal writes (`crates/shamir-engine/src/repo/changelog_store.rs:64-85`).
   During runtime, before each local sealed-WAL truncation, the drainer samples
   settled W, reserves and flushes a recovery allocation floor at least J, then
   flushes events/gaps and advances J. A checkpoint error prevents unlink. The
-  retained-byte cap is measured on sealed segments; `refuse_writes` rejects new
-  admissions until successful truncation brings retained bytes under the cap.
-  `declare_gap` persists a real GAP where possible but does not evict WAL whose
-  data/history is not known safe; a failed journal writer falls back to refusal.
-  Memory/hybrid WAL bypass these controls. Cold reconciliation of surviving WAL
-  entries remains PR4, so runtime J checkpoints do not eliminate all crash GAPs.
-  Live subscriptions deliver from this same journal (broadcast is only a
-  wake-up hint) and so inherit its caveats: a certified gap terminates the
-  subscription and the journal tail lost in a crash is not reconstructed (see
-  the live-ordering bullet in section 4 and
+  retained-byte cap is measured on sealed segments; `refuse_writes` rejects
+  new admissions until successful truncation brings retained bytes under the
+  cap. `declare_gap` persists a real GAP where possible but does not evict WAL
+  whose data/history is not known safe; a failed journal writer falls back to
+  refusal. Memory/hybrid WAL bypass these controls. Runtime orphan replay and
+  channel-full gap repair remain PR5 and are not implemented: such existing
+  gaps are not cleared by cold reconciliation. Followers have no WAL; their
+  conservative in-flight-batch recovery path remains PR6 and is not changed
+  by this cold-start repair. Live subscriptions deliver from this same journal
+  (broadcast is only a wake-up hint); a certified gap terminates a subscription
+  (see the live-ordering bullet in section 4 and
   `crates/shamir-server/src/subscriptions/bridge.rs`).
 - **Detected gaps stop replication, but `Resume` does not repair data.**
   When the leader reports a `gap_at` at or after the requested `from_version`,
@@ -648,33 +654,35 @@ artifact).
   `crates/shamir-db/src/shamir_db/execute/admin_replication.rs:413-467`.
   There is **no automatic snapshot/reseed**. Runtime clean-horizon checkpoints
   bound the retained local WAL; retention enforcement follows the configured
-  refusal or conservative GAP policy. Cold reconciliation remains PR4, so a
-  crash can still require reseeding when exact event recovery is not yet
-  implemented. The persisted recovery interval rejects requests at/below its affected horizon,
-  including a fresh follower's bookmark 0 (first pull from 1), even with a
-  complete journal. `Resume`, clean shutdown and recreating the subscription
-  do not clear it. Full replay from zero works only against a gap-free source
-  lineage. To recover, stop replication and writes, preserve an offline backup,
-  rebuild a new source lineage from authoritative logical data with the same
-  schema, recreate empty followers and subscriptions, and replay that new
-  journal. Alternatively use a verified, matching follower data image AND its
-  upstream bookmark through the affected horizon; an arbitrary older backup
-  or a bookmark advanced without the matching data is not a repair. There is
-  no built-in operator command for atomic snapshot-plus-bookmark seeding.
-  What IS built in (SEED-2..5, offline R2-lite) is a STOPPED-source
-  operator runbook, not an online snapshot: `replication-seed-export` /
-  `-verify` / `-install` move the leader's logical state at a settled
-  version `V >= certified_gap.through` into a NEW follower repository with
-  a paused, receipt-bound subscription, and validated `Resume` starts the
-  first pull at `V+1` (runbook:
+  refusal or conservative GAP policy. PR4 cold reconciliation means an
+  unclean crash alone no longer implies reseeding: a seed is needed when the
+  residual certified gap intersects the follower bookmark/next required
+  version, or a separate divergence requires replacing follower state. A gap
+  can still result from unknown legacy WAL, missing evidence (including WAL
+  removed after a retention `declare_gap`), or other unrecoverable loss; exact
+  provenance is not always available. `Resume`, clean shutdown and recreating
+  the subscription do not clear an existing persisted gap. Full replay from
+  zero works only against a gap-free source lineage. To recover, stop
+  replication and writes, preserve an offline backup, rebuild a new source
+  lineage from authoritative logical data with the same schema, recreate empty
+  followers and subscriptions, and replay that new journal. Alternatively use
+  a verified, matching follower data image AND its upstream bookmark through
+  the affected horizon; an arbitrary older backup or a bookmark advanced
+  without the matching data is not a repair. There is no built-in operator
+  command for atomic snapshot-plus-bookmark seeding. What IS built in
+  (SEED-2..5, offline R2-lite) is a STOPPED-source operator runbook, not an
+  online snapshot: `replication-seed-export` / `-verify` / `-install` move the
+  leader's logical state at a settled version `V >= certified_gap.through`
+  into a NEW follower repository with a paused, receipt-bound subscription,
+  and validated `Resume` starts the first pull at `V+1` (runbook:
   `guide/09-seed-recovery.md`; format:
-  `guide-docs/architecture/SEED_FORMAT.md`). It does NOT replicate DDL
-  (schema divergence is refused), does NOT seed secondary indexes, is
-  Unix-only, whole-repository-scoped, requires the leader to be stopped,
-  recovers NOTHING the leader itself could not recover, and is not an
-  automatic reseed, promotion, or full-server recovery. The CI
-  certification kills leader PROCESSES (SIGKILL) and proves process-crash
-  behaviour only — not power-loss guarantees.
+  `guide-docs/architecture/SEED_FORMAT.md`). It does NOT replicate DDL (schema
+  divergence is refused), does NOT seed secondary indexes, is Unix-only,
+  whole-repository-scoped, requires the leader to be stopped, recovers NOTHING
+  the leader itself could not recover, and is not an automatic reseed,
+  promotion, or full-server recovery. The CI certification kills leader
+  PROCESSES (SIGKILL) and proves process-crash behaviour only — not power-loss
+  guarantees.
 - **The identity fence is universal but is detection, not repair.** Since
   S5c-X PR7 every subscription (seeded or not) records the leader's
   `(lineage, history epoch)` at first contact and stops terminally

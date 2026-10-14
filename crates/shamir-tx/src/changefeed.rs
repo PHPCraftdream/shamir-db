@@ -18,10 +18,8 @@
 //!    equals numeric order). The commit-path hands the event to a bounded
 //!    [`tokio::sync::mpsc`] channel via `try_send` (NEVER blocks); a
 //!    background task batches pending events and writes them durably to
-//!    the changelog store. Engine pulls use `RepoInstance::read_changelog_from`
-//!    to confirm a writer barrier and range-read only the settled version prefix.
-//!    The lower-level [`RepoChangefeed::read_from`] is unbounded and does not
-//!    itself establish that ordering guarantee.
+//!    the changelog store. Engine pulls confirm a writer barrier and range-read
+//!    only the settled version prefix.
 //!
 //! NEITHER track blocks the hot commit-path. The projection is done once
 //! and reused for both tracks; a commit with an empty footprint emits
@@ -37,20 +35,20 @@
 //! Confirmation has a bounded budget; timeout returns an older safe prefix.
 //! A version still committing holds back the prefix rather than being skipped.
 //!
-//! Persistence remains asynchronous: a crash can lose the unflushed journal
-//! tail. The engine conservatively certifies the cold interval (J, H] before
-//! registration, even when all events survived; affected followers require
-//! manual resync. H remains limited by the recovered gate floor.
-//! Queue overflow/closure, write failures and corrupt records mark known gaps.
-//! Gap metadata is persisted asynchronously and restored on reopen once durable;
-//! marker-write failures retain dirty state for retry. This does not eliminate
-//! the crash window before persistence. The journal is an observability and
-//! replication feed, not the data's source of truth.
+//! Persistence is asynchronous: crash may lose the unflushed tail; cold start
+//! rebuilds derivable events from surviving WAL. Missing/legacy entries and
+//! overflow, closure, write failures or corruption mark gaps. With follower
+//! provenance, unknown in-flight range makes unresolved (J, H] conservatively
+//! gapped; H is the recovered gate floor. Failed shutdown alone adds no blanket
+//! gap: WAL rebuilds through H. Gap metadata persists asynchronously; failed
+//! marker writes stay dirty for retry. The journal is not the source of truth.
 //!
 //! Live broadcast occurs after publication in commit-completion order, not
 //! necessarily version order. A consumer that discards versions at or below
 //! its last delivered version can skip a late lower-version event. Use bounded
 //! engine journal pulls for ordered history, and handle reported gaps.
+
+pub mod cold;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -525,10 +523,9 @@ impl RepoChangefeed {
         self.clean_horizon.load(Ordering::Acquire)
     }
 
-    /// J is also advanced at runtime before WAL truncation, so clean stop is
-    /// not the only checkpoint boundary. A checkpoint covers only the sampled
-    /// settled prefix; newer events may arrive while the write is in flight and
-    /// can still require conservative GAP certification after a crash.
+    /// A checkpoint covers the sampled settled prefix. Any unresolved version
+    /// in that prefix must already have a durable journal event or persisted
+    /// gap before J advances.
     /// cancel-safe: NO — after admission the writer owns the request. A closed
     /// acknowledgement suppresses a not-yet-started J put, but an in-flight
     /// backend write may finish; cancellation never acknowledges durability.

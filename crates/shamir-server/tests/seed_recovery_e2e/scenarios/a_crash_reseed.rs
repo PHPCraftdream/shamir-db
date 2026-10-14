@@ -1,7 +1,8 @@
 //! Scenario A — the main recovery path (design §6 PR-5 acceptance row):
 //!
 //! real leader child writes rows (inserts, updates, deletes, two tables) →
-//! SIGKILL → reopen certifies the recovery gap → a fresh bookmark-0
+//! SIGKILL → reopen reconciles the surviving WAL with no gap; a genuinely
+//! residual durable gap is then fixture-recorded so the fresh bookmark-0
 //! follower pulls and stops with `resync_required`, NO payload applied →
 //! leader stopped → real `replication-seed-export` CLI → real
 //! `replication-seed-verify` CLI → real `replication-seed-install` CLI into
@@ -25,7 +26,7 @@ use crate::harness::follower;
 use crate::harness::ops;
 use crate::harness::wire;
 
-const WAIT: Duration = Duration::from_secs(90);
+const WAIT: Duration = Duration::from_secs(30);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn seed_e2e_a_kill_resync_offline_seed_resume_converges() {
@@ -50,20 +51,38 @@ async fn seed_e2e_a_kill_resync_offline_seed_resume_converges() {
     wire::delete_row(&admin, "audit", "a0").await;
     drop(admin);
 
-    // -- Unclean kill, reopen: the recovery gap is certified. --
+    // -- Unclean kill, reopen: durable wire-created app/main reconciles WAL. --
     child::kill(&mut leader).await;
     let mut leader = child::spawn_leader(&leader_dir, addr).await;
     drop(child::connect_admin(&leader).await);
     let cert = wire::gap_certificate(addr).await;
-    let gap_through = cert.gap_through.expect("reopen certifies a gap horizon");
-    assert!(gap_through >= 1, "the certified horizon covers the writes");
+    assert_eq!(
+        cert.gap_through, None,
+        "surviving WAL must not force reseed"
+    );
+
+    // Retain the historical reseed proof with an explicit residual certificate.
+    let admin = child::connect_admin(&leader).await;
+    let gap_through = wire::current_version(&admin).await;
+    drop(admin);
+    assert!(
+        gap_through >= 1,
+        "surviving WAL must include the committed writes",
+    );
+    child::kill(&mut leader).await;
+    child::inject_recovery_gap(&leader_dir, 1, gap_through).await;
+    let mut leader = child::spawn_leader(&leader_dir, addr).await;
+    drop(child::connect_admin(&leader).await);
+    let cert = wire::gap_certificate(addr).await;
+    assert_eq!(cert.gap_first, Some(1));
+    assert_eq!(cert.gap_through, Some(gap_through));
 
     // -- Fresh bookmark-0 follower: resync_required, no payload applied. --
     let fresh = Arc::new(follower::fresh_in_memory().await);
     ops::create_subscription(&fresh, &upstream, false).await;
     let fresh_loop = follower::supervisor(&fresh);
     fresh_loop.reconcile().await;
-    follower::wait_until("fresh follower resync_required", WAIT, || {
+    follower::wait_until("fresh follower resync_required", WAIT, &fresh, addr, || {
         let fresh = fresh.clone();
         async move {
             follower::status_of(&fresh, "sub")
@@ -150,9 +169,13 @@ async fn seed_e2e_a_kill_resync_offline_seed_resume_converges() {
     let admin = child::connect_admin(&leader).await;
     ops::resume(&home).await.expect("validated resume");
     seeded_loop.reconcile().await;
-    follower::wait_until("seeded loop running after resume", WAIT, || async {
-        seeded_loop.is_running("sub")
-    })
+    follower::wait_until(
+        "seeded loop running after resume",
+        WAIT,
+        &home,
+        addr,
+        || async { seeded_loop.is_running("sub") },
+    )
     .await;
     assert_eq!(
         follower::bookmark(&home).await,
@@ -177,7 +200,7 @@ async fn seed_e2e_a_kill_resync_offline_seed_resume_converges() {
     wire::delete_row(&admin, "audit", "a1").await;
     for table in wire::TABLES {
         let expected = wire::read_rows(&admin, table).await;
-        follower::wait_until(&format!("convergence on {table}"), WAIT, {
+        follower::wait_until(&format!("convergence on {table}"), WAIT, &home, addr, {
             let home = home.clone();
             let expected = expected.clone();
             move || {
@@ -189,13 +212,19 @@ async fn seed_e2e_a_kill_resync_offline_seed_resume_converges() {
         .await;
     }
     // The bookmark is persisted after the rows become visible: wait for it.
-    follower::wait_until("bookmark advances past the seed version", WAIT, {
-        let home = home.clone();
-        move || {
+    follower::wait_until(
+        "bookmark advances past the seed version",
+        WAIT,
+        &home,
+        addr,
+        {
             let home = home.clone();
-            async move { follower::bookmark(&home).await > v }
-        }
-    })
+            move || {
+                let home = home.clone();
+                async move { follower::bookmark(&home).await > v }
+            }
+        },
+    )
     .await;
     let post = follower::bookmark(&home).await;
     assert!(post > v, "bookmark advanced past seed V ({post} > {v})");
@@ -203,7 +232,10 @@ async fn seed_e2e_a_kill_resync_offline_seed_resume_converges() {
 
     // -- The SOURCE gap certificate is unchanged by the whole procedure. --
     let cert_after = wire::gap_certificate(addr).await;
-    assert_eq!(cert, cert_after, "source certificate must be immutable");
+    assert_eq!(
+        cert, cert_after,
+        "the source certificate remains unchanged after reseed and later writes",
+    );
 
     child::kill(&mut leader).await;
 }
