@@ -796,9 +796,8 @@ async fn persistent_negative_control_unclamped_truncation_yields_gap() {
         park_writer(&feed, &store).await;
         let v = commit_row(&repo, &table, "lost").await;
         assert_eq!(feed.repair_pending_depth(), 1);
-        let mut last = v;
         for index in 0..2 {
-            last = commit_row(&repo, &table, &format!("seal-{index}")).await;
+            commit_row(&repo, &table, &format!("seal-{index}")).await;
         }
         assert_eq!(feed.repair_pending_depth(), 3);
         repo.repo_interner().await.unwrap().persist().await.unwrap();
