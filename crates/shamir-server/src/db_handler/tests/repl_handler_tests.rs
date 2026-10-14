@@ -253,6 +253,7 @@ async fn pull_returns_events_after_writes() {
                 from_version: 0,
                 limit: 100,
                 wait_ms: None,
+                capabilities: None,
             },
         )
         .await;
@@ -300,6 +301,7 @@ async fn pull_denied_without_grant() {
                 from_version: 0,
                 limit: 100,
                 wait_ms: None,
+                capabilities: None,
             },
         )
         .await;
@@ -334,6 +336,7 @@ async fn long_poll_empty_tail_does_not_hang() {
                 from_version: u64::MAX,
                 limit: 100,
                 wait_ms: Some(200),
+                capabilities: None,
             },
         )
         .await;
@@ -408,6 +411,7 @@ async fn leader_epoch_carried_on_all_responses() {
                 from_version: 0,
                 limit: 10,
                 wait_ms: None,
+                capabilities: None,
             },
         )
         .await;
@@ -427,6 +431,7 @@ async fn leader_epoch_carried_on_all_responses() {
                 from_version: 0,
                 limit: 10,
                 wait_ms: None,
+                capabilities: None,
             },
         )
         .await;

@@ -48,7 +48,7 @@ const POLL_STEP: Duration = Duration::from_millis(50);
 /// `replication_serve = completed_reseed` — such a repo must never be served
 /// to a follower that has not advertised [`REPL_CAP_IDENTITY_FENCE`]
 /// (a legacy follower cannot hold a completed-reseed lineage).
-fn fence_required(modes: impl Iterator<Item = ReplicationServe>) -> bool {
+fn fence_required(mut modes: impl Iterator<Item = ReplicationServe>) -> bool {
     modes.any(|mode| mode == ReplicationServe::CompletedReseed)
 }
 
@@ -161,7 +161,7 @@ impl ShamirDbHandler {
                 let Some(instance) = db_instance.get_repo(&repo_name) else {
                     continue;
                 };
-                candidates.push((db_name, repo_name, instance));
+                candidates.push((db_name.clone(), repo_name, instance));
             }
         }
 
