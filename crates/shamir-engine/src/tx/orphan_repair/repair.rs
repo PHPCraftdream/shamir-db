@@ -27,13 +27,13 @@ impl std::fmt::Display for GapReason {
     }
 }
 
-/// WAL-derived event repair. `Outcome::Gap` denotes conservative fallback;
-/// callers must mark that GAP before settling the orphan.
-///
-/// The replay guard serializes retries. FIFO clean-horizon acknowledgements
-/// drain the previous prefix even if confirm_through's watermark fast path
-/// would return. They only record the current safe J and may fsync the journal;
-/// the commit path is unchanged.
+fn is_closed_writer(error: &DbError) -> bool {
+    matches!(error, DbError::Storage(message) if message == "changefeed writer closed")
+}
+
+/// WAL-derived event repair. A checkpoint failure is retryable unless the
+/// existing changefeed boundary reports its exact closed-send sentinel. The
+/// sentinel is stringly typed because the existing production API does not expose a closed-writer type; backend errors are never parsed.
 pub(in crate::tx::drainer) async fn repair_event(
     repo: &RepoInstance,
     entry: &WalEntryV2,
@@ -42,13 +42,7 @@ pub(in crate::tx::drainer) async fn repair_event(
     let Some(event) = shamir_tx::event_from_wal_entry(entry) else {
         return Ok(Outcome::Gap(GapReason::UnknownWAL));
     };
-    let handle = match repo.changefeed().await {
-        Ok(handle) => handle,
-        Err(error) => {
-            log::warn!("orphan {version}: changefeed unavailable: {error}");
-            return Ok(Outcome::Gap(GapReason::EnqueueFailed));
-        }
-    };
+    let handle = repo.changefeed().await?;
     let feed = &handle.feed;
     let safe_horizon = feed.clean_horizon();
     if safe_horizon >= version {
@@ -57,14 +51,15 @@ pub(in crate::tx::drainer) async fn repair_event(
         )));
     }
 
-    // This ack is always queued, even if the confirmed watermark already
-    // reaches the version. It settles any timed-out earlier enqueue before
-    // the idempotence lookup.
+    // A failed preflight must not probe by enqueueing: an event may already
+    // be pending and an enqueue can duplicate it. Only the API's exact closed
+    // sender sentinel authorizes conservative GAP settlement.
     if let Err(error) = feed.record_clean_horizon(safe_horizon).await {
-        // A closed writer cannot acknowledge the prefix; return the conservative
-        // fallback so the caller marks a GAP instead of stranding the orphan.
-        log::warn!("orphan {version}: preflight writer barrier failed: {error}");
-        return Ok(Outcome::Gap(GapReason::EnqueueFailed));
+        if is_closed_writer(&error) {
+            log::warn!("orphan {version}: journal writer closed before repair");
+            return Ok(Outcome::Gap(GapReason::EnqueueFailed));
+        }
+        return Err(error);
     }
 
     let key = shamir_tx::changefeed::version_key(version);
@@ -76,25 +71,27 @@ pub(in crate::tx::drainer) async fn repair_event(
     if let Some(bytes) = rows.first() {
         let found = rmp_serde::from_slice::<shamir_tx::ChangelogEvent>(bytes)
             .map_err(|error| DbError::Codec(format!("orphan {version} event decode: {error}")))?;
-        if let Some(expected) = shamir_tx::event_from_wal_entry(entry) {
-            if found.commit_version == version {
-                if found == expected {
-                    return Ok(Outcome::Repaired);
-                }
-                return Err(DbError::Internal(format!(
-                    "orphan {version} existing journal event differs from WAL"
-                )));
+        if found.commit_version == version {
+            if found == event {
+                return Ok(Outcome::Repaired);
             }
+            return Err(DbError::Internal(format!(
+                "orphan {version} existing journal event differs from WAL"
+            )));
         }
     }
 
     let event = Arc::new(event);
+    let previous_gap = feed.first_gap_version();
     feed.journal_enqueue(&event);
-    if let Err(error) = feed.record_clean_horizon(safe_horizon).await {
-        // This command's failed send means the writer is closed. Event enqueue
-        // also marks the version gap when the channel is closed/full.
-        log::warn!("orphan {version}: journal confirmation failed: {error}");
+    if feed.first_gap_version() != previous_gap && feed.first_gap_version() == version {
         return Ok(Outcome::Gap(GapReason::EnqueueFailed));
+    }
+    if let Err(error) = feed.record_clean_horizon(safe_horizon).await {
+        if is_closed_writer(&error) {
+            return Ok(Outcome::Gap(GapReason::EnqueueFailed));
+        }
+        return Err(error);
     }
 
     let rows = handle

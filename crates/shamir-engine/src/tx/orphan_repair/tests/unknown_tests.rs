@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use bytes::Bytes;
 use shamir_wal::{WalEntryV2, WalEventHeader, WalOpV2};
 
@@ -5,6 +7,7 @@ use super::super::repair::repair_event;
 use super::super::repair::{GapReason, Outcome};
 use crate::repo::{BoxRepoFactory, RepoInstance};
 use crate::table::TableConfig;
+use crate::tx::tests::post_wal_orphan_ordering_tests::fixture;
 
 fn entry_without_event(version: u64) -> WalEntryV2 {
     WalEntryV2::new(version, 0, Vec::new()).with_commit_version(version)
@@ -19,6 +22,36 @@ fn eventless_header() -> WalEventHeader {
         table_names: Vec::new(),
         extra_changes: Vec::new(),
     }
+}
+
+#[tokio::test]
+async fn legacy_entry_drains_as_certified_gap() {
+    let (repo, _) = fixture("orphan_legacy_gap").await;
+    let gate = repo.tx_gate().await.unwrap();
+    let mut guard = gate.assign_next_version_guarded();
+    let version = guard.version();
+    guard.wal_accepted();
+    drop(guard);
+    let entry = Arc::new(WalEntryV2::new(version, 0, Vec::new()).with_commit_version(version));
+    repo.drainer().offer(entry);
+    assert_eq!(gate.durable_watermark(), 0);
+    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    assert_eq!(gate.durable_watermark(), version);
+    let handle = repo.changefeed().await.unwrap();
+    handle
+        .feed
+        .record_clean_horizon(gate.completion().watermark())
+        .await
+        .unwrap();
+    assert_eq!(handle.feed.clean_horizon(), version);
+    assert_eq!(handle.feed.first_gap_version(), version);
+    assert_eq!(
+        handle.feed.certified_gap_interval(),
+        Some((version, version))
+    );
+    let read = handle.feed.read_from(&handle.store, version, 1).await;
+    assert_eq!(read.events.len(), 0);
+    handle.feed.shutdown_and_wait().await.unwrap();
 }
 
 #[tokio::test]

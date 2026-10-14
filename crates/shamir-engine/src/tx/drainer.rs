@@ -369,25 +369,8 @@ impl Drainer {
         log::debug!("orphan journal repair totals: repaired={repaired}, gaps={gaps}");
     }
 
-    // Called only under the existing serialized replay guard. Count at most
-    // one failure per attempted orphan, not each failing operation/table.
     fn record_orphan_failure(&self, failed: &mut bool, error: impl std::fmt::Display) {
-        if *failed {
-            return;
-        }
-        *failed = true;
-        let mut error = error.to_string();
-        let mut end = error.len().min(1024);
-        while !error.is_char_boundary(end) {
-            end -= 1;
-        }
-        error.truncate(end);
-        error.shrink_to_fit();
-        self.orphan_replay_last_error.store(Some(Arc::new(error)));
-        self.orphan_replay_failures_total
-            .fetch_add(1, Ordering::Relaxed);
-        self.orphan_replay_consecutive_failures
-            .fetch_add(1, Ordering::Relaxed);
+        orphan_repair::record_orphan_failure(self, failed, error);
     }
 
     #[cfg(test)]
@@ -688,6 +671,10 @@ impl Drainer {
                 if gate.is_orphaned_post_wal(*k) {
                     break;
                 }
+            }
+            drop(guard2);
+            if window_entries.is_empty() {
+                orphan_repair::settle_missing_evidence(self, repo, &gate).await?;
             }
         }
 

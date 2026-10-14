@@ -1,4 +1,34 @@
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+use super::super::Drainer;
+
+pub(in crate::tx::drainer) fn record_orphan_failure(
+    drainer: &Drainer,
+    failed: &mut bool,
+    error: impl std::fmt::Display,
+) {
+    if *failed {
+        return;
+    }
+    *failed = true;
+    let mut error = error.to_string();
+    let mut end = error.len().min(1024);
+    while !error.is_char_boundary(end) {
+        end -= 1;
+    }
+    error.truncate(end);
+    error.shrink_to_fit();
+    drainer
+        .orphan_replay_last_error
+        .store(Some(Arc::new(error)));
+    drainer
+        .orphan_replay_failures_total
+        .fetch_add(1, Ordering::Relaxed);
+    drainer
+        .orphan_replay_consecutive_failures
+        .fetch_add(1, Ordering::Relaxed);
+}
 
 #[derive(Default)]
 pub(in crate::tx::drainer) struct Metrics {

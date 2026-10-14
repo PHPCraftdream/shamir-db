@@ -1,3 +1,5 @@
+use std::sync::atomic::Ordering;
+
 use bytes::Bytes;
 use shamir_tx::IsolationLevel;
 use shamir_types::types::value::InnerValue;
@@ -18,6 +20,7 @@ async fn orphan_is_repaired_and_bounded_pull_has_no_gap() {
         .unwrap();
     let version = panic_post_wal(&repo, &hook, tx).await;
     drop(snapshot);
+    let entry = repo.drainer().window_entry(version).unwrap();
     assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
     let (events, gap) = repo
         .read_changelog_for_replication(version, 10)
@@ -26,6 +29,10 @@ async fn orphan_is_repaired_and_bounded_pull_has_no_gap() {
     assert_eq!(gap, None);
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].event.commit_version, version);
+    assert_eq!(
+        events[0].event,
+        shamir_tx::event_from_wal_entry(&entry).unwrap()
+    );
     assert!(repo.drainer().window_entry(version).is_none());
 }
 
@@ -52,12 +59,36 @@ async fn existing_mismatch_is_error_and_orphan_is_preserved() {
         )
         .await
         .unwrap();
-    assert!(repair_event(&repo, &entry)
+    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 0);
+    assert_eq!(
+        repo.drainer()
+            .orphan_replay_failures_total
+            .load(Ordering::Relaxed),
+        1
+    );
+    assert!(repo
+        .drainer()
+        .orphan_replay_last_error
+        .load_full()
+        .as_ref()
+        .is_some_and(|error| error.contains("differs from WAL")));
+    let gate = repo.tx_gate().await.unwrap();
+    assert!(gate.is_orphaned_post_wal(version));
+    assert!(gate.durable_watermark() < version);
+    assert_eq!(repo.changefeed().await.unwrap().feed.first_gap_version(), 0);
+    let failed_row = handle
+        .store
+        .range_from(shamir_tx::changefeed::version_key(version), 1)
         .await
-        .unwrap_err()
-        .to_string()
-        .contains("differs from WAL"));
-    assert!(repo.tx_gate().await.unwrap().is_orphaned_post_wal(version));
+        .unwrap();
+    assert_eq!(failed_row.len(), 1);
+    assert_eq!(
+        rmp_serde::from_slice::<shamir_tx::ChangelogEvent>(&failed_row[0]).unwrap(),
+        wrong
+    );
+    let gate = repo.tx_gate().await.unwrap();
+    assert!(gate.is_orphaned_post_wal(version));
+    assert_eq!(gate.durable_watermark() + 1, version);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
