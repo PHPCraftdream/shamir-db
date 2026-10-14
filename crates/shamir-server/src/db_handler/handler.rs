@@ -73,9 +73,7 @@ use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::{Session, SessionStore};
 
 use shamir_db::access::Actor;
-use shamir_db::engine::repo::DurabilityPolicy;
 use shamir_db::query::batch::{BatchError, BatchOp, BatchRequest};
-use shamir_db::RepoAdminObserver;
 use shamir_db::ShamirDb;
 use shamir_query_types::batch::BatchTreeVisitor;
 
@@ -96,6 +94,7 @@ use super::admin::{
 };
 use super::config::{CursorLimitsCap, NodeMode, QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
 use super::cursor_handlers::{authorize_cursor_read, error_response};
+use super::repo_audit;
 use super::subscribe_handler;
 
 /// Absolute lifetime cap for an interactive (Phase B) transaction — bounds

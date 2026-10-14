@@ -26,7 +26,36 @@ use shamir_types::types::value::QueryValue;
 
 use crate::DbError;
 
-/// Encode an override into the `durability` record value.
+pub(crate) fn repository_record(
+    db_name: &str,
+    repo_name: &str,
+    engine: &str,
+    path: Option<&str>,
+    meta: &shamir_types::access::ResourceMeta,
+    durability: Option<&DurabilityOverride>,
+) -> QueryValue {
+    let mut fields = new_map();
+    fields.insert("db_name".to_string(), QueryValue::Str(db_name.to_string()));
+    fields.insert(
+        "repo_name".to_string(),
+        QueryValue::Str(repo_name.to_string()),
+    );
+    fields.insert("engine".to_string(), QueryValue::Str(engine.to_string()));
+    fields.insert(
+        "path".to_string(),
+        path.map(|p| QueryValue::Str(p.to_string()))
+            .unwrap_or(QueryValue::Null),
+    );
+    let mut record = QueryValue::Map(fields);
+    meta.inject_into(&mut record);
+    if let Some(over) = durability {
+        if let QueryValue::Map(fields) = &mut record {
+            fields.insert("durability".to_string(), durability_to_record(over));
+        }
+    }
+    record
+}
+
 pub(crate) fn durability_to_record(over: &DurabilityOverride) -> QueryValue {
     let mut m = new_map();
     if let Some(wal_commit) = over.wal_commit {

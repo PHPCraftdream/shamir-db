@@ -10,10 +10,10 @@ use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::{Session, SessionPermissions};
 use shamir_db::access::{principal64, Actor};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
-use shamir_db::ports::RepoAdminObserver;
+use shamir_db::engine::table::TableConfig;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
-use shamir_query_builder::filter::lit;
+use shamir_query_builder::val::lit;
 use shamir_query_types::batch::BatchRequest;
 use shamir_query_types::durability::{DurabilityOverride, WalCommitTier};
 use shamir_query_types::wire::{DbRequest, DbResponse};
@@ -54,7 +54,7 @@ async fn fixture() -> (ShamirDbHandler, Arc<MemoryAppender>, Session) {
     db.create_db_as("app", owner.clone()).await;
     db.add_repo_as(
         "app",
-        RepoConfig::new("main", BoxRepoFactory::in_memory()),
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items")),
         owner,
     )
     .await
@@ -151,7 +151,7 @@ async fn permission_and_invalid_alters_emit_no_audit_event() {
     let denied = session(false, [4; 16]);
     let denied_response = send(&handler, &denied, alter_batch("denied", "main", true)).await;
     assert!(
-        matches!(denied_response, DbResponse::Error { ref code, .. } if code == "access_denied")
+        matches!(denied_response, DbResponse::Error { ref code, .. } if code == "permission_denied")
     );
     assert!(appender.0.lock().is_empty());
 
@@ -159,7 +159,7 @@ async fn permission_and_invalid_alters_emit_no_audit_event() {
     let mut invalid = Batch::new();
     invalid.alter_repo("invalid", shamir_query_builder::ddl::alter_repo("missing"));
     let invalid_response = send(&handler, &permitted, invalid.build()).await;
-    assert!(matches!(invalid_response, DbResponse::Error { ref code, .. } if code == "query"));
+    assert!(matches!(invalid_response, DbResponse::Error { ref code, .. } if code == "unknown_db"));
     assert!(appender.0.lock().is_empty());
 }
 
@@ -217,6 +217,48 @@ async fn foreach_execution_audits_each_alter_iteration() {
     outer.for_each("loop", vec![lit(1), lit(2)], "item", body.build());
     let _ = send(&handler, &session, outer.build()).await;
     assert_eq!(appender.0.lock().len(), 2);
+}
+
+#[tokio::test]
+async fn interactive_tx_execute_audits_successful_alter_before_failure_and_rollback() {
+    let (handler, appender, session) = fixture().await;
+    let opened = handler
+        .tx_begin(&session, CURRENT_QUERY_LANG_VERSION, "app", "main", None)
+        .await;
+    let handle = match opened {
+        DbResponse::TxOpened { tx_handle, .. } => tx_handle,
+        other => panic!("expected interactive transaction, got {other:?}"),
+    };
+
+    let mut batch = Batch::new();
+    let alter = batch.alter_repo(
+        "alter",
+        shamir_query_builder::ddl::alter_repo("main").durability(Some(DurabilityOverride {
+            wal_commit: Some(WalCommitTier::Synced),
+            ..Default::default()
+        })),
+    );
+    let invalid = batch.op("invalid", shamir_query_builder::ddl::alter_repo("missing"));
+    batch.after(&invalid, &alter);
+    batch.return_only(Vec::<String>::new());
+    let request = DbRequest::TxExecute {
+        query_version: CURRENT_QUERY_LANG_VERSION,
+        db: "app".into(),
+        tx_handle: handle,
+        batch: batch.build(),
+    };
+    let bytes = rmp_serde::to_vec_named(&request).unwrap();
+    let response = handler
+        .handle(&session, &bytes, &ConnectionServices::without_push(0))
+        .await
+        .unwrap();
+    let response: DbResponse = rmp_serde::from_slice(&response).unwrap();
+    assert!(matches!(response, DbResponse::Error { ref code, .. } if code == "unknown_db"));
+    assert_eq!(appender.0.lock().len(), 1);
+    assert!(matches!(
+        handler.tx_rollback(&session, "app", handle).await,
+        DbResponse::TxRolledBack { .. }
+    ));
 }
 
 #[test]

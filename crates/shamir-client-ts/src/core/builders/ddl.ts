@@ -63,7 +63,7 @@ import type {
   RollbackMigrationOp,
 } from '../types/ddl.js';
 import { assertSafeVersion } from './write.js';
-import { createRepo, alterRepo, describeRepo } from './repo-admin/index.js';
+import { createRepo, alterRepo, describeRepo } from './admin/repo-admin/index.js';
 import {
   canonicalDropDb,
   canonicalDropRepo,
@@ -1345,7 +1345,7 @@ export function describeTable(
   };
 }
 
-export { createRepo, alterRepo, describeRepo } from './repo-admin/index.js';
+export { createRepo, alterRepo, describeRepo } from './admin/repo-admin/index.js';
 
 /** Aggregate namespace — every DDL constructor in one object. */
 export const ddl = {

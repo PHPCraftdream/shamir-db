@@ -4,4 +4,6 @@
 
 mod record;
 
-pub(crate) use record::{durability_from_record, durability_to_record, merge_override};
+pub(crate) use record::{
+    durability_from_record, durability_to_record, merge_override, repository_record,
+};

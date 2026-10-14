@@ -11,7 +11,7 @@ use shamir_db::query::batch::BatchError;
 use shamir_db::{ShamirDb, SystemStoreConfig};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
-use shamir_query_builder::write::{doc, insert};
+use shamir_query_builder::write::{doc, Insert};
 use shamir_query_types::durability::{DurabilityOverride, ReplicationServe, RetentionOverflow};
 use shamir_types::types::value::QueryValue;
 
@@ -384,10 +384,9 @@ async fn hybrid_repo_accepts_durability_override() {
 }
 
 /// The public DB path persists and live-swaps ALTER before returning; the
-/// same client then commits a table write and observes its recoverable prefix
-/// at ACK, covering the integrated admin-to-WAL path (not a direct setter).
+/// subsequent committed prefix is recoverable when sampled after completion.
 #[tokio::test]
-async fn alter_repo_synced_commit_is_recoverable_at_ack() {
+async fn alter_repo_synced_commit_has_recoverable_prefix_after_return() {
     let dir = tempfile::tempdir().unwrap();
     let data_root = dir.path().join("metadata");
     let db = ShamirDb::init(SystemStoreConfig::Fjall(data_root.join("system.redb")))
@@ -411,23 +410,43 @@ async fn alter_repo_synced_commit_is_recoverable_at_ack() {
         .await
         .unwrap();
 
-    let repo = db.get_db("testdb").unwrap().get_repo("r1").unwrap();
-    let group = repo.wal_group().await.unwrap();
+    let mut create_items = Batch::new();
+    create_items.id(3);
+    create_items.create_table("create_items", ddl::create_table("items").repo("r1"));
+    db.execute("testdb", &create_items.to_request_via_msgpack())
+        .await
+        .unwrap();
+
     let mut batch = Batch::new();
-    batch.id(3);
+    batch.id(4);
     batch.insert(
         "insert_item",
-        insert::with_repo("r1", "items").row(doc().set("value", 1)),
+        Insert::with_repo("r1", "items").row(doc().set("value", 1)),
     );
     db.execute("testdb", &batch.to_request_via_msgpack())
         .await
         .unwrap();
-    let committed = group.max_committed_version();
+    let committed = db
+        .get_db("testdb")
+        .unwrap()
+        .get_repo("r1")
+        .unwrap()
+        .wal_group()
+        .await
+        .unwrap()
+        .max_committed_version();
     assert!(committed > 0, "the DB client must commit through r1");
     assert_eq!(
-        group.recoverable_through(),
+        db.get_db("testdb")
+            .unwrap()
+            .get_repo("r1")
+            .unwrap()
+            .wal_group()
+            .await
+            .unwrap()
+            .recoverable_through(),
         committed,
-        "ALTER-installed Synced policy must make the committed prefix recoverable before ACK"
+        "Synced policy should cover the committed prefix sampled after the request returns"
     );
 }
 
@@ -498,9 +517,11 @@ async fn concurrent_alters_preserve_both_patches() {
         "alter_retention",
         ddl::alter_repo("r1").durability(Some(big_retention_override())),
     );
+    let tier_request = tier_batch.to_request_via_msgpack();
+    let retention_request = retention_batch.to_request_via_msgpack();
     let (tier_result, retention_result) = tokio::join!(
-        db.execute("testdb", &tier_batch.to_request_via_msgpack()),
-        db.execute("testdb", &retention_batch.to_request_via_msgpack()),
+        db.execute("testdb", &tier_request),
+        db.execute("testdb", &retention_request),
     );
     tier_result.unwrap();
     retention_result.unwrap();

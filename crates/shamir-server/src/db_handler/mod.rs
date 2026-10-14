@@ -3,8 +3,10 @@ mod config;
 mod cursor_handlers;
 mod handler;
 mod repl_handler;
+#[path = "repo_admin/repo_audit.rs"]
 mod repo_audit;
 mod subscribe_handler;
+#[path = "repo_admin/tx_handlers.rs"]
 mod tx_handlers;
 mod visibility_handlers;
 

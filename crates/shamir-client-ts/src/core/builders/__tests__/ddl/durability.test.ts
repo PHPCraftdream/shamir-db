@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { createRepo, alterRepo, describeRepo } from '../repo-admin/index.js';
-import { validateWalRetentionBudget } from '../durability.js';
-import { encode, decode } from '../../framing.js';
+import { createRepo, alterRepo, describeRepo } from '../../admin/repo-admin/index.js';
+import { encode, decode } from '../../../framing.js';
 
 describe('repository durability builders', () => {
   it('emits sparse create and alter overrides losslessly', () => {

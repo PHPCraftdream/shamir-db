@@ -31,7 +31,7 @@ export interface DurabilityOverride {
   on_wal_retention_exceeded?: WalRetentionExceeded;
   replication_serve?: ReplicationServe;
 }
-/** Effective durability uses native integers, or decimal strings for u64 values above i64::MAX. */
+/** Effective durability uses native integers up to i64::MAX, or decimal strings above i64::MAX; integer decoding yields number or bigint according to MessagePack width. */
 export interface EffectiveDurability {
   wal_commit: WalCommit;
   wal_retention_max_bytes: number | bigint | string;

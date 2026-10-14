@@ -11,6 +11,7 @@
 //! engine re-export (`crate::engine::tx::*`) — the same concrete `shamir-tx`
 //! types the server names. See `docs/dev-artifacts/roadmap/PHASE_B_INTERACTIVE_TX.md` §5.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use shamir_query_types::batch::{ExecPolicy, VisibilityWait};
@@ -163,6 +164,30 @@ impl ShamirDb {
         policy: ExecPolicy,
         deadline_cap: Option<Duration>,
     ) -> Result<BatchResponse, BatchError> {
+        self.tx_execute_with_policy_and_budget_and_repo_observer(
+            actor,
+            db_name,
+            request,
+            tx,
+            policy,
+            deadline_cap,
+            None,
+        )
+        .await
+    }
+
+    /// Execute in an open transaction with a per-execution admin observer.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn tx_execute_with_policy_and_budget_and_repo_observer(
+        &self,
+        actor: Actor,
+        db_name: &str,
+        request: &BatchRequest,
+        tx: &mut crate::engine::tx::TxContext,
+        policy: ExecPolicy,
+        deadline_cap: Option<Duration>,
+        repo_admin_observer: Option<Arc<dyn crate::RepoAdminObserver>>,
+    ) -> Result<BatchResponse, BatchError> {
         // Authorization must consume, not renew, the caller's remaining budget.
         let started = Instant::now();
         let mut auth = Authorized::authorize(request, actor, db_name, self)
@@ -184,7 +209,7 @@ impl ShamirDb {
             shamir: self.clone(),
             db_name: db_name.to_string(),
             actor: auth.actor().clone(),
-            repo_admin_observer: None,
+            repo_admin_observer,
         };
         let invoker = ShamirFunctionInvoker {
             shamir: self.clone(),

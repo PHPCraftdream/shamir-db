@@ -23,7 +23,7 @@ export {
   // directly from './select.js'.
 } from './select.js';
 export * from './write.js';
-export * from './repo-admin/index.js';
+export * from './admin/repo-admin/index.js';
 export {
   currentOnly, olderThan, olderThanAge,
   FieldBuilder,
@@ -46,7 +46,7 @@ export {
   // `field` is NOT re-exported here — it collides with select.field.
   // Use `ddl.field(...)` or import directly from './ddl.js'.
 } from './ddl.js';
-export * from './admin.js';
+export * from './admin/index.js';
 export * from './replication.js';
 export * from './query.js';
 export * from './call.js';

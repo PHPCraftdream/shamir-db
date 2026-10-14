@@ -91,7 +91,7 @@ const alter = ddl.alterRepo('archive', { wal_retention_max_bytes: 1073741824 });
 const described = ddl.describeRepo('archive');
 ```
 
-`DESCRIBE REPO` is built with `ddl.describeRepo('archive')` and reports effective `durability` and the sparse `durability_override`. Retention accepts positive safe numbers, bigint, or canonical decimal strings; >i64::MAX input is sent losslessly as decimal text. Effective integer response values decode as safe numbers or bigint according to the MessagePack frame, not as universal strings. Unknown fields and invalid enum values are rejected. Retention must be at least twice the effective WAL segment size. `completed_reseed` is rejected because it is not implemented; only `durable` is supported. In-memory and hybrid WALs ignore `wal_commit`; selecting `synced` does not make them persistent.
+`DESCRIBE REPO` строится через `ddl.describeRepo('archive')` и сообщает эффективную `durability` и sparse `durability_override`. Rust DTO запроса всегда передаёт retention десятичной строкой. TypeScript принимает положительные безопасные числа, `bigint` или канонические десятичные строки и без потери точности нормализует значения выше `i64::MAX` в текст. В эффективном ответе значения до `i64::MAX` включительно — native MessagePack integer, декодируемый в TypeScript как `number` или `bigint` согласно ширине wire integer; значения выше `i64::MAX` — десятичные строки. Неизвестные поля и недопустимые значения enum отклоняются. Retention должен быть не меньше удвоенного effective WAL segment size. `completed_reseed` отклоняется как нереализованный режим; поддерживается только `durable`. In-memory и hybrid WAL игнорируют `wal_commit`; выбор `synced` не делает их persistent.
 
 ### After a leader crash
 

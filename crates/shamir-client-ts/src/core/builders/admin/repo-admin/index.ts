@@ -1,6 +1,6 @@
-import type { CreateRepoOp, AlterRepoOp, DescribeRepoOp, DurabilityOverride } from '../../types/ddl.js';
-import { durabilityOverride } from '../durability.js';
-export { validateWalRetentionBudget } from '../durability.js';
+import type { CreateRepoOp, AlterRepoOp, DescribeRepoOp, DurabilityOverride } from '../../../types/ddl.js';
+import { durabilityOverride } from './durability.js';
+export { validateWalRetentionBudget } from './durability.js';
 
 /** CREATE REPO preserves the established engine/path/tables/if_not_exists options. */
 export function createRepo(
