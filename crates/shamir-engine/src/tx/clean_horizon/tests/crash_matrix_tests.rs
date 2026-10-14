@@ -26,7 +26,7 @@ const PHASES: [&str; 4] = [
 ];
 const RECORDS: usize = 80;
 
-async fn count_rows(table: &crate::table::Table) -> usize {
+async fn count_rows(table: &crate::table::TableManager) -> usize {
     let stream = table.list_stream(256);
     pin_mut!(stream);
     let mut count = 0;

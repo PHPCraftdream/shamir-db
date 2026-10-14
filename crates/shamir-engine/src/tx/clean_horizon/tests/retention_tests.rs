@@ -5,11 +5,12 @@ use std::sync::Arc;
 
 use crate::repo::{BoxRepo, BoxRepoFactory, DurabilityPolicy, RepoInstance};
 use crate::table::TableConfig;
+use crate::tx::clean_horizon::checkpoint::test_seam;
 use crate::tx::clean_horizon::retention::{enforce_retention, RetentionAction};
 use crate::tx::drainer::Drainer;
 use futures::{pin_mut, StreamExt};
 
-async fn count_rows(table: &crate::table::Table) -> usize {
+async fn count_rows(table: &crate::table::TableManager) -> usize {
     let stream = table.list_stream(256);
     pin_mut!(stream);
     let mut count = 0;
@@ -127,7 +128,7 @@ async fn declare_gap_persists_floor_and_unlinks_safe_retained_wal() {
     );
     let feed = repo.changefeed().await.unwrap().feed;
     assert!(feed.certified_gap_interval().is_some());
-    let store = repo.repo.store_get("__changelog__").await.unwrap();
+    let store = repo.changelog_store_for_test().await.unwrap();
     let raw_j = store
         .get(shamir_tx::changefeed::clean_horizon_key().into())
         .await
