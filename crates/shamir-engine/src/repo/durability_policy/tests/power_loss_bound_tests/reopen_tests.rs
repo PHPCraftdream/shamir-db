@@ -322,8 +322,11 @@ fn completed_reseed_policy() -> DurabilityPolicy {
 /// serve a speculative page (v2 exists in W and the journal but NOT in R),
 /// then lose exactly the unsynced tail bytes. Returns the identity BEFORE
 /// the loss and the fixture path — the caller reopens with its own policy.
-/// Dropping the `TempDir` inside `DiskFixture` cleans everything up.
-async fn arm_serve_and_lose_speculative_tail(name: &str) -> (RepoIdentity, std::path::PathBuf) {
+/// The owning `TempDir` is returned to the caller: dropping it here would
+/// delete the data/WAL directory BEFORE the caller's reopen (empty repo).
+async fn arm_serve_and_lose_speculative_tail(
+    name: &str,
+) -> (RepoIdentity, std::path::PathBuf, tempfile::TempDir) {
     let fx = helpers::disk_repo(name).await;
     fx.repo.set_durability(completed_reseed_policy()).unwrap();
     helpers::append_wal(&fx.repo, 1, WalDurability::Synced)
@@ -378,7 +381,7 @@ async fn arm_serve_and_lose_speculative_tail(name: &str) -> (RepoIdentity, std::
         .unwrap()
         .set_len(safe_len)
         .unwrap();
-    (before, backing)
+    (before, backing, _dir)
 }
 
 /// Reopening after losing the unsynced tail under `CompletedReseed` serving
@@ -387,7 +390,7 @@ async fn arm_serve_and_lose_speculative_tail(name: &str) -> (RepoIdentity, std::
 /// metrics, and fences any follower bookmark recorded against the old epoch.
 #[tokio::test(start_paused = true)]
 async fn completed_reseed_speculative_tail_loss_bumps_epoch_and_fences_old_bookmark() {
-    let (before, backing) = arm_serve_and_lose_speculative_tail("spec-tail").await;
+    let (before, backing, _dir) = arm_serve_and_lose_speculative_tail("spec-tail").await;
     // Reopen with the SAME completed_reseed policy: recovery runs the
     // unclean-open bump hook (Armed record, no Clean certificate).
     let reopened = RepoInstance::from_factory_with_durability(
@@ -440,7 +443,7 @@ async fn completed_reseed_speculative_tail_loss_bumps_epoch_and_fences_old_bookm
 #[tokio::test(start_paused = true)]
 async fn completed_reseed_seam_suppresses_unclean_epoch_bump() {
     SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST.store(true, Ordering::Release);
-    let (before, backing) = arm_serve_and_lose_speculative_tail("spec-tail-seam").await;
+    let (before, backing, _dir) = arm_serve_and_lose_speculative_tail("spec-tail-seam").await;
     let reopened = RepoInstance::from_factory_with_durability(
         "spec-tail-seam".into(),
         BoxRepoFactory::fjall_raw(backing),
@@ -469,7 +472,7 @@ async fn completed_reseed_seam_suppresses_unclean_epoch_bump() {
 /// bump, not the mode).
 #[tokio::test(start_paused = true)]
 async fn durable_reopen_after_fast_period_loss_bumps_epoch_armed_survives_config_change() {
-    let (before, backing) = arm_serve_and_lose_speculative_tail("spec-tail-dur").await;
+    let (before, backing, _dir) = arm_serve_and_lose_speculative_tail("spec-tail-dur").await;
     // `open()` reopens under the default `durable` serve mode — the record
     // decision is mode-independent, so the hook bumps exactly once.
     let reopened = open(&backing, "spec-tail-dur").await;

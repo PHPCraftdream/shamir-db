@@ -117,30 +117,15 @@ impl RepoInstance {
     /// Later setters use the same captured segment size as WAL rotation.
     pub fn set_durability(&self, policy: DurabilityPolicy) -> DbResult<()> {
         let resolved = resolve(&policy, None, self.wal_segment_bytes)?;
-        // Backend-combination validation. This is a COLD admin path — one
-        // call per open or per admin operation — never a hot path, so plain
-        // branches are fine.
-        //
         // `completed_reseed` on an ephemeral backend (in-memory / hybrid;
         // Mem WAL sink, `!has_persistent_wal()`) is ALLOWED: it is the only
-        // honest serve mode when nothing survives a restart. `durable`
-        // serving on an ephemeral backend is NOT rejected here (durable mem
-        // repos are relied on by tests and legal at the engine layer); that
-        // combination is validated at publication time, server-side.
-        if resolved.effective_wal_commit() == shamir_query_types::WalCommitTier::Synced
-            && !self.has_persistent_wal()
-        {
-            // Loud rejection instead of `for_wal_backend`'s silent
-            // downgrade: an explicit admin request for Synced on a backend
-            // with no persistent WAL is a configuration error, and the
-            // resolved-before-forcing value is what the operator asked for.
-            return Err(DbError::Storage(format!(
-                "durability.wal_commit = synced requires a file-backed WAL, \
-                 but the repo backend is ephemeral (no persistent WAL); \
-                 requested tier {:?} would be silently downgraded to buffered",
-                resolved.wal_commit(),
-            )));
-        }
+        // honest serve mode when nothing survives a restart. `wal_commit`
+        // tiers that need a persistent WAL (e.g. `synced`) are silently
+        // downgraded by `for_wal_backend`, with one warn line per open at
+        // WAL open. Durable serving on an ephemeral backend is NOT rejected
+        // here (durable mem repos are relied on by tests and legal at the
+        // engine layer); durable-ephemeral publication-time validation lives
+        // server-side.
         let policy = resolved.for_wal_backend(self.wal_dir.is_some());
         self.durability.store(Arc::new(policy));
         Ok(())

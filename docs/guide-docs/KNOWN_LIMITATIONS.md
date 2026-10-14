@@ -720,8 +720,10 @@ artifact).
   RAM-backed, so every reopen — clean or not — mints a new incarnation /
   new lineage), so they may serve replication only with explicit
   `completed_reseed`; an admin `set_durability` of `wal_commit: synced` on
-  them is rejected with a typed error naming `synced` and "no persistent
-  WAL". Under `durable` mode shutdown writes no `Clean` certificate.
+  them is IGNORED (silently downgraded to `buffered` via `for_wal_backend`,
+  with one warn line per open). Under `durable` mode shutdown writes no
+  `Clean` certificate. The only ephemeral-backend rule PR8 adds is that
+  explicit `completed_reseed` is required at publication time.
 - **Connected followers learn of a `history_epoch` bump only on their next
   fenced pull.** The PR7 fence runs at Hello and before every Pull (before
   any decode/apply), so until that next fenced pull a follower keeps its

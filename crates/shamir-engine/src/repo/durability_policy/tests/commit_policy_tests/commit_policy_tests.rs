@@ -150,23 +150,17 @@ async fn policy_store_through_one_clone_is_visible_through_another() {
 
 #[test]
 fn public_policy_setter_rejects_invalid_modes_without_changing_clones() {
+    // `synced` alone is VALID again (silently downgraded on ephemeral
+    // backends); only the retention-under-floor entry stays invalid.
     let repo = helpers::mem_repo("setter-validation");
     let clone = repo.clone();
     let before = **clone.durability_policy();
-    for invalid in [
-        DurabilityPolicy::new(
-            WalCommitTier::Synced,
-            DEFAULT_WAL_RETENTION_MAX_BYTES,
-            RetentionOverflow::RefuseWrites,
-            ReplicationServe::CompletedReseed,
-        ),
-        DurabilityPolicy::new(
-            WalCommitTier::Synced,
-            1,
-            RetentionOverflow::RefuseWrites,
-            ReplicationServe::Durable,
-        ),
-    ] {
+    for invalid in [DurabilityPolicy::new(
+        WalCommitTier::Synced,
+        1,
+        RetentionOverflow::RefuseWrites,
+        ReplicationServe::Durable,
+    )] {
         assert!(repo.set_durability(invalid).is_err());
         assert_eq!(**clone.durability_policy(), before);
     }

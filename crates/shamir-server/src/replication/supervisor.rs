@@ -437,6 +437,11 @@ impl SubscriptionSupervisor {
                                 error = %e,
                                 "identity fence tripped; quarantine disabled by test seam"
                             );
+                            // Negative control must exercise the UNPROTECTED
+                            // path — the pre-quarantine production behaviour,
+                            // i.e. the generic terminal mapping.
+                            super::source::seed::terminal::persist_terminal(&local, &sub_name, &e)
+                                .await;
                         } else {
                             // Same catalogue state the gap path persists via
                             // `mark_subscription_resync_required`

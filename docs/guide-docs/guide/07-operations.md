@@ -514,10 +514,11 @@ prefix и собственно скорость apply follower; это разн�
 сохраняет durable-floor-before-history ordering независимо от режима.
 
 Явная админ-установка `set_durability` с `wal_commit: synced` на
-in-memory/hybrid репозитории (нет persistent WAL) отвергается typed
-ошибкой (называет `synced` и "no persistent WAL"); `completed_reseed` на
-них разрешён, `durable` разрешён на engine-уровне и проверяется при
-publication time.
+in-memory/hybrid репозитории (нет persistent WAL) НЕ отвергается:
+`synced` игнорируется — тихое понижение до `buffered` через
+`for_wal_backend` с одним warn в лог на каждый open; `completed_reseed`
+на них разрешён (и обязателен явно при publication), `durable`
+разрешён на engine-уровне и проверяется при publication time.
 
 Стоимость (hot path): commit path не изменён; serve path добавляет один
 атомарный load policy/mode на каждую replication page read и, при первом

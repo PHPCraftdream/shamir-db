@@ -13,18 +13,12 @@ async fn mem_sink_keeps_r_equal_w_regardless_of_policy() {
     let repo = helpers::mem_repo("mem_r_equals_w");
     let clone = repo.clone();
     clone
-        .set_durability(
-            super::super::DurabilityPolicy::new(
-                super::super::WalCommitTier::Synced,
-                super::super::DEFAULT_WAL_RETENTION_MAX_BYTES,
-                super::super::RetentionOverflow::RefuseWrites,
-                super::super::ReplicationServe::Durable,
-            )
-            // PR8: an explicit admin `set_durability` now LOUDLY rejects
-            // Synced on an ephemeral backend, so pre-force the effective
-            // tier the way `for_wal_backend` (default construction) does.
-            .for_wal_backend(false),
-        )
+        .set_durability(super::super::DurabilityPolicy::new(
+            super::super::WalCommitTier::Synced,
+            super::super::DEFAULT_WAL_RETENTION_MAX_BYTES,
+            super::super::RetentionOverflow::RefuseWrites,
+            super::super::ReplicationServe::Durable,
+        ))
         .unwrap();
     let policy = repo.durability_policy();
     assert_eq!(policy.wal_commit(), super::super::WalCommitTier::Synced);
@@ -88,9 +82,9 @@ async fn hybrid_reopen_starts_a_new_lineage_and_keeps_no_table_data() {
         super::super::RetentionOverflow::RefuseWrites,
         super::super::ReplicationServe::Durable,
     )
-    // Hybrid backend: Mem WAL sink, no persistent WAL. PR8 `set_durability`
-    // rejects Synced on ephemeral backends, so install the effective tier.
-    .for_wal_backend(false);
+    // Hybrid backend: Mem WAL sink, no persistent WAL; the Synced tier is
+    // silently downgraded by `for_wal_backend`.
+    ;
     let repo = RepoInstance::from_factory_with_durability(
         "hybrid-policy".into(),
         BoxRepoFactory::hybrid(path.clone()),
@@ -148,14 +142,15 @@ async fn hybrid_reopen_starts_a_new_lineage_and_keeps_no_table_data() {
 }
 
 /// PR8 chunk 1: on an ephemeral backend `completed_reseed` set_durability
-/// SUCCEEDS (the only honest serve mode there), while an explicitly
-/// requested `synced` commit tier is loudly rejected with a message naming
-/// both values instead of `for_wal_backend`'s silent downgrade.
+/// SUCCEEDS (the only honest serve mode there), and an explicitly
+/// requested `synced` commit tier is silently downgraded to `buffered`
+/// via `for_wal_backend` — the requested tier stays visible in
+/// `wal_commit()` while `effective_wal_commit()` reports the downgrade.
 #[tokio::test]
-async fn set_durability_accepts_completed_reseed_but_rejects_synced_on_mem_backend() {
+async fn set_durability_downgrades_synced_to_buffered_on_mem_backend() {
     let repo = helpers::mem_repo("mem_completed_reseed_set");
     repo.set_durability(super::super::DurabilityPolicy::new(
-        super::super::WalCommitTier::Buffered,
+        super::super::WalCommitTier::Synced,
         super::super::DEFAULT_WAL_RETENTION_MAX_BYTES,
         super::super::RetentionOverflow::RefuseWrites,
         super::super::ReplicationServe::CompletedReseed,
@@ -163,35 +158,17 @@ async fn set_durability_accepts_completed_reseed_but_rejects_synced_on_mem_backe
     .unwrap();
     let policy = repo.durability_policy();
     assert_eq!(
-        policy.replication_serve(),
-        super::super::ReplicationServe::CompletedReseed
+        policy.wal_commit(),
+        super::super::WalCommitTier::Synced,
+        "the requested tier is stored unchanged"
     );
     assert_eq!(
         policy.effective_wal_commit(),
-        super::super::WalCommitTier::Buffered
+        super::super::WalCommitTier::Buffered,
+        "silent downgrade via for_wal_backend, exactly like default construction"
     );
-    drop(policy);
-
-    let err = repo
-        .set_durability(super::super::DurabilityPolicy::new(
-            super::super::WalCommitTier::Synced,
-            super::super::DEFAULT_WAL_RETENTION_MAX_BYTES,
-            super::super::RetentionOverflow::RefuseWrites,
-            super::super::ReplicationServe::CompletedReseed,
-        ))
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains("synced") && err.contains("no persistent WAL"),
-        "loud rejection must name the requested tier and the ephemeral backend: {err}"
-    );
-    // The rejected store must leave the shared policy cell unchanged.
     assert_eq!(
-        repo.durability_policy().replication_serve(),
+        policy.replication_serve(),
         super::super::ReplicationServe::CompletedReseed
-    );
-    assert_eq!(
-        repo.durability_policy().effective_wal_commit(),
-        super::super::WalCommitTier::Buffered
     );
 }

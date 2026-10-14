@@ -229,13 +229,8 @@ async fn load_lifecycle_record(store: &Arc<dyn Store>) -> DbResult<Option<Lifecy
 }
 
 /// One atomic store value; `set` then `flush` so the state never survives a
-/// crash half-written.
-async fn save_lifecycle_record(store: &Arc<dyn Store>, state: LifecycleState) -> DbResult<()> {
-    save_lifecycle_record_inner(store, state, true).await
-}
-
-/// Inner save with a caller-controlled flush; only the negative-control seams
-/// below may pass `flush: false`.
+/// crash half-written. Only the negative-control seams below may pass
+/// `flush: false`.
 async fn save_lifecycle_record_inner(
     store: &Arc<dyn Store>,
     state: LifecycleState,
