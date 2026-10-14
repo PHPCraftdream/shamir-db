@@ -10,9 +10,9 @@
 структурированные логи, rate-limit, audit trail. Этот этаж — о том, как
 ShamirDB живёт в проде.
 
-## 1. Один бинарник — все режимы
+Server configuration is strict: unknown top-level sections are rejected, and `logging.level` is validated against supported levels. Correct section/key names and log-level values before startup; these mistakes are not silently ignored. See [PR1c migration](./PR1C-MIGRATION.md).
 
-ShamirDB — self-contained бинарник (`shamir-server`). Режим запуска
+## 1. Один бинарник — все режимы
 определяется подкомандой:
 
 ```bash
@@ -346,7 +346,7 @@ VisibilityWait::Bounded { timeout_ms: 0 }).await?`. Zero is an immediate
 predicate check, not infinity. Strict is explicit and may wait indefinitely.
 Use the SAME repository incarnation; names cannot detect deletion/recreation.
 Observation proves settlement through a position, not whether an unknown write
-committed, and upgrades neither durability nor async-index readiness.
+committed, and upgrades neither durability nor `async` index visibility.
 
 Rust positions stay `u64`; TS reconciliation/prefix positions are `bigint`.
 Transaction version fields accept a documented lossless wire dual (`number |
@@ -857,11 +857,11 @@ not a retry signal. Dependent read aliases report `visibility_dependency_pending
 in their `value`, with the awaited position and `skipped: true`, without executing
 the read. Data-flow consumers also stop; unrelated operations inside nested
 bodies and across ForEach iterations continue. Same-connection order is not a fence.
-The budget excludes inner commit (including async-index durability-error tail
+The budget excludes inner commit (including asynchronous index-visibility durability-error tail
 awaits), admission and network backpressure; post-ack soft pressure is not a
 hard memory admission guarantee. Reconcile Pending with WaitForVisibility and
 open a new snapshot for reads. Materialization is independent of visibility.
-Protocol v3 gating is unchanged; supported SDK adoption remains VIS-5 work.
+Protocol v4 gating is current; query-v3 requests are rejected. See [PR1c migration](./PR1C-MIGRATION.md). Supported SDK adoption remains VIS-5 work.
 Ktav uses `transactions: { visibility_ack_mode: strict ... }` with the same keys.
 
 VIS-4c exposes this policy as metrics: acknowledgement duration histograms

@@ -18,7 +18,9 @@ use crate::query::batch::{
 };
 use crate::query::read::QueryResult;
 use shamir_collections::TFxSet;
-use shamir_query_types::batch::ResultEncoding;
+use shamir_query_types::batch::{
+    IndexVisibility, IsolationLevel as WireIsolationLevel, RequestDurability, ResultEncoding,
+};
 use shamir_tx::CommitVisibility;
 use shamir_types::access::Actor;
 use shamir_types::types::common::{new_map, new_map_wc, TMap};
@@ -204,7 +206,7 @@ pub(super) async fn plan_and_validate_batch(
 }
 
 /// Durability step shared by [`execute_batch_impl`] and
-/// [`execute_planned_batch_impl`]: if `request.durability == "synced"`,
+/// [`execute_planned_batch_impl`]: if `request.durability == Some(RequestDurability::Synced)`,
 /// flush every distinct repo the batch touched so the write survives an
 /// immediate hard crash. No-op otherwise.
 async fn flush_if_synced_durability(
@@ -212,7 +214,7 @@ async fn flush_if_synced_durability(
     resolver: &dyn TableResolver,
     db_name: &str,
 ) -> Result<(), BatchError> {
-    if request.durability.as_deref() != Some("synced") {
+    if !matches!(request.durability, Some(RequestDurability::Synced)) {
         return Ok(());
     }
     let repos = shamir_query_types::batch::distinct_repos(&request.queries);
@@ -802,11 +804,11 @@ pub(super) async fn execute_transactional_impl(
         .visibility_wait
         .unwrap_or_else(|| repo.commit_visibility_wait());
 
-    // Parse isolation.
-    let iso = match request.isolation.as_deref() {
-        Some("serializable") => shamir_tx::IsolationLevel::Serializable,
-        Some("pessimistic") | Some("level3") => shamir_tx::IsolationLevel::Pessimistic,
-        _ => shamir_tx::IsolationLevel::Snapshot,
+    // Parse isolation (strict typed enum — exhaustive match, no fallback).
+    let iso = match request.isolation {
+        Some(WireIsolationLevel::Serializable) => shamir_tx::IsolationLevel::Serializable,
+        Some(WireIsolationLevel::Pessimistic) => shamir_tx::IsolationLevel::Pessimistic,
+        Some(WireIsolationLevel::Snapshot) | None => shamir_tx::IsolationLevel::Snapshot,
     };
 
     let (mut tx, _guard) = repo
@@ -819,10 +821,11 @@ pub(super) async fn execute_transactional_impl(
         })?;
     // Thread the actor into the tx for commit-time provenance (R2).
     tx.set_actor(actor.clone());
-    // Opt into async-index commit visibility when the wire client requests it.
-    // "buffered" (default) and "synced" keep CommitVisibility::Synchronous so
-    // existing behaviour is byte-identical.
-    if request.durability.as_deref() == Some("async_index") {
+    // Opt into async-index commit visibility when the wire client requests
+    // it (v4 `index_visibility: "async"`; the old `durability: "async_index"`
+    // string is gone). Absent or `"sync"` keeps CommitVisibility::Synchronous
+    // so existing behaviour is byte-identical.
+    if request.index_visibility == Some(IndexVisibility::Async) {
         tx.set_visibility(CommitVisibility::AsyncIndex);
     }
     let snapshot_version = tx.snapshot_version;

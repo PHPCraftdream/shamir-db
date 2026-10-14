@@ -83,7 +83,7 @@ fn writes(wait: Option<VisibilityWait>, transactional: bool) -> BatchRequest {
 
 fn execute(batch: BatchRequest) -> DbRequest {
     DbRequest::Execute {
-        query_version: 3,
+        query_version: 4,
         db: "app".into(),
         batch,
     }
@@ -91,7 +91,7 @@ fn execute(batch: BatchRequest) -> DbRequest {
 
 fn commit(handle: u64, wait: Option<VisibilityWait>) -> DbRequest {
     DbRequest::TxCommit {
-        query_version: 3,
+        query_version: 4,
         db: "app".into(),
         tx_handle: handle,
         visibility_wait: wait,
@@ -99,7 +99,7 @@ fn commit(handle: u64, wait: Option<VisibilityWait>) -> DbRequest {
 }
 
 async fn begin(handler: &ShamirDbHandler, session: &Session) -> u64 {
-    match handler.tx_begin(session, 3, "app", "main", None).await {
+    match handler.tx_begin(session, 4, "app", "main", None).await {
         DbResponse::TxOpened { tx_handle, .. } => tx_handle,
         other => panic!("begin failed: {other:?}"),
     }
@@ -127,7 +127,7 @@ async fn pending_commit_consumes_handle_releases_snapshot_and_reconciles_over_wi
     let handle = begin(&handler, &session).await;
     assert!(!gate.active_snapshots_empty());
     let staged = handler
-        .tx_execute(&session, 3, "app", handle, writes(None, false))
+        .tx_execute(&session, 4, "app", handle, writes(None, false))
         .await;
     assert!(matches!(&staged, DbResponse::TxBatch { .. }), "{staged:?}");
     let owned = handler.clone();
@@ -312,7 +312,7 @@ async fn invalid_commit_policy_consumes_owned_handle_but_version_and_owner_gates
     ] {
         let handle = begin(&handler, &session).await;
         let staged = handler
-            .tx_execute(&session, 3, "app", handle, writes(None, false))
+            .tx_execute(&session, 4, "app", handle, writes(None, false))
             .await;
         assert!(matches!(staged, DbResponse::TxBatch { .. }));
         let mut legacy = commit(handle, Some(wait));
@@ -374,7 +374,7 @@ async fn tx_execute_still_rejects_commit_only_options_without_consuming_handle()
             &handler,
             &session,
             DbRequest::TxExecute {
-                query_version: 3,
+                query_version: 4,
                 db: "app".into(),
                 tx_handle: handle,
                 batch,

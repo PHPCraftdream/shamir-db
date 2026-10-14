@@ -220,6 +220,7 @@ fn build_read_batch(n: usize, skip_half: bool) -> BatchRequest {
         isolation: None,
         visibility_wait: None,
         durability: None,
+        index_visibility: None,
         queries,
         return_all: true,
         return_only: None,

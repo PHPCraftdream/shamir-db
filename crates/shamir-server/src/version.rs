@@ -42,7 +42,7 @@ pub const CURRENT_HANDSHAKE_PROTO_VERSION: u8 = 1;
 /// `u32` rather than `u8` because the query-language version is much more
 /// likely to evolve than the wire-level handshake — easier to bump for a
 /// long time without overflowing.
-pub const SUPPORTED_QUERY_LANG_VERSIONS: &[u32] = &[3];
+pub const SUPPORTED_QUERY_LANG_VERSIONS: &[u32] = &[4];
 
 /// The query-language version the server prefers to advertise.
 pub const CURRENT_QUERY_LANG_VERSION: u32 = shamir_query_types::wire::CURRENT_QUERY_LANG_VERSION;
@@ -60,7 +60,10 @@ pub enum VersionError {
         supported: &'static [u8],
     },
     /// Client asked for a query-language version this server does not
-    /// implement.
+    /// implement. As of query-language v4 the server gate is `&[4]` only:
+    /// v3 and older are REJECTED (v4 introduced typed request options and
+    /// `deny_unknown_fields` on `BatchRequest`, so older versions cannot be
+    /// interpreted safely).
     #[error("query_lang_version: client requested {requested}, server supports {supported:?}")]
     UnsupportedQueryLang {
         requested: u32,

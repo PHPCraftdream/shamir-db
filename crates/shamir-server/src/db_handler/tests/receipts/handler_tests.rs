@@ -67,7 +67,7 @@ async fn bounded_startup_default_applies_and_pending_reservation_shrinks_then_re
         Insert::with_repo("main", "items").row(doc().set("n", 1)),
     );
     let request = DbRequest::Execute {
-        query_version: 3,
+        query_version: 4,
         db: "app".into(),
         batch: batch.build(),
     };

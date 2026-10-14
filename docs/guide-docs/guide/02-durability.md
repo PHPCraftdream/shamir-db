@@ -2,7 +2,9 @@
 
 # Этаж 2 — Durability и транзакции
 
-**Когда подниматься:** данные терять нельзя.
+## Migration note
+
+For query protocol v4 changes and required client/server upgrades, see [PR1c migration](./PR1C-MIGRATION.md).
 
 На этажах 0–1 мы не касались durability — всё работало из коробки.
 По умолчанию `buffered` подтверждает запись после локального write в WAL
@@ -87,7 +89,8 @@ durability: {
 и не ожидание follower на commit path. Локальный `buffered` ack может быть
 выше R: хвост ещё нельзя безопасно отдать follower с durable bookmark.
 
-## 2. Транзакционные батчи
+`index_visibility` выбирает видимость индексов: `sync` ждёт синхронного обновления, `async` допускает отложенную видимость. Эти варианты отдельны от durability: запрос durability принимает только `buffered` или `synced`. Старые примеры с предыдущий параметр асинхронного обновления индексов следует мигрировать на `index_visibility: async`; см. [заметку PR1c](./PR1C-MIGRATION.md).
+
 
 `.transactional()` оборачивает весь батч в MVCC-транзакцию.
 Все операции видят консистентный срез (snapshot) данных, коммит — атомарный.

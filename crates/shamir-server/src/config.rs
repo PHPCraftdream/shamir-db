@@ -74,7 +74,10 @@ pub use crate::transactions_config::TransactionsConfig;
 pub use durability::DurabilityConfig;
 
 /// Top-level configuration as loaded from the `.ktav` file.
+///
+/// Strict schema: unknown top-level keys fail at parse time (typo `durabilty:` → boot error).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     /// Root directory for durable state (server_meta, user_directory,
     /// audit log, fjall databases).
@@ -773,6 +776,19 @@ impl Config {
             ));
         }
 
+        // `logging::init` parses this via `LevelFilter::from_str`, which silently falls back to
+        // INFO on garbage — reject typos here instead of silently changing verbosity.
+        let lvl = self.logging.level.to_ascii_lowercase();
+        if !matches!(
+            lvl.as_str(),
+            "trace" | "debug" | "info" | "warn" | "error" | "off"
+        ) {
+            return Err(ConfigError::Validation(format!(
+                "logging.level: invalid level {:?} — valid: trace|debug|info|warn|error|off (case-insensitive)",
+                self.logging.level
+            )));
+        }
+
         let limits = &self.security.query_limits;
         // Compare like-typed values without narrowing numeric conversions.
         macro_rules! validate_query_limit {
@@ -807,9 +823,7 @@ impl Config {
             let max_result = self.security.query_limits.max_result_size_bytes;
             if max_inflight < max_result {
                 return Err(ConfigError::Validation(format!(
-                    "security.query_limits.max_inflight_response_bytes ({max_inflight}) must be \
-                     >= max_result_size_bytes ({max_result}) — otherwise no single max-size \
-                     batch could ever be admitted"
+                    "security.query_limits.max_inflight_response_bytes ({max_inflight}) must be >= max_result_size_bytes ({max_result}) — otherwise no single max-size batch could ever be admitted"
                 )));
             }
         }
@@ -843,8 +857,7 @@ impl Config {
         // confusing runtime error on the very first cursor request.
         if self.security.cursors.idle_timeout_secs == 0 {
             return Err(ConfigError::Validation(
-                "security.cursors.idle_timeout_secs must be >= 1 (a zero idle timeout would \
-                 evict every cursor almost immediately, disabling the feature outright)"
+                "security.cursors.idle_timeout_secs must be >= 1 (a zero idle timeout would evict every cursor almost immediately, disabling the feature outright)"
                     .into(),
             ));
         }
@@ -889,9 +902,7 @@ fn validate_listener(idx: usize, l: &ListenerConfig) -> Result<(), ConfigError> 
         }
         if l.profile != ProfileKind::Plain {
             return Err(ConfigError::Validation(format!(
-                "listeners[{idx}] kind=unix requires profile=plain (spec \
-                 TRANSPORT_UNIX.md — no TLS distinction for local IPC); \
-                 got {:?}",
+                "listeners[{idx}] kind=unix requires profile=plain (spec TRANSPORT_UNIX.md — no TLS distinction for local IPC); got {:?}",
                 l.profile
             )));
         }
@@ -930,8 +941,7 @@ fn validate_listener(idx: usize, l: &ListenerConfig) -> Result<(), ConfigError> 
     // 4. Plain profile: loopback only.
     if l.profile == ProfileKind::Plain && !is_loopback_ip(addr.ip()) {
         return Err(ConfigError::Validation(format!(
-            "listeners[{idx}] profile=plain requires a loopback address \
-             (127.0.0.0/8 or ::1); got {}",
+            "listeners[{idx}] profile=plain requires a loopback address (127.0.0.0/8 or ::1); got {}",
             addr
         )));
     }
@@ -942,8 +952,7 @@ fn validate_listener(idx: usize, l: &ListenerConfig) -> Result<(), ConfigError> 
         && l.browser_origin_allowlist.is_empty()
     {
         return Err(ConfigError::Validation(format!(
-            "listeners[{idx}] (ws + tls_no_export, browser endpoint) \
-             requires non-empty browser_origin_allowlist (spec §9)"
+            "listeners[{idx}] (ws + tls_no_export, browser endpoint) requires non-empty browser_origin_allowlist (spec §9)"
         )));
     }
 

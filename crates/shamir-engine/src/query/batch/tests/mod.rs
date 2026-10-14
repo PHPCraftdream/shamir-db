@@ -17,6 +17,7 @@ pub mod fk_reverse_cache_race_tests;
 pub mod fk_reverse_cache_tests;
 pub mod fk_ri_barrier_tests;
 pub mod for_each_tests;
+pub mod index_visibility_parity_tests;
 pub mod interactive_deadline_tests;
 pub mod limit_enforcement_tests;
 pub mod pagination_bounds_tests;

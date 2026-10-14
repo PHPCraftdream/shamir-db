@@ -5,6 +5,9 @@ use shamir_collections::TMap;
 use shamir_types::types::value::QueryValue;
 
 use super::batch_limits::BatchLimits;
+use super::options::{
+    deserialize_optional_field, IndexVisibility, IsolationLevel, RequestDurability,
+};
 use super::query_entry::QueryEntry;
 use super::result_encoding::ResultEncoding;
 
@@ -37,7 +40,11 @@ use super::result_encoding::ResultEncoding;
 /// - `return_all`: Return all results (default: true)
 /// - `return_only`: Specific aliases to return (overrides return_all)
 /// - `limits`: Security limits
+/// - `isolation`: `snapshot|serializable|pessimistic` (typed enum, v4)
+/// - `durability`: `buffered|synced` (typed enum, v4); the old
+///   `"async_index"` string moved to `index_visibility: sync|async`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BatchRequest {
     /// Client-provided request ID, echoed back in the response.
     /// Used for correlating async requests with responses.
@@ -55,30 +62,55 @@ pub struct BatchRequest {
 
     /// Requested isolation level for transactional batches.
     ///
-    /// - `"snapshot"` (default) — Snapshot Isolation. Reads see a
-    ///   consistent snapshot; writes use last-writer-wins.
-    /// - `"serializable"` — Serializable Snapshot Isolation. Read-set
-    ///   validated at commit; concurrent write conflict → abort.
+    /// - [`IsolationLevel::Snapshot`] (default) — Snapshot Isolation. Reads
+    ///   see a consistent snapshot; writes use last-writer-wins.
+    /// - [`IsolationLevel::Serializable`] — Serializable Snapshot Isolation.
+    ///   Read-set validated at commit; concurrent write conflict → abort.
+    /// - [`IsolationLevel::Pessimistic`] — level-3 locks guard concurrent
+    ///   writers.
     ///
-    /// Ignored when `transactional` is false.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub isolation: Option<String>,
+    /// Strictly typed (v4): unknown wire strings are rejected. Ignored when
+    /// `transactional` is false.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_isolation"
+    )]
+    pub isolation: Option<IsolationLevel>,
 
-    /// Per-request durability level.
+    /// Per-request durability level (typed enum, v4).
     ///
-    /// - `"buffered"` (default / absent) — ack after the in-memory
-    ///   MemBuffer; durability on the ~500 ms background tick or
-    ///   graceful drain.
-    /// - `"synced"` — before ack, flush the durable backing of every
-    ///   repo this batch touched, so a committed write survives even
-    ///   an immediate hard crash.
-    /// - `"async_index"` — ack after WAL fsync + data apply + MVCC publish;
-    ///   index posting apply, recovery markers, WAL cleanup, and HNSW promote
-    ///   run on a background task. Shortens the pre-ACK critical section while
-    ///   preserving WAL durability and read-your-own-writes on data. Only
-    ///   meaningful for `transactional: true` batches; ignored otherwise.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub durability: Option<String>,
+    /// - [`RequestDurability::Buffered`] (default / absent) — ack after the
+    ///   buffered WAL append; periodic fsync runs nominally every 250 ms
+    ///   (not a hard bound), or on graceful drain.
+    /// - [`RequestDurability::Synced`] — before ack, flush the durable
+    ///   backing of every repo this batch touched, so a committed write
+    ///   survives even an immediate hard crash.
+    ///
+    /// The old `"async_index"` value is REMOVED; the index-apply visibility
+    /// it controlled moved to [`BatchRequest::index_visibility`].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_durability"
+    )]
+    pub durability: Option<RequestDurability>,
+
+    /// Index-apply visibility for transactional commits (NEW in v4).
+    ///
+    /// - [`IndexVisibility::Sync`] (default / absent) — index posting apply
+    ///   runs inline before ack.
+    /// - [`IndexVisibility::Async`] — ack after WAL fsync + data apply +
+    ///   MVCC publish; index posting apply, recovery markers, WAL cleanup,
+    ///   and HNSW promote run on a background task. Replaces the old
+    ///   `durability: "async_index"` string. Only meaningful for
+    ///   `transactional: true` batches; ignored otherwise.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_index_visibility"
+    )]
+    pub index_visibility: Option<IndexVisibility>,
 
     /// Commit-only override; VIS-1 carries it without enabling bounded waits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -120,6 +152,29 @@ pub struct BatchRequest {
     /// client de-interns. Backward-compatible: absent → [`ResultEncoding::Name`].
     #[serde(default)]
     pub result_encoding: ResultEncoding,
+}
+
+fn deserialize_durability<'de, D>(deserializer: D) -> Result<Option<RequestDurability>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_field(deserializer, "durability")
+}
+
+fn deserialize_isolation<'de, D>(deserializer: D) -> Result<Option<IsolationLevel>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_field(deserializer, "isolation")
+}
+
+fn deserialize_index_visibility<'de, D>(
+    deserializer: D,
+) -> Result<Option<IndexVisibility>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_field(deserializer, "index_visibility")
 }
 
 fn default_return_all() -> bool {

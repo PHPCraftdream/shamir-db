@@ -150,7 +150,7 @@ async fn configured_zero_as_of_budget_reaches_real_server_execution() {
         &handler,
         &owner,
         DbRequest::Execute {
-            query_version: 3,
+            query_version: 4,
             db: "app".into(),
             batch: batch.build(),
         },
@@ -201,7 +201,7 @@ async fn interactive_as_of_timeout_preserves_handle_and_structured_fields() {
         read_visibility_timeout_ms: 0,
         ..TransactionsConfig::default()
     });
-    let opened = handler.tx_begin(&owner, 3, "app", "main", None).await;
+    let opened = handler.tx_begin(&owner, 4, "app", "main", None).await;
     let handle = match opened {
         DbResponse::TxOpened { tx_handle, .. } => tx_handle,
         other => panic!("begin failed: {other:?}"),
@@ -209,7 +209,7 @@ async fn interactive_as_of_timeout_preserves_handle_and_structured_fields() {
     let mut batch = Batch::new();
     batch.query("read", Query::with_repo("main", "items").as_of_version(1));
     let result = handler
-        .tx_execute(&owner, 3, "app", handle, batch.build())
+        .tx_execute(&owner, 4, "app", handle, batch.build())
         .await;
     assert!(matches!(
         result,
@@ -266,7 +266,7 @@ async fn configured_nonzero_budget_times_out_at_server_read_seam() {
     let mut batch = Batch::new();
     batch.query("read", Query::with_repo("main", "items").as_of_version(1));
     let conn = ConnectionServices::without_push(0);
-    let mut execution = Box::pin(handler.execute(&owner, 3, "app", batch.build(), &conn));
+    let mut execution = Box::pin(handler.execute(&owner, 4, "app", batch.build(), &conn));
     poll_fn(|cx| {
         assert!(execution.as_mut().poll(cx).is_pending());
         Poll::Ready(())

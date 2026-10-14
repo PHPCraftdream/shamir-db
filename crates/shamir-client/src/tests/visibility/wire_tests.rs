@@ -25,7 +25,7 @@ fn bounded_zero_and_u64_positions_roundtrip() {
             matches!(decoded, DbRequest::WaitForVisibility {
                 version: actual,
                 visibility_wait: VisibilityWait::Bounded { timeout_ms: 0 },
-                query_version: 3,
+                query_version: CURRENT_QUERY_LANG_VERSION,
                 ..
             } if actual == version),
             "{decoded:?}",
@@ -80,7 +80,7 @@ async fn commit_transport_timeout_has_one_request_and_no_replay() {
             decoded,
             DbRequest::TxCommit {
                 tx_handle: u64::MAX,
-                query_version: 3,
+                query_version: CURRENT_QUERY_LANG_VERSION,
                 ..
             }
         ),

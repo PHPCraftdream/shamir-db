@@ -1,7 +1,9 @@
 use shamir_collections::{new_map, TMap};
 use shamir_query_types::batch::extract_base_alias;
 use shamir_query_types::batch::{
-    BatchLimits, BatchOp, BatchRequest, ForEachOp, QueryEntry, ResultEncoding, SubBatchOp,
+    BatchLimits, BatchOp, BatchRequest, ForEachOp, IndexVisibility as WireIndexVisibility,
+    IsolationLevel as WireIsolationLevel, QueryEntry, RequestDurability as WireRequestDurability,
+    ResultEncoding, SubBatchOp,
 };
 use shamir_query_types::call::CallOp;
 use shamir_query_types::filter::{Filter, FilterValue};
@@ -14,6 +16,7 @@ use crate::filter::{and, not, or};
 use super::build_error::BuildError;
 use super::durability::Durability;
 use super::handle::Handle;
+use super::index_visibility::IndexVisibility;
 use super::into_batch_op::IntoBatchOp;
 use super::isolation::Isolation;
 use super::try_into_batch_op::TryIntoBatchOp;
@@ -28,9 +31,10 @@ pub struct Batch {
     id: QueryValue,
     name: Option<String>,
     transactional: bool,
-    isolation: Option<String>,
+    isolation: Option<WireIsolationLevel>,
     visibility_wait: Option<shamir_query_types::batch::VisibilityWait>,
-    durability: Option<String>,
+    durability: Option<WireRequestDurability>,
+    index_visibility: Option<WireIndexVisibility>,
     pub(crate) queries: TMap<String, QueryEntry>,
     return_all: bool,
     return_only: Option<Vec<String>>,
@@ -55,6 +59,7 @@ impl Batch {
             isolation: None,
             visibility_wait: None,
             durability: None,
+            index_visibility: None,
             queries: new_map(),
             return_all: true,
             return_only: None,
@@ -93,7 +98,11 @@ impl Batch {
 
     /// Set the isolation level.
     pub fn isolation(&mut self, iso: Isolation) -> &mut Self {
-        self.isolation = Some(iso.as_str().to_owned());
+        self.isolation = Some(match iso {
+            Isolation::Snapshot => WireIsolationLevel::Snapshot,
+            Isolation::Serializable => WireIsolationLevel::Serializable,
+            Isolation::Pessimistic => WireIsolationLevel::Pessimistic,
+        });
         self
     }
 
@@ -108,7 +117,19 @@ impl Batch {
 
     /// Set the durability level.
     pub fn durability(&mut self, d: Durability) -> &mut Self {
-        self.durability = Some(d.as_str().to_owned());
+        self.durability = Some(match d {
+            Durability::Buffered => WireRequestDurability::Buffered,
+            Durability::Synced => WireRequestDurability::Synced,
+        });
+        self
+    }
+
+    /// Set the index-apply visibility for transactional commits (v4).
+    pub fn index_visibility(&mut self, v: IndexVisibility) -> &mut Self {
+        self.index_visibility = Some(match v {
+            IndexVisibility::Sync => WireIndexVisibility::Sync,
+            IndexVisibility::Async => WireIndexVisibility::Async,
+        });
         self
     }
 
@@ -899,9 +920,10 @@ impl Batch {
             id: self.id.clone(),
             name: self.name.clone(),
             transactional: self.transactional,
-            isolation: self.isolation.clone(),
+            isolation: self.isolation,
             visibility_wait: self.visibility_wait,
-            durability: self.durability.clone(),
+            durability: self.durability,
+            index_visibility: self.index_visibility,
             queries: self.queries.clone(),
             return_all: self.return_all,
             return_only: self.return_only.clone(),

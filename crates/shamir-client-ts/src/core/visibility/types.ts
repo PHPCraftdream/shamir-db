@@ -1,4 +1,4 @@
-import type { TransactionInfo } from '../types/batch.js';
+import type { IsolationLevel, TransactionInfo } from '../types/batch.js';
 
 export type VisibilityWait =
   | { mode: 'strict' }
@@ -17,6 +17,6 @@ export type TransactionResult<T> = {
 );
 export interface TransactionOptions {
   repo?: string;
-  isolation?: 'snapshot' | 'serializable';
+  isolation?: IsolationLevel;
   visibilityWait?: VisibilityWait;
 }

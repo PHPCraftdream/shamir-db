@@ -1,3 +1,5 @@
+//! Transaction isolation level (builder-side).
+
 /// Transaction isolation level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Isolation {
@@ -5,13 +7,8 @@ pub enum Isolation {
     Snapshot,
     /// Read-set validated at commit; concurrent write conflict aborts.
     Serializable,
-}
-
-impl Isolation {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Isolation::Snapshot => "snapshot",
-            Isolation::Serializable => "serializable",
-        }
-    }
+    /// Pessimistic (level-3) isolation: locks guard concurrent writers.
+    /// (Exposed in query-language v4; previously wire-only as
+    /// `"level3"`/`"pessimistic"`.)
+    Pessimistic,
 }

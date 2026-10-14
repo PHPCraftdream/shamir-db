@@ -8,6 +8,7 @@ pub mod conn_limiter_tests;
 pub mod connection_tests;
 pub mod cursor_registry_tests;
 pub mod gate_observability_tests;
+pub mod logging_level_validation_tests;
 pub mod per_ip_limiter_tests;
 pub mod restore_identity_tests;
 pub mod restore_tests;

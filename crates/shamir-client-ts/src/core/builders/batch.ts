@@ -15,6 +15,7 @@ import type {
   QueryEntry,
   IsolationLevel,
   DurabilityLevel,
+  IndexVisibility,
   BatchLimits,
   BatchRequest,
   BatchResponse,
@@ -70,6 +71,7 @@ export class Batch {
   private transactionalValue = false;
   private isolationValue: IsolationLevel | undefined;
   private durabilityValue: DurabilityLevel | undefined;
+  private indexVisibilityValue: IndexVisibility | undefined;
   private readonly queriesMap: Record<string, QueryEntry> = {};
   private returnAllExplicit: boolean | undefined;
   private returnOnlyValue: string[] | undefined;
@@ -280,6 +282,12 @@ export class Batch {
     return this;
   }
 
+  /** Per-request index visibility mode. */
+  indexVisibility(mode: IndexVisibility): this {
+    this.indexVisibilityValue = mode;
+    return this;
+  }
+
   /**
    * Override `return_all`. Omitted when true (default); emitted as
    * `false` only when explicitly set to `false`.
@@ -343,6 +351,8 @@ export class Batch {
       req.isolation = this.isolationValue;
     if (this.durabilityValue !== undefined)
       req.durability = this.durabilityValue;
+    if (this.indexVisibilityValue !== undefined)
+      req.index_visibility = this.indexVisibilityValue;
     if (this.returnAllExplicit === false) req.return_all = false;
     if (this.returnOnlyValue !== undefined) req.return_only = this.returnOnlyValue;
     if (this.limitsValue !== undefined) req.limits = this.limitsValue;

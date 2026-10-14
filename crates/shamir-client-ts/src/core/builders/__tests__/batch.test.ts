@@ -108,6 +108,16 @@ describe('Batch — transactional', () => {
     expect(req.isolation).toBeUndefined();
   });
 
+  it('transactional with pessimistic isolation', () => {
+    expect(Batch.create().add('u', Query.from('users')).transactional('pessimistic').build().isolation)
+      .toBe('pessimistic');
+  });
+
+  it('rejects unsupported isolation at compile time', () => {
+    const batch = Batch.create();
+    // @ts-expect-error not a supported isolation level
+    batch.transactional('read_uncommitted');
+  });
   it('omits transactional when not set', () => {
     const req = Batch.create()
       .add('u', Query.from('users'))
@@ -137,14 +147,16 @@ describe('Batch — durability, name, returnOnly, limits', () => {
     expect(req.durability).toBe('synced');
   });
 
-  it('durability("async_index") is accepted (Finding 1.3 — was missing)', () => {
-    // `'async_index'` is a first-class DurabilityLevel in Rust
-    // (batch_request.rs); it must type-check AND round-trip through the builder.
-    const req = Batch.create()
-      .add('u', Query.from('users'))
-      .durability('async_index')
-      .build();
-    expect(req.durability).toBe('async_index');
+  it('indexVisibility emits index_visibility', () => {
+    const req = Batch.create().add('u', Query.from('users'))
+      .indexVisibility('async').build();
+    expect(req.index_visibility).toBe('async');
+  });
+
+  it('rejects removed durability option at compile time', () => {
+    const batch = Batch.create();
+    // @ts-expect-error async_index is no longer a durability level
+    batch.durability('async_index');
   });
 
   it('name emits name field', () => {
