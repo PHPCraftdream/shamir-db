@@ -659,20 +659,26 @@ impl Drainer {
             self.seed_from_recover(recovered);
             // Retry the window scan once.
             window_entries.clear();
-            let guard2 = scc::Guard::new();
-            for (expected2, (k, v)) in (dur + 1..).zip(self.window.range(dur + 1..=vis, &guard2)) {
-                if *k != expected2 {
-                    break; // still a genuine gap after the one reseed
-                }
-                if gate.is_active_post_wal(*k) || (*k > visible && !gate.is_orphaned_post_wal(*k)) {
-                    break; // in-flight entry: stop, never reseed again
-                }
-                window_entries.push(Arc::clone(v));
-                if gate.is_orphaned_post_wal(*k) {
-                    break;
+            // Scoped so the non-`Send` guard is not live across the `.await` below.
+            {
+                let guard2 = scc::Guard::new();
+                for (expected2, (k, v)) in
+                    (dur + 1..).zip(self.window.range(dur + 1..=vis, &guard2))
+                {
+                    if *k != expected2 {
+                        break; // still a genuine gap after the one reseed
+                    }
+                    if gate.is_active_post_wal(*k)
+                        || (*k > visible && !gate.is_orphaned_post_wal(*k))
+                    {
+                        break; // in-flight entry: stop, never reseed again
+                    }
+                    window_entries.push(Arc::clone(v));
+                    if gate.is_orphaned_post_wal(*k) {
+                        break;
+                    }
                 }
             }
-            drop(guard2);
             if window_entries.is_empty() {
                 orphan_repair::settle_missing_evidence(self, repo, &gate).await?;
             }
