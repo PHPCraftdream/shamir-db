@@ -35,6 +35,7 @@ mod buffer_config;
 mod create_db;
 mod create_index;
 mod create_index_build_error;
+#[path = "alter_repo/create_repo.rs"]
 mod create_repo;
 mod create_table;
 mod describe_table;

@@ -15,8 +15,6 @@ mod index_visibility;
 #[path = "into_batch_op/into_batch_op.rs"]
 mod into_batch_op;
 mod isolation;
-#[path = "into_batch_op/repo_admin.rs"]
-mod repo_admin;
 pub mod subscribe;
 mod try_into_batch_op;
 

@@ -22,7 +22,7 @@
 
 use async_trait::async_trait;
 
-#[path = "repo_durability/repo_admin_observer.rs"]
+#[path = "execute/repo_admin/repo_durability/repo_admin_observer.rs"]
 mod repo_admin_observer;
 pub use repo_admin_observer::RepoAdminObserver;
 

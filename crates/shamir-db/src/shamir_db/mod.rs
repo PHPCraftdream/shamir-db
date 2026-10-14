@@ -6,6 +6,7 @@ mod curl_gateway;
 pub(crate) mod execute;
 #[path = "ports.rs"]
 pub mod ports;
+#[path = "execute/repo_admin/repo_durability/mod.rs"]
 pub(crate) mod repo_durability;
 #[allow(clippy::module_inception)]
 pub mod shamir_db;
