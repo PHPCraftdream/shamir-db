@@ -31,6 +31,7 @@ pub struct GapCert {
     pub epoch: u64,
     pub gap_first: Option<u64>,
     pub gap_through: Option<u64>,
+    pub current_version: u64,
     pub schema: String,
 }
 
@@ -44,7 +45,10 @@ pub async fn setup_leader(admin: &Client) {
     execute(admin, "default", batch).await;
     let mut batch = Batch::new();
     batch.id("setup-repo");
-    batch.create_repo("repo", ddl::create_repo(REPO).tables(TABLES));
+    batch.create_repo(
+        "repo",
+        ddl::create_repo(REPO).engine("fjall").tables(TABLES),
+    );
     execute(admin, DB, batch).await;
     // Open (0o777) db + repo + each table so the replicator-role session
     // gains Read via the normal Shomer DAC path (repl_pull_e2e pattern).
@@ -214,6 +218,7 @@ pub async fn gap_certificate(addr: SocketAddr) -> GapCert {
         epoch: repo.history_epoch.expect("history epoch advertised"),
         gap_first: repo.gap_first,
         gap_through: repo.gap_through,
+        current_version: repo.current_version,
         schema: repo
             .schema_digest
             .clone()

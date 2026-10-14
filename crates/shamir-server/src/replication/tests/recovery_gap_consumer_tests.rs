@@ -1,6 +1,5 @@
 //! S5c consumer contracts over raw fjall + runtime teardown, not simulated gaps.
-//! Expected green on S5c-1/2. Counterfactuals: omit cold certification, apply
-//! before checking gap_at, restart resync_required, or invalidate beyond H.
+//! A separate durable marker fixture retains consumer/supervisor gap refusal.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -8,6 +7,7 @@ use std::time::Duration;
 
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig, RepoInstance};
 use shamir_db::engine::table::TableConfig;
+use shamir_db::engine::tx::apply_replicated::{ApplyOutcome, ApplyPolicy};
 use shamir_db::engine::tx::ReplicatedEvent;
 use shamir_db::types::value::QueryValue;
 use shamir_db::ShamirDb;
@@ -70,8 +70,6 @@ async fn write(db: &ShamirDb, id: &str) -> u64 {
     let repo = repo(db);
     let h = repo.current_commit_version().await.unwrap();
     repo.flush_buffers().await.unwrap();
-    // Public bounded read confirms the writer prefix without accessing the
-    // engine-private changefeed handle.
     let journal = repo.read_changelog_bounded(1, 100).await.unwrap();
     assert!(journal.confirmed, "fixture journal must confirm its prefix");
     assert_eq!(journal.bound, h);
@@ -110,7 +108,25 @@ async fn run(follower: &ShamirDb, leader: &ShamirDb) -> Result<(), ReplError> {
     .await
 }
 
-async fn assert_admin_state(follower: &ShamirDb) {
+async fn create_subscription(follower: &ShamirDb) {
+    let mut batch = Batch::new();
+    batch.op(
+        "profile",
+        replication_profile("profile").stream(
+            repl_scope("app").repo("main").build(),
+            ReplDirection::Pull,
+            ReplMode::ReadOnly,
+        ),
+    );
+    batch.op(
+        "sub",
+        subscription("sub", "tcp://leader:9000", "pub", "profile"),
+    );
+    let response = follower.execute("app", &batch.build()).await.unwrap();
+    assert!(!response.results.contains_key("__error"), "{response:?}");
+}
+
+async fn assert_admin_state(follower: &ShamirDb, expected_state: &str) {
     let mut batch = Batch::new();
     batch.op("list", list_subscriptions());
     batch.op("status", replication_status());
@@ -127,13 +143,13 @@ async fn assert_admin_state(follower: &ShamirDb) {
         );
         assert_eq!(
             subscriptions[0].get("state").and_then(QueryValue::as_str),
-            Some("resync_required"),
+            Some(expected_state),
         );
     }
 }
 
 #[test]
-fn cold_reopen_gap_stops_consumer_and_supervisor_but_not_beyond_h() {
+fn cold_reopen_reconciles_events_for_consumer_and_supervisor() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("leader");
     let rt = runtime();
@@ -141,8 +157,80 @@ fn cold_reopen_gap_stops_consumer_and_supervisor_but_not_beyond_h() {
         let leader = open(Some(&path)).await;
         write(&leader, "before-crash").await
     });
-    // Cancels background owners and releases stores, WITHOUT shutdown_clean.
-    // This is an unclean admission lifecycle, not a power-loss simulation.
+    assert_eq!(h, 1);
+    drop(rt);
+
+    let rt = runtime();
+    rt.block_on(async {
+        let leader = open(Some(&path)).await;
+        let source = InProcessReplSource::new(leader.clone());
+        let reply = source.pull("app", "main", 1, 100, None).await.unwrap();
+        let ReplResponse::Pull { events, gap_at, .. } = reply else {
+            panic!("expected real pull");
+        };
+        assert_eq!(gap_at, None);
+        let events: Vec<ReplicatedEvent> = rmp_serde::from_slice(&events).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event.commit_version, h);
+        let journal = leader
+            .read_changelog_from_journal("app", "main", 1, 100)
+            .await
+            .unwrap();
+        assert_eq!(journal.gap_at, None);
+        assert_eq!(journal.events.len(), 1);
+        assert_eq!(journal.events[0].event.commit_version, h);
+        let follower = open(None).await;
+        run(&follower, &leader).await.unwrap();
+        assert_eq!(repo(&follower).replication_bookmark().await.unwrap(), h);
+        assert_eq!(rows(&follower).await, rows(&leader).await);
+
+        let supervised = open(None).await;
+        create_subscription(&supervised).await;
+        let leader_clone = leader.clone();
+        let factory: ReplSourceFactory = Arc::new(move |_| {
+            Arc::new(InProcessReplSource::new(leader_clone.clone())) as Arc<dyn ReplSource>
+        });
+        let supervisor =
+            SubscriptionSupervisor::new(Arc::new(supervised.clone()), factory, "follower")
+                .with_poll_wait_ms(0)
+                .with_max_iterations(1);
+        supervisor.reconcile().await;
+        supervisor.wait_for_subscription("sub").await;
+        // The test join removes the task's handle after its configured pull iteration.
+        assert_eq!(supervisor.active_count(), 0);
+        assert_admin_state(&supervised, "running").await;
+        assert_eq!(repo(&supervised).replication_bookmark().await.unwrap(), h);
+        assert_eq!(rows(&supervised).await, rows(&leader).await);
+        supervisor.stop_all().await;
+
+        let later = write(&leader, "after-crash").await;
+        assert!(later > h);
+        let fresh = open(None).await;
+        run(&fresh, &leader).await.unwrap();
+        assert_eq!(repo(&fresh).replication_bookmark().await.unwrap(), later);
+        assert_eq!(rows(&fresh).await, rows(&leader).await);
+    });
+    drop(rt);
+}
+
+#[test]
+fn explicit_persisted_gap_stops_consumer_and_supervisor_but_not_beyond_h() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("leader");
+    let rt = runtime();
+    let h = rt.block_on(async {
+        let leader = open(Some(&path)).await;
+        write(&leader, "before-gap").await
+    });
+    drop(rt);
+
+    let rt = runtime();
+    rt.block_on(async {
+        let leader = open(Some(&path)).await;
+        let feed = repo(&leader).changefeed().await.unwrap();
+        feed.feed.record_recovery_gap(1, h).await.unwrap();
+        feed.feed.shutdown_and_wait().await.unwrap();
+    });
     drop(rt);
 
     let rt = runtime();
@@ -155,48 +243,22 @@ fn cold_reopen_gap_stops_consumer_and_supervisor_but_not_beyond_h() {
         };
         assert_eq!(gap_at, Some(1));
         let events: Vec<ReplicatedEvent> = rmp_serde::from_slice(&events).unwrap();
-        assert_eq!(
-            events.len(),
-            1,
-            "gap must accompany a real applicable event"
-        );
+        assert_eq!(events.len(), 1);
         assert_eq!(events[0].event.commit_version, h);
-        assert!(!events[0].field_bindings.is_empty());
-
         let follower = open(None).await;
         let error = run(&follower, &leader).await.unwrap_err();
-        assert!(
-            matches!(
-                error,
-                ReplError::JournalGap {
-                    gap_at: 1,
-                    from_version: 1,
-                }
-            ),
-            "{error:?}",
-        );
+        assert!(matches!(
+            error,
+            ReplError::JournalGap {
+                gap_at: 1,
+                from_version: 1
+            }
+        ));
         assert_eq!(repo(&follower).replication_bookmark().await.unwrap(), 0);
         assert_eq!(repo(&follower).current_commit_version().await.unwrap(), 0);
-        assert!(
-            rows(&follower).await.is_empty(),
-            "accompanying Put must not apply",
-        );
+        assert!(rows(&follower).await.is_empty());
 
-        let mut batch = Batch::new();
-        batch.op(
-            "profile",
-            replication_profile("profile").stream(
-                repl_scope("app").repo("main").build(),
-                ReplDirection::Pull,
-                ReplMode::ReadOnly,
-            ),
-        );
-        batch.op(
-            "sub",
-            subscription("sub", "tcp://leader:9000", "pub", "profile"),
-        );
-        let response = follower.execute("app", &batch.build()).await.unwrap();
-        assert!(!response.results.contains_key("__error"), "{response:?}");
+        create_subscription(&follower).await;
         let leader_clone = leader.clone();
         let factory: ReplSourceFactory = Arc::new(move |_| {
             Arc::new(InProcessReplSource::new(leader_clone.clone())) as Arc<dyn ReplSource>
@@ -206,55 +268,44 @@ fn cold_reopen_gap_stops_consumer_and_supervisor_but_not_beyond_h() {
                 .with_poll_wait_ms(0)
                 .with_max_iterations(1);
         supervisor.reconcile().await;
-        // Join through the catalogue-state write without polling or timers.
         supervisor.wait_for_subscription("sub").await;
-        assert_admin_state(&follower).await;
+        assert_admin_state(&follower, "resync_required").await;
         supervisor.reconcile().await;
         assert_eq!(
             supervisor.active_count(),
             0,
-            "resync_required cannot auto-restart",
+            "terminal refusal is not restarted"
         );
-        assert_admin_state(&follower).await;
+        assert_admin_state(&follower, "resync_required").await;
         assert_eq!(repo(&follower).replication_bookmark().await.unwrap(), 0);
+        assert_eq!(repo(&follower).current_commit_version().await.unwrap(), 0);
         assert!(rows(&follower).await.is_empty());
         supervisor.stop_all().await;
-
-        // A genuinely caught-up follower already has the pre-crash data and H.
-        // In this complete-journal fixture, explicit embedded seeding can apply
-        // that known event; this is NOT the pull loop bypassing a gap.
+        // Apply the actual payload delivered alongside the explicit GAP, then
+        // persist its leader bookmark to model a follower caught up through H.
         let seeded = open(None).await;
-        let seeded_repo = repo(&seeded);
-        for event in events {
-            let outcome = seeded_repo
-                .apply_replicated(
-                    &event.event,
-                    &event.field_bindings,
-                    0,
-                    shamir_db::engine::tx::apply_replicated::ApplyPolicy::default(),
-                )
-                .await
-                .unwrap();
-            assert!(
-                matches!(
-                    outcome,
-                    shamir_db::engine::tx::apply_replicated::ApplyOutcome::Applied { .. }
-                ),
-                "{outcome:?}",
-            );
-            seeded_repo
-                .advance_replication_bookmark(event.event.commit_version)
-                .await
-                .unwrap();
-        }
+        let outcome = repo(&seeded)
+            .apply_replicated(
+                &events[0].event,
+                &events[0].field_bindings,
+                0,
+                ApplyPolicy::default(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ApplyOutcome::Applied { .. }));
+        repo(&seeded).advance_replication_bookmark(h).await.unwrap();
+        assert_eq!(repo(&seeded).replication_bookmark().await.unwrap(), h);
         assert_eq!(rows(&seeded).await, rows(&leader).await);
-        let later = write(&leader, "after-crash").await;
+
+        // The source's certified gap ends at H; H+1 and later pulls are valid.
+        let later = write(&leader, "after-gap").await;
         assert!(later > h);
         run(&seeded, &leader).await.unwrap();
-        assert_eq!(seeded_repo.replication_bookmark().await.unwrap(), later);
+        assert_eq!(repo(&seeded).replication_bookmark().await.unwrap(), later);
         assert_eq!(rows(&seeded).await, rows(&leader).await);
 
-        // Bookmark 0 is NOT a reseed: the persisted interval still rejects it.
+        // A fresh bookmark remains rejected despite the complete journal.
         let fresh = open(None).await;
         assert!(matches!(
             run(&fresh, &leader).await,
@@ -262,9 +313,7 @@ fn cold_reopen_gap_stops_consumer_and_supervisor_but_not_beyond_h() {
         ));
         assert!(rows(&fresh).await.is_empty());
 
-        // Achievable zero-bookmark recovery: rebuild an independent, gap-free
-        // leader lineage from authoritative logical data, then full replay.
-        // No snapshot protocol or GAP deletion is being invented here.
+        // A separately rebuilt lineage is gap-free and replays from zero.
         let rebuilt = open(None).await;
         let authoritative = rows(&leader).await;
         let mut import = Batch::new();
@@ -272,22 +321,21 @@ fn cold_reopen_gap_stops_consumer_and_supervisor_but_not_beyond_h() {
         import.insert("seed", insert("items").rows(authoritative.clone()));
         let response = rebuilt.execute("app", &import.build()).await.unwrap();
         assert!(!response.results.contains_key("__error"), "{response:?}");
-        let rebuilt_repo = repo(&rebuilt);
-        let head = rebuilt_repo.current_commit_version().await.unwrap();
-        let journal = rebuilt_repo.read_changelog_bounded(1, 100).await.unwrap();
+        let rebuilt_head = repo(&rebuilt).current_commit_version().await.unwrap();
+        let journal = repo(&rebuilt).read_changelog_bounded(1, 100).await.unwrap();
         assert!(journal.confirmed, "rebuilt journal must confirm its prefix");
-        assert_eq!(journal.bound, head);
-        // The original GAP run recorded its leader identity even at bookmark 0.
-        // Full replay of a rebuilt lineage requires a new follower.
-        let fresh = open(None).await;
-        run(&fresh, &rebuilt).await.unwrap();
-        assert_eq!(repo(&fresh).replication_bookmark().await.unwrap(), head);
-        assert_eq!(rows(&fresh).await, authoritative);
+        assert_eq!(journal.bound, rebuilt_head);
+        let replay = open(None).await;
+        run(&replay, &rebuilt).await.unwrap();
+        assert_eq!(
+            repo(&replay).replication_bookmark().await.unwrap(),
+            rebuilt_head
+        );
+        assert_eq!(rows(&replay).await, authoritative);
     });
     drop(rt);
 }
 
-// Counterfactual: omit the clean checkpoint and this reopen produces a gap.
 #[test]
 fn clean_reopen_allows_follower_at_head() {
     let dir = tempfile::tempdir().unwrap();
@@ -303,6 +351,7 @@ fn clean_reopen_allows_follower_at_head() {
         h
     });
     drop(rt);
+
     let rt = runtime();
     rt.block_on(async {
         let leader = open(Some(&path)).await;
@@ -312,7 +361,7 @@ fn clean_reopen_allows_follower_at_head() {
                 .await
                 .unwrap()
                 .gap_at,
-            None,
+            None
         );
         let follower = open(None).await;
         run(&follower, &leader).await.unwrap();

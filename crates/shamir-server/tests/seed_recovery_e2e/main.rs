@@ -3,15 +3,11 @@
 //!
 //! # What these tests prove
 //!
-//! A REAL leader process (`env!("CARGO_BIN_EXE_shamir-server")`) is killed
-//! without a clean shutdown (`Child::kill` = SIGKILL on Unix). Reopening the
-//! leader's data directory certifies a recovery gap `[J+1, H]`; a fresh
-//! follower stops with `resync_required` and applies NO payload; a
-//! stopped-source `replication-seed-export` CLI produces a verified
-//! artifact; `replication-seed-install` boots a NEW follower repository with
-//! a paused, receipt-bound subscription; the operator's explicit Resume
-//! activates the loop, whose first pull starts at seed version `V + 1`; and
-//! subsequent leader writes converge row-for-row.
+//! leader's data directory reconciles events from its surviving WAL without
+//! an unclean-stop blanket gap. Seed scenarios explicitly persist a residual
+//! gap, then verify a fresh follower stops with `resync_required` and applies
+//! NO payload; the stopped-source seed CLI installs and resumes a new follower
+//! repository, whose subsequent writes converge row-for-row.
 //!
 //! # Honesty boundary (do not overstate)
 //!

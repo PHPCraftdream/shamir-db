@@ -18,6 +18,10 @@ use std::time::Duration;
 
 use tokio::process::Child;
 
+use shamir_db::storage::storage_fjall::FjallRepo;
+use shamir_db::storage::types::{RecordKey, Repo, Store};
+use shamir_tx::changefeed::{encode_gap_marker, gap_marker_key};
+
 use shamir_client::Client;
 use shamir_client::ConnectOptions;
 use zeroize::Zeroizing;
@@ -136,6 +140,26 @@ pub async fn spawn_leader(data_dir: &Path, addr: SocketAddr) -> LeaderChild {
         config_path,
         log_path,
     }
+}
+
+/// Raw fixture setup for durable repos created through wire `CreateRepo(engine = "fjall")`.
+pub async fn inject_recovery_gap(data_dir: &Path, first: u64, through: u64) {
+    let repo_path = data_dir.join("app").join("main");
+    let backing = FjallRepo::new(&repo_path).expect("open stopped app/main repository");
+    let store = backing
+        .store_get("__changelog__")
+        .await
+        .expect("open changelog store");
+    store
+        .set(
+            RecordKey::from_slice(&gap_marker_key()),
+            encode_gap_marker((first, through)),
+        )
+        .await
+        .expect("write durable recovery gap");
+    store.flush().await.expect("flush durable recovery gap");
+    drop(store);
+    drop(backing);
 }
 
 /// Last bytes of the child's log, for failure messages.

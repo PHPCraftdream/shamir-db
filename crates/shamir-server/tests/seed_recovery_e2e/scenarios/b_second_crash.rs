@@ -37,7 +37,7 @@ async fn seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues() {
     let addr = child::free_addr();
     let upstream = format!("tcp://{addr}");
 
-    // -- Leader v1: writes, unclean kill, export. --
+    // -- Leader v1: writes, unclean kill, WAL repair, explicit gap, export. --
     let mut leader = child::spawn_leader(&leader_dir, addr).await;
     let admin = child::connect_admin(&leader).await;
     wire::setup_leader(&admin).await;
@@ -45,6 +45,21 @@ async fn seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues() {
     wire::put(&admin, "audit", "a0", 1).await;
     drop(admin);
     child::kill(&mut leader).await;
+    let mut leader = child::spawn_leader(&leader_dir, addr).await;
+    let current = child::connect_admin(&leader).await;
+    let gap_through = wire::current_version(&current).await;
+    drop(current);
+    assert_eq!(gap_through, 2);
+    drop(child::connect_admin(&leader).await);
+    assert_eq!(
+        wire::gap_certificate(addr).await.gap_through,
+        None,
+        "surviving WAL repairs events without a blanket gap",
+    );
+    child::kill(&mut leader).await;
+    child::inject_recovery_gap(&leader_dir, 1, gap_through).await;
+    let mut leader = child::spawn_leader(&leader_dir, addr).await;
+    drop(child::connect_admin(&leader).await);
     let digest1 = child::cli_export(&leader.config_path, &seed1).await;
 
     // -- Seed #1 into home-1 and converge. --
@@ -59,14 +74,22 @@ async fn seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues() {
     wait_converged(&home1, &admin).await;
     let bookmark1 = follower::bookmark(&home1).await;
 
-    // -- Leader writes MORE, then is killed: horizon rises above bookmark. --
+    // -- Leader writes MORE; reconciled WAL then receives an explicit residual gap. --
     wire::put(&admin, "items", "k1", 10).await;
     wire::update_row(&admin, "audit", "a0", 77).await;
     child::kill(&mut leader).await;
     let mut leader = child::spawn_leader(&leader_dir, addr).await;
     drop(child::connect_admin(&leader).await);
+    let recovered = wire::gap_certificate(addr).await;
+    assert_eq!(recovered.gap_through, None, "surviving WAL is reconciled");
+    let horizon = recovered.current_version;
+    assert!(horizon > bookmark1);
+    child::kill(&mut leader).await;
+    child::inject_recovery_gap(&leader_dir, bookmark1 + 1, horizon).await;
+    let mut leader = child::spawn_leader(&leader_dir, addr).await;
+    drop(child::connect_admin(&leader).await);
     let cert = wire::gap_certificate(addr).await;
-    let horizon = cert.gap_through.expect("reopen certifies a new horizon");
+    assert_eq!(cert.gap_through, Some(horizon));
     assert!(
         horizon > bookmark1,
         "new horizon {horizon} must sit ABOVE the follower bookmark {bookmark1}",

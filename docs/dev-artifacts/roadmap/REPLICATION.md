@@ -652,9 +652,13 @@ reconnect_backoff_ms = { min = 200, max = 30_000 }   # + jitter
 - Reconnect: авто, exp backoff + jitter, resume-тикеты (уже дают ~7×
   дешевле полного SCRAM) — follower переживает рестарты лидера без
   оператора.
-- Гап/reseed: при `bookmark+1 < journal_floor` или `gap_at` — понятная
-  ошибка в лог + метрика + инструкция (`reseed` из бэкапа / R2-snapshot);
-  никакого тихого расхождения.
+- Гап/reseed: `gap_at` останавливает follower до применения payload и
+  требует операторского восстановления, если residual gap пересекает его
+  bookmark/следующую версию. После S5c-X PR4 unclean restart сам по себе не
+  означает GAP: cold open восстанавливает выводимые события v3 из WAL;
+  неизвестный legacy WAL или отсутствующие evidence могут оставить
+  минимальный консервативный gap. Offline seed остаётся ручным; автоматического
+  или online snapshot/reseed нет.
 - Аудит: репликационные сессии — в существующий audit-HMAC лог (кто,
   когда, какие repos тянул).
 
@@ -677,6 +681,18 @@ reconnect_backoff_ms = { min = 200, max = 30_000 }   # + jitter
 | **R2 — bootstrap + schema + semi-sync** | **Статус: частично доставлен как OFFLINE R2-lite (SEED-1..5, не ONLINE snapshot).** Доставлено: identity-метаданные (repo lineage + history epoch в Hello/Pull), офлайн-экспорт логического состояния остановленного лидера (`replication-seed-export`), изолированный crash-safe инсталлер с durable-квитанцией (`replication-seed-install`), pause+validated Resume с типизированными отказами (`seed_*`), operator runbook (`guide/09-seed-recovery.md`) и CI-сертификация (`tests/seed_recovery_e2e/`). НЕ построено (остаётся этим пунктом роадмапа): онлайн snapshot transfer, автоматический reseed, DDL/meta-репликация (схема заморожена, расхождение = `seed_wrong_schema`), retention-политика журнала, `min_version` barrier, semi-sync ack. Офлайн-сид требует ОСТАНОВЛЕННОГО лидера, Unix, scope = один `(db, repo)`, и не восстанавливает потерянные лидером записи. | snapshot transfer для новых реплик (temporal `AsOf(V)` скан → стрим → журнал с V+1) — закрывает G4-bootstrap; журнальная retention-политика (G4-disk); DDL/meta-репликация (G2: либо meta-writes в журнал, либо DDL-форвардинг с версионным барьером); `min_version` barrier; опциональный semi-sync ack (k-of-n, деградирующий в async по таймауту — MySQL semi-sync urok). | G2, G4 | L |
 | **R3 — failover** | promote-hardening: epoch-fencing e2e-тесты, старый лидер самодемотируется; авто-failover (lease или Raft для *конфигурации*, не данных — PacificA-разделение) — только если появится реальная эксплуатационная нужда. | G5½ | M (авто: L) |
 | **R4 — P2P / chat** | gossip-топология, update-anywhere через CRDT (Shapiro et al.) поверх того же event-потока; отдельный research-док, когда доберёмся. | — | XL |
+
+**S5c-X PR4 — cold reconciliation: реализовано; только cold path,
+unbenchmarked.** До serving recovery идемпотентно восстанавливает
+отсутствующие выводимые v3 journal events из surviving WAL; совпадающие
+записи не меняются, несовпадающие persisted bytes и I/O/decode ошибки
+закрывают open. Eventless v3 entry не создаёт GAP. Unknown legacy entries
+или отсутствующие evidence могут оставить минимальный консервативный GAP;
+pre-existing GAP не очищаются. Journal и recovery floor flush'ятся до записи
+J=H, затем J сохраняется до serving. Unclean shutdown сам по себе не требует
+reseed. PR5 (runtime orphan/channel-full gap repair) и PR6 (WAL-less follower
+recovery) не реализованы; WAL-less путь остаётся консервативным. PR4 не
+меняет commit hot path; benchmarks не запускались.
 
 Дисциплина PLAN.md §4 сохраняется: каждый шаг — research → implement →
 zero-trust verify → отдельный коммит; не строить R2 раньше, чем R1 запросит.

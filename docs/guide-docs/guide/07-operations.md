@@ -831,8 +831,15 @@ scrape_configs:
   unclean shutdown: exit code **70**, один ERROR с именами неуспешных
   репозиториев и счётчик `shutdown_unclean_total`. Clean требует quiesce,
   drain, W = allocation high-water и сохранённого J. При следующем старте
-  uncertified интервал (J,H] сертифицируется как conservative replication
-  gap (пустой интервал не создаёт gap); OS reclaim'ает сокеты.
+  cold reconciliation восстанавливает выводимые v3 journal events из
+  сохранившегося WAL; совпадающие события остаются без изменений,
+  несовпадающие bytes и любые I/O/decode ошибки запрещают open. v3 entries
+  с event header, из которых не выводится событие, gap не создают. Для
+  неизвестных legacy entries или версий с отсутствующими evidence может
+  остаться минимальный консервативный gap; уже существующие gap не
+  очищаются. Journal и recovery floor flush'ятся до продвижения J к H, а J
+  сохраняется до serving. Поэтому сам unclean shutdown не означает
+  replication gap или reseed; OS reclaim'ает сокеты.
 * **Single-instance guard.** Файловая блокировка (`fs4`) на `data_dir`.
   Два процесса на одних данных → второй не стартует.
 * **Logging — non-blocking.** Никогда не блокирует горячий путь. Overflow

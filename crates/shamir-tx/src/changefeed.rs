@@ -38,19 +38,23 @@
 //! A version still committing holds back the prefix rather than being skipped.
 //!
 //! Persistence remains asynchronous: a crash can lose the unflushed journal
-//! tail. The engine conservatively certifies the cold interval (J, H] before
-//! registration, even when all events survived; affected followers require
-//! manual resync. H remains limited by the recovered gate floor.
-//! Queue overflow/closure, write failures and corrupt records mark known gaps.
-//! Gap metadata is persisted asynchronously and restored on reopen once durable;
-//! marker-write failures retain dirty state for retry. This does not eliminate
-//! the crash window before persistence. The journal is an observability and
-//! replication feed, not the data's source of truth.
+//! tail. At cold start, surviving WAL entries rebuild derivable events. Gaps
+//! are certified for missing version intervals or legacy entries whose event
+//! cannot be derived; when follower provenance exists, the unresolved (J, H]
+//! range is conservatively gapped because the in-flight range is unknown.
+//! H remains limited by the recovered gate floor. Queue overflow/closure,
+//! write failures and corrupt records also mark gaps. Gap metadata is persisted
+//! asynchronously and restored on reopen once durable; marker-write failures
+//! retain dirty state for retry. This does not eliminate the crash window before
+//! persistence. The journal is an observability and replication feed, not the
+//! data's source of truth.
 //!
 //! Live broadcast occurs after publication in commit-completion order, not
 //! necessarily version order. A consumer that discards versions at or below
 //! its last delivered version can skip a late lower-version event. Use bounded
 //! engine journal pulls for ordered history, and handle reported gaps.
+
+pub mod cold;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -525,10 +529,9 @@ impl RepoChangefeed {
         self.clean_horizon.load(Ordering::Acquire)
     }
 
-    /// J is also advanced at runtime before WAL truncation, so clean stop is
-    /// not the only checkpoint boundary. A checkpoint covers only the sampled
-    /// settled prefix; newer events may arrive while the write is in flight and
-    /// can still require conservative GAP certification after a crash.
+    /// A checkpoint covers the sampled settled prefix. Any unresolved version
+    /// in that prefix must already have a durable journal event or persisted
+    /// gap before J advances.
     /// cancel-safe: NO — after admission the writer owns the request. A closed
     /// acknowledgement suppresses a not-yet-started J put, but an in-flight
     /// backend write may finish; cancellation never acknowledges durability.

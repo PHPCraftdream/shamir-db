@@ -1,7 +1,8 @@
 //! Scenario A — the main recovery path (design §6 PR-5 acceptance row):
 //!
 //! real leader child writes rows (inserts, updates, deletes, two tables) →
-//! SIGKILL → reopen certifies the recovery gap → a fresh bookmark-0
+//! SIGKILL → reopen reconciles the surviving WAL with no gap; a genuinely
+//! residual durable gap is then fixture-recorded so the fresh bookmark-0
 //! follower pulls and stops with `resync_required`, NO payload applied →
 //! leader stopped → real `replication-seed-export` CLI → real
 //! `replication-seed-verify` CLI → real `replication-seed-install` CLI into
@@ -50,13 +51,28 @@ async fn seed_e2e_a_kill_resync_offline_seed_resume_converges() {
     wire::delete_row(&admin, "audit", "a0").await;
     drop(admin);
 
-    // -- Unclean kill, reopen: the recovery gap is certified. --
+    // -- Unclean kill, reopen: durable wire-created app/main reconciles WAL. --
     child::kill(&mut leader).await;
     let mut leader = child::spawn_leader(&leader_dir, addr).await;
     drop(child::connect_admin(&leader).await);
     let cert = wire::gap_certificate(addr).await;
-    let gap_through = cert.gap_through.expect("reopen certifies a gap horizon");
-    assert!(gap_through >= 1, "the certified horizon covers the writes");
+    assert_eq!(
+        cert.gap_through, None,
+        "surviving WAL must not force reseed"
+    );
+
+    // Retain the historical reseed proof with an explicit residual certificate.
+    let gap_through = cert.current_version;
+    assert!(
+        gap_through >= 1,
+        "surviving WAL must include the committed writes",
+    );
+    child::kill(&mut leader).await;
+    child::inject_recovery_gap(&leader_dir, 1, gap_through).await;
+    let mut leader = child::spawn_leader(&leader_dir, addr).await;
+    let admin = child::connect_admin(&leader).await;
+    let cert = wire::gap_certificate(addr).await;
+    assert_eq!(cert.gap_through, Some(gap_through));
 
     // -- Fresh bookmark-0 follower: resync_required, no payload applied. --
     let fresh = Arc::new(follower::fresh_in_memory().await);
