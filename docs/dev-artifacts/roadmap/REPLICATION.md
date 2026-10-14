@@ -690,8 +690,10 @@ unbenchmarked.** До serving recovery идемпотентно восстана
 или отсутствующие evidence могут оставить минимальный консервативный GAP;
 pre-existing GAP не очищаются. Journal и recovery floor flush'ятся до записи
 J=H, затем J сохраняется до serving. Unclean shutdown сам по себе не требует
-reseed. PR5 (runtime orphan/channel-full gap repair) и PR6 (WAL-less follower
-recovery) не реализованы; WAL-less путь остаётся консервативным. PR4 не
+reseed. PR5 (runtime orphan/channel-full gap repair) реализован; с PR6c WAL-less follower
+при холодном старте сертифицирует журнал через J из своей bookmark-записи,
+оставляя минимальный uncertain GAP только для in-flight батча (retry-safe
+receipts PR6b не реализованы). PR4 не
 меняет commit hot path; benchmarks не запускались.
 
 Дисциплина PLAN.md §4 сохраняется: каждый шаг — research → implement →
