@@ -1,7 +1,5 @@
+use crate::meta::repl::{decode_bookmark_v3, encode_bookmark_v3, load_bookmark_v3, BookmarkV3};
 use crate::meta::repl_bookmark::{save_bookmark_and_clean_horizon, save_fence_record, FenceRecord};
-use crate::meta::repl_receipt::{
-    decode_bookmark_v3, encode_bookmark_v3, load_bookmark_v3, BookmarkV3,
-};
 use crate::meta::{MetaEnvelope, MetaKey};
 use bytes::Bytes;
 use shamir_storage::error::DbError;

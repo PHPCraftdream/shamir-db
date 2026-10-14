@@ -1,4 +1,5 @@
 //! S5c-X PR6b-1 — publication-bound MVCC history primitives.
+//! (moved from `crates/shamir-tx/src/tests/publication_bound/` — write_receipt-scoped layout ratchet.)
 //!
 //! Pins the split between [`MvccStore::materialize_committed_to_history`]
 //! (durable rows + ts, NO visibility) and [`MvccStore::publish_materialized`]

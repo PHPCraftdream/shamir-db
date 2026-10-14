@@ -2,7 +2,7 @@
 //! OPTIONAL outstanding receipt reference. Decode-capable now; no
 //! production writer — PR6b-2 activates writing.
 
-use crate::meta::repl_bookmark::{
+use crate::meta::repl::bookmark::{
     load_clean_horizon, load_fence_record, load_replication_bookmark, FenceRecord,
 };
 use crate::meta::{MetaEnvelope, MetaKey};
@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 /// Bookmark v3 record: everything v2 carried plus an optional reference to
 /// the outstanding replication redo receipt (see
-/// [`crate::meta::repl_receipt::receipt_record`]).
+/// [`crate::meta::repl::receipt`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookmarkV3 {
     pub fence: Option<FenceRecord>,

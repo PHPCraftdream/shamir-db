@@ -546,31 +546,9 @@ impl MvccStore {
     /// The fn stays `async` to keep its many call sites / public shape
     /// unchanged; it no longer suspends.
     ///
-    /// The body moved to the synchronous [`publish_cell_sync`] — the
-    /// publication-split primitives (S5c-X PR6b-1) need an infallible,
-    /// non-awaiting publish step.
+    /// The body lives in `write_receipt::cell_publish`.
     pub(super) async fn publish_cell(&self, key: RecordKey, version: u64) {
         self.publish_cell_sync(key, version);
-    }
-
-    /// Synchronous body of [`publish_cell`]. Same max-monotonic cell
-    /// semantics; no `.await`, no I/O — callable from the synchronous
-    /// PUBLISH half of the publication split.
-    pub(super) fn publish_cell_sync(&self, key: RecordKey, version: u64) {
-        match self.cells.entry_sync(key) {
-            scc::hash_map::Entry::Occupied(mut e) => {
-                if version > e.get().version {
-                    e.get_mut().version = version;
-                }
-            }
-            scc::hash_map::Entry::Vacant(e) => {
-                e.insert_entry(RecordCell {
-                    version,
-                    vacuum_anchor: 0,
-                    reserved_by: 0,
-                });
-            }
-        }
     }
 
     /// A10 vacuum anchor deferral: atomically set the cell's `vacuum_anchor`

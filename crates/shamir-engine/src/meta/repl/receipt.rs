@@ -166,7 +166,7 @@ fn validate(receipt: &ReplicationReceipt) -> DbResult<()> {
 /// Encode a receipt under tuple version 1 after validation.
 pub fn encode_receipt(receipt: &ReplicationReceipt) -> DbResult<Vec<u8>> {
     validate(receipt)?;
-    MetaEnvelope::new((1u16, receipt))
+    MetaEnvelope::new((1u16, receipt.clone()))
         .encode()
         .map_err(|e| DbError::Storage(format!("replication receipt codec: {e}")))
 }

@@ -1,4 +1,4 @@
-use crate::meta::repl_receipt::{
+use crate::meta::repl::{
     decode_receipt, encode_receipt, receipt_id, ReceiptBinding, ReceiptCounterDelta, ReceiptOp,
     ReceiptPhase, ReceiptTimestamp, ReceiptVersionMapping, ReplicationReceipt, MAX_RECEIPT_EVENTS,
     MAX_RECEIPT_OPS,
