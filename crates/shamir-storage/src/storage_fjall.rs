@@ -14,19 +14,6 @@ use std::thread::JoinHandle;
 use tokio::sync::oneshot;
 use tokio::task;
 
-#[cfg(test)]
-pub(crate) mod atomic_batch_test_seam {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    pub static FAIL_BEFORE_COMMIT: AtomicBool = AtomicBool::new(false);
-    pub static FAIL_AFTER_COMMIT: AtomicBool = AtomicBool::new(false);
-
-    pub fn reset() {
-        FAIL_BEFORE_COMMIT.store(false, Ordering::Release);
-        FAIL_AFTER_COMMIT.store(false, Ordering::Release);
-    }
-}
-
 // ============================================================================
 // Write worker (task #536) — single dedicated OS thread per FjallStore that
 // serializes point-writes with NO embedded read (insert / transact) submitted
@@ -879,3 +866,16 @@ impl Store for FjallStore {
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[cfg(test)]
+pub(crate) mod atomic_batch_test_seam {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    pub static FAIL_BEFORE_COMMIT: AtomicBool = AtomicBool::new(false);
+    pub static FAIL_AFTER_COMMIT: AtomicBool = AtomicBool::new(false);
+
+    pub fn reset() {
+        FAIL_BEFORE_COMMIT.store(false, Ordering::Release);
+        FAIL_AFTER_COMMIT.store(false, Ordering::Release);
+    }
+}
