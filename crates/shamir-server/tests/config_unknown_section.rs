@@ -40,7 +40,7 @@ tls: {
 
 #[test]
 fn unknown_top_level_section_is_rejected() {
-    let src = format!("{}\ndurabilty = {{}}\n", minimal_valid());
+    let src = format!("{}\ndurabilty: {{\n}}\n", minimal_valid());
     let err = ktav::from_str::<Config>(&src).expect_err("typo section must fail at parse time");
     let msg = err.to_string();
     assert!(
