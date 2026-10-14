@@ -49,7 +49,7 @@ use shamir_connect::common::username::NormalizedUsername;
 use shamir_transport_tcp::framing::{read_frame, write_frame, MAX_FRAME_SIZE_DEFAULT};
 use shamir_transport_tcp::tls::{extract_tls_exporter, make_client_config_no_ca};
 
-use shamir_engine::tx::ReplicatedEvent;
+use shamir_db::engine::tx::ReplicatedEvent;
 use shamir_query_types::wire::repl::{ReplRequest, ReplResponse};
 use shamir_server::backup;
 use shamir_server::config::{
