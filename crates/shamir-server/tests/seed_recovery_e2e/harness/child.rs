@@ -18,8 +18,9 @@ use std::time::Duration;
 
 use tokio::process::Child;
 
+use shamir_db::storage::error::DbError;
 use shamir_db::storage::storage_fjall::FjallRepo;
-use shamir_db::storage::types::{DbError, RecordKey, Repo, Store};
+use shamir_db::storage::types::{RecordKey, Repo};
 use shamir_tx::changefeed::{decode_gap_marker, encode_gap_marker, gap_marker_key};
 
 use shamir_client::Client;

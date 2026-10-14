@@ -72,7 +72,7 @@ async fn seed_e2e_a_kill_resync_offline_seed_resume_converges() {
     child::kill(&mut leader).await;
     child::inject_recovery_gap(&leader_dir, 1, gap_through).await;
     let mut leader = child::spawn_leader(&leader_dir, addr).await;
-    let admin = child::connect_admin(&leader).await;
+    drop(child::connect_admin(&leader).await);
     let cert = wire::gap_certificate(addr).await;
     assert_eq!(cert.gap_first, Some(1));
     assert_eq!(cert.gap_through, Some(gap_through));
