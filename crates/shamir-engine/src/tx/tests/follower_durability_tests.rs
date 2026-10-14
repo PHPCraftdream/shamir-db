@@ -21,6 +21,7 @@ use crate::meta::{MetaEnvelope, MetaKey};
 use crate::repo::{BoxRepo, RepoInstance};
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
+use crate::tx::apply_replicated::follower_durability::{durable_journal_barrier, in_flight_range};
 use crate::tx::apply_replicated::{apply_batch_with_info, apply_replicated_batch};
 use crate::tx::{ApplyOutcome, ApplyPolicy, ReplicatedEvent};
 
@@ -143,6 +144,42 @@ async fn fixture(fail: bool) -> (RepoInstance, Arc<RecordingHistory>, Arc<MvccSt
     (repo, history, mvcc)
 }
 
+// The batch certificate is observable alongside the upstream-space cursor.
+// A completed confirmation with no corresponding persisted payload is not
+// sufficient evidence: read-back must fail before any bookmark is saved.
+#[tokio::test]
+async fn confirmed_but_missing_journal_event_is_rejected_and_never_acked() {
+    let repo = repo();
+    repo.get_table("items").await.unwrap();
+    let _handle = repo.changefeed().await.unwrap();
+    let event = Arc::new(ChangelogEvent {
+        repo: "follower".into(),
+        commit_version: 1,
+        tx_id: 1,
+        actor: Actor::System,
+        timestamp_ns: 0,
+        changes: Vec::new(),
+    });
+    let error = durable_journal_barrier(&repo, &[event], 1, 1)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DbError::NotFound(_)), "{error:?}");
+    assert_eq!(repo.replication_bookmark().await.unwrap(), 0);
+}
+
+#[test]
+fn crash_phase_table_has_precise_certification_windows() {
+    let cases = [
+        (None, 4, Some(1..=4)),
+        (Some(0), 4, Some(1..=4)),
+        (Some(4), 4, None),
+        (Some(2), 4, Some(3..=4)),
+    ];
+    for (horizon, end, expected) in cases {
+        assert_eq!(in_flight_range(horizon, end), expected);
+    }
+}
+
 // Behavioral counterfactual: omitting history flush or reserving after writes
 // violates the recording barriers. This batch API did not exist on baseline.
 #[tokio::test]
@@ -157,6 +194,12 @@ async fn batch_reserves_floor_then_flushes_history_once_before_bookmark() {
     assert_eq!(history.flushes.load(Ordering::Acquire), 1);
     assert_eq!(repo.replication_bookmark().await.unwrap(), 2);
     assert_eq!(load_last_committed(&history.info).await.unwrap(), Some(2));
+    assert_eq!(
+        crate::meta::repl_bookmark::load_clean_horizon(&history.info)
+            .await
+            .unwrap(),
+        Some(2),
+    );
     for id in 1..=2 {
         assert!(mvcc
             .get_current_bytes(&RecordId([id; 16]).to_bytes())
@@ -182,6 +225,13 @@ async fn published_batch_flush_failure_stops_and_keeps_old_bookmark() {
     assert_eq!(gate.durable_watermark(), 0);
     assert_eq!(repo.replication_bookmark().await.unwrap(), 0);
     assert_eq!(load_last_committed(&history.info).await.unwrap(), Some(2));
+    assert_eq!(
+        crate::meta::repl_bookmark::load_clean_horizon(&history.info)
+            .await
+            .unwrap(),
+        None,
+    );
+    assert_eq!(history.flushes.load(Ordering::Acquire), 1);
     assert!(mvcc
         .get_current_bytes(&RecordId([1; 16]).to_bytes())
         .await

@@ -95,6 +95,9 @@
 //!    follower wrote history directly via `apply_committed_ops`; the
 //!    drainer has nothing to drain for this version).
 //!  - Interner mappings are translated by name and persisted before allocation.
+//!
+#[path = "follower_durability/mod.rs"]
+pub mod follower_durability;
 
 use std::sync::Arc;
 
@@ -108,6 +111,7 @@ use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::RecordView;
 use shamir_types::types::value::InnerValue;
 
+use self::follower_durability::single_barrier;
 use crate::meta::recovery_marker::{
     load_last_committed, load_next_tx_id_snapshot, save_last_committed_flushed,
     save_next_tx_id_snapshot,
@@ -571,6 +575,8 @@ async fn apply_prepared(
     // Resolve only after the last failure exit: an aborted apply must enqueue
     // nothing and must not mark a changefeed gap. Preserve translated bytes,
     // actor and timestamp, but key downstream replication on the local version.
+    #[cfg(test)]
+    follower_durability::test_seam::history_written(repo).await;
     let downstream_event = reproject_for_downstream(rewritten_event, repo.name(), local_version);
     let prepared = repo.prepare_journal_event(Some(downstream_event)).await;
 
@@ -600,6 +606,7 @@ async fn apply_prepared(
     // the caller to persist a bookmark. A failed barrier is terminal.
     if let Err(error) = async {
         if !batched {
+            single_barrier(repo, downstream_event.as_ref(), local_version).await?;
             repo.flush_all_history().await?;
         }
         Ok::<(), DbError>(())
@@ -711,19 +718,12 @@ pub(crate) async fn apply_batch_with_info(
     // of the node's follower role. Settle the exact applied versions only
     // after this history flush, not on the basis of a WAL sync. An in-memory
     // backend still provides no restart persistence.
-    repo.flush_all_history()
+    follower_durability::finish_batch(repo, info, &prepared, floor, leader_floor)
         .await
-        .map_err(|error| DbError::RepoRequiresReopen(error.to_string()))?;
-    let group = repo.wal_group().await?;
-    for event in &prepared {
-        if let Some(version) = event.version {
-            gate.mark_durable(version);
-            group.settle(version);
-        }
-    }
-    crate::meta::repl_bookmark::save_replication_bookmark(info, leader_floor)
-        .await
-        .map_err(|error| DbError::RepoRequiresReopen(error.to_string()))?;
+        .map_err(|error| {
+            gate.set_requires_reopen();
+            DbError::RepoRequiresReopen(error.to_string())
+        })?;
     durability.armed = false;
     Ok(ApplyOutcome::Applied {
         local_version: floor,

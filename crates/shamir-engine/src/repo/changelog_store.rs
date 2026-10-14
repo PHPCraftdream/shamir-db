@@ -13,6 +13,9 @@ use futures::StreamExt;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::Store;
 
+#[path = "changelog_store/follower_durability.rs"]
+mod follower_durability;
+
 /// Per-repo durable changelog journal backed by a `Store`.
 pub struct StoreChangelog {
     store: Arc<dyn Store>,
