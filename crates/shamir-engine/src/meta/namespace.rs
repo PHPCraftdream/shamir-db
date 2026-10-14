@@ -70,6 +70,10 @@ pub enum MetaKey {
     /// back into [`crate::tx::apply_replicated`] as `applied_watermark` for
     /// O(1) idempotent re-delivery gating.
     ReplicationBookmark,
+
+    /// S5c-X PR6b-1: outstanding replication redo receipt; separate key
+    /// from the bookmark; codec only — no production writer in this PR.
+    ReplicationReceipt,
 }
 
 impl MetaKey {
@@ -93,6 +97,7 @@ impl MetaKey {
             MetaKey::RepoIdentity => "_t.rid",
             MetaKey::LifecycleRecord => "_t.lcr",
             MetaKey::ReplicationBookmark => "_t.rbm",
+            MetaKey::ReplicationReceipt => "_t.rrc",
         }
     }
 

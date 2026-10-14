@@ -8,7 +8,10 @@
 pub mod envelope;
 pub mod namespace;
 pub mod recovery_marker;
-pub mod repl_bookmark;
+pub mod repl;
+// Back-compat alias: every pre-existing `meta::repl_bookmark::…` path in
+// this crate, shamir-db, shamir-server and tests keeps resolving unchanged.
+pub use repl::bookmark as repl_bookmark;
 pub mod repo_identity;
 
 pub use envelope::{MetaEnvelope, MetaError, ENVELOPE_MAGIC, ENVELOPE_VERSION};
