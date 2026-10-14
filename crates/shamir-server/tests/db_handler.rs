@@ -157,11 +157,16 @@ async fn invalid_msgpack_returns_protocol_err() {
     let session = user_session();
 
     let garbage: &[u8] = &[0xff, 0x00, 0x10, 0x42, 0x99, 0x01];
-    let err = handler
+    // Malformed input is now a structured `invalid_request` response, not a
+    // transport-level error string.
+    let bytes = handler
         .handle(&session, garbage, &ConnectionServices::without_push(0))
         .await
-        .unwrap_err();
-    assert!(err.starts_with("invalid_request:"), "got {:?}", err);
+        .expect("invalid request must be a structured response");
+    match decode(&bytes) {
+        DbResponse::Error { code, .. } => assert_eq!(code, "invalid_request"),
+        other => panic!("expected invalid_request Error, got {:?}", other),
+    }
 }
 
 // --------------------------------------------------------------------------

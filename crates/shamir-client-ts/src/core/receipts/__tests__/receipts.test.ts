@@ -281,7 +281,7 @@ describe('implicit batch receipts (VIS-5b)', () => {
           // resolves would deadlock: the response IS what resolves it.)
           return f.nextRequest().then((request) => {
             expect(request).toMatchObject({
-              op: 'wait_for_visibility', query_version: 3, db: 'db', repo, version,
+              op: 'wait_for_visibility', query_version: 4, db: 'db', repo, version,
               visibility_wait: { mode: 'bounded', timeout_ms: 0n },
             });
             observed.push({ repo, version });

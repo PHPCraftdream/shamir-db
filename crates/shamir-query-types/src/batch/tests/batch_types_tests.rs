@@ -7,7 +7,7 @@ use crate::admin::{GroupRef, ResourceRef};
 use crate::admin::{ReplDirection, ReplMode, SubAction};
 use crate::batch::{
     BatchLimits, BatchOp, BatchRequest, BatchResponse, EdgeKind, ForEachOp, InternerDelta,
-    QueryEntry, ResultEncoding, SubBatchOp, TransactionInfo,
+    IsolationLevel, QueryEntry, RequestDurability, ResultEncoding, SubBatchOp, TransactionInfo,
 };
 use crate::filter::FilterValue;
 
@@ -116,7 +116,7 @@ fn batch_request_parses_isolation_field() {
     });
     let req: BatchRequest = from_qv(qv);
     assert!(req.transactional);
-    assert_eq!(req.isolation, Some("serializable".to_string()));
+    assert_eq!(req.isolation, Some(IsolationLevel::Serializable));
 }
 
 #[test]
@@ -138,7 +138,7 @@ fn batch_request_parses_durability_field() {
         "queries": {}
     });
     let req: BatchRequest = from_qv(qv);
-    assert_eq!(req.durability, Some("synced".to_string()));
+    assert_eq!(req.durability, Some(RequestDurability::Synced));
 }
 
 #[test]
@@ -550,6 +550,7 @@ fn nested_batch_serde_roundtrip() {
         isolation: None,
         visibility_wait: None,
         durability: None,
+        index_visibility: None,
         queries: TMap::default(),
         return_all: true,
         return_only: None,
@@ -588,6 +589,7 @@ fn nested_batch_empty_bind_omitted() {
         isolation: None,
         visibility_wait: None,
         durability: None,
+        index_visibility: None,
         queries: TMap::default(),
         return_all: true,
         return_only: None,
@@ -627,6 +629,7 @@ fn empty_nested_batch_is_not_admin() {
         isolation: None,
         visibility_wait: None,
         durability: None,
+        index_visibility: None,
         queries: TMap::default(),
         return_all: true,
         return_only: None,
@@ -691,6 +694,7 @@ fn batch_request_interner_epochs_omitted_when_empty() {
         isolation: None,
         visibility_wait: None,
         durability: None,
+        index_visibility: None,
         queries: TMap::default(),
         return_all: true,
         return_only: None,
@@ -719,6 +723,7 @@ fn batch_request_interner_epochs_roundtrip() {
         isolation: None,
         visibility_wait: None,
         durability: None,
+        index_visibility: None,
         queries: TMap::default(),
         return_all: true,
         return_only: None,
@@ -922,6 +927,7 @@ fn batch_request_result_encoding_id_roundtrip_via_msgpack() {
         isolation: None,
         visibility_wait: None,
         durability: None,
+        index_visibility: None,
         queries: TMap::default(),
         return_all: true,
         return_only: None,
@@ -969,6 +975,7 @@ fn single_query_batch(alias: &str, inner: BatchOp) -> BatchRequest {
         isolation: None,
         visibility_wait: None,
         durability: None,
+        index_visibility: None,
         queries,
         return_all: true,
         return_only: None,
@@ -1195,6 +1202,7 @@ fn is_write_subbatch_with_read_and_insert_is_true() {
         isolation: None,
         visibility_wait: None,
         durability: None,
+        index_visibility: None,
         queries,
         return_all: true,
         return_only: None,

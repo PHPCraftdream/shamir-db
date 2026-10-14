@@ -69,14 +69,26 @@ the drainer truncates the WAL back under the cap; a retried commit then
 succeeds. Nothing was published — retry the same writes (new transaction)
 after the retention gate releases.
 
-### Query v3: transactional visibility acknowledgement
+## Typed batch options (query v4)
 
-Query version **3** requires explicit opt-in on `Execute`, `TxBegin`,
-`TxExecute`, and `TxCommit`. Older, future, or omitted versions return
-`DbResponse.Error { code: "unsupported_query_version", ... }` before database
-execution or interactive commit consumes a handle. Omission is legacy version
-0, not implicit support for new outcome semantics. The auth handshake version
-is unchanged.
+The current wire options are typed fields: `durability` accepts `buffered` or
+`synced`; `index_visibility` accepts `sync` or `async`; `isolation` accepts
+`snapshot`, `serializable`, or `pessimistic`. The `pessimistic` value selects
+pessimistic locking (level 3); only the string alias `level3` is obsolete and
+must be replaced by `pessimistic`.
+
+The parser rejects unsupported requested query-language versions with
+`DbResponse::Error { code: "unsupported_query_version", message: ... }`.
+Unknown `BatchRequest` and `CreateRepoOp` keys, invalid enum values, and
+malformed request payloads are reported with
+`DbResponse::Error { code: "invalid_request", message: <detail> }`. No request
+is executed after this validation failure.
+
+Query version **4** requires explicit opt-in on `Execute`, `TxBegin`,
+`TxExecute`, and `TxCommit`. The server supports query v4 only; query v3 and
+other omitted/older/future versions return `DbResponse::Error { code:
+"unsupported_query_version", message: ... }` before database execution or
+interactive commit consumes a handle. The auth handshake version is unchanged.
 
 `BatchRequest.visibility_wait` and `TxCommit.visibility_wait` are optional:
 
@@ -92,7 +104,7 @@ is unchanged.
 
 Bounded is supported on TxCommit, explicit Execute, and implicit DML batches,
 including nested Batch/ForEach bodies and multi-repository execution. Startup
-accepts `visibility_ack_mode = "bounded"`; the default remains Strict. Query v3
+accepts `visibility_ack_mode = "bounded"`; the default remains Strict. Query v4
 gating and recursive caps/Strict permissions still apply before writes.
 Receipt-less Call/admin write paths reject Bounded with validation. Nested
 commit-only overrides inside an already transactional outer batch remain rejected;
@@ -114,7 +126,7 @@ pending positions: only dependent reads are suppressed, not unrelated contained
 operations. Reconcile the write, then issue the read in a new snapshot.
 Same-connection completion order is not a visibility fence.
 
-Every committed `TransactionInfo` in v3 includes `visibility`; aborted metadata
+Every committed `TransactionInfo` in v4 includes `visibility`; aborted metadata
 omits it. Missing/null committed visibility, visibility on an abort, invalid
 state/reason tags, and invalid sampled-prefix arithmetic are malformed, never
 inferred to be visible. `is_committed()` remains a commit-decision predicate;
@@ -222,7 +234,7 @@ visibility types; engine receipts use the shared query DTO types.
 **No durability upgrade:** direct CRUD remains best-effort/no-WAL and unsafe to
 cancel mid-sequence (data, counters and indexes are not a transaction). Bound
 only post-known-outcome observation, never the entire write. A receipt promises
-neither transactional atomicity, fsync/crash durability, async-index completion,
+neither transactional atomicity, fsync/crash durability, `async` index visibility,
 nor bounded end-to-end latency. Direct writes add no independent post-ack brake;
 existing transactional soft backpressure and execution/admission limits are
 unchanged. Implicit/network batch receipts are described above; supported SDK
@@ -375,9 +387,9 @@ fences the write lock; transactional commit checks the bit too
 (`crates/shamir-engine/src/table/table_manager.rs::begin_migration_freeze`,
 `crates/shamir-engine/src/tx/pre_commit.rs`).
 
-## Read-only visibility reconciliation (protocol v3)
+## Read-only visibility reconciliation (protocol v4)
 
-`WaitForVisibility { query_version: 3, db, repo, version, visibility_wait }`
+`WaitForVisibility { query_version: 4, db, repo, version, visibility_wait }`
 returns `VisibilityObserved { version, visibility }`. Repository READ access is
 required. `visibility_wait` is `{ mode: "strict" }` or
 `{ mode: "bounded", timeout_ms: N }`. Zero is an immediate status check,

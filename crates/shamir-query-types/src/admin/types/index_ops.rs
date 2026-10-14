@@ -39,7 +39,11 @@ pub struct CreateIndexOp {
     pub index_type: Option<String>,
 
     /// FTS tokenizer: "whitespace" (default) or "unicode".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_fts_tokenizer"
+    )]
     pub fts_tokenizer: Option<String>,
 
     /// FTS language hint (for future stemming).
@@ -60,14 +64,21 @@ pub struct CreateIndexOp {
     pub vector_dim: Option<u32>,
 
     /// Vector metric: "l2", "cosine" (default), "dot".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_vector_metric"
+    )]
     pub vector_metric: Option<String>,
 
     /// Vector quantization (V5.2 #411): "sq8" for SQ8 scalar quantization
     /// (deferred fit at 256 vectors, then a u8-code HNSW graph with
-    /// dequant-rescore). `None` / omitted / unrecognised → unquantized
-    /// f32 HNSW path, bit-for-bit identical to pre-#411.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// dequant-rescore). `None` / omitted selects the unquantized f32 path.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_vector_quantization"
+    )]
     pub vector_quantization: Option<String>,
 
     /// Covering index: extra fields whose values are stored directly in the
@@ -80,6 +91,106 @@ pub struct CreateIndexOp {
     /// error — the operation returns `{"created": false, "existed": true}`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub if_not_exists: bool,
+}
+
+/// FTS tokenizer DSL values accepted by the engine's tokenizer parser.
+fn valid_fts_tokenizer(value: &str) -> bool {
+    let ngram_is_valid = value
+        .strip_prefix("ngram")
+        .is_some_and(|digits| digits.parse::<u8>().is_ok_and(|n| n > 0));
+    matches!(value, "whitespace" | "unicode" | "ngram")
+        || ngram_is_valid
+        || value.strip_prefix("stemmed_").is_some_and(|lang| {
+            matches!(
+                lang,
+                "english"
+                    | "en"
+                    | "russian"
+                    | "ru"
+                    | "arabic"
+                    | "ar"
+                    | "danish"
+                    | "da"
+                    | "dutch"
+                    | "nl"
+                    | "finnish"
+                    | "fi"
+                    | "french"
+                    | "fr"
+                    | "german"
+                    | "de"
+                    | "greek"
+                    | "el"
+                    | "hungarian"
+                    | "hu"
+                    | "italian"
+                    | "it"
+                    | "norwegian"
+                    | "no"
+                    | "portuguese"
+                    | "pt"
+                    | "romanian"
+                    | "ro"
+                    | "spanish"
+                    | "es"
+                    | "swedish"
+                    | "sv"
+                    | "tamil"
+                    | "ta"
+                    | "turkish"
+                    | "tr"
+            )
+        })
+}
+
+fn deserialize_fts_tokenizer<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)
+        .map_err(|error| serde::de::Error::custom(format!("fts_tokenizer: {error}")))?;
+    if let Some(tokenizer) = value.as_deref() {
+        if !valid_fts_tokenizer(tokenizer) {
+            return Err(serde::de::Error::custom(format!(
+                "fts_tokenizer: unknown value '{tokenizer}'"
+            )));
+        }
+    }
+    Ok(value)
+}
+
+fn deserialize_vector_metric<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)
+        .map_err(|error| serde::de::Error::custom(format!("vector_metric: {error}")))?;
+    if let Some(metric) = value.as_deref() {
+        if !matches!(metric, "l2" | "dot" | "cosine") {
+            return Err(serde::de::Error::custom(format!(
+                "vector_metric: unknown value '{}' (expected l2, dot, or cosine)",
+                metric
+            )));
+        }
+    }
+    Ok(value)
+}
+
+fn deserialize_vector_quantization<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)
+        .map_err(|error| serde::de::Error::custom(format!("vector_quantization: {error}")))?;
+    if let Some(quantization) = value.as_deref() {
+        if !quantization.eq_ignore_ascii_case("sq8") {
+            return Err(serde::de::Error::custom(format!(
+                "vector_quantization: unknown value '{}' (expected sq8)",
+                quantization
+            )));
+        }
+    }
+    Ok(value)
 }
 
 /// Rename an index on a table (in-place rekey, no data loss).

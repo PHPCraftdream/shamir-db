@@ -205,7 +205,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
     });
 
     // ═══════════════════════════════════════════════════════════════════
-    // Batch.durability — 'synced' / 'async_index' live-effect smoke.
+    // Batch.durability — 'synced' and index visibility options.
     // A durability/timing guarantee, not observable via query results alone;
     // the honest e2e proof is that the option round-trips (the batch
     // completes) and the write is immediately visible on read.
@@ -228,18 +228,16 @@ describe.skipIf(!SERVER_AVAILABLE)(
       expect(rd.results.r.records[0].qty).toBe(11);
     });
 
-    it('durability: async_index transactional batch completes and write is visible', async () => {
-      // async_index is documented as "only meaningful for transactional: true
-      // batches" — prove it round-trips without breaking the write.
-      const resp: BatchResponse = br(await Batch.create('dur-async')
-        .add('ins', write.insert('items', [{ sku: 'DUR-ASYNC', qty: 22 }]))
+    it('index visibility async transactional batch completes and write is visible', async () => {
+      const resp: BatchResponse = br(await Batch.create('index-async')
+        .add('ins', write.insert('items', [{ sku: 'INDEX-ASYNC', qty: 22 }]))
         .transactional()
-        .durability('async_index')
+        .indexVisibility('async')
         .execute(client!, db));
       expect(resp.results.ins.records.length).toBe(1);
 
-      const rd: BatchResponse = br(await Batch.create('dur-async-rd')
-        .add('r', Query.from('items').where(filter.eq('sku', 'DUR-ASYNC')).build())
+      const rd: BatchResponse = br(await Batch.create('index-async-rd')
+        .add('r', Query.from('items').where(filter.eq('sku', 'INDEX-ASYNC')).build())
         .execute(client!, db));
       expect(rd.results.r.records.length).toBe(1);
       expect(rd.results.r.records[0].qty).toBe(22);
