@@ -252,9 +252,8 @@ pub(super) async fn materialize(
     )
 }
 
-/// Transfer a failed visible projection to the existing orphan replay path.
-/// No false visible event is journaled or broadcast: the drainer records the
-/// changefeed gap before settling the orphan. Its WAL entry retains the data.
+/// Drainer derives events from available WAL evidence; only unknown/eventless
+/// entries or failed journal admission/persistence become GAPs.
 pub(super) fn settle_visible(
     repo: &RepoInstance,
     guard: shamir_tx::VersionGuard,
