@@ -87,11 +87,26 @@ async fn stop(repo: RepoInstance) {
 // shutdown validates persisted state; it is not a power-cut simulation.
 #[tokio::test(flavor = "current_thread")]
 async fn follower_batch_crash_points_certify_only_the_in_flight_batch() {
-    for (tag, phase, record_landed) in [
-        ("history-written", Phase::HistoryWritten, false),
-        ("journal-confirmed", Phase::JournalConfirmed, false),
-        ("journal-flushed", Phase::AfterJournalFlush, false),
-        ("bookmark-persisted", Phase::BookmarkPersisted, true),
+    for (tag, phase, record_landed, expected_versions) in [
+        ("history-written", Phase::HistoryWritten, false, vec![1u64]),
+        (
+            "journal-confirmed",
+            Phase::JournalConfirmed,
+            false,
+            vec![1, 2],
+        ),
+        (
+            "journal-flushed",
+            Phase::AfterJournalFlush,
+            false,
+            vec![1, 2],
+        ),
+        (
+            "bookmark-persisted",
+            Phase::BookmarkPersisted,
+            true,
+            vec![1, 2],
+        ),
     ] {
         let temp = tempfile::TempDir::new().unwrap();
         let name = format!(
@@ -154,15 +169,25 @@ async fn follower_batch_crash_points_certify_only_the_in_flight_batch() {
                 "cold-start gap at {tag}"
             );
             let page = reopened.read_changelog_from(1, 8).await.expect("pull page");
-            // A downstream pull sees no missing event outside the window:
-            // the completed prefix is served, the tail is inside the gap.
-            if record_landed {
-                assert_eq!(page.gap_at, None, "pull gap at {tag}");
-                assert_eq!(page.events.len(), 2, "pull events at {tag}");
+            // The journal reader serves every event present up to the
+            // confirmed bound and attaches gap_at; it never truncates the
+            // page at the gap. At JournalConfirmed/AfterJournalFlush the
+            // interrupted batch's event IS present (the barrier confirmed and
+            // the writer flushed it) but remains uncertified inside the GAP;
+            // at HistoryWritten it was never enqueued, so only the completed
+            // prefix is served.
+            let served_versions: Vec<u64> = page
+                .events
+                .iter()
+                .map(|event| event.commit_version)
+                .collect();
+            assert_eq!(served_versions, expected_versions, "pull events at {tag}");
+            let expected_page_gap = if record_landed {
+                None
             } else {
-                assert_eq!(page.gap_at, Some(record_j + 1), "pull gap at {tag}");
-                assert_eq!(page.events.len(), 1, "pull events at {tag}");
-            }
+                Some(record_j + 1)
+            };
+            assert_eq!(page.gap_at, expected_page_gap, "pull gap at {tag}");
             drop(feed);
             close(reopened).await;
         }
@@ -182,7 +207,11 @@ async fn unknown_j_record_keeps_the_conservative_gap() {
         assert_eq!(feed.certified_gap_interval(), Some((1, 10)));
         let page = repo.read_changelog_from(1, 8).await.unwrap();
         assert_eq!(page.gap_at, Some(1));
-        assert!(page.events.is_empty());
+        // The reader serves events that exist up to the confirmed bound and
+        // flags the gap separately: version 3's event is present inside the
+        // wide legacy GAP (1, 10] and IS returned, and no event outside the
+        // recorded journal is silently invented.
+        assert_eq!(page.events, vec![event(3)]);
         drop(feed);
         stop(repo).await;
     }
