@@ -108,9 +108,10 @@ async fn follower_batch_crash_points_certify_only_the_in_flight_batch() {
         let hook = Arc::new(test_seam::Hook::default());
         *hook.park_at.lock().unwrap() = Some(phase);
         test_seam::install(&name, Arc::clone(&hook));
+        let second_batch = [replicated(2, 2)];
         let mut apply = Box::pin(apply_replicated_batch(
             &repo,
-            &[replicated(2, 2)],
+            &second_batch,
             1,
             ApplyPolicy::Trusted,
         ));
