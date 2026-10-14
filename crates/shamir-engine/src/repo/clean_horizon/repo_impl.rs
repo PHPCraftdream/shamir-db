@@ -5,6 +5,8 @@ use shamir_storage::types::Store;
 use std::sync::Arc;
 
 use super::RepoInstance;
+#[cfg(test)]
+use crate::tx::clean_horizon::checkpoint::test_seam;
 
 impl RepoInstance {
     #[cfg(test)]
@@ -26,9 +28,7 @@ impl RepoInstance {
     #[cfg(test)]
     pub(crate) fn clean_horizon_test_state(
         &self,
-    ) -> &std::sync::OnceLock<
-        Arc<std::sync::Mutex<crate::tx::clean_horizon::checkpoint::test_seam::State>>,
-    > {
+    ) -> &std::sync::OnceLock<Arc<std::sync::Mutex<test_seam::State>>> {
         &self.clean_horizon_test_state
     }
 

@@ -286,7 +286,7 @@ async fn hybrid_wal_bypasses_retention_gate_and_checkpoint() {
     let _ = test_seam::take_order(&repo);
     assert!(crate::tx::clean_horizon::checkpoint::checkpoint_before_truncate(&repo).await);
     assert_eq!(feed.clean_horizon(), initial_j);
-    assert!(crate::tx::clean_horizon::checkpoint::test_seam::take_order(&repo).is_empty());
+    assert!(test_seam::take_order(&repo).is_empty());
 }
 
 #[tokio::test]

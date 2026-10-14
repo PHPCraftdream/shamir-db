@@ -96,6 +96,8 @@ use shamir_wal::{WalEntryV2, WalOpV2, WalTicketState};
 use tokio::sync::{Mutex, Notify};
 
 use crate::repo::RepoInstance;
+#[cfg(test)]
+use crate::tx::clean_horizon::checkpoint::test_seam;
 use crate::tx::materialize::interner_delta_safe_to_truncate;
 
 /// Test-only injection: when set to a non-zero `table_id`, the Phase B
@@ -1560,7 +1562,7 @@ impl Drainer {
             repo.flush_all_history().await?;
             let removed = wal.truncate_below(checkpoint_ceiling).await?;
             #[cfg(test)]
-            crate::tx::clean_horizon::checkpoint::test_seam::record(repo, "truncate");
+            test_seam::record(repo, "truncate");
             // Recheck actual retained bytes after unlink; clear admission refusal only below cap.
             let _retention_action =
                 crate::tx::clean_horizon::retention::enforce_retention(repo, checkpoint_ceiling)

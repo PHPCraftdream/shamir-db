@@ -8,6 +8,8 @@ use crate::query::batch::BatchError;
 use crate::query::write::WriteResult;
 use crate::repo::durability_policy::{DurabilityMetrics, DurabilityPolicy};
 use crate::table::interner_manager::InternerManager;
+#[cfg(test)]
+use crate::tx::clean_horizon::checkpoint::test_seam;
 use crate::tx::CommitTailBarrier;
 use shamir_query_types::batch::VisibilityWait;
 use shamir_storage::error::{DbError, DbResult};
@@ -149,11 +151,7 @@ pub struct RepoInstance {
     /// shared across clones like every other field.
     wal_retention_gate: Arc<crate::tx::clean_horizon::retention_gate::RetentionGate>,
     #[cfg(test)]
-    clean_horizon_test_state: Arc<
-        std::sync::OnceLock<
-            Arc<std::sync::Mutex<crate::tx::clean_horizon::checkpoint::test_seam::State>>,
-        >,
-    >,
+    clean_horizon_test_state: Arc<std::sync::OnceLock<Arc<std::sync::Mutex<test_seam::State>>>>,
     #[cfg(test)]
     background_drainer_disabled: Arc<std::sync::atomic::AtomicBool>,
     wal_segment_bytes: u64,
@@ -1513,7 +1511,7 @@ impl RepoInstance {
     /// [`read_changelog_from`]: Self::read_changelog_from
     pub(crate) async fn changefeed(&self) -> DbResult<ChangefeedHandle> {
         #[cfg(test)]
-        crate::tx::clean_horizon::checkpoint::test_seam::record(self, "before_feed_init");
+        test_seam::record(self, "before_feed_init");
         let handle = self
             .changefeed
             .get_or_try_init(|| async {
