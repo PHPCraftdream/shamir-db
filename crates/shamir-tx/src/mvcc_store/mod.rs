@@ -545,21 +545,10 @@ impl MvccStore {
     /// `try_reserve` on this same map), so every `read_sync` wait is bounded.
     /// The fn stays `async` to keep its many call sites / public shape
     /// unchanged; it no longer suspends.
+    ///
+    /// The body lives in `write_receipt::cell_publish`.
     pub(super) async fn publish_cell(&self, key: RecordKey, version: u64) {
-        match self.cells.entry_sync(key) {
-            scc::hash_map::Entry::Occupied(mut e) => {
-                if version > e.get().version {
-                    e.get_mut().version = version;
-                }
-            }
-            scc::hash_map::Entry::Vacant(e) => {
-                e.insert_entry(RecordCell {
-                    version,
-                    vacuum_anchor: 0,
-                    reserved_by: 0,
-                });
-            }
-        }
+        self.publish_cell_sync(key, version);
     }
 
     /// A10 vacuum anchor deferral: atomically set the cell's `vacuum_anchor`

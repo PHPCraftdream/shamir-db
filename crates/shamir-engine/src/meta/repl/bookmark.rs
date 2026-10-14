@@ -4,7 +4,7 @@
 //! bookmark to its upstream fence, while version 2 also tracks the follower's
 //! local clean-history horizon independently. `J` is monotonic and never
 //! overwrites the upstream history epoch.
-#[path = "tests/follower_bookmark/v2.rs"]
+#[path = "../tests/follower_bookmark/v2.rs"]
 mod v2;
 pub use v2::{
     load_clean_horizon, load_fence_record, load_replication_bookmark,
@@ -12,5 +12,5 @@ pub use v2::{
 };
 
 #[cfg(test)]
-#[path = "tests/follower_bookmark/mod.rs"]
+#[path = "../tests/follower_bookmark/mod.rs"]
 mod tests;

@@ -1,4 +1,4 @@
-use super::types::{RecordKey, Repo, Store};
+use super::types::{AtomicBatch, AtomicCommitOutcome, KvOp, RecordKey, Repo, Store};
 use crate::error::{DbError, DbResult};
 use async_stream::stream;
 use async_trait::async_trait;
@@ -16,12 +16,17 @@ use std::sync::Arc;
 
 pub struct InMemoryRepo {
     stores: Arc<TDashMap<String, Arc<InMemoryStore>>>,
+    /// One-shot serialization of repo-wide atomic-batch commits; in-memory
+    /// test/embedded backend, never a hot path (sanctioned std::sync::Mutex
+    /// exception).
+    batch_lock: Arc<std::sync::Mutex<()>>,
 }
 
 impl InMemoryRepo {
     pub fn new() -> Self {
         Self {
             stores: Arc::new(new_dash_map_wc(1024)),
+            batch_lock: Arc::new(std::sync::Mutex::new(())),
         }
     }
 }
@@ -53,6 +58,95 @@ impl Repo for InMemoryRepo {
     async fn stores_list(&self) -> DbResult<Vec<String>> {
         let names: Vec<String> = self.stores.iter().map(|kv| kv.key().clone()).collect();
         Ok(names)
+    }
+
+    /// `true` — the in-memory backend has no durability layer, so a staged
+    /// batch commit cannot fail after staging.
+    fn supports_atomic_batch(&self) -> bool {
+        true
+    }
+
+    async fn begin_atomic_batch(&self) -> DbResult<Box<dyn AtomicBatch>> {
+        Ok(Box::new(InMemoryAtomicBatch {
+            stores: Arc::clone(&self.stores),
+            commit_lock: Arc::clone(&self.batch_lock),
+            ops: Vec::new(),
+        }))
+    }
+}
+
+/// Pending repository-wide atomic batch for [`InMemoryRepo`]: ops are staged
+/// as (store-name, op) pairs and applied under the repo-wide commit lock in
+/// one pass. Commit cannot fail after staging on this backend (no durability
+/// layer), so it always reports [`AtomicCommitOutcome::Committed`].
+///
+/// **Atomicity scope.** Visibility atomicity for concurrent READERS relies on
+/// the engine's single-writer discipline — `scc::TreeIndex` has no multi-key
+/// publish primitive, so a concurrent reader can observe ops one at a time.
+/// The `commit_lock` only serializes batch-vs-batch (two `commit` calls never
+/// interleave their ops); it does not block point reads/writes.
+struct InMemoryAtomicBatch {
+    stores: Arc<TDashMap<String, Arc<InMemoryStore>>>,
+    commit_lock: Arc<std::sync::Mutex<()>>,
+    ops: Vec<(String, KvOp)>,
+}
+
+#[async_trait]
+impl AtomicBatch for InMemoryAtomicBatch {
+    fn set(&mut self, store: &str, key: RecordKey, value: Bytes) -> DbResult<()> {
+        if store.is_empty() {
+            return Err(DbError::Validation(
+                "atomic batch: store name must not be empty".into(),
+            ));
+        }
+        self.ops.push((store.to_string(), KvOp::Set(key, value)));
+        Ok(())
+    }
+
+    fn delete(&mut self, store: &str, key: RecordKey) -> DbResult<()> {
+        if store.is_empty() {
+            return Err(DbError::Validation(
+                "atomic batch: store name must not be empty".into(),
+            ));
+        }
+        self.ops.push((store.to_string(), KvOp::Remove(key)));
+        Ok(())
+    }
+
+    /// Apply the staged ops. The std mutex is taken as a BLOCKING lock and
+    /// the critical section contains NO `.await` — the whole apply loop is
+    /// synchronous (TreeIndex `insert_sync`/`remove_sync`), so nothing is
+    /// held across a suspension point.
+    async fn commit(self: Box<Self>) -> DbResult<AtomicCommitOutcome> {
+        // Staging validation already ran at `set`/`delete` time, so a commit
+        // reaches this point only with well-formed ops (an Err during staging
+        // leaves nothing applied — all-or-nothing on staging error).
+        let _guard = self
+            .commit_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (name, op) in &self.ops {
+            let store = self
+                .stores
+                .entry(name.clone())
+                .or_insert_with(|| Arc::new(InMemoryStore::new()))
+                .value()
+                .clone();
+            match op {
+                KvOp::Set(k, v) => {
+                    // TreeIndex has no update-in-place; mirror `set`'s
+                    // insert-or-remove+insert fallback.
+                    if store.data.insert_sync(k.clone(), v.clone()).is_err() {
+                        store.data.remove_sync(k);
+                        let _ = store.data.insert_sync(k.clone(), v.clone());
+                    }
+                }
+                KvOp::Remove(k) => {
+                    store.data.remove_sync(k);
+                }
+            }
+        }
+        Ok(AtomicCommitOutcome::Committed)
     }
 }
 
@@ -142,6 +236,11 @@ impl Store for InMemoryStore {
 
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
         Ok(self.data.remove_sync(&key))
+    }
+
+    /// `true` — raw in-memory backend (see `InMemoryAtomicBatch`).
+    fn supports_atomic_batch(&self) -> bool {
+        true
     }
 
     fn iter_stream(
