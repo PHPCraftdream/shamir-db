@@ -47,7 +47,7 @@ pub fn decode_bookmark_v3(bytes: &[u8]) -> DbResult<BookmarkV3> {
         return Err(DbError::Storage("not a v3 bookmark record".into()));
     }
     let envelope: MetaEnvelope<(u16, BookmarkV3)> =
-        bincode::deserialize(bytes).map_err(codec_error)?;
+        bincode::deserialize(bytes).map_err(|e| codec_error(MetaError::Decode(e.to_string())))?;
     if envelope.magic != ENVELOPE_MAGIC {
         return Err(codec_error(MetaError::BadMagic {
             expected: ENVELOPE_MAGIC,
