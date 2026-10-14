@@ -89,7 +89,7 @@ jobs:
           fi
       # Same pinned nextest as the `test` job (see its comment above for the
       # perimeter-guard rationale).
-      - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af  # v2.87.11
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375  # v2.87.12
         if: steps.affected.outputs.args != ''
         with:
           tool: nextest@0.9.137
@@ -167,7 +167,7 @@ jobs:
       # renaming/removing it and fail-closing ALL test runs. The shorthand
       # `taiki-e/install-action@nextest` form cannot pin a version — the
       # full-form `@v2` + `with: { tool: "nextest@X.Y.Z" }` is required.
-      - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af  # v2.87.11
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375  # v2.87.12
         with:
           tool: nextest@0.9.137
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
@@ -237,7 +237,7 @@ jobs:
       # renaming/removing it and fail-closing ALL test runs. The shorthand
       # `taiki-e/install-action@nextest` form cannot pin a version — the
       # full-form `@v2` + `with: { tool: "nextest@X.Y.Z" }` is required.
-      - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af  # v2.87.11
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375  # v2.87.12
         with:
           tool: nextest@0.9.137
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
@@ -364,7 +364,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
-      - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af  # v2.87.11
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375  # v2.87.12
         with:
           tool: nextest@0.9.137
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
