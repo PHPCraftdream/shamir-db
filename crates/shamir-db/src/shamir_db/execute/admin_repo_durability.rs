@@ -7,13 +7,13 @@ use core::num::NonZeroU64;
 use crate::access::{Action, ResourcePath};
 use crate::engine::repo::durability_policy::{effective_wal_segment_bytes, resolve};
 use crate::engine::repo::DurabilityPolicy;
-use crate::query::admin::{AlterRepoOp, DescribeRepoOp};
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
 use crate::shamir_db::repo_durability::{
     durability_from_record, durability_to_record, merge_override,
 };
 use crate::types::value::QueryValue;
+use shamir_query_types::admin::{AlterRepoOp, DescribeRepoOp};
 use shamir_query_types::durability::DurabilityOverride;
 use shamir_types::mpack;
 
