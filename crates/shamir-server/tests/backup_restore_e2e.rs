@@ -395,6 +395,7 @@ fn backup_unclean_server_restore_certifies_before_serving_pull() {
                 from_version: 1,
                 limit: 100,
                 wait_ms: None,
+                capabilities: None,
             }),
             sid,
             2,

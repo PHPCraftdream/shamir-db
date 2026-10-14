@@ -220,6 +220,7 @@ async fn seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues() {
             from_version: follower::bookmark(&home2).await + 1,
             limit: 64,
             wait_ms: Some(0),
+            capabilities: None,
         })
         .await
         .expect("equal-horizon continuation pull");

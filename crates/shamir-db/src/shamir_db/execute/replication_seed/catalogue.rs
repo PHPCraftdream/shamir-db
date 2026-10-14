@@ -33,7 +33,7 @@ pub(super) async fn rows(home: &ShamirDb, name: &str) -> DbResult<Vec<QueryValue
         .collect())
 }
 
-pub(super) async fn streams(
+pub(in crate::shamir_db::execute) async fn streams(
     home: &ShamirDb,
     profile: &str,
 ) -> Result<Vec<ReplStream>, SeedRefusal> {

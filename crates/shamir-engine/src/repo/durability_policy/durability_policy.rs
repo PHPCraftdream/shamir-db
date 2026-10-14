@@ -25,8 +25,9 @@ pub const DEFAULT_WAL_RETENTION_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 /// `wal_commit` retains the configured tier for telemetry; the commit seam
 /// consumes `effective_wal_commit` from the same snapshot.
 /// The retention fields are consumed by runtime enforcement.
-/// `replication_serve` is consumed by the replication bound (only
-/// `Durable` is accepted in PR1 — see `resolve`).
+/// `replication_serve` is consumed by the replication bound (`durable`
+/// clamps to the recoverability prefix; `completed_reseed` serves past it
+/// and pays a reseed on unclean restart).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct DurabilityPolicy {
     wal_commit: WalCommitTier,
@@ -91,8 +92,9 @@ impl DurabilityPolicy {
     }
 
     /// What a replication pull may serve past the WAL's durability boundary
-    /// (config key `durability.replication_serve`). PR1 accepts ONLY
-    /// [`ReplicationServe::Durable`] — `resolve` rejects the rest.
+    /// (config key `durability.replication_serve`). `durable` (the default)
+    /// clamps to `R`; `completed_reseed` serves the completed prefix and
+    /// pays a history-epoch bump (reseed) after an unclean restart.
     #[must_use]
     pub const fn replication_serve(&self) -> ReplicationServe {
         self.replication_serve

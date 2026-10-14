@@ -112,6 +112,7 @@ async fn wire_pull(
         from_version,
         limit: u32::MAX,
         wait_ms: None,
+        capabilities: None,
     });
     let bytes = rmp_serde::to_vec_named(&request).expect("encode wire Pull");
     let connection = ConnectionServices::without_push(1);

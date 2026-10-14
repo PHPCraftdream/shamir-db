@@ -83,8 +83,9 @@ bookmark по одному лишь `current_version` вместо реальн�
 background fsync не hard maximum (storage errors и задержки могут растянуть
 окно). `synced` ждёт coalesced fsync, но не follower. Mem/hybrid не persistent,
 tier игнорируется с одним warn при open. Retention budget/action parsed only
-до PR2; `declare_gap` не включает эвикцию. `replication_serve` только `durable`:
-`completed_reseed is not available yet (planned: epoch bump + universal fencing)`.
+до PR2; `declare_gap` не включает эвикцию. `replication_serve` принимает `durable` (default) и `completed_reseed`: с PR8
+`completed_reseed` поддерживается — safe convergence, reseed после unclean
+restart (см. [07-operations](./07-operations.md)).
 
 `shamir_wal_synced_lag_versions`, `shamir_wal_sync_now_calls`,
 `shamir_replication_pull_held_back_ns` и `..._held_back_count` существуют в

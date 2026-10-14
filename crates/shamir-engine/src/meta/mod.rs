@@ -13,6 +13,7 @@ pub mod repo_identity;
 
 pub use envelope::{MetaEnvelope, MetaError, ENVELOPE_MAGIC, ENVELOPE_VERSION};
 pub use namespace::MetaKey;
+pub use repo_identity::LifecycleState;
 
 #[cfg(test)]
 mod tests;

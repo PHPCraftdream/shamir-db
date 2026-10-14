@@ -146,6 +146,8 @@ pub struct RepoInstance {
     /// Shared policy installed before recovery and observed by every clone.
     durability: Arc<arc_swap::ArcSwap<DurabilityPolicy>>,
     durability_metrics: Arc<DurabilityMetrics>,
+    /// Per-open cache for the completed-reseed lifecycle record (see `repo_impl.rs`).
+    replication_armed: Arc<std::sync::atomic::AtomicBool>,
     /// PR2 S5c-X — lock-free WAL retention gate (refuse flag + counters);
     /// shared across clones like every other field.
     wal_retention_gate: Arc<crate::tx::clean_horizon::retention_gate::RetentionGate>,
@@ -198,6 +200,7 @@ impl Clone for RepoInstance {
             wal_group: Arc::clone(&self.wal_group),
             durability: Arc::clone(&self.durability),
             durability_metrics: Arc::clone(&self.durability_metrics),
+            replication_armed: Arc::clone(&self.replication_armed),
             wal_retention_gate: Arc::clone(&self.wal_retention_gate),
             #[cfg(test)]
             clean_horizon_test_state: Arc::clone(&self.clean_horizon_test_state),
@@ -270,6 +273,7 @@ impl RepoInstance {
             table_init_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             wal_group: Arc::new(OnceCell::new()),
             durability_metrics: Arc::new(DurabilityMetrics::default()),
+            replication_armed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             durability: Arc::new(arc_swap::ArcSwap::from_pointee(policy)),
             wal_retention_gate: Arc::new(
                 crate::tx::clean_horizon::retention_gate::RetentionGate::default(),
@@ -1968,23 +1972,7 @@ impl RepoInstance {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         tokio::time::timeout(remaining, async {
             self.flush_buffers().await?;
-            let gate = self.tx_gate().await?;
-            let h = gate.version_allocation_high_water_mark();
-            // Settled includes aborted allocations, unlike last_committed.
-            // After stopped admission + quiescence + drain, W must equal H;
-            // unresolved allocation holes refuse a clean certificate.
-            if gate.completion().watermark() != h {
-                return Err(DbError::Storage(
-                    "unsettled versions at clean shutdown".into(),
-                ));
-            }
-            let handle = self.changefeed().await?;
-            if tokio::time::Instant::now() >= deadline {
-                return Err(DbError::Storage(
-                    "clean shutdown timed out before checkpoint".into(),
-                ));
-            }
-            handle.feed.record_clean_horizon(h).await
+            self.finish_clean_shutdown(deadline).await
         })
         .await
         .map_err(|_| DbError::Storage("clean shutdown timed out".into()))?

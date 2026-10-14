@@ -8,7 +8,9 @@ impl RepoInstance {
         self.repo.store_get("__changelog__").await
     }
 
-    pub(crate) fn has_persistent_wal(&self) -> bool {
+    /// Backend capability: does this repo persist a WAL across reopen?
+    /// Read on the cold publication path only (replication DDL enforcement).
+    pub fn has_persistent_wal(&self) -> bool {
         self.wal_dir.is_some()
     }
 

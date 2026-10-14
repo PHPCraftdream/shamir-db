@@ -4,6 +4,7 @@
 //! release after `drop`).
 
 use std::path::Path;
+use std::sync::atomic::Ordering;
 
 use shamir_query_types::batch::VisibilityWait;
 use shamir_tx::IsolationLevel;
@@ -11,6 +12,8 @@ use shamir_types::types::value::InnerValue;
 use shamir_wal::{SegmentSet, WalDurability, WalEntryV2};
 
 use super::super::helpers::{self, DiskFixture};
+use crate::meta::repo_identity::RepoIdentity;
+use crate::meta::repo_identity::{load_state, LifecycleState, SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST};
 use crate::repo::durability_policy::{
     DurabilityPolicy, ReplicationServe, RetentionOverflow, WalCommitTier,
     DEFAULT_WAL_RETENTION_MAX_BYTES,
@@ -301,12 +304,199 @@ async fn power_loss_real_reopen_bounds_survivors_and_next_synced_commit() {
     let h = helpers::recovered_horizon(&reopened).await;
     assert_eq!(h, 1);
     assert_eq!(reopened.wal_group().await.unwrap().recoverable_through(), h);
-    let (events, gap) = reopened
+    next_commit_is_servable(&reopened, h).await;
+    reopened.stop_journal_writer_for_test().await.unwrap();
+}
+
+/// CompletedReseed policy on the File backend (Buffered commit tier).
+fn completed_reseed_policy() -> DurabilityPolicy {
+    DurabilityPolicy::new(
+        WalCommitTier::Buffered,
+        DEFAULT_WAL_RETENTION_MAX_BYTES,
+        RetentionOverflow::RefuseWrites,
+        ReplicationServe::CompletedReseed,
+    )
+}
+
+/// Shared body: build a repo serving `CompletedReseed`, commit v1 SYNCED,
+/// serve a speculative page (v2 exists in W and the journal but NOT in R),
+/// then lose exactly the unsynced tail bytes. Returns the identity BEFORE
+/// the loss and the fixture path — the caller reopens with its own policy.
+/// The owning `TempDir` is returned to the caller: dropping it here would
+/// delete the data/WAL directory BEFORE the caller's reopen (empty repo).
+async fn arm_serve_and_lose_speculative_tail(
+    name: &str,
+) -> (RepoIdentity, std::path::PathBuf, tempfile::TempDir) {
+    let fx = helpers::disk_repo(name).await;
+    fx.repo.set_durability(completed_reseed_policy()).unwrap();
+    helpers::append_wal(&fx.repo, 1, WalDurability::Synced)
+        .await
+        .unwrap();
+    let file = fx.wal_file();
+    let safe_len = std::fs::metadata(&file).unwrap().len();
+    helpers::seed_journal(&fx.repo, &[1, 2]).await;
+    // Unsynced tail: v2 raises W but not R — it is speculative.
+    helpers::append_wal(&fx.repo, 2, WalDurability::Buffered)
+        .await
+        .unwrap();
+    let group = fx.repo.wal_group().await.unwrap();
+    assert_eq!(group.max_committed_version(), 2);
+    let recoverable = group.recoverable_through();
+    // The page read arms the lifecycle record BEFORE any byte is served
+    // (`read_changelog_replication_page`), then serves the completed prefix
+    // PAST the recoverable bound — the speculative tail.
+    let (events, gap) = fx
+        .repo
         .read_changelog_for_replication(0, 100)
         .await
         .unwrap();
-    assert!(events.iter().all(|event| event.event.commit_version <= h));
-    assert_eq!(gap, Some(1)); // unknown old-format history stays conservative
-    next_commit_is_servable(&reopened, h).await;
+    assert_eq!(gap, None);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].event.commit_version, 1);
+    assert_eq!(events[1].event.commit_version, 2);
+    assert!(
+        events[1].event.commit_version > recoverable,
+        "the completed_reseed page serves past recoverable_through ({recoverable})"
+    );
+    let store = fx.repo.tx_info_store().await.unwrap();
+    assert_eq!(
+        load_state(&store).await.unwrap(),
+        Some(LifecycleState::Armed),
+        "arming must precede the first served speculative byte"
+    );
+    drop(store);
+    let before = fx.repo.repo_identity().await.unwrap();
+    fx.repo.stop_journal_writer_for_test().await.unwrap();
+    let DiskFixture {
+        repo,
+        _dir,
+        backing,
+    } = fx;
+    drop(repo);
+    // Lose ONLY the unsynced WAL bytes: the journal/history stores keep the
+    // speculative events — the epoch bump, not byte loss, forces the reseed.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(file)
+        .unwrap()
+        .set_len(safe_len)
+        .unwrap();
+    (before, backing, _dir)
+}
+
+/// Reopening after losing the unsynced tail under `CompletedReseed` serving
+/// bumps the history epoch exactly +1 (lineage stable), leaves the record
+/// Armed (the obligation persists), counts the bump in the durability
+/// metrics, and fences any follower bookmark recorded against the old epoch.
+#[tokio::test(start_paused = true)]
+async fn completed_reseed_speculative_tail_loss_bumps_epoch_and_fences_old_bookmark() {
+    let (before, backing, _dir) = arm_serve_and_lose_speculative_tail("spec-tail").await;
+    // Reopen with the SAME completed_reseed policy: recovery runs the
+    // unclean-open bump hook (Armed record, no Clean certificate).
+    let reopened = RepoInstance::from_factory_with_durability(
+        "spec-tail".into(),
+        BoxRepoFactory::fjall_raw(backing),
+        vec![TableConfig::new("items")],
+        completed_reseed_policy(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        reopened.wal_group().await.unwrap().recoverable_through(),
+        1,
+        "the unsynced tail is really gone"
+    );
+    let identity = reopened.repo_identity().await.unwrap();
+    assert_eq!(
+        identity.lineage_id, before.lineage_id,
+        "the bump must NEVER change the lineage"
+    );
+    assert_eq!(identity.history_epoch, before.history_epoch + 1);
+    // The armed obligation persists until the next clean shutdown.
+    let store = reopened.tx_info_store().await.unwrap();
+    assert_eq!(
+        load_state(&store).await.unwrap(),
+        Some(LifecycleState::Armed)
+    );
+    drop(store);
+    assert_eq!(
+        reopened.durability_metrics_snapshot().counters[7],
+        1,
+        "the epoch-bump counter must record exactly one unclean bump"
+    );
+    // Fencing (inline form of the `shamir_db::fence_metadata` rule — the real
+    // fence path is covered by the shamir-server identity-fence tests): a
+    // bookmark recorded against the OLD identity carries the same lineage
+    // but the OLD epoch; the reopened leader's epoch differs, so the follower
+    // must re-seed instead of pulling.
+    let old_bookmark_lineage = before.lineage_id;
+    let old_bookmark_epoch = before.history_epoch;
+    assert_eq!(identity.lineage_id, old_bookmark_lineage);
+    assert_ne!(identity.history_epoch, old_bookmark_epoch);
+    reopened.stop_journal_writer_for_test().await.unwrap();
+}
+
+/// NEGATIVE CONTROL: with `SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST` set, the same
+/// loss + reopen does NOT bump — proving the open-time bump hook (not the
+/// byte loss) is what forces the reseed. nextest runs each test in its own
+/// process, so setting the seam here cannot race any other test.
+#[tokio::test(start_paused = true)]
+async fn completed_reseed_seam_suppresses_unclean_epoch_bump() {
+    SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST.store(true, Ordering::Release);
+    let (before, backing, _dir) = arm_serve_and_lose_speculative_tail("spec-tail-seam").await;
+    let reopened = RepoInstance::from_factory_with_durability(
+        "spec-tail-seam".into(),
+        BoxRepoFactory::fjall_raw(backing),
+        vec![TableConfig::new("items")],
+        completed_reseed_policy(),
+    )
+    .await
+    .unwrap();
+    let identity = reopened.repo_identity().await.unwrap();
+    assert_eq!(identity.lineage_id, before.lineage_id);
+    assert_eq!(
+        identity.history_epoch, before.history_epoch,
+        "the seam must skip the unclean-open bump entirely"
+    );
+    assert_eq!(reopened.durability_metrics_snapshot().counters[7], 0);
+    // Reset even though nextest isolates processes (guard-free, no Drop
+    // across the runtime teardown).
+    SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST.store(false, Ordering::Release);
+}
+
+/// Review finding 2a: the unclean-open bump decision no longer depends on
+/// the CURRENT serve mode. The Armed record left over from the earlier
+/// completed-reseed period survives the switch to `durable` serving, and the
+/// unclean durable reopen MUST bump (the served tail is gone; under durable
+/// serving an old-epoch follower bookmark is inert, so fencing requires the
+/// bump, not the mode).
+#[tokio::test(start_paused = true)]
+async fn durable_reopen_after_fast_period_loss_bumps_epoch_armed_survives_config_change() {
+    let (before, backing, _dir) = arm_serve_and_lose_speculative_tail("spec-tail-dur").await;
+    // `open()` reopens under the default `durable` serve mode — the record
+    // decision is mode-independent, so the hook bumps exactly once.
+    let reopened = open(&backing, "spec-tail-dur").await;
+    let identity = reopened.repo_identity().await.unwrap();
+    assert_eq!(
+        identity.lineage_id, before.lineage_id,
+        "the bump must NEVER change the lineage"
+    );
+    assert_eq!(
+        identity.history_epoch,
+        before.history_epoch + 1,
+        "an Armed record must bump even though the CURRENT mode is durable"
+    );
+    let store = reopened.tx_info_store().await.unwrap();
+    assert_eq!(
+        load_state(&store).await.unwrap(),
+        Some(LifecycleState::Armed),
+        "the obligation persists until the next clean shutdown"
+    );
+    drop(store);
+    assert_eq!(
+        reopened.durability_metrics_snapshot().counters[7],
+        1,
+        "exactly one unclean bump on the durable reopen"
+    );
     reopened.stop_journal_writer_for_test().await.unwrap();
 }

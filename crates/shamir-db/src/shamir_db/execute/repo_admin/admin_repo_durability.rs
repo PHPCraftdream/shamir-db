@@ -251,6 +251,20 @@ impl ShamirAdminExecutor {
             }
         };
 
+        // S5c-X PR8: expose the live repo's leader identity so operators can
+        // correlate follower fence refusals (recorded vs observed lineage/
+        // epoch) with the source. Absent (Null) when the repo is not open.
+        let (lineage_id, history_epoch) = match db.get_repo(&op.describe_repo) {
+            Some(repo) => {
+                let identity = repo.repo_identity().await.map_err(|e| err(e.to_string()))?;
+                (
+                    QueryValue::Str(hex_lineage(&identity.lineage_id)),
+                    QueryValue::from(identity.history_epoch),
+                )
+            }
+            None => (QueryValue::Null, QueryValue::Null),
+        };
+
         Ok(admin_result(mpack!({
             "describe_repo": @(QueryValue::Str(op.describe_repo.clone())),
             "repo": @(QueryValue::Str(self.db_name.clone())),
@@ -258,6 +272,14 @@ impl ShamirAdminExecutor {
             "path": @(path_qv),
             "durability": @(effective_qv),
             "durability_override": @(stored_override),
+            "lineage_id": @(lineage_id),
+            "history_epoch": @(history_epoch),
         })))
     }
+}
+
+/// Hex-encode a 16-byte lineage id (mirrors the follower fence's rendering,
+/// which is `pub(crate)` inside shamir-server and not visible cross-crate).
+fn hex_lineage(lineage: &[u8; 16]) -> String {
+    lineage.iter().map(|byte| format!("{byte:02x}")).collect()
 }

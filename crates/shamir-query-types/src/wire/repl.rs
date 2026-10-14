@@ -16,6 +16,13 @@ use serde::{Deserialize, Serialize};
 /// `repl_handler.rs::handle_repl`'s `Hello` arm for the enforcement point.
 pub const CURRENT_REPL_PROTO_VER: u32 = 1;
 
+/// Capability advertised by a follower that runs the universal identity
+/// fence (S5c-X PR7): hello + per-pull identity verification. A leader whose
+/// repos run `replication_serve = completed_reseed` refuses followers that
+/// do NOT advertise this capability (`legacy_follower_refused`) — fail
+/// closed against legacy peers that cannot hold a completed-reseed lineage.
+pub const REPL_CAP_IDENTITY_FENCE: &str = "identity_fence";
+
 /// Privileged replication request (leader-facing). Carried as the single
 /// `DbRequest::Repl` variant so the replication protocol versions
 /// independently of the client query protocol (REPLICATION §5, PR5).
@@ -31,6 +38,12 @@ pub enum ReplRequest {
         proto_ver: u32,
         /// Stable follower node identity.
         node_id: String,
+        /// Optional capability list (e.g. [`REPL_CAP_IDENTITY_FENCE`]).
+        /// Additive: a request from an older peer (or one serialized before
+        /// this field existed) decodes as `None` — the leader then treats
+        /// the follower as legacy.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capabilities: Option<Vec<String>>,
     },
     /// Pull a batch of changelog events for one repo from `from_version`.
     Pull {
@@ -46,6 +59,11 @@ pub enum ReplRequest {
         /// no events are available.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wait_ms: Option<u32>,
+        /// Optional capability list, mirroring [`ReplRequest::Hello`] — the
+        /// leader re-checks it on every pull (`completed_reseed` repos must
+        /// never be served to a legacy peer).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capabilities: Option<Vec<String>>,
     },
 }
 
