@@ -9,6 +9,7 @@ use shamir_engine::function::{
     EnvPolicy, FnCtx, FunctionMeta, FunctionRegistry, GlobalVars, NetGateway, WasmEngine,
     WasmFunction, WasmLimits,
 };
+use shamir_engine::repo::durability_policy::{effective_wal_segment_bytes, resolve};
 use shamir_engine::validator::{RecordValidator, ValidatorRegistry, WasmRecordValidator};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
@@ -20,6 +21,7 @@ use crate::engine::repo::{BoxRepoFactory, DurabilityPolicy, RepoConfig};
 use crate::engine::table::TableConfig;
 
 use super::super::ports::{PrincipalResolver, UserAdminPort};
+use super::super::repo_durability::durability_from_record;
 use super::super::system_store::{SystemStore, SystemStoreConfig};
 use super::SYSTEM_DB_NAME;
 
@@ -285,8 +287,19 @@ impl ShamirDb {
                     // Fail closed, before registry insertion, including J load
                     // and gap/J persistence failures. Do not silently skip repos.
                     shamir.seed_boot_gate(engine, path).await?;
-                    db.add_repo_with_durability(config, shamir.durability_policy)
-                        .await?;
+                    // S5c-X PR1b part 2: a stored per-repo durability
+                    // override takes precedence over the server default at
+                    // boot. A corrupt override fails init LOUDLY (fail
+                    // closed) — it never silently degrades to the default.
+                    let policy = match durability_from_record(record)? {
+                        Some(over) => resolve(
+                            &shamir.durability_policy,
+                            Some(&over),
+                            effective_wal_segment_bytes(),
+                        )?,
+                        None => shamir.durability_policy,
+                    };
+                    db.add_repo_with_durability(config, policy).await?;
                 }
             }
         }
@@ -534,10 +547,10 @@ impl ShamirDb {
         &self.db_create_lock
     }
 
-    /// Per-database lock map serialising `handle_create_repo`'s
-    /// exists-check → authorize → create sequence, keyed by `db_name`
-    /// (task #546 TOCTOU close). Mirrors [`Self::admin_user_locks`]'s
-    /// get-or-insert-then-lock usage pattern.
+    /// Per-database lock serialising repo admin mutations, keyed by
+    /// `db_name` (task #546 TOCTOU close). Alter-repo operations clone the
+    /// entry's Arc out of the DashMap before awaiting the mutex so guards
+    /// are never held across async suspension.
     pub fn repo_create_locks(&self) -> &Arc<DashMap<String, Arc<Mutex<()>>, THasher>> {
         &self.repo_create_locks
     }

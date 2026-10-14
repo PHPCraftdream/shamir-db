@@ -4,9 +4,12 @@ use tokio::time::Instant;
 
 use crate::access::{Actor, ResourceMeta};
 use crate::engine::db_instance::db_instance::DbInstance;
+use crate::engine::repo::durability_policy::{effective_wal_segment_bytes, resolve};
 use crate::engine::repo::RepoConfig;
+use crate::shamir_db::repo_durability::durability_from_record;
 use crate::types::value::QueryValue;
 use crate::{DbError, DbResult};
+use shamir_query_types::durability::DurabilityOverride;
 
 use super::SYSTEM_DB_NAME;
 use super::{ShamirDb, ShutdownReport};
@@ -235,12 +238,20 @@ impl ShamirDb {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
             let repo_meta = ResourceMeta::from_record(&rec);
+            let repo_durability = durability_from_record(&rec)?;
 
             // Write-new-before-remove-old; `path` is preserved verbatim
             // (key invariant γ — physical location is unchanged).
             if let Err(e) = self
                 .system_store
-                .save_repository(to, &repo_name, &engine, path.as_deref(), &repo_meta)
+                .save_repository(
+                    to,
+                    &repo_name,
+                    &engine,
+                    path.as_deref(),
+                    &repo_meta,
+                    repo_durability.as_ref(),
+                )
                 .await
             {
                 log::warn!(
@@ -351,7 +362,8 @@ impl ShamirDb {
     /// // is the achievable P2 mitigation here (task #606).
     #[doc(hidden)]
     pub async fn add_repo(&self, db_name: &str, config: RepoConfig) -> DbResult<()> {
-        self.add_repo_as(db_name, config, Actor::System).await
+        self.add_repo_as_with_durability(db_name, config, Actor::System, None)
+            .await
     }
 
     /// Like `add_repo` but stamps the repo (and its inline tables) with
@@ -361,6 +373,21 @@ impl ShamirDb {
         db_name: &str,
         config: RepoConfig,
         actor: Actor,
+    ) -> DbResult<()> {
+        self.add_repo_as_with_durability(db_name, config, actor, None)
+            .await
+    }
+
+    /// Like [`add_repo_as`](Self::add_repo_as) but resolves the sparse
+    /// per-repo durability override against the server-default policy and
+    /// opens the repo with the EFFECTIVE policy, then persists the override
+    /// inside the catalogue record (S5c-X PR1b part 2).
+    pub async fn add_repo_as_with_durability(
+        &self,
+        db_name: &str,
+        config: RepoConfig,
+        actor: Actor,
+        durability: Option<&DurabilityOverride>,
     ) -> DbResult<()> {
         // Owned clone (cheap Arc) — never hold the DashMap shard guard
         // across the `add_repo` / recovery awaits below.
@@ -381,17 +408,50 @@ impl ShamirDb {
             .collect();
 
         // DbInstance recovers and certifies before registry insertion.
-        db.add_repo_with_durability(config, self.durability_policy)
-            .await?;
+        // A `Some` override is resolved against the server-default policy
+        // HERE (not at next boot) so the running repo immediately runs the
+        // effective policy; an invalid override fails before any mutation.
+        let policy = resolve(
+            &self.durability_policy,
+            durability,
+            effective_wal_segment_bytes(),
+        )?;
+        db.add_repo_with_durability(config, policy).await?;
 
         let meta = ResourceMeta::owned_enforced(actor.clone());
 
         // Persist to system store
         if let Err(e) = self
             .system_store
-            .save_repository(db_name, &repo_name, &storage_type, path.as_deref(), &meta)
+            .save_repository(
+                db_name,
+                &repo_name,
+                &storage_type,
+                path.as_deref(),
+                &meta,
+                durability,
+            )
             .await
         {
+            // A Some override carries an explicit persistence contract.
+            // Any failed upsert/flush path is terminal for this CREATE: roll
+            // back both registry and possible catalogue residue.
+            if durability.is_some() {
+                db.remove_repo(&repo_name).await;
+                if let Err(cleanup_error) = self
+                    .system_store
+                    .remove_repository(db_name, &repo_name)
+                    .await
+                {
+                    log::warn!(
+                        "shamir_db::add_repo: failed to roll back catalogue '{}/{}' after durability persist failure: {}",
+                        db_name,
+                        repo_name,
+                        cleanup_error
+                    );
+                }
+                return Err(e);
+            }
             log::warn!(
                 "shamir_db::add_repo: failed to persist '{}/{}': {}",
                 db_name,
@@ -409,6 +469,40 @@ impl ShamirDb {
                 .save_table(db_name, &repo_name, table_name, *enable_indexes, &meta)
                 .await
             {
+                if durability.is_some() {
+                    // An explicit override is an atomic CREATE contract:
+                    // failed inline catalogue persistence must not return
+                    // success with a live repo that won't reload correctly.
+                    db.remove_repo(&repo_name).await;
+                    for (persisted_name, _) in &inline_tables {
+                        if let Err(cleanup_error) = self
+                            .system_store
+                            .remove_table(db_name, &repo_name, persisted_name)
+                            .await
+                        {
+                            log::warn!(
+                                "shamir_db::add_repo: failed to roll back table catalogue '{}/{}/{}': {}",
+                                db_name,
+                                repo_name,
+                                persisted_name,
+                                cleanup_error
+                            );
+                        }
+                    }
+                    if let Err(cleanup_error) = self
+                        .system_store
+                        .remove_repository(db_name, &repo_name)
+                        .await
+                    {
+                        log::warn!(
+                            "shamir_db::add_repo: failed to roll back catalogue '{}/{}': {}",
+                            db_name,
+                            repo_name,
+                            cleanup_error
+                        );
+                    }
+                    return Err(e);
+                }
                 log::warn!(
                     "shamir_db::add_repo: failed to persist table catalogue '{}/{}/{}': {}",
                     db_name,
@@ -516,6 +610,7 @@ impl ShamirDb {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         let existing_meta = ResourceMeta::from_record(&old_repo_record);
+        let existing_durability = durability_from_record(&old_repo_record)?;
 
         // 1. In-memory re-key (no per-table store copy).
         let renamed = db.rename_repo(from, to);
@@ -527,7 +622,14 @@ impl ShamirDb {
         //    registration under `from` is already gone.
         if let Err(e) = self
             .system_store
-            .save_repository(db_name, to, &engine, path.as_deref(), &existing_meta)
+            .save_repository(
+                db_name,
+                to,
+                &engine,
+                path.as_deref(),
+                &existing_meta,
+                existing_durability.as_ref(),
+            )
             .await
         {
             log::warn!(

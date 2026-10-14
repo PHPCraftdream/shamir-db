@@ -12,6 +12,9 @@
 //! is a pure logical re-key — no `rename_table_stores` and no drain are
 //! needed; the tables travel with the repo under the new key for free.
 
+#[path = "durability_override.rs"]
+mod durability_override;
+
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
 use shamir_db::query::batch::{BatchError, BatchRequest, BatchResponse};

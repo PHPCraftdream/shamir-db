@@ -7,7 +7,7 @@
  * HMAC-gated ops take a `signer: HmacSigner` + `dbInUse`, build the
  * canonical input via `../hmac.ts`, and attach `hmac: signer.hmacTagHex(…)`.
  *
- * PLATFORM-AGNOSTIC.
+ * Repo-specific admin operations live in `./repo-admin/`.
  */
 
 import type {
@@ -27,7 +27,6 @@ import type {
   GetTableSchemaOp,
   DescribeTableOp,
   CreateDbOp,
-  CreateRepoOp,
   CreateTableOp,
   CreateIndexOp,
   SetBufferConfigOp,
@@ -63,6 +62,8 @@ import type {
   CommitMigrationOp,
   RollbackMigrationOp,
 } from '../types/ddl.js';
+import { assertSafeVersion } from './write.js';
+import { createRepo, alterRepo, describeRepo } from './admin/repo-admin/index.js';
 import {
   canonicalDropDb,
   canonicalDropRepo,
@@ -74,7 +75,7 @@ import {
   canonicalSetRetention,
   canonicalPurgeHistory,
 } from '../hmac.js';
-import { assertSafeVersion } from './write.js';
+
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -109,25 +110,6 @@ export function createDb(
   opts?: { if_not_exists?: boolean },
 ): CreateDbOp {
   const op: CreateDbOp = { create_db: name };
-  if (opts?.if_not_exists) op.if_not_exists = true;
-  return op;
-}
-
-/** Create a new repository. */
-export function createRepo(
-  name: string,
-  opts?: {
-    engine?: string;
-    path?: string;
-    tables?: string[];
-    if_not_exists?: boolean;
-  },
-): CreateRepoOp {
-  const op: CreateRepoOp = { create_repo: name };
-  if (opts?.engine !== undefined) op.engine = opts.engine;
-  if (opts?.path !== undefined) op.path = opts.path;
-  if (opts?.tables !== undefined && opts.tables.length > 0)
-    op.tables = opts.tables;
   if (opts?.if_not_exists) op.if_not_exists = true;
   return op;
 }
@@ -1363,6 +1345,8 @@ export function describeTable(
   };
 }
 
+export { createRepo, alterRepo, describeRepo } from './admin/repo-admin/index.js';
+
 /** Aggregate namespace — every DDL constructor in one object. */
 export const ddl = {
   currentOnly,
@@ -1372,6 +1356,8 @@ export const ddl = {
   FieldBuilder,
   createDb,
   createRepo,
+  alterRepo,
+  describeRepo,
   createTable,
   createIndex,
   setTableSchema,

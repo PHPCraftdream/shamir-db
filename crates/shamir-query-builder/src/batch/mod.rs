@@ -12,6 +12,7 @@ mod build_error;
 mod durability;
 mod handle;
 mod index_visibility;
+#[path = "into_batch_op/into_batch_op.rs"]
 mod into_batch_op;
 mod isolation;
 pub mod subscribe;

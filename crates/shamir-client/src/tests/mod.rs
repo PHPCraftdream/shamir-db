@@ -4,6 +4,8 @@ pub mod cursor_stream_tests;
 pub mod demux_tests;
 pub mod interner_cache_tests;
 pub mod receipts;
+#[path = "visibility/repo_admin/mod.rs"]
+pub mod repo_admin;
 pub mod resume_wire_tests;
 pub mod timeout_tests;
 pub mod v2_passthrough_tests;

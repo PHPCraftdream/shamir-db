@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::repo::durability_policy::{resolve, DurabilityMetricsSnapshot};
+use shamir_query_types::DurabilityOverride;
 
 impl RepoInstance {
     #[cfg(test)]
@@ -87,6 +88,28 @@ impl RepoInstance {
     #[must_use]
     pub fn durability_policy(&self) -> arc_swap::Guard<Arc<DurabilityPolicy>> {
         self.durability.load()
+    }
+
+    /// Check whether an already-initialized transaction gate requires repo
+    /// reopen, without initializing the gate or touching transaction state.
+    pub fn durability_change_requires_reopen(&self) -> bool {
+        self.initialized_tx_gate()
+            .is_some_and(shamir_tx::RepoTxGate::requires_reopen)
+    }
+
+    /// Resolve and validate an ALTER override against this open repo's
+    /// captured segment size, without initializing transaction state. The
+    /// result can be passed to `set_durability` after catalogue persistence;
+    /// both paths use the same immutable segment-size input.
+    pub fn validate_durability_change(
+        &self,
+        server_default: &DurabilityPolicy,
+        over: &DurabilityOverride,
+    ) -> DbResult<DurabilityPolicy> {
+        if self.durability_change_requires_reopen() {
+            return Err(DbError::RepoRequiresReopen(self.name.clone()));
+        }
+        resolve(server_default, Some(over), self.wal_segment_bytes)
     }
 
     /// Validate before storing; rejected policies leave every clone unchanged.

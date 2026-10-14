@@ -1,8 +1,15 @@
-//! Repository-level DDL operations: create / drop repository.
+//! Repository-level DDL operations: create / drop / alter / describe
+//! repository.
 
 use serde::{Deserialize, Serialize};
 
+use crate::durability::DurabilityOverride;
+
 use super::db_ops::is_false;
+
+fn default_repo() -> String {
+    "main".to_string()
+}
 
 /// Create a new repository within the current database.
 ///
@@ -22,6 +29,11 @@ pub struct CreateRepoOp {
     /// error — the operation returns `{"created": false, "existed": true}`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub if_not_exists: bool,
+    /// Sparse per-repo durability override, applied on top of the
+    /// server-default durability policy at repo creation time. `None` (or
+    /// absent on the wire) inherits the server default untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durability: Option<DurabilityOverride>,
 }
 
 /// Drop a repository.
@@ -40,6 +52,22 @@ pub struct DropRepoOp {
     /// returning `{"existed": false}` instead of an error.
     #[serde(default, skip_serializing_if = "is_false")]
     pub if_exists: bool,
+}
+
+/// Alter a repository's per-repo settings — currently the sparse durability
+/// override, patched on top of the server-default durability policy.
+///
+/// Fields that are `None` are left untouched; fields that are `Some` win.
+///
+/// ```text
+/// { "alter_repo": "main", "durability": { "wal_commit": "synced" } }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlterRepoOp {
+    pub alter_repo: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durability: Option<DurabilityOverride>,
 }
 
 /// Rename a repository inside the current database, preserving all of its
@@ -92,4 +120,18 @@ pub struct RenameRepoOp {
 pub struct RenameDbOp {
     pub rename_db: String,
     pub to: String,
+}
+
+/// Describe a repository — return its full form (engine, path, per-repo
+/// durability policy) in a single response.
+///
+/// ```text
+/// { "describe_repo": "main" }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DescribeRepoOp {
+    pub describe_repo: String,
+    #[serde(default = "default_repo")]
+    pub repo: String,
 }

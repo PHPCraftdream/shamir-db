@@ -192,6 +192,7 @@ impl ShamirDb {
                 "fjall",
                 Some(path),
                 &meta,
+                None,
             )
             .await?;
         self.flush_seed_catalogue().await

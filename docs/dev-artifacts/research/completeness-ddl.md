@@ -22,7 +22,7 @@ user code).
 |---|---|---|---|
 | `CREATE DATABASE` | `ddl::create_db` (`create_db.rs`) | `CreateDbOp` (`db_ops.rs`) — `if_not_exists` | ✅ present |
 | `DROP DATABASE` | `ddl::drop_db` | `DropDbOp` — `hmac` + `cascade` (recursive) | ✅ present |
-| `CREATE REPO` (store) | `ddl::create_repo` | `CreateRepoOp` — `engine`, `path`, `tables[]`, `if_not_exists` | ✅ present |
+| `CREATE REPO` (store) | `ddl::create_repo` | `CreateRepoOp` — `engine`, `path`, `tables[]`, `if_not_exists`, sparse per-repository `durability` override | ✅ present |
 | `DROP REPO` | `ddl::drop_repo` | `DropRepoOp` — `hmac` + `cascade` | ✅ present |
 | `CREATE TABLE` | `ddl::create_table` | `CreateTableOp` — `if_not_exists`, optional inline `Retention`, optional inline declarative `schema: Vec<FieldRuleDto>` | ✅ present |
 | `DROP TABLE` | `ddl::drop_table` | `DropTableOp` — `hmac` | ✅ present |

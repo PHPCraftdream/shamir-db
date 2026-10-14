@@ -10,6 +10,8 @@ pub mod p1064_ddl_op_status_acl_tests;
 pub mod pull_cap_tests;
 mod receipts;
 pub mod repl_handler_tests;
+#[path = "receipts/repo_audit/mod.rs"]
+pub mod repo_audit;
 pub mod rowwise_response_budget_tests;
 pub mod seed_identity_tests;
 pub mod server_limit_policy_tests;

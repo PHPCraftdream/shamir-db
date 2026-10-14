@@ -67,6 +67,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use shamir_connect::server::audit_chain::AuditChainWriter;
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::{Session, SessionStore};
@@ -93,6 +94,7 @@ use super::admin::{
 };
 use super::config::{CursorLimitsCap, NodeMode, QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
 use super::cursor_handlers::{authorize_cursor_read, error_response};
+use super::repo_audit;
 use super::subscribe_handler;
 
 /// Absolute lifetime cap for an interactive (Phase B) transaction — bounds
@@ -147,6 +149,8 @@ pub(super) fn session_actor(session: &Session) -> Actor {
 #[derive(Clone)]
 pub struct ShamirDbHandler {
     pub(super) db: Arc<ShamirDb>,
+    /// Per-connection audit writer, attached by the request boundary.
+    pub(super) audit: Option<Arc<AuditChainWriter>>,
     pub(super) transactions: crate::config::TransactionsConfig,
     /// `None` means the handler was constructed without admin support;
     /// `CreateScramUser` requests will return `not_supported`.
@@ -206,11 +210,17 @@ pub struct ShamirDbHandler {
 }
 
 impl ShamirDbHandler {
+    pub fn with_audit_writer(mut self, audit: Arc<AuditChainWriter>) -> Self {
+        self.audit = Some(audit);
+        self
+    }
+
     /// Construct a handler over a shared [`ShamirDb`] without admin support.
     /// Use [`Self::with_admin`] when SCRAM user creation should be possible.
     pub fn new(db: Arc<ShamirDb>) -> Self {
         Self {
             db,
+            audit: None,
             transactions: crate::config::TransactionsConfig::default(),
             admin: None,
             slow_query: SlowQueryConfig::DISABLED,
@@ -231,6 +241,7 @@ impl ShamirDbHandler {
     pub fn with_admin(db: Arc<ShamirDb>, admin: AdminGlue) -> Self {
         Self {
             db,
+            audit: None,
             transactions: crate::config::TransactionsConfig::default(),
             admin: Some(admin),
             slow_query: SlowQueryConfig::DISABLED,
@@ -657,9 +668,19 @@ impl ShamirDbHandler {
         };
 
         let actor = session_actor(session);
+        let repo_observer = self
+            .audit
+            .as_ref()
+            .map(|audit| repo_audit::repo_audit_observer(audit.clone(), session));
         let exec_result = self
             .db
-            .execute_with_policy(actor.clone(), db_name, &batch, self.execution_policy())
+            .execute_with_policy_and_repo_observer(
+                actor.clone(),
+                db_name,
+                &batch,
+                self.execution_policy(),
+                repo_observer,
+            )
             .await;
         let final_response = match exec_result {
             Ok(mut response) => {

@@ -192,15 +192,19 @@ impl ShamirDbHandler {
             let mut guard = it.ctx().lock().await;
             match guard.as_mut() {
                 Some(tx) => {
+                    let repo_observer = self.audit.as_ref().map(|audit| {
+                        super::repo_audit::repo_audit_observer(audit.clone(), session)
+                    });
                     let r = self
                         .db
-                        .tx_execute_with_policy_and_budget(
+                        .tx_execute_with_policy_and_budget_and_repo_observer(
                             actor,
                             db_name,
                             &batch,
                             tx,
                             self.execution_policy(),
                             Some(it.remaining_lifetime()),
+                            repo_observer,
                         )
                         .await;
                     // Measure staged size INSIDE the same lock as the engine call.
