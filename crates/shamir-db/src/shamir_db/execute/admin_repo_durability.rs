@@ -6,7 +6,7 @@ use core::num::NonZeroU64;
 
 use crate::access::{Action, ResourcePath};
 use crate::engine::repo::durability_policy::{effective_wal_segment_bytes, resolve};
-use crate::engine::repo::{DurabilityPolicy, RepoInstance};
+use crate::engine::repo::DurabilityPolicy;
 use crate::query::admin::{AlterRepoOp, DescribeRepoOp};
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
@@ -125,11 +125,9 @@ impl ShamirAdminExecutor {
         let server_default = self.shamir.durability_policy();
         let resolved = repo
             .validate_durability_change(&server_default, &merged)
-            .map_err(|e| match &e {
-                crate::DbError::RepoRequiresReopen(_) => {
-                    err_code("repo_requires_reopen", e.to_string())
-                }
-                _ => err(e.to_string()),
+            .map_err(|e| {
+                let code = e.code().unwrap_or("invalid_request");
+                err_code(code, e.to_string())
             })?;
 
         // Preserve engine/path/meta and persist the MERGED override FIRST.
@@ -167,6 +165,9 @@ impl ShamirAdminExecutor {
             .map_err(|e| err(e.to_string()))?;
 
         let effective = repo.durability_policy();
+        if let Some(observer) = &self.repo_admin_observer {
+            observer.repository_durability_changed(&self.db_name, &op.alter_repo, &effective);
+        }
         Ok(admin_result(mpack!({
             "altered_repo": @(QueryValue::Str(op.alter_repo.clone())),
             "altered": @(QueryValue::Bool(true)),

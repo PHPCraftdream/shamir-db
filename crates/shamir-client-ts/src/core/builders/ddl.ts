@@ -7,7 +7,7 @@
  * HMAC-gated ops take a `signer: HmacSigner` + `dbInUse`, build the
  * canonical input via `../hmac.ts`, and attach `hmac: signer.hmacTagHex(…)`.
  *
- * PLATFORM-AGNOSTIC.
+ * Repo-specific admin operations live in `./repo-admin/`.
  */
 
 import type {
@@ -27,10 +27,6 @@ import type {
   GetTableSchemaOp,
   DescribeTableOp,
   CreateDbOp,
-  CreateRepoOp,
-  AlterRepoOp,
-  DescribeRepoOp,
-  DurabilityOverride,
   CreateTableOp,
   CreateIndexOp,
   SetBufferConfigOp,
@@ -66,6 +62,8 @@ import type {
   CommitMigrationOp,
   RollbackMigrationOp,
 } from '../types/ddl.js';
+import { assertSafeVersion } from './write.js';
+import { createRepo, alterRepo, describeRepo } from './repo-admin/index.js';
 import {
   canonicalDropDb,
   canonicalDropRepo,
@@ -77,7 +75,6 @@ import {
   canonicalSetRetention,
   canonicalPurgeHistory,
 } from '../hmac.js';
-import { durabilityOverride } from './durability.js';
 
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -115,35 +112,6 @@ export function createDb(
   const op: CreateDbOp = { create_db: name };
   if (opts?.if_not_exists) op.if_not_exists = true;
   return op;
-}
-
-/** Create a new repository. */
-export function createRepo(
-  name: string,
-  opts?: {
-    engine?: string;
-    path?: string;
-    tables?: string[];
-    if_not_exists?: boolean;
-    durability?: DurabilityOverride;
-  },
-): CreateRepoOp {
-  const op: CreateRepoOp = { create_repo: name };
-  if (opts?.engine !== undefined) op.engine = opts.engine;
-  if (opts?.path !== undefined) op.path = opts.path;
-  if (opts?.tables !== undefined && opts.tables.length > 0)
-    op.tables = opts.tables;
-  if (opts?.if_not_exists) op.if_not_exists = true;
-  if (opts?.durability !== undefined) op.durability = durabilityOverride(opts.durability);
-  return op;
-}
-
-export function alterRepo(name: string, durability: DurabilityOverride): AlterRepoOp {
-  return { alter_repo: name, durability: durabilityOverride(durability) };
-}
-
-export function describeRepo(name: string): DescribeRepoOp {
-  return { describe_repo: name };
 }
 
 /** Create a table in a repository. */
@@ -1376,6 +1344,8 @@ export function describeTable(
     repo: repoOrDefault(opts?.repo),
   };
 }
+
+export { createRepo, alterRepo, describeRepo } from './repo-admin/index.js';
 
 /** Aggregate namespace — every DDL constructor in one object. */
 export const ddl = {

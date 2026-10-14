@@ -10,7 +10,7 @@ use shamir_types::mpack;
 
 use crate::ddl;
 
-use super::helpers::roundtrip;
+use super::super::helpers::roundtrip;
 
 // ============================================================================
 // Database DDL
@@ -150,7 +150,7 @@ fn create_repo_with_durability() {
 
     let j = roundtrip(&op);
     assert_eq!(j["durability"]["wal_commit"], "synced");
-    assert_eq!(j["durability"]["wal_retention_max_bytes"], 4096);
+    assert_eq!(j["durability"]["wal_retention_max_bytes"], "4096");
     assert_eq!(j["durability"]["on_wal_retention_exceeded"], "declare_gap");
     assert_eq!(j["durability"]["replication_serve"], "durable");
 

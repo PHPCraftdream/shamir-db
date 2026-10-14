@@ -23,10 +23,11 @@ export {
   // directly from './select.js'.
 } from './select.js';
 export * from './write.js';
+export * from './repo-admin/index.js';
 export {
   currentOnly, olderThan, olderThanAge,
   FieldBuilder,
-  createDb, createRepo, alterRepo, describeRepo, createTable, createIndex,
+  createDb, createTable, createIndex,
   setTableSchema, addSchemaRule, removeSchemaRule, getTableSchema,
   setBufferConfig, getBufferConfig, alterBufferConfig,
   migrationStatus,

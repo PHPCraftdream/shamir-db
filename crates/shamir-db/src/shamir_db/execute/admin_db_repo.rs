@@ -251,7 +251,7 @@ impl ShamirAdminExecutor {
                 Some(over),
                 effective_wal_segment_bytes(),
             )
-            .map_err(|e| err(e.to_string()))?;
+            .map_err(|e| err_code(e.code().unwrap_or("invalid_request"), e.to_string()))?;
         }
 
         let factory = match op.engine.as_deref() {

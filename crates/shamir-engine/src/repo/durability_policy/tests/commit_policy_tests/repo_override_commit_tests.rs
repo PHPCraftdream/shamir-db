@@ -11,7 +11,7 @@ use crate::repo::durability_policy::{
 };
 use crate::repo::RepoInstance;
 
-use super::helpers;
+use super::super::helpers;
 
 const STATUS: VisibilityWait = VisibilityWait::Bounded { timeout_ms: 0 };
 

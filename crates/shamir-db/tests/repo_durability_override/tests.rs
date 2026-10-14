@@ -11,6 +11,7 @@ use shamir_db::query::batch::BatchError;
 use shamir_db::{ShamirDb, SystemStoreConfig};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
+use shamir_query_builder::write::{doc, insert};
 use shamir_query_types::durability::{DurabilityOverride, ReplicationServe, RetentionOverflow};
 use shamir_types::types::value::QueryValue;
 
@@ -195,10 +196,11 @@ async fn invalid_create_overrides_leave_no_repo() {
         let mut batch = Batch::new();
         batch.id(id);
         batch.create_repo("create", ddl::create_repo(name).durability(over));
-        assert!(db
+        let error = db
             .execute("testdb", &batch.to_request_via_msgpack())
             .await
-            .is_err());
+            .unwrap_err();
+        assert_eq!(err_code(&error), Some("invalid_request"));
         assert!(!db.get_db("testdb").unwrap().has_repo(name));
     }
 }
@@ -221,10 +223,11 @@ async fn invalid_alter_has_no_effect_on_live_policy_or_record() {
     let mut batch = Batch::new();
     batch.id(2);
     batch.alter_repo("alter", ddl::alter_repo("r1").durability(Some(invalid)));
-    assert!(db
+    let error = db
         .execute("testdb", &batch.to_request_via_msgpack())
         .await
-        .is_err());
+        .unwrap_err();
+    assert_eq!(err_code(&error), Some("invalid_request"));
     assert_eq!(open_policy(&db, "testdb", "r1"), WalCommitTier::Buffered);
     assert_eq!(
         describe_repo(&db, "r1").await["durability_override"],
@@ -367,16 +370,64 @@ async fn hybrid_repo_accepts_durability_override() {
         .unwrap();
     assert_eq!(
         repo.durability_policy().effective_wal_commit(),
-        WalCommitTier::Synced
+        WalCommitTier::Buffered
     );
     let described = describe_repo(&db, "hybrid_repo").await;
     assert_eq!(
         described["durability"]["wal_commit"].as_str(),
-        Some("synced")
+        Some("buffered")
     );
     assert_eq!(
         described["durability_override"]["wal_commit"].as_str(),
         Some("synced")
+    );
+}
+
+/// The public DB path persists and live-swaps ALTER before returning; the
+/// same client then commits a table write and observes its recoverable prefix
+/// at ACK, covering the integrated admin-to-WAL path (not a direct setter).
+#[tokio::test]
+async fn alter_repo_synced_commit_is_recoverable_at_ack() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_root = dir.path().join("metadata");
+    let db = ShamirDb::init(SystemStoreConfig::Fjall(data_root.join("system.redb")))
+        .await
+        .unwrap();
+    db.create_db("testdb").await;
+    let mut batch = Batch::new();
+    batch.id(1);
+    batch.create_repo("create", ddl::create_repo("r1").engine("fjall"));
+    db.execute("testdb", &batch.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    let mut batch = Batch::new();
+    batch.id(2);
+    batch.alter_repo(
+        "alter",
+        ddl::alter_repo("r1").durability(Some(synced_override())),
+    );
+    db.execute("testdb", &batch.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    let repo = db.get_db("testdb").unwrap().get_repo("r1").unwrap();
+    let group = repo.wal_group().await.unwrap();
+    let mut batch = Batch::new();
+    batch.id(3);
+    batch.insert(
+        "insert_item",
+        insert::with_repo("r1", "items").row(doc().set("value", 1)),
+    );
+    db.execute("testdb", &batch.to_request_via_msgpack())
+        .await
+        .unwrap();
+    let committed = group.max_committed_version();
+    assert!(committed > 0, "the DB client must commit through r1");
+    assert_eq!(
+        group.recoverable_through(),
+        committed,
+        "ALTER-installed Synced policy must make the committed prefix recoverable before ACK"
     );
 }
 

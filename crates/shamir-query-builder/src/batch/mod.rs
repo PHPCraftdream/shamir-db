@@ -16,7 +16,6 @@ mod into_batch_op;
 mod isolation;
 #[path = "repo_admin.rs"]
 mod repo_admin;
-pub(crate) use repo_admin::*;
 pub mod subscribe;
 mod try_into_batch_op;
 

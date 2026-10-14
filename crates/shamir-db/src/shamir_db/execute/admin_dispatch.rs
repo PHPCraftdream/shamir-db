@@ -3,6 +3,7 @@
 use crate::access::{Action, Actor, ResourcePath};
 use crate::query::batch::{AdminExecutor, BatchError, BatchOp};
 use crate::query::read::QueryResult;
+use crate::shamir_db::ports::RepoAdminObserver;
 
 use super::super::shamir_db::ShamirDb;
 
@@ -11,6 +12,7 @@ pub(super) struct ShamirAdminExecutor {
     pub(super) shamir: ShamirDb,
     pub(super) db_name: String,
     pub(super) actor: Actor,
+    pub(super) repo_admin_observer: Option<std::sync::Arc<dyn RepoAdminObserver>>,
 }
 
 #[async_trait::async_trait]

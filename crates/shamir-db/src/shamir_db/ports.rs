@@ -22,6 +22,10 @@
 
 use async_trait::async_trait;
 
+#[path = "ports/repo_admin_observer.rs"]
+mod repo_admin_observer;
+pub use repo_admin_observer::RepoAdminObserver;
+
 /// Boxed error type for the write port. Chosen over a concrete enum because
 /// the implementing layer (`shamir-server`) returns its own directory error
 /// type (`shamir_connect::common::error::Error`) that `shamir-db` cannot

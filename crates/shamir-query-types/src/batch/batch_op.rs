@@ -6,18 +6,19 @@ use serde::{Deserialize, Serialize};
 use shamir_types::access::{Action, ResourcePath};
 
 use crate::admin::{
-    AccessTreeOp, AddGroupMemberOp, AddSchemaRuleOp, AlterBufferConfigOp, AlterSubscriptionOp,
-    BindValidatorOp, ChangesSinceOp, ChgrpOp, ChmodOp, ChownOp, CommitMigrationOp, CreateDbOp,
-    CreateFunctionFolderOp, CreateFunctionOp, CreateGroupOp, CreateIndexOp, CreatePublicationOp,
-    CreateReplicationProfileOp, CreateRepoOp, CreateSubscriptionOp, CreateTableOp,
-    CreateValidatorOp, DescribeRepoOp, DescribeTableOp, DropDbOp, DropFunctionOp, DropGroupOp,
-    DropIndexOp, DropPublicationOp, DropReplicationProfileOp, DropRepoOp, DropSubscriptionOp,
-    DropTableOp, DropValidatorOp, GetBufferConfigOp, GetTableSchemaOp, InternerDumpOp,
-    InternerTouchOp, ListOp, ListPublicationsOp, ListSubscriptionsOp, ListValidatorsOp,
-    MigrationStatusOp, PurgeHistoryOp, RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameDbOp,
-    RenameFunctionFolderOp, RenameFunctionOp, RenameGroupOp, RenameIndexOp, RenameRepoOp,
-    RenameTableOp, RenameValidatorOp, ReplicationStatusOp, RollbackMigrationOp, SetBufferConfigOp,
-    SetRetentionOp, SetTableSchemaOp, StartMigrationOp, UnbindValidatorOp,
+    AccessTreeOp, AddGroupMemberOp, AddSchemaRuleOp, AlterBufferConfigOp, AlterRepoOp,
+    AlterSubscriptionOp, BindValidatorOp, ChangesSinceOp, ChgrpOp, ChmodOp, ChownOp,
+    CommitMigrationOp, CreateDbOp, CreateFunctionFolderOp, CreateFunctionOp, CreateGroupOp,
+    CreateIndexOp, CreatePublicationOp, CreateReplicationProfileOp, CreateRepoOp,
+    CreateSubscriptionOp, CreateTableOp, CreateValidatorOp, DescribeRepoOp, DescribeTableOp,
+    DropDbOp, DropFunctionOp, DropGroupOp, DropIndexOp, DropPublicationOp,
+    DropReplicationProfileOp, DropRepoOp, DropSubscriptionOp, DropTableOp, DropValidatorOp,
+    GetBufferConfigOp, GetTableSchemaOp, InternerDumpOp, InternerTouchOp, ListOp,
+    ListPublicationsOp, ListSubscriptionsOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp,
+    RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameDbOp, RenameFunctionFolderOp, RenameFunctionOp,
+    RenameGroupOp, RenameIndexOp, RenameRepoOp, RenameTableOp, RenameValidatorOp,
+    ReplicationStatusOp, RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp,
+    StartMigrationOp, UnbindValidatorOp,
 };
 use crate::auth::{CreateUserOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
 use crate::call::CallOp;

@@ -63,6 +63,7 @@ pub struct DropRepoOp {
 /// { "alter_repo": "main", "durability": { "wal_commit": "synced" } }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AlterRepoOp {
     pub alter_repo: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -128,6 +129,7 @@ pub struct RenameDbOp {
 /// { "describe_repo": "main" }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DescribeRepoOp {
     pub describe_repo: String,
     #[serde(default = "default_repo")]

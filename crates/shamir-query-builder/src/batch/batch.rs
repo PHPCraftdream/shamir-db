@@ -1116,7 +1116,12 @@ impl Batch {
         handles
     }
 
-    fn add_entry(&mut self, alias: impl Into<String>, op: BatchOp, return_result: bool) -> Handle {
+    pub(super) fn add_entry(
+        &mut self,
+        alias: impl Into<String>,
+        op: BatchOp,
+        return_result: bool,
+    ) -> Handle {
         self.add_entry_after(alias, op, return_result, &[])
     }
 

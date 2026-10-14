@@ -77,7 +77,7 @@ fn override_zero_retention_budget_is_an_error() {
         .expect_err("zero retention budget must fail");
     let msg = err.to_string();
     assert!(
-        msg.contains("invalid value"),
-        "error must be a value-domain rejection, got: {msg}"
+        msg.contains("nonzero"),
+        "error must identify the nonzero constraint, got: {msg}"
     );
 }

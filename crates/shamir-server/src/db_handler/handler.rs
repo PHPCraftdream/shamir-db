@@ -73,7 +73,9 @@ use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::{Session, SessionStore};
 
 use shamir_db::access::Actor;
+use shamir_db::engine::repo::DurabilityPolicy;
 use shamir_db::query::batch::{BatchError, BatchOp, BatchRequest};
+use shamir_db::RepoAdminObserver;
 use shamir_db::ShamirDb;
 use shamir_query_types::batch::BatchTreeVisitor;
 
@@ -667,9 +669,19 @@ impl ShamirDbHandler {
         };
 
         let actor = session_actor(session);
+        let repo_observer = self
+            .audit
+            .as_ref()
+            .map(|audit| repo_audit::repo_audit_observer(audit.clone(), session));
         let exec_result = self
             .db
-            .execute_with_policy(actor.clone(), db_name, &batch, self.execution_policy())
+            .execute_with_policy_and_repo_observer(
+                actor.clone(),
+                db_name,
+                &batch,
+                self.execution_policy(),
+                repo_observer,
+            )
             .await;
         let final_response = match exec_result {
             Ok(mut response) => {
@@ -690,7 +702,6 @@ impl ShamirDbHandler {
                     );
                 }
                 self.persist_table_lifecycle(db_name, &batch);
-                self.audit_successful_alter_repo(session, db_name, &batch, &response);
                 subscribe_handler::activate_subscriptions(
                     conn,
                     &self.db,

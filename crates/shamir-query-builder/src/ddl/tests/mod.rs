@@ -1,5 +1,4 @@
 pub mod access_ddl_tests;
-pub mod describe_repo_tests;
 pub mod function_ddl_tests;
 pub mod helpers;
 pub mod index_spec_tests;

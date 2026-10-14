@@ -6,7 +6,7 @@
 
 ## Repository durability changes
 
-Use `ALTER REPO` to patch a repository's durability override. Successfully applied top-level changes are recorded in the server's HMAC-chained audit log with the repository and resulting effective durability policy. Nested ALTERs inside sub-batches or loop bodies lack independently addressable results in the current response format and are not asserted as successful audit events.
+Use `ALTER REPO` to patch a repository's durability override. Each successfully applied ALTER produces its own audit event, including operations inside sub-batches and loop bodies; row-result suppression does not suppress the event. Earlier successful operations remain audited if a later operation fails. Failed or suppressed operations do not generate success events.
 
 До этого этажа сервер запускался вручную: `shamir-server --config …` в
 терминале. Для разработки этого хватает. Но продакшен требует: сервисный
@@ -86,11 +86,12 @@ Repository durability can override the server default at creation or be patched 
 Use the query builder for these operations (builder examples are not protocol wire specifications):
 
 ```ts
-const create = ddl.createRepo('archive').durability({ wal_commit: 'synced' });
-const alter = ddl.alterRepo('archive').durability({ wal_retention_max_bytes: 1073741824 });
+const create = ddl.createRepo('archive', { durability: { wal_commit: 'synced' } });
+const alter = ddl.alterRepo('archive', { wal_retention_max_bytes: 1073741824 });
+const described = ddl.describeRepo('archive');
 ```
 
-`DESCRIBE REPO` reports effective `durability` and the sparse `durability_override`. Unknown fields and invalid enum values are rejected. Retention must be at least twice the effective WAL segment size. `completed_reseed` is rejected because it is not implemented; only `durable` is supported. In-memory and hybrid WALs ignore `wal_commit`; selecting `synced` does not make them persistent.
+`DESCRIBE REPO` is built with `ddl.describeRepo('archive')` and reports effective `durability` and the sparse `durability_override`. Retention accepts positive safe numbers, bigint, or canonical decimal strings; >i64::MAX input is sent losslessly as decimal text. Effective integer response values decode as safe numbers or bigint according to the MessagePack frame, not as universal strings. Unknown fields and invalid enum values are rejected. Retention must be at least twice the effective WAL segment size. `completed_reseed` is rejected because it is not implemented; only `durable` is supported. In-memory and hybrid WALs ignore `wal_commit`; selecting `synced` does not make them persistent.
 
 ### After a leader crash
 

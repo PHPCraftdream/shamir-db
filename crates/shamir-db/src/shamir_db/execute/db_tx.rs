@@ -184,6 +184,7 @@ impl ShamirDb {
             shamir: self.clone(),
             db_name: db_name.to_string(),
             actor: auth.actor().clone(),
+            repo_admin_observer: None,
         };
         let invoker = ShamirFunctionInvoker {
             shamir: self.clone(),

@@ -1,6 +1,7 @@
 //! Durability accessors and replication-only page wiring.
 
 use super::*;
+use crate::repo::durability_policy::{resolve, DurabilityMetricsSnapshot};
 use shamir_query_types::DurabilityOverride;
 
 impl RepoInstance {
