@@ -26,7 +26,7 @@ use crate::harness::follower;
 use crate::harness::ops;
 use crate::harness::wire;
 
-const WAIT: Duration = Duration::from_secs(90);
+const WAIT: Duration = Duration::from_secs(30);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn seed_e2e_a_kill_resync_offline_seed_resume_converges() {
@@ -82,7 +82,7 @@ async fn seed_e2e_a_kill_resync_offline_seed_resume_converges() {
     ops::create_subscription(&fresh, &upstream, false).await;
     let fresh_loop = follower::supervisor(&fresh);
     fresh_loop.reconcile().await;
-    follower::wait_until("fresh follower resync_required", WAIT, || {
+    follower::wait_until("fresh follower resync_required", WAIT, &fresh, addr, || {
         let fresh = fresh.clone();
         async move {
             follower::status_of(&fresh, "sub")
@@ -169,9 +169,13 @@ async fn seed_e2e_a_kill_resync_offline_seed_resume_converges() {
     let admin = child::connect_admin(&leader).await;
     ops::resume(&home).await.expect("validated resume");
     seeded_loop.reconcile().await;
-    follower::wait_until("seeded loop running after resume", WAIT, || async {
-        seeded_loop.is_running("sub")
-    })
+    follower::wait_until(
+        "seeded loop running after resume",
+        WAIT,
+        &home,
+        addr,
+        || async { seeded_loop.is_running("sub") },
+    )
     .await;
     assert_eq!(
         follower::bookmark(&home).await,
@@ -196,7 +200,7 @@ async fn seed_e2e_a_kill_resync_offline_seed_resume_converges() {
     wire::delete_row(&admin, "audit", "a1").await;
     for table in wire::TABLES {
         let expected = wire::read_rows(&admin, table).await;
-        follower::wait_until(&format!("convergence on {table}"), WAIT, {
+        follower::wait_until(&format!("convergence on {table}"), WAIT, &home, addr, {
             let home = home.clone();
             let expected = expected.clone();
             move || {
@@ -208,13 +212,19 @@ async fn seed_e2e_a_kill_resync_offline_seed_resume_converges() {
         .await;
     }
     // The bookmark is persisted after the rows become visible: wait for it.
-    follower::wait_until("bookmark advances past the seed version", WAIT, {
-        let home = home.clone();
-        move || {
+    follower::wait_until(
+        "bookmark advances past the seed version",
+        WAIT,
+        &home,
+        addr,
+        {
             let home = home.clone();
-            async move { follower::bookmark(&home).await > v }
-        }
-    })
+            move || {
+                let home = home.clone();
+                async move { follower::bookmark(&home).await > v }
+            }
+        },
+    )
     .await;
     let post = follower::bookmark(&home).await;
     assert!(post > v, "bookmark advanced past seed V ({post} > {v})");
