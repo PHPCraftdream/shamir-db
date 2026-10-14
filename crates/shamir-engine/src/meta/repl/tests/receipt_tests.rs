@@ -33,6 +33,7 @@ fn full_receipt() -> ReplicationReceipt {
                 value: None,
             },
         ],
+        ops_per_event: vec![1, 1],
         bindings: vec![ReceiptBinding {
             interned_id: 12,
             name: "name".into(),
@@ -71,6 +72,7 @@ fn receipt_round_trips_all_fields() {
         let id = receipt_id(&receipt);
         let bytes = encode_receipt(&receipt).unwrap();
         assert_eq!(decode_receipt(&id, &bytes).unwrap(), receipt);
+        assert_eq!(receipt.ops_per_event, vec![1, 1]);
     }
 }
 

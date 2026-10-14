@@ -1,6 +1,7 @@
 mod algorithm;
 mod classification;
 mod follower;
+mod receipt_recovery;
 
 #[cfg(test)]
 #[path = "tests/mod.rs"]

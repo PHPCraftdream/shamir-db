@@ -49,6 +49,7 @@
 //! engine journal pulls for ordered history, and handle reported gaps.
 
 pub mod cold;
+mod install;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -188,6 +189,13 @@ enum JournalMsg {
     },
     RecoveryGap {
         interval: (u64, u64),
+        ack: oneshot::Sender<Result<(), String>>,
+    },
+    /// Serialized durable install (S5c-X PR6b-2): exact pre-encoded journal
+    /// records for the follower receipt path. Rides the SAME FIFO as normal
+    /// events (ordering kept); the sender awaits, so this path is never lossy.
+    InstallRecords {
+        records: Vec<(u64, Bytes)>,
         ack: oneshot::Sender<Result<(), String>>,
     },
 }
@@ -400,7 +408,9 @@ impl RepoChangefeed {
                 | mpsc::error::TrySendError::Full(JournalMsg::CleanHorizon { .. })
                 | mpsc::error::TrySendError::Closed(JournalMsg::CleanHorizon { .. })
                 | mpsc::error::TrySendError::Full(JournalMsg::RecoveryGap { .. })
-                | mpsc::error::TrySendError::Closed(JournalMsg::RecoveryGap { .. }) => {
+                | mpsc::error::TrySendError::Closed(JournalMsg::RecoveryGap { .. })
+                | mpsc::error::TrySendError::Full(JournalMsg::InstallRecords { .. })
+                | mpsc::error::TrySendError::Closed(JournalMsg::InstallRecords { .. }) => {
                     unreachable!("journal_enqueue only sends events");
                 }
             }
@@ -1085,6 +1095,9 @@ async fn process_journal_msg(
             let result = gap.persist_recovery(store, interval).await;
             // A cancelled caller no longer wants the ack; the repair still finishes.
             let _ = ack.send(result);
+        }
+        JournalMsg::InstallRecords { records, ack } => {
+            install::process_install(store, records, last_persisted_version, ack).await
         }
         JournalMsg::Barrier(w) => {
             confirmed_through.fetch_max(w, Ordering::Release);

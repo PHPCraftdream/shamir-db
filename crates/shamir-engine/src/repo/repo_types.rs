@@ -6,7 +6,7 @@
 //! whichever ones they don't need (`default-features = false,
 //! features = ["redb"]`).
 
-use shamir_storage::error::DbResult;
+use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_cached::{CachedStore, WriteMode};
 #[cfg(feature = "fjall")]
 use shamir_storage::storage_fjall::FjallRepo;
@@ -17,7 +17,7 @@ use shamir_storage::storage_mirrored::{is_durable_table_config, MirroredStore};
 
 #[cfg(feature = "fjall")]
 use shamir_collections::TFxSet;
-use shamir_storage::types::{Repo, Store};
+use shamir_storage::types::{AtomicBatch, Repo, Store};
 #[cfg(feature = "fjall")]
 use shamir_types::types::common::THasher;
 use std::path::PathBuf;
@@ -283,6 +283,37 @@ impl Repo for BoxRepo {
             BoxRepo::Cached(c) => c.inner.stores_list().await,
             #[cfg(feature = "fjall")]
             BoxRepo::Hybrid(c) => c.stores_list_routed().await,
+        }
+    }
+
+    fn supports_atomic_batch(&self) -> bool {
+        match self {
+            BoxRepo::InMemory(repo) => repo.supports_atomic_batch(),
+            #[cfg(feature = "fjall")]
+            BoxRepo::Fjall(repo) => repo.supports_atomic_batch(),
+            // Wrapper composites keep read/write caches OUTSIDE an atomic
+            // batch's scope, so a staged commit would bypass them.
+            BoxRepo::MemBuffer(_) | BoxRepo::Cached(_) => false,
+            // Hybrid splits stores across two physical databases; no single
+            // atomic commit spans both.
+            #[cfg(feature = "fjall")]
+            BoxRepo::Hybrid(_) => false,
+        }
+    }
+
+    async fn begin_atomic_batch(&self) -> DbResult<Box<dyn AtomicBatch>> {
+        match self {
+            BoxRepo::InMemory(repo) => repo.begin_atomic_batch().await,
+            #[cfg(feature = "fjall")]
+            BoxRepo::Fjall(repo) => repo.begin_atomic_batch().await,
+            BoxRepo::MemBuffer(_) | BoxRepo::Cached(_) => Err(DbError::AtomicBatchUnsupported(
+                "MemBuffer/Cached wrappers cannot participate in repository-wide atomic batches"
+                    .into(),
+            )),
+            #[cfg(feature = "fjall")]
+            BoxRepo::Hybrid(_) => Err(DbError::AtomicBatchUnsupported(
+                "hybrid repos split stores across two physical databases".into(),
+            )),
         }
     }
 }

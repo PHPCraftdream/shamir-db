@@ -677,6 +677,12 @@ pub(crate) async fn apply_batch_with_info(
     if gate.requires_reopen() {
         return Err(DbError::RepoRequiresReopen(repo.name().to_string()));
     }
+    if follower_durability::receipt::receipt_path_selected(repo, info).await? {
+        return follower_durability::receipt::apply_batch_receipt(
+            repo, info, events, bookmark, policy,
+        )
+        .await;
+    }
     // Retain the already-required preparation objects, not a second guard
     // vector, and translate each event exactly once.
     let mut prepared = Vec::with_capacity(events.len());

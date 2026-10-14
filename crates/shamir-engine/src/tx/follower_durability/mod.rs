@@ -1,6 +1,7 @@
 mod barrier;
 mod batch;
 mod range;
+pub(crate) mod receipt;
 mod record;
 #[cfg(test)]
 pub(crate) mod test_seam;
