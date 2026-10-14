@@ -61,9 +61,12 @@ pub struct RepairPending {
     /// Repair drainers wait here; the Full arm wakes them.
     wake: Notify,
     /// Test-only negative-control seam (SHAMIR tests elsewhere use env/hook
-    /// seams): when set, `clamp_barrier` returns `w` unchanged. The engine
+    /// seams): when set, `clamp_barrier` returns `w` unchanged AND the
+    /// engine drainer's repair-pending truncation-ceiling clamp
+    /// ([`RepoChangefeed::repair_ceiling_clamp`]) reports `None`. The engine
     /// drainer's tests set this via [`RepairPending::test_set_clamp_disabled`]
-    /// to prove the clamp is load-bearing. Always compiled; zero cost until set.
+    /// to prove both clamps are load-bearing. Always compiled; zero cost until
+    /// set.
     clamp_disabled: AtomicBool,
 }
 
@@ -157,6 +160,13 @@ impl RepairPending {
         &self.wake
     }
 
+    /// Whether the negative-control seam disabled the barrier clamp AND the
+    /// engine's repair-pending truncation-ceiling clamp; test-only, zero cost
+    /// until set.
+    pub fn clamp_disabled(&self) -> bool {
+        self.clamp_disabled.load(Ordering::Relaxed)
+    }
+
     /// Clamp a confirmation barrier below the oldest pending version so no
     /// reader is confirmed across the pending hole.
     pub fn clamp_barrier(&self, w: u64) -> u64 {
@@ -202,9 +212,11 @@ impl RepairPending {
         self.min_version.store(m, Ordering::Release);
     }
 
-    /// TEST-ONLY negative-control seam: disables the barrier/ceiling clamp
-    /// ([`RepairPending::clamp_barrier`]) so engine tests can prove the clamp
-    /// is load-bearing. Never call in production code paths.
+    /// TEST-ONLY negative-control seam: disables the barrier clamp
+    /// ([`RepairPending::clamp_barrier`]) AND the engine drainer's
+    /// truncation-ceiling clamp ([`RepoChangefeed::repair_ceiling_clamp`]) so
+    /// engine tests can prove both clamps are load-bearing. Never call in
+    /// production code paths.
     pub fn test_set_clamp_disabled(&self) {
         self.clamp_disabled.store(true, Ordering::Relaxed);
     }
@@ -316,6 +328,16 @@ impl RepoChangefeed {
     /// Oldest version deferred by a full journal channel, if any.
     pub fn repair_pending_min(&self) -> Option<u64> {
         self.repair_pending.min_pending()
+    }
+
+    /// Truncation-ceiling clamp source for the drainer: the oldest pending
+    /// version, unless the negative-control seam disabled the clamp.
+    pub fn repair_ceiling_clamp(&self) -> Option<u64> {
+        if self.repair_pending.clamp_disabled() {
+            None
+        } else {
+            self.repair_pending.min_pending()
+        }
     }
 
     /// Number of versions deferred by a full journal channel.

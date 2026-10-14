@@ -243,10 +243,15 @@ async fn journal_barrier_idle_fast_path_sends_nothing() {
 }
 
 #[tokio::test]
-async fn journal_barrier_full_and_closed_enqueue_mark_gap_immediately() {
+async fn journal_barrier_full_defers_then_closed_marks_gap() {
     let store: Arc<dyn ChangelogStore> = Arc::new(BarrierStore::default());
-    let (feed, mut rx) = fixture(1);
+    // Capacity 2, in this order: event(11) takes slot 1, the manual Barrier
+    // takes slot 2, and event(10) then deterministically hits Full (a
+    // capacity-1 channel would make the try_send itself panic; enqueueing
+    // 10 before the barrier would let 10 take slot 2 and never defer).
+    let (feed, mut rx) = fixture(2);
     feed.journal_enqueue(&Arc::new(event(11)));
+    feed.journal_tx.try_send(JournalMsg::Barrier(11)).unwrap();
     feed.journal_enqueue(&Arc::new(event(10)));
     // Full no longer gaps: the over-capacity event is deferred to the
     // repair-pending set instead.
@@ -260,8 +265,7 @@ async fn journal_barrier_full_and_closed_enqueue_mark_gap_immediately() {
     assert_eq!(feed.repair_pending().min_pending(), Some(10));
     assert_eq!(feed.repair_pending().channel_full_total(), 1);
     // The pending hole at 10 must hold back the confirmed prefix: process the
-    // barrier manually and confirm the clamped watermark.
-    feed.journal_tx.try_send(JournalMsg::Barrier(11)).unwrap();
+    // queued messages manually and confirm the clamped watermark.
     drain_and_persist(
         &mut rx,
         &store,
@@ -299,8 +303,13 @@ async fn journal_barrier_full_and_closed_enqueue_mark_gap_immediately() {
         "no additional timeout after the closed-send short-circuit"
     );
     assert_eq!(feed.read_from(&store, 0, 8).await.gap_at, Some(8));
-    // on_writer_closed retired the pending version 10; 8 was never pending.
-    assert_eq!(feed.repair_pending_depth(), 0);
+    // on_writer_closed retired only the Closed-enqueued version 8 (never
+    // pending — no-op); the deferred version 10 REMAINS repair-pending.
+    assert_eq!(
+        feed.repair_pending_depth(),
+        1,
+        "only version 8 was closed; version 10 stays repair-pending"
+    );
     assert_eq!(feed.repair_pending().gaps_writer_closed_total(), 1);
 }
 

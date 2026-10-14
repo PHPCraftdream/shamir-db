@@ -26,6 +26,7 @@ use crate::repo::changelog_store::StoreChangelog;
 use crate::repo::repo_instance::ChangefeedHandle;
 use crate::repo::{BoxRepo, BoxRepoFactory, DurabilityPolicy, RepoInstance};
 use crate::table::TableConfig;
+use crate::tx::clean_horizon::repair_pending_drain::drain_repair_pending;
 
 const MAX_KEY: u64 = u64::MAX;
 const BACKLOG_KEY: u64 = u64::MAX - 1;
@@ -271,9 +272,13 @@ async fn channel_full_defers_and_repairs_in_order() {
 
 // (b) Retention gate: the WAL frames holding a repair-pending version stay
 // retained (clean horizon does not pass the hole) until the repaired event
-// is checkpointed — and the negative control proves the clamp is
-// load-bearing (without it the truncation destroys the pending evidence).
-// Runs on the IN-MEMORY fixture: the Mem WAL sink supports
+// is checkpointed — and the negative control proves the SETTLE_AND_TRUNCATE
+// ceiling clamp (the production truncation path's shape) is load-bearing:
+// without it the truncation destroys the pending evidence. The seam
+// (`test_set_clamp_disabled`) lifts BOTH the barrier clamp and the ceiling
+// clamp. Mem-sink caveat: this exercises the ceiling mechanism on the Mem
+// WAL; the PERSISTENT checkpoint interplay is covered by the crash-matrix
+// suite. Runs on the IN-MEMORY fixture: the Mem WAL sink supports
 // `has_truncatable`/`truncate_below`/`replay` with per-frame versioning, so
 // the clamp story is fully exercisable without a disk repo (whose cold
 // reconciliation would initialise the feed before `install_journal_for_test`).
@@ -324,11 +329,11 @@ async fn retention_gate_holds_segment_until_checkpointed() {
         "the clean horizon must not pass the pending hole"
     );
 
-    // NEGATIVE CONTROL: disable the clamp. On the Mem WAL the clean-horizon
-    // checkpoint succeeds without the seam bypass (the parked writer is not
-    // an obstacle there), so no `test_seam` is needed — and the same
-    // truncation now crosses the pending version, destroying the WAL
-    // evidence of a version that was never repaired.
+    // NEGATIVE CONTROL: disable the clamps (barrier AND truncation ceiling).
+    // On the Mem WAL the clean-horizon checkpoint succeeds without the seam
+    // bypass (the parked writer is not an obstacle there), so no `test_seam`
+    // is needed — and the same truncation now crosses the pending version,
+    // destroying the WAL evidence of a version that was never repaired.
     feed.repair_pending().test_set_clamp_disabled();
     let mut gone = false;
     for _ in 0..500 {
@@ -368,31 +373,40 @@ async fn retention_gate_holds_segment_until_checkpointed() {
 async fn unclean_restart_rebuilds_lost_deferred_event() {
     let temp = tempfile::TempDir::new().unwrap();
     let path = temp.path().join("rp_restart");
-    let repo = open_disk("rp_restart", &path).await.unwrap();
-    let table = repo.get_table("t").await.unwrap();
-    let v = commit_row(&repo, &table, "deferred").await;
-    // The real feed persisted the event; wait for it deterministically.
-    {
-        let feed = repo.changefeed().await.unwrap().feed.clone();
-        wait_persisted(&feed, v).await;
-        feed.shutdown_and_wait().await.unwrap();
-    }
+    // Scoped setup: every fjall `Database` handle (repo, table, changelog
+    // store) must be DROPPED before the reopen loop — fjall releases its
+    // LOCK_FILE only when the last `Database` handle drops, so a leaked
+    // handle makes every `open_retry` attempt fail with `Locked`.
+    let v = {
+        let repo = open_disk("rp_restart", &path).await.unwrap();
+        let table = repo.get_table("t").await.unwrap();
+        let v = commit_row(&repo, &table, "deferred").await;
+        // The real feed persisted the event; wait for it deterministically.
+        {
+            let feed = repo.changefeed().await.unwrap().feed.clone();
+            wait_persisted(&feed, v).await;
+            feed.shutdown_and_wait().await.unwrap();
+        }
 
-    // Simulate the exact crash state of a channel-full deferral:
-    //  - the journal event is lost (not yet persisted when the crash hit),
-    //  - the WAL entry is retained,
-    //  - the version was recorded repair-pending (in-memory state, lost).
-    let store = repo.changelog_store_for_cold_reconcile().await.unwrap();
-    shamir_tx::changefeed::cold::delete_event(store.as_ref(), v)
-        .await
-        .unwrap();
-    repo.changefeed()
-        .await
-        .unwrap()
-        .feed
-        .repair_pending()
-        .record_channel_full(v);
-    drop(repo);
+        // Simulate the exact crash state of a channel-full deferral:
+        //  - the journal event is lost (not yet persisted when the crash hit),
+        //  - the WAL entry is retained,
+        //  - the version was recorded repair-pending (in-memory state, lost).
+        let store = repo.changelog_store_for_cold_reconcile().await.unwrap();
+        shamir_tx::changefeed::cold::delete_event(store.as_ref(), v)
+            .await
+            .unwrap();
+        repo.changefeed()
+            .await
+            .unwrap()
+            .feed
+            .repair_pending()
+            .record_channel_full(v);
+        drop(store);
+        drop(table);
+        drop(repo); // last `Database` handle released here → LOCK_FILE unlocked
+        v
+    };
 
     for round in 0..2 {
         let repo = open_retry("rp_restart", &path).await;
@@ -465,8 +479,13 @@ async fn legacy_entry_declares_minimal_gap() {
     feed.shutdown_and_wait().await.unwrap();
 }
 
-// (e) Re-running the repair pass over an already-present, equal journal
-// event retires the version WITHOUT a second store put (idempotence).
+// (e) Repair-pass idempotence: running the repair drainer over the SAME
+// pending version repeatedly while the channel is full never puts early,
+// and once admitted, a further pass probing an already-present, equal
+// journal event retires the version WITHOUT a second store put. Direct
+// `drain_repair_pending` calls never truncate, so the WAL evidence stays
+// retained for the whole sequence — `drain_all` (which truncates) is never
+// invoked; the writer's channel admission is exercised directly.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn double_repair_produces_one_put() {
     let (repo, feed, store) = fixture("rp_double").await;
@@ -474,27 +493,46 @@ async fn double_repair_produces_one_put() {
     park_writer(&feed, &store).await;
     let v = commit_row(&repo, &table, "once").await;
     assert_eq!(feed.repair_pending_depth(), 1);
+    assert_eq!(put_count(&store, v), 0, "no put of v before the repair");
 
+    // Two repair passes over the SAME pending version while the writer is
+    // still parked: `journal_enqueue_tracked` hits Full both times, so the
+    // version stays pending with NO premature put — this is the
+    // "repaired twice produces one put" proof.
+    drain_repair_pending(&repo).await.unwrap();
+    drain_repair_pending(&repo).await.unwrap();
+    assert_eq!(feed.repair_pending_depth(), 1);
+    assert_eq!(put_count(&store, v), 0, "no put while the channel is full");
+    assert_eq!(feed.first_gap_version(), 0);
+
+    // Release the writer: the channel drains, then a THIRD direct repair
+    // pass (same pending window — the version never left the set) admits v
+    // through the now-empty channel → exactly one put.
     store.release_filler.notify_one();
     wait_persisted(&feed, BACKLOG_KEY).await;
-    assert_eq!(put_count(&store, v), 0, "no put of v before the repair");
-    repo.drainer().drain_all(&repo).await.unwrap();
-    assert_eq!(feed.repair_pending_depth(), 0);
+    drain_repair_pending(&repo).await.unwrap();
     wait_event_stored(&store, v).await;
+    assert_eq!(feed.repair_pending_depth(), 0);
     assert_eq!(
         put_count(&store, v),
         1,
         "the repair must produce exactly one put of the repaired version"
     );
 
-    // Second repair pass over the SAME version: the store probe finds the
-    // event present and equal — retire, never re-put.
+    // Final probe-idempotence pass with v's WAL frame STILL retained (no
+    // `drain_all` ran → no `settle_and_truncate` → no truncation): the store
+    // probe finds the event present and equal — retire, never re-put.
     feed.repair_pending().record_channel_full(v);
-    repo.drainer().drain_all(&repo).await.unwrap();
+    drain_repair_pending(&repo).await.unwrap();
     assert_eq!(feed.repair_pending_depth(), 0);
-    assert_eq!(put_count(&store, v), 1, "the second pass must not re-put");
+    assert_eq!(put_count(&store, v), 1, "the probe pass must not re-put");
     assert_eq!(feed.repair_pending().repair_mismatch_total(), 0);
     assert_eq!(feed.first_gap_version(), 0);
+    assert_eq!(
+        feed.repair_pending().repaired_total(),
+        1,
+        "only the admission pass earns a repair credit"
+    );
     feed.shutdown_and_wait().await.unwrap();
 }
 

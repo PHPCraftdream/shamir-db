@@ -1511,8 +1511,8 @@ impl Drainer {
         // cross a repair-pending version — the WAL segment holding the still
         // deferred event stays retained until the repaired event is durably
         // checkpointed (`checkpoint_before_truncate` is FIFO after any
-        // admitted repaired event, so J never passes an unflushed one).
-        let ceiling = match repo.changefeed().await?.feed.repair_pending_min() {
+        // admitted repaired event); only the test seam lifts this clamp.
+        let ceiling = match repo.changefeed().await?.feed.repair_ceiling_clamp() {
             Some(min_repair) => ceiling.min(min_repair.saturating_sub(1)),
             None => ceiling,
         };
