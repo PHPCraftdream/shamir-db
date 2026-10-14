@@ -82,6 +82,33 @@ const COUNTERS: [(&str, &str); 7] = [
     ),
 ];
 
+const JOURNAL_COUNTERS: [(&str, &str); 6] = [
+    (
+        "shamir_journal_checkpoint_failures_total",
+        "Failed runtime clean-horizon checkpoints",
+    ),
+    (
+        "shamir_journal_checkpoints_total",
+        "Successful runtime clean-horizon checkpoints",
+    ),
+    (
+        "shamir_journal_retention_overflow_total",
+        "Retention measurements above configured cap",
+    ),
+    (
+        "shamir_journal_retention_refusals_total",
+        "Retention enforcement passes refusing writes",
+    ),
+    (
+        "shamir_journal_retention_gaps_total",
+        "Durable retention GAP records",
+    ),
+    (
+        "shamir_journal_channel_dropped_total",
+        "Journal events dropped on bounded-channel overflow",
+    ),
+];
+
 /// Describe at recorder initialization. Zero-touch is per registered repo at
 /// scrape, not an unlabelled process series. No stores/workers are initialized.
 pub(crate) fn register_durability_metrics() {
@@ -93,7 +120,7 @@ pub(crate) fn register_durability_metrics() {
         };
         metrics::describe_gauge!(name, unit, help);
     }
-    for (name, help) in COUNTERS {
+    for (name, help) in COUNTERS.into_iter().chain(JOURNAL_COUNTERS) {
         let unit = if name.ends_with("_ns") {
             metrics::Unit::Nanoseconds
         } else {
@@ -116,6 +143,9 @@ pub(crate) fn record_durability_metrics(
         metrics::gauge!(name, "db" => db.clone(), "repo" => repo.clone()).set(value as f64);
     }
     for ((name, _), value) in COUNTERS.into_iter().zip(snapshot.counters) {
+        metrics::counter!(name, "db" => db.clone(), "repo" => repo.clone()).absolute(value);
+    }
+    for ((name, _), value) in JOURNAL_COUNTERS.into_iter().zip(snapshot.journal) {
         metrics::counter!(name, "db" => db.clone(), "repo" => repo.clone()).absolute(value);
     }
 }

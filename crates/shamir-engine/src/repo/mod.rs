@@ -3,6 +3,7 @@ pub(crate) mod visibility_observer;
 pub use bounded_journal_read::BoundedJournalRead;
 
 pub mod changelog_store;
+mod clean_horizon;
 pub mod durability_policy;
 pub mod fk_reverse_cache;
 pub mod group_commit;

@@ -32,7 +32,11 @@ fn pending_decode_is_committed_and_retains_durability_warning() {
 
 #[test]
 fn abort_and_indeterminate_keep_their_classification() {
-    for reason in ["tx_conflict", "wal_requires_reopen"] {
+    for reason in [
+        "tx_conflict",
+        "wal_requires_reopen",
+        "wal_retention_exceeded",
+    ] {
         let result = CommitResult::from_transaction(TransactionInfo::aborted(9, reason));
         let Err(ClientError::TransactionOutcome(info)) = result else {
             panic!("expected noncommitted outcome: {result:?}");
@@ -66,6 +70,19 @@ fn typed_errors_use_wire_fields_not_message_parsing() {
         ),
         "{result:?}",
     );
+    let bytes = rmp_serde::to_vec_named(&DbResponse::Error {
+        code: "wal_retention_exceeded".into(),
+        message: "retained WAL budget is full".into(),
+    })
+    .unwrap();
+    let decoded: DbResponse = rmp_serde::from_slice(&bytes).unwrap();
+    let mapped = crate::visibility::map_response(decoded).unwrap_err();
+    assert!(matches!(
+        mapped,
+        ClientError::Db { code, message }
+            if code == "wal_retention_exceeded" && message == "retained WAL budget is full"
+    ));
+
     for code in [
         "as_of_future_version",
         "as_of_reopen_required",

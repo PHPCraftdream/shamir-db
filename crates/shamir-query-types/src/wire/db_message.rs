@@ -357,6 +357,10 @@ pub enum DbResponse {
         ///   `tx_already_open`, `tx_in_tx`, `tx_forbidden`, `tx_write`,
         ///   `tx_wrong_db`, `tx_wrong_repo`, `tx_cross_repo_not_supported`,
         ///   `tx_too_large`, `tx_expired`, `tx_error`.
+        /// - Commit admission (via `QueryError` structured `code`):
+        ///   `wal_requires_reopen`, `wal_retention_exceeded` (transient —
+        ///   the refusal clears once the drainer truncates the retained
+        ///   sealed WAL back under `durability.wal_retention_max_bytes`).
         /// - Foreign keys: `fk_violation`, `fk_restrict`, `fk_cascade_depth`,
         ///   `fk_requires_index`, `fk_actions`, `fk_on_update`,
         ///   `fk_restrict`, `fk_update_unsupported_new_value`.

@@ -4,12 +4,13 @@ use shamir_db::engine::repo::durability_policy::DurabilityMetricsSnapshot;
 use super::super::durability_export::{record_durability_metrics, register_durability_metrics};
 
 #[test]
-fn durability_export_has_only_repo_labels_and_does_not_mix_sources() {
+fn durability_export_uses_repo_labels_and_absolute_snapshots_without_double_counting() {
     let recorder = PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
     let mut a = DurabilityMetricsSnapshot::default();
-    a.gauges[3] = 7;
     a.counters[0] = 3;
+    a.gauges[3] = 7;
+    a.journal = [4, 5, 6, 7, 8, 9];
     let b = DurabilityMetricsSnapshot::default();
     metrics::with_local_recorder(&recorder, || {
         register_durability_metrics();
@@ -33,6 +34,11 @@ fn durability_export_has_only_repo_labels_and_does_not_mix_sources() {
         ("shamir_wal_synced_lag_versions", "db_b", "0"),
         ("shamir_wal_sync_now_calls", "db_a", "3"),
         ("shamir_wal_sync_now_calls", "db_b", "0"),
+        ("shamir_journal_checkpoint_failures_total", "db_a", "4"),
+        ("shamir_journal_checkpoints_total", "db_a", "5"),
+        ("shamir_journal_retention_gaps_total", "db_a", "8"),
+        ("shamir_journal_channel_dropped_total", "db_a", "9"),
+        ("shamir_journal_retention_overflow_total", "db_b", "0"),
     ] {
         let line = samples
             .iter()

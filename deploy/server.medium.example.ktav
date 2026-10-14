@@ -16,9 +16,10 @@ data_dir: /var/lib/shamir-db
 ## process crash != power loss. Background fsync has a nominal 250 ms timer,
 ## NOT a hard maximum: scheduler/storage delays and errors can extend it.
 ## synced: ack after coalesced WAL fsync (subject to honest storage).
-## Retention budget/action are parsed ONLY until PR2; no cap enforcement yet.
-## Budget must be >= 2 x effective segment size, including
-## SHAMIR_WAL_SEGMENT_MAX_BYTES. declare_gap warns; it does not evict yet.
+## Retention budget is measured from sealed bytes after successful truncation.
+## refuse_writes rejects admissions until safe truncation catches up. declare_gap
+## records a durable GAP but never unlinks history-unsafe WAL. Cold reconciliation
+## remains PR4, so runtime checkpoints do not eliminate every crash GAP.
 ## durable pulls serve min(confirmed, W, R), R = contiguous recoverability;
 ## on-demand sync is coalesced with bounded waiting, not a timer-only stall.
 ## completed_reseed is rejected (planned: epoch bump + universal fencing).
