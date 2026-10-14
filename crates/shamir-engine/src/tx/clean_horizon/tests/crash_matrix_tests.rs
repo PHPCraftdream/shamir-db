@@ -7,6 +7,7 @@ use shamir_storage::types::Repo as _;
 use crate::meta::recovery_marker::load_last_committed;
 use crate::repo::{BoxRepoFactory, DurabilityPolicy, RepoFactory, RepoInstance};
 use crate::table::TableConfig;
+use crate::tx::clean_horizon::checkpoint::test_seam;
 use crate::tx::drainer::Drainer;
 use crate::tx::IsolationLevel;
 use futures::{pin_mut, StreamExt};
@@ -153,7 +154,7 @@ async fn crash_child(path: PathBuf, phase: &str) {
     rmp_serde::encode::write(&mut oracle, &journal.events).expect("encode events oracle");
     oracle.sync_all().expect("sync events oracle");
     if phase == "mid_checkpoint" {
-        crate::tx::clean_horizon::checkpoint::test_seam::on_sample_w(&repo, || {
+        test_seam::on_sample_w(&repo, || {
             let marker =
                 std::env::var_os("SHAMIR_CLEAN_HORIZON_REACHED").expect("reached marker path");
             let mut file = std::fs::File::create(marker).expect("create checkpoint marker");

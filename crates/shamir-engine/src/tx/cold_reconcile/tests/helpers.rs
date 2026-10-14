@@ -76,7 +76,7 @@ pub(super) async fn prepare_image(
         shamir_tx::ChangelogStore::put(
             &adapter,
             clean_horizon_key(),
-            shamir_tx::changefeed::encode_clean_horizon(clean_horizon).into(),
+            shamir_tx::changefeed::encode_clean_horizon(clean_horizon),
         )
         .await
         .expect("persist clean horizon fixture");
