@@ -9,7 +9,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { ddl } from '../../ddl.js';
-
+import { canonicalSetRetention, canonicalPurgeHistory } from '../../../hmac.js';
 
 /** Fake signer that returns a predictable tag based on canonical length. */
 const fakeSigner = {
