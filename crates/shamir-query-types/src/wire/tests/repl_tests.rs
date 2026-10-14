@@ -48,7 +48,9 @@ fn repl_hello_request_roundtrip() {
     let req = DbRequest::Repl(inner.clone());
     let back = roundtrip_db_request(&req);
     match back {
-        DbRequest::Repl(ReplRequest::Hello { proto_ver, node_id }) => {
+        DbRequest::Repl(ReplRequest::Hello {
+            proto_ver, node_id, ..
+        }) => {
             assert_eq!((proto_ver, node_id), (1, "follower-7".to_string()));
         }
         other => panic!("expected Repl(Hello), got {other:?}"),
@@ -83,6 +85,7 @@ fn repl_pull_request_roundtrip_with_wait() {
             from_version,
             limit,
             wait_ms,
+            ..
         }) => {
             assert_eq!(db, "app");
             assert_eq!(repo, "main");

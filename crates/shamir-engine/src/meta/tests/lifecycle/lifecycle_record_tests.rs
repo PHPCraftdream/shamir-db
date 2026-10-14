@@ -23,6 +23,7 @@ use crate::repo::durability_policy::{
 };
 use crate::repo::{BoxRepo, RepoInstance};
 use crate::table::TableConfig;
+use shamir_storage::error::DbResult;
 use shamir_storage::storage_in_memory::{InMemoryRepo, InMemoryStore};
 use shamir_storage::types::Store;
 use std::sync::atomic::Ordering;
@@ -175,7 +176,7 @@ mod disk_crash {
             .unwrap()
     }
 
-    fn reseed_open(dir: &std::path::Path) -> impl Future<Output = RepoInstance> {
+    fn reseed_open(dir: &std::path::Path) -> impl Future<Output = DbResult<RepoInstance>> {
         RepoInstance::from_factory_with_durability(
             "main".into(),
             crate::repo::BoxRepoFactory::fjall_raw(dir),
@@ -184,7 +185,7 @@ mod disk_crash {
         )
     }
 
-    fn durable_open(dir: &std::path::Path) -> impl Future<Output = RepoInstance> {
+    fn durable_open(dir: &std::path::Path) -> impl Future<Output = DbResult<RepoInstance>> {
         RepoInstance::from_factory_with_durability(
             "main".into(),
             crate::repo::BoxRepoFactory::fjall_raw(dir),
