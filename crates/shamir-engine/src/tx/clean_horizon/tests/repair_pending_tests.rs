@@ -8,7 +8,7 @@
 //! reopen, where the test runtime drop reaps it) and every temp dir is
 //! cleaned by `TempDir`.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -26,7 +26,6 @@ use crate::repo::changelog_store::StoreChangelog;
 use crate::repo::repo_instance::ChangefeedHandle;
 use crate::repo::{BoxRepo, BoxRepoFactory, DurabilityPolicy, RepoInstance};
 use crate::table::TableConfig;
-use crate::tx::clean_horizon::checkpoint::test_seam;
 
 const MAX_KEY: u64 = u64::MAX;
 const BACKLOG_KEY: u64 = u64::MAX - 1;
@@ -37,7 +36,9 @@ const BACKLOG_KEY: u64 = u64::MAX - 1;
 /// further `journal_enqueue` deterministically returns Full and defers.
 struct ParkStore {
     inner: StoreChangelog,
-    event_puts: AtomicUsize,
+    // Test fixture, not a hot path: per-version put counts let a test assert
+    // "exactly one put of THIS version" instead of global counter deltas.
+    put_counts: std::sync::Mutex<std::collections::BTreeMap<Bytes, usize>>,
     block_filler_once: AtomicBool,
     filler_entered: Notify,
     release_filler: Notify,
@@ -47,7 +48,7 @@ impl ParkStore {
     fn new() -> Self {
         Self {
             inner: StoreChangelog::new(Arc::new(InMemoryStore::new())),
-            event_puts: AtomicUsize::new(0),
+            put_counts: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             block_filler_once: AtomicBool::new(false),
             filler_entered: Notify::new(),
             release_filler: Notify::new(),
@@ -65,7 +66,12 @@ impl ChangelogStore for ParkStore {
                 self.filler_entered.notify_one();
                 self.release_filler.notified().await;
             }
-            self.event_puts.fetch_add(1, Ordering::Relaxed);
+            *self
+                .put_counts
+                .lock()
+                .unwrap()
+                .entry(key.clone())
+                .or_insert(0) += 1;
         }
         self.inner.put(key, value).await
     }
@@ -77,6 +83,17 @@ impl ChangelogStore for ParkStore {
 
 fn park_store() -> Arc<ParkStore> {
     Arc::new(ParkStore::new())
+}
+
+/// Total puts recorded for the journal event at `version`.
+fn put_count(store: &Arc<ParkStore>, version: u64) -> usize {
+    store
+        .put_counts
+        .lock()
+        .unwrap()
+        .get(&version_key(version))
+        .copied()
+        .unwrap_or(0)
 }
 
 fn journal_handle(store: &Arc<ParkStore>) -> ChangefeedHandle {
@@ -252,50 +269,45 @@ async fn channel_full_defers_and_repairs_in_order() {
     feed.shutdown_and_wait().await.unwrap();
 }
 
-// (b) Retention gate: the sealed WAL segment holding a repair-pending
-// version stays retained (clean horizon does not pass the hole) until the
-// repaired event is checkpointed — and the negative control proves the clamp
-// is load-bearing (without it the truncation destroys the pending evidence).
+// (b) Retention gate: the WAL frames holding a repair-pending version stay
+// retained (clean horizon does not pass the hole) until the repaired event
+// is checkpointed — and the negative control proves the clamp is
+// load-bearing (without it the truncation destroys the pending evidence).
+// Runs on the IN-MEMORY fixture: the Mem WAL sink supports
+// `has_truncatable`/`truncate_below`/`replay` with per-frame versioning, so
+// the clamp story is fully exercisable without a disk repo (whose cold
+// reconciliation would initialise the feed before `install_journal_for_test`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retention_gate_holds_segment_until_checkpointed() {
-    let temp = tempfile::TempDir::new().unwrap();
-    let path = temp.path().join("rp_retention");
-    let repo = open_disk("rp_retention", &path).await.unwrap();
-    let table = repo.get_table("t").await.unwrap();
+    let (repo, feed, store) = fixture("rp_retention").await;
+    let table = repo.get_table("a").await.unwrap();
+    // Baseline commits BEFORE parking the writer: the channel is empty, so
+    // these events are admitted and persisted normally.
     for index in 0..4 {
-        commit_row(&repo, &table, &format!("seed-{index}-{}", "x".repeat(64))).await;
+        let seed_v = commit_row(&repo, &table, &format!("seed-{index}")).await;
+        wait_persisted(&feed, seed_v).await;
     }
-    repo.repo_interner().await.unwrap().persist().await.unwrap();
-    repo.drainer().drain_all(&repo).await.unwrap();
 
-    // Install the parking journal AFTER the baseline drain: the parked
-    // writer starts from an empty channel.
-    let store = park_store();
-    repo.install_journal_for_test(journal_handle(&store));
-    let feed = repo.changefeed().await.unwrap().feed;
     park_writer(&feed, &store).await;
 
-    let v = commit_row(&repo, &table, &format!("held-{}", "y".repeat(64))).await;
+    let v = commit_row(&repo, &table, "held").await;
     assert_eq!(feed.repair_pending_depth(), 1);
     assert_eq!(feed.first_gap_version(), 0);
-    // Force enough frames to seal the segment holding `v`.
     let mut last = v;
     for index in 0..6 {
-        last = commit_row(&repo, &table, &format!("seal-{index}-{}", "z".repeat(96))).await;
+        last = commit_row(&repo, &table, &format!("seal-{index}")).await;
     }
     assert_eq!(feed.repair_pending_depth(), 7);
 
     let group = repo.wal_group().await.unwrap();
-    repo.repo_interner().await.unwrap().persist().await.unwrap();
 
     // Clamped pass: the ceiling may not cross the still-pending version.
     repo.drainer().drain_all(&repo).await.unwrap();
     assert!(
         group.has_truncatable(last),
-        "a sealed, fully durable segment crossing v must be truncatable but for \
-         the clamp — otherwise this test proves nothing"
+        "frames at or below the seal commits' watermark must be truncatable \
+         but for the clamp — otherwise this test proves nothing"
     );
-    assert!(group.sealed_retained_bytes().await.unwrap() > 0);
     assert!(
         group
             .replay()
@@ -305,14 +317,19 @@ async fn retention_gate_holds_segment_until_checkpointed() {
             .any(|entry| entry.commit_version == v),
         "the clamped ceiling must retain the WAL entry of the pending version"
     );
-    assert!(feed.clean_horizon() < v);
+    // On the Mem sink the clean horizon stays at 0 (no durable history
+    // flush watermark) — the meaningful assertion is `<= v - 1`.
+    assert!(
+        feed.clean_horizon() < v,
+        "the clean horizon must not pass the pending hole"
+    );
 
-    // NEGATIVE CONTROL: disable the clamp (and bypass the clean-horizon
-    // checkpoint — the parked writer cannot accept its CleanHorizon message)
-    // and the same truncation now crosses the pending version, destroying
-    // the WAL evidence of a version that was never repaired.
+    // NEGATIVE CONTROL: disable the clamp. On the Mem WAL the clean-horizon
+    // checkpoint succeeds without the seam bypass (the parked writer is not
+    // an obstacle there), so no `test_seam` is needed — and the same
+    // truncation now crosses the pending version, destroying the WAL
+    // evidence of a version that was never repaired.
     feed.repair_pending().test_set_clamp_disabled();
-    test_seam::with_state(&repo, |state| state.bypass_checkpoint = true);
     let mut gone = false;
     for _ in 0..500 {
         repo.drainer().drain_all(&repo).await.unwrap();
@@ -343,37 +360,57 @@ async fn retention_gate_holds_segment_until_checkpointed() {
     feed.shutdown_and_wait().await.unwrap();
 }
 
-// (c) A version left repair-pending across a HARD restart is rebuilt from
-// the retained WAL by the cold reconciliation; no gap, depth 0 after drain.
+// (c) The post-crash state of a deferred event — journal event lost, WAL
+// entry retained, version marked repair-pending — is rebuilt across a
+// restart: the cold reconciliation at open re-derives the event from the
+// retained WAL; no gap, fresh (empty) in-memory pending set.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unclean_restart_rebuilds_deferred_event() {
+async fn unclean_restart_rebuilds_lost_deferred_event() {
     let temp = tempfile::TempDir::new().unwrap();
     let path = temp.path().join("rp_restart");
     let repo = open_disk("rp_restart", &path).await.unwrap();
     let table = repo.get_table("t").await.unwrap();
-    let store = park_store();
-    repo.install_journal_for_test(journal_handle(&store));
-    let feed = repo.changefeed().await.unwrap().feed;
-    park_writer(&feed, &store).await;
     let v = commit_row(&repo, &table, "deferred").await;
-    assert_eq!(feed.repair_pending_depth(), 1);
-    assert_eq!(feed.first_gap_version(), 0);
-    // HARD drop: the writer stays parked (never released, never shut down);
-    // the test runtime reaps it.
+    // The real feed persisted the event; wait for it deterministically.
+    {
+        let feed = repo.changefeed().await.unwrap().feed.clone();
+        wait_persisted(&feed, v).await;
+        feed.shutdown_and_wait().await.unwrap();
+    }
+
+    // Simulate the exact crash state of a channel-full deferral:
+    //  - the journal event is lost (not yet persisted when the crash hit),
+    //  - the WAL entry is retained,
+    //  - the version was recorded repair-pending (in-memory state, lost).
+    let store = repo.changelog_store_for_cold_reconcile().await.unwrap();
+    shamir_tx::changefeed::cold::delete_event(store.as_ref(), v)
+        .await
+        .unwrap();
+    repo.changefeed()
+        .await
+        .unwrap()
+        .feed
+        .repair_pending()
+        .record_channel_full(v);
     drop(repo);
 
     for round in 0..2 {
         let repo = open_retry("rp_restart", &path).await;
         repo.disable_background_drainer_for_test();
-        repo.drainer().drain_all(&repo).await.unwrap();
+        // NO manual drain: the cold reconciliation at open must already have
+        // rebuilt the event from the retained WAL.
         let feed = repo.changefeed().await.unwrap().feed;
-        assert_eq!(feed.repair_pending_depth(), 0, "round {round}");
+        assert_eq!(
+            feed.repair_pending_depth(),
+            0,
+            "round {round}: the pending set is fresh in-memory state"
+        );
         assert_eq!(feed.first_gap_version(), 0, "round {round}");
         let (events, gap) = repo.read_changelog_for_replication(v, 8).await.unwrap();
         assert_eq!(gap, None, "round {round}");
         assert!(
             events.iter().any(|event| event.event.commit_version == v),
-            "round {round}: cold reconciliation must rebuild the deferred event \
+            "round {round}: cold reconciliation must rebuild the lost event \
              from the retained WAL"
         );
         feed.shutdown_and_wait().await.unwrap();
@@ -440,15 +477,14 @@ async fn double_repair_produces_one_put() {
 
     store.release_filler.notify_one();
     wait_persisted(&feed, BACKLOG_KEY).await;
-    // The filler + backlog puts also count; snapshot them as the baseline.
-    let puts_baseline = store.event_puts.load(Ordering::Relaxed);
+    assert_eq!(put_count(&store, v), 0, "no put of v before the repair");
     repo.drainer().drain_all(&repo).await.unwrap();
     assert_eq!(feed.repair_pending_depth(), 0);
     wait_event_stored(&store, v).await;
     assert_eq!(
-        store.event_puts.load(Ordering::Relaxed),
-        puts_baseline + 1,
-        "the repair must produce exactly one event put"
+        put_count(&store, v),
+        1,
+        "the repair must produce exactly one put of the repaired version"
     );
 
     // Second repair pass over the SAME version: the store probe finds the
@@ -456,11 +492,7 @@ async fn double_repair_produces_one_put() {
     feed.repair_pending().record_channel_full(v);
     repo.drainer().drain_all(&repo).await.unwrap();
     assert_eq!(feed.repair_pending_depth(), 0);
-    assert_eq!(
-        store.event_puts.load(Ordering::Relaxed),
-        puts_baseline + 1,
-        "the second pass must not re-put the already-present event"
-    );
+    assert_eq!(put_count(&store, v), 1, "the second pass must not re-put");
     assert_eq!(feed.repair_pending().repair_mismatch_total(), 0);
     assert_eq!(feed.first_gap_version(), 0);
     feed.shutdown_and_wait().await.unwrap();

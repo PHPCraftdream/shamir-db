@@ -245,21 +245,63 @@ async fn journal_barrier_idle_fast_path_sends_nothing() {
 #[tokio::test]
 async fn journal_barrier_full_and_closed_enqueue_mark_gap_immediately() {
     let store: Arc<dyn ChangelogStore> = Arc::new(BarrierStore::default());
-    let (feed, rx) = fixture(1);
+    let (feed, mut rx) = fixture(1);
     feed.journal_enqueue(&Arc::new(event(11)));
     feed.journal_enqueue(&Arc::new(event(10)));
-    assert_eq!(feed.first_gap_version(), 10);
+    // Full no longer gaps: the over-capacity event is deferred to the
+    // repair-pending set instead.
     assert_eq!(feed.journal_dropped(), 1);
     assert_eq!(
-        feed.read_from_bounded(&store, 9, 0, 0).await.gap_at,
-        Some(10),
+        feed.first_gap_version(),
+        0,
+        "channel overflow defers, it does not gap"
     );
+    assert_eq!(feed.repair_pending_depth(), 1);
+    assert_eq!(feed.repair_pending().min_pending(), Some(10));
+    assert_eq!(feed.repair_pending().channel_full_total(), 1);
+    // The pending hole at 10 must hold back the confirmed prefix: process the
+    // barrier manually and confirm the clamped watermark.
+    feed.journal_tx.try_send(JournalMsg::Barrier(11)).unwrap();
+    drain_and_persist(
+        &mut rx,
+        &store,
+        &feed.last_persisted_version,
+        &feed.gap,
+        &feed.confirmed_through,
+        &feed.barrier_notify,
+        &feed.repair_pending,
+    )
+    .await;
+    assert_eq!(
+        feed.confirm_through(11, Duration::ZERO).await,
+        9,
+        "the pending hole at 10 clamps the confirmed prefix below 10"
+    );
+    assert_eq!(feed.confirm_timeouts(), 1);
+    // No gap exists, so a bounded read reports none.
+    assert_eq!(feed.read_from_bounded(&store, 9, 0, 0).await.gap_at, None);
+    // Closed arm: dropping the receiver closes the channel; the next enqueue
+    // marks the gap instead of deferring.
     drop(rx);
     feed.journal_enqueue(&Arc::new(event(8)));
     assert_eq!(feed.first_gap_version(), 8);
-    assert_eq!(feed.confirm_through(11, Duration::from_secs(1)).await, 0);
-    assert_eq!(feed.confirm_timeouts(), 0);
+    // Closed send: `confirm_through` short-circuits on the failed send and
+    // returns the CURRENT confirmed bound — the clamped prefix 9 — without
+    // recording another timeout.
+    assert_eq!(
+        feed.confirm_through(11, Duration::from_secs(1)).await,
+        9,
+        "a closed writer cannot advance the confirmed prefix past the clamped bound"
+    );
+    assert_eq!(
+        feed.confirm_timeouts(),
+        1,
+        "no additional timeout after the closed-send short-circuit"
+    );
     assert_eq!(feed.read_from(&store, 0, 8).await.gap_at, Some(8));
+    // on_writer_closed retired the pending version 10; 8 was never pending.
+    assert_eq!(feed.repair_pending_depth(), 0);
+    assert_eq!(feed.repair_pending().gaps_writer_closed_total(), 1);
 }
 
 #[tokio::test]
