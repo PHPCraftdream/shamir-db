@@ -422,9 +422,12 @@ impl MvccStore {
     /// combined method (the ack-path routes the visible half inline; the
     /// background drainer writes history). It remains for non-cutover callers
     /// (unit tests / direct invocations) that want the pre-cutover "both
-    /// halves at once" semantics. Ordering: history FIRST (durable landing),
-    /// then visible (overlay + cell) — matching the pre-split contract where a
-    /// failed history `transact` (`?`) left no reader-visible state.
+    /// halves at once" semantics.
+    ///
+    /// Ordering: the visible half runs FIRST so the
+    /// commit-time ts stamp is available to the drain half; a history error
+    /// leaves the overlay/cell ahead until the drainer catches up — the
+    /// intentional pre-existing semantics.
     pub async fn apply_committed_ops(&self, ops: Vec<KvOp>, commit_version: u64) -> DbResult<()> {
         // Visible FIRST so the commit-time ts stamp (set in
         // `apply_committed_visible`) is in `pending_ts` before
@@ -533,7 +536,40 @@ impl MvccStore {
     /// This is the expensive `history.transact` the cutover moved OFF the
     /// ack-path. Called by the background `Drainer` (via `replay_v2_entry`'s
     /// per-table routing) and reachable on direct/recovery paths.
+    ///
+    /// S5c-X PR6b-1: this is now the materialize+publish WRAPPER preserving
+    /// the exact pre-split ordering (durable rows → ts index → cell seeds →
+    /// floor raise) over [`materialize_committed_to_history`] +
+    /// [`publish_materialized`]; the PR6b receipt application will call the
+    /// two halves separately.
     pub async fn write_committed_to_history(
+        &self,
+        ops: &[KvOp],
+        commit_version: u64,
+    ) -> DbResult<()> {
+        // Hot path: the wrapper adds exactly one inlined fn-call layer — zero
+        // new allocation, locks or atomics.
+        self.materialize_committed_to_history(ops, commit_version)
+            .await?;
+        self.publish_materialized(ops, commit_version);
+        Ok(())
+    }
+
+    /// S5c-X PR6b-1 — MATERIALIZE half. Writes the history rows (version-key
+    /// entries + the commit `ts_key`) and updates the in-memory ts index for
+    /// `commit_version`, WITHOUT raising the published floor and WITHOUT any
+    /// cell/visibility notification.
+    ///
+    /// A materialized-but-unpublished version stays invisible to every
+    /// reader: all read paths cap at `gate.last_committed()`, and neither the
+    /// cell nor the overlay was touched, so `get_current` / `current_stream`
+    /// / `get_at` cannot observe the row until [`publish_materialized`]
+    /// raises the floor.
+    ///
+    /// Cancel-safe semantics unchanged: a single durable `history.transact`
+    /// — cancellation mid-write leaves the batch all-or-nothing on backends
+    /// that override `transact`.
+    pub async fn materialize_committed_to_history(
         &self,
         ops: &[KvOp],
         commit_version: u64,
@@ -611,12 +647,15 @@ impl MvccStore {
         // Phase 3: maintain the in-memory ts-index (idempotent — duplicate
         // insert into TreeIndex is a no-op).
         self.ts_index_insert(ts_ms, commit_version);
+        Ok(())
+    }
 
-        // Seed the cell from the durable write (idempotent; needed on the cold
-        // recovery path so a key whose value lives only in history reports the
-        // correct version). On the warm drain path the cell is already at
-        // `commit_version` (set by the ack-path's `apply_committed_visible`),
-        // so this is a redundant no-op.
+    /// S5c-X PR6b-1 — PUBLISH half. Raises the reader-visible floor
+    /// (`gate.raise_published`) and seeds each touched key's cell (max-
+    /// monotonic, idempotent). Synchronous, infallible, no I/O and no
+    /// `.await`, so a receipt apply can publish after durability without a
+    /// failure path.
+    pub fn publish_materialized(&self, ops: &[KvOp], commit_version: u64) {
         for op in ops {
             let key = match op {
                 KvOp::Set(k, _) => k.clone(),
@@ -624,13 +663,12 @@ impl MvccStore {
             };
             // KvOp keys and the cell map are both `RecordKey`-keyed
             // (task #532) — pass straight through, no conversion.
-            self.publish_cell(key, commit_version).await;
+            self.publish_cell_sync(key, commit_version);
         }
 
         // R3: advance the reader-visible floor (monotonic fetch_max). On the
         // ack-driven flow the floor is already at/above this; on cold recovery
         // this lifts it.
         self.gate.raise_published(commit_version);
-        Ok(())
     }
 }

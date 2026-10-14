@@ -127,6 +127,11 @@ pub enum DbError {
         "Index '{0}' is currently being dropped; lookup result unavailable — retry or re-plan"
     )]
     IndexDrainInProgress(String),
+
+    /// A repository-wide atomic batch (`Repo::begin_atomic_batch`) is not
+    /// supported by this backend.
+    #[error("Repository-wide atomic batch is not supported by this backend: {0}")]
+    AtomicBatchUnsupported(String),
 }
 
 impl From<CodecError> for DbError {

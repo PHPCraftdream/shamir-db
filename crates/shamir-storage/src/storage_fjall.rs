@@ -1,4 +1,4 @@
-use super::types::{KvOp, RecordKey, Repo, Store};
+use super::types::{AtomicBatch, AtomicCommitOutcome, KvOp, RecordKey, Repo, Store};
 use crate::error::{DbError, DbResult};
 use async_stream::stream;
 use async_trait::async_trait;
@@ -177,6 +177,127 @@ fn exec_transact(db: &Arc<Database>, keyspace: &Keyspace, ops: Vec<KvOp>) -> DbR
     Ok(())
 }
 
+/// Execute a repository-wide atomic batch synchronously: ops are staged as
+/// (store-name, op) pairs, resolved to keyspaces up-front (any resolution
+/// failure is a plain `Err` — nothing applied), then committed in ONE
+/// `Database::batch()` + `persist(SyncAll)`.
+fn exec_atomic_commit(
+    db: &Arc<Database>,
+    ops: Vec<(String, KvOp)>,
+) -> DbResult<AtomicCommitOutcome> {
+    if ops.is_empty() {
+        return Ok(AtomicCommitOutcome::Committed);
+    }
+
+    // Fail fast BEFORE any write on an invalid store name.
+    for (name, _) in &ops {
+        if name.is_empty() {
+            return Err(DbError::Validation(
+                "atomic batch: store name must not be empty".into(),
+            ));
+        }
+    }
+
+    // Test seam: injected failure BEFORE any write is staged into a batch —
+    // a plain Err, nothing applied.
+    #[cfg(test)]
+    if atomic_batch_test_seam::FAIL_BEFORE_COMMIT.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(DbError::Storage(
+            "injected atomic batch failure before commit".into(),
+        ));
+    }
+
+    // Resolve each distinct store name to a keyspace before building the
+    // batch (op counts are small — linear lookup dedupe is fine).
+    let mut keyspaces: Vec<(String, Keyspace)> = Vec::new();
+    for (name, _) in &ops {
+        if keyspaces.iter().any(|(n, _)| n == name) {
+            continue;
+        }
+        let ks = db
+            .keyspace(name, KeyspaceCreateOptions::default)
+            .map_err(|e| DbError::Storage(e.to_string()))?;
+        keyspaces.push((name.clone(), ks));
+    }
+
+    let mut batch = db.batch();
+    for (name, op) in ops {
+        let keyspace = &keyspaces
+            .iter()
+            .find(|(n, _)| *n == name)
+            .expect("keyspace resolved above")
+            .1;
+        match op {
+            KvOp::Set(k, v) => batch.insert(keyspace, k.as_ref(), v.as_ref()),
+            KvOp::Remove(k) => batch.remove(keyspace, k.as_ref()),
+        }
+    }
+
+    // fjall's API cannot distinguish a pre-apply from a post-apply failure
+    // here, so an error AFTER staging is reported UNCERTAIN — never assumed
+    // absent.
+    if let Err(e) = batch.commit() {
+        return Ok(AtomicCommitOutcome::Uncertain {
+            detail: format!("fjall batch commit: {e}"),
+        });
+    }
+
+    #[cfg(test)]
+    if atomic_batch_test_seam::FAIL_AFTER_COMMIT.load(std::sync::atomic::Ordering::Acquire) {
+        return Ok(AtomicCommitOutcome::Uncertain {
+            detail: "injected uncertain commit after batch application".into(),
+        });
+    }
+
+    // The batch is applied; durability is per-backend policy. A persist
+    // failure means applied-but-durability-unknown → Uncertain.
+    match db.persist(PersistMode::SyncAll) {
+        Ok(()) => Ok(AtomicCommitOutcome::Committed),
+        Err(e) => Ok(AtomicCommitOutcome::Uncertain {
+            detail: format!("fjall persist after atomic batch: {e}"),
+        }),
+    }
+}
+
+/// Pending repository-wide atomic batch for [`FjallRepo`]: ops are staged as
+/// (store-name, op) pairs and applied in ONE `Database::batch()` commit +
+/// `persist(SyncAll)` on commit — all-or-nothing across keyspaces.
+struct FjallAtomicBatch {
+    db: Arc<Database>,
+    ops: Vec<(String, KvOp)>,
+}
+
+#[async_trait]
+impl AtomicBatch for FjallAtomicBatch {
+    fn set(&mut self, store: &str, key: RecordKey, value: Bytes) -> DbResult<()> {
+        if store.is_empty() {
+            return Err(DbError::Validation(
+                "atomic batch: store name must not be empty".into(),
+            ));
+        }
+        self.ops.push((store.to_string(), KvOp::Set(key, value)));
+        Ok(())
+    }
+
+    fn delete(&mut self, store: &str, key: RecordKey) -> DbResult<()> {
+        if store.is_empty() {
+            return Err(DbError::Validation(
+                "atomic batch: store name must not be empty".into(),
+            ));
+        }
+        self.ops.push((store.to_string(), KvOp::Remove(key)));
+        Ok(())
+    }
+
+    async fn commit(mut self: Box<Self>) -> DbResult<AtomicCommitOutcome> {
+        let db = self.db.clone();
+        let ops = std::mem::take(&mut self.ops);
+        task::spawn_blocking(move || exec_atomic_commit(&db, ops))
+            .await
+            .map_err(|e| DbError::Internal(e.to_string()))?
+    }
+}
+
 /// Submit a job to the worker and await its oneshot reply.
 ///
 /// `build` receives the reply-sender and returns the fully-constructed
@@ -273,6 +394,19 @@ impl Repo for FjallRepo {
         })
         .await
         .map_err(|e| DbError::Internal(e.to_string()))?
+    }
+
+    /// `true` — the batch commits in ONE `OwnedWriteBatch::commit()` +
+    /// `persist(SyncAll)` across all keyspaces (see `exec_atomic_commit`).
+    fn supports_atomic_batch(&self) -> bool {
+        true
+    }
+
+    async fn begin_atomic_batch(&self) -> DbResult<Box<dyn AtomicBatch>> {
+        Ok(Box::new(FjallAtomicBatch {
+            db: self.db.clone(),
+            ops: Vec::new(),
+        }))
     }
 }
 
@@ -507,6 +641,12 @@ impl Store for FjallStore {
         true
     }
 
+    /// `true` — raw fjall backend: the repo-wide atomic batch writes
+    /// through `Database::batch()` directly (see `exec_atomic_commit`).
+    fn supports_atomic_batch(&self) -> bool {
+        true
+    }
+
     /// Force the WAL to fsync-on-disk. fjall buffers individual
     /// writes in the journal; `persist(SyncAll)` fsyncs the journal
     /// + writes any pending metadata. Reachable through
@@ -726,3 +866,16 @@ impl Store for FjallStore {
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[cfg(test)]
+pub(crate) mod atomic_batch_test_seam {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    pub static FAIL_BEFORE_COMMIT: AtomicBool = AtomicBool::new(false);
+    pub static FAIL_AFTER_COMMIT: AtomicBool = AtomicBool::new(false);
+
+    pub fn reset() {
+        FAIL_BEFORE_COMMIT.store(false, Ordering::Release);
+        FAIL_AFTER_COMMIT.store(false, Ordering::Release);
+    }
+}
