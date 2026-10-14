@@ -265,7 +265,9 @@ impl SystemStore {
     // Repository metadata
     // ========================================================================
 
-    /// Save repository metadata. Injects `owner`/`group`/`mode` from `meta`.
+    /// Save repository metadata. Injects `owner`/`group`/`mode` from `meta`
+    /// and, when `Some`, the per-repo durability override under the
+    /// `durability` key (encoded by the `repo_durability` codec).
     pub async fn save_repository(
         &self,
         db_name: &str,
@@ -273,6 +275,7 @@ impl SystemStore {
         engine: &str,
         path: Option<&str>,
         meta: &ResourceMeta,
+        durability: Option<&shamir_query_types::durability::DurabilityOverride>,
     ) -> DbResult<()> {
         let mut m = new_map();
         m.insert("db_name".to_string(), QueryValue::Str(db_name.to_string()));
@@ -290,6 +293,14 @@ impl SystemStore {
         );
         let mut record = QueryValue::Map(m);
         meta.inject_into(&mut record);
+        if let Some(over) = durability {
+            if let QueryValue::Map(fields) = &mut record {
+                fields.insert(
+                    "durability".to_string(),
+                    crate::shamir_db::repo_durability::durability_to_record(over),
+                );
+            }
+        }
         let table = self.table(TABLE_REPOSITORIES).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_REPOSITORIES),

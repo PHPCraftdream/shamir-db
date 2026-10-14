@@ -67,6 +67,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use shamir_connect::server::audit_chain::AuditChainWriter;
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::{Session, SessionStore};
@@ -147,6 +148,8 @@ pub(super) fn session_actor(session: &Session) -> Actor {
 #[derive(Clone)]
 pub struct ShamirDbHandler {
     pub(super) db: Arc<ShamirDb>,
+    /// Per-connection audit writer, attached by the request boundary.
+    pub(super) audit: Option<Arc<AuditChainWriter>>,
     pub(super) transactions: crate::config::TransactionsConfig,
     /// `None` means the handler was constructed without admin support;
     /// `CreateScramUser` requests will return `not_supported`.
@@ -206,11 +209,17 @@ pub struct ShamirDbHandler {
 }
 
 impl ShamirDbHandler {
+    pub fn with_audit_writer(mut self, audit: Arc<AuditChainWriter>) -> Self {
+        self.audit = Some(audit);
+        self
+    }
+
     /// Construct a handler over a shared [`ShamirDb`] without admin support.
     /// Use [`Self::with_admin`] when SCRAM user creation should be possible.
     pub fn new(db: Arc<ShamirDb>) -> Self {
         Self {
             db,
+            audit: None,
             transactions: crate::config::TransactionsConfig::default(),
             admin: None,
             slow_query: SlowQueryConfig::DISABLED,
@@ -231,6 +240,7 @@ impl ShamirDbHandler {
     pub fn with_admin(db: Arc<ShamirDb>, admin: AdminGlue) -> Self {
         Self {
             db,
+            audit: None,
             transactions: crate::config::TransactionsConfig::default(),
             admin: Some(admin),
             slow_query: SlowQueryConfig::DISABLED,
@@ -671,6 +681,7 @@ impl ShamirDbHandler {
                     );
                 }
                 self.persist_table_lifecycle(db_name, &batch);
+                self.audit_successful_alter_repo(session, db_name, &batch, &response);
                 subscribe_handler::activate_subscriptions(
                     conn,
                     &self.db,

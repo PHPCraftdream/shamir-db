@@ -28,6 +28,7 @@
 //! TLS+SCRAM+envelope handling.
 
 mod client;
+mod client_repo_admin;
 pub mod cursor_stream;
 mod error;
 pub mod interner_cache;

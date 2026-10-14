@@ -17,6 +17,7 @@
 //! - [`admin_validator`]   — CreateValidator, DropValidator, RenameValidator, BindValidator, UnbindValidator, ListValidators
 //! - [`admin_schema`]      — SetTableSchema, AddSchemaRule, RemoveSchemaRule, GetTableSchema
 //! - [`admin_describe`]    — DescribeTable
+//! - [`admin_repo_durability`] — AlterRepo, DescribeRepo
 //! - [`admin_retention`]   — SetRetention, PurgeHistory, ChangesSince
 //! - [`admin_interner`]    — InternerDump, InternerTouch
 //! - [`ambient_interner`]  — ambient epoch-delta sync (Part A)
@@ -33,6 +34,7 @@ mod admin_interner;
 mod admin_list;
 mod admin_migration;
 mod admin_replication;
+mod admin_repo_durability;
 mod admin_retention;
 mod admin_schema;
 mod admin_table_index;

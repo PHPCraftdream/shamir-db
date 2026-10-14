@@ -4,6 +4,10 @@
 
 **Когда подниматься:** выкатка в прод.
 
+## Repository durability changes
+
+Use `ALTER REPO` to patch a repository's durability override. Successfully applied top-level changes are recorded in the server's HMAC-chained audit log with the repository and resulting effective durability policy. Nested ALTERs inside sub-batches or loop bodies lack independently addressable results in the current response format and are not asserted as successful audit events.
+
 До этого этажа сервер запускался вручную: `shamir-server --config …` в
 терминале. Для разработки этого хватает. Но продакшен требует: сервисный
 режим (systemd / Windows service), observability (`/healthz`, `/metrics`),
@@ -74,6 +78,19 @@ shamir-server service install
 ### macOS / BSD
 
 `service install` генерирует launchd plist (macOS) или rc.d-скрипт (BSD).
+
+### Per-repository durability
+
+Repository durability can override the server default at creation or be patched while running with `ALTER REPO`. Overrides are sparse: unspecified fields inherit the server policy, and ALTER preserves previously stored fields not present in the patch. The policy is swapped live for the open repository and persisted in its `system.repositories` record; legacy records without a `durability` field mean no override. At boot, a stored override takes precedence over the server default.
+
+Use the query builder for these operations (builder examples are not protocol wire specifications):
+
+```ts
+const create = ddl.createRepo('archive').durability({ wal_commit: 'synced' });
+const alter = ddl.alterRepo('archive').durability({ wal_retention_max_bytes: 1073741824 });
+```
+
+`DESCRIBE REPO` reports effective `durability` and the sparse `durability_override`. Unknown fields and invalid enum values are rejected. Retention must be at least twice the effective WAL segment size. `completed_reseed` is rejected because it is not implemented; only `durable` is supported. In-memory and hybrid WALs ignore `wal_commit`; selecting `synced` does not make them persistent.
 
 ### After a leader crash
 

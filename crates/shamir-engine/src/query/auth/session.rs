@@ -280,6 +280,14 @@ impl SessionPermissions {
                     database: op.rename_db.clone(),
                 },
             ),
+            // AlterRepo — Write on the repo itself (settings mutation).
+            BatchOp::AlterRepo(op) => (
+                Action::Write,
+                Resource::Repo {
+                    database: db_name.to_string(),
+                    repo: op.alter_repo.clone(),
+                },
+            ),
             BatchOp::CreateTable(op) => (
                 Action::Create,
                 Resource::Table {
@@ -518,6 +526,14 @@ impl SessionPermissions {
                     database: db_name.to_string(),
                     repo: op.repo.clone(),
                     table: op.describe_table.clone(),
+                },
+            ),
+            // DescribeRepo — read-level introspection on the repo itself.
+            BatchOp::DescribeRepo(op) => (
+                Action::Read,
+                Resource::Repo {
+                    database: db_name.to_string(),
+                    repo: op.describe_repo.clone(),
                 },
             ),
 

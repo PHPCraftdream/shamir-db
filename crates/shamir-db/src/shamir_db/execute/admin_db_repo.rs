@@ -1,8 +1,10 @@
 //! Admin handlers: CreateDb, DropDb, CreateRepo, DropRepo.
 
 use crate::access::{Action, ResourcePath};
+use crate::engine::repo::durability_policy::{effective_wal_segment_bytes, resolve};
 use crate::engine::repo::repo_types::BoxRepoFactory;
 use crate::engine::repo::RepoConfig;
+
 use crate::engine::table::TableConfig;
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
@@ -240,6 +242,18 @@ impl ShamirAdminExecutor {
             }
         }
 
+        // S5c-X PR1b part 2: validate the durability override EARLY —
+        // before any mutation (no repo directory, no catalogue row). A
+        // rejected override must leave everything untouched.
+        if let Some(over) = op.durability.as_ref() {
+            resolve(
+                &self.shamir.durability_policy(),
+                Some(over),
+                effective_wal_segment_bytes(),
+            )
+            .map_err(|e| err(e.to_string()))?;
+        }
+
         let factory = match op.engine.as_deref() {
             Some("in_memory") => BoxRepoFactory::in_memory(),
             Some("fjall") | None => {
@@ -308,7 +322,12 @@ impl ShamirAdminExecutor {
         }
 
         self.shamir
-            .add_repo_as(&self.db_name, config, self.actor.clone())
+            .add_repo_as_with_durability(
+                &self.db_name,
+                config,
+                self.actor.clone(),
+                op.durability.as_ref(),
+            )
             .await
             .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({

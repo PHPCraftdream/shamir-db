@@ -18,6 +18,7 @@ pub use shamir_query_types::admin::Retention;
 pub use shamir_query_types::admin::{BufferConfigDto as BufConfig, BufferConfigPatch as BufPatch};
 pub use shamir_query_types::admin::{GroupRef, ResourceRef};
 pub use shamir_query_types::admin::{ReplDirection, ReplMode, ReplScope, ReplStream, SubAction};
+pub use shamir_query_types::durability::DurabilityOverride;
 pub use shamir_query_types::WriteOp;
 
 // ============================================================================
@@ -28,6 +29,7 @@ pub use shamir_query_types::WriteOp;
 pub mod res;
 
 mod access_control;
+mod alter_repo;
 mod auth;
 mod buffer_config;
 mod create_db;
@@ -64,6 +66,7 @@ mod validator;
 pub(crate) use index_spec::IndexSpec;
 
 pub use access_control::*;
+pub use alter_repo::*;
 pub use auth::*;
 pub use buffer_config::*;
 pub use create_db::*;

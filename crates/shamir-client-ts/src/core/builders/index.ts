@@ -26,7 +26,7 @@ export * from './write.js';
 export {
   currentOnly, olderThan, olderThanAge,
   FieldBuilder,
-  createDb, createRepo, createTable, createIndex,
+  createDb, createRepo, alterRepo, describeRepo, createTable, createIndex,
   setTableSchema, addSchemaRule, removeSchemaRule, getTableSchema,
   setBufferConfig, getBufferConfig, alterBufferConfig,
   migrationStatus,

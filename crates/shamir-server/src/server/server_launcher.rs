@@ -455,6 +455,7 @@ impl ServerLauncher {
                     tables_registry: Some(tables_registry.clone()),
                 },
             )
+            .with_audit_writer(audit_writer.clone())
             .with_slow_query(SlowQueryConfig::from_ms(
                 config.logging.slow_query_threshold_ms,
             ))

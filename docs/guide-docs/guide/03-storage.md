@@ -67,6 +67,28 @@ await db.run(ddl.createRepo('cold'));
 
 Ответ: `results.r.records[0].created_repo === "cold"`.
 
+`CREATE REPO` также принимает optional `durability` sparse override. Exact operation shape:
+
+```json
+{"create_repo":"cold","durability":{"wal_commit":"synced","wal_retention_max_bytes":"1073741824"}}
+```
+
+Only provided policy fields are overridden; absent fields inherit the server durability defaults. `wal_retention_max_bytes` is a positive u64 byte count and is serialized canonically as a decimal string (to preserve values above signed i64); decoders also accept a nonnegative integer form. Supported fields/enums: `wal_commit: "buffered"|"synced"`; `wal_retention_max_bytes`; `on_wal_retention_exceeded: "refuse_writes"|"declare_gap"`; `replication_serve: "durable"`. Unknown fields and enum values are errors. `completed_reseed` is not supported. Retention must be at least twice the effective WAL segment size.
+
+An override may be changed by `ALTER REPO`; this operation takes a sparse patch and merges present fields, preserving stored override fields omitted from the patch:
+
+```json
+{"alter_repo":"cold","durability":{"on_wal_retention_exceeded":"refuse_writes"}}
+```
+
+The change is validated, persisted, and applied live. `DESCRIBE REPO` returns effective settings separately from the sparse override:
+
+```json
+{"describe_repo":"cold"}
+```
+
+Its result includes `durability` (effective policy) and `durability_override` (only persisted override fields, or `null` when none). At boot, persisted overrides take precedence over server defaults; legacy repository records with no `durability` key mean no override. In-memory/hybrid WALs ignore `wal_commit` and do not become persistent when set to `synced`.
+
 **Durable по умолчанию — три движка на шкале durability.**
 
 Без поля `engine` (или `engine: 'fjall'`) репозиторий следует дому: если

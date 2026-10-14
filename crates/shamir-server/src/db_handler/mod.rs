@@ -3,6 +3,7 @@ mod config;
 mod cursor_handlers;
 mod handler;
 mod repl_handler;
+mod repo_audit;
 mod subscribe_handler;
 mod tx_handlers;
 mod visibility_handlers;

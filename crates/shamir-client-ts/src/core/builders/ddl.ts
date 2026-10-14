@@ -28,6 +28,9 @@ import type {
   DescribeTableOp,
   CreateDbOp,
   CreateRepoOp,
+  AlterRepoOp,
+  DescribeRepoOp,
+  DurabilityOverride,
   CreateTableOp,
   CreateIndexOp,
   SetBufferConfigOp,
@@ -74,7 +77,8 @@ import {
   canonicalSetRetention,
   canonicalPurgeHistory,
 } from '../hmac.js';
-import { assertSafeVersion } from './write.js';
+import { durabilityOverride } from './durability.js';
+
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -121,6 +125,7 @@ export function createRepo(
     path?: string;
     tables?: string[];
     if_not_exists?: boolean;
+    durability?: DurabilityOverride;
   },
 ): CreateRepoOp {
   const op: CreateRepoOp = { create_repo: name };
@@ -129,7 +134,16 @@ export function createRepo(
   if (opts?.tables !== undefined && opts.tables.length > 0)
     op.tables = opts.tables;
   if (opts?.if_not_exists) op.if_not_exists = true;
+  if (opts?.durability !== undefined) op.durability = durabilityOverride(opts.durability);
   return op;
+}
+
+export function alterRepo(name: string, durability: DurabilityOverride): AlterRepoOp {
+  return { alter_repo: name, durability: durabilityOverride(durability) };
+}
+
+export function describeRepo(name: string): DescribeRepoOp {
+  return { describe_repo: name };
 }
 
 /** Create a table in a repository. */
@@ -1372,6 +1386,8 @@ export const ddl = {
   FieldBuilder,
   createDb,
   createRepo,
+  alterRepo,
+  describeRepo,
   createTable,
   createIndex,
   setTableSchema,

@@ -2,6 +2,10 @@
 //! and `create_db` with `if_not_exists`.
 
 use shamir_query_types::admin::{BufferConfigDto, BufferConfigPatch, FkAction, ForeignKeyDto};
+use shamir_query_types::batch::BatchOp;
+use shamir_query_types::durability::{
+    DurabilityOverride, ReplicationServe, RetentionOverflow, WalCommitTier,
+};
 use shamir_types::mpack;
 
 use crate::ddl;
@@ -122,6 +126,75 @@ fn create_repo_typed_repo_engine_matches_raw_string() {
         roundtrip(&none_op).get("engine").is_none(),
         "engine must be absent when not set"
     );
+}
+
+/// S5c-X PR1b — `create_repo(..).durability(..)` carries the sparse override
+/// on the op, survives the msgpack wire round trip (through the `BatchOp`
+/// key-dispatch decode), and is absent when not set.
+#[test]
+fn create_repo_with_durability() {
+    let override_dto = DurabilityOverride {
+        wal_commit: Some(WalCommitTier::Synced),
+        wal_retention_max_bytes: Some(std::num::NonZeroU64::new(4096).unwrap()),
+        on_wal_retention_exceeded: Some(RetentionOverflow::DeclareGap),
+        replication_serve: Some(ReplicationServe::Durable),
+    };
+    let op = ddl::create_repo("hot_cache")
+        .durability(override_dto)
+        .build();
+
+    let BatchOp::CreateRepo(cr) = &op else {
+        panic!("create_repo(..).build() must yield BatchOp::CreateRepo");
+    };
+    assert_eq!(cr.durability, Some(override_dto));
+
+    let j = roundtrip(&op);
+    assert_eq!(j["durability"]["wal_commit"], "synced");
+    assert_eq!(j["durability"]["wal_retention_max_bytes"], 4096);
+    assert_eq!(j["durability"]["on_wal_retention_exceeded"], "declare_gap");
+    assert_eq!(j["durability"]["replication_serve"], "durable");
+
+    // Without `.durability(..)` the key must be absent on the wire.
+    let plain_op = ddl::create_repo("hot_cache").build();
+    assert!(
+        roundtrip(&plain_op).get("durability").is_none(),
+        "durability must be absent when not set"
+    );
+}
+
+/// S5c-X PR1b — the `alter_repo` builder produces `BatchOp::AlterRepo`, the
+/// msgpack round trip decodes back through the `"alter_repo"` dispatch key,
+/// and serde_json (a dev-dependency here) round-trips the same op — proving
+/// the custom `BatchOp::Deserialize` is format-agnostic for the new variant.
+#[test]
+fn alter_repo_builder_round_trip() {
+    let override_dto = DurabilityOverride {
+        wal_commit: Some(WalCommitTier::Buffered),
+        wal_retention_max_bytes: None,
+        on_wal_retention_exceeded: Some(RetentionOverflow::RefuseWrites),
+        replication_serve: Some(ReplicationServe::CompletedReseed),
+    };
+    let op = ddl::alter_repo("main")
+        .durability(Some(override_dto))
+        .build();
+
+    let BatchOp::AlterRepo(alter) = &op else {
+        panic!("alter_repo(..).build() must yield BatchOp::AlterRepo");
+    };
+    assert_eq!(alter.alter_repo, "main");
+    assert_eq!(alter.durability, Some(override_dto));
+    assert!(op.is_admin(), "AlterRepo must classify as admin DDL");
+    assert!(op.is_write(), "AlterRepo must classify as a write");
+
+    // msgpack round trip exercises the `has("alter_repo")` decode arm.
+    let j = roundtrip(&op);
+    assert_eq!(j["alter_repo"], "main");
+    assert_eq!(j["durability"]["wal_commit"], "buffered");
+
+    // JSON round trip through the same custom Deserialize.
+    let json = serde_json::to_string(&op).unwrap();
+    let back: BatchOp = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, op);
 }
 
 #[test]

@@ -18,6 +18,32 @@
 
 import type { WireValue, WriteValue } from './write.js';
 
+export type WalCommit = 'buffered' | 'synced';
+export type WalRetentionExceeded = 'refuse_writes' | 'declare_gap';
+export type ReplicationServe = 'durable';
+/** Sparse per-repository durability override; u64 budgets remain lossless. */
+export type U64Decimal = string;
+export interface DurabilityOverride {
+  wal_commit?: WalCommit;
+  wal_retention_max_bytes?: number | bigint | U64Decimal;
+  on_wal_retention_exceeded?: WalRetentionExceeded;
+  replication_serve?: ReplicationServe;
+}
+export interface EffectiveDurability {
+  wal_commit: WalCommit;
+  wal_retention_max_bytes: U64Decimal;
+  on_wal_retention_exceeded: WalRetentionExceeded;
+  replication_serve: ReplicationServe;
+}
+export interface DescribeRepoResponse {
+  describe_repo: string;
+  repo: string;
+  engine: string;
+  path: string | null;
+  durability: EffectiveDurability;
+  durability_override: DurabilityOverride | null;
+}
+
 // ── Schema DTO types ────────────────────────────────────────────────
 
 /**
@@ -247,10 +273,20 @@ export interface CreateDbOp {
 
 export interface CreateRepoOp {
   create_repo: string;
+  durability?: DurabilityOverride;
   engine?: string;
   path?: string;
   tables?: string[];
   if_not_exists?: true;
+}
+
+export interface AlterRepoOp {
+  alter_repo: string;
+  durability?: DurabilityOverride;
+}
+
+export interface DescribeRepoOp {
+  describe_repo: string;
 }
 
 export interface CreateTableOp {
@@ -540,6 +576,8 @@ export type DdlOp =
   | CreateDbOp
   | DropDbOp
   | CreateRepoOp
+  | AlterRepoOp
+  | DescribeRepoOp
   | DropRepoOp
   | RenameRepoOp
   | RenameDbOp

@@ -10,14 +10,14 @@ use crate::admin::{
     BindValidatorOp, ChangesSinceOp, ChgrpOp, ChmodOp, ChownOp, CommitMigrationOp, CreateDbOp,
     CreateFunctionFolderOp, CreateFunctionOp, CreateGroupOp, CreateIndexOp, CreatePublicationOp,
     CreateReplicationProfileOp, CreateRepoOp, CreateSubscriptionOp, CreateTableOp,
-    CreateValidatorOp, DescribeTableOp, DropDbOp, DropFunctionOp, DropGroupOp, DropIndexOp,
-    DropPublicationOp, DropReplicationProfileOp, DropRepoOp, DropSubscriptionOp, DropTableOp,
-    DropValidatorOp, GetBufferConfigOp, GetTableSchemaOp, InternerDumpOp, InternerTouchOp, ListOp,
-    ListPublicationsOp, ListSubscriptionsOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp,
-    RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameDbOp, RenameFunctionFolderOp, RenameFunctionOp,
-    RenameGroupOp, RenameIndexOp, RenameRepoOp, RenameTableOp, RenameValidatorOp,
-    ReplicationStatusOp, RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp,
-    StartMigrationOp, UnbindValidatorOp,
+    CreateValidatorOp, DescribeRepoOp, DescribeTableOp, DropDbOp, DropFunctionOp, DropGroupOp,
+    DropIndexOp, DropPublicationOp, DropReplicationProfileOp, DropRepoOp, DropSubscriptionOp,
+    DropTableOp, DropValidatorOp, GetBufferConfigOp, GetTableSchemaOp, InternerDumpOp,
+    InternerTouchOp, ListOp, ListPublicationsOp, ListSubscriptionsOp, ListValidatorsOp,
+    MigrationStatusOp, PurgeHistoryOp, RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameDbOp,
+    RenameFunctionFolderOp, RenameFunctionOp, RenameGroupOp, RenameIndexOp, RenameRepoOp,
+    RenameTableOp, RenameValidatorOp, ReplicationStatusOp, RollbackMigrationOp, SetBufferConfigOp,
+    SetRetentionOp, SetTableSchemaOp, StartMigrationOp, UnbindValidatorOp,
 };
 use crate::auth::{CreateUserOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
 use crate::call::CallOp;
@@ -61,6 +61,8 @@ pub enum BatchOp {
     CreateRepo(CreateRepoOp),
     DropRepo(DropRepoOp),
     RenameRepo(RenameRepoOp),
+    /// Alter a repository's per-repo settings (durability override patch).
+    AlterRepo(AlterRepoOp),
     RenameDb(RenameDbOp),
     CreateTable(CreateTableOp),
     DropTable(DropTableOp),
@@ -120,6 +122,9 @@ pub enum BatchOp {
     /// Describe a table — full introspection (schema, indexes, validators,
     /// retention, buffer, access meta) in a single response.
     DescribeTable(DescribeTableOp),
+
+    /// Describe a repository — engine, path, per-repo durability policy.
+    DescribeRepo(DescribeRepoOp),
 
     // Function folder DDL
     CreateFunctionFolder(CreateFunctionFolderOp),
@@ -186,6 +191,7 @@ impl Serialize for BatchOp {
             BatchOp::CreateRepo(op) => op.serialize(serializer),
             BatchOp::DropRepo(op) => op.serialize(serializer),
             BatchOp::RenameRepo(op) => op.serialize(serializer),
+            BatchOp::AlterRepo(op) => op.serialize(serializer),
             BatchOp::RenameDb(op) => op.serialize(serializer),
             BatchOp::CreateTable(op) => op.serialize(serializer),
             BatchOp::DropTable(op) => op.serialize(serializer),
@@ -228,6 +234,7 @@ impl Serialize for BatchOp {
             BatchOp::RemoveSchemaRule(op) => op.serialize(serializer),
             BatchOp::GetTableSchema(op) => op.serialize(serializer),
             BatchOp::DescribeTable(op) => op.serialize(serializer),
+            BatchOp::DescribeRepo(op) => op.serialize(serializer),
             BatchOp::CreateFunctionFolder(op) => op.serialize(serializer),
             BatchOp::RenameFunctionFolder(op) => op.serialize(serializer),
             BatchOp::InternerDump(op) => op.serialize(serializer),
@@ -303,6 +310,8 @@ impl<'de> Deserialize<'de> for BatchOp {
             qv_to::<DropRepoOp, _>(&bytes).map(BatchOp::DropRepo)
         } else if has("rename_repo") {
             qv_to::<RenameRepoOp, _>(&bytes).map(BatchOp::RenameRepo)
+        } else if has("alter_repo") {
+            qv_to::<AlterRepoOp, _>(&bytes).map(BatchOp::AlterRepo)
         } else if has("rename_db") {
             qv_to::<RenameDbOp, _>(&bytes).map(BatchOp::RenameDb)
         } else if has("create_table") {
@@ -385,6 +394,8 @@ impl<'de> Deserialize<'de> for BatchOp {
             qv_to::<RemoveSchemaRuleOp, _>(&bytes).map(BatchOp::RemoveSchemaRule)
         } else if has("describe_table") {
             qv_to::<DescribeTableOp, _>(&bytes).map(BatchOp::DescribeTable)
+        } else if has("describe_repo") {
+            qv_to::<DescribeRepoOp, _>(&bytes).map(BatchOp::DescribeRepo)
         } else if has("get_table_schema") {
             qv_to::<GetTableSchemaOp, _>(&bytes).map(BatchOp::GetTableSchema)
         } else if has("create_function_folder") {
@@ -482,6 +493,7 @@ impl BatchOp {
             | BatchOp::CreateRepo(_)
             | BatchOp::DropRepo(_)
             | BatchOp::RenameRepo(_)
+            | BatchOp::AlterRepo(_)
             | BatchOp::RenameDb(_)
             | BatchOp::CreateTable(_)
             | BatchOp::DropTable(_)
@@ -524,6 +536,7 @@ impl BatchOp {
             | BatchOp::RemoveSchemaRule(_)
             | BatchOp::GetTableSchema(_)
             | BatchOp::DescribeTable(_)
+            | BatchOp::DescribeRepo(_)
             | BatchOp::CreateFunctionFolder(_)
             | BatchOp::RenameFunctionFolder(_)
             | BatchOp::InternerDump(_)
@@ -590,6 +603,7 @@ impl BatchOp {
                 | BatchOp::CreateRepo(_)
                 | BatchOp::DropRepo(_)
                 | BatchOp::RenameRepo(_)
+                | BatchOp::AlterRepo(_)
                 | BatchOp::RenameDb(_)
                 | BatchOp::CreateTable(_)
                 | BatchOp::DropTable(_)
@@ -632,6 +646,7 @@ impl BatchOp {
                 | BatchOp::RemoveSchemaRule(_)
                 | BatchOp::GetTableSchema(_)
                 | BatchOp::DescribeTable(_)
+                | BatchOp::DescribeRepo(_)
                 | BatchOp::CreateFunctionFolder(_)
                 | BatchOp::RenameFunctionFolder(_)
                 | BatchOp::InternerDump(_)
@@ -682,6 +697,7 @@ impl BatchOp {
             BatchOp::ListValidators(_) => false,
             BatchOp::GetTableSchema(_) => false,
             BatchOp::DescribeTable(_) => false,
+            BatchOp::DescribeRepo(_) => false,
             BatchOp::InternerDump(_) => false,
             BatchOp::ChangesSince(_) => false,
             BatchOp::Subscribe(_) => false,
@@ -702,6 +718,7 @@ impl BatchOp {
             BatchOp::CreateRepo(_) => true,
             BatchOp::DropRepo(_) => true,
             BatchOp::RenameRepo(_) => true,
+            BatchOp::AlterRepo(_) => true,
             BatchOp::RenameDb(_) => true,
             BatchOp::CreateTable(_) => true,
             BatchOp::DropTable(_) => true,
