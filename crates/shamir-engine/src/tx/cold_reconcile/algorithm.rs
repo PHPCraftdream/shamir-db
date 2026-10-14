@@ -153,8 +153,9 @@ pub(super) async fn reconcile_with_hook(
     // certified everything through it, so only its in-flight batch stays an
     // uncertain GAP.
     if follower_provenance {
-        if let Some((first, through)) = in_flight_range(Some(certified_through), h) {
-            feed.record_recovery_gap(first, through).await?;
+        if let Some(range) = in_flight_range(Some(certified_through), h) {
+            feed.record_recovery_gap(*range.start(), *range.end())
+                .await?;
         }
     } else {
         for (first, through) in missing_intervals(&wal_versions, j, h) {
