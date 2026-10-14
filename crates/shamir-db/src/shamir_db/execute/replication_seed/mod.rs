@@ -1,4 +1,4 @@
-mod catalogue;
+pub(super) mod catalogue;
 pub(super) mod control;
 pub use control::{fence_metadata, validate_seed_hello};
 mod error;

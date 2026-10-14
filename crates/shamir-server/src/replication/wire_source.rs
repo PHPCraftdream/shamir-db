@@ -12,7 +12,7 @@
 
 use async_trait::async_trait;
 use shamir_client::Client;
-use shamir_query_types::wire::repl::{ReplRequest, ReplResponse};
+use shamir_query_types::wire::repl::{ReplRequest, ReplResponse, REPL_CAP_IDENTITY_FENCE};
 use tokio::sync::Mutex;
 
 use super::error::ReplError;
@@ -63,6 +63,10 @@ impl ReplSource for WireReplSource {
             from_version,
             limit,
             wait_ms,
+            // Mirror `hello_request`: the production follower runs the
+            // identity fence, so every request carries the capability
+            // (a `completed_reseed` leader re-checks it on every pull).
+            capabilities: Some(vec![REPL_CAP_IDENTITY_FENCE.to_string()]),
         };
         let client = self.client.lock().await;
         client

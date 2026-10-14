@@ -91,7 +91,7 @@ const alter = ddl.alterRepo('archive', { wal_retention_max_bytes: 1073741824 });
 const described = ddl.describeRepo('archive');
 ```
 
-`DESCRIBE REPO` строится через `ddl.describeRepo('archive')` и сообщает эффективную `durability` и sparse `durability_override`. Rust DTO запроса всегда передаёт retention десятичной строкой. TypeScript принимает положительные безопасные числа, `bigint` или канонические десятичные строки и без потери точности нормализует значения выше `i64::MAX` в текст. В эффективном ответе значения до `i64::MAX` включительно — native MessagePack integer, декодируемый в TypeScript как `number` или `bigint` согласно ширине wire integer; значения выше `i64::MAX` — десятичные строки. Неизвестные поля и недопустимые значения enum отклоняются. Retention должен быть не меньше удвоенного effective WAL segment size. `completed_reseed` отклоняется как нереализованный режим; поддерживается только `durable`. In-memory и hybrid WAL игнорируют `wal_commit`; выбор `synced` не делает их persistent.
+`DESCRIBE REPO` строится через `ddl.describeRepo('archive')` и сообщает эффективную `durability` и sparse `durability_override`. Rust DTO запроса всегда передаёт retention десятичной строкой. TypeScript принимает положительные безопасные числа, `bigint` или канонические десятичные строки и без потери точности нормализует значения выше `i64::MAX` в текст. В эффективном ответе значения до `i64::MAX` включительно — native MessagePack integer, декодируемый в TypeScript как `number` или `bigint` согласно ширине wire integer; значения выше `i64::MAX` — десятичные строки. Неизвестные поля и недопустимые значения enum отклоняются. Retention должен быть не меньше удвоенного effective WAL segment size. `replication_serve` принимает `durable` (default) и `completed_reseed` (см. ниже). In-memory и hybrid WAL игнорируют `wal_commit`; выбор `synced` не делает их persistent.
 
 ### After a leader crash
 
@@ -450,8 +450,8 @@ In-memory/hybrid WAL не persistent; tier игнорируется с одни�
 Boot проверяет enum/неизвестные вложенные ключи и retention floor
 `>= 2 × effective segment bytes` через общий resolver, включая env override
 `SHAMIR_WAL_SEGMENT_MAX_BYTES`, до init базы. Верхнеуровневый детектор
-похожих на durability опечаток не добавлен. `completed_reseed` отвергается:
-`completed_reseed is not available yet (planned: epoch bump + universal fencing)`.
+похожих на durability опечаток не добавлен. `resolve` принимает и
+`completed_reseed` (см. ниже).
 Retention budget и overflow action **только parsed/validated до PR2**:
 не считайте 1 GiB enforced лимитом диска, `declare_gap` пока только warns.
 
@@ -461,12 +461,85 @@ recoverability (не max fsynced version). Pull запрашивает coalesced
 старый safe bound. Lag может включать journal confirmation, uncovered WAL
 prefix и собственно скорость apply follower; это разные причины.
 
+### replication_serve: durable и completed_reseed (S5c-X PR8)
+
+`durability.replication_serve` задаётся как серверный default (блок
+`durability`, `deny_unknown_fields`) и как per-repository override
+(`CREATE`/`ALTER REPO` `durability`). Режимы:
+
+- `durable` (DEFAULT): отдача ограничена `min(confirmed, W, R)`, где
+  R — непрерывный префикс recoverability (WAL fsync coverage).
+- `completed_reseed`: отдача ограничена `min(confirmed, W)` — completed
+  prefix БЕЗ R-clamp. Выбирайте его, когда минимальная replication latency
+  важнее, и вы принимаете reseed-after-crash. Это
+  "safe convergence, not lossless replication: speculative observations
+  may be retracted, and an unclean restart conservatively costs a reseed
+  even if the bytes survived."
+
+Модель lifecycle/epoch под `completed_reseed`:
+
+1. До первой speculative страницы пишется и сбрасывается durable lifecycle
+   record `Armed` (per-repo, в `__tx__` info store; атомарный fast path
+   избавляет от его повторного чтения в каждом pull).
+2. Чистая остановка (admission stopped, writes settled, durable data/WAL,
+   journal horizon через `record_clean_horizon`, allocation evidence)
+   пишет сертификат `Clean` ПОСЛЕ того, как всё это зафиксировано. Под
+   `durable` shutdown ничего не пишет.
+3. При открытии под `completed_reseed` запись `Armed` без более позднего
+   `Clean` = unclean restart: recovery завершается приватно, затем
+   `history_epoch` инкрементируется durably (checked add; неудачный
+   bump/flush БЛОКИРУЕТ admission, overflow тоже), старая replication
+   continuity инвалидируется (lineage остаётся STABLE — двигается только
+   epoch), после чего service допускается. Это стоит reseed, даже если
+   WAL-байты пережили сбой — консервативно by design.
+4. Fencing (PR7): каждая subscription/bookmark привязана к lineage+epoch
+   (fence выполняется на Hello и перед каждым Pull, до любого
+   decode/apply). Follower со старым epoch в bookmark получает отказ;
+   supervisor помечает подписку `resync_required` (counter
+   `shamir_repl_resync_required_total`) и она остаётся в карантине до
+   установки replacement seed. Legacy peers без lineage/epoch identity
+   отвергаются (`MissingIdentity`), fail-closed.
+5. Переключение `durable` → `completed_reseed` при существующей записи
+   `Armed` безопасно: следующий fast-mode open видит Armed-without-Clean
+   и делает bump один раз. Обратное переключение не стирает `Armed`; под
+   `durable` он инертен.
+6. In-memory и hybrid: ничего не переживает рестарт (identity store
+   RAM-backed — каждый reopen, чистый или нет, выпускает новую
+   incarnation/new lineage); для репликации такие репозитории
+   обслуживаются только с явным `completed_reseed`.
+
+`wal_commit` (`buffered|synced`) независим от `replication_serve`:
+запросная `durability` может УСИЛИТЬ подтверждение, но никогда не может
+ослабить serve-политику репозитория. WAL-less follower apply path
+сохраняет durable-floor-before-history ordering независимо от режима.
+
+Явная админ-установка `set_durability` с `wal_commit: synced` на
+in-memory/hybrid репозитории (нет persistent WAL) НЕ отвергается:
+`synced` игнорируется — тихое понижение до `buffered` через
+`for_wal_backend` с одним warn в лог на каждый open; `completed_reseed`
+на них разрешён (и обязателен явно при publication), `durable`
+разрешён на engine-уровне и проверяется при publication time.
+
+Стоимость (hot path): commit path не изменён; serve path добавляет один
+атомарный load policy/mode на каждую replication page read и, при первом
+speculative pull после открытия, одну запись Armed в store с flush;
+unclean-open epoch bump — это одна запись metadata-ключа + flush на
+recovery path, никогда на commit path.
+
+Наблюдаемость: `DESCRIBE REPO` теперь несёт `durability` (effective,
+включая `replication_serve`), `durability_override`, `lineage_id` (hex) и
+`history_epoch`; gauges `shamir_replication_serve` (effective mode),
+`shamir_replication_served_bound`, `shamir_wal_watermark_w` и новый
+counter `shamir_repo_history_epoch_bumps_total` (плюс существующие
+counters identity-mismatch и новый resync-required).
+
 В текущем exporter все durability series имеют **только labels `db` и `repo`**.
 Источники принадлежат конкретному repo и его WAL; clones разделяют одно
 состояние. `shamir_wal_effective_commit` сохраняет configured tier
 (0 buffered, 1 synced), несмотря на историческое имя: Mem WAL игнорирует
 configured Synced и использует effective Buffered без sync demands.
-`shamir_replication_serve` (0 durable) и
+`shamir_replication_serve` (0 durable, 1 completed_reseed — effective mode
+репозитория) и
 `shamir_wal_backend_mem` (1 для initialized Mem WAL, 0 для
 file/uninitialized) семплируются при scrape, без открытия WAL или stores.
 `shamir_wal_synced_lag_versions` и `shamir_wal_pending_versions` —

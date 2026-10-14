@@ -18,7 +18,9 @@
 //! `pull` (fetch a batch of events).
 
 use async_trait::async_trait;
-use shamir_query_types::wire::repl::{ReplRequest, ReplResponse, CURRENT_REPL_PROTO_VER};
+use shamir_query_types::wire::repl::{
+    ReplRequest, ReplResponse, CURRENT_REPL_PROTO_VER, REPL_CAP_IDENTITY_FENCE,
+};
 
 #[path = "seed/mod.rs"]
 pub(crate) mod seed;
@@ -76,5 +78,10 @@ pub(crate) fn hello_request(node_id: &str) -> ReplRequest {
     ReplRequest::Hello {
         proto_ver: CURRENT_REPL_PROTO_VER,
         node_id: node_id.to_string(),
+        // The production follower runs the universal identity fence
+        // (`FollowerLoopConfig` hardcodes it on outside tests), so it
+        // advertises the capability: a `completed_reseed` leader will serve
+        // it; a legacy follower (no capability) is refused fail-closed.
+        capabilities: Some(vec![REPL_CAP_IDENTITY_FENCE.to_string()]),
     }
 }

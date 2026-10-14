@@ -44,6 +44,7 @@
 //! holds no follower locks and never blocks the server. `reconcile` only
 //! reads the catalogue and starts/stops tasks.
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use shamir_collections::{THasher, TMap};
@@ -51,7 +52,7 @@ use shamir_db::query::admin::ReplStream;
 use shamir_db::query::filter::FilterContext;
 use shamir_db::query::read::{QueryResult, ReadQuery};
 use shamir_db::types::value::QueryValue;
-use shamir_db::ShamirDb;
+use shamir_db::{SeedRefusal, ShamirDb};
 use shamir_query_types::admin::{ReplDirection, ReplScope};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -409,6 +410,66 @@ impl SubscriptionSupervisor {
                             error = %e,
                             "follower loop terminated; subscription marked resync_required"
                         );
+                    }
+                    Err(
+                        e @ (ReplError::IdentityMismatch { .. }
+                        | ReplError::Seed(
+                            SeedRefusal::WrongIdentity
+                            | SeedRefusal::WrongHistoryEpoch
+                            | SeedRefusal::MissingIdentity
+                            | SeedRefusal::WrongSchema,
+                        )),
+                    ) => {
+                        // S5c-X PR8 chunk 4 — SERVER FENCES: an identity/epoch
+                        // fence trip means the leader is not the incarnation
+                        // this subscription recorded. QUARANTINE the follower
+                        // (state = "resync_required") so the split is visible
+                        // and the loop stays stopped, exactly like the
+                        // journal-gap path. The fence fires BEFORE decode/
+                        // apply, so nothing was applied and the gap metadata
+                        // is 0/0 (no version was reached).
+                        let skip_quarantine = cfg!(test)
+                            && super::identity_fence::checks::SKIP_FENCE_QUARANTINE_FOR_TEST
+                                .load(Ordering::Relaxed);
+                        if skip_quarantine {
+                            warn!(
+                                subscription = %sub_name,
+                                error = %e,
+                                "identity fence tripped; quarantine disabled by test seam"
+                            );
+                            // Negative control must exercise the UNPROTECTED
+                            // path — the pre-quarantine production behaviour,
+                            // i.e. the generic terminal mapping.
+                            super::source::seed::terminal::persist_terminal(&local, &sub_name, &e)
+                                .await;
+                        } else {
+                            // Same catalogue state the gap path persists via
+                            // `mark_subscription_resync_required`
+                            // (state = "resync_required"), but the message
+                            // keeps the TYPED fence reason plus the recorded
+                            // and observed identities instead of gap text —
+                            // there is no gap; nothing was applied.
+                            if let Err(mark_err) = local
+                                .mark_subscription_terminal(
+                                    &sub_name,
+                                    "resync_required",
+                                    &e.to_string(),
+                                )
+                                .await
+                            {
+                                warn!(
+                                    subscription = %sub_name,
+                                    error = %mark_err,
+                                    "supervisor: failed to persist resync_required after identity fence trip"
+                                );
+                            }
+                            metrics::counter!("shamir_repl_resync_required_total").increment(1);
+                            warn!(
+                                subscription = %sub_name,
+                                error = %e,
+                                "identity fence tripped; subscription marked resync_required"
+                            );
+                        }
                     }
                     Err(e @ ReplError::ReopenRequired { .. }) => {
                         if let Err(error) = local

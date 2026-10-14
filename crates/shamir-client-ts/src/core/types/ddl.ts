@@ -20,7 +20,8 @@ import type { WireValue, WriteValue } from './write.js';
 
 export type WalCommit = 'buffered' | 'synced';
 export type WalRetentionExceeded = 'refuse_writes' | 'declare_gap';
-export type ReplicationServe = 'durable';
+/** `completed_reseed` (S5c-X PR8) serves `min(confirmed, W)` with epoch-bump fencing after an unclean restart (safe convergence, not lossless); `durable` stays the default. */
+export type ReplicationServe = 'durable' | 'completed_reseed';
 /**
  * Sparse durability override; accepts positive safe numbers, bigint, or canonical decimal strings. String is the explicit lossless form for values above i64::MAX.
  */

@@ -11,6 +11,7 @@ use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl::{paused_subscription, repl_scope, replication_profile};
 use shamir_query_types::admin::{ReplDirection, ReplMode};
 use shamir_query_types::wire::repl::{ReplRepoInfo, ReplResponse};
+use shamir_query_types::{DurabilityOverride, ReplicationServe};
 use tokio_util::sync::CancellationToken;
 
 use crate::replication::{
@@ -230,8 +231,19 @@ async fn paused_subscription_never_constructs_source_or_pulls() {
 async fn real_in_process_hello_advertises_schema_settled_position_and_named_publication() {
     let source = ShamirDb::init_memory().await.unwrap();
     source.create_db("app").await;
+    // The repo is in-memory (no persistent WAL), so publication-time
+    // enforcement only allows publishing it under an explicit
+    // `completed_reseed` durability override.
     source
-        .add_repo("app", RepoConfig::new("main", BoxRepoFactory::in_memory()))
+        .add_repo_as_with_durability(
+            "app",
+            RepoConfig::new("main", BoxRepoFactory::in_memory()),
+            shamir_db::access::Actor::System,
+            Some(&DurabilityOverride {
+                replication_serve: Some(ReplicationServe::CompletedReseed),
+                ..Default::default()
+            }),
+        )
         .await
         .unwrap();
     source

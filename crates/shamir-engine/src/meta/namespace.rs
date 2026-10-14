@@ -53,6 +53,14 @@ pub enum MetaKey {
 
     RepoIdentity,
 
+    /// Completed-reseed speculative-serve lifecycle certificate
+    /// ([`crate::meta::repo_identity`], versioned envelope body).
+    /// `Armed` before the first speculative replication page is served;
+    /// `Clean` only after a clean shutdown certifies journal + allocation
+    /// + data + WAL durability. An `Armed` record at open costs a
+    ///   history-epoch bump (followers re-seed).
+    LifecycleRecord,
+
     /// Durable per-(db,repo) follower replication bookmark (`u64 BE` body).
     ///
     /// The highest LEADER `commit_version` applied on this follower repo.
@@ -83,6 +91,7 @@ impl MetaKey {
             MetaKey::NextTxId => "_t.nti",
             MetaKey::Validators => "_m.val",
             MetaKey::RepoIdentity => "_t.rid",
+            MetaKey::LifecycleRecord => "_t.lcr",
             MetaKey::ReplicationBookmark => "_t.rbm",
         }
     }

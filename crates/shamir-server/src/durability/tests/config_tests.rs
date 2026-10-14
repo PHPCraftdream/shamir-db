@@ -66,39 +66,44 @@ fn custom_values_and_effective_segment_floor_use_engine_resolver() {
     assert!(zero.resolve_for_segment(1).is_err());
 }
 
+/// PR8 chunk 1 un-gated `completed_reseed`: the server `durability:` section
+/// with `replication_serve: completed_reseed` now parses, validates, and
+/// resolves to `ReplicationServe::CompletedReseed`.
 #[test]
-fn completed_reseed_fails_validation_with_exact_reason() {
+fn completed_reseed_parses_and_resolves_to_completed_reseed_policy() {
     let input = EXAMPLE.replace(
         "replication_serve: durable",
         "replication_serve: completed_reseed",
     );
     let cfg: Config = ktav::from_str(&input).unwrap();
-    match cfg.validate().unwrap_err() {
-        ConfigError::Validation(reason) => {
-            assert_eq!(
-                reason,
-                "completed_reseed is not available yet (planned: epoch bump + universal fencing)"
-            );
-        }
-        other => panic!("wrong validation error: {other}"),
-    }
+    cfg.validate().unwrap();
+    assert_eq!(
+        cfg.durability.replication_serve,
+        ReplicationServe::CompletedReseed
+    );
+    let policy = cfg.durability.resolve_policy().unwrap();
+    assert_eq!(
+        policy.replication_serve(),
+        ReplicationServe::CompletedReseed
+    );
 }
 
 #[tokio::test]
 async fn invalid_durability_is_rejected_before_boot_creates_storage() {
+    // completed_reseed is VALID since PR8 chunk 1; an invalid durability that
+    // still parses is a zero retention budget (under the 2× segment floor).
     let input = EXAMPLE.replace(
-        "replication_serve: durable",
-        "replication_serve: completed_reseed",
+        "wal_retention_max_bytes: 1073741824",
+        "wal_retention_max_bytes: 0",
     );
     let mut cfg: Config = ktav::from_str(&input).unwrap();
     let dir = tempfile::TempDir::new().unwrap();
     cfg.data_dir = dir.path().join("must_not_be_created");
     let path = cfg.data_dir.clone();
     match ServerLauncher::new(cfg).launch().await {
-        Err(BootError::Config(ConfigError::Validation(reason))) => assert_eq!(
-            reason,
-            "completed_reseed is not available yet (planned: epoch bump + universal fencing)"
-        ),
+        Err(BootError::Config(ConfigError::Validation(reason))) => {
+            assert!(reason.contains("wal_retention_max_bytes"), "{reason}");
+        }
         Err(other) => panic!("wrong boot error: {other}"),
         Ok(_) => panic!("unsupported durability started the server"),
     }

@@ -23,7 +23,7 @@ data_dir: /var/lib/shamir-db
 ## runtime checkpoints do not eliminate every crash GAP.
 ## durable pulls serve min(confirmed, W, R), R = contiguous recoverability;
 ## on-demand sync is coalesced with bounded waiting, not a timer-only stall.
-## completed_reseed is rejected (planned: epoch bump + universal fencing).
+## replication_serve: durable | completed_reseed  (default: durable; completed_reseed = safe convergence, reseed after unclean restart)
 ## In-memory/hybrid WALs do not persist; commit tier is ignored, warned once at open.
 durability: {
     wal_commit: buffered

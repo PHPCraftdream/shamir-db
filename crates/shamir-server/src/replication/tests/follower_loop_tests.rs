@@ -818,3 +818,56 @@ async fn supervisor_forwards_payload_validation_and_marks_terminal_resync() {
 async fn supervisor_marks_unknown_table_resync_and_does_not_restart() {
     assert_supervisor_rejection_marks_resync(true).await;
 }
+
+/// S5c-X 2c: a leader refusal with code `legacy_follower_refused` (the
+/// leader runs `replication_serve = completed_reseed` repos and the follower
+/// did not advertise the `identity_fence` capability) is TERMINAL: the loop
+/// maps it to the typed `ReplError::Seed(SeedRefusal::MissingIdentity)` —
+/// the supervisor's quarantine arm then marks the subscription
+/// `resync_required`. Any other error code stays transient (backoff).
+#[tokio::test(start_paused = true)]
+async fn legacy_follower_refusal_is_terminal_missing_identity() {
+    struct LegacyRefusalSource;
+
+    #[async_trait]
+    impl ReplSource for LegacyRefusalSource {
+        async fn hello(&self, _node_id: &str) -> Result<ReplResponse, ReplError> {
+            // Exercise first-Pull adoption: no successful Hello here.
+            Err(ReplError::Transport("fixture starts with Pull".into()))
+        }
+
+        async fn pull(
+            &self,
+            _db: &str,
+            _repo: &str,
+            _from_version: u64,
+            _limit: u32,
+            _wait_ms: Option<u32>,
+        ) -> Result<ReplResponse, ReplError> {
+            Ok(ReplResponse::Error {
+                leader_epoch: 1,
+                code: "legacy_follower_refused".into(),
+                message: "leader advertises completed_reseed repos".into(),
+            })
+        }
+    }
+
+    let follower = build_db("follower").await;
+    let error = run_follower_loop(
+        Arc::new(follower),
+        Arc::new(LegacyRefusalSource),
+        FollowerLoopConfig::new("follower-1", "app", "main")
+            .with_poll_wait_ms(0)
+            .with_max_iterations(5),
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("a legacy-follower refusal must terminate the loop");
+    assert!(
+        matches!(
+            error,
+            ReplError::Seed(shamir_db::SeedRefusal::MissingIdentity)
+        ),
+        "expected Seed(MissingIdentity), got {error:?}"
+    );
+}

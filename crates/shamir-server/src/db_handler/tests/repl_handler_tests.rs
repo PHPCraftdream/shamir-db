@@ -172,6 +172,7 @@ async fn deny_without_replicator_role() {
             ReplRequest::Hello {
                 proto_ver: 1,
                 node_id: "follower-1".into(),
+                capabilities: None,
             },
         )
         .await;
@@ -206,6 +207,7 @@ async fn hello_with_role_lists_accessible_repos() {
             ReplRequest::Hello {
                 proto_ver: 1,
                 node_id: "follower-1".into(),
+                capabilities: None,
             },
         )
         .await;
@@ -251,6 +253,7 @@ async fn pull_returns_events_after_writes() {
                 from_version: 0,
                 limit: 100,
                 wait_ms: None,
+                capabilities: None,
             },
         )
         .await;
@@ -298,6 +301,7 @@ async fn pull_denied_without_grant() {
                 from_version: 0,
                 limit: 100,
                 wait_ms: None,
+                capabilities: None,
             },
         )
         .await;
@@ -332,6 +336,7 @@ async fn long_poll_empty_tail_does_not_hang() {
                 from_version: u64::MAX,
                 limit: 100,
                 wait_ms: Some(200),
+                capabilities: None,
             },
         )
         .await;
@@ -387,6 +392,7 @@ async fn leader_epoch_carried_on_all_responses() {
             ReplRequest::Hello {
                 proto_ver: 1,
                 node_id: "f".into(),
+                capabilities: None,
             },
         )
         .await;
@@ -405,6 +411,7 @@ async fn leader_epoch_carried_on_all_responses() {
                 from_version: 0,
                 limit: 10,
                 wait_ms: None,
+                capabilities: None,
             },
         )
         .await;
@@ -424,6 +431,7 @@ async fn leader_epoch_carried_on_all_responses() {
                 from_version: 0,
                 limit: 10,
                 wait_ms: None,
+                capabilities: None,
             },
         )
         .await;
@@ -449,6 +457,7 @@ async fn proto_ver_upper_bound_reject_and_accept() {
             ReplRequest::Hello {
                 proto_ver: CURRENT_REPL_PROTO_VER + 1,
                 node_id: "follower-1".into(),
+                capabilities: None,
             },
         )
         .await;
@@ -474,6 +483,7 @@ async fn proto_ver_upper_bound_reject_and_accept() {
             ReplRequest::Hello {
                 proto_ver: CURRENT_REPL_PROTO_VER,
                 node_id: "follower-1".into(),
+                capabilities: None,
             },
         )
         .await;
@@ -489,11 +499,73 @@ async fn proto_ver_upper_bound_reject_and_accept() {
             ReplRequest::Hello {
                 proto_ver: 0,
                 node_id: "follower-1".into(),
+                capabilities: None,
             },
         )
         .await;
     match resp {
         ReplResponse::Hello { leader_epoch, .. } => assert_eq!(leader_epoch, 1),
         other => panic!("expected Hello, got: {other:?}"),
+    }
+}
+
+/// S5c-X 2e: a repo covered by a `resync_required` downstream subscription
+/// is refused at the serve entry with the typed code
+/// `downstream_resync_required` (fail closed), while a repo without any
+/// quarantine keeps being served.
+#[tokio::test]
+async fn pull_refused_with_downstream_resync_required() {
+    let handler = build_handler().await;
+    let db = handler.db();
+
+    // Profile (Pull over app/main) + subscription on this node's catalogue,
+    // then quarantine it exactly like the supervisor's terminal arm.
+    let mut b = Batch::new();
+    b.id(1);
+    b.op(
+        "crp",
+        shamir_query_builder::ddl::replication_profile("prof_resync").stream(
+            shamir_query_builder::ddl::repl_scope("app")
+                .repo("main")
+                .build(),
+            shamir_query_types::admin::ReplDirection::Pull,
+            shamir_query_types::admin::ReplMode::ReadOnly,
+        ),
+    );
+    b.op(
+        "cs",
+        shamir_query_builder::ddl::subscription(
+            "sub_resync",
+            "tcp://leader:9000",
+            "pub",
+            "prof_resync",
+        ),
+    );
+    db.execute("app", &b.to_request_via_msgpack())
+        .await
+        .expect("create profile+subscription");
+    db.mark_subscription_resync_required("sub_resync", 100, 42)
+        .await
+        .unwrap();
+
+    let session = alice_replicator_session();
+    let resp = handler
+        .handle_repl(
+            &session,
+            ReplRequest::Pull {
+                db: "app".into(),
+                repo: "main".into(),
+                from_version: 0,
+                limit: 10,
+                wait_ms: None,
+                capabilities: None,
+            },
+        )
+        .await;
+    match resp {
+        ReplResponse::Error { code, message, .. } => {
+            assert_eq!(code, "downstream_resync_required", "message: {message}");
+        }
+        other => panic!("expected Error(downstream_resync_required), got {other:?}"),
     }
 }

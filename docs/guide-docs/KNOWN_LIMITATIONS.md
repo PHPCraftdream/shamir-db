@@ -699,6 +699,43 @@ artifact).
   Identity lives in the actual advancing bookmark value and is preserved on
   every advance. Missing identity fails closed even on first contact; no
   production disable switch exists. Seed receipts retain stricter schema checks.
+- **Under `replication_serve: completed_reseed` the speculative tail may be
+  retracted — by design.** This mode serves `min(confirmed, W)` — the
+  completed prefix WITHOUT the R clamp — so pages may include observations
+  that a later unclean-restart recovery retracts. The guarantee is
+  "safe convergence, not lossless replication: speculative observations may
+  be retracted, and an unclean restart conservatively costs a reseed even if
+  the bytes survived." See `guide/07-operations.md` for the
+  lifecycle/epoch model (`Armed` record, clean-shutdown `Clean`
+  certificate, recovery completes privately before service is admitted).
+- **Under `completed_reseed` an unclean restart costs a reseed even when the
+  bytes survived.** On open, an `Armed` record with no later `Clean`
+  certificate durably increments `history_epoch` (checked add; a failed
+  bump/flush or overflow blocks admission) and invalidates the old
+  replication continuity while the lineage stays STABLE. The conservatism
+  is deliberate: a served speculative page that later recovery retracts
+  must never look converged to a follower.
+- **In-memory and Hybrid repositories cannot do better than
+  `completed_reseed`.** Nothing survives a restart (the identity store is
+  RAM-backed, so every reopen — clean or not — mints a new incarnation /
+  new lineage), so they may serve replication only with explicit
+  `completed_reseed`; an admin `set_durability` of `wal_commit: synced` on
+  them is IGNORED (silently downgraded to `buffered` via `for_wal_backend`,
+  with one warn line per open). Under `durable` mode shutdown writes no
+  `Clean` certificate. The only ephemeral-backend rule PR8 adds is that
+  explicit `completed_reseed` is required at publication time.
+- **Connected followers learn of a `history_epoch` bump only on their next
+  fenced pull.** The PR7 fence runs at Hello and before every Pull (before
+  any decode/apply), so until that next fenced pull a follower keeps its
+  old bookmark and its previously served speculative pages: this mode
+  advertises speculative consistency, not linearizability. A refused
+  bookmark marks the subscription `resync_required` (counter
+  `shamir_repl_resync_required_total`) and it stays quarantined until a
+  replacement seed is installed; legacy peers omitting lineage/epoch
+  identity are refused (`MissingIdentity`) and never adopted. Sources:
+  `crates/shamir-server/src/replication/identity_fence/mod.rs`,
+  `crates/shamir-engine/src/meta/repo_identity.rs`,
+  `crates/shamir-engine/src/repo/durability_policy/`.
 - **Duplicate loops and bookmark crash risk.** Two subscriptions for the
   same `(db, repo)` start two loops; bookmark advancement is not atomic.
   The bookmark is stored in `__tx__` without flush ordering against follower

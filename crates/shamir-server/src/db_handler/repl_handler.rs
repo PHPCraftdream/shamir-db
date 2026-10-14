@@ -28,8 +28,9 @@ use std::time::{Duration, Instant};
 use shamir_connect::server::session::Session;
 use shamir_db::access::{Action, ResourcePath};
 use shamir_query_types::wire::repl::{
-    ReplRepoInfo, ReplRequest, ReplResponse, CURRENT_REPL_PROTO_VER,
+    ReplRepoInfo, ReplRequest, ReplResponse, CURRENT_REPL_PROTO_VER, REPL_CAP_IDENTITY_FENCE,
 };
+use shamir_query_types::ReplicationServe;
 
 use crate::replication::in_process::MAX_PULL_EVENTS;
 use crate::replication::source::seed::advertisement::authorized_publications;
@@ -41,6 +42,20 @@ use super::handler::{session_actor, ShamirDbHandler};
 /// (new events appear within ~this interval), long enough to avoid a busy
 /// loop when the tail is empty. See §5.1.
 const POLL_STEP: Duration = Duration::from_millis(50);
+
+/// Pure decision: is the identity-capability fence REQUIRED for the repos
+/// with these serve modes? Required iff ANY repo runs
+/// `replication_serve = completed_reseed` — such a repo must never be served
+/// to a follower that has not advertised [`REPL_CAP_IDENTITY_FENCE`]
+/// (a legacy follower cannot hold a completed-reseed lineage).
+fn fence_required(mut modes: impl Iterator<Item = ReplicationServe>) -> bool {
+    modes.any(|mode| mode == ReplicationServe::CompletedReseed)
+}
+
+/// Does the request advertise the identity-fence capability?
+fn advertises_identity_fence(capabilities: Option<&[String]>) -> bool {
+    capabilities.is_some_and(|caps| caps.iter().any(|cap| cap == REPL_CAP_IDENTITY_FENCE))
+}
 
 impl ShamirDbHandler {
     /// Entry point for `DbRequest::Repl`. Enforces the capability gate, then
@@ -65,6 +80,7 @@ impl ShamirDbHandler {
             ReplRequest::Hello {
                 proto_ver,
                 node_id: _,
+                ref capabilities,
             } => {
                 // Upper-bound reject only: a follower speaking a NEWER,
                 // unrecognized protocol version is rejected; an OLDER (or
@@ -81,7 +97,7 @@ impl ShamirDbHandler {
                         ),
                     };
                 }
-                self.handle_hello(session).await
+                self.handle_hello(session, capabilities.as_deref()).await
             }
             ReplRequest::Pull {
                 db,
@@ -89,16 +105,29 @@ impl ShamirDbHandler {
                 from_version,
                 limit,
                 wait_ms,
+                ref capabilities,
             } => {
-                self.handle_pull(session, &db, &repo, from_version, limit, wait_ms)
-                    .await
+                self.handle_pull(
+                    session,
+                    &db,
+                    &repo,
+                    from_version,
+                    limit,
+                    wait_ms,
+                    capabilities.as_deref(),
+                )
+                .await
             }
         }
     }
 
     /// Gather the set of repos this leader can replicate to the caller.
     /// Repos the caller cannot read are omitted (no existence leak).
-    async fn handle_hello(&self, session: &Session) -> ReplResponse {
+    async fn handle_hello(
+        &self,
+        session: &Session,
+        capabilities: Option<&[String]>,
+    ) -> ReplResponse {
         let actor = session_actor(session);
         let publications = match authorized_publications(&self.db, &actor).await {
             Ok(publications) => publications,
@@ -110,8 +139,10 @@ impl ShamirDbHandler {
                 }
             }
         };
-        let mut repos = Vec::new();
-
+        // First pass — collect the authorized (db, repo, instance) candidates
+        // so the capability fence can be evaluated BEFORE any payload work
+        // (fail closed, before the hello is built).
+        let mut candidates = Vec::new();
         for db_name in self.db.list_dbs() {
             let Some(db_instance) = self.db.get_db(&db_name) else {
                 continue;
@@ -127,65 +158,107 @@ impl ShamirDbHandler {
                 {
                     continue;
                 }
-                let current_version = self
-                    .db
-                    .current_commit_version(&db_name, &repo_name)
-                    .await
-                    .unwrap_or(0);
                 let Some(instance) = db_instance.get_repo(&repo_name) else {
                     continue;
                 };
-                let metadata = async {
-                    let identity = instance.repo_identity().await?;
-                    let gap = instance.certified_gap_interval().await?;
-                    Ok::<_, shamir_db::DbError>((identity, gap))
-                }
-                .await;
-                let (identity, gap) = match metadata {
-                    Ok(metadata) => metadata,
-                    Err(error) => {
-                        return ReplResponse::Error {
-                            leader_epoch: self.leader_epoch,
-                            code: "replication_read_error".into(),
-                            message: error.to_string(),
-                        };
-                    }
-                };
-                let schema_digest = match live_schema(&self.db, &db_name, &repo_name).await {
-                    Ok(digest) => digest,
-                    Err(error) => {
-                        return ReplResponse::Error {
-                            leader_epoch: self.leader_epoch,
-                            code: "replication_read_error".into(),
-                            message: error.to_string(),
-                        }
-                    }
-                };
-                let settled_version = match instance.consistent_version().await {
-                    Ok(version) => version,
-                    Err(error) => {
-                        return ReplResponse::Error {
-                            leader_epoch: self.leader_epoch,
-                            code: "replication_read_error".into(),
-                            message: error.to_string(),
-                        }
-                    }
-                };
-                repos.push(ReplRepoInfo {
-                    schema_digest: Some(schema_digest),
-                    settled_version: Some(settled_version),
-                    publications: publications.clone(),
-                    db: db_name.clone(),
-                    repo: repo_name,
-                    current_version,
-                    // R0: no retention — the journal floor is 0 (G4).
-                    journal_floor: 0,
-                    repo_lineage_id: Some(identity.lineage_id),
-                    history_epoch: Some(identity.history_epoch),
-                    gap_first: gap.map(|(first, _)| first),
-                    gap_through: gap.map(|(_, through)| through),
-                });
+                candidates.push((db_name.clone(), repo_name, instance));
             }
+        }
+
+        // S5c-X 2c: a leader whose advertised repos run
+        // `replication_serve = completed_reseed` refuses legacy followers
+        // (no `identity_fence` capability) BEFORE building the payload.
+        if fence_required(
+            candidates
+                .iter()
+                .map(|(_, _, instance)| instance.durability_policy().replication_serve()),
+        ) && !advertises_identity_fence(capabilities)
+        {
+            return ReplResponse::Error {
+                leader_epoch: self.leader_epoch,
+                code: "legacy_follower_refused".into(),
+                message: format!(
+                    "leader advertises completed_reseed repos; follower must advertise the \
+                     '{REPL_CAP_IDENTITY_FENCE}' capability"
+                ),
+            };
+        }
+
+        let mut repos = Vec::new();
+        for (db_name, repo_name, instance) in &candidates {
+            // S5c-X 2e: a repo whose downstream subscription is
+            // `resync_required` is excluded from advertisement — fail closed
+            // rather than serving a lineage that is being reseeded.
+            match self
+                .db
+                .has_resync_required_subscription_covering(db_name, repo_name)
+                .await
+            {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    return ReplResponse::Error {
+                        leader_epoch: self.leader_epoch,
+                        code: "replication_read_error".into(),
+                        message: error.to_string(),
+                    };
+                }
+            }
+            let current_version = self
+                .db
+                .current_commit_version(db_name, repo_name)
+                .await
+                .unwrap_or(0);
+            let metadata = async {
+                let identity = instance.repo_identity().await?;
+                let gap = instance.certified_gap_interval().await?;
+                Ok::<_, shamir_db::DbError>((identity, gap))
+            }
+            .await;
+            let (identity, gap) = match metadata {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    return ReplResponse::Error {
+                        leader_epoch: self.leader_epoch,
+                        code: "replication_read_error".into(),
+                        message: error.to_string(),
+                    };
+                }
+            };
+            let schema_digest = match live_schema(&self.db, db_name, repo_name).await {
+                Ok(digest) => digest,
+                Err(error) => {
+                    return ReplResponse::Error {
+                        leader_epoch: self.leader_epoch,
+                        code: "replication_read_error".into(),
+                        message: error.to_string(),
+                    }
+                }
+            };
+            let settled_version = match instance.consistent_version().await {
+                Ok(version) => version,
+                Err(error) => {
+                    return ReplResponse::Error {
+                        leader_epoch: self.leader_epoch,
+                        code: "replication_read_error".into(),
+                        message: error.to_string(),
+                    }
+                }
+            };
+            repos.push(ReplRepoInfo {
+                schema_digest: Some(schema_digest),
+                settled_version: Some(settled_version),
+                publications: publications.clone(),
+                db: db_name.clone(),
+                repo: repo_name.clone(),
+                current_version,
+                // R0: no retention — the journal floor is 0 (G4).
+                journal_floor: 0,
+                repo_lineage_id: Some(identity.lineage_id),
+                history_epoch: Some(identity.history_epoch),
+                gap_first: gap.map(|(first, _)| first),
+                gap_through: gap.map(|(_, through)| through),
+            });
         }
 
         ReplResponse::Hello {
@@ -196,6 +269,7 @@ impl ShamirDbHandler {
 
     /// Pull a batch of changelog events for one repo, with optional
     /// deadline-bounded long-poll.
+    #[allow(clippy::too_many_arguments)] // the fields of one `ReplRequest::Pull`, not groupable further
     async fn handle_pull(
         &self,
         session: &Session,
@@ -204,6 +278,7 @@ impl ShamirDbHandler {
         from_version: u64,
         limit: u32,
         wait_ms: Option<u32>,
+        capabilities: Option<&[String]>,
     ) -> ReplResponse {
         let actor = session_actor(session);
 
@@ -224,6 +299,52 @@ impl ShamirDbHandler {
                 message: format!("repository '{db}/{repo}' not found"),
             };
         };
+        // Serve order (fail closed earliest-first): authorisation (denied_repo)
+        // → unknown_repo → downstream_resync_required → legacy_follower_refused
+        // → serve.
+        // S5c-X 2e: refuse to serve a repo whose downstream subscription is
+        // `resync_required` — the destination is being reseeded and must not
+        // be treated as a healthy upstream.
+        match self
+            .db
+            .has_resync_required_subscription_covering(db, repo)
+            .await
+        {
+            Ok(true) => {
+                return ReplResponse::Error {
+                    leader_epoch: self.leader_epoch,
+                    code: "downstream_resync_required".into(),
+                    message: format!(
+                        "repository '{db}/{repo}' is covered by a resync_required downstream \
+                         subscription; refusing to serve"
+                    ),
+                };
+            }
+            Ok(false) => {}
+            Err(error) => {
+                return ReplResponse::Error {
+                    leader_epoch: self.leader_epoch,
+                    code: "replication_read_error".into(),
+                    message: error.to_string(),
+                };
+            }
+        }
+        // S5c-X 2c: the target repo runs `completed_reseed` → the follower
+        // must have advertised the identity-fence capability (on this same
+        // request; the leader is stateless between requests).
+        if fence_required(std::iter::once(
+            instance.durability_policy().replication_serve(),
+        )) && !advertises_identity_fence(capabilities)
+        {
+            return ReplResponse::Error {
+                leader_epoch: self.leader_epoch,
+                code: "legacy_follower_refused".into(),
+                message: format!(
+                    "repo '{db}/{repo}' runs replication_serve = completed_reseed; follower \
+                     must advertise the '{REPL_CAP_IDENTITY_FENCE}' capability"
+                ),
+            };
+        }
         // Clamp limit to a non-zero floor so the journal read always has
         // room to return at least one event. A `limit == 0` request is
         // treated as "give me what you can" — we use 1 as the effective
@@ -340,5 +461,36 @@ impl ShamirDbHandler {
             gap_at: jr.1,
             current_version,
         }
+    }
+}
+
+#[cfg(test)]
+mod fence_required_tests {
+    use super::*;
+
+    /// No advertised repos at all → nothing to fence.
+    #[test]
+    fn empty_modes_do_not_require_fencing() {
+        assert!(!fence_required(std::iter::empty()));
+    }
+
+    /// Default durable (or push/both-mode) repos never demand the fence.
+    #[test]
+    fn durable_only_does_not_require_fencing() {
+        assert!(!fence_required(
+            [ReplicationServe::Durable, ReplicationServe::Durable,].into_iter()
+        ));
+    }
+
+    /// Any `completed_reseed` repo among the advertised set demands the
+    /// fence — fail closed even if other repos are durable.
+    #[test]
+    fn any_completed_reseed_requires_fencing() {
+        assert!(fence_required(
+            [ReplicationServe::Durable, ReplicationServe::CompletedReseed].into_iter()
+        ));
+        assert!(fence_required(std::iter::once(
+            ReplicationServe::CompletedReseed
+        )));
     }
 }

@@ -6,7 +6,7 @@
 //! override shape (`shamir_query_types::DurabilityOverride`) is already
 //! serde-friendly so the PR-later per-repo admin op can reuse it verbatim.
 
-use shamir_query_types::{DurabilityOverride, ReplicationServe};
+use shamir_query_types::DurabilityOverride;
 use shamir_storage::error::DbError;
 
 use super::durability_policy::DurabilityPolicy;
@@ -23,10 +23,11 @@ pub const MIN_RETENTION_SEGMENT_FACTOR: u64 = 2;
 /// `>= 2 × effective_segment_bytes`. `over = None` (the PR1 shape) returns
 /// the server default unchanged (subject to the same floor check).
 ///
-/// Amendment B3 (point 3): `replication_serve = completed_reseed` is
-/// REJECTED here — boot and every later path go through `resolve`, so no
-/// fast-serve mode can sneak in — with the exact message
-/// "completed_reseed is not available yet (planned: epoch bump + universal fencing)".
+/// PR8 chunk 1: `replication_serve = completed_reseed` is ACCEPTED — it
+/// resolves through a server default and through a per-repo override like
+/// any other field. `resolve` stays pure: it knows nothing about backends;
+/// backend-combination validation lives in the repo's admin path
+/// (`set_durability`).
 ///
 /// The error names the configuration key, the configured value and the
 /// computed minimum so an operator can fix the config without source
@@ -70,12 +71,6 @@ pub fn resolve(
                 serve,
             );
         }
-    }
-    if policy.replication_serve() == ReplicationServe::CompletedReseed {
-        return Err(DbError::Internal(
-            "completed_reseed is not available yet (planned: epoch bump + universal fencing)"
-                .into(),
-        ));
     }
     let minimum = effective_segment_bytes
         .saturating_mul(MIN_RETENTION_SEGMENT_FACTOR)

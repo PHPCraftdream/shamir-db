@@ -23,6 +23,7 @@ use crate::query::read::QueryResult;
 use crate::types::value::QueryValue;
 use crate::{DbResult, ShamirDb};
 use shamir_query_types::admin::ReplDirection;
+use shamir_query_types::ReplicationServe;
 use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
@@ -158,10 +159,53 @@ impl ShamirAdminExecutor {
             message: msg,
             code: None,
         };
+        let err_code = |code: &str, msg: String| BatchError::QueryError {
+            alias: String::new(),
+            message: msg,
+            code: Some(code.to_string()),
+        };
         self.authorize_repl_mutation().await?;
         let _control = self.shamir.replication_control_lock.lock().await;
 
         let name = op.create_publication.clone();
+
+        // S5c-X 2b: an ephemeral backend (no persistent WAL) may only be
+        // published downstream when the repo's durability policy sets an
+        // EXPLICIT `replication_serve = completed_reseed` — the operator has
+        // acknowledged that every data-losing reopen mints a new incarnation
+        // and downstream followers must reseed. Checked BEFORE any store
+        // write: a rejected publication leaves the catalogue untouched.
+        for scope in &op.scopes {
+            let Some(db) = self.shamir.get_db(&scope.db) else {
+                // Unknown db: nothing to check (no repos resolve).
+                continue;
+            };
+            let repos: Vec<String> = match &scope.repo {
+                Some(repo) => vec![repo.clone()],
+                None => db.list_repos(),
+            };
+            for repo_name in repos {
+                let Some(repo) = db.get_repo(&repo_name) else {
+                    continue;
+                };
+                if repo.has_persistent_wal() {
+                    continue;
+                }
+                if repo.durability_policy().replication_serve() != ReplicationServe::CompletedReseed
+                {
+                    return Err(err_code(
+                        "ephemeral_backend_requires_completed_reseed",
+                        format!(
+                            "repository '{}/{repo_name}' runs on an ephemeral backend (no \
+                             persistent WAL); publishing it requires an explicit durability \
+                             override `replication_serve: completed_reseed`",
+                            scope.db
+                        ),
+                    ));
+                }
+            }
+        }
+
         let mut m = crate::types::common::new_map();
         m.insert("name".to_string(), QueryValue::Str(name.clone()));
         m.insert("scopes".to_string(), to_qv(&op.scopes));
@@ -626,6 +670,61 @@ impl ShamirAdminExecutor {
 // `Actor::System` already used by `delete_repl`/`SystemStore::set_via_implicit_tx`
 // throughout this file), not a user-initiated admin command.
 impl ShamirDb {
+    /// Does any subscription in `state = "resync_required"` cover
+    /// `(db_name, repo_name)` with a `Pull` stream?
+    ///
+    /// Cold-ish path: reads the whole `system/subscriptions` table and
+    /// resolves each resync_required row's profile streams
+    /// (`replication_profiles` table). Called by the replication serve path
+    /// (leader hello/pull in `shamir-server`) to refuse serving a repo whose
+    /// downstream destination is quarantined for reseed (S5c-X 2e).
+    /// scope.repo `None` matches every repo in the scope's db.
+    pub async fn has_resync_required_subscription_covering(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+    ) -> DbResult<bool> {
+        let table = self.system_store().subscriptions_table().await?;
+        let interner = table.interner().get().await?;
+        let refs = crate::types::common::new_map();
+        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let result = table
+            .read(&crate::query::read::ReadQuery::new("subscriptions"), &ctx)
+            .await?;
+        let rows: Vec<QueryValue> = result
+            .records
+            .into_iter()
+            .map(|row| row.as_value().into_owned())
+            .collect();
+        for row in &rows {
+            if row.get("state").and_then(|value| value.as_str()) != Some("resync_required") {
+                continue;
+            }
+            let Some(profile) = row.get("profile").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let Ok(streams) = super::replication_seed::catalogue::streams(self, profile).await
+            else {
+                // Missing/unreadable profile: not a covering stream.
+                continue;
+            };
+            for stream in streams {
+                if !matches!(stream.direction, ReplDirection::Pull) {
+                    continue;
+                }
+                if stream.scope.db != db_name {
+                    continue;
+                }
+                match &stream.scope.repo {
+                    None => return Ok(true),
+                    Some(repo) if repo == repo_name => return Ok(true),
+                    Some(_) => {}
+                }
+            }
+        }
+        Ok(false)
+    }
+
     /// Persist `state = "resync_required"` on subscription `name`'s row in
     /// `system/subscriptions`.
     ///

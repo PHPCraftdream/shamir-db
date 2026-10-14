@@ -170,29 +170,20 @@ async fn alter_live_swaps_and_merges_open_repo_policy() {
     );
 }
 
-/// Invalid CREATE overrides (retention under 2× the segment and unsupported
-/// completed_reseed) leave no open repository behind.
+/// Invalid CREATE overrides (retention under 2× the segment) leave no open
+/// repository behind; `completed_reseed` is a VALID serve mode since PR8
+/// chunk 1 and must create cleanly instead.
 #[tokio::test]
 async fn invalid_create_overrides_leave_no_repo() {
     let db = setup_memory().await;
-    for (id, name, over) in [
-        (
-            1,
-            "too_small",
-            DurabilityOverride {
-                wal_retention_max_bytes: Some(NonZeroU64::new(1024).unwrap()),
-                ..Default::default()
-            },
-        ),
-        (
-            2,
-            "reseed",
-            DurabilityOverride {
-                replication_serve: Some(ReplicationServe::CompletedReseed),
-                ..Default::default()
-            },
-        ),
-    ] {
+    for (id, name, over) in [(
+        1,
+        "too_small",
+        DurabilityOverride {
+            wal_retention_max_bytes: Some(NonZeroU64::new(1024).unwrap()),
+            ..Default::default()
+        },
+    )] {
         let mut batch = Batch::new();
         batch.id(id);
         batch.create_repo("create", ddl::create_repo(name).durability(over));
@@ -203,6 +194,19 @@ async fn invalid_create_overrides_leave_no_repo() {
         assert_eq!(err_code(&error), Some("invalid_request"));
         assert!(!db.get_db("testdb").unwrap().has_repo(name));
     }
+    let mut batch = Batch::new();
+    batch.id(2);
+    batch.create_repo(
+        "create",
+        ddl::create_repo("reseed").durability(DurabilityOverride {
+            replication_serve: Some(ReplicationServe::CompletedReseed),
+            ..Default::default()
+        }),
+    );
+    db.execute("testdb", &batch.to_request_via_msgpack())
+        .await
+        .unwrap();
+    assert!(db.get_db("testdb").unwrap().has_repo("reseed"));
 }
 
 /// Invalid ALTER must not update either the live policy or stored override.

@@ -243,7 +243,9 @@ async fn supervisor_persists_identity_reason_despite_stale_leader_epoch() {
     let row = &entries[0];
     assert_eq!(
         row["state"].as_str(),
-        Some(SeedRefusal::WrongIdentity.code())
+        Some("resync_required"),
+        "a fenced subscription is quarantined as resync_required; the typed
+         reason stays in the status message"
     );
     assert_ne!(
         row["recorded_identity"]["lineage_id"],

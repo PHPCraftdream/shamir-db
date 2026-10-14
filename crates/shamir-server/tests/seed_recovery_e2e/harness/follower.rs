@@ -207,6 +207,7 @@ pub async fn wait_until<F, Fut>(
                     .repl(ReplRequest::Hello {
                         proto_ver: 1,
                         node_id: "seed-e2e-timeout-diagnostic".to_string(),
+                        capabilities: None,
                     })
                     .await
             ),

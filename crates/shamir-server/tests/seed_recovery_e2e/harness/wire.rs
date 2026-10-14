@@ -202,6 +202,7 @@ pub async fn gap_certificate(addr: SocketAddr) -> GapCert {
         .repl(ReplRequest::Hello {
             proto_ver: 1,
             node_id: "seed-e2e-cert".to_string(),
+            capabilities: None,
         })
         .await
         .expect("replicator hello");
@@ -230,6 +231,7 @@ pub async fn current_version(client: &Client) -> u64 {
         .repl(ReplRequest::Hello {
             proto_ver: 1,
             node_id: "seed-e2e-version".to_string(),
+            capabilities: None,
         })
         .await
         .expect("hello for current_version");

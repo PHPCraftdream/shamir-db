@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::repo::durability_policy::{resolve, DurabilityMetricsSnapshot};
-use shamir_query_types::DurabilityOverride;
+use shamir_query_types::{DurabilityOverride, ReplicationServe};
 
 impl RepoInstance {
     #[cfg(test)]
@@ -116,8 +116,17 @@ impl RepoInstance {
     /// Factory opens validate once and install before recovery/admission.
     /// Later setters use the same captured segment size as WAL rotation.
     pub fn set_durability(&self, policy: DurabilityPolicy) -> DbResult<()> {
-        let policy =
-            resolve(&policy, None, self.wal_segment_bytes)?.for_wal_backend(self.wal_dir.is_some());
+        let resolved = resolve(&policy, None, self.wal_segment_bytes)?;
+        // `completed_reseed` on an ephemeral backend (in-memory / hybrid;
+        // Mem WAL sink, `!has_persistent_wal()`) is ALLOWED: it is the only
+        // honest serve mode when nothing survives a restart. `wal_commit`
+        // tiers that need a persistent WAL (e.g. `synced`) are silently
+        // downgraded by `for_wal_backend`, with one warn line per open at
+        // WAL open. Durable serving on an ephemeral backend is NOT rejected
+        // here (durable mem repos are relied on by tests and legal at the
+        // engine layer); durable-ephemeral publication-time validation lives
+        // server-side.
+        let policy = resolved.for_wal_backend(self.wal_dir.is_some());
         self.durability.store(Arc::new(policy));
         Ok(())
     }
@@ -133,7 +142,10 @@ impl RepoInstance {
             .ok_or_else(|| DbError::Internal("wal group not initialized".to_string()))
     }
 
-    /// One replication journal page, bounded by `min(confirm_through, W, R)`.
+    /// One replication journal page. `durable` (default) bounds it by
+    /// `min(confirm_through, W, R)`; `completed_reseed` bounds it by
+    /// `min(confirm_through, W)` with NO `R` clamp (see
+    /// [`read_replication_page`]).
     ///
     /// Smallest-correct mechanism: the completion-watermark bound lives
     /// inside [`read_changelog_bounded_impl`](Self::read_changelog_bounded_impl)
@@ -149,12 +161,105 @@ impl RepoInstance {
         from_version: u64,
         limit: usize,
     ) -> DbResult<crate::repo::BoundedJournalRead> {
+        // PR8 completed_reseed chunk 2: arm the lifecycle record BEFORE any
+        // speculative page byte is built or returned. The policy is snapshotted
+        // into a local `Copy` BEFORE any await so the arc_swap Guard never
+        // crosses `.await`; the ensure_armed flush lands strictly before the
+        // first served page, so a crash after serving implies Armed on disk.
+        let mode: ReplicationServe = self.durability_policy().replication_serve();
+        if mode == ReplicationServe::CompletedReseed {
+            self.ensure_replication_armed().await?;
+        }
         crate::repo::durability_policy::read_replication_page(
             self,
             from_version,
             limit,
+            mode,
             &self.durability_metrics,
         )
         .await
+    }
+
+    /// Arm the lifecycle record for speculative serving. Atomic fast path
+    /// (cache hit), store write at most once per open (cold path): concurrent
+    /// clones that miss the cache may both write `Armed`, but the value is
+    /// identical and idempotent, so no ordering hazard exists.
+    pub(crate) async fn ensure_replication_armed(&self) -> DbResult<()> {
+        if self
+            .replication_armed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(());
+        }
+        let store = self.tx_info_store().await?;
+        crate::meta::repo_identity::ensure_armed(&store).await?;
+        self.replication_armed
+            .store(true, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
+    /// Tail of `shutdown_clean`, called (inside the shutdown timeout) after
+    /// `flush_buffers`. Settled includes aborted allocations, unlike
+    /// last_committed; after stopped admission + quiescence + drain, W must
+    /// equal H — unresolved allocation holes refuse a clean certificate.
+    /// PR8 completed_reseed chunk 2: the Clean lifecycle certificate is
+    /// written ONLY after every step it certifies has already landed
+    /// durably — journal (record_clean_horizon), allocation settle
+    /// (watermark == H), data buffers (flush_buffers) and WAL evidence —
+    /// so a surviving Clean implies all of them. Under `durable` serving
+    /// this is a no-op (no speculative period to close).
+    pub(crate) async fn finish_clean_shutdown(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> DbResult<()> {
+        let gate = self.tx_gate().await?;
+        let h = gate.version_allocation_high_water_mark();
+        if gate.completion().watermark() != h {
+            return Err(DbError::Storage(
+                "unsettled versions at clean shutdown".into(),
+            ));
+        }
+        let handle = self.changefeed().await?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(DbError::Storage(
+                "clean shutdown timed out before checkpoint".into(),
+            ));
+        }
+        handle.feed.record_clean_horizon(h).await?;
+        let mode: ReplicationServe = self.durability_policy().replication_serve();
+        if mode != ReplicationServe::CompletedReseed {
+            return Ok(());
+        }
+        let store = self.tx_info_store().await?;
+        crate::meta::repo_identity::mark_clean(&store).await
+    }
+
+    /// Open-time unclean bump (called from `tx::recovery` AFTER
+    /// `certify_cold_start`): an Armed lifecycle record with no later Clean
+    /// certificate costs a history-epoch bump — followers must re-seed. The
+    /// CURRENT serve mode is deliberately NOT consulted (review finding 2a):
+    /// the Armed obligation survives a configuration change — a repo that
+    /// served speculatively and was switched to `durable` still loses its
+    /// served tail on an unclean restart, and under durable serving an
+    /// old-epoch follower bookmark is inert, so fencing REQUIRES the bump.
+    /// The armed record is left as-is: the obligation persists until the next
+    /// clean shutdown. A failed bump/flush propagates and blocks admission
+    /// (`?` at the caller).
+    pub(crate) async fn note_unclean_open_bump(&self) -> DbResult<()> {
+        let store = self.tx_info_store().await?;
+        let record = crate::meta::repo_identity::load_state(&store).await?;
+        if !crate::meta::repo_identity::requires_unclean_bump(record) {
+            return Ok(());
+        }
+        // Negative-control seam: constant-false in production, branch elided.
+        if cfg!(test)
+            && crate::meta::repo_identity::SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(());
+        }
+        self.bump_history_epoch().await?;
+        self.durability_metrics.note_epoch_bump();
+        Ok(())
     }
 }

@@ -662,8 +662,9 @@ async fn supervisor_marks_status_with_typed_reason_and_identities() {
     let row = &entries[0];
     assert_eq!(
         row.get("state").and_then(|v| v.as_str()),
-        Some(SeedRefusal::WrongIdentity.code()),
-        "subscription must be visibly stopped with the typed fence reason"
+        Some("resync_required"),
+        "a fenced subscription is quarantined as resync_required; the typed
+         reason stays in the status message"
     );
     let message = row
         .get("status_message")

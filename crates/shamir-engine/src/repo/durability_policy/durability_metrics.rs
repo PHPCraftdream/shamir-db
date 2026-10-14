@@ -25,12 +25,17 @@ struct PendingSample {
     observed: Instant,
 }
 
+/// PR8 `completed_reseed` chunk 2: count of unclean-open history-epoch
+/// bumps (one per reopen that finds an Armed lifecycle record with no
+/// later Clean certificate while serving `CompletedReseed`).
+///
 /// One value per repository, not a process-wide last-observed sample.
 pub struct DurabilityMetrics {
     pull: ArcSwap<PullSample>,
     pending: ArcSwap<PendingSample>,
     held_ns: AtomicU64,
     held_count: AtomicU64,
+    epoch_bumps: AtomicU64,
 }
 
 /// Off-path observation. Pending count is the uncovered version span W - R,
@@ -40,7 +45,7 @@ pub struct DurabilityMetrics {
 #[derive(Default)]
 pub struct DurabilityMetricsSnapshot {
     pub gauges: [u64; 11],
-    pub counters: [u64; 7],
+    pub counters: [u64; 8],
     pub journal: [u64; 6],
 }
 
@@ -56,6 +61,7 @@ impl Default for DurabilityMetrics {
             }),
             held_ns: AtomicU64::new(0),
             held_count: AtomicU64::new(0),
+            epoch_bumps: AtomicU64::new(0),
         }
     }
 }
@@ -70,6 +76,10 @@ impl DurabilityMetrics {
             metrics: self,
             started: Instant::now(),
         }
+    }
+
+    pub(crate) fn note_epoch_bump(&self) {
+        self.epoch_bumps.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Scrape only: samples initialized WAL without creating stores or workers.
@@ -135,6 +145,7 @@ impl DurabilityMetrics {
                 duration,
                 self.held_ns.load(Ordering::Relaxed),
                 self.held_count.load(Ordering::Relaxed),
+                self.epoch_bumps.load(Ordering::Relaxed),
             ],
             journal: [0; 6],
         }

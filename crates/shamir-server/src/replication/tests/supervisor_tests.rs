@@ -739,3 +739,50 @@ async fn sub_state(follower: &ShamirDb, name: &str) -> Option<String> {
             .map(String::from)
     })
 }
+
+/// S5c-X 2e: once a subscription is quarantined `resync_required`, the
+/// destination repo it covers is excluded from DOWNSTREAM serving —
+/// `ShamirDb::has_resync_required_subscription_covering` is true for the
+/// covered (db, repo) and false for an uncovered one. A node with no
+/// subscriptions at all must NOT be refused (regression guard for the
+/// leader serve path).
+#[tokio::test]
+async fn resync_required_destination_is_excluded_from_downstream_serving() {
+    let follower = build_db().await;
+    create_profile_and_subscription(&follower).await; // profile `prof_a`, Pull over `app/main`
+
+    // Nothing quarantined yet → nothing covered (also covers the
+    // "no resync_required subscriptions → false" leader-path regression).
+    assert!(!follower
+        .has_resync_required_subscription_covering("app", "main")
+        .await
+        .unwrap());
+
+    // Quarantine exactly like the supervisor's terminal arm does.
+    follower
+        .mark_subscription_resync_required("sub_a", 100, 42)
+        .await
+        .unwrap();
+
+    assert!(
+        follower
+            .has_resync_required_subscription_covering("app", "main")
+            .await
+            .unwrap(),
+        "the covered repo must be excluded from serving"
+    );
+    assert!(
+        !follower
+            .has_resync_required_subscription_covering("app", "other")
+            .await
+            .unwrap(),
+        "an uncovered repo in the same db must stay servable"
+    );
+    assert!(
+        !follower
+            .has_resync_required_subscription_covering("otherdb", "main")
+            .await
+            .unwrap(),
+        "an uncovered db must stay servable"
+    );
+}

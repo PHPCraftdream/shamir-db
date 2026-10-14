@@ -51,7 +51,7 @@ const GAUGES: [(&str, &str); 11] = [
     ),
 ];
 
-const COUNTERS: [(&str, &str); 7] = [
+const COUNTERS: [(&str, &str); 8] = [
     (
         "shamir_wal_sync_now_calls",
         "Registered sync demands, including pending and already-covered calls",
@@ -79,6 +79,10 @@ const COUNTERS: [(&str, &str); 7] = [
     (
         "shamir_replication_pull_held_back_count",
         "Pulls held back on recoverability, including cancellation",
+    ),
+    (
+        "shamir_repo_history_epoch_bumps_total",
+        "Unclean-open history-epoch bumps under completed-reseed serving",
     ),
 ];
 
