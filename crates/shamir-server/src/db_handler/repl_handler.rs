@@ -269,6 +269,7 @@ impl ShamirDbHandler {
 
     /// Pull a batch of changelog events for one repo, with optional
     /// deadline-bounded long-poll.
+    #[allow(clippy::too_many_arguments)] // the fields of one `ReplRequest::Pull`, not groupable further
     async fn handle_pull(
         &self,
         session: &Session,
