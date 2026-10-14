@@ -80,7 +80,7 @@ fn park_store() -> Arc<ParkStore> {
 }
 
 fn journal_handle(store: &Arc<ParkStore>) -> ChangefeedHandle {
-    let journal: Arc<dyn ChangelogStore> = Arc::clone(store);
+    let journal: Arc<dyn ChangelogStore> = Arc::clone(&store) as Arc<dyn ChangelogStore>;
     ChangefeedHandle {
         feed: RepoChangefeed::new(Arc::clone(&journal)),
         store: journal,
@@ -225,12 +225,12 @@ async fn channel_full_defers_and_repairs_in_order() {
     // NO gap: channel-full defers, it does not drop.
     assert_eq!(feed.first_gap_version(), 0);
     assert_eq!(feed.repair_pending_depth(), 5);
-    assert_eq!(feed.channel_full_total(), 5);
+    assert_eq!(feed.repair_pending().channel_full_total(), 5);
 
     store.release_filler.notify_one();
     wait_persisted(&feed, BACKLOG_KEY).await;
     drain_until_empty(&repo, &feed).await;
-    assert_eq!(feed.repaired_total(), 5);
+    assert_eq!(feed.repair_pending().repaired_total(), 5);
     assert_eq!(feed.first_gap_version(), 0);
 
     wait_event_stored(&store, versions[4]).await;
@@ -424,7 +424,7 @@ async fn legacy_entry_declares_minimal_gap() {
         "legacy evidence declares a gap"
     );
     assert_eq!(feed.repair_pending_depth(), 0);
-    assert_eq!(feed.repair_mismatch_total(), 0);
+    assert_eq!(feed.repair_pending().repair_mismatch_total(), 0);
     feed.shutdown_and_wait().await.unwrap();
 }
 
@@ -461,7 +461,7 @@ async fn double_repair_produces_one_put() {
         puts_baseline + 1,
         "the second pass must not re-put the already-present event"
     );
-    assert_eq!(feed.repair_mismatch_total(), 0);
+    assert_eq!(feed.repair_pending().repair_mismatch_total(), 0);
     assert_eq!(feed.first_gap_version(), 0);
     feed.shutdown_and_wait().await.unwrap();
 }
@@ -494,7 +494,7 @@ async fn mismatching_event_is_loud_error() {
     feed.repair_pending().record_channel_full(v);
     repo.drainer().drain_all(&repo).await.unwrap();
 
-    assert_eq!(feed.repair_mismatch_total(), 1);
+    assert_eq!(feed.repair_pending().repair_mismatch_total(), 1);
     assert_eq!(feed.repair_pending_depth(), 0);
     assert_eq!(
         feed.first_gap_version(),
