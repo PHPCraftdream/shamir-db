@@ -1,0 +1,443 @@
+//! In-process tests for the receipt apply pipeline (S5c-X PR6b-2): the
+//! atomic Prepared/Materialized/checkpoint writes, the identical-allocation
+//! resume, the changed-pull-boundary convergence, fail-closed identity
+//! rejection, the Uncertain read-back reconcile, absolute counters, and the
+//! negative-control contrast with the legacy (unprotected) apply path.
+//!
+//! Deterministic: the crash points park on the `test_seam::Hook`
+//! notify/notify_waiters handshake — no sleeps anywhere.
+
+use bytes::Bytes;
+use shamir_storage::error::DbError;
+use shamir_storage::types::{RecordKey, Repo as _, Store};
+use shamir_tx::{decode_version_key, encode_version_key, ChangeOp, ChangelogEvent, RecordChange};
+use shamir_types::access::Actor;
+use shamir_types::codecs::basic::bincode as bincode_codec;
+use shamir_types::types::record_id::RecordId;
+use shamir_types::types::value::InnerValue;
+use std::path::Path;
+use std::sync::Arc;
+
+use crate::meta::repl::bookmark_v3::load_bookmark_v3;
+use crate::meta::repl::receipt::receipt_key;
+use crate::meta::repl::{decode_receipt, ReceiptPhase};
+use crate::meta::MetaKey;
+use crate::repo::{BoxRepoFactory, RepoInstance};
+use crate::table::TableConfig;
+use crate::tx::apply_replicated::follower_durability::test_seam::{self, Phase};
+use crate::tx::apply_replicated::{apply_replicated_batch, ApplyOutcome, ApplyPolicy};
+use crate::tx::ReplicatedEvent;
+
+use super::super::activation::disable_receipt_lookup;
+use super::super::stage::set_simulate_uncertain;
+
+fn event(leader_version: u64, id: u8) -> ReplicatedEvent {
+    ReplicatedEvent {
+        event: ChangelogEvent {
+            repo: "leader".into(),
+            commit_version: leader_version,
+            tx_id: leader_version,
+            actor: Actor::System,
+            timestamp_ns: 0,
+            changes: vec![RecordChange {
+                table: "items".into(),
+                key: RecordId([id; 16]).to_bytes(),
+                op: ChangeOp::Put,
+                value: Some(InnerValue::Str(format!("row-{id}")).to_bytes().unwrap()),
+            }],
+        },
+        field_bindings: Vec::new(),
+    }
+}
+
+fn delete_event(leader_version: u64, id: u8) -> ReplicatedEvent {
+    ReplicatedEvent {
+        event: ChangelogEvent {
+            repo: "leader".into(),
+            commit_version: leader_version,
+            tx_id: leader_version,
+            actor: Actor::System,
+            timestamp_ns: 0,
+            changes: vec![RecordChange {
+                table: "items".into(),
+                key: RecordId([id; 16]).to_bytes(),
+                op: ChangeOp::Delete,
+                value: None,
+            }],
+        },
+        field_bindings: Vec::new(),
+    }
+}
+
+async fn open(path: &Path, name: &str) -> RepoInstance {
+    RepoInstance::from_factory(
+        name.into(),
+        BoxRepoFactory::fjall_raw(path),
+        vec![TableConfig::new("items")],
+    )
+    .await
+    .unwrap()
+}
+
+async fn close(repo: RepoInstance) {
+    let handle = repo.changefeed().await.unwrap();
+    handle.feed.shutdown_and_wait().await.unwrap();
+    drop(handle);
+    drop(repo);
+}
+
+fn repo_name(tag: &str, path: &Path) -> String {
+    format!("{tag}-{}", path.display().to_string().replace('\\', "_"))
+}
+
+async fn journal(repo: &RepoInstance, version: u64) -> Option<Bytes> {
+    repo.follower_journal_store()
+        .await
+        .unwrap()
+        .get(RecordKey::from_slice(&version.to_be_bytes()))
+        .await
+        .ok()
+}
+
+fn count_key() -> RecordKey {
+    RecordKey::from_slice(MetaKey::Count.as_record_id().as_bytes())
+}
+
+async fn history_row(repo: &RepoInstance, key: &[u8], version: u64) -> Option<Bytes> {
+    let store = repo.repo.store_get("__history__items").await.unwrap();
+    store
+        .get(RecordKey::from_slice(&encode_version_key(key, version)))
+        .await
+        .ok()
+}
+
+/// Every local version at which `key` has a history row.
+async fn history_versions(repo: &RepoInstance, key: &[u8]) -> Vec<u64> {
+    let store = repo.repo.store_get("__history__items").await.unwrap();
+    let mut versions = Vec::new();
+    for batch in store.iter_stream(128).collect::<Vec<_>>().await {
+        for (record_key, _) in batch.unwrap() {
+            if let Some((row_key, version)) = decode_version_key(record_key.as_ref()) {
+                if row_key == key {
+                    versions.push(version);
+                }
+            }
+        }
+    }
+    versions.sort_unstable();
+    versions
+}
+
+async fn persisted_count(repo: &RepoInstance) -> u64 {
+    let store = repo.repo.store_get("__info__items").await.unwrap();
+    let bytes = store.get(count_key()).await.unwrap();
+    bincode_codec::from_bytes::<u64>(&bytes).unwrap()
+}
+
+/// `(bookmark v3, stored receipt phase)` — `None` when no receipt is stored.
+async fn outstanding_state(repo: &RepoInstance) -> (Option<[u8; 16]>, Option<ReceiptPhase>) {
+    let info = repo.tx_info_store().await.unwrap();
+    let v3 = load_bookmark_v3(&info).await.unwrap();
+    let Some(id) = v3.as_ref().and_then(|v3| v3.outstanding_receipt) else {
+        return (None, None);
+    };
+    let bytes = match info.get(receipt_key()).await {
+        Ok(bytes) => bytes,
+        Err(DbError::NotFound(_)) => return (Some(id), None),
+        Err(error) => panic!("receipt read failed: {error}"),
+    };
+    (Some(id), Some(decode_receipt(&id, &bytes).unwrap().phase))
+}
+
+/// Apply `events` and abort the task the moment the durable Prepared phase
+/// is reached (park on the seam, then drop the future at that await point).
+async fn crash_at_prepared(repo: &RepoInstance, name: &str, events: &[ReplicatedEvent]) {
+    let hook = Arc::new(test_seam::Hook::default());
+    *hook.park_at.lock().unwrap() = Some(Phase::ReceiptPrepared);
+    test_seam::install(name, Arc::clone(&hook));
+    let mut apply = Box::pin(apply_replicated_batch(
+        repo,
+        events,
+        0,
+        ApplyPolicy::Trusted,
+    ));
+    let reached = hook.reached.notified();
+    tokio::pin!(reached);
+    reached.as_mut().enable();
+    tokio::select! {
+        _ = &mut reached => {}
+        result = &mut apply => {
+            panic!("apply completed before ReceiptPrepared: {result:?}")
+        }
+    }
+    drop(apply);
+    hook.resume.notify_waiters();
+    test_seam::remove(name);
+}
+
+async fn key_bytes(id: u8) -> Vec<u8> {
+    RecordId([id; 16]).to_bytes().to_vec()
+}
+
+// One fresh batch of two events goes through the whole pipeline atomically:
+// journal rows, history rows, absolute counters, an advanced v3 bookmark
+// with no outstanding receipt, and no receipt left behind.
+#[tokio::test]
+async fn fresh_apply_writes_receipt_pipeline_atomically() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = repo_name("receipt-fresh", temp.path());
+    let repo = open(temp.path(), &name).await;
+
+    assert_eq!(
+        apply_replicated_batch(&repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted)
+            .await
+            .unwrap(),
+        ApplyOutcome::Applied { local_version: 1 }
+    );
+
+    let info = repo.tx_info_store().await.unwrap();
+    let v3 = load_bookmark_v3(&info).await.unwrap().unwrap();
+    assert_eq!(v3.outstanding_receipt, None);
+    assert_eq!(v3.bookmark, 2);
+    assert_eq!(v3.clean_through, Some(2));
+    assert!(matches!(
+        info.get(receipt_key()).await,
+        Err(DbError::NotFound(_))
+    ));
+    drop(info);
+
+    let key1 = key_bytes(1).await;
+    let key2 = key_bytes(2).await;
+    assert!(journal(&repo, 1).await.is_some());
+    assert!(journal(&repo, 2).await.is_some());
+    assert!(history_row(&repo, &key1, 1).await.is_some());
+    assert!(history_row(&repo, &key2, 2).await.is_some());
+    assert_eq!(history_versions(&repo, &key1).await, vec![1]);
+    assert_eq!(history_versions(&repo, &key2).await, vec![2]);
+    let counter = repo.get_table("items").await.unwrap().counter().clone();
+    assert_eq!(counter.get().await.unwrap(), 2);
+    assert_eq!(persisted_count(&repo).await, 2);
+
+    close(repo).await;
+}
+
+// A crash after the durable Prepared phase and before materialization
+// resumes with the IDENTICAL local allocation: the replayed batch re-owns
+// version 1 from the receipt instead of allocating a replacement. The
+// history key therefore exists at exactly one version, 1.
+#[tokio::test]
+async fn crash_prepared_resumes_with_identical_allocation() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = repo_name("receipt-resume", temp.path());
+    let repo = open(temp.path(), &name).await;
+    let key1 = key_bytes(1).await;
+
+    crash_at_prepared(&repo, &name, &[event(1, 1)]).await;
+    let (outstanding, phase) = outstanding_state(&repo).await;
+    assert!(outstanding.is_some());
+    assert_eq!(phase, Some(ReceiptPhase::Prepared));
+    assert!(history_row(&repo, &key1, 1).await.is_none());
+
+    // Same open repo: the warm resume path re-owns the receipt's version.
+    assert_eq!(
+        apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+            .await
+            .unwrap(),
+        ApplyOutcome::Applied { local_version: 1 }
+    );
+    assert_eq!(history_versions(&repo, &key1).await, vec![1]);
+    assert!(history_row(&repo, &key1, 1).await.is_some());
+    let (outstanding, phase) = outstanding_state(&repo).await;
+    assert_eq!(outstanding, None);
+    assert_eq!(phase, None);
+    let info = repo.tx_info_store().await.unwrap();
+    let v3 = load_bookmark_v3(&info).await.unwrap().unwrap();
+    assert_eq!(v3.bookmark, 1);
+    assert_eq!(v3.clean_through, Some(1));
+    drop(info);
+
+    close(repo).await;
+}
+
+// A replay with a SUPERSET of the crashed batch (changed pull boundary)
+// converges: the receipt's versions 1 and 2 are reused and the tail event is
+// allocated as 3 — no replacement allocations, no duplicates.
+#[tokio::test]
+async fn changed_pull_boundary_converges() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = repo_name("receipt-superset", temp.path());
+    let repo = open(temp.path(), &name).await;
+    let keys = [key_bytes(1).await, key_bytes(2).await, key_bytes(3).await];
+
+    crash_at_prepared(&repo, &name, &[event(1, 1), event(2, 2)]).await;
+    assert_eq!(
+        apply_replicated_batch(
+            &repo,
+            &[event(1, 1), event(2, 2), event(3, 3)],
+            0,
+            ApplyPolicy::Trusted,
+        )
+        .await
+        .unwrap(),
+        // The resume outcome reports the receipt's highest re-owned version;
+        // the tail event is allocated as 3 on top.
+        ApplyOutcome::Applied { local_version: 2 }
+    );
+    for (id, key) in keys.iter().enumerate() {
+        let expected = id as u64 + 1;
+        assert_eq!(
+            history_versions(&repo, key).await,
+            vec![expected],
+            "key {id} must exist at exactly version {expected}"
+        );
+    }
+    assert!(journal(&repo, 1).await.is_some());
+    assert!(journal(&repo, 2).await.is_some());
+    assert!(journal(&repo, 3).await.is_some());
+    let counter = repo.get_table("items").await.unwrap().counter().clone();
+    assert_eq!(counter.get().await.unwrap(), 3);
+
+    close(repo).await;
+}
+
+// A corrupted outstanding receipt is fail-closed: the resume lookup rejects
+// the decode mismatch instead of replaying or discarding the batch.
+#[tokio::test]
+async fn identity_rejection_is_fail_closed() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = repo_name("receipt-corrupt", temp.path());
+    let repo = open(temp.path(), &name).await;
+
+    crash_at_prepared(&repo, &name, &[event(1, 1)]).await;
+    let info = repo.tx_info_store().await.unwrap();
+    info.set(
+        receipt_key(),
+        Bytes::from_static(b"corrupted receipt bytes"),
+    )
+    .await
+    .unwrap();
+    drop(info);
+
+    let error = apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, DbError::Storage(_)),
+        "expected a Storage decode error, got {error:?}"
+    );
+
+    close(repo).await;
+}
+
+// With the simulated-Uncertain seam on, the Materialized commit's read-back
+// reconcile runs and still leaves exactly one set of rows: no double-write
+// and no error.
+#[tokio::test]
+async fn uncertain_materialization_reconciles_by_read_back() {
+    set_simulate_uncertain(false);
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = repo_name("receipt-uncertain", temp.path());
+    let repo = open(temp.path(), &name).await;
+    let keys = [key_bytes(1).await, key_bytes(2).await];
+
+    set_simulate_uncertain(true);
+    let outcome =
+        apply_replicated_batch(&repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted).await;
+    set_simulate_uncertain(false);
+    assert_eq!(outcome.unwrap(), ApplyOutcome::Applied { local_version: 1 });
+    assert_eq!(history_versions(&repo, &keys[0]).await, vec![1]);
+    assert_eq!(history_versions(&repo, &keys[1]).await, vec![2]);
+    let counter = repo.get_table("items").await.unwrap().counter().clone();
+    assert_eq!(counter.get().await.unwrap(), 2);
+
+    close(repo).await;
+}
+
+// A PUT followed by a DELETE of the same key lands the tombstone row
+// (empty value), keeps the absolute counter at zero, and the published
+// snapshot read returns None.
+#[tokio::test]
+async fn receipt_path_writes_absolute_counters() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = repo_name("receipt-tombstone", temp.path());
+    let repo = open(temp.path(), &name).await;
+    let key = key_bytes(7).await;
+
+    assert_eq!(
+        apply_replicated_batch(
+            &repo,
+            &[event(1, 7), delete_event(2, 7)],
+            0,
+            ApplyPolicy::Trusted,
+        )
+        .await
+        .unwrap(),
+        ApplyOutcome::Applied { local_version: 1 }
+    );
+
+    let tombstone = history_row(&repo, &key, 2).await.unwrap();
+    assert!(tombstone.is_empty(), "delete must write an empty value");
+    let counter = repo.get_table("items").await.unwrap().counter().clone();
+    assert_eq!(counter.get().await.unwrap(), 0);
+    assert_eq!(persisted_count(&repo).await, 0);
+    let table = repo.get_table("items").await.unwrap();
+    assert!(table.get_bytes(RecordId([7; 16])).await.unwrap().is_none());
+    drop(table);
+
+    close(repo).await;
+}
+
+// NEGATIVE CONTROL: with the receipt lookup seam disabled the legacy path
+// replays the crashed batch as a NEW allocation on top of the abandoned
+// receipt's reserved version — the exactly-one-version invariant of the
+// receipt path provably fails here.
+#[tokio::test]
+async fn disabled_receipt_lookup_replays_allocate_new_versions() {
+    disable_receipt_lookup(false);
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = repo_name("receipt-legacy-ctrl", temp.path());
+    let repo = open(temp.path(), &name).await;
+    let key1 = key_bytes(1).await;
+
+    crash_at_prepared(&repo, &name, &[event(1, 1)]).await;
+    disable_receipt_lookup(true);
+    let error = apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted).await;
+    disable_receipt_lookup(false);
+
+    // The legacy path allocates a REPLACEMENT version (2), writes it, and
+    // only then fails on the v3 bookmark it cannot downgrade — the replay
+    // never converges on the receipt's version 1.
+    assert!(
+        matches!(&error, Err(DbError::RepoRequiresReopen(_))),
+        "legacy replay must fail-stop on the outstanding v3 bookmark, got {error:?}"
+    );
+    assert!(history_row(&repo, &key1, 1).await.is_none());
+    assert!(
+        history_row(&repo, &key1, 2).await.is_some(),
+        "legacy replay allocated a replacement version on top of the receipt"
+    );
+    assert!(journal(&repo, 2).await.is_some());
+
+    close(repo).await;
+}
+
+// After a successful apply the counter's periodic persist cannot overwrite
+// the committed absolute value: count stays put and the info-store blob
+// equals it.
+#[tokio::test]
+async fn periodic_persist_cannot_overwrite_committed_counter() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = repo_name("receipt-counter", temp.path());
+    let repo = open(temp.path(), &name).await;
+
+    apply_replicated_batch(&repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted)
+        .await
+        .unwrap();
+    let counter = repo.get_table("items").await.unwrap().counter().clone();
+    assert_eq!(counter.get().await.unwrap(), 2);
+    counter.persist().await.unwrap();
+    assert_eq!(counter.get().await.unwrap(), 2);
+    assert_eq!(persisted_count(&repo).await, 2);
+
+    close(repo).await;
+}

@@ -151,6 +151,19 @@ impl RecordCounter {
         }
     }
 
+    /// S5c-X PR6b-2: adopt an ABSOLUTE durable count written by the follower
+    /// receipt atomic batch. Cache and `last_persisted` are set to `after`
+    /// under `persist_lock`, so the periodic `persist()` sees
+    /// cache == last_persisted and never overwrites the committed count with
+    /// a stale value.
+    pub async fn adopt_absolute(&self, after: u64) -> DbResult<()> {
+        let cache = self.ensure_cache().await?;
+        let _guard = self.persist_lock.lock().await;
+        cache.store(after, Ordering::Release);
+        self.last_persisted.store(after, Ordering::Release);
+        Ok(())
+    }
+
     /// Set the counter to an absolute value. Used by the doctor to
     /// reconcile the cached counter with a fresh count of records
     /// in the data store.

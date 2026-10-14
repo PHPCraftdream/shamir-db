@@ -292,6 +292,24 @@ store **атомарно с применением батча** (или конс
 хвоста — no-op по идемпотентности). Это slot-механика PostgreSQL, живущая
 на стороне консьюмера (Kafka-стиль).
 
+**S5c-X PR6b-2 (реализовано): receipt-protected follower apply.**
+Retry-сходимость: обычный отказ I/O ставит батч на паузу, а СЛЕДУЮЩИЙ PULL
+ПРОДОЛЖАЕТ ТОТ ЖЕ RECEIPT с идентичным локальным allocation — без лишних
+версий, без потерянных счётчиков, без новых гэпов; терминальны только
+порча/неоднозначность (reopen/quarantine). Конвейер на чанк: Prepared-receipt
++ резервирование allocation + указатель bookmark-v3; ОДИН атомарный батч
+(строки истории/таймстампы + абсолютные счётчики + downstream journal-записи
++ receipt → Materialized); read-back + checkpoint bookmark+J с уходом receipt
+в том же батче; затем publish + broadcast. Commit-путь ЛИДЕРА и non-follower
+apply не меняются; follower-apply получает одну запись receipt + один
+атомарный батч + один checkpoint-sync на батч (батчи режутся по
+`MAX_RECEIPT_EVENTS`/`MAX_RECEIPT_OPS`). Активация: WAL-less follower +
+`supports_atomic_batch` + bookmark v3 или fresh install; v1/v2 bookmark
+держат legacy-поведение до миграции PR6b-3 (оставшийся шаг); persistent
+бэкенды без capability отклоняются `AtomicBatchUnsupported`; wrapper/hybrid
+бэкенды исключены. Обычные/unique/sorted/index2 индексы по-прежнему
+отклоняются до allocation; exactly-once заявления для posting/vector нет.
+
 ### 4.3 Read-only enforcement (закрывает G5)
 
 Узел в роли `follower` отклоняет клиентские write-ops (`ReadOnlyReplica`
@@ -692,8 +710,9 @@ pre-existing GAP не очищаются. Journal и recovery floor flush'ятс
 J=H, затем J сохраняется до serving. Unclean shutdown сам по себе не требует
 reseed. PR5 (runtime orphan/channel-full gap repair) реализован; с PR6c WAL-less follower
 при холодном старте сертифицирует журнал через J из своей bookmark-записи,
-оставляя минимальный uncertain GAP только для in-flight батча (retry-safe
-receipts PR6b не реализованы). PR4 не
+оставляя минимальный uncertain GAP только для in-flight батча; с PR6b-2 этот
+in-flight батч закрывается receipt-resume с идентичным allocation (retry-safe
+receipts реализованы; миграция v1/v2 bookmark — остающийся шаг PR6b-3). PR4 не
 меняет commit hot path; benchmarks не запускались.
 
 Дисциплина PLAN.md §4 сохраняется: каждый шаг — research → implement →

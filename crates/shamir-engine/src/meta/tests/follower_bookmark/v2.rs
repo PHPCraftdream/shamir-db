@@ -1,3 +1,4 @@
+use crate::meta::repl::bookmark_v3::decode_bookmark_v3;
 use crate::meta::{MetaEnvelope, MetaKey};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -20,7 +21,21 @@ fn key() -> RecordKey {
     RecordKey::from_slice(MetaKey::ReplicationBookmark.as_record_id().as_bytes())
 }
 
+fn is_v3(bytes: &[u8]) -> bool {
+    bytes.len() >= 16 && u16::from_le_bytes([bytes[14], bytes[15]]) == 3
+}
+
 fn decode(bytes: &[u8]) -> DbResult<Version2Record> {
+    if is_v3(bytes) {
+        // PR6b-2: a v3 record (receipt protocol) decodes through the v3
+        // codec; the legacy view simply drops `outstanding_receipt`.
+        let v3 = decode_bookmark_v3(bytes)?;
+        return Ok(Version2Record {
+            fence: v3.fence,
+            bookmark: v3.bookmark,
+            clean_through: v3.clean_through,
+        });
+    }
     if bytes.len() == 22 {
         let bookmark: u64 = MetaEnvelope::open(bytes)
             .map_err(|e| DbError::Storage(format!("replication bookmark codec: {e}")))?;
@@ -124,7 +139,27 @@ async fn get_previous(info: &Arc<dyn Store>) -> DbResult<Option<Version2Record>>
     }
 }
 
+/// Legacy `save_*` writers must never downgrade a v3 record to v2 (the
+/// receipt pointer would be lost); PR6b-2 repos advance the bookmark through
+/// `bookmark_v3::save_bookmark_v3` (or an atomic batch) only.
+async fn refuse_v3(info: &Arc<dyn Store>) -> DbResult<()> {
+    let bytes = match info.get(key()).await {
+        Ok(bytes) => bytes,
+        Err(DbError::NotFound(_)) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if is_v3(&bytes) {
+        return Err(DbError::Storage(
+            "replication bookmark: a v3 record is present; legacy save_* must \
+             not downgrade it — use bookmark_v3::save_bookmark_v3 (PR6b-2)"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn save_fence_record(info: &Arc<dyn Store>, record: FenceRecord) -> DbResult<()> {
+    refuse_v3(info).await?;
     let old = get_previous(info).await?;
     if old.is_some_and(|old| old.clean_through.is_some()) {
         return save_record(
@@ -145,6 +180,7 @@ pub async fn save_fence_record(info: &Arc<dyn Store>, record: FenceRecord) -> Db
 }
 
 pub async fn save_replication_bookmark(info: &Arc<dyn Store>, bookmark: u64) -> DbResult<()> {
+    refuse_v3(info).await?;
     let mut record = load(info).await?;
     record.bookmark = bookmark;
     if let Some(mut fence) = record.fence {
@@ -173,6 +209,7 @@ pub async fn save_bookmark_and_clean_horizon(
     bookmark: u64,
     clean_horizon: u64,
 ) -> DbResult<()> {
+    refuse_v3(info).await?;
     let mut record = load(info).await?;
     record.bookmark = bookmark;
     record.clean_through = Some(

@@ -346,7 +346,7 @@ impl MvccStore {
 
     /// Phase 3: insert a (ts_millis, version) entry into the in-memory ts-index.
     /// Lock-free (TreeIndex::insert is a CAS-based B+ tree operation).
-    pub(super) fn ts_index_insert(&self, ts_millis: u64, version: u64) {
+    pub fn ts_index_insert(&self, ts_millis: u64, version: u64) {
         let _ = self
             .ts_index
             .insert_sync((Reverse(ts_millis), Reverse(version)), ());

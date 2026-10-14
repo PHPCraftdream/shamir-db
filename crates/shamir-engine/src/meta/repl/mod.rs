@@ -5,7 +5,9 @@
 pub mod bookmark;
 pub mod bookmark_v3;
 pub mod receipt;
-pub use bookmark_v3::{decode_bookmark_v3, encode_bookmark_v3, load_bookmark_v3, BookmarkV3};
+pub use bookmark_v3::{
+    decode_bookmark_v3, encode_bookmark_v3, load_bookmark_v3, save_bookmark_v3, BookmarkV3,
+};
 pub use receipt::{
     decode_receipt, encode_receipt, receipt_id, ReceiptBinding, ReceiptCounterDelta, ReceiptOp,
     ReceiptPhase, ReceiptTimestamp, ReceiptVersionMapping, ReplicationReceipt, MAX_RECEIPT_EVENTS,

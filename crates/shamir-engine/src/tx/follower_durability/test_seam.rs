@@ -12,6 +12,9 @@ pub(crate) enum Phase {
     AfterJournalFlush,
     BeforeCombinedHistoryFlush,
     BookmarkPersisted,
+    ReceiptPrepared,
+    ReceiptMaterialized,
+    ReceiptCheckpointed,
 }
 
 #[derive(Default)]
@@ -20,6 +23,7 @@ pub(crate) struct Hook {
     pub bypass_journal_barrier: AtomicBool,
     pub fail_history_flush: AtomicBool,
     pub park_at: Mutex<Option<Phase>>,
+    pub abort_at: Mutex<Option<Phase>>,
     pub reached: Notify,
     pub resume: Notify,
 }
@@ -72,6 +76,12 @@ pub(crate) async fn phase(repo_name: &str, phase: Phase) {
             resumed.as_mut().enable();
             hook.reached.notify_waiters();
             resumed.await;
+        }
+        if *hook.abort_at.lock().unwrap() == Some(phase) {
+            // The notify lets an in-process observer proceed before the
+            // abort (kill without graceful shutdown, for the crash harness).
+            hook.reached.notify_waiters();
+            std::process::abort();
         }
     }
 }
