@@ -654,7 +654,7 @@ async fn persistent_retention_gate_holds_until_checkpointed_reopens() {
         // initialises its own feed, so `install_journal_for_test` (which
         // asserts the OnceCell is unset) cannot be used post-open.
         let seam = journal_handle(&store);
-        crate::repo::tests::test_journal_seam::install("rp_persist_retention".into(), seam.clone());
+        super::test_journal_seam::install("rp_persist_retention".into(), seam.clone());
         let repo = open_disk("rp_persist_retention", &path).await.unwrap();
         let live = repo.changefeed().await.unwrap();
         // Sanity: the SEAM feed is live — if the seam had failed, cold
@@ -787,7 +787,7 @@ async fn persistent_negative_control_unclamped_truncation_yields_gap() {
     let v = {
         let store = park_store();
         let seam = journal_handle(&store);
-        crate::repo::tests::test_journal_seam::install("rp_persist_negative".into(), seam.clone());
+        super::test_journal_seam::install("rp_persist_negative".into(), seam.clone());
         let repo = open_disk("rp_persist_negative", &path).await.unwrap();
         let live = repo.changefeed().await.unwrap();
         assert!(Arc::ptr_eq(&live.feed, &seam.feed));

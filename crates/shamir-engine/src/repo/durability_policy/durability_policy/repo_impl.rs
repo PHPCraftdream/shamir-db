@@ -4,6 +4,9 @@ use super::*;
 use crate::repo::durability_policy::{resolve, DurabilityMetricsSnapshot};
 use shamir_query_types::{DurabilityOverride, ReplicationServe};
 
+#[cfg(test)]
+use crate::tx::clean_horizon::tests::test_journal_seam;
+
 impl RepoInstance {
     #[cfg(test)]
     pub(crate) async fn from_factory_with_test_segment_bytes(
@@ -14,8 +17,8 @@ impl RepoInstance {
         segment_bytes: u64,
     ) -> DbResult<Self> {
         // Test-only seam: consume a handle the test registered BEFORE this
-        // open (`repo::tests::test_journal_seam`); `name` is moved below.
-        let pending_journal = crate::repo::tests::test_journal_seam::take(&name);
+        // open (`tx::clean_horizon::tests::test_journal_seam`); `name` is moved below.
+        let pending_journal = test_journal_seam::take(&name);
         let mut instance = Self::from_factory_unrecovered(name, factory, configs).await?;
         instance.disable_background_drainer_for_test();
         instance.set_wal_segment_bytes_for_test(segment_bytes);
