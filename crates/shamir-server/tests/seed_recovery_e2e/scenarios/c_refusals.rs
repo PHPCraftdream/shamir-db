@@ -37,6 +37,7 @@ use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_types::admin::{CreatePublicationOp, ReplScope};
 use shamir_query_types::wire::repl::ReplResponse;
+use shamir_query_types::{DurabilityOverride, ReplicationServe};
 use shamir_server::replication::in_process::InProcessReplSource;
 use shamir_server::replication::source::ReplSource;
 use shamir_server::replication_seed::{self, Manifest};
@@ -110,7 +111,22 @@ async fn recreated_leader() -> ShamirDb {
     for table in wire::TABLES {
         config = config.add_table(TableConfig::new(table));
     }
-    leader.add_repo(wire::DB, config).await.expect("repo");
+    // The repo is in-memory (no persistent WAL): the explicit
+    // `completed_reseed` override is what makes publishing over it legal.
+    // The scenario's MEANING is unchanged — a recreated incarnation with a
+    // fresh lineage that fails the fence on identity.
+    leader
+        .add_repo_as_with_durability(
+            wire::DB,
+            config,
+            shamir_db::access::Actor::System,
+            Some(&DurabilityOverride {
+                replication_serve: Some(ReplicationServe::CompletedReseed),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("repo");
     let mut batch = Batch::new();
     batch.id("pub");
     batch.op(

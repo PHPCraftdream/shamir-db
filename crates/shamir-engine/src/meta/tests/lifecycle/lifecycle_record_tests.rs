@@ -3,19 +3,17 @@
 //!
 //! Record-level (non-crash) tests use `InMemoryStore` exactly like the
 //! sibling `repl_bookmark_tests`; "reopen" there is a fresh decode of the
-//! same store value. Every CRASH/reopen test below uses a DISK-backed fjall
-//! fixture and destroys the whole tokio runtime between opens (Windows fjall
-//! lock release), so a skipped `flush` really is lost — that is what makes
-//! the negative-control seams meaningful.
+//! same store value. The FLUSH-LOSS negative controls below run against a
+//! local pending/durable store fake (`FlushStore`) with REAL flush
+//! semantics: unflushed writes are invisible to `crash_image()`. The
+//! remaining CRASH/reopen tests use a DISK-backed fjall fixture and destroy
+//! the whole tokio runtime between opens (Windows fjall lock release).
 
 use crate::meta::repo_identity::RepoIdentity;
 use crate::meta::repo_identity::{
     ensure_armed, load_state, mark_clean, requires_unclean_bump, LifecycleState,
-    SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST,
-};
-#[cfg(feature = "fjall")]
-use crate::meta::repo_identity::{
     SKIP_ARMING_FLUSH_FOR_TEST, SKIP_BUMP_FLUSH_FOR_TEST, SKIP_CLEAN_FLUSH_FOR_TEST,
+    SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST,
 };
 use crate::repo::durability_policy::{
     DurabilityPolicy, ReplicationServe, RetentionOverflow, WalCommitTier,
@@ -23,14 +21,147 @@ use crate::repo::durability_policy::{
 };
 use crate::repo::{BoxRepo, RepoInstance};
 use crate::table::TableConfig;
-use shamir_storage::error::DbResult;
+use async_trait::async_trait;
+use bytes::Bytes;
+use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_in_memory::{InMemoryRepo, InMemoryStore};
-use shamir_storage::types::Store;
+use shamir_storage::types::{RecordKey, Store};
+use std::collections::BTreeMap;
+use std::pin::Pin;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 fn mem_store() -> Arc<dyn Store> {
     Arc::new(InMemoryStore::new())
+}
+
+type TestStream = Pin<Box<dyn futures::Stream<Item = DbResult<Vec<(RecordKey, Bytes)>>> + Send>>;
+
+/// Local pending/durable store fake with REAL flush semantics: `set` writes
+/// ONLY into `pending`; `flush()` copies pending into durable; `crash()`
+/// simulates process death by discarding pending; `crash_image()` returns a
+/// snapshot over ONLY the durable map (unflushed writes are lost). Models
+/// the `DiskImage`/`SnapshotStore` pair of `crash_image_tests.rs` at the
+/// record layer, without a fjall dependency.
+#[derive(Default)]
+struct FlushStore {
+    pending: Mutex<BTreeMap<RecordKey, Bytes>>,
+    durable: Mutex<BTreeMap<RecordKey, Bytes>>,
+}
+
+impl FlushStore {
+    /// Process death: the unflushed write buffer is lost.
+    fn crash(&self) {
+        *self.pending.lock().unwrap() = self.durable.lock().unwrap().clone();
+    }
+
+    /// Everything an unclean reopen would find: ONLY flushed bytes.
+    fn crash_image(&self) -> Arc<dyn Store> {
+        Arc::new(DurableSnapshot {
+            records: Mutex::new(self.durable.lock().unwrap().clone()),
+        })
+    }
+}
+
+/// Immutable snapshot of one durable state.
+struct DurableSnapshot {
+    records: Mutex<BTreeMap<RecordKey, Bytes>>,
+}
+
+#[async_trait]
+impl Store for DurableSnapshot {
+    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
+        let key = RecordKey::from_slice(&(self.records.lock().unwrap().len() as u64).to_be_bytes());
+        self.set(key.clone(), value).await?;
+        Ok(key)
+    }
+    async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
+        Ok(self.records.lock().unwrap().insert(key, value).is_none())
+    }
+    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
+        self.records
+            .lock()
+            .unwrap()
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| DbError::NotFound("fake store key".into()))
+    }
+    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
+        Ok(self.records.lock().unwrap().remove(&key).is_some())
+    }
+    fn iter_stream(&self, _batch_size: usize) -> TestStream {
+        Box::pin(futures::stream::empty())
+    }
+    fn scan_prefix_stream(&self, _prefix: Bytes, _batch_size: usize) -> TestStream {
+        Box::pin(futures::stream::empty())
+    }
+    fn iter_range_stream(
+        &self,
+        _start: Option<Bytes>,
+        _end: Option<Bytes>,
+        _batch_size: usize,
+    ) -> TestStream {
+        Box::pin(futures::stream::empty())
+    }
+    fn iter_range_stream_reverse(
+        &self,
+        _start: Option<Bytes>,
+        _end: Option<Bytes>,
+        _batch_size: usize,
+    ) -> TestStream {
+        Box::pin(futures::stream::empty())
+    }
+}
+
+#[async_trait]
+impl Store for FlushStore {
+    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
+        let key = RecordKey::from_slice(&(self.pending.lock().unwrap().len() as u64).to_be_bytes());
+        self.set(key.clone(), value).await?;
+        Ok(key)
+    }
+    async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
+        Ok(self.pending.lock().unwrap().insert(key, value).is_none())
+    }
+    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
+        self.pending
+            .lock()
+            .unwrap()
+            .get(&key)
+            .cloned()
+            .or_else(|| self.durable.lock().unwrap().get(&key).cloned())
+            .ok_or_else(|| DbError::NotFound("fake store key".into()))
+    }
+    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
+        let in_pending = self.pending.lock().unwrap().remove(&key).is_some();
+        Ok(in_pending | self.durable.lock().unwrap().remove(&key).is_some())
+    }
+    async fn flush(&self) -> DbResult<()> {
+        *self.durable.lock().unwrap() = self.pending.lock().unwrap().clone();
+        Ok(())
+    }
+    fn iter_stream(&self, _batch_size: usize) -> TestStream {
+        Box::pin(futures::stream::empty())
+    }
+    fn scan_prefix_stream(&self, _prefix: Bytes, _batch_size: usize) -> TestStream {
+        Box::pin(futures::stream::empty())
+    }
+    fn iter_range_stream(
+        &self,
+        _start: Option<Bytes>,
+        _end: Option<Bytes>,
+        _batch_size: usize,
+    ) -> TestStream {
+        Box::pin(futures::stream::empty())
+    }
+    fn iter_range_stream_reverse(
+        &self,
+        _start: Option<Bytes>,
+        _end: Option<Bytes>,
+        _batch_size: usize,
+    ) -> TestStream {
+        Box::pin(futures::stream::empty())
+    }
 }
 
 /// Repo whose effective serve mode is CompletedReseed (in-memory backend —
@@ -135,6 +266,121 @@ async fn epoch_bump_is_atomic_single_key() {
     // Reopen: the record decodes and the epoch is exactly old + 1.
     let reloaded = RepoIdentity::load_or_create(&s).await.unwrap();
     assert_eq!(reloaded.history_epoch, old + 1);
+}
+
+/// NEGATIVE CONTROL (arming flush): the protection must be load-bearing.
+/// Default path: the arming flush survives an unclean end, so the reopen
+/// reads Armed. With `SKIP_ARMING_FLUSH_FOR_TEST` set, the unflushed Armed
+/// write is lost and the reopen reads NO record at all.
+#[tokio::test]
+async fn arming_flush_is_load_bearing_negative_control() {
+    // Protection present: the arming flush survives process death.
+    let live = Arc::new(FlushStore::default());
+    let store: Arc<dyn Store> = live.clone();
+    ensure_armed(&store).await.unwrap();
+    assert_eq!(
+        load_state(&live.crash_image()).await.unwrap(),
+        Some(LifecycleState::Armed),
+        "the arming flush must survive an unclean process end"
+    );
+    // Seam set: without the flush the Armed record never reaches disk.
+    let live = Arc::new(FlushStore::default());
+    let store: Arc<dyn Store> = live.clone();
+    SKIP_ARMING_FLUSH_FOR_TEST.store(true, Ordering::Release);
+    ensure_armed(&store).await.unwrap();
+    SKIP_ARMING_FLUSH_FOR_TEST.store(false, Ordering::Release);
+    assert_eq!(
+        load_state(&live.crash_image()).await.unwrap(),
+        None,
+        "without the arming flush the Armed record must be lost"
+    );
+}
+
+/// NEGATIVE CONTROL (clean-certificate flush): with
+/// `SKIP_CLEAN_FLUSH_FOR_TEST`, `mark_clean`'s Clean write never reaches
+/// disk, so the unclean reopen still sees Armed — and pays the unclean
+/// bump. Proves the certificate flush is what closes the obligation.
+#[tokio::test]
+async fn clean_flush_is_load_bearing_negative_control() {
+    // Seam: the Clean write is never flushed, so the durable record is
+    // still Armed and the reopen must cost the unclean bump.
+    let live = Arc::new(FlushStore::default());
+    let store: Arc<dyn Store> = live.clone();
+    ensure_armed(&store).await.unwrap();
+    SKIP_CLEAN_FLUSH_FOR_TEST.store(true, Ordering::Release);
+    mark_clean(&store).await.unwrap();
+    SKIP_CLEAN_FLUSH_FOR_TEST.store(false, Ordering::Release);
+    let state = load_state(&live.crash_image()).await.unwrap();
+    assert_eq!(
+        state,
+        Some(LifecycleState::Armed),
+        "the lost Clean certificate must leave the Armed obligation on disk"
+    );
+    assert!(
+        requires_unclean_bump(state),
+        "so the reopen must cost the unclean bump"
+    );
+    // Protection present: the flushed Clean certificate closes it.
+    let live = Arc::new(FlushStore::default());
+    let store: Arc<dyn Store> = live.clone();
+    ensure_armed(&store).await.unwrap();
+    mark_clean(&store).await.unwrap();
+    let state = load_state(&live.crash_image()).await.unwrap();
+    assert_eq!(state, Some(LifecycleState::Clean));
+    assert!(!requires_unclean_bump(state));
+}
+
+/// CRASH BOUNDARY (iii): crash DURING the epoch bump, flush skipped
+/// (`SKIP_BUMP_FLUSH_FOR_TEST`). The durable record stays Armed with the
+/// OLD epoch, so each reopen re-derives the bump: old+1, then old+2 — a
+/// torn/lost bump CONVERGES instead of corrupting.
+#[tokio::test]
+async fn crash_during_bump_flush_skipped_converges() {
+    SKIP_BUMP_FLUSH_FOR_TEST.store(false, Ordering::Release);
+    let live = Arc::new(FlushStore::default());
+    let store: Arc<dyn Store> = live.clone();
+    let before = RepoIdentity {
+        lineage_id: [7; 16],
+        history_epoch: 5,
+    };
+    RepoIdentity::save_record(&store, before, None)
+        .await
+        .unwrap();
+    ensure_armed(&store).await.unwrap();
+    // Crash DURING the bump: the bumped value lands in pending only.
+    SKIP_BUMP_FLUSH_FOR_TEST.store(true, Ordering::Release);
+    RepoIdentity::bump(&store, None).await.unwrap();
+    SKIP_BUMP_FLUSH_FOR_TEST.store(false, Ordering::Release);
+    live.crash();
+    let image = live.crash_image();
+    assert_eq!(
+        RepoIdentity::load_or_create(&image).await.unwrap(),
+        before,
+        "the bumped value was lost with the unflushed write"
+    );
+    assert_eq!(
+        load_state(&image).await.unwrap(),
+        Some(LifecycleState::Armed),
+        "the bump must NOT touch the lifecycle record"
+    );
+    // Reopen: Armed on the durable image → the hook re-derives the bump,
+    // this time flushed, and Armed persists until a clean shutdown.
+    for expected_bump in [1u64, 2] {
+        RepoIdentity::bump(&store, None).await.unwrap();
+        let image = live.crash_image();
+        let identity = RepoIdentity::load_or_create(&image).await.unwrap();
+        assert_eq!(identity.lineage_id, before.lineage_id);
+        assert_eq!(
+            identity.history_epoch,
+            before.history_epoch + expected_bump,
+            "the lost bump must be re-derived on reopen"
+        );
+        assert_eq!(
+            load_state(&image).await.unwrap(),
+            Some(LifecycleState::Armed),
+            "the obligation persists until a clean shutdown"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -336,128 +582,5 @@ mod disk_crash {
                 );
             });
         }
-    }
-
-    /// CRASH BOUNDARY (iii): crash DURING the epoch bump, flush skipped
-    /// (`SKIP_BUMP_FLUSH_FOR_TEST`). The on-disk record stays Armed with the
-    /// OLD epoch, so the reopen hook re-derives the bump: epoch = old+1,
-    /// then old+2 — a torn/lost bump CONVERGES instead of corrupting.
-    #[test]
-    fn crash_during_bump_flush_skipped_converges() {
-        SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST.store(false, Ordering::Release);
-        SKIP_BUMP_FLUSH_FOR_TEST.store(false, Ordering::Release);
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().to_path_buf();
-        let before = runtime().block_on(async {
-            let repo = reseed_open(&path).await.unwrap();
-            repo.ensure_replication_armed().await.unwrap();
-            let id = repo.repo_identity().await.unwrap();
-            // Compute the bump but lose its flush.
-            SKIP_BUMP_FLUSH_FOR_TEST.store(true, Ordering::Release);
-            repo.note_unclean_open_bump().await.unwrap();
-            SKIP_BUMP_FLUSH_FOR_TEST.store(false, Ordering::Release);
-            id
-        });
-        for expected_bump in [1u64, 2] {
-            runtime().block_on(async {
-                let repo = reseed_open(&path).await.unwrap();
-                let identity = repo.repo_identity().await.unwrap();
-                assert_eq!(identity.lineage_id, before.lineage_id);
-                assert_eq!(
-                    identity.history_epoch,
-                    before.history_epoch + expected_bump,
-                    "the lost bump must be re-derived on reopen"
-                );
-                let store = repo.tx_info_store().await.unwrap();
-                assert_eq!(
-                    load_state(&store).await.unwrap(),
-                    Some(LifecycleState::Armed)
-                );
-                assert_eq!(repo.durability_metrics_snapshot().counters[7], 1);
-            });
-        }
-    }
-
-    /// NEGATIVE CONTROL (arming flush): the protection must be load-bearing.
-    /// Default path: the arming flush survives an unclean end, so the reopen
-    /// reads Armed. With `SKIP_ARMING_FLUSH_FOR_TEST` set, the unflushed
-    /// Armed write is lost and the reopen reads NO record at all.
-    #[test]
-    fn arming_flush_is_load_bearing_negative_control() {
-        SKIP_ARMING_FLUSH_FOR_TEST.store(false, Ordering::Release);
-        // Protection present: Armed survives the unclean end.
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().to_path_buf();
-        runtime().block_on(async {
-            let repo = reseed_open(&path).await.unwrap();
-            repo.ensure_replication_armed().await.unwrap();
-        });
-        runtime().block_on(async {
-            let repo = reseed_open(&path).await.unwrap();
-            let store = repo.tx_info_store().await.unwrap();
-            assert_eq!(
-                load_state(&store).await.unwrap(),
-                Some(LifecycleState::Armed),
-                "the arming flush must survive an unclean process end"
-            );
-        });
-        // Seam set: the "protection present" assertion above would FAIL —
-        // the record never reached disk.
-        SKIP_ARMING_FLUSH_FOR_TEST.store(true, Ordering::Release);
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().to_path_buf();
-        runtime().block_on(async {
-            let repo = reseed_open(&path).await.unwrap();
-            repo.ensure_replication_armed().await.unwrap();
-        });
-        runtime().block_on(async {
-            let repo = reseed_open(&path).await.unwrap();
-            let store = repo.tx_info_store().await.unwrap();
-            assert_eq!(
-                load_state(&store).await.unwrap(),
-                None,
-                "without the arming flush the Armed record must be lost"
-            );
-        });
-        SKIP_ARMING_FLUSH_FOR_TEST.store(false, Ordering::Release);
-    }
-
-    /// NEGATIVE CONTROL (clean-certificate flush): with
-    /// `SKIP_CLEAN_FLUSH_FOR_TEST`, `shutdown_clean`'s Clean write never
-    /// reaches disk, so the unclean reopen still sees Armed — and the epoch
-    /// bumps. Proves the certificate flush is what closes the obligation.
-    #[test]
-    fn clean_flush_is_load_bearing_negative_control() {
-        SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST.store(false, Ordering::Release);
-        SKIP_CLEAN_FLUSH_FOR_TEST.store(true, Ordering::Release);
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().to_path_buf();
-        let before = runtime().block_on(async {
-            let repo = reseed_open(&path).await.unwrap();
-            repo.ensure_replication_armed().await.unwrap();
-            let id = repo.repo_identity().await.unwrap();
-            repo.shutdown_clean(std::time::Duration::from_secs(5))
-                .await
-                .unwrap();
-            id
-        });
-        SKIP_CLEAN_FLUSH_FOR_TEST.store(false, Ordering::Release);
-        runtime().block_on(async {
-            let repo = reseed_open(&path).await.unwrap();
-            let identity = repo.repo_identity().await.unwrap();
-            assert_eq!(identity.lineage_id, before.lineage_id);
-            assert_eq!(
-                identity.history_epoch,
-                before.history_epoch + 1,
-                "the lost Clean certificate must cost the unclean bump"
-            );
-            let store = repo.tx_info_store().await.unwrap();
-            assert_eq!(
-                load_state(&store).await.unwrap(),
-                Some(LifecycleState::Armed),
-                "the record must NOT be Clean: its flush was skipped"
-            );
-            assert_eq!(repo.durability_metrics_snapshot().counters[7], 1);
-        });
     }
 }
