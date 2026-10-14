@@ -56,7 +56,7 @@ pub(crate) async fn durable_journal_barrier(
             .await?;
     }
     let gap = handle.feed.certified_gap_interval();
-    let can_advance_horizon = !gap.is_some_and(|(first, _)| first <= end);
+    let can_advance_horizon = gap.is_none_or(|(first, _)| first > end);
     verify_events_and_flush(store.as_ref(), events, start, end, gap).await?;
     Ok(can_advance_horizon)
 }
