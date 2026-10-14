@@ -5,8 +5,7 @@ use crate::meta::recovery_marker::save_last_committed_flushed;
 use crate::meta::repl_bookmark::save_replication_bookmark;
 use crate::repo::{BoxRepoFactory, RepoFactory, RepoInstance};
 use crate::table::TableConfig;
-use crate::tx::cold_reconcile::tests::reconcile_with_hook;
-use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::error::DbResult;
 use shamir_storage::types::{Repo as _, Store};
 use shamir_tx::changefeed::cold::{encode_event, read_event};
 use shamir_tx::changefeed::{clean_horizon_key, ChangelogEvent};
@@ -91,7 +90,8 @@ pub(super) async fn prepare_image(
 
 pub(super) async fn open_and_reconcile(path: &Path) -> DbResult<RepoInstance> {
     let repo = open_unrecovered(path).await;
-    let entries = match repo.repo_wal().await?.recover().await {
+    let wal = repo.repo_wal().await?;
+    let entries = match wal.recover().await {
         Ok(entries) => entries,
         Err(error) => {
             repo.stop_journal_writer_for_test().await?;
@@ -105,28 +105,6 @@ pub(super) async fn open_and_reconcile(path: &Path) -> DbResult<RepoInstance> {
     Ok(repo)
 }
 
-pub(super) async fn open_and_reconcile_with_hook<F>(
-    path: &Path,
-    mut hook: F,
-) -> DbResult<RepoInstance>
-where
-    F: FnMut(&'static str) -> DbResult<()> + Send,
-{
-    let repo = open_unrecovered(path).await;
-    let entries = match repo.repo_wal().await?.recover().await {
-        Ok(entries) => entries,
-        Err(error) => {
-            repo.stop_journal_writer_for_test().await?;
-            return Err(error);
-        }
-    };
-    let result = reconcile_with_hook(&repo, &entries, &mut hook).await;
-    if result.is_err() {
-        repo.stop_journal_writer_for_test().await?;
-    }
-    result.map(|()| repo)
-}
-
 pub(super) async fn raw_store(path: &Path, name: &str) -> Arc<dyn Store> {
     let raw = BoxRepoFactory::fjall_raw(path.to_path_buf())
         .create()
@@ -135,14 +113,6 @@ pub(super) async fn raw_store(path: &Path, name: &str) -> Arc<dyn Store> {
     let store = raw.store_get(name).await.expect("open raw store");
     drop(raw);
     store
-}
-
-pub(super) async fn clean_horizon(store: &dyn Store) -> u64 {
-    match store.get(clean_horizon_key().into()).await {
-        Ok(bytes) => shamir_tx::changefeed::decode_clean_horizon(&bytes).expect("decode J"),
-        Err(DbError::NotFound(_)) => 0,
-        Err(error) => panic!("read J: {error}"),
-    }
 }
 
 pub(super) async fn journal_event(store: &dyn Store, version: u64) -> Option<ChangelogEvent> {

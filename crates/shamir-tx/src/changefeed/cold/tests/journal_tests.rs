@@ -5,8 +5,8 @@ use shamir_types::access::Actor;
 use std::sync::Arc;
 
 use super::super::journal::{
-    delete_events_in_range, encode_event, events_in_range, flush_journal, put_event_if_missing,
-    read_event,
+    delete_events_in_range, encode_event, events_in_range, flush_journal, key_version,
+    put_event_if_missing, read_event,
 };
 use crate::changefeed::{
     clean_horizon_key, gap_marker_key, version_key, ChangeOp, ChangelogEvent, RecordChange,
@@ -127,4 +127,9 @@ async fn bounded_scan_rejects_malformed_nonmetadata_key() {
         .await
         .unwrap();
     assert!(events_in_range(store.as_ref(), 0, 10, 4).await.is_err());
+}
+
+#[test]
+fn gap_marker_is_excluded_by_key_classifier() {
+    assert_eq!(key_version(&gap_marker_key()).unwrap(), None);
 }

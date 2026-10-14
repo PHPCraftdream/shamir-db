@@ -9,6 +9,8 @@ use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig, RepoInstance};
 use shamir_db::engine::table::TableConfig;
 use shamir_db::engine::tx::apply_replicated::{ApplyOutcome, ApplyPolicy};
 use shamir_db::engine::tx::ReplicatedEvent;
+use shamir_db::storage::storage_fjall::FjallRepo;
+use shamir_db::storage::types::{RecordKey, Repo, Store};
 use shamir_db::types::value::QueryValue;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
@@ -20,6 +22,7 @@ use shamir_query_builder::query::Query;
 use shamir_query_builder::write::insert;
 use shamir_query_types::admin::{ReplDirection, ReplMode};
 use shamir_query_types::wire::repl::ReplResponse;
+use shamir_tx::changefeed::{encode_gap_marker, gap_marker_key};
 use tokio::runtime::{Builder, Runtime};
 use tokio_util::sync::CancellationToken;
 
@@ -178,7 +181,7 @@ fn cold_reopen_reconciles_events_for_consumer_and_supervisor() {
             .unwrap();
         assert_eq!(journal.gap_at, None);
         assert_eq!(journal.events.len(), 1);
-        assert_eq!(journal.events[0].event.commit_version, h);
+        assert_eq!(journal.events[0].commit_version, h);
         let follower = open(None).await;
         run(&follower, &leader).await.unwrap();
         assert_eq!(repo(&follower).replication_bookmark().await.unwrap(), h);
@@ -226,10 +229,18 @@ fn explicit_persisted_gap_stops_consumer_and_supervisor_but_not_beyond_h() {
 
     let rt = runtime();
     rt.block_on(async {
-        let leader = open(Some(&path)).await;
-        let feed = repo(&leader).changefeed().await.unwrap();
-        feed.feed.record_recovery_gap(1, h).await.unwrap();
-        feed.feed.shutdown_and_wait().await.unwrap();
+        let backing = FjallRepo::new(&path).expect("open stopped raw repository");
+        let store = backing.store_get("__changelog__").await.unwrap();
+        store
+            .set(
+                RecordKey::from_slice(&gap_marker_key()),
+                encode_gap_marker((1, h)),
+            )
+            .await
+            .unwrap();
+        store.flush().await.unwrap();
+        drop(store);
+        drop(backing);
     });
     drop(rt);
 

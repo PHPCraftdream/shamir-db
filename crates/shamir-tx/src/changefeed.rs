@@ -18,10 +18,8 @@
 //!    equals numeric order). The commit-path hands the event to a bounded
 //!    [`tokio::sync::mpsc`] channel via `try_send` (NEVER blocks); a
 //!    background task batches pending events and writes them durably to
-//!    the changelog store. Engine pulls use `RepoInstance::read_changelog_from`
-//!    to confirm a writer barrier and range-read only the settled version prefix.
-//!    The lower-level [`RepoChangefeed::read_from`] is unbounded and does not
-//!    itself establish that ordering guarantee.
+//!    the changelog store. Engine pulls confirm a writer barrier and range-read
+//!    only the settled version prefix.
 //!
 //! NEITHER track blocks the hot commit-path. The projection is done once
 //! and reused for both tracks; a commit with an empty footprint emits

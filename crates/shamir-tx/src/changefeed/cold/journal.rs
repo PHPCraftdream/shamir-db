@@ -35,7 +35,7 @@ fn decode_event(bytes: Bytes) -> DbResult<ChangelogEvent> {
         .map_err(|error| DbError::Storage(format!("decode changelog event: {error}")))
 }
 
-fn key_version(key: &[u8]) -> DbResult<Option<u64>> {
+pub(super) fn key_version(key: &[u8]) -> DbResult<Option<u64>> {
     if key == gap_marker_key().as_ref() || key == clean_horizon_key().as_ref() {
         return Ok(None);
     }

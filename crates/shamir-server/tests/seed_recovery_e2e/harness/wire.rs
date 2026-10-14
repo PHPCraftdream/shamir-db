@@ -31,7 +31,6 @@ pub struct GapCert {
     pub epoch: u64,
     pub gap_first: Option<u64>,
     pub gap_through: Option<u64>,
-    pub current_version: u64,
     pub schema: String,
 }
 
@@ -218,7 +217,6 @@ pub async fn gap_certificate(addr: SocketAddr) -> GapCert {
         epoch: repo.history_epoch.expect("history epoch advertised"),
         gap_first: repo.gap_first,
         gap_through: repo.gap_through,
-        current_version: repo.current_version,
         schema: repo
             .schema_digest
             .clone()

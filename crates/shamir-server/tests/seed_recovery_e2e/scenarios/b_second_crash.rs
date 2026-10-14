@@ -2,9 +2,9 @@
 //! bookmark branch:
 //!
 //! 1. converge a seeded follower (offline seed → Resume → catch up);
-//! 2. leader writes more, is SIGKILLed, reopen certifies a NEW horizon
-//!    above the follower bookmark → the follower stops with
-//!    `resync_required` again (no payload applied);
+//! 2. leader writes more, is SIGKILLed, reopen certifies the new committed
+//!    horizon above the follower bookmark; a separately merged explicit gap
+//!    then makes the follower stop with `resync_required` (no payload applied);
 //! 3. a second offline seed into ANOTHER new repository converges;
 //! 4. the opposite branch: a crash with NO new writes (new horizon ==
 //!    follower bookmark) does NOT stop the follower — it keeps pulling
@@ -46,20 +46,23 @@ async fn seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues() {
     drop(admin);
     child::kill(&mut leader).await;
     let mut leader = child::spawn_leader(&leader_dir, addr).await;
-    let current = child::connect_admin(&leader).await;
-    let gap_through = wire::current_version(&current).await;
-    drop(current);
-    assert_eq!(gap_through, 2);
-    drop(child::connect_admin(&leader).await);
+    let gap_cert = wire::gap_certificate(addr).await;
+    let admin = child::connect_admin(&leader).await;
+    let horizon = wire::current_version(&admin).await;
+    drop(admin);
+    assert_eq!(horizon, 2);
     assert_eq!(
-        wire::gap_certificate(addr).await.gap_through,
-        None,
+        gap_cert.gap_through, None,
         "surviving WAL repairs events without a blanket gap",
     );
     child::kill(&mut leader).await;
-    child::inject_recovery_gap(&leader_dir, 1, gap_through).await;
+    child::inject_recovery_gap(&leader_dir, 1, horizon).await;
     let mut leader = child::spawn_leader(&leader_dir, addr).await;
+    let cert_before_second_crash = wire::gap_certificate(addr).await;
+    assert_eq!(cert_before_second_crash.gap_first, Some(1));
+    assert_eq!(cert_before_second_crash.gap_through, Some(horizon));
     drop(child::connect_admin(&leader).await);
+    child::kill(&mut leader).await;
     let digest1 = child::cli_export(&leader.config_path, &seed1).await;
 
     // -- Seed #1 into home-1 and converge. --
@@ -79,21 +82,30 @@ async fn seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues() {
     wire::update_row(&admin, "audit", "a0", 77).await;
     child::kill(&mut leader).await;
     let mut leader = child::spawn_leader(&leader_dir, addr).await;
-    drop(child::connect_admin(&leader).await);
+    let admin = child::connect_admin(&leader).await;
     let recovered = wire::gap_certificate(addr).await;
-    assert_eq!(recovered.gap_through, None, "surviving WAL is reconciled");
-    let horizon = recovered.current_version;
-    assert!(horizon > bookmark1);
+    let recovered_horizon = wire::current_version(&admin).await;
+    drop(admin);
+    assert_eq!(recovered, cert_before_second_crash);
+    assert_eq!(recovered.gap_through, Some(horizon));
+    assert!(recovered_horizon > bookmark1);
     child::kill(&mut leader).await;
-    child::inject_recovery_gap(&leader_dir, bookmark1 + 1, horizon).await;
+    child::inject_recovery_gap(&leader_dir, bookmark1 + 1, recovered_horizon).await;
+    let horizon = recovered_horizon;
     let mut leader = child::spawn_leader(&leader_dir, addr).await;
     drop(child::connect_admin(&leader).await);
     let cert = wire::gap_certificate(addr).await;
-    assert_eq!(cert.gap_through, Some(horizon));
+    assert_eq!(cert.gap_first, Some(1));
+    assert_eq!(
+        cert.gap_through,
+        Some(horizon),
+        "the later interval extends the original certificate",
+    );
     assert!(
         horizon > bookmark1,
         "new horizon {horizon} must sit ABOVE the follower bookmark {bookmark1}",
     );
+    let cert_after_extension = cert.clone();
     let before = ops::data_fingerprint(&home1).await;
     // The old loop's wire client is bound to the dead leader incarnation
     // (lazy connect caches the session); a follower would re-enter through
@@ -154,6 +166,14 @@ async fn seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues() {
     let mut leader = child::spawn_leader(&leader_dir, addr).await;
     drop(child::connect_admin(&leader).await);
     let cert = wire::gap_certificate(addr).await;
+    assert_eq!(
+        cert.gap_first, cert_after_extension.gap_first,
+        "the extended certificate remains immutable at equal horizon",
+    );
+    assert_eq!(
+        cert.gap_through, cert_after_extension.gap_through,
+        "the extended certificate remains immutable at equal horizon",
+    );
     assert_eq!(
         cert.gap_through,
         Some(follower::bookmark(&home2).await),

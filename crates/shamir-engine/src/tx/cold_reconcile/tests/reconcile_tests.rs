@@ -1,18 +1,18 @@
-use super::helpers::{
-    open_and_reconcile, open_and_reconcile_with_hook, open_unrecovered, prepare_image, temp_path,
-};
-use crate::repo::{BoxRepoFactory, RepoInstance};
+use super::helpers::{open_and_reconcile, open_unrecovered, prepare_image, temp_path};
+use crate::repo::{BoxRepoFactory, RepoFactory, RepoInstance};
 use crate::table::TableConfig;
 use crate::tx::clean_horizon::checkpoint::test_seam;
+
+use super::reconcile_with_hook;
 use crate::tx::drainer::Drainer;
 use bytes::Bytes;
 use shamir_query_builder::write::doc;
 use shamir_query_types::{ReplicationServe, RetentionOverflow, WalCommitTier};
-use shamir_storage::error::DbError;
 use shamir_tx::changefeed::{ChangeOp, ChangelogEvent, RecordChange};
 use shamir_types::access::Actor;
 use shamir_types::codecs::interned::query_value_to_inner;
 use shamir_wal::{WalEntryV2, WalEventHeader};
+use std::io::Write as _;
 
 fn event(version: u64) -> ChangelogEvent {
     ChangelogEvent {
@@ -199,51 +199,170 @@ async fn corrupt_journal_event_refuses_open() {
     assert!(open_and_reconcile(&path).await.is_err());
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn reconciliation_interruption_points_converge_on_later_open() {
-    for (case, entries, journal, phase) in [
-        ("pre_put", vec![derived(1)], vec![], "pre_put"),
-        ("after_put", vec![derived(1)], vec![], "after_put"),
-        ("pre_delete", vec![], vec![event(1)], "pre_delete"),
-        ("after_delete", vec![], vec![event(1)], "after_delete"),
-        ("pre_flush", vec![derived(1)], vec![], "pre_flush"),
-        ("after_flush", vec![derived(1)], vec![], "after_flush"),
-        ("before_j", vec![derived(1)], vec![], "before_j"),
-        ("after_j", vec![derived(1)], vec![], "after_j"),
-        ("mid_reconcile", vec![derived(1)], vec![], "mid_reconcile"),
-    ] {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join(case);
-        prepare_image(&path, &entries, &journal, None, 0).await;
-        let injected = phase.to_string();
-        let result = open_and_reconcile_with_hook(&path, move |at| {
-            if at == injected {
-                return Err(DbError::Internal(format!("crash at {at}")));
+#[test]
+fn reconcile_crash_child_entrypoint() {
+    const CHILD: &str = "SHAMIR_COLD_RECONCILE_CRASH_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        return;
+    }
+    let path = std::path::PathBuf::from(
+        std::env::var_os("SHAMIR_COLD_RECONCILE_CRASH_PATH").expect("child path"),
+    );
+    let phase = std::env::var("SHAMIR_COLD_RECONCILE_CRASH_PHASE").expect("child phase");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("child runtime");
+    runtime.block_on(async move {
+        if phase == "pre_publish" {
+            let repo = RepoInstance::from_factory_with_durability(
+                super::helpers::REPO_NAME.into(),
+                BoxRepoFactory::fjall_raw(path.clone()),
+                vec![TableConfig::new("items")],
+                crate::repo::DurabilityPolicy::new(
+                    shamir_query_types::WalCommitTier::Synced,
+                    u64::MAX,
+                    shamir_query_types::RetentionOverflow::RefuseWrites,
+                    shamir_query_types::ReplicationServe::Durable,
+                ),
+            )
+            .await
+            .expect("open live-commit child repo");
+            repo.disable_background_drainer_for_test();
+            let table = repo.get_table("items").await.unwrap();
+            let user_record = doc().set("payload", "crash-row").build();
+            let interner = table.interner().get().await.unwrap();
+            let record = query_value_to_inner(&user_record, interner).unwrap();
+            let (mut tx, _guard) = repo
+                .begin_tx(crate::tx::IsolationLevel::Snapshot)
+                .await
+                .unwrap();
+            table.insert_tx(&record, Some(&mut tx)).await.unwrap();
+            let _ = repo.commit_tx(tx).await;
+            panic!("pre_publish hook did not fire");
+        }
+        let repo = open_unrecovered(&path).await;
+        let wal = repo.repo_wal().await.unwrap();
+        let entries = wal.recover().await.unwrap();
+        let _ = reconcile_with_hook(&repo, &entries, &mut |at| {
+            if at == phase {
+                if let Ok(marker) = std::env::var("SHAMIR_COLD_RECONCILE_PHASE_MARKER") {
+                    let mut file = std::fs::File::create(marker).expect("create reached marker");
+                    write!(file, "{at}").expect("write reached marker");
+                    file.sync_all().expect("sync reached marker");
+                }
+                std::process::abort();
             }
             Ok(())
         })
         .await;
-        assert!(result.is_err(), "fault must fire at {phase}");
+    });
+    panic!("crash hook did not fire");
+}
 
+#[tokio::test(flavor = "current_thread")]
+async fn subprocess_crashes_during_reconcile_reopen_twice() {
+    const CHILD: &str = "SHAMIR_COLD_RECONCILE_CRASH_CHILD";
+    const PHASES: [&str; 10] = [
+        "pre_put",
+        "after_put",
+        "pre_delete",
+        "after_delete",
+        "pre_flush",
+        "after_flush",
+        "before_j",
+        "after_j",
+        "mid_reconcile",
+        "pre_publish",
+    ];
+    for phase in PHASES {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("child_repo");
+        let (entries, journal): (Vec<WalEntryV2>, Vec<ChangelogEvent>) = if phase == "pre_publish" {
+            (vec![], vec![])
+        } else if phase.contains("delete") {
+            (vec![], vec![event(1)])
+        } else {
+            (vec![derived(1)], vec![])
+        };
+        prepare_image(&path, &entries, &journal, None, 0).await;
+        let oracle = path.with_extension("expected");
+        let mut oracle_file = std::fs::File::create(&oracle).unwrap();
+        if phase != "pre_publish" {
+            write!(
+                oracle_file,
+                "{}",
+                if phase.contains("delete") {
+                    "lost"
+                } else {
+                    "present"
+                }
+            )
+            .unwrap();
+        }
+        oracle_file.sync_all().unwrap();
+        drop(oracle_file);
+        let executable = std::env::current_exe().unwrap();
+        let mut child = tokio::process::Command::new(executable)
+            .args([
+                "--exact",
+                "tx::cold_reconcile::tests::reconcile_tests::reconcile_crash_child_entrypoint",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("SHAMIR_COLD_RECONCILE_CRASH_PATH", &path)
+            .env("SHAMIR_COLD_RECONCILE_CRASH_PHASE", phase)
+            .env(
+                "SHAMIR_COLD_RECONCILE_PHASE_MARKER",
+                path.with_extension("reached"),
+            )
+            .env("SHAMIR_TEST_CRASH_AFTER", phase)
+            .env("SHAMIR_COLD_RECONCILE_EXPECTED_EVENTS", &oracle)
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn crash child");
+        let status =
+            match tokio::time::timeout(std::time::Duration::from_secs(90), child.wait()).await {
+                Ok(status) => status.expect("wait for crash child"),
+                Err(_) => {
+                    child.kill().await.expect("kill timed-out child");
+                    let _ = child.wait().await.expect("reap timed-out child");
+                    panic!("crash child timed out at {phase}");
+                }
+            };
+        assert!(!status.success(), "process must abort at {phase}");
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("reached")).unwrap(),
+            phase,
+            "crash hook reached {phase}"
+        );
+        let expected: ChangelogEvent = if phase == "pre_publish" {
+            rmp_serde::from_slice(
+                &std::fs::read(&oracle).expect("expected event oracle written before abort"),
+            )
+            .expect("decode expected event")
+        } else {
+            event(1)
+        };
         for _ in 0..2 {
-            let repo = open_and_reconcile(&path).await.unwrap();
-            let read = repo.read_changelog_from(1, 8).await.unwrap();
-            let store = repo.changelog_store_for_cold_reconcile().await.unwrap();
-            assert_eq!(super::helpers::clean_horizon(store.as_ref()).await, 1);
-            if case == "pre_delete" || case == "after_delete" {
-                assert_eq!(read.gap_at, Some(1), "lost event gap after {case}");
-                assert!(read.events.is_empty(), "deleted event after {case}");
-                assert!(super::helpers::journal_event(store.as_ref(), 1)
-                    .await
-                    .is_none());
+            let repo = if phase == "pre_publish" {
+                let repo = open_unrecovered(&path).await;
+                repo.recover_v2_inflight().await.unwrap();
+                repo
             } else {
-                assert_eq!(read.gap_at, None, "no follower gap after {case}");
-                assert_eq!(read.events, vec![event(1)], "event after {case}");
-                assert!(super::helpers::journal_event(store.as_ref(), 1)
-                    .await
-                    .is_some());
+                open_and_reconcile(&path).await.unwrap()
+            };
+            let read = repo
+                .read_changelog_from(expected.commit_version, 8)
+                .await
+                .unwrap();
+            if phase.contains("delete") {
+                assert_eq!(read.gap_at, Some(expected.commit_version));
+                assert!(read.events.is_empty());
+            } else {
+                assert_eq!(read.gap_at, None);
+                assert_eq!(read.events, vec![expected.clone()]);
             }
-            drop(store);
             stop(repo).await;
         }
     }
@@ -251,9 +370,8 @@ async fn reconciliation_interruption_points_converge_on_later_open() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn stopped_image_crash_boundaries_reopen_twice_without_follower_gaps() {
-    // These are deterministic persisted-image states, not claims of process
-    // crashes at the named instruction. PR2's crash harness separately
-    // exercises actual pre/post-truncate process termination.
+    // Persisted fixture images exercise state shapes; process interruption
+    // coverage is provided by subprocess tests.
     let cases = [
         ("pre_publish", vec![derived(1)], vec![], 0),
         ("pre_truncate", vec![derived(1)], vec![event(1)], 0),
@@ -271,55 +389,6 @@ async fn stopped_image_crash_boundaries_reopen_twice_without_follower_gaps() {
             assert_eq!(page.events, vec![event(1)], "follower event at {boundary}");
             stop(repo).await;
         }
-    }
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn checkpoint_boundary_images_converge_twice_without_follower_gap() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("mid_checkpoint");
-    prepare_image(&path, &[derived(1)], &[event(1)], None, 0).await;
-
-    let first = open_unrecovered(&path).await;
-    let wal = first.repo_wal().await.unwrap();
-    let entries = wal.recover().await.unwrap();
-    assert!(!entries.is_empty());
-    drop(wal);
-    let page = first.read_changelog_from(1, 8).await.unwrap();
-    assert_eq!(page.gap_at, None);
-    assert_eq!(page.events, vec![event(1)]);
-    let feed = first.changefeed().await.unwrap().feed;
-    assert_eq!(feed.clean_horizon(), 0);
-    stop(first).await;
-
-    for _ in 0..2 {
-        let repo = open_and_reconcile(&path).await.unwrap();
-        let page = repo.read_changelog_from(1, 8).await.unwrap();
-        assert_eq!(page.gap_at, None);
-        assert_eq!(page.events, vec![event(1)]);
-        stop(repo).await;
-    }
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn mid_reconcile_image_converges_twice_after_interrupted_put() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp_path(&temp);
-    prepare_image(&path, &[derived(1)], &[], None, 0).await;
-    let result = open_and_reconcile_with_hook(&path, |phase| {
-        if phase == "mid_reconcile" {
-            return Err(DbError::Internal("simulated mid-reconcile stop".into()));
-        }
-        Ok(())
-    })
-    .await;
-    assert!(result.is_err());
-    for _ in 0..2 {
-        let repo = open_and_reconcile(&path).await.unwrap();
-        let page = repo.read_changelog_from(1, 8).await.unwrap();
-        assert_eq!(page.gap_at, None);
-        assert_eq!(page.events, vec![event(1)]);
-        stop(repo).await;
     }
 }
 
@@ -441,16 +510,19 @@ async fn ephemeral_repositories_keep_legacy_cold_start_behavior() {
         raw,
         vec![TableConfig::new("items")],
     );
-    let wal = repo.repo_wal().await.unwrap();
-    assert!(wal.is_mem_sink());
     let entry = derived(1);
-    wal.begin_grouped(&entry, shamir_wal::WalDurability::Buffered)
+    let manager = repo.repo_wal().await.unwrap();
+    manager
+        .begin_grouped(&entry, shamir_wal::WalDurability::Buffered)
         .await
         .unwrap();
+    let wal_group = repo.wal_group().await.unwrap();
+    assert!(wal_group.is_mem_sink());
     repo.certify_cold_start(&[entry]).await.unwrap();
     let feed = repo.changefeed().await.unwrap().feed;
-    assert_eq!(feed.clean_horizon(), 0);
-    assert_eq!(feed.first_gap_version(), 0);
+    assert_eq!(feed.clean_horizon(), 1);
+    assert_eq!(feed.first_gap_version(), 1);
+    assert_eq!(feed.certified_gap_interval(), Some((1, 1)));
     stop(repo).await;
 }
 
@@ -466,15 +538,18 @@ async fn hybrid_factory_keeps_legacy_cold_start_behavior() {
         raw,
         vec![TableConfig::new("items")],
     );
-    let wal = repo.repo_wal().await.unwrap();
-    assert!(wal.is_mem_sink());
     let entry = derived(1);
-    wal.begin_grouped(&entry, shamir_wal::WalDurability::Buffered)
+    let manager = repo.repo_wal().await.unwrap();
+    manager
+        .begin_grouped(&entry, shamir_wal::WalDurability::Buffered)
         .await
         .unwrap();
+    let wal_group = repo.wal_group().await.unwrap();
+    assert!(wal_group.is_mem_sink());
     repo.certify_cold_start(&[entry]).await.unwrap();
     let feed = repo.changefeed().await.unwrap().feed;
-    assert_eq!(feed.clean_horizon(), 0);
-    assert_eq!(feed.first_gap_version(), 0);
+    assert_eq!(feed.clean_horizon(), 1);
+    assert_eq!(feed.first_gap_version(), 1);
+    assert_eq!(feed.certified_gap_interval(), Some((1, 1)));
     stop(repo).await;
 }

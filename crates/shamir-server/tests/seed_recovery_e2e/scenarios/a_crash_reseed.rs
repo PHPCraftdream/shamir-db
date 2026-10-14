@@ -62,7 +62,9 @@ async fn seed_e2e_a_kill_resync_offline_seed_resume_converges() {
     );
 
     // Retain the historical reseed proof with an explicit residual certificate.
-    let gap_through = cert.current_version;
+    let admin = child::connect_admin(&leader).await;
+    let gap_through = wire::current_version(&admin).await;
+    drop(admin);
     assert!(
         gap_through >= 1,
         "surviving WAL must include the committed writes",
@@ -72,6 +74,7 @@ async fn seed_e2e_a_kill_resync_offline_seed_resume_converges() {
     let mut leader = child::spawn_leader(&leader_dir, addr).await;
     let admin = child::connect_admin(&leader).await;
     let cert = wire::gap_certificate(addr).await;
+    assert_eq!(cert.gap_first, Some(1));
     assert_eq!(cert.gap_through, Some(gap_through));
 
     // -- Fresh bookmark-0 follower: resync_required, no payload applied. --
@@ -219,7 +222,10 @@ async fn seed_e2e_a_kill_resync_offline_seed_resume_converges() {
 
     // -- The SOURCE gap certificate is unchanged by the whole procedure. --
     let cert_after = wire::gap_certificate(addr).await;
-    assert_eq!(cert, cert_after, "source certificate must be immutable");
+    assert_eq!(
+        cert, cert_after,
+        "the source certificate remains unchanged after reseed and later writes",
+    );
 
     child::kill(&mut leader).await;
 }
