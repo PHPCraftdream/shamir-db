@@ -21,7 +21,7 @@ use crate::tx::tests::post_wal_orphan_ordering_tests::fixture;
 use crate::tx::{MaterializationState, TxOutcome};
 
 // Observe the actual driver poll after its own version settles, not scheduling.
-pub(super) async fn spawn_settled_commit(
+pub(crate) async fn spawn_settled_commit(
     repo: &RepoInstance,
     tx: TxContext,
 ) -> (u64, JoinHandle<Result<TxOutcome, TxError>>) {

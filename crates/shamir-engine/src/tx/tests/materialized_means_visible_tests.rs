@@ -129,6 +129,7 @@ async fn failed_projection_waits_for_replay(visibility: CommitVisibility, index_
         ));
         assert_eq!(table.get(id).await.unwrap(), value);
     }
+    let replayed_entry = repo.drainer().window_entry(version).unwrap();
     assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
     let outcome = task.await.unwrap().unwrap();
     assert_eq!(outcome.commit_version, version);
@@ -159,8 +160,20 @@ async fn failed_projection_waits_for_replay(visibility: CommitVisibility, index_
         Err(DbError::NotFound(_))
     ));
     assert!(matches!(live.try_recv(), Err(TryRecvError::Empty)));
-    // Orphan replay owns journal loss reporting, not a fabricated visible event.
-    assert_eq!(feed.feed.first_gap_version(), version);
+    // A derived WAL event repairs the orphan while preserving visibility guarantees.
+    let (events, gap) = repo
+        .read_changelog_for_replication(version, 1)
+        .await
+        .unwrap();
+    assert_eq!(gap, None);
+    assert_eq!(events.len(), 1);
+    let entry = repo.drainer().window_entry(version);
+    assert!(entry.is_none());
+    assert_eq!(events[0].event.commit_version, version);
+    assert_eq!(
+        events[0].event,
+        shamir_tx::event_from_wal_entry(&replayed_entry).unwrap()
+    );
     drop((writer_snapshot, old_guard, new_guard));
 }
 

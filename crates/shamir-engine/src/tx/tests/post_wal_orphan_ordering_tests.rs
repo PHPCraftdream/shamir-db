@@ -41,7 +41,7 @@ pub(crate) async fn fixture(name: &str) -> (RepoInstance, Arc<PostWalPrePublishH
     (repo, hook)
 }
 
-pub(super) async fn panic_post_wal(
+pub(crate) async fn panic_post_wal(
     repo: &RepoInstance,
     hook: &PostWalPrePublishHook,
     tx: TxContext,

@@ -96,6 +96,8 @@ use shamir_wal::{WalEntryV2, WalOpV2, WalTicketState};
 use tokio::sync::{Mutex, Notify};
 
 use crate::repo::RepoInstance;
+#[path = "orphan_repair/mod.rs"]
+mod orphan_repair;
 #[cfg(test)]
 use crate::tx::clean_horizon::checkpoint::test_seam;
 use crate::tx::materialize::interner_delta_safe_to_truncate;
@@ -134,6 +136,7 @@ pub struct Drainer {
     orphan_replay_failures_total: AtomicU64,
     orphan_replay_consecutive_failures: AtomicU64,
     orphan_replay_last_error: ArcSwapOption<String>,
+    orphan_repair_metrics: orphan_repair::Metrics,
     /// Per-repo ordered window of inflight WAL entries already offered by
     /// the commit path. Replaces wal.recover() on the drain hot path —
     /// see Op #2 design.
@@ -229,6 +232,7 @@ impl Drainer {
             orphan_replay_failures_total: AtomicU64::new(0),
             orphan_replay_consecutive_failures: AtomicU64::new(0),
             orphan_replay_last_error: ArcSwapOption::empty(),
+            orphan_repair_metrics: orphan_repair::Metrics::default(),
             window: TreeIndex::new(),
             window_high_watermark: AtomicUsize::new(DEFAULT_WINDOW_HIGH_WATERMARK),
             offer_dropped_total: AtomicU64::new(0),
@@ -361,27 +365,12 @@ impl Drainer {
             .orphan_replay_last_error
             .load_full()
             .map(|error| (*error).clone());
+        let (repaired, gaps) = self.orphan_repair_metrics.snapshot();
+        log::debug!("orphan journal repair totals: repaired={repaired}, gaps={gaps}");
     }
 
-    // Called only under the existing serialized replay guard. Count at most
-    // one failure per attempted orphan, not each failing operation/table.
     fn record_orphan_failure(&self, failed: &mut bool, error: impl std::fmt::Display) {
-        if *failed {
-            return;
-        }
-        *failed = true;
-        let mut error = error.to_string();
-        let mut end = error.len().min(1024);
-        while !error.is_char_boundary(end) {
-            end -= 1;
-        }
-        error.truncate(end);
-        error.shrink_to_fit();
-        self.orphan_replay_last_error.store(Some(Arc::new(error)));
-        self.orphan_replay_failures_total
-            .fetch_add(1, Ordering::Relaxed);
-        self.orphan_replay_consecutive_failures
-            .fetch_add(1, Ordering::Relaxed);
+        orphan_repair::record_orphan_failure(self, failed, error);
     }
 
     #[cfg(test)]
@@ -670,18 +659,16 @@ impl Drainer {
             self.seed_from_recover(recovered);
             // Retry the window scan once.
             window_entries.clear();
-            let guard2 = scc::Guard::new();
-            for (expected2, (k, v)) in (dur + 1..).zip(self.window.range(dur + 1..=vis, &guard2)) {
-                if *k != expected2 {
-                    break; // still a genuine gap after the one reseed
-                }
-                if gate.is_active_post_wal(*k) || (*k > visible && !gate.is_orphaned_post_wal(*k)) {
-                    break; // in-flight entry: stop, never reseed again
-                }
-                window_entries.push(Arc::clone(v));
-                if gate.is_orphaned_post_wal(*k) {
-                    break;
-                }
+            orphan_repair::rescan_window_prefix(
+                self,
+                &gate,
+                dur,
+                vis,
+                visible,
+                &mut window_entries,
+            );
+            if window_entries.is_empty() {
+                orphan_repair::settle_missing_evidence(self, repo, &gate).await?;
             }
         }
 
@@ -1358,9 +1345,9 @@ impl Drainer {
                         }
                     }
                 }
-                repo.mark_changefeed_gap(*v).await.inspect_err(|error| {
-                    self.record_orphan_failure(&mut orphan_failed, error);
-                })?;
+                if !orphan_repair::settle_event(self, repo, entry, &mut orphan_failed).await? {
+                    break 'finalize;
+                }
                 gate.complete_orphaned_post_wal(*v);
                 self.orphan_replay_consecutive_failures
                     .store(0, Ordering::Relaxed);
