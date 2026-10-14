@@ -20,7 +20,7 @@ use crate::harness::follower;
 use crate::harness::ops;
 use crate::harness::wire;
 
-const WAIT: Duration = Duration::from_secs(90);
+const WAIT: Duration = Duration::from_secs(30);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn seed_e2e_d_reopen_at_install_resume_and_first_batch_boundaries() {
@@ -93,7 +93,7 @@ async fn seed_e2e_d_reopen_at_install_resume_and_first_batch_boundaries() {
     let supervisor = follower::supervisor(&home);
     supervisor.reconcile().await;
     wire::put(&admin, "items", "k1", 10).await;
-    follower::wait_until("first applied batch lands", WAIT, {
+    follower::wait_until("first applied batch lands", WAIT, &home, addr, {
         let home = home.clone();
         move || {
             let home = home.clone();
@@ -109,7 +109,7 @@ async fn seed_e2e_d_reopen_at_install_resume_and_first_batch_boundaries() {
     // The follower persists the bookmark only after the applied rows are
     // durable, so the rows can be visible a moment before the bookmark moves:
     // wait for the bookmark itself instead of sampling it right after the rows.
-    follower::wait_until("first batch advances the bookmark", WAIT, {
+    follower::wait_until("first batch advances the bookmark", WAIT, &home, addr, {
         let home = home.clone();
         move || {
             let home = home.clone();
@@ -140,7 +140,7 @@ async fn seed_e2e_d_reopen_at_install_resume_and_first_batch_boundaries() {
     let supervisor = follower::supervisor(&home);
     supervisor.reconcile().await;
     wire::put(&admin, "audit", "a1", 20).await;
-    follower::wait_until("second batch converges", WAIT, {
+    follower::wait_until("second batch converges", WAIT, &home, addr, {
         let home = home.clone();
         move || {
             let home = home.clone();

@@ -24,12 +24,7 @@ pub(crate) async fn checkpoint_allocation_floor(repo: &RepoInstance) -> DbResult
         .await
 }
 
-/// Called by recover_inflight_v2 after replay/interner persistence/finalization,
-/// exclusively before factory publication. H starts as an allocation floor;
-/// flushing recovered history and certifying unknown (J,H] as gaps turns it
-/// into a safe baseline, NOT a claim that every historical version committed.
-/// Already-checkpointed J needs no second gap; still flush replayed history.
-/// No reconciliation/projection of historical events is performed here (PR4).
+/// Legacy certification retained only for backends without a persistent WAL.
 pub(crate) async fn certify_recovered_open(repo: &RepoInstance) -> DbResult<()> {
     let gate = repo.tx_gate().await?;
     let h = gate.version_allocation_high_water_mark();

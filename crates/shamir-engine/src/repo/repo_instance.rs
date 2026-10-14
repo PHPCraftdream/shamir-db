@@ -29,6 +29,9 @@ use tokio::sync::OnceCell;
 #[path = "clean_horizon/repo_impl.rs"]
 mod clean_horizon_impl;
 
+#[path = "cold_reconcile/repo_impl.rs"]
+mod cold_reconcile_impl;
+
 use crate::table::table_manager::table_token_for;
 
 /// Fixed read-side budget, not a tunable: a stalled writer returns an older
@@ -80,12 +83,8 @@ pub struct RepoInstance {
     pub(crate) journal_publish_hook: Arc<
         arc_swap::ArcSwapOption<crate::tx::tests::journal_publish_order_tests::JournalPublishHook>,
     >,
-    /// On-disk backing directory for this repo, captured from the factory's
-    /// `backing_dir()` at construction. `Some(dir)` for disk-backed repos —
-    /// [`repo_wal`](Self::repo_wal) builds a file-backed `WalGroupCommit`
-    /// rooted at `dir/wal`. `None` for in-memory/test repos — the WAL falls
-    /// back to KV markers. INERT plumbing (W3): the file WAL is constructed
-    /// but not yet written by the live commit path (W4/W5).
+    /// `backing_dir()` at construction. `Some(dir)` selects a file-backed WAL;
+    /// `None` selects the in-memory WAL used by ephemeral backends.
     wal_dir: Option<std::path::PathBuf>,
     /// D2 P1d-2b: lazily-spawned background drainer (history-write off the
     /// ack-path). Created + spawned once on first [`drainer`](Self::drainer)
@@ -1956,18 +1955,6 @@ impl RepoInstance {
     /// Returns the count of recovered entries.
     pub async fn recover_v2_inflight(&self) -> DbResult<usize> {
         crate::tx::recovery::recover_inflight_v2(self).await
-    }
-
-    /// Exclusive cold-open certification, before ANY registry insertion.
-    /// Conservative, not exact: even a complete journal invalidates (J, H].
-    /// Followers at/below H stop with JournalGap/resync_required; automated
-    /// reseeding is not supported. A legacy directory without J certifies once.
-    /// H is the marker/surviving-WAL/clean-checkpoint floor, NOT a history maximum.
-    /// Runtime checkpoints may advance J before WAL truncation; consumers must
-    /// account for checkpoint events and later gaps. Clean stop additionally
-    /// certifies the settled allocation range through H.
-    pub(crate) async fn certify_cold_start(&self) -> DbResult<()> {
-        super::durability_policy::certify_recovered_open(self).await
     }
 
     /// Caller MUST stop commit/apply admission before calling this method.

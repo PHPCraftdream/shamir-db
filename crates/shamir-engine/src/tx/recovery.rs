@@ -383,9 +383,9 @@ pub async fn recover_inflight_v2(repo: &RepoInstance) -> DbResult<usize> {
     // entry for Phase C so we don't need to hold the entries themselves.
     let mut finalized: Vec<(u64 /* txn_id */, u64 /* commit_version */)> =
         Vec::with_capacity(entries.len());
-    for entry in entries {
+    for entry in &entries {
         max_replayed = max_replayed.max(entry.commit_version);
-        replay_v2_entry(&entry, repo).await?;
+        replay_v2_entry(entry, repo).await?;
         finalized.push((entry.txn_id, entry.commit_version));
     }
 
@@ -455,7 +455,7 @@ pub async fn recover_inflight_v2(repo: &RepoInstance) -> DbResult<usize> {
             floor
         );
     }
-    repo.certify_cold_start().await?;
+    repo.certify_cold_start(&entries).await?;
     Ok(count)
 }
 

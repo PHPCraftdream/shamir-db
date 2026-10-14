@@ -102,10 +102,10 @@ fn hard_reopen_certifies_before_registry_and_clean_reopen_does_not_widen() {
         .unwrap();
         let repo = db.get_repo("repo").unwrap();
         for from in 0..=h {
-            assert_eq!(
-                repo.read_changelog_from(from, 100).await.unwrap().gap_at,
-                Some(from.max(1)),
-            );
+            let journal = repo.read_changelog_from(from, 100).await.unwrap();
+            assert_eq!(journal.gap_at, None);
+            assert_eq!(journal.events.len(), 1);
+            assert_eq!(journal.events[0].commit_version, h);
         }
         assert_eq!(
             repo.read_changelog_from(h + 1, 100).await.unwrap().gap_at,

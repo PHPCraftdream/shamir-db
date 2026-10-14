@@ -18,6 +18,11 @@ use std::time::Duration;
 
 use tokio::process::Child;
 
+use shamir_db::storage::error::DbError;
+use shamir_db::storage::storage_fjall::FjallRepo;
+use shamir_db::storage::types::{RecordKey, Repo};
+use shamir_tx::changefeed::{decode_gap_marker, encode_gap_marker, gap_marker_key};
+
 use shamir_client::Client;
 use shamir_client::ConnectOptions;
 use zeroize::Zeroizing;
@@ -136,6 +141,37 @@ pub async fn spawn_leader(data_dir: &Path, addr: SocketAddr) -> LeaderChild {
         config_path,
         log_path,
     }
+}
+
+/// Raw fixture setup for durable repos created through wire `CreateRepo(engine = "fjall")`.
+pub async fn inject_recovery_gap(data_dir: &Path, first: u64, through: u64) {
+    let repo_path = data_dir.join("app").join("main");
+    let backing = FjallRepo::new(&repo_path).expect("open stopped app/main repository");
+    let store = backing
+        .store_get("__changelog__")
+        .await
+        .expect("open changelog store");
+    let marker_key = RecordKey::from_slice(&gap_marker_key());
+    let existing = match store.get(marker_key.clone()).await {
+        Ok(bytes) => Some(bytes),
+        Err(DbError::NotFound(_)) => None,
+        Err(error) => panic!("read existing recovery gap: {error}"),
+    };
+    let interval = match existing {
+        Some(bytes) => {
+            let (existing_first, existing_through) =
+                decode_gap_marker(&bytes).expect("decode existing recovery gap");
+            (existing_first.min(first), existing_through.max(through))
+        }
+        None => (first, through),
+    };
+    store
+        .set(marker_key, encode_gap_marker(interval))
+        .await
+        .expect("write durable recovery gap");
+    store.flush().await.expect("flush durable recovery gap");
+    drop(store);
+    drop(backing);
 }
 
 /// Last bytes of the child's log, for failure messages.

@@ -3,10 +3,12 @@
 //! the real wire factory (production `build_prod_factory`).
 
 use std::future::Future;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use shamir_client::{Client, ConnectOptions};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
 use shamir_db::ShamirDb;
@@ -14,9 +16,11 @@ use shamir_db::SystemStoreConfig;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_builder::query::Query;
+use shamir_query_types::wire::repl::ReplRequest;
 use shamir_server::replication::prod_factory::build_prod_factory;
 use shamir_server::replication::supervisor::SubscriptionSupervisor;
 use shamir_types::types::value::QueryValue;
+use zeroize::Zeroizing;
 
 use super::child;
 use super::wire;
@@ -139,22 +143,81 @@ pub fn supervisor(home: &Arc<ShamirDb>) -> SubscriptionSupervisor {
         .with_validate_replicated_payload(false)
 }
 
-/// Bounded, deadline-based wait on an observable condition. Polls every
-/// 100 ms — no fixed sleeps, no wall-clock assumptions.
-pub async fn wait_until<F, Fut>(what: &str, deadline: Duration, mut condition: F)
-where
+/// Bounded, deadline-based wait on an observable condition. Each poll is
+/// individually bounded by the same absolute deadline; diagnostics run once
+/// after timeout and have their own short bound.
+pub async fn wait_until<F, Fut>(
+    what: &str,
+    deadline: Duration,
+    home: &ShamirDb,
+    leader_addr: SocketAddr,
+    mut condition: F,
+) where
     F: FnMut() -> Fut,
     Fut: Future<Output = bool>,
 {
     let end = tokio::time::Instant::now() + deadline;
     loop {
-        if condition().await {
-            return;
+        match tokio::time::timeout_at(end, condition()).await {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(_) => break,
         }
-        assert!(
-            tokio::time::Instant::now() < end,
-            "timed out waiting for: {what}",
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let now = tokio::time::Instant::now();
+        if now >= end {
+            break;
+        }
+        tokio::time::sleep_until((now + Duration::from_millis(100)).min(end)).await;
+        if tokio::time::Instant::now() >= end {
+            break;
+        }
     }
+
+    let follower = async {
+        let mut batch = Batch::new();
+        batch.id("status");
+        batch.op("status", ddl::replication_status());
+        let status = home.execute(wire::DB, &batch.build()).await;
+        let status = match status {
+            Ok(response) => format!("Ok({:?})", response.results.get("status")),
+            Err(error) => format!("Err({error:?})"),
+        };
+        let bookmark = match home.get_db(wire::DB).and_then(|db| db.get_repo(wire::REPO)) {
+            Some(repo) => format!("{:?}", repo.replication_bookmark().await),
+            None => "Err(repo not registered)".to_string(),
+        };
+        (status, bookmark)
+    };
+    let leader = async {
+        match Client::connect(ConnectOptions {
+            addr: leader_addr,
+            server_name: "localhost".to_string(),
+            username: child::REPLICATOR.to_string(),
+            password: Zeroizing::new(child::REPLICATOR_PW.as_bytes().to_vec()),
+            accept_new_host: true,
+            trusted_pin: None,
+            connect_timeout: Some(Duration::from_secs(15)),
+            request_timeout: Some(Duration::from_secs(35)),
+        })
+        .await
+        {
+            Ok(client) => format!(
+                "{:?}",
+                client
+                    .repl(ReplRequest::Hello {
+                        proto_ver: 1,
+                        node_id: "seed-e2e-timeout-diagnostic".to_string(),
+                    })
+                    .await
+            ),
+            Err(error) => format!("connect error: {error:?}"),
+        }
+    };
+    let (follower_snapshot, leader_snapshot) = tokio::join!(
+        tokio::time::timeout(Duration::from_secs(3), follower),
+        tokio::time::timeout(Duration::from_secs(3), leader),
+    );
+    panic!(
+        "timed out waiting for {what} (deadline {deadline:?}); follower={follower_snapshot:?}; leader Hello={leader_snapshot:?}"
+    );
 }

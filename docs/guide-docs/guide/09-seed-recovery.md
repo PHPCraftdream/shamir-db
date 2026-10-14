@@ -4,12 +4,15 @@
 
 A follower stopped with `resync_required` (or a brand-new follower that
 cannot start from version 0 against a gapped leader) is recovered by
-**offline seeding**: export the leader's logical state from a STOPPED
-server, install it into a NEW follower data directory, and Resume from the
-seed version + 1. This is the only supported recovery path today. It is
-"R2-lite": an offline, operator-driven, whole-repository logical seed —
-NOT an online snapshot, NOT automatic reseeding, NOT promotion/failover,
-and NOT full-server disaster recovery.
+**offline seeding** when its cursor intersects a residual certified gap or
+another unrecoverable source divergence: export the leader's logical state
+from a STOPPED server, install it into a NEW follower data directory, and
+Resume from the seed version + 1. Cold open first reconciles derivable
+journal events from surviving WAL; an unclean shutdown alone no longer
+implies a gap or a seed. This remains the supported operator-driven recovery
+path for residual gaps. It is "R2-lite": an offline, whole-repository
+logical seed — NOT an online snapshot, NOT automatic reseeding,
+NOT promotion/failover, and NOT full-server disaster recovery.
 
 Read this together with:
 
@@ -24,10 +27,13 @@ Read this together with:
 
 Use this runbook when ALL of these hold:
 
-* A follower subscription is `resync_required` (a certified recovery gap
-  `[J+1, H]` exists on the leader at or above the follower bookmark), or
-  you are bootstrapping a new follower after the leader lost its journal
-  tail to a crash.
+* A follower subscription is `resync_required` because its next required
+  version intersects a residual certified recovery gap, or you are
+  bootstrapping a new follower against a source with such a gap. Cold open
+  rebuilds derivable v3 events from surviving WAL before serving; it does
+  not turn every unclean restart into a gap. A seed is needed only when the
+  residual gap reaches the follower's cursor (or another unrecoverable
+  divergence requires replacing the follower's state).
 * You can STOP the leader for the export window (minutes for typical
   repository sizes). Export refuses to run against a live server.
 * The repository is a normal user `(db, repo)`. System repositories are
@@ -193,7 +199,7 @@ Refusal codes (they appear in admin errors, terminal
 | `seed_wrong_identity` | the leader repository was RECREATED or regenerated (new lineage) — checked on EVERY subscription, seeded or not (§3.1) | the old replication relationship is dead: re-export and reseed into a new repository |
 | `seed_wrong_history_epoch` | leader history was restored/rewound (epoch advanced) — checked on EVERY subscription, seeded or not (§3.1) | same as above: reseed |
 | `seed_wrong_schema` | leader schema diverged after the export (DDL is not replicated) | re-export and reseed (§8) |
-| `seed_horizon_above_bookmark` | a NEW crash certified a gap above the follower bookmark | repeat this runbook: export again, seed into ANOTHER new repository |
+| `seed_horizon_above_bookmark` | a NEW crash/recovery pass left a certified gap above the follower bookmark | repeat this runbook: export again, seed into ANOTHER new repository |
 | `seed_source_regression` | leader settled version regressed below the seed position | leader inconsistency — investigate before trusting it |
 | `seed_bookmark_overflow` | bookmark+1 would overflow u64 | practically unreachable; file a bug |
 | `seed_competing_owner` | another subscription already owns a pull stream for this repository | keep exactly one pull subscription per repository |
@@ -203,17 +209,15 @@ Refusal codes (they appear in admin errors, terminal
 ## 6. Process crash vs power loss — honesty
 
 The CI certification (`crates/shamir-server/tests/seed_recovery_e2e/`)
-kills the leader PROCESS (SIGKILL) and proves: crash-recovery
-certification, `resync_required` with no payload applied, export→install→
-Resume→convergence, refusal codes, and restart-survival at every durable
-boundary. That establishes PROCESS-crash behaviour only. Data still in
-the OS page cache at process death survives a process kill but not
-necessarily a machine power cut; these tests do not — and cannot — prove
-power-loss guarantees. The ORDERING claims (history durable before
-bookmark durable before Complete before publication) are proven by the
-deterministic boundary-injection tests of SEED-3
-(`crates/shamir-server/src/replication_seed/install/tests/`), not by
-killing processes.
+kills the leader PROCESS (SIGKILL) and proves the scenarios covered there:
+crash-recovery behavior, `resync_required` without payload applied when a
+certified gap is encountered, and export→install→Resume→convergence for the
+seed path. This is process-crash coverage only. Data still in the OS page
+cache at process death survives a process kill but not necessarily a machine
+power cut; these tests do not — and cannot — prove power-loss guarantees.
+Cold reconciliation must persist repaired journal state and the recovery
+floor before J, and J before serving; that ordering is a recovery protocol,
+not a power-loss guarantee beyond the configured storage durability.
 
 ## 7. Permissions
 

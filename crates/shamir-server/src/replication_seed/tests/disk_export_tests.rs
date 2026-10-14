@@ -10,6 +10,7 @@ use shamir_db::engine::tx::IsolationLevel;
 use shamir_db::storage::types::RecordKey;
 use shamir_db::{ShamirDb, SystemStoreConfig};
 use shamir_query_builder::doc;
+use shamir_tx::{event_from_wal_entry, ChangeOp, ChangelogEvent};
 use shamir_types::codecs::interned::query_value_to_inner;
 use tokio::runtime::{Builder, Runtime};
 
@@ -24,7 +25,7 @@ fn runtime() -> Runtime {
 
 // Real server-layout catalogue and raw Fjall data; runtime teardown releases
 // repository-internal owners deterministically, without sleeps or lock retries.
-async fn fixture(root: &Path, clean: bool) -> (u64, Vec<(Vec<u8>, Vec<u8>)>) {
+async fn fixture(root: &Path, clean: bool) -> (u64, Vec<(Vec<u8>, Vec<u8>)>, ChangelogEvent) {
     let meta = root.join("shamir_db_meta.redb");
     let source = ShamirDb::init(SystemStoreConfig::Fjall(meta))
         .await
@@ -51,14 +52,17 @@ async fn fixture(root: &Path, clean: bool) -> (u64, Vec<(Vec<u8>, Vec<u8>)>) {
     let value = query_value_to_inner(&doc! { "name" => "committed" }.into(), interner).unwrap();
     let payload = value.to_bytes().unwrap();
     let mvcc = table.mvcc_store().unwrap();
-    mvcc.set_versioned_no_wait(RecordKey::from_slice(&[0, 255, 128]), payload.clone())
+    let put_version = mvcc
+        .set_versioned_no_wait(RecordKey::from_slice(&[0, 255, 128]), payload.clone())
         .await
         .unwrap();
     let deleted = RecordKey::from_slice(&[255, 0, 1]);
-    mvcc.set_versioned_no_wait(deleted.clone(), payload)
+    let delete_put_version = mvcc
+        .set_versioned_no_wait(deleted.clone(), payload)
         .await
         .unwrap();
-    mvcc.delete_versioned_no_wait(deleted).await.unwrap();
+    let delete_version = mvcc.delete_versioned_no_wait(deleted).await.unwrap();
+    assert_eq!((put_version, delete_put_version, delete_version), (1, 2, 3));
     // Stage a genuine transaction and abort by the documented RAII contract.
     let aborted_value =
         query_value_to_inner(&doc! { "name" => "aborted" }.into(), interner).unwrap();
@@ -80,6 +84,33 @@ async fn fixture(root: &Path, clean: bool) -> (u64, Vec<(Vec<u8>, Vec<u8>)>) {
     repo.flush_seed_metadata().await.unwrap();
     source.flush_seed_catalogue().await.unwrap();
     let version = repo.consistent_version().await.unwrap();
+    assert_eq!(
+        version, 4,
+        "the committed transaction must be WAL version 4"
+    );
+    let wal = repo.repo_wal().await.unwrap();
+    let recovered = wal.recover().await.unwrap();
+    assert_eq!(
+        recovered.len(),
+        1,
+        "only the final transaction WAL survives"
+    );
+    assert_eq!(recovered[0].commit_version, 4);
+    let expected_event = event_from_wal_entry(&recovered[0])
+        .expect("the genuine final WAL entry must derive its journal event");
+    assert_eq!(expected_event.commit_version, 4);
+    assert_eq!(expected_event.changes.len(), 1);
+    assert_eq!(expected_event.changes[0].table, "rows");
+    assert_eq!(expected_event.changes[0].op, ChangeOp::Put);
+    assert_eq!(
+        expected_event.changes[0].key.as_ref(),
+        committed_id.as_bytes()
+    );
+    let expected_value_bytes = value.to_bytes().unwrap();
+    assert_eq!(
+        expected_event.changes[0].value.as_deref(),
+        Some(expected_value_bytes.as_ref())
+    );
     let stream = mvcc.snapshot_stream(1, version);
     futures_util::pin_mut!(stream);
     let mut expected = Vec::new();
@@ -116,7 +147,7 @@ async fn fixture(root: &Path, clean: bool) -> (u64, Vec<(Vec<u8>, Vec<u8>)>) {
             ),
         );
     }
-    (version, expected)
+    (version, expected, expected_event)
 }
 
 fn assert_artifact(
@@ -159,14 +190,18 @@ fn assert_artifact(
 
 // Independently cold-open the certificate, then tear down ALL internal owners
 // before the next public export. No live database handle spans runtime drops.
-fn certificate(root: &Path) -> (Option<(u64, u64)>, u64) {
+fn certificate(root: &Path) -> (Option<(u64, u64)>, u64, u64, Vec<ChangelogEvent>) {
     let rt = runtime();
     let result = rt.block_on(async {
         let source = MaintenanceOpen::open(root).await.unwrap();
         let repo = source.db.get_db("app").unwrap().get_repo("main").unwrap();
+        let consistent = repo.consistent_version().await.unwrap();
+        let journal = repo.read_changelog_from(1, 100).await.unwrap();
         (
             repo.certified_gap_interval().await.unwrap(),
             repo.clean_horizon().await.unwrap(),
+            consistent,
+            journal.events,
         )
     });
     drop(rt);
@@ -176,12 +211,16 @@ fn certificate(root: &Path) -> (Option<(u64, u64)>, u64) {
 fn exercise(clean: bool) {
     let dir = tempfile::tempdir().unwrap();
     let rt = runtime();
-    let (version, expected) = rt.block_on(fixture(dir.path(), clean));
+    let (version, expected, expected_event) = rt.block_on(fixture(dir.path(), clean));
     // Unclean control is admission/runtime teardown, NOT power-loss simulation.
     drop(rt);
+    let expected_gap = if clean { None } else { Some((1, version - 1)) };
+    assert_eq!(version, 4);
     let before = certificate(dir.path());
-    let expected_gap = if clean { None } else { Some((1, version)) };
-    assert_eq!(before, (expected_gap, version));
+    assert_eq!(before.0, expected_gap);
+    assert_eq!(before.1, version);
+    assert_eq!(before.2, version);
+    assert_eq!(before.3, vec![expected_event.clone()]);
     for attempt in 0..2 {
         let out = dir.path().join(format!("seed-{attempt}"));
         let rt = runtime();
@@ -190,11 +229,11 @@ fn exercise(clean: bool) {
             .unwrap();
         drop(rt);
         assert_artifact(&out, &hash, version, before.0, &expected);
-        assert_eq!(
-            certificate(dir.path()),
-            before,
-            "public export must preserve existing gap AND J across cold reopen",
-        );
+        let after = certificate(dir.path());
+        assert_eq!(after.0, expected_gap);
+        assert_eq!(after.1, version);
+        assert_eq!(after.2, version);
+        assert_eq!(after.3, vec![expected_event.clone()]);
     }
     // Keep direct MaintenanceOpen + bounded helper coverage in addition to the
     // public path. This also checks the certificate while the owner is held.
@@ -211,6 +250,8 @@ fn exercise(clean: bool) {
             (
                 repo.certified_gap_interval().await.unwrap(),
                 repo.clean_horizon().await.unwrap(),
+                repo.consistent_version().await.unwrap(),
+                repo.read_changelog_from(1, 100).await.unwrap().events,
             ),
             before,
         );
