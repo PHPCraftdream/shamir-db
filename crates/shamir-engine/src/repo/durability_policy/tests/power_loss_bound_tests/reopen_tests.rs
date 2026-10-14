@@ -331,7 +331,7 @@ async fn arm_serve_and_lose_speculative_tail(name: &str) -> (RepoIdentity, std::
         .unwrap();
     let file = fx.wal_file();
     let safe_len = std::fs::metadata(&file).unwrap().len();
-    helpers::seed_journal(&fx.repo, &[1, 2]).await.unwrap();
+    helpers::seed_journal(&fx.repo, &[1, 2]).await;
     // Unsynced tail: v2 raises W but not R — it is speculative.
     helpers::append_wal(&fx.repo, 2, WalDurability::Buffered)
         .await
