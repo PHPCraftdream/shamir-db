@@ -164,9 +164,8 @@ async fn real_fjall_crash_phase_matrix() {
             let entries = journal_entries(&reopened).await;
             let decoded: Vec<ChangelogEvent> = entries
                 .iter()
-                .filter_map(|(key, value)| {
-                    (key.as_ref().len() == 8).then(|| rmp_serde::from_slice(value).unwrap())
-                })
+                .filter(|(key, _)| key.as_ref().len() == 8)
+                .map(|(_, value)| rmp_serde::from_slice(value).unwrap())
                 .collect();
             assert_eq!(
                 decoded
