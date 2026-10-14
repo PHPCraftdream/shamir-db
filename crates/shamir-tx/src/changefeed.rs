@@ -308,6 +308,7 @@ impl RepoChangefeed {
         });
 
         let (done, writer_done) = watch::channel(false);
+        let repair_pending = Arc::new(RepairPendingInner::new());
         let me = Arc::new(Self {
             live,
             journal_tx,
@@ -321,7 +322,7 @@ impl RepoChangefeed {
             writer_done,
             clean_horizon: Arc::new(AtomicU64::new(0)),
             confirm_timeouts: AtomicU64::new(0),
-            repair_pending: Arc::new(RepairPendingInner::new()),
+            repair_pending: Arc::clone(&repair_pending),
         });
 
         // fire-and-forget: detached by design; owns no feed and drains on shutdown.
@@ -335,7 +336,7 @@ impl RepoChangefeed {
                 gap,
                 confirmed_through,
                 barrier_notify,
-                Arc::clone(&me.repair_pending),
+                repair_pending,
             )
             .await;
             // No waiter is required; channel closure also reports writer failure.

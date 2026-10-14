@@ -36,8 +36,8 @@ use super::{ChangelogEvent, JournalMsg, RepoChangefeed};
 /// Versions whose changefeed events await channel re-admission, plus the
 /// counters and wakeup signal the engine drainer coordinates through.
 ///
-/// Lock-free throughout: `scc::HashMap` guarded only by EBR guards confined
-/// to synchronous call bodies (never held across an `.await`), with O(1)
+/// Lock-free throughout: `scc::HashMap` guarded only by synchronous scc calls
+/// (no guard is ever held across an `.await`), with O(1)
 /// atomic mirrors for depth and the oldest pending version.
 #[derive(Debug)]
 pub struct RepairPending {
@@ -86,7 +86,7 @@ impl RepairPending {
     /// versions are ignored (the first pending record wins). Wakes the
     /// repair drainer.
     pub fn record_channel_full(&self, version: u64) {
-        if self.map.insert(version, ()).is_ok() {
+        if self.map.insert_sync(version, ()).is_ok() {
             self.depth.fetch_add(1, Ordering::AcqRel);
             let mut cur = self.min_version.load(Ordering::Relaxed);
             while cur == 0 || version < cur {
@@ -108,7 +108,7 @@ impl RepairPending {
     /// Retire a version after the engine drainer successfully (re-)enqueued
     /// its event. Bumps `repaired_total`; a no-op for unknown versions.
     pub fn on_admitted(&self, version: u64) {
-        if self.map.remove(&version).is_some() {
+        if self.map.remove_sync(&version).is_some() {
             self.depth.fetch_sub(1, Ordering::AcqRel);
             self.recompute_min();
         }
@@ -121,7 +121,7 @@ impl RepairPending {
     pub fn on_writer_closed(&self, version: u64) {
         self.gaps_writer_closed_total
             .fetch_add(1, Ordering::Relaxed);
-        if self.map.remove(&version).is_some() {
+        if self.map.remove_sync(&version).is_some() {
             self.depth.fetch_sub(1, Ordering::AcqRel);
             self.recompute_min();
         }
@@ -141,12 +141,15 @@ impl RepairPending {
         self.depth.load(Ordering::Acquire)
     }
 
-    /// All pending versions, unordered. Synchronous collect under one EBR
-    /// guard — the guard MUST NOT live across any `.await`; callers are
+    /// All pending versions, unordered. Synchronous collect; callers are
     /// synchronous contexts only.
     pub fn snapshot(&self) -> Vec<u64> {
-        let guard = scc::Guard::new();
-        self.map.iter(&guard).map(|(k, _)| *k).collect()
+        let mut out = Vec::new();
+        self.map.iter_sync(|k, _| {
+            out.push(*k);
+            true
+        });
+        out
     }
 
     /// Wake signal the engine repair drainer waits on.
@@ -189,15 +192,13 @@ impl RepairPending {
         self.repair_mismatch_total.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Recompute `min_version` from the map. Synchronous scc iteration under
-    /// an EBR guard confined to this body — never across an `.await`.
+    /// Recompute `min_version` from the map. Synchronous scc iteration.
     fn recompute_min(&self) {
         let mut m = 0u64;
-        let guard = scc::Guard::new();
-        for (k, _) in self.map.iter(&guard) {
-            let k = *k;
-            m = if m == 0 { k } else { m.min(k) };
-        }
+        self.map.iter_sync(|k, _| {
+            m = if m == 0 { *k } else { m.min(*k) };
+            true
+        });
         self.min_version.store(m, Ordering::Release);
     }
 
@@ -221,7 +222,7 @@ impl RepairPending {
     /// - [`RepairPending::on_unrepairable`] — WAL entry no longer derivable,
     ///   engine declares the gap and counts the reason itself.
     pub fn on_unrepairable(&self, version: u64) {
-        if self.map.remove(&version).is_some() {
+        if self.map.remove_sync(&version).is_some() {
             self.depth.fetch_sub(1, Ordering::AcqRel);
             self.recompute_min();
         }
