@@ -147,6 +147,7 @@ async fn resume_refusal_does_not_mutate_and_recreate_still_checks_repository_rec
         shamir: home.clone(),
         db_name: "app".into(),
         actor: crate::access::Actor::System,
+        repo_admin_observer: None,
     };
     executor
         .handle_drop_subscription(&shamir_query_types::admin::DropSubscriptionOp {

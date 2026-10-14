@@ -78,6 +78,18 @@ durability: {
 предупреждение выдаётся один раз при открытии WAL. `synced` не превращает
 такие репозитории в долговечные.
 
+**Пер-репозиторная политика (S5c-X PR1b).** Помимо серверного default, репозиторий может задавать sparse override при `CREATE REPO` или менять его через `ALTER REPO`. Неуказанные поля наследуют серверную политику; `ALTER` — patch: переданные поля заменяются, остальные override остаются. Это настройка WAL репозитория, не per-batch настройка.
+
+Query-builder API (пример builder; это не wire-протокол):
+
+```ts
+const create = ddl.createRepo('archive', { durability: { wal_commit: 'synced' } });
+const alter = ddl.alterRepo('archive', { on_wal_retention_exceeded: 'refuse_writes' });
+const described = ddl.describeRepo('archive');
+```
+
+Политика durability репозитория наследует серверные значения по умолчанию; sparse override задаётся при создании репозитория и изменяется через `ALTER REPO`. Rust DTO запроса всегда передаёт `wal_retention_max_bytes` десятичной строкой. TypeScript принимает положительные безопасные числа, `bigint` и канонические десятичные строки и нормализует значения выше `i64::MAX` в десятичный текст. В эффективном ответе значения до `i64::MAX` включительно передаются как native MessagePack integer и декодируются в TypeScript как `number` или `bigint` в зависимости от ширины wire integer; значения выше `i64::MAX` передаются строками. Неизвестные поля и значения отвергаются. Retention должен быть не меньше 2 × effective WAL segment size. `completed_reseed` сейчас отклоняется как неподдерживаемый режим. На in-memory/hybrid WAL `wal_commit` игнорируется (не добавляет persistence). Политика открытого репозитория применяется live через shared policy swap. `DESCRIBE REPO` показывает обе секции: эффективную `durability` и sparse `durability_override`; отсутствующий override в старой записи каталога читается как `None`. При старте persisted override имеет приоритет над серверным default.
+
 ### Durability и replication lag
 
 `R` — **непрерывный префикс recoverability**, а не максимальная версия,

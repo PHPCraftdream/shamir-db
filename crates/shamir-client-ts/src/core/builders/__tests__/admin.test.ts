@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { admin } from '../admin.js';
+import { admin } from '../admin/index.js';
 import type { Action, SetSuperuserOp, SetReplicatorOp } from '../../types/admin.js';
 import {
   canonicalDropUser,
