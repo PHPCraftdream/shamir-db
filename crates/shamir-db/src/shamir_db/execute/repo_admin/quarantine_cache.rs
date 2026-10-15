@@ -64,13 +64,10 @@ tokio::task_local! {
 #[inline]
 pub(crate) fn skip_read_quarantine_for_test() -> bool {
     #[cfg(test)]
-    {
-        return SKIP_READ_QUARANTINE_FOR_TEST
-            .try_with(|skip| *skip)
-            .unwrap_or(false);
-    }
+    let skip = SKIP_READ_QUARANTINE_FOR_TEST
+        .try_with(|skip| *skip)
+        .unwrap_or(false);
     #[cfg(not(test))]
-    {
-        false
-    }
+    let skip = false;
+    skip
 }
