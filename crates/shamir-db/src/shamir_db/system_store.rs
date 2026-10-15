@@ -172,10 +172,18 @@ impl SystemStore {
             .admit()
             .await
             .map_err(|e| DbError::Internal(e.to_string()))?;
-        if let Some(record) = intern {
-            table.intern_query_value_admitted(&permit, record).await?;
-        }
-        table.persist_interner_admitted(&permit).await
+        // Round-12 (stack layout): the admitted tail (optional interning +
+        // dictionary persist) is pinned so its await state stays on the heap
+        // instead of widening this fn's future — `persist_table_interner` is
+        // awaited inline in every admin-catalogue writer, including
+        // `handle_alter_subscription`'s RESUME arm on the main thread.
+        Box::pin(async move {
+            if let Some(record) = intern {
+                table.intern_query_value_admitted(&permit, record).await?;
+            }
+            table.persist_interner_admitted(&permit).await
+        })
+        .await
     }
 
     /// Route a single non-tx DELETE through the implicit-tx file-WAL path

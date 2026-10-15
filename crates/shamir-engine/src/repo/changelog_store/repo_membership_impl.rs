@@ -56,7 +56,14 @@ impl RepoInstance {
             .admit()
             .await
             .map_err(|error| DbError::Internal(error.to_string()))?;
-        self.get_table_ctx(table_name, &permit).await
+        // S5c-X Round-12 (stack layout): `get_table_ctx` embeds the whole
+        // cold-init chain inline (`create_table_context` →
+        // `create_with_domain_admitted` → store_get/tx_gate/interner/MVCC).
+        // Pinning it — exactly like the admitted twin below — keeps that
+        // await state on the heap instead of widening this fn's future,
+        // which is embedded inline in every catalogue read/write along the
+        // main-thread admin (ALTER SUBSCRIPTION ... RESUME) poll chain.
+        Box::pin(self.get_table_ctx(table_name, &permit)).await
     }
 
     /// Returns an already initialized table without admitting or triggering
