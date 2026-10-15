@@ -37,6 +37,7 @@
 
 use std::sync::Arc;
 
+use futures::stream::BoxStream;
 use futures::StreamExt;
 use shamir_index::base_index::ddl_op_log;
 use shamir_index::base_index::index_definition::IndexDefinition;
@@ -181,14 +182,7 @@ impl<'a> TableInfoStoreReadView<'a> {
         &self,
         prefix: bytes::Bytes,
         batch_size: usize,
-    ) -> std::pin::Pin<
-        Box<
-            dyn futures::Stream<
-                    Item = shamir_storage::error::DbResult<Vec<(bytes::Bytes, bytes::Bytes)>>,
-                > + Send
-                + '_,
-        >,
-    > {
+    ) -> BoxStream<'_, shamir_storage::error::DbResult<Vec<(bytes::Bytes, bytes::Bytes)>>> {
         // `RecordStream`'s item key is the crate-private `RecordKey` — map
         // it to its `bytes::Bytes` form so the public item type is nameable.
         let inner = self
