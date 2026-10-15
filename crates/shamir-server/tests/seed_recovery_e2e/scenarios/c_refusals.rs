@@ -144,6 +144,10 @@ async fn recreated_leader() -> ShamirDb {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn seed_e2e_c_resume_refusals_leave_state_unchanged() {
+    Box::pin(seed_e2e_c_resume_refusals_leave_state_unchanged_body()).await;
+}
+
+async fn seed_e2e_c_resume_refusals_leave_state_unchanged_body() {
     let fx = fixture().await;
     let lineage = fx.manifest.lineage_id;
     let epoch = fx.manifest.history_epoch;
@@ -233,6 +237,11 @@ async fn seed_e2e_c_resume_refusals_leave_state_unchanged() {
 /// retry must converge without replaying rows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn seed_e2e_c_incomplete_install_boot_gate_refuses_then_exact_retry_converges() {
+    Box::pin(seed_e2e_c_incomplete_install_boot_gate_refuses_then_exact_retry_converges_body())
+        .await;
+}
+
+async fn seed_e2e_c_incomplete_install_boot_gate_refuses_then_exact_retry_converges_body() {
     let fx = fixture().await;
     let home_dir = fx._root.path().join("home-incomplete");
     let addr = child::free_addr();
@@ -292,6 +301,10 @@ async fn seed_e2e_c_incomplete_install_boot_gate_refuses_then_exact_retry_conver
 /// and leaves the repository untouched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn seed_e2e_c_existing_ordinary_destination_refused() {
+    Box::pin(seed_e2e_c_existing_ordinary_destination_refused_body()).await;
+}
+
+async fn seed_e2e_c_existing_ordinary_destination_refused_body() {
     let fx = fixture().await;
     let dir = fx._root.path().join("ordinary-home");
     let addr = child::free_addr();
