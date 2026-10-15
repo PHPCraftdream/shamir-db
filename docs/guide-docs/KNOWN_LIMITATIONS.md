@@ -677,12 +677,14 @@ artifact).
   PR8) is unchanged. Status, `ReplicationStatus`/`ListSubscriptions`
   (which already echo `state` and `status_message` verbatim), DESCRIBE and
   other admin ops stay readable so the operator can see why; the
-  quarantine lifts only through the operator path that flips the
-  subscription state back — and plain admin `Resume` alone no longer
-  suffices: a quarantined `Resume` is refused until a replacement-seed
-  install has bound a fresh `seed_receipt` (durable `resync_from_receipt`
-  comparison on the subscription row), per the runbook, or the subscription
-  is dropped. Runtime clean-horizon checkpoints
+  quarantine lifts only through the operator path: the row carries a durable
+  `quarantined` marker (plus the `resync_from_receipt` baseline), so plain
+  admin `Resume` — and even `Pause`/`SetProfile` — of a quarantined
+  subscription are refused with the typed `resync_required` error; the
+  procedure is to DROP the quarantined subscription, install a replacement
+  seed with the real installer (which creates a FRESH paused subscription
+  bound to the new `seed_receipt`), then `Resume` that fresh row, per the
+  runbook, or drop the subscription. Runtime clean-horizon checkpoints
   bound the retained local WAL; retention enforcement follows the configured
   refusal or conservative GAP policy. PR4 cold reconciliation means an
   unclean crash alone no longer implies reseeding: a seed is needed when the
@@ -724,8 +726,8 @@ artifact).
   RAM-only. This stops silent history swaps; it does NOT repair the
   follower's data — recovery stays the operator runbook above, and since
   PR8b ordinary reads and local changefeed pulls of the quarantined
-  destination are refused (`resync_required`) until the state is flipped
-  back. Pre-PR7
+  destination are refused (`resync_required`) until the operator reseeds
+  via the DROP + install + Resume procedure described above. Pre-PR7
   subscriptions adopt the first observed identity once (one WARN line).
   Identity lives in the actual advancing bookmark value and is preserved on
   every advance. Missing identity fails closed even on first contact; no

@@ -452,28 +452,35 @@ impl ShamirAdminExecutor {
         }
 
         let mut record = existing.records[0].as_value().into_owned();
-        // S5c-X PR8b: `Resume` of a quarantined (`resync_required`)
-        // subscription is refused until a replacement seed has been bound
-        // since the quarantine began — compared via the durable
-        // `resync_from_receipt` baseline `mark_subscription_terminal` wrote
-        // against the row's current `seed_receipt`. This gate runs FIRST:
-        // no row mutation (and no `seed_resume_validated` flip) happens on
-        // refusal, and the typed error names the runbook.
-        if let SubAction::Resume = &op.action {
-            if record.get("state").and_then(|value| value.as_str()) == Some("resync_required") {
-                let baseline = record.get("resync_from_receipt");
-                let bound = record.get("seed_receipt");
-                let reseeded = matches!((baseline, bound), (Some(from), Some(now)) if from != now);
-                if !reseeded {
-                    return Err(BatchError::query_coded(
-                        "",
-                        "resync_required",
-                        format!(
-                            "subscription '{name}' is quarantined (resync_required): \
-                             install a replacement seed per guide/09-seed-recovery.md, then Resume"
-                        ),
-                    ));
+        // S5c-X PR8b: any action on a quarantined (`resync_required` or
+        // durably `quarantined`-marked) subscription is refused until a
+        // replacement seed has been bound since the quarantine began —
+        // compared via the durable `resync_from_receipt` baseline
+        // `mark_subscription_terminal` wrote against the row's current
+        // `seed_receipt`. Pause and SetProfile on a quarantined row are
+        // refused too: a state flip can never clear the quarantine (operators
+        // must reseed or DROP). This gate runs FIRST: no row mutation (and no
+        // `seed_resume_validated` flip) happens on refusal, and the typed
+        // error names the runbook.
+        if row_is_quarantined(&record) {
+            let reseeded = match &op.action {
+                SubAction::Resume => {
+                    let baseline = record.get("resync_from_receipt");
+                    let bound = record.get("seed_receipt");
+                    matches!((baseline, bound), (Some(from), Some(now)) if from != now)
                 }
+                // Pause / SetProfile: refused outright on a quarantined row.
+                _ => false,
+            };
+            if !reseeded {
+                return Err(BatchError::query_coded(
+                    "",
+                    "resync_required",
+                    format!(
+                        "subscription '{name}' is quarantined (resync_required): \
+                             install a replacement seed per guide/09-seed-recovery.md, then Resume"
+                    ),
+                ));
             }
         }
         self.shamir
@@ -544,7 +551,12 @@ impl ShamirAdminExecutor {
                             }
                         }
                     }
+                    // S5c-X PR8b: a successful (post-reseed) Resume lifts the
+                    // quarantine — remove the durable marker and its receipt
+                    // baseline alongside the state flip.
                     m.shift_remove("status_message");
+                    m.shift_remove("quarantined");
+                    m.shift_remove("resync_from_receipt");
                     m.insert("seed_resume_validated".into(), QueryValue::Bool(true));
                     m.insert("state".to_string(), QueryValue::Str("active".to_string()));
                 }
@@ -793,8 +805,9 @@ impl ShamirDb {
     }
 
     /// Single source of truth for the quarantine set: walk the
-    /// `system/subscriptions` table rows with `state == "resync_required"`
-    /// and resolve each row's profile `Pull` streams into cache keys
+    /// `system/subscriptions` table rows that are quarantined
+    /// ([`row_is_quarantined`]) and resolve each row's profile `Pull` streams
+    /// into cache keys
     /// `(db, repo)` (or `(db, "*")` when `scope.repo` is `None`), valued
     /// with the row's `status_message` (or a constant reason when absent).
     /// Consumed by both [`Self::has_resync_required_subscription_covering`]
@@ -810,7 +823,7 @@ impl ShamirDb {
             .await?;
         for record in result.records {
             let row = record.as_value().into_owned();
-            if row.get("state").and_then(|value| value.as_str()) != Some("resync_required") {
+            if !row_is_quarantined(&row) {
                 continue;
             }
             let Some(profile) = row.get("profile").and_then(|value| value.as_str()) else {
@@ -871,7 +884,10 @@ impl ShamirDb {
     /// install (which binds a NEW `seed_receipt` on the row, differing from
     /// the `resync_from_receipt` baseline captured here) followed by the
     /// `Resume` admin action — a plain `Resume` of a still-quarantined row
-    /// is refused with a typed error.
+    /// is refused with a typed error. The quarantine is additionally marked
+    /// with a durable `quarantined` flag on the row, which — unlike `state`
+    /// — survives Pause/SetProfile: any admin action on a quarantined row
+    /// except a post-reseed `Resume` (or a `DROP`) is refused.
     ///
     /// `name` not found → treated as a no-op (logged, not errored): the
     /// subscription may have been dropped concurrently by an admin command
@@ -891,6 +907,10 @@ impl ShamirDb {
     }
 
     /// Persist an operational stop reason exposed verbatim by status/list.
+    /// A `"resync_required"` state additionally stamps the durable
+    /// `quarantined` marker plus the `resync_from_receipt` baseline (see
+    /// [`Self::mark_subscription_resync_required`]); other states never set
+    /// the marker.
     pub async fn mark_subscription_terminal(
         &self,
         name: &str,
@@ -931,6 +951,12 @@ impl ShamirDb {
         if let QueryValue::Map(ref mut m) = record {
             m.insert("state".to_string(), QueryValue::Str(state.to_string()));
             m.insert("resync_from_receipt".into(), resync_from_receipt);
+            if state == "resync_required" {
+                // Durable quarantine marker: unlike `state`, it is not
+                // cleared by Pause/SetProfile — only a successful post-reseed
+                // `Resume` (or DROP) removes it.
+                m.insert("quarantined".into(), QueryValue::Bool(true));
+            }
         }
         if let QueryValue::Map(ref mut fields) = record {
             fields.insert(
@@ -958,4 +984,14 @@ impl ShamirDb {
         self.refresh_resync_quarantine_cache().await;
         Ok(())
     }
+}
+
+/// S5c-X PR8b: a subscription row is quarantined while `state ==
+/// "resync_required"` OR while the durable `quarantined` marker is set. The
+/// marker is written by [`ShamirDb::mark_subscription_terminal`] and survives
+/// state changes that do not reseed (Pause → `"paused"`, SetProfile), so a
+/// state flip alone can never lift the read gate.
+fn row_is_quarantined(row: &QueryValue) -> bool {
+    row.get("state").and_then(|value| value.as_str()) == Some("resync_required")
+        || row.get("quarantined") == Some(&QueryValue::Bool(true))
 }

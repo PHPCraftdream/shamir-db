@@ -21,6 +21,7 @@ use shamir_query_builder::doc;
 use shamir_query_builder::query::Query;
 use shamir_query_builder::write::insert;
 use shamir_query_types::admin::{ReplDirection, ReplMode};
+use shamir_query_types::batch::BatchError;
 use shamir_query_types::wire::repl::ReplResponse;
 use shamir_tx::changefeed::{encode_gap_marker, gap_marker_key};
 use tokio::runtime::{Builder, Runtime};
@@ -292,7 +293,23 @@ fn explicit_persisted_gap_stops_consumer_and_supervisor_but_not_beyond_h() {
         assert_admin_state(&follower, "resync_required").await;
         assert_eq!(repo(&follower).replication_bookmark().await.unwrap(), 0);
         assert_eq!(repo(&follower).current_commit_version().await.unwrap(), 0);
-        assert!(rows(&follower).await.is_empty());
+        // S5c-X PR8b: reads of a quarantined destination fail closed. `sub`
+        // covers `app/main` and the supervisor just marked it
+        // `resync_required`, so an ordinary batch read of the same repo is
+        // refused with the typed `BatchError::ResyncRequired` (code
+        // `resync_required`) — it no longer returns (empty) rows. All other
+        // assertions above (consumer stopped, supervisor state, journal
+        // semantics) are unchanged.
+        let read_error = {
+            let mut batch = Batch::new();
+            batch.query("rows", Query::from("items"));
+            follower
+                .execute("app", &batch.build())
+                .await
+                .expect_err("quarantined read must be refused")
+        };
+        assert!(matches!(read_error, BatchError::ResyncRequired { .. }));
+        assert_eq!(read_error.code(), Some("resync_required"));
         supervisor.stop_all().await;
         // Apply the actual payload delivered alongside the explicit GAP, then
         // persist its leader bookmark to model a follower caught up through H.

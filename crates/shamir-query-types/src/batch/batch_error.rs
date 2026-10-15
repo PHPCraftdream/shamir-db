@@ -260,12 +260,29 @@ pub enum BatchError {
 
     /// S5c-X PR8b: a read op targeted a replication destination in
     /// `resync_required` quarantine; refused until a replacement seed is installed.
+    ///
+    /// The three payload strings are boxed behind [`ResyncRequiredDetail`]:
+    /// nested `Batch`/`ForEach` execution recurses through boxed futures that
+    /// each hold `Result<_, BatchError>`-sized locals, so every extra inline
+    /// byte in this enum multiplies across nesting depth (SIGABRT stack
+    /// overflow in debug builds on 2 MiB test stacks — see the audit tests
+    /// `nested_batch_alter_is_audited` / `foreach_execution_audits_each_alter_iteration`).
     ResyncRequired {
         alias: String,
-        db: String,
-        repo: String,
-        reason: String,
+        detail: std::boxed::Box<ResyncRequiredDetail>,
     },
+}
+
+/// S5c-X PR8b: heap-boxed payload of [`BatchError::ResyncRequired`], keeping
+/// the enum's inline size minimal for deep nested-batch recursion.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResyncRequiredDetail {
+    /// Database name of the quarantined destination.
+    pub db: String,
+    /// Repository name of the quarantined destination.
+    pub repo: String,
+    /// Why the destination is quarantined (journal gap / epoch mismatch).
+    pub reason: String,
 }
 
 impl std::fmt::Display for BatchError {
@@ -405,16 +422,12 @@ impl std::fmt::Display for BatchError {
                     size, max
                 )
             }
-            BatchError::ResyncRequired {
-                alias,
-                db,
-                repo,
-                reason,
-            } => {
+            BatchError::ResyncRequired { alias, detail } => {
                 write!(
                     f,
-                    "query '{alias}': repository {db}/{repo} is quarantined \
-                     (resync_required): {reason}"
+                    "query '{alias}': repository {}/{} is quarantined \
+                     (resync_required): {}",
+                    detail.db, detail.repo, detail.reason
                 )
             }
         }

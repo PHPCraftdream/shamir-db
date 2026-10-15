@@ -84,9 +84,11 @@ impl ShamirDb {
             {
                 return Err(BatchError::ResyncRequired {
                     alias,
-                    db: db_name.to_string(),
-                    repo,
-                    reason,
+                    detail: std::boxed::Box::new(shamir_query_types::batch::ResyncRequiredDetail {
+                        db: db_name.to_string(),
+                        repo,
+                        reason,
+                    }),
                 });
             }
         }
