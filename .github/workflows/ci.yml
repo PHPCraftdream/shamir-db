@@ -110,6 +110,8 @@ jobs:
       # enabled; see its Cargo.toml `[lib]`).
       - name: doctests (shamir-engine compile-fail gate)
         if: steps.affected.outputs.args != ''
+        env:
+          AFFECTED: ${{ steps.affected.outputs.args }}
         shell: bash
         run: |
           if [ "$AFFECTED" = "--workspace" ]; then

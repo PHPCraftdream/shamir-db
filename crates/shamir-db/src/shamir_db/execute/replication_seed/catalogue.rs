@@ -126,7 +126,7 @@ impl ShamirDb {
             value: QueryValue::Map(fields),
         };
         self.system_store().set_via_implicit_tx(&table, &op).await?;
-        home.system_store().persist_table_interner(&table).await?;
+        self.system_store().persist_table_interner(&table).await?;
         self.flush_seed_catalogue().await
     }
 

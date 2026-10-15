@@ -17,6 +17,8 @@ use shamir_index::base_index::ddl_op_log;
 use shamir_index::build_backend::build_index2_backend_with_resolver;
 use shamir_query_types::read::DdlOpStatus;
 use shamir_storage::error::{DbError, DbResult};
+use shamir_types::codecs::interned::query_value_to_inner;
+use shamir_types::types::value::{InnerValue, QueryValue};
 
 use super::TableManager;
 use crate::index2::state::IndexState;
@@ -180,6 +182,26 @@ impl TableManager {
     pub async fn persist_interner_admitted(&self, permit: &RepoWritePermit) -> DbResult<()> {
         self.write_domain.debug_check_permit(permit);
         self.interner.persist().await
+    }
+
+    /// Admitted WRITE-prep interning of a `QueryValue` (S5c-X Round 7):
+    /// replaces the read-view `TableInfoStoreReadView::to_inner`, whose only
+    /// real effect was interning the record's map keys through the
+    /// interior-mutable interner — a mutation that must sit behind
+    /// admission. Interns `value`'s field names into THIS table's
+    /// dictionary and returns the encoded `InnerValue` (callers that don't
+    /// need it discard it). The caller holds repo admission; the usual
+    /// companion is [`Self::persist_interner_admitted`] with the SAME
+    /// permit (see `SystemStore::persist_table_interner_interning`, which
+    /// chains both under a single admission).
+    pub async fn intern_query_value_admitted(
+        &self,
+        permit: &RepoWritePermit,
+        value: &QueryValue,
+    ) -> DbResult<InnerValue> {
+        self.write_domain.debug_check_permit(permit);
+        let interner = self.interner.get().await?;
+        query_value_to_inner(value, interner).map_err(|e| DbError::Codec(e.to_string()))
     }
 
     /// Admitted MIGRATION coordinator factory (fresh START path). Builds the
