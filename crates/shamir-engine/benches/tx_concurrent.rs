@@ -208,11 +208,8 @@ async fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());
     let instance = RepoInstance::new("bench".into(), BoxRepo::InMemory(repo), Vec::new());
     let permit = instance.write_domain().admit().await.unwrap();
-    instance
-        .add_table_admitted(TableConfig::new("bench_table".to_string()), &permit)
-        .await
-        .unwrap();
-    drop(permit);
+    let config = TableConfig::new("bench_table".to_string());
+    instance.add_table_admitted(config, &permit).await.unwrap();
     instance
 }
 
@@ -296,10 +293,8 @@ fn main() {
                 for w in 0..n {
                     let name = format!("writer_{w}");
                     let permit = repo.write_domain().admit().await.unwrap();
-                    repo.add_table_admitted(TableConfig::new(name.clone()), &permit)
-                        .await
-                        .unwrap();
-                    drop(permit);
+                    let config = TableConfig::new(name.clone());
+                    repo.add_table_admitted(config, &permit).await.unwrap();
                     tables.push(repo.get_table(&name).await.unwrap());
                 }
                 (repo, tables)

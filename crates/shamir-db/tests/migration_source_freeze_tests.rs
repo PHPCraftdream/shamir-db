@@ -201,7 +201,7 @@ async fn r4_failed_start_releases_source_freeze() {
     let original = registry.all_descriptors().await.pop().unwrap();
     let mut broken = original.clone();
     broken.paths[0][0] = u64::MAX;
-    let (barrier, lock) = source.begin_write_barrier(INDEX2_CREATE).await;
+    let (barrier, lock) = source.begin_write_barrier(INDEX2_CREATE).await.unwrap();
     registry.remove_by_id(original.id).await.unwrap();
     registry
         .insert(build_index2_backend(broken, &source.info_store_for_test()))
@@ -218,7 +218,7 @@ async fn r4_failed_start_releases_source_freeze() {
     );
     assert!(db.active_migrations().is_empty());
     assert!(database.get_repo("dst").is_none());
-    let (barrier, lock) = source.begin_write_barrier(INDEX2_CREATE).await;
+    let (barrier, lock) = source.begin_write_barrier(INDEX2_CREATE).await.unwrap();
     registry.remove_by_id(original.id).await.unwrap();
     registry
         .insert(build_index2_backend(
