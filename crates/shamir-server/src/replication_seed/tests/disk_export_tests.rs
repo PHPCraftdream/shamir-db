@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
-use shamir_db::engine::table::TableConfig;
 use shamir_db::engine::tx::IsolationLevel;
 use shamir_db::storage::types::RecordKey;
 use shamir_db::{ShamirDb, SystemStoreConfig};

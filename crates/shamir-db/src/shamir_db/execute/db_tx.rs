@@ -251,16 +251,6 @@ impl ShamirDb {
         deadline_cap: Option<Duration>,
         repo_admin_observer: Option<Arc<dyn crate::RepoAdminObserver>>,
     ) -> Result<BatchResponse, BatchError> {
-        // S5c-X PR8b: ordinary READS of a quarantined repo fail closed, even
-        // for a tx opened BEFORE the quarantine. Same shape as the batch gate
-        // in `repo_admin/db_execute.rs` (incl. the test-only skip seam).
-        let skip_seam = cfg!(test) && SKIP_READ_QUARANTINE_FOR_TEST.load(Ordering::Relaxed);
-        if !skip_seam {
-            if let Some(err) = tx_read_quarantine_refusal_for_request(self, db_name, request) {
-                return Err(err);
-            }
-        }
-
         // Authorization must consume, not renew, the caller's remaining budget.
         let started = Instant::now();
         let mut auth = Authorized::authorize(request, actor, db_name, self)
@@ -268,6 +258,18 @@ impl ShamirDb {
             .with_policy(policy);
         if let Some(cap) = deadline_cap {
             auth = auth.with_deadline_cap(cap.saturating_sub(started.elapsed()));
+        }
+
+        // S5c-X PR8b: ordinary READS of a quarantined repo fail closed, even
+        // for a tx opened BEFORE the quarantine. Same shape as the batch gate
+        // in `repo_admin/db_execute.rs` (incl. the test-only skip seam).
+        // Authorization comes FIRST so unauthorized callers get `access_denied`
+        // and never learn the repo's quarantine state.
+        let skip_seam = cfg!(test) && SKIP_READ_QUARANTINE_FOR_TEST.load(Ordering::Relaxed);
+        if !skip_seam {
+            if let Some(err) = tx_read_quarantine_refusal_for_request(self, db_name, request) {
+                return Err(err);
+            }
         }
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),

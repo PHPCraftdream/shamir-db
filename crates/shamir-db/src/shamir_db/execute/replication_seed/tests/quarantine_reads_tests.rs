@@ -668,10 +668,9 @@ async fn t10_tx_reads_refused_while_quarantined() {
     quarantine(&shamir, "sub", "prof", "main").await;
 
     // BEGIN on the quarantined repo is refused.
-    let err = shamir
-        .tx_begin("testdb", "main", "snapshot")
-        .await
-        .unwrap_err();
+    let Err(err) = shamir.tx_begin("testdb", "main", "snapshot").await else {
+        panic!("tx_begin on a quarantined repo must be refused");
+    };
     assert_eq!(err.code(), Some("resync_required"));
 
     // EXECUTE on the pre-quarantine tx is refused too (fail closed on use).
@@ -720,4 +719,39 @@ async fn t11_subscribe_changelog_refused_while_quarantined() {
         .unwrap()
         .expect("side repo exists");
     drop(rx);
+}
+
+/// S5c-X PR8b follow-up: the bounded journal read — the exact call the
+/// server's `DbJournalSource::read` makes for a live subscription — refuses
+/// with the typed `DbError::ResyncRequired` once the repo is quarantined, so
+/// a bridge/subscription attached BEFORE the quarantine terminates on its
+/// next drain (`JournalDrain::run` propagates the `Err` → task emits Closed
+/// and exits). The non-replicated `side` repo keeps serving `Ok`.
+#[tokio::test]
+async fn t12_gated_journal_source_refuses_once_quarantined() {
+    let shamir = setup().await;
+    seed_row(&shamir).await;
+
+    // Healthy before the quarantine.
+    assert!(shamir
+        .read_changelog_bounded("testdb", "main", 1, 10)
+        .await
+        .unwrap()
+        .is_some());
+
+    quarantine(&shamir, "sub", "prof", "main").await;
+
+    // The gated journal source's read fails closed with the typed error.
+    let Err(err) = shamir.read_changelog_bounded("testdb", "main", 1, 10).await else {
+        panic!("read_changelog_bounded on a quarantined repo must be refused");
+    };
+    assert!(matches!(err, DbError::ResyncRequired { .. }));
+    assert_eq!(err.code(), Some("resync_required"));
+
+    // Non-replicated repo is unaffected.
+    assert!(shamir
+        .read_changelog_bounded("testdb", "side", 1, 10)
+        .await
+        .unwrap()
+        .is_some());
 }

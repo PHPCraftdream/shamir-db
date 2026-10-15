@@ -364,12 +364,25 @@ impl ShamirDb {
     ///
     /// The returned `TableManager` has the global `ValidatorRegistry`
     /// injected (S3) so the write path can resolve validator bindings.
+    ///
+    /// S5c-X PR8b: a quarantined (`resync_required`) repo refuses table
+    /// acquisition with `DbError::ResyncRequired`. The gate is at ACQUISITION:
+    /// a `TableManager` handle already obtained before the quarantine cannot
+    /// be revoked retroactively (same model as cursor create — per-read
+    /// revocation of a raw handle is not possible without a wrapper type).
     pub async fn get_table(
         &self,
         db_name: &str,
         repo_name: &str,
         table_name: &str,
     ) -> DbResult<TableManager> {
+        if let Some(reason) = self.quarantined_read_reason(db_name, repo_name) {
+            return Err(DbError::ResyncRequired {
+                db: db_name.to_string(),
+                repo: repo_name.to_string(),
+                reason,
+            });
+        }
         let db = self
             .get_db(db_name)
             .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;

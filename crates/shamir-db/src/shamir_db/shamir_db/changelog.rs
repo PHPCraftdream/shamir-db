@@ -153,9 +153,12 @@ impl ShamirDb {
         from_version: u64,
         limit: usize,
     ) -> shamir_storage::error::DbResult<Option<Vec<shamir_engine::ChangelogEvent>>> {
-        let jr = self
+        let Some(jr) = self
             .read_changelog_from_journal(db, repo, from_version, limit)
-            .await?;
+            .await?
+        else {
+            return Ok(None);
+        };
         if let Some(gap) = jr.gap_at {
             log::warn!(
                 "changefeed journal gap detected: db={db} repo={repo} \
@@ -185,9 +188,11 @@ impl ShamirDb {
 
     /// Pull-only journal read with field-name bindings and unchanged gap metadata.
     ///
-    /// Only called from the follower's own pull/serve machinery, which already
-    /// refuses at the serve entry when the destination is quarantined
-    /// (PR8 `downstream_resync_required`); left ungated for that reason.
+    /// Only called from the follower's own pull/serve machinery. S5c-X PR8b:
+    /// a quarantined (`resync_required`) destination is refused with
+    /// `DbError::ResyncRequired` before any journal data is served (fail
+    /// closed), same gate as
+    /// [`read_changelog_bounded`](Self::read_changelog_bounded).
     pub async fn read_changelog_for_replication(
         &self,
         db: &str,
@@ -197,6 +202,19 @@ impl ShamirDb {
     ) -> shamir_storage::error::DbResult<
         Option<(Vec<shamir_engine::tx::ReplicatedEvent>, Option<u64>)>,
     > {
+        // S5c-X PR8b: refuse a quarantined repo before serving journal data
+        // (fail closed). Negative-control seam, test builds only — mirrors
+        // `read_changelog_bounded` below.
+        let skip_seam = cfg!(test) && SKIP_READ_QUARANTINE_FOR_TEST.load(Ordering::Relaxed);
+        if !skip_seam {
+            if let Some(reason) = self.quarantined_read_reason(db, repo) {
+                return Err(DbError::ResyncRequired {
+                    db: db.to_string(),
+                    repo: repo.to_string(),
+                    reason,
+                });
+            }
+        }
         let Some(repo_instance) = self.get_db(db).and_then(|db| db.get_repo(repo)) else {
             return Ok(None);
         };
@@ -295,7 +313,6 @@ impl ShamirDb {
         repo_instance
             .read_changelog_from(from_version, limit)
             .await
-            .ok()
             .map(Some)
     }
 }

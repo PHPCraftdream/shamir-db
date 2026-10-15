@@ -22,12 +22,9 @@ use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
 use crate::types::value::QueryValue;
 use crate::{DbResult, ShamirDb};
-use dashmap::DashMap;
-use shamir_collections::THasher;
 use shamir_query_types::admin::ReplDirection;
 use shamir_query_types::ReplicationServe;
 use shamir_types::mpack;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::helpers::{admin_result, to_qv};
@@ -701,72 +698,6 @@ impl ShamirAdminExecutor {
     }
 }
 
-/// S5c-X PR8b — lock-free read-quarantine cache.
-///
-/// Mirrors the full set of `(db, repo)` (or `(db, "*")` for scope.repo `None`
-/// pull streams) targets covered by a subscription whose persisted row has
-/// `state = "resync_required"`, with the row's `status_message` as the value.
-/// Rebuilt wholesale by [`ShamirDb::refresh_resync_quarantine_cache`] after
-/// every subscription-state mutation (and at init), so reads pay one atomic
-/// `is_empty` load on the healthy path and never take a lock.
-pub(crate) struct ResyncQuarantineCache {
-    entries: DashMap<(String, String), String, THasher>,
-    count: AtomicUsize,
-}
-
-impl Default for ResyncQuarantineCache {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ResyncQuarantineCache {
-    pub(crate) fn new() -> Self {
-        Self {
-            entries: DashMap::with_hasher(THasher::default()),
-            count: AtomicUsize::new(0),
-        }
-    }
-
-    /// Cheap healthy-path probe: one `Relaxed` load. Empty ⇒ no quarantine.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.count.load(Ordering::Relaxed) == 0
-    }
-
-    /// Quarantine reason for `(db, repo)`, checking the exact repo first and
-    /// then the whole-db wildcard installed for `scope.repo: None` streams.
-    pub(crate) fn reason_for(&self, db: &str, repo: &str) -> Option<String> {
-        if let Some(reason) = self.entries.get(&(db.to_string(), repo.to_string())) {
-            return Some(reason.value().clone());
-        }
-        self.entries
-            .get(&(db.to_string(), "*".to_string()))
-            .map(|reason| reason.value().clone())
-    }
-
-    /// Atomically replace the whole set. No lock anywhere: the map is
-    /// cleared and repopulated lock-free; readers see either the old or the
-    /// new complete set (never a mix that matters — the refresh is idempotent
-    /// and derived from the same persisted rows).
-    pub(crate) fn install(&self, entries: impl IntoIterator<Item = ((String, String), String)>) {
-        self.entries.clear();
-        let mut len = 0usize;
-        for (key, reason) in entries {
-            self.entries.insert(key, reason);
-            len += 1;
-        }
-        self.count.store(len, Ordering::Release);
-    }
-}
-
-/// Negative-control seam for tests: when set, the read guards skip the
-/// `resync_required` quarantine and serve (stale) reads anyway (mirrors
-/// `SKIP_FENCE_QUARANTINE_FOR_TEST` in `shamir-server`'s
-/// `replication/identity_fence/checks.rs`). Always compiled; the guards read
-/// it behind `cfg!(test)` so the branch is elided in production and the
-/// static is never dead on any platform.
-pub(crate) static SKIP_READ_QUARANTINE_FOR_TEST: AtomicBool = AtomicBool::new(false);
-
 // ----------------------------------------------------------------------
 // Follower-side gap visibility (Part 2, RI-10)
 // ----------------------------------------------------------------------
@@ -862,9 +793,15 @@ impl ShamirDb {
     }
 
     /// Quarantine reason for an ordinary READ of `(db_name, repo_name)`, or
-    /// `None` when the repo is readable. One `Relaxed` load on the healthy
-    /// path (callers short-circuit on [`ResyncQuarantineCache::is_empty`]).
+    /// `None` when the repo is readable. Healthy path (empty cache): one
+    /// `Relaxed` `is_empty` load and no allocation / map lock — this is what
+    /// the wire-layer cursor gate in `shamir-server` rides on.
     pub(crate) fn quarantined_read_reason(&self, db_name: &str, repo_name: &str) -> Option<String> {
+        // Healthy-path fast path: one Relaxed load, no allocation, no map
+        // lock when the cache is empty (no subscription is quarantined).
+        if self.resync_quarantine.is_empty() {
+            return None;
+        }
         self.resync_quarantine.reason_for(db_name, repo_name)
     }
 
