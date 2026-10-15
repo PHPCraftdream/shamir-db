@@ -26,9 +26,26 @@ use crate::harness::wire;
 
 const WAIT: Duration = Duration::from_secs(30);
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues() {
-    Box::pin(seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues_body()).await;
+// TEMP-DIAG (orchestrator, revert before merge): run the body on a 256 MiB
+// stack to tell a finite-but-deep poll chain (passes) from unbounded
+// recursion (still overflows).
+#[test]
+fn seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues() {
+    std::thread::Builder::new()
+        .stack_size(256 << 20)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(Box::pin(
+                    seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues_body(),
+                ))
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 async fn seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues_body() {
