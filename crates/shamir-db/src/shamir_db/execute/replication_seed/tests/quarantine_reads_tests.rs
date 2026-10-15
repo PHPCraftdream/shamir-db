@@ -194,7 +194,6 @@ mod recovery {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use bytes::Bytes;
     use shamir_engine::meta::repo_identity::RepoIdentity;
     use shamir_engine::repo::{SeedImageWriter, SeedReceipt, SeedTable};
     use shamir_query_builder::batch::Batch;
@@ -206,6 +205,7 @@ mod recovery {
     use shamir_types::codecs::interned::query_value_to_inner_with;
     use shamir_types::codecs::CodecError;
     use shamir_types::core::interner::InternerKey;
+    use shamir_types::types::record_id::RecordId;
 
     use crate::{ResumeProbe, SeedRefusal, ShamirDb};
 
@@ -280,6 +280,13 @@ mod recovery {
     /// `users` inventory carrying ONE replacement row), then run
     /// `install_seed_profile` + `install_seed_subscription` — which create a
     /// FRESH paused subscription row bound to the NEW receipt, no marker.
+    ///
+    /// The row key MUST be a real 16-byte `RecordId`: ordinary table reads
+    /// decode every stored key as a 16-byte `RecordId` and silently skip
+    /// keys that do not fit (`shamir-engine/src/table/table.rs
+    /// `decode_raw_batch`), so an opaque key would make the row invisible to
+    /// every scan. `RecordId::system` is deterministic, so the key is
+    /// identical across the fjall reopen in the restart test.
     pub(super) async fn install_replacement_seed(shamir: &ShamirDb, sub: &str) {
         let repo = shamir.get_db("testdb").unwrap().get_repo("main").unwrap();
         let receipt = replacement_receipt();
@@ -309,7 +316,7 @@ mod recovery {
         writer
             .row(
                 0,
-                Bytes::from_static(b"replacement"),
+                RecordId::system("replacement").to_bytes(),
                 row.to_bytes().unwrap(),
             )
             .await
