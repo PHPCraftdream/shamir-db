@@ -605,7 +605,7 @@ async fn read_all(
     table: &shamir_db::engine::table::TableManager,
     table_name: &str,
 ) -> shamir_db::DbResult<Vec<QueryValue>> {
-    let interner = table.interner().get().await?;
+    let interner = table.info_store_read_view().interner_get().await?;
     let refs: TMap<String, QueryResult> = TMap::default();
     let ctx = FilterContext::new(interner, &refs);
     let query = ReadQuery::new(table_name);

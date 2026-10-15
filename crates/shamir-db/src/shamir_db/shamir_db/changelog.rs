@@ -28,7 +28,11 @@ impl ShamirDb {
     ) -> Option<QueryValue> {
         let repo_instance = self.get_db(db)?.get_repo(repo)?;
         let table_manager = repo_instance.get_table(table).await.ok()?;
-        let interner = table_manager.interner().get().await.ok()?;
+        let interner = table_manager
+            .info_store_read_view()
+            .interner_get()
+            .await
+            .ok()?;
         let inner: InnerValue = rmp_serde::from_slice(bytes).ok()?;
         inner_value_to_query_value(&inner, interner).ok()
     }
@@ -60,8 +64,12 @@ impl ShamirDb {
         // Initialize the interner (no-op if already warm) and grab a
         // shared handle to the OnceCell so the decode cache can hold it
         // without keeping the TableManager alive.
-        let _ = table_manager.interner().get().await.ok()?;
-        let interner_cell = table_manager.interner().interner_cell();
+        let _ = table_manager
+            .info_store_read_view()
+            .interner_get()
+            .await
+            .ok()?;
+        let interner_cell = table_manager.info_store_read_view().interner_cell();
         let inner: InnerValue = rmp_serde::from_slice(bytes).ok()?;
         Some((inner, interner_cell))
     }
@@ -81,8 +89,12 @@ impl ShamirDb {
     ) -> Option<Arc<OnceCell<Interner>>> {
         let repo_instance = self.get_db(db)?.get_repo(repo)?;
         let table_manager = repo_instance.get_table(table).await.ok()?;
-        let _ = table_manager.interner().get().await.ok()?;
-        Some(table_manager.interner().interner_cell())
+        let _ = table_manager
+            .info_store_read_view()
+            .interner_get()
+            .await
+            .ok()?;
+        Some(table_manager.info_store_read_view().interner_cell())
     }
 
     // ============================================================================

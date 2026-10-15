@@ -113,7 +113,7 @@ async fn build_docs_table(n: usize, with_fts_index: bool) -> TableManager {
     }
 
     let body_k = {
-        let i = mgr.interner().get().await.unwrap();
+        let i = mgr.interner_for_test().get().await.unwrap();
         match i.touch_ind("body").unwrap() {
             TouchInd::Exists(k) | TouchInd::New(k) => k,
         }
@@ -161,7 +161,7 @@ async fn build_docs_table_selective(n: usize, with_fts_index: bool) -> TableMana
     }
 
     let body_k = {
-        let i = mgr.interner().get().await.unwrap();
+        let i = mgr.interner_for_test().get().await.unwrap();
         match i.touch_ind("body").unwrap() {
             TouchInd::Exists(k) | TouchInd::New(k) => k,
         }
@@ -195,7 +195,7 @@ fn register_read(h: &mut Harness, id: &str, table: TableManager, q: ReadQuery) {
         let table = table.clone();
         let q = q.clone();
         async move {
-            let interner = table.interner().get().await.unwrap();
+            let interner = table.interner_for_test().get().await.unwrap();
             let refs = new_map();
             let ctx = FilterContext::new(interner, &refs);
             let r = table.read(&q, &ctx).await.unwrap();

@@ -5,7 +5,6 @@ use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::{DdlOpKind, DdlOpState, DdlOpStatus, QueryResult};
 use crate::shamir_db::shamir_db::schema_management::SCHEMA_FIELD;
 use crate::types::value::QueryValue;
-use shamir_engine::table::ddl_op_log;
 use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
@@ -230,58 +229,34 @@ impl ShamirAdminExecutor {
                     // needs; no new bit is minted since the table is about to
                     // be removed entirely regardless of which writers see the
                     // slow path via this specific bit. The raw manager
-                    // primitives called below do NOT themselves acquire
+                    // primitives the sweep uses do NOT themselves acquire
                     // `ddl_admission`/`unique_write_lock` (confirmed by reading
                     // `TableManager::drop_index`/`drop_unique_index`/
                     // `drop_sorted_index`/`drop_index2`, which call these exact
                     // primitives AFTER already taking the barrier) — so
-                    // acquiring it here once cannot re-enter the non-reentrant
+                    // acquiring it once cannot re-enter the non-reentrant
                     // `tokio::sync::Mutex`.
-                    let (_barrier, _uwl_guard) = table
-                        .begin_write_barrier(
-                            shamir_engine::index::write_barrier_flags::REGULAR_INDEX_CREATE,
-                        )
+                    //
+                    // S5c-X: the sweep itself is engine-owned now — the facade
+                    // acquires repo admission and
+                    // `TableManager::drop_all_indexes_for_table_removal_admitted`
+                    // runs the identical barrier + raw primitive sequence
+                    // internally (write_receipt/admission/admitted_ops.rs).
+                    let repo_instance = db
+                        .get_repo(&op.repo)
+                        .ok_or_else(|| err(format!("Repository '{}' not found", op.repo)))?;
+                    let permit = repo_instance
+                        .write_domain()
+                        .admit()
                         .await
                         .map_err(|e| err(e.to_string()))?;
-                    // base_index regular indexes.
-                    let regular_ids: Vec<u64> = table
-                        .index_manager_ref()
-                        .iter_indexes()
-                        .map(|d| d.name_interned)
-                        .collect();
-                    for id in regular_ids {
-                        let _ = table.index_manager_ref().drop_index(id, None, None).await;
-                    }
-                    // base_index unique indexes.
-                    let unique_ids: Vec<u64> = table
-                        .index_manager_ref()
-                        .iter_unique_indexes()
-                        .map(|d| d.name_interned)
-                        .collect();
-                    for id in unique_ids {
-                        let _ = table
-                            .index_manager_ref()
-                            .drop_unique_index(id, None, None)
-                            .await;
-                    }
-                    // Sorted indexes.
-                    let sorted_ids: Vec<u64> = table
-                        .sorted_indexes()
-                        .iter_indexes()
-                        .iter()
-                        .map(|d| d.name_interned)
-                        .collect();
-                    for id in sorted_ids {
-                        let _ = table.sorted_indexes().drop_index(id, None, None).await;
-                    }
-                    // index2 registry — remove all backends.
-                    let backends = table.index2_registry().all_backends().await;
-                    for b in &backends {
-                        let _ = table
-                            .index2_registry()
-                            .remove_by_id(b.descriptor().id)
-                            .await;
-                    }
+                    table
+                        .drop_all_indexes_for_table_removal_admitted(&permit)
+                        .await
+                        .map_err(|e| err(e.to_string()))?;
+                    // Release repo admission before the rest of the DROP TABLE
+                    // flow (non-reentrant repository write mutex).
+                    drop(permit);
                 }
             }
         }
@@ -673,8 +648,7 @@ impl ShamirAdminExecutor {
         // Defect 1 (#1069): Idempotent retry check — if a status record already
         // exists for this op_id (from a previous send of the same request),
         // short-circuit and return the existing status instead of re-executing.
-        if let Ok(Some(existing_status)) =
-            ddl_op_log::read_op_status(table.info_store(), &op_id).await
+        if let Ok(Some(existing_status)) = table.info_store_read_view().read_op_status(&op_id).await
         {
             // An existing status means this op_id was already processed.
             // Return a response with the existing op_id and let polling determine the outcome.
@@ -728,7 +702,18 @@ impl ShamirAdminExecutor {
             kind: kind.clone(),
             state: DdlOpState::InProgress,
         };
-        if let Err(e) = ddl_op_log::write_op_status(table.info_store(), &in_progress_status).await {
+        let repo_instance = db
+            .get_repo(&op.repo)
+            .ok_or_else(|| err(format!("Repository '{}' not found", op.repo)))?;
+        let permit = repo_instance
+            .write_domain()
+            .admit()
+            .await
+            .map_err(|e| err(e.to_string()))?;
+        if let Err(e) = table
+            .write_ddl_op_status_admitted(&in_progress_status, &permit)
+            .await
+        {
             // If we can't write InProgress, we have no choice but to continue:
             // the mutation will happen, and we'll try to write Succeeded after.
             // Log the error loudly so operators know the crash-safety contract is weakened.
@@ -739,6 +724,9 @@ impl ShamirAdminExecutor {
                 op.drop_index, e
             );
         }
+        // Release repo admission BEFORE the DDL itself re-admits — the
+        // repository write mutex is non-reentrant (tokio::sync::Mutex).
+        drop(permit);
 
         // Dispatch to the ONE matching family's drop call — the server now
         // resolves the index family from the catalog, not from the client's
@@ -873,8 +861,7 @@ impl ShamirAdminExecutor {
         // Defect 1 (#1069): Idempotent retry check — if a status record already
         // exists for this op_id (from a previous send of the same request),
         // short-circuit and return the existing status instead of re-executing.
-        if let Ok(Some(existing_status)) =
-            ddl_op_log::read_op_status(table.info_store(), &op_id).await
+        if let Ok(Some(existing_status)) = table.info_store_read_view().read_op_status(&op_id).await
         {
             // An existing status means this op_id was already processed.
             // Return a response with the existing op_id and let polling determine the outcome.
@@ -958,7 +945,18 @@ impl ShamirAdminExecutor {
             kind: kind.clone(),
             state: DdlOpState::InProgress,
         };
-        if let Err(e) = ddl_op_log::write_op_status(table.info_store(), &in_progress_status).await {
+        let repo_instance = db
+            .get_repo(&op.repo)
+            .ok_or_else(|| err(format!("Repository '{}' not found", op.repo)))?;
+        let permit = repo_instance
+            .write_domain()
+            .admit()
+            .await
+            .map_err(|e| err(e.to_string()))?;
+        if let Err(e) = table
+            .write_ddl_op_status_admitted(&in_progress_status, &permit)
+            .await
+        {
             // If we can't write InProgress, we have no choice but to continue:
             // the mutation will happen, and we'll try to write Succeeded after.
             // Log the error loudly so operators know the crash-safety contract is weakened.
@@ -969,6 +967,9 @@ impl ShamirAdminExecutor {
                 op.rename_index, op.to, e
             );
         }
+        // Release repo admission BEFORE the DDL itself re-admits — the
+        // repository write mutex is non-reentrant (tokio::sync::Mutex).
+        drop(permit);
 
         table
             .rename_index(&op.rename_index, &op.to, Some(op_id))

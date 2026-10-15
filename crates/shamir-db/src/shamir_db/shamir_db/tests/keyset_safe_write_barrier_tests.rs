@@ -108,7 +108,7 @@ async fn keyset_safe_true_for_empty_table_after_set_table_schema() {
     // Table is genuinely empty: no rows yet.
     let users = db.get_table("testdb", "main", "users").await.unwrap();
     assert_eq!(
-        users.counter().get().await.unwrap(),
+        users.counter_for_test().get().await.unwrap(),
         0,
         "precondition: empty table"
     );
@@ -134,7 +134,7 @@ async fn keyset_safe_true_for_empty_table_after_set_table_schema() {
 async fn keyset_safe_true_for_empty_table_after_add_schema_rule() {
     let db = setup().await;
     let users = db.get_table("testdb", "main", "users").await.unwrap();
-    assert_eq!(users.counter().get().await.unwrap(), 0);
+    assert_eq!(users.counter_for_test().get().await.unwrap(), 0);
 
     // Add a single rule via add_schema_rule.
     let rule = ddl::field(["name"]).string().required().build();
@@ -175,7 +175,7 @@ async fn set_table_schema_ddl_acquires_unique_write_barrier() {
     // Pre-acquire the table's unique_write_lock — the exact lock the F-37 DDL
     // path takes inside begin_schema_activation_barrier.
     let users = db.get_table("testdb", "main", "users").await.unwrap();
-    let held = users.unique_write_lock().lock_owned().await;
+    let held = users.unique_write_lock_for_test().lock_owned().await;
 
     // Spawn the DDL; it must block acquiring the lock we hold.
     let db_ddl = db.clone();

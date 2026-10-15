@@ -31,7 +31,7 @@ fn scaled() -> bool {
 }
 
 async fn row(table: &TableManager, id: usize, distance: Option<usize>) -> InnerValue {
-    let interner = table.interner().get().await.unwrap();
+    let interner = table.interner_for_test().get().await.unwrap();
     let mut map = new_map();
     map.insert(
         interner.touch_ind("ordinal").unwrap().into_key(),
@@ -73,7 +73,7 @@ async fn fixture(n: usize, vector: bool) -> (RepoInstance, TableManager) {
         let value = row(&table, i, vector.then_some(i + n)).await;
         table.insert(&value).await.unwrap();
     }
-    table.interner().persist().await.unwrap();
+    table.interner_for_test().persist().await.unwrap();
     (repo, table)
 }
 
@@ -83,7 +83,7 @@ async fn fixture(n: usize, vector: bool) -> (RepoInstance, TableManager) {
 // In particular, baseline COUNT uses the committed counter (N, not N+1%):
 // that cell is expected to reject the baseline, rather than certify a speedup.
 async fn read(table: &TableManager, query: &ReadQuery, tx: &TxContext) -> QueryResult {
-    let interner = table.interner().get().await.unwrap();
+    let interner = table.interner_for_test().get().await.unwrap();
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
     table.read_tx(query, &ctx, Some(tx)).await.unwrap()
@@ -145,7 +145,8 @@ fn main() {
                                         // Store the actual allocated ID as physical_id
                                         // fixture data (not the reserved synthetic field)
                                         // so both revisions can project and serialize it.
-                                        let interner = table.interner().get().await.unwrap();
+                                        let interner =
+                                            table.interner_for_test().get().await.unwrap();
                                         let InnerValue::Map(ref mut fields) = value else {
                                             panic!("bench row must be a map");
                                         };

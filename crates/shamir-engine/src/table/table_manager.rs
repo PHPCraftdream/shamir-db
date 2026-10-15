@@ -22,6 +22,10 @@ use shamir_storage::types::Store;
 // see its private/`pub(super)` fields — that is what makes the
 // line-budget-driven move of the admitted twins out of this file legal
 // without widening visibility. Same pattern as `repo/changelog_store.rs`.
+#[path = "write_receipt/admission/admitted_ops.rs"]
+mod admitted_ops;
+#[path = "write_receipt/admission/read_only_views.rs"]
+mod read_only_views;
 #[path = "write_receipt/admission/write_domain_barrier.rs"]
 mod write_domain_barrier;
 #[path = "write_receipt/admission/write_domain_index_admitted.rs"]
@@ -33,6 +37,8 @@ mod write_domain_online_index;
 #[path = "write_receipt/admission/write_domain_rename_admitted.rs"]
 mod write_domain_rename_admitted;
 
+pub use read_only_views::{TableDataStoreReadView, TableInfoStoreReadView};
+
 /// Compute the deterministic token for a table name.
 /// Same hash as `TableManager::table_token` (instance method).
 pub fn table_token_for(name: &str) -> u64 {
@@ -41,6 +47,15 @@ pub fn table_token_for(name: &str) -> u64 {
     h.finish()
 }
 
+///
+/// ```compile_fail
+/// use shamir_engine::table::TableManager;
+///
+/// fn downstream(manager: &TableManager) {
+///     let _ = manager.info_store();
+///     let _ = manager.data_store();
+/// }
+/// ```
 pub struct TableManager {
     pub(super) name: String,
     pub(super) table: Arc<Table>,
@@ -465,6 +480,13 @@ impl Clone for TableManager {
 }
 
 impl TableManager {
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn validator_registry_ref_for_test(
+        &self,
+    ) -> Option<&Arc<crate::validator::ValidatorRegistry>> {
+        self.validator_registry.as_ref()
+    }
+
     /// R0-C (#1009): build the table-open-wide error for a persisted index2
     /// descriptor whose name collides with an already-registered backend.
     ///
@@ -729,7 +751,12 @@ impl TableManager {
     /// `read_exec` for vectored `get_many` and by tests. Production
     /// callers must not write to the table directly; go through
     /// `TableManager::insert / set / delete` so index hooks fire.
-    pub fn table(&self) -> &Table {
+    pub(crate) fn table(&self) -> &Table {
+        &self.table
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn table_for_test(&self) -> &Table {
         &self.table
     }
 
@@ -742,27 +769,55 @@ impl TableManager {
         table_token_for(&self.name)
     }
 
-    /// Direct access to the underlying data_store. Used by V2 WAL
-    /// recovery to apply Put/Delete ops bypassing the indexing /
-    /// counter hooks (those replay separately).
-    pub fn data_store(&self) -> &Arc<dyn Store> {
+    pub(crate) fn data_store(&self) -> &Arc<dyn Store> {
         self.table.data_store()
     }
 
     /// Borrow the info_store this table writes its sidecar
     /// metadata into (counter, interner dictionary, sorted-index
     /// blob, WAL, buffer config, ...). DDL uses this directly.
-    pub fn info_store(&self) -> &Arc<dyn Store> {
+    pub(crate) fn info_store(&self) -> &Arc<dyn Store> {
         &self.info_store
     }
 
-    pub fn interner(&self) -> &InternerManager {
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn data_store_for_test(&self) -> &Arc<dyn Store> {
+        self.table.data_store()
+    }
+
+    /// S5c-X read-only view over the info store for PRODUCTION cross-crate
+    /// callers (`shamir-db` catalogue / DDL-status readers). The raw
+    /// [`info_store`](Self::info_store) handle stays `pub(crate)`; the view
+    /// exposes exactly the read/durability methods those callers use (see
+    /// `write_receipt/admission/read_only_views.rs`).
+    pub fn info_store_read_view(&self) -> TableInfoStoreReadView<'_> {
+        TableInfoStoreReadView { manager: self }
+    }
+
+    /// S5c-X read-only view over the data store for PRODUCTION cross-crate
+    /// callers (`shamir-db` migration seeding, `SystemStore` durability
+    /// flushes). The raw [`data_store`](Self::data_store) handle stays
+    /// `pub(crate)`.
+    pub fn data_store_read_view(&self) -> TableDataStoreReadView<'_> {
+        TableDataStoreReadView { manager: self }
+    }
+
+    /// Test-only raw info-store handle for fixture code (same gating as
+    /// [`data_store_for_test`](Self::data_store_for_test)): returns an owned
+    /// `Arc` clone so tests can call store-level helpers (ddl op-log writes,
+    /// validator-metadata reads) directly.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn info_store_for_test(&self) -> Arc<dyn Store> {
+        Arc::clone(&self.info_store)
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn interner_for_test(&self) -> &InternerManager {
         &self.interner
     }
 
-    /// Public accessor for the record counter — used by the read
-    /// fast-path for `COUNT(*)` without filter (Opt #2).
-    pub fn counter(&self) -> &Arc<RecordCounter> {
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn counter_for_test(&self) -> &Arc<RecordCounter> {
         &self.counter
     }
 
@@ -777,12 +832,47 @@ impl TableManager {
     /// when this code was a single crate, but `db_instance` and
     /// `table_manager` now live in adjacent crate modules and the
     /// boundary needs `pub`.
-    pub fn index_manager_ref(&self) -> &IndexManager {
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn index_manager_ref_for_test(&self) -> &IndexManager {
         &self.index_manager
     }
 
-    pub fn index2_registry(&self) -> &Arc<crate::index2::IndexRegistry> {
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn index2_registry_for_test(&self) -> &Arc<crate::index2::IndexRegistry> {
         &self.index2_registry
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn mvcc_store_for_test(&self) -> Option<Arc<shamir_tx::MvccStore>> {
+        self.mvcc_store_ref().cloned()
+    }
+
+    // -----------------------------------------------------------------------
+    // Engine-internal raw component handles. NOT part of the public boundary:
+    // cross-crate callers must go through the read-only views above or the
+    // admitted ops in `write_receipt/admission/`. They stay reachable inside
+    // `shamir-engine` (query batch, repo seed/recovery, doctor, benches)
+    // because those callers are engine-trusted code.
+    // -----------------------------------------------------------------------
+
+    pub(crate) fn interner(&self) -> &InternerManager {
+        &self.interner
+    }
+
+    pub(crate) fn counter(&self) -> &Arc<RecordCounter> {
+        &self.counter
+    }
+
+    pub(crate) fn index_manager_ref(&self) -> &IndexManager {
+        &self.index_manager
+    }
+
+    pub(crate) fn index2_registry(&self) -> &Arc<crate::index2::IndexRegistry> {
+        &self.index2_registry
+    }
+
+    pub(crate) fn unique_write_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(&self.unique_write_lock)
     }
 
     /// Test-only: install (or clear with `None`) the deterministic
@@ -917,8 +1007,14 @@ impl TableManager {
     /// re-check and its posting write are atomic against any concurrent non-tx
     /// unique writer to that table. Returns the `Arc` (cloned) so the caller
     /// holds the exact same mutex instance the non-tx path locks.
-    pub fn unique_write_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn unique_write_lock_for_test(&self) -> Arc<tokio::sync::Mutex<()>> {
         Arc::clone(&self.unique_write_lock)
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn sorted_indexes_for_test(&self) -> &SortedIndexManager {
+        &self.sorted_indexes
     }
 
     /// F-70 (#897, P0) — THE canonical acquisition path for a DDL-side write
@@ -1095,7 +1191,7 @@ impl TableManager {
     /// Borrow the table's sorted-index manager — used by the planner
     /// for range / order / min queries, and by DDL when a
     /// `create_index { sorted: true }` op lands.
-    pub fn sorted_indexes(&self) -> &SortedIndexManager {
+    pub(crate) fn sorted_indexes(&self) -> &SortedIndexManager {
         &self.sorted_indexes
     }
 
@@ -1216,7 +1312,7 @@ impl TableManager {
     /// Public accessor for the attached MvccStore (the version-log handle).
     /// Used by the migration coordinator (Q1) to read the source snapshot
     /// through the log seam (`current_stream`) instead of the raw data_store.
-    pub fn mvcc_store(&self) -> Option<Arc<shamir_tx::MvccStore>> {
+    pub(crate) fn mvcc_store(&self) -> Option<Arc<shamir_tx::MvccStore>> {
         self.mvcc_store_ref().cloned()
     }
 

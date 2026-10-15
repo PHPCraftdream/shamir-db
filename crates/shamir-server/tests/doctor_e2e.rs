@@ -142,7 +142,7 @@ async fn corrupt_table_counter(data_dir: &Path) {
     // Corrupt: set counter to a value that cannot match the actual record
     // count (0 records exist), making verify() report counter_consistent=false.
     table_mgr
-        .counter()
+        .counter_for_test()
         .set_to(999)
         .await
         .expect("corrupt counter");

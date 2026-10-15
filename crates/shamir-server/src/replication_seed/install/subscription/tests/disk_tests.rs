@@ -38,11 +38,11 @@ fn install_cli_final_step_is_paused_durable_and_exact_retry_idempotent() {
             shamir_query_builder::doc! { "value" => 1 }.into();
         let inner = shamir_types::codecs::interned::query_value_to_inner(
             &value,
-            table.interner().get().await.unwrap(),
+            table.interner_for_test().get().await.unwrap(),
         )
         .unwrap();
         table
-            .mvcc_store()
+            .mvcc_store_for_test()
             .unwrap()
             .set_versioned_no_wait(
                 shamir_db::storage::types::RecordKey::from_slice(b"seed-row"),
@@ -91,7 +91,7 @@ fn install_cli_final_step_is_paused_durable_and_exact_retry_idempotent() {
                     .unwrap();
             let table = home.system_store().subscriptions_table().await.unwrap();
             let refs = shamir_collections::TMap::default();
-            let ctx = FilterContext::new(table.interner().get().await.unwrap(), &refs);
+            let ctx = FilterContext::new(table.interner_for_test().get().await.unwrap(), &refs);
             let result = table
                 .read(&ReadQuery::new("subscriptions"), &ctx)
                 .await

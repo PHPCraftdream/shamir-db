@@ -151,7 +151,7 @@ pub(crate) async fn export_open_with_index_limit(
             .checked_sub(table_bytes)
             .ok_or_else(|| invalid("table metadata budget exceeded"))?
             .min(index_metadata_limit);
-        for definition in table.index_manager_ref().iter_indexes() {
+        for definition in table.index_definitions() {
             push_index(
                 &mut excluded_indexes,
                 &mut index_bytes,
@@ -160,7 +160,7 @@ pub(crate) async fn export_open_with_index_limit(
                 &definition,
             )?;
         }
-        for definition in table.index_manager_ref().iter_unique_indexes() {
+        for definition in table.unique_index_definitions() {
             push_index(
                 &mut excluded_indexes,
                 &mut index_bytes,
@@ -172,7 +172,7 @@ pub(crate) async fn export_open_with_index_limit(
         // These inventories clone descriptors already resident in the open
         // registries. Bound their full Serialize representations by the same
         // metadata budget as regular/unique indexes; never copy index data.
-        for definition in table.sorted_indexes().iter_indexes() {
+        for definition in table.sorted_index_definitions() {
             push_index(
                 &mut excluded_indexes,
                 &mut index_bytes,
@@ -181,7 +181,7 @@ pub(crate) async fn export_open_with_index_limit(
                 &definition,
             )?;
         }
-        for definition in table.index2_registry().all_descriptors().await {
+        for definition in table.index2_descriptors().await {
             push_index(
                 &mut excluded_indexes,
                 &mut index_bytes,
@@ -193,10 +193,9 @@ pub(crate) async fn export_open_with_index_limit(
         excluded_indexes.sort();
         let directory = format!("tables/{id:06}");
         fs::create_dir_all(staging.join(&directory))?;
-        let mvcc = table
-            .mvcc_store()
+        let stream = table
+            .mvcc_snapshot_stream(1, version)
             .ok_or_else(|| invalid("seed requires MVCC"))?;
-        let stream = mvcc.snapshot_stream(1, version);
         futures_util::pin_mut!(stream);
         let mut chunk = Vec::new();
         let mut chunk_rows = 0u64;

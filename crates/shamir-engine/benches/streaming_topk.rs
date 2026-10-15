@@ -68,7 +68,7 @@ async fn build_table() -> TableManager {
         .await
         .unwrap();
 
-    let interner = mgr.interner().get().await.unwrap();
+    let interner = mgr.interner_for_test().get().await.unwrap();
     let touch = |s: &str| match interner.touch_ind(s).unwrap() {
         TouchInd::Exists(k) | TouchInd::New(k) => k,
     };
@@ -112,7 +112,7 @@ fn query_full_materialize() -> ReadQuery {
 /// DELTA between the two paths isolates the projected-row accumulation.
 async fn peak_of_read(mgr: &TableManager, q: &ReadQuery) -> usize {
     shamir_bench_utils::peak_mem::reset();
-    let interner = mgr.interner().get().await.unwrap();
+    let interner = mgr.interner_for_test().get().await.unwrap();
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
     let res = mgr.read(q, &ctx).await.unwrap();
@@ -162,7 +162,7 @@ fn main() {
             let mgr = mgr.clone();
             let q = q.clone();
             async move {
-                let interner = mgr.interner().get().await.unwrap();
+                let interner = mgr.interner_for_test().get().await.unwrap();
                 let refs = new_map();
                 let ctx = FilterContext::new(interner, &refs);
                 black_box(mgr.read(&q, &ctx).await.unwrap());
@@ -177,7 +177,7 @@ fn main() {
             let mgr = mgr.clone();
             let q = q.clone();
             async move {
-                let interner = mgr.interner().get().await.unwrap();
+                let interner = mgr.interner_for_test().get().await.unwrap();
                 let refs = new_map();
                 let ctx = FilterContext::new(interner, &refs);
                 black_box(mgr.read(&q, &ctx).await.unwrap());

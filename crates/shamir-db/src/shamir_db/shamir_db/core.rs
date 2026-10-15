@@ -794,7 +794,6 @@ impl ShamirDb {
         table_name: &str,
         op_id_str: &str,
     ) -> Result<Option<crate::query::read::DdlOpStatus>, shamir_storage::error::DbError> {
-        use shamir_engine::table::ddl_op_log;
         use shamir_types::types::record_id::RecordId;
         use std::str::FromStr;
 
@@ -814,8 +813,8 @@ impl ShamirDb {
                 ))
             })?;
 
-        // Read the op status from this table's info_store.
-        ddl_op_log::read_op_status(table.info_store(), &op_id).await
+        // Read the op status from this table's info store (read-only view).
+        table.info_store_read_view().read_op_status(&op_id).await
     }
 
     /// Build an [`FnCtx`] with globals, registry, net gateway, the

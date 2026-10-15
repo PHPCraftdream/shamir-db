@@ -89,7 +89,7 @@ impl TableResolver for Resolver {
 }
 
 async fn key_id(tbl: &TableManager, name: &str) -> u64 {
-    let interner = tbl.interner().get().await.unwrap();
+    let interner = tbl.interner_for_test().get().await.unwrap();
     match interner.touch_ind(name).unwrap() {
         TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
     }

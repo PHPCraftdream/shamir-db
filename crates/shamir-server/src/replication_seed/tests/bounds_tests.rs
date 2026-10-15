@@ -226,13 +226,13 @@ async fn sorted_registry_exports_full_descriptors_and_rows() {
         .create_sorted_index("body_sorted", &["body"])
         .await
         .unwrap();
-    let interner = table.interner().get().await.unwrap();
+    let interner = table.interner_for_test().get().await.unwrap();
     let payload = query_value_to_inner(&doc! { "body" => "seed row" }.into(), interner)
         .unwrap()
         .to_bytes()
         .unwrap();
     table
-        .mvcc_store()
+        .mvcc_store_for_test()
         .unwrap()
         .set_versioned_no_wait(RecordKey::from_slice(b"raw-key"), payload.clone())
         .await
@@ -242,7 +242,7 @@ async fn sorted_registry_exports_full_descriptors_and_rows() {
     let hash = export_open(&source, "app", "main", &out, 1024)
         .await
         .unwrap();
-    let definition = table.sorted_indexes().iter_indexes().pop().unwrap();
+    let definition = table.sorted_indexes_for_test().iter_indexes().pop().unwrap();
     let name = interner
         .get_str(&InternerKey::new(definition.name_interned))
         .unwrap();
@@ -286,13 +286,13 @@ async fn index2_registry_exports_full_descriptors_and_rows() {
         panic!("builder must produce CreateIndex");
     };
     table.create_index_v2(&op).await.unwrap();
-    let interner = table.interner().get().await.unwrap();
+    let interner = table.interner_for_test().get().await.unwrap();
     let payload = query_value_to_inner(&doc! { "body" => "seed row" }.into(), interner)
         .unwrap()
         .to_bytes()
         .unwrap();
     table
-        .mvcc_store()
+        .mvcc_store_for_test()
         .unwrap()
         .set_versioned_no_wait(RecordKey::from_slice(b"raw-key"), payload.clone())
         .await
@@ -303,7 +303,7 @@ async fn index2_registry_exports_full_descriptors_and_rows() {
         .await
         .unwrap();
     let definition = table
-        .index2_registry()
+        .index2_registry_for_test()
         .all_descriptors()
         .await
         .pop()
@@ -376,7 +376,7 @@ async fn descriptor_set_over_budget_refuses_without_truncating() {
     for name in ["first_sorted", "second_sorted"] {
         table.create_sorted_index(name, &["body"]).await.unwrap();
     }
-    let definitions = table.sorted_indexes().iter_indexes();
+    let definitions = table.sorted_indexes_for_test().iter_indexes();
     assert_eq!(definitions.len(), 2);
     let mut entries = Vec::new();
     let mut used = 5;
@@ -387,7 +387,7 @@ async fn descriptor_set_over_budget_refuses_without_truncating() {
     assert!(error.to_string().contains("budget exceeded"), "{error}");
     assert_eq!(entries, before);
     assert_eq!(used, limit);
-    assert_eq!(table.sorted_indexes().iter_indexes().len(), 2);
+    assert_eq!(table.sorted_indexes_for_test().iter_indexes().len(), 2);
     let dir = TempDir::new().unwrap();
     let out = dir.path().join("seed");
     let error = export_open_with_index_limit(&source, "app", "main", &out, 1024, limit)

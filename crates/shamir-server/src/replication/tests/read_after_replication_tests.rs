@@ -189,7 +189,7 @@ async fn assert_read(
             assert_eq!(ids.len(), expected.len());
             for (id, expected) in ids.iter().zip(expected) {
                 let value = table.get(*id).await.expect("replicated point get");
-                let interner = table.interner().get().await.expect("follower interner");
+                let interner = table.interner_for_test().get().await.expect("follower interner");
                 assert_eq!(
                     inner_value_to_query_value(&value, interner).expect("decode follower names"),
                     *expected,
@@ -555,7 +555,7 @@ async fn matrix_secondary_index_lookup() {
             .get_repo("main")
             .expect("repo");
         let table = repo.get_table("items").await.expect("table");
-        let interner = table.interner().get().await.expect("interner");
+        let interner = table.interner_for_test().get().await.expect("interner");
         for field in ["label", "v", "by_v"] {
             interner
                 .touch_ind(field)
@@ -567,7 +567,7 @@ async fn matrix_secondary_index_lookup() {
             create_index("by_v", "items").repo("main").field("v"),
         );
         execute(db, &batch).await;
-        let interner = table.interner().get().await.expect("post-DDL interner");
+        let interner = table.interner_for_test().get().await.expect("post-DDL interner");
         let pairs: Vec<_> = ["label", "v", "by_v"]
             .into_iter()
             .map(|name| {
@@ -620,7 +620,7 @@ async fn matrix_preinterned_field_leader_names() {
         .get_repo("main")
         .expect("repo");
     let table = repo.get_table("items").await.expect("table");
-    let interner = table.interner().get().await.expect("interner");
+    let interner = table.interner_for_test().get().await.expect("interner");
     let collision = interner
         .touch_ind("follower_only")
         .expect("preintern field")
@@ -636,7 +636,7 @@ async fn matrix_preinterned_field_leader_names() {
         .expect("repo");
     let leader_table = leader_repo.get_table("items").await.expect("table");
     let leader_interner = leader_table
-        .interner()
+        .interner_for_test()
         .get()
         .await
         .expect("leader interner");

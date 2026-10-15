@@ -375,7 +375,11 @@ async fn build_filter_context<'a>(
     table: &'a TableManager,
     resolved_refs: &'a TMap<String, shamir_db::query::read::QueryResult>,
 ) -> Result<FilterContext<'a>, BatchError> {
-    let interner = table.interner().get().await.map_err(wrap_engine_err)?;
+    let interner = table
+        .info_store_read_view()
+        .interner_get()
+        .await
+        .map_err(wrap_engine_err)?;
     Ok(FilterContext::new(interner, resolved_refs))
 }
 
@@ -457,10 +461,11 @@ fn pagination_mode_for_query(query: &ReadQuery) -> PaginationMode {
 /// why this can't just delegate to `try_plan_keyset_seek` itself even
 /// setting `where` aside.
 ///
-/// Built ENTIRELY from methods already `pub` today: `TableManager::
-/// sorted_indexes()`, `SortedIndexManager::find_by_field`, and
-/// `shamir_engine::query::filter::resolve::intern_field_path` — no new `pub`
-/// method needs to be added anywhere (see the design memo §1.2 for the full
+/// Built ENTIRELY from APIs already reachable today: `TableManager::
+/// sorted_index_definition_by_field` (the S5c-X read-only view over
+/// `SortedIndexManager::find_by_field`) and
+/// `shamir_engine::query::filter::resolve::intern_field_path`
+/// (see the design memo §1.2 for the full
 /// grep proof of reachability from this crate).
 ///
 /// Wired as the FIRST branch in `create_cursor`'s mode-decision chain: when
@@ -487,7 +492,7 @@ fn probe_index_seek_eligible(
         return None;
     }
     let field_path = intern_field_path(&item.field, interner)?;
-    let def = table.sorted_indexes().find_by_field(&field_path)?;
+    let def = table.sorted_index_definition_by_field(&field_path)?;
     Some(def.name_interned)
 }
 
@@ -524,7 +529,7 @@ fn probe_index_seek_eligible(
 /// `Bin`, see above), or a matched rule whose `keyset_safe` proof is
 /// `false`.
 fn order_by_column_is_schema_typed_scalar(table: &TableManager, field: &[String]) -> bool {
-    let Some(registry) = table.validator_registry_ref() else {
+    let Some(registry) = table.validator_registry() else {
         return false;
     };
     let bindings = table.validator_bindings();
@@ -1221,7 +1226,7 @@ impl ShamirDbHandler {
         // does not (`validator_registry` is a plain `Option<Arc<..>>` field,
         // not shared via `ArcSwap`/a cell, so it only affects whichever
         // clone it's set on). Without this, `order_by_column_is_schema_typed_
-        // scalar`'s `table.validator_registry_ref()` would always see `None`
+        // scalar`'s `table.validator_registry()` would always see `None`
         // regardless of what's bound via `bind_validator`, silently
         // defeating the new schema-typed-scalar gate for every cursor. Reads
         // don't otherwise need the registry (validators are a write-path
@@ -1312,7 +1317,7 @@ impl ShamirDbHandler {
         // data-shape edge cases those two `Keyset`-specific safety probes
         // exist for). Only when `probe_index_seek_eligible` returns `None`
         // does the existing chain run, completely unchanged.
-        let interner = match table.interner().get().await {
+        let interner = match table.info_store_read_view().interner_get().await {
             Ok(i) => i,
             Err(e) => return error_response(&wrap_engine_err(e)),
         };

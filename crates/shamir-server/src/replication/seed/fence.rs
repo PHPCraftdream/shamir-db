@@ -121,8 +121,8 @@ pub(crate) async fn publications(home: &ShamirDb) -> Result<Vec<CreatePublicatio
         .await
         .map_err(|e| ReplError::Transport(e.to_string()))?;
     let interner = table
-        .interner()
-        .get()
+        .info_store_read_view()
+        .interner_get()
         .await
         .map_err(|e| ReplError::Transport(e.to_string()))?;
     let refs = shamir_collections::TMap::default();

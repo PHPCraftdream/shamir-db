@@ -557,7 +557,7 @@ async fn partial_history_failure_stops_supervisor_and_refuses_paused_resume() {
             .get_table(first)
             .await
             .unwrap()
-            .counter()
+            .counter_for_test()
             .get()
             .await
             .unwrap(),
@@ -722,7 +722,7 @@ async fn healthy_destination_can_resume_persisted_reopen_state() {
 
 async fn sub_state(follower: &ShamirDb, name: &str) -> Option<String> {
     let table = follower.system_store().subscriptions_table().await.ok()?;
-    let interner = table.interner().get().await.ok()?;
+    let interner = table.interner_for_test().get().await.ok()?;
     let refs = shamir_db::types::common::new_map();
     let ctx = shamir_db::query::filter::FilterContext::new(interner, &refs);
     let query = shamir_db::query::read::ReadQuery::new("subscriptions").filter(

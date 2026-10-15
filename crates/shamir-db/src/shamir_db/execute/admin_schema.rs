@@ -158,8 +158,8 @@ async fn validate_unique_indexes(
 
             let field_name = &rule.path[0];
             let interner = self_table
-                .interner()
-                .get()
+                .info_store_read_view()
+                .interner_get()
                 .await
                 .map_err(|e| err_code("internal_error", e.to_string()))?;
             let has_index = interner.get_ind(field_name).is_some_and(|field_id| {
@@ -295,8 +295,8 @@ async fn validate_fk_indexes(
             // Resolve the ref_field to an interner id and check for a
             // single-field index.
             let interner = ref_table
-                .interner()
-                .get()
+                .info_store_read_view()
+                .interner_get()
                 .await
                 .map_err(|e| err_code("internal_error", e.to_string()))?;
             let has_index = interner.get_ind(&fk.ref_field).is_some_and(|field_id| {

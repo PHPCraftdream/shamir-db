@@ -33,10 +33,9 @@ impl ShamirDb {
         let mut records = 0usize;
         for name in repo.list_table_names() {
             let table = repo.get_table(&name).await?;
-            let mvcc = table
-                .mvcc_store()
+            let stream = table
+                .mvcc_snapshot_stream(1, version)
                 .ok_or_else(|| DbError::Storage("seed catalogue requires MVCC".into()))?;
-            let stream = mvcc.snapshot_stream(1, version);
             futures::pin_mut!(stream);
             while let Some(batch) = stream.next().await {
                 for (key, value) in batch? {

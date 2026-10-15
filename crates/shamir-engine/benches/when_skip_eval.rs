@@ -163,7 +163,7 @@ async fn make_repo_with_rows(n_rows: usize) -> RepoInstance {
         vec![TableConfig::new("rows".to_string())],
     );
     let table = instance.get_table("rows").await.unwrap();
-    let interner = table.interner().get().await.unwrap();
+    let interner = table.interner_for_test().get().await.unwrap();
     let touch = |s: &str| match interner.touch_ind(s).unwrap() {
         shamir_types::core::interner::TouchInd::Exists(k)
         | shamir_types::core::interner::TouchInd::New(k) => k,

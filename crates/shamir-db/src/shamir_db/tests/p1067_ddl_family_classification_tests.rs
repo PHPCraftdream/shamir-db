@@ -96,7 +96,7 @@ async fn p1067_drop_regular_classified_as_drop_hash_index() {
         .await
         .unwrap();
 
-    let status = ddl_op_log::read_op_status(table.info_store(), &op_id)
+    let status = ddl_op_log::read_op_status(&table.info_store_for_test(), &op_id)
         .await
         .unwrap()
         .expect("status should exist");
@@ -131,7 +131,7 @@ async fn p1067_drop_unique_classified_as_drop_unique_hash_index() {
         .await
         .unwrap();
 
-    let status = ddl_op_log::read_op_status(table.info_store(), &op_id)
+    let status = ddl_op_log::read_op_status(&table.info_store_for_test(), &op_id)
         .await
         .unwrap()
         .expect("status should exist");
@@ -168,7 +168,7 @@ async fn p1067_drop_sorted_classified_as_drop_sorted_index() {
         .await
         .unwrap();
 
-    let status = ddl_op_log::read_op_status(table.info_store(), &op_id)
+    let status = ddl_op_log::read_op_status(&table.info_store_for_test(), &op_id)
         .await
         .unwrap()
         .expect("status should exist");
@@ -204,7 +204,7 @@ async fn p1067_drop_index2_classified_as_drop_index2() {
         .await
         .unwrap();
 
-    let status = ddl_op_log::read_op_status(table.info_store(), &op_id)
+    let status = ddl_op_log::read_op_status(&table.info_store_for_test(), &op_id)
         .await
         .unwrap()
         .expect("status should exist");
@@ -244,7 +244,7 @@ async fn p1067_rename_regular_classified_as_rename_hash_index() {
         .await
         .unwrap();
 
-    let status = ddl_op_log::read_op_status(table.info_store(), &op_id)
+    let status = ddl_op_log::read_op_status(&table.info_store_for_test(), &op_id)
         .await
         .unwrap()
         .expect("status should exist");
@@ -280,7 +280,7 @@ async fn p1067_rename_unique_classified_as_rename_unique_hash_index() {
         .await
         .unwrap();
 
-    let status = ddl_op_log::read_op_status(table.info_store(), &op_id)
+    let status = ddl_op_log::read_op_status(&table.info_store_for_test(), &op_id)
         .await
         .unwrap()
         .expect("status should exist");
@@ -319,7 +319,7 @@ async fn p1067_rename_sorted_classified_as_rename_sorted_index() {
         .await
         .unwrap();
 
-    let status = ddl_op_log::read_op_status(table.info_store(), &op_id)
+    let status = ddl_op_log::read_op_status(&table.info_store_for_test(), &op_id)
         .await
         .unwrap()
         .expect("status should exist");
@@ -359,7 +359,7 @@ async fn p1067_rename_index2_classified_as_rename_index2() {
         .await
         .unwrap();
 
-    let status = ddl_op_log::read_op_status(table.info_store(), &op_id)
+    let status = ddl_op_log::read_op_status(&table.info_store_for_test(), &op_id)
         .await
         .unwrap()
         .expect(
@@ -413,7 +413,7 @@ async fn p1067_sorted_drop_op_id_round_trips() {
         "returned op_id must equal the client-supplied request_id"
     );
 
-    let status = ddl_op_log::read_op_status(table.info_store(), &client_supplied_id)
+    let status = ddl_op_log::read_op_status(&table.info_store_for_test(), &client_supplied_id)
         .await
         .unwrap()
         .expect(
@@ -455,7 +455,7 @@ async fn p1067_sorted_rename_op_id_round_trips() {
         "returned op_id must equal the client-supplied request_id"
     );
 
-    let status = ddl_op_log::read_op_status(table.info_store(), &client_supplied_id)
+    let status = ddl_op_log::read_op_status(&table.info_store_for_test(), &client_supplied_id)
         .await
         .unwrap()
         .expect(
