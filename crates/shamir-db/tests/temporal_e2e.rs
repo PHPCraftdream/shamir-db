@@ -17,6 +17,7 @@
 //! Mirrors `retention_ddl.rs` / `purge_history.rs` / `changes_since.rs` /
 //! `changefeed_e2e.rs` for setup, MvccStore access, and clock control.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::timeout;
