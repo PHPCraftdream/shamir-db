@@ -20,13 +20,21 @@ the covered repository are also refused (PR8b): client reads
 pulls fail with the wire code `resync_required` (non-retryable), so stale
 state is never served. Status/`ReplicationStatus`/`ListSubscriptions`
 (state + `status_message`) and DESCRIBE stay readable. There is no
-automatic reseed: the operator sees the quarantine via status, installs
-the replacement seed per this runbook, and only then `Resume`s the
-subscription — a plain `Resume` of a still-quarantined subscription is
-REFUSED with a typed `resync_required` error naming this runbook, because
-the row durably records which `seed_receipt` the quarantine began from
-(`resync_from_receipt`) and `Resume` requires a NEW receipt to have been
-bound since (the first read after that succeeds).
+automatic reseed. The quarantine is carried by a durable marker on the
+subscription row (`quarantined`, plus the `resync_from_receipt` baseline
+recording which `seed_receipt` the quarantine began from), so it survives
+Pause/SetProfile: Pause and SetProfile of a quarantined subscription are
+REFUSED with the same typed `resync_required` error, as is a plain
+`Resume`. The recovery procedure is:
+
+1. See the quarantine via status/list (reads and local pulls of the covered
+   repos are refused; Pause/SetProfile/Resume are refused too).
+2. `DROP` the quarantined subscription (deletes the row and its marker).
+3. Install the replacement seed with the real installer
+   (`replication-seed-export` / `-install`) — it creates a FRESH paused
+   subscription bound to the NEW `seed_receipt` (no marker).
+4. `Resume` the fresh subscription — it succeeds, and the first read
+   succeeds.
 
 Read this together with:
 
