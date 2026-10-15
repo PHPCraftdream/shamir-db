@@ -72,7 +72,9 @@ fn tx_read_quarantine_refusal(
 /// into an async fn inflates that future, and under nested
 /// `Batch`/`ForEach` recursion the future is held on the stack once per
 /// recursion level — the Round-12 Windows stack overflow traced to exactly
-/// that. Keep this helper sync.
+/// that. Keep this helper sync and out of line: once inlined, its locals
+/// still widen the caller's `poll` frame, which nests once per level.
+#[inline(never)]
 pub(crate) fn tx_read_quarantine_refusal_for_request(
     shamir: &ShamirDb,
     db_name: &str,
