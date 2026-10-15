@@ -84,6 +84,7 @@ impl ShamirAdminExecutor {
             .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
 
         let table_name = &op.start_migration;
+        let dst_repo_name = &op.dst_repo;
         // Atomic counter + ns timestamp + random suffix — collision-free
         // even under concurrent start_migration on same table within
         // the same nanosecond.
@@ -107,14 +108,6 @@ impl ShamirAdminExecutor {
             )));
         }
 
-        // Get source table's data_store + info_store
-        let src_table = db
-            .get_table(&op.repo, table_name)
-            .await
-            .map_err(|e| err(e.to_string()))?;
-        let src_data = Arc::clone(src_table.table().data_store());
-        let info_store = Arc::clone(src_table.info_store());
-
         // Resolve dst engine factory
         let dst_factory = match op.dst_engine.as_str() {
             "in_memory" => BoxRepoFactory::in_memory(),
@@ -125,43 +118,35 @@ impl ShamirAdminExecutor {
                 )))
             }
         };
-        let dst_repo_name = &op.dst_repo;
-        let dst_config =
-            RepoConfig::new(dst_repo_name, dst_factory).add_table(TableConfig::new(table_name));
-        db.add_repo(dst_config)
-            .await
-            .map_err(|e| err(e.to_string()))?;
+        // Resolve the registered source and reject a destination name collision
+        // before constructing its private instance (including factory recovery).
+        let src_repo = db
+            .get_repo(&op.repo)
+            .ok_or_else(|| err(format!("Repository '{}' not found", op.repo)))?;
+        if db.has_repo(dst_repo_name) {
+            return Err(err(format!(
+                "Repository '{}' already exists",
+                dst_repo_name
+            )));
+        }
+        let dst_repo = crate::engine::repo::RepoInstance::from_factory(
+            dst_repo_name.clone(),
+            dst_factory,
+            vec![TableConfig::new(table_name)],
+        )
+        .await
+        .map_err(|e| err(e.to_string()))?;
 
-        // From here on, any error must clean up dst repo
-        // (rollback-on-failure). We pull dst_data + run snapshot/drain;
-        // a `?` aborts the whole batch, but the dst repo would leak.
-        // So unwind explicitly on failure.
+        // Both permits cover table initialization, snapshot/drain and publication.
         let run = async {
-            // S5c-X PR6b-2a: dual write-admission. Acquire BOTH repositories'
-            // permits in stable identity order (admit_pair sorts by unique
-            // instance token), so A→B and B→A migrations can never deadlock.
-            // The destination repo was created and fully initialized above;
-            // PR6b-2c will move that construction behind the permit. Both
-            // permits are held for the whole `run` block.
-            let src_repo = db.get_repo(&op.repo).ok_or_else(|| {
-                shamir_storage::error::DbError::NotFound(format!(
-                    "Repository '{}' not found",
-                    op.repo
-                ))
-            })?;
-            let dst_repo = db.get_repo(dst_repo_name).ok_or_else(|| {
-                shamir_storage::error::DbError::NotFound(format!(
-                    "Repository '{dst_repo_name}' not found"
-                ))
-            })?;
-            // Held to the end of the block; the underscore-prefixed names are
-            // ownership markers, not unused results.
-            let (_src_permit, _dst_permit) =
+            let (src_permit, dst_permit) =
                 RepoWriteDomain::admit_pair(src_repo.write_domain(), dst_repo.write_domain())
                     .await
                     .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
-
-            let dst_table = db.get_table(dst_repo_name, table_name).await?;
+            let src_table = src_repo.get_table_admitted(table_name, &src_permit).await?;
+            let src_data = Arc::clone(src_table.table().data_store());
+            let info_store = Arc::clone(src_table.info_store());
+            let dst_table = dst_repo.get_table_admitted(table_name, &dst_permit).await?;
             let dst_data = Arc::clone(dst_table.table().data_store());
             // Local RAII owns preparation; failed/cancelled replication clears
             // the bit. This guard does not retain ddl_admission at cutover.
@@ -221,21 +206,24 @@ impl ShamirAdminExecutor {
             }
             coord.mark_cutover_ready().await?;
             coord.persist_state().await?;
-            Ok::<_, shamir_storage::error::DbError>(coord)
+            Ok::<_, shamir_storage::error::DbError>((coord, src_permit, dst_permit))
         }
         .await;
 
-        let coord = match run {
-            Ok(c) => c,
+        let (coord, src_permit, dst_permit) = match run {
+            Ok(result) => result,
             Err(e) => {
-                // Roll back: remove the orphan dst repo.
-                db.remove_repo(dst_repo_name).await;
+                // The private destination is dropped on failure; it was never published.
                 return Err(err_code(
                     e.code().unwrap_or("migration_start_error"),
                     e.to_string(),
                 ));
             }
         };
+        db.publish_repo_admitted(dst_repo, &dst_permit)
+            .map_err(|e| err(e.to_string()))?;
+        drop(src_permit);
+        drop(dst_permit);
 
         let phase = coord.phase().await.to_string();
         self.shamir
@@ -357,11 +345,33 @@ impl ShamirAdminExecutor {
                     .value(),
             )
         };
-        // Only the serialized finaliser owns cleanup. A cancelled waiter must
-        // not take or release another operation's freeze. No await separates
-        // lock acquisition from the synchronous ownership transfer.
+        // Resolve coordinator state before admission; then acquire repository
+        // permits before finalisation, consistently with rollback.
+        let initial_state = coord.state().await;
+        let src_repo = db
+            .get_repo(&initial_state.src_repo)
+            .ok_or_else(|| err(format!("Repository '{}' not found", initial_state.src_repo)))?;
+        let dst_repo = db
+            .get_repo(&initial_state.dst_repo)
+            .ok_or_else(|| err(format!("Repository '{}' not found", initial_state.dst_repo)))?;
+        let (src_permit, dst_permit) =
+            RepoWriteDomain::admit_pair(src_repo.write_domain(), dst_repo.write_domain())
+                .await
+                .map_err(|e| err(e.to_string()))?;
         let _finalisation = coord.lock_finalisation().await;
+        let locked_state = coord.state().await;
+        if locked_state.id != initial_state.id
+            || locked_state.src_repo != initial_state.src_repo
+            || locked_state.dst_repo != initial_state.dst_repo
+            || locked_state.table_name != initial_state.table_name
+        {
+            return Err(err_code(
+                "migration_state_changed",
+                "Migration target changed while acquiring admission".to_string(),
+            ));
+        }
         let source_freeze = coord.take_migration_freeze();
+
         if source_freeze.is_none() && coord.phase().await != MigrationPhase::Committed {
             return Err(err_code(
                 "migration_restart_required",
@@ -392,14 +402,31 @@ impl ShamirAdminExecutor {
             })?;
         }
         let cutover_state = coord.state().await;
-        let src_table = db
-            .get_table(&cutover_state.src_repo, &cutover_state.table_name)
+        if cutover_state.id != initial_state.id
+            || cutover_state.src_repo != initial_state.src_repo
+            || cutover_state.dst_repo != initial_state.dst_repo
+            || cutover_state.table_name != initial_state.table_name
+        {
+            return Err(err_code(
+                "migration_state_changed",
+                "Migration target changed while acquiring admission".to_string(),
+            ));
+        }
+        let src_table = src_repo
+            .get_table_admitted(&initial_state.table_name, &src_permit)
+            .await
+            .map_err(|e| err(e.to_string()))?;
+        let dst_table = dst_repo
+            .get_table_admitted(&initial_state.table_name, &dst_permit)
             .await
             .map_err(|e| err(e.to_string()))?;
         let (src_barrier, src_write_lock) = src_table
-            .begin_write_barrier(crate::engine::index::write_barrier_flags::INDEX2_CREATE)
-            .await
-            .map_err(|e| err(e.to_string()))?;
+            .begin_write_barrier_admitted(
+                crate::engine::index::write_barrier_flags::INDEX2_CREATE,
+                &src_permit,
+            )
+            .await;
+
         let tail = coord
             .final_drain_and_commit()
             .await
@@ -429,22 +456,16 @@ impl ShamirAdminExecutor {
         //
         // After this point the migration is committed. New writes
         // go through `insert()` → `index2_on_insert` automatically.
-        let dst_table = db
-            .get_table(&state.dst_repo, &state.table_name)
+        let dst_table = dst_repo
+            .get_table_admitted(&state.table_name, &dst_permit)
             .await
             .map_err(|e| err(e.to_string()))?;
-
-        // C2 (collapse-main bridge): the migration coordinator copies
-        // records straight into the dst `data_store` (raw, bypassing the
-        // version log). Reads now resolve from the log, so seed the dst
-        // log from `data_store` here so migrated records become current
-        // versions in the log (visible to reads AND to the log-backed
-        // `bulk_populate_index2` seam). The coordinator will write the log
-        // directly in a later slice (C5); this bridges it at cutover.
         let (barrier, write_lock) = dst_table
-            .begin_write_barrier(crate::engine::index::write_barrier_flags::INDEX2_CREATE)
-            .await
-            .map_err(|e| err(e.to_string()))?;
+            .begin_write_barrier_admitted(
+                crate::engine::index::write_barrier_flags::INDEX2_CREATE,
+                &dst_permit,
+            )
+            .await;
         let progress = coord
             .finalisation_progress()
             .await
@@ -542,6 +563,8 @@ impl ShamirAdminExecutor {
         }
         drop(write_lock);
         drop(barrier);
+        drop(src_permit);
+        drop(dst_permit);
 
         // Keep the durable completed marker as an idempotent retry receipt;
         // only the transient active-map entry is cleaned up.
@@ -597,9 +620,59 @@ impl ShamirAdminExecutor {
                 )
             })?
             .clone();
+        let db = self
+            .shamir
+            .get_db(&self.db_name)
+            .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
+        let state = coord.state().await;
+        let src_repo = db
+            .get_repo(&state.src_repo)
+            .ok_or_else(|| err(format!("Repository '{}' not found", state.src_repo)))?;
+        let dst_repo = db.get_repo(&state.dst_repo);
+        let src_permit;
+        let dst_permit;
+        if let Some(dst_repo) = dst_repo {
+            (src_permit, dst_permit) =
+                RepoWriteDomain::admit_pair(src_repo.write_domain(), dst_repo.write_domain())
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+            let _src_table = src_repo
+                .get_table_admitted(&state.table_name, &src_permit)
+                .await
+                .map_err(|e| err(e.to_string()))?;
+            let _dst_table = dst_repo
+                .get_table_admitted(&state.table_name, &dst_permit)
+                .await
+                .map_err(|e| err(e.to_string()))?;
+        } else {
+            src_permit = src_repo
+                .write_domain()
+                .admit()
+                .await
+                .map_err(|e| err(e.to_string()))?;
+            let _src_table = src_repo
+                .get_table_admitted(&state.table_name, &src_permit)
+                .await
+                .map_err(|e| err(e.to_string()))?;
+            dst_permit = None;
+        }
+        // Commit and rollback use the same repository-permit -> finalisation-lock order.
         let _finalisation = coord.lock_finalisation().await;
+        let locked_state = coord.state().await;
+        if locked_state.id != state.id
+            || locked_state.src_repo != state.src_repo
+            || locked_state.dst_repo != state.dst_repo
+            || locked_state.table_name != state.table_name
+        {
+            return Err(err_code(
+                "migration_state_changed",
+                "Migration target changed while acquiring admission".to_string(),
+            ));
+        }
         let _source_freeze = coord.take_migration_freeze();
         coord.rollback().await.map_err(|e| err(e.to_string()))?;
+        drop(dst_permit);
+        drop(src_permit);
         self.shamir
             .active_migrations()
             .remove(&op.rollback_migration);

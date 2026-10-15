@@ -130,6 +130,7 @@ async fn corrupt_table_counter(data_dir: &Path) {
     // so we must re-register it before we can open the TableManager.
     if !db.has_table("main", "test_table") {
         db.create_table("main", "test_table")
+            .await
             .expect("create_table for corruption");
     }
     let repo = db.get_repo("main").expect("main repo exists");

@@ -18,7 +18,7 @@ use shamir_storage::types::{KvOp, RecordKey};
 use shamir_tx::CompletionState;
 use shamir_wal::WalOpV2;
 
-use crate::repo::RepoInstance;
+use crate::repo::{RepoInstance, RepoWritePermit};
 
 /// Test-only injection (CRIT-1 / #435): when set to a non-zero `txn_id`,
 /// `seed_version_cache_for_entry` returns a synthetic error for the matching
@@ -54,13 +54,30 @@ pub(crate) static FAIL_HISTORY_SEED_TX_ID: std::sync::atomic::AtomicU64 =
 ///   broadcasts to all tables' info_stores).
 /// InternerOverlayMerge is deferred (Stage 5 — repo-level interner).
 pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
+    let permit = repo
+        .write_domain()
+        .admit()
+        .await
+        .map_err(|error| DbError::Internal(error.to_string()))?;
+    replay_v2_op_admitted(op, repo, &permit).await
+}
+
+async fn replay_v2_op_admitted(
+    op: &WalOpV2,
+    repo: &RepoInstance,
+    permit: &RepoWritePermit,
+) -> DbResult<()> {
+    repo.write_domain().debug_check_permit(permit);
     match op {
         WalOpV2::Put {
             table_id_interned,
             rid,
             body,
         } => {
-            let tbl = match repo.table_by_token(*table_id_interned).await? {
+            let tbl = match repo
+                .table_by_token_admitted(*table_id_interned, permit)
+                .await?
+            {
                 Some(t) => t,
                 None => {
                     log::warn!(
@@ -88,7 +105,10 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
             table_id_interned,
             rid,
         } => {
-            let tbl = match repo.table_by_token(*table_id_interned).await? {
+            let tbl = match repo
+                .table_by_token_admitted(*table_id_interned, permit)
+                .await?
+            {
                 Some(t) => t,
                 None => {
                     log::warn!(
@@ -151,7 +171,10 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
             value,
         } => {
             if *table_id_interned != 0 {
-                let tbl = match repo.table_by_token(*table_id_interned).await? {
+                let tbl = match repo
+                    .table_by_token_admitted(*table_id_interned, permit)
+                    .await?
+                {
                     Some(t) => t,
                     None => {
                         log::warn!(
@@ -177,7 +200,7 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
             // for_entry` first-err pattern already used in this crate.
             let mut first_err: Option<DbError> = None;
             for name in repo.list_table_names() {
-                match repo.get_table(&name).await {
+                match repo.get_table_admitted(&name, permit).await {
                     Ok(tbl) => {
                         if let Err(e) = tbl
                             .info_store()
@@ -212,7 +235,10 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
             key,
         } => {
             if *table_id_interned != 0 {
-                let tbl = match repo.table_by_token(*table_id_interned).await? {
+                let tbl = match repo
+                    .table_by_token_admitted(*table_id_interned, permit)
+                    .await?
+                {
                     Some(t) => t,
                     None => {
                         log::warn!(
@@ -236,7 +262,7 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
             // NotFound is the expected norm and benign — but a genuine I/O
             // error on any table propagates.
             for name in repo.list_table_names() {
-                match repo.get_table(&name).await {
+                match repo.get_table_admitted(&name, permit).await {
                     Ok(tbl) => match tbl.info_store().remove(key.clone().into()).await {
                         Ok(_) | Err(DbError::NotFound(_)) => {}
                         Err(e) => return Err(e),
@@ -326,7 +352,8 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
 ///    floor survives the *next* restart. Once step 2 clears the markers,
 ///    the inflight pre-scan in step 1 would find nothing, so the durable
 ///    marker must now carry the recovered max or the floor would rewind.
-pub async fn recover_inflight_v2(repo: &RepoInstance) -> DbResult<usize> {
+pub async fn recover_inflight_v2(repo: &RepoInstance, permit: &RepoWritePermit) -> DbResult<usize> {
+    repo.write_domain().debug_check_permit(permit);
     // Step 1: build the gate before replay so its version floor is seeded
     // from the inflight commit_versions while the markers still exist.
     let gate = repo.tx_gate().await?;
@@ -385,7 +412,7 @@ pub async fn recover_inflight_v2(repo: &RepoInstance) -> DbResult<usize> {
         Vec::with_capacity(entries.len());
     for entry in &entries {
         max_replayed = max_replayed.max(entry.commit_version);
-        replay_v2_entry(entry, repo).await?;
+        replay_v2_entry_admitted(entry, repo, permit).await?;
         finalized.push((entry.txn_id, entry.commit_version));
     }
 
@@ -481,6 +508,20 @@ pub async fn recover_inflight_v2(repo: &RepoInstance) -> DbResult<usize> {
 /// so without this the version cache would report `0` for recovered keys.
 /// See [`seed_version_cache_for_entry`] for why this matters.
 pub async fn replay_v2_entry(entry: &shamir_wal::WalEntryV2, repo: &RepoInstance) -> DbResult<()> {
+    let permit = repo
+        .write_domain()
+        .admit()
+        .await
+        .map_err(|error| DbError::Internal(error.to_string()))?;
+    replay_v2_entry_admitted(entry, repo, &permit).await
+}
+
+async fn replay_v2_entry_admitted(
+    entry: &shamir_wal::WalEntryV2,
+    repo: &RepoInstance,
+    permit: &RepoWritePermit,
+) -> DbResult<()> {
+    repo.write_domain().debug_check_permit(permit);
     // A4-recovery + Stage I keystone: apply the interner delta BEFORE
     // replaying data ops. The ops' record bytes reference intern-ids from the
     // delta, so the interner must know them before any decode/replay occurs.
@@ -506,14 +547,14 @@ pub async fn replay_v2_entry(entry: &shamir_wal::WalEntryV2, repo: &RepoInstance
     }
 
     for op in &entry.ops {
-        replay_v2_op(op, repo).await.map_err(|e| {
+        replay_v2_op_admitted(op, repo, permit).await.map_err(|e| {
             shamir_storage::error::DbError::Internal(format!(
                 "replay tx {} op failed: {}",
                 entry.txn_id, e
             ))
         })?;
     }
-    seed_version_cache_for_entry(entry, repo).await?;
+    seed_version_cache_for_entry(entry, repo, permit).await?;
     Ok(())
 }
 
@@ -558,6 +599,7 @@ pub async fn replay_v2_entry(entry: &shamir_wal::WalEntryV2, repo: &RepoInstance
 async fn seed_version_cache_for_entry(
     entry: &shamir_wal::WalEntryV2,
     repo: &RepoInstance,
+    permit: &RepoWritePermit,
 ) -> DbResult<()> {
     let v = entry.commit_version;
 

@@ -10,9 +10,14 @@ use shamir_storage::error::DbError;
 use shamir_storage::types::{RecordKey, Store};
 use std::sync::Arc;
 
-/// Persist the given validator bindings into the table's info-twin
+/// Persist the given validator bindings into the table's info-twin.
+///
+/// S5c-X: `pub(crate)` — the permit-free persistence bypass is closed at
+/// the crate boundary. The ONLY legitimate writers are the admitted
+/// binding paths in `table_manager_validators.rs` (under a repo permit)
+/// and in-crate tests.
 /// under `MetaKey::Validators`.
-pub async fn save_validators_metadata(
+pub(crate) async fn save_validators_metadata(
     bindings: &[crate::validator::ValidatorBinding],
     info_store: &Arc<dyn Store>,
 ) -> Result<(), DbError> {

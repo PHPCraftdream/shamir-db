@@ -560,7 +560,7 @@ impl TableManager {
     }
 
     /// S5c-X admitted twin — caller already holds repo admission.
-    pub(crate) async fn repair_admitted(&self, permit: &RepoWritePermit) -> DbResult<RepairReport> {
+    pub async fn repair_admitted(&self, permit: &RepoWritePermit) -> DbResult<RepairReport> {
         let start = Instant::now();
 
         let regular_defs: Vec<IndexDefinition> = self.index_manager_ref().iter_indexes().collect();

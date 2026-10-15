@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use crate::{DbError, DbResult};
 use shamir_engine::query::filter::{query_value_to_filter_value as qv_to_fv_literal, FilterValue};
+use shamir_engine::repo::RepoWritePermit;
 use shamir_engine::validator::schema::{FieldRule, SchemaValidator};
 use shamir_engine::validator::{RecordValidator, ValidatorBinding, WriteOp};
 use shamir_types::core::interner::Interner;
@@ -507,6 +508,36 @@ impl ShamirDb {
         schema_validator_id: RecordId,
         rules: Vec<FieldRule>,
     ) -> DbResult<()> {
+        let repo = self
+            .get_db(db_name)
+            .and_then(|db| db.get_repo(repo_name))
+            .ok_or_else(|| {
+                DbError::NotFound(format!("Repository '{db_name}.{repo_name}' not found"))
+            })?;
+        let permit =
+            repo.write_domain().admit().await.map_err(|e| {
+                DbError::Internal(format!("repository write admission failed: {e}"))
+            })?;
+        self.compile_table_schema_admitted(
+            db_name,
+            repo_name,
+            table_name,
+            schema_validator_id,
+            rules,
+            &permit,
+        )
+        .await
+    }
+
+    pub(crate) async fn compile_table_schema_admitted(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+        schema_validator_id: RecordId,
+        rules: Vec<FieldRule>,
+        permit: &RepoWritePermit,
+    ) -> DbResult<()> {
         let name = schema_validator_name(db_name, repo_name, table_name);
         let validator: Arc<dyn RecordValidator> = Arc::new(SchemaValidator::new(rules));
 
@@ -578,7 +609,13 @@ impl ShamirDb {
         let activation_result: DbResult<()> = async {
             // Auto-bind to the table (idempotent — the table's info-twin
             // deduplicates by validator_id).
-            let table = self.get_table(db_name, repo_name, table_name).await?;
+            let db = self
+                .get_db(db_name)
+                .ok_or_else(|| DbError::NotFound(format!("Database '{db_name}' not found")))?;
+            let repo = db
+                .get_repo(repo_name)
+                .ok_or_else(|| DbError::NotFound(format!("Repository '{repo_name}' not found")))?;
+            let table = repo.get_table_admitted(table_name, permit).await?;
             let binding = ValidatorBinding {
                 validator_id: schema_validator_id,
                 ops: vec![
@@ -590,7 +627,9 @@ impl ShamirDb {
                 .into(),
                 priority: SCHEMA_VALIDATOR_PRIORITY,
             };
-            table.add_validator_binding(binding).await?;
+            table
+                .add_validator_binding_admitted(binding, permit)
+                .await?;
 
             // Track in the global registry's bound_in.
             let table_ref = Self::table_ref_str(db_name, repo_name, table_name);

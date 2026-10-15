@@ -187,19 +187,21 @@ pub(super) async fn apply_table_retention(
     let db = shamir
         .get_db(db_name)
         .ok_or_else(|| err(format!("Database '{}' not found", db_name)))?;
-    // Force the lazy MvccStore entry for this table.
-    let _ = db
-        .get_table(repo, table)
-        .await
-        .map_err(|e| err(e.to_string()))?;
     let repo_instance = db
         .get_repo(repo)
         .ok_or_else(|| err(format!("Repository '{}' not found", repo)))?;
+    let permit = repo_instance
+        .write_domain()
+        .admit()
+        .await
+        .map_err(|e| err(e.to_string()))?;
+    let _table = repo_instance
+        .get_table_admitted(table, &permit)
+        .await
+        .map_err(|e| err(e.to_string()))?;
     let token = crate::engine::table::table_token_for(table);
-    if let Some(entry) = repo_instance.per_table_mvcc().get_sync(&token) {
-        entry
-            .set_retention(policy)
-            .map_err(|e| err(e.to_string()))?;
+    if let Some(mvcc) = repo_instance.per_table_mvcc().get_sync(&token) {
+        mvcc.set_retention(policy).map_err(err)?;
     }
     Ok(())
 }

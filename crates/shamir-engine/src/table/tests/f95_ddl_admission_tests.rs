@@ -497,13 +497,24 @@ async fn f95_admission_mutex_is_per_table_not_global() {
         let (_guard, _lock) = y.begin_write_barrier(REGULAR_INDEX_CREATE).await.unwrap();
         y_done_c.store(true, Ordering::SeqCst);
     });
-    // Release X's DDL. (S5c-X: Y's DDL waits on the SHARED per-repo
+    // BOUNDED spin asserting Y has NOT completed while X still holds the
+    // repo permit — the ordering assertion the S5c-X cutover had lost. In a
+    // single-threaded runtime the spins give ddl_y chances to run; it can
+    // only finish after X's permit is released, so `!y_done` must hold for
+    // the whole budget. (Fails pre-S5c-X: with no shared domain, Y completes
+    // freely and this assertion trips.)
+    for _ in 0..500 {
+        assert!(
+            !y_done.load(Ordering::SeqCst),
+            "Y's DDL completed while X still held the shared repo write permit"
+        );
+        tokio::task::yield_now().await;
+    }
+
+    // Release X's DDL — ONCE. (S5c-X: Y's DDL waits on the SHARED per-repo
     // write-admission domain while X holds it — repo-level serialization
     // is by design; `ddl_admission` remains the per-table serializer ON
     // TOP of it. Both DDLs must still complete within the deadlock bound.)
-    release_x.notify_one();
-
-    // Release X's DDL.
     release_x.notify_one();
 
     tokio::time::timeout(BOUND, async {
