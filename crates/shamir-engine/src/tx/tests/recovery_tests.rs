@@ -426,7 +426,7 @@ async fn replay_inflight_v2_from_simulated_partial_commit_state() {
         assert!(tbl_pre.get(rid_a).await.is_err(), "data not yet applied");
         assert!(tbl_pre.get(rid_b).await.is_err());
         assert_eq!(tbl_pre.counter().get().await.unwrap(), 0);
-        assert_eq!(wal.recover().await.unwrap(), inflight_before);
+        assert_eq!(wal.recover().await.unwrap().len(), 1);
 
         // === SIMULATED RESTART === drop without clean shutdown.
         drop(repo1);

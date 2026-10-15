@@ -1297,9 +1297,8 @@ async fn delta_chunk_count(tbl: &TableManager) -> usize {
     let id = backend.descriptor().id;
     let keyspace = format!("__vec_snap__{id}");
     let prefix = format!("{keyspace}.delta.");
-    let mut stream = tbl
-        .info_store_read_view()
-        .scan_prefix_stream(prefix.into(), 100);
+    let view = tbl.info_store_read_view();
+    let mut stream = view.scan_prefix_stream(prefix.into(), 100);
     let mut count = 0usize;
     while let Some(batch) = stream.next().await {
         if let Ok(rows) = batch {

@@ -62,8 +62,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Notify;
-
 use crate::index::write_barrier_flags::{
     INDEX2_CREATE, REGULAR_INDEX_CREATE, SCHEMA_ACTIVATION, SORTED_INDEX_CREATE,
     UNIQUE_INDEX_CREATE,
