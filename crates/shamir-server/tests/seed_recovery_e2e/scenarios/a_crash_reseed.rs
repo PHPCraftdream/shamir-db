@@ -30,6 +30,10 @@ const WAIT: Duration = Duration::from_secs(30);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn seed_e2e_a_kill_resync_offline_seed_resume_converges() {
+    Box::pin(seed_e2e_a_kill_resync_offline_seed_resume_converges_body()).await;
+}
+
+async fn seed_e2e_a_kill_resync_offline_seed_resume_converges_body() {
     let root = tempfile::tempdir().expect("temp root");
     let leader_dir = root.path().join("leader");
     let artifact_dir = root.path().join("seed-artifact");
