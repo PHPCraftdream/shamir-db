@@ -452,7 +452,8 @@ impl ShamirAdminExecutor {
             .get_table_admitted(&initial_state.table_name, &src_permit)
             .await
             .map_err(|e| err(e.to_string()))?;
-        let dst_table = dst_repo
+        // Existence check under the destination permit; the handle is unused.
+        let _dst_table = dst_repo
             .get_table_admitted(&initial_state.table_name, &dst_permit)
             .await
             .map_err(|e| err(e.to_string()))?;
