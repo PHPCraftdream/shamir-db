@@ -2,8 +2,6 @@
 //! replication destination fail closed; status/DESCRIBE stay readable;
 //! healthy and non-replicated repos are unaffected.
 
-use std::sync::atomic::Ordering;
-
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl::{
     alter_subscription, drop_subscription, list_subscriptions, repl_scope, replication_profile,
@@ -112,23 +110,6 @@ async fn pause_subscription(
     b.id(id);
     b.try_op("alt", alter_subscription(sub).pause()).unwrap();
     shamir.execute("testdb", &b.to_request_via_msgpack()).await
-}
-
-/// Order-independent drop guard for the negative-control seam (nextest runs
-/// all tests of one binary in-process).
-struct SeamGuard;
-
-impl SeamGuard {
-    fn set() -> Self {
-        SKIP_READ_QUARANTINE_FOR_TEST.store(true, Ordering::Relaxed);
-        SeamGuard
-    }
-}
-
-impl Drop for SeamGuard {
-    fn drop(&mut self) {
-        SKIP_READ_QUARANTINE_FOR_TEST.store(false, Ordering::Relaxed);
-    }
 }
 
 /// Reads succeed before quarantine; a Get (SELECT) and a Query batch both
@@ -580,9 +561,12 @@ async fn t7_negative_control_seam_serves_stale_reads() {
     quarantine(&shamir, "sub", "prof", "main").await;
     assert!(read_users(&shamir, "main").await.is_err());
 
-    let _guard = SeamGuard::set();
-    let resp = read_users(&shamir, "main").await.unwrap();
-    assert_eq!(resp.results["r"].records.len(), 1);
+    SKIP_READ_QUARANTINE_FOR_TEST
+        .scope(true, async {
+            let resp = read_users(&shamir, "main").await.unwrap();
+            assert_eq!(resp.results["r"].records.len(), 1);
+        })
+        .await;
 }
 
 /// A temporal (`Temporal::AsOf`) batch read of a quarantined repo is refused

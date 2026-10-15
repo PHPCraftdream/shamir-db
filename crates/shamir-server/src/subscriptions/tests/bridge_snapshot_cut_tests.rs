@@ -23,15 +23,26 @@ use tokio::sync::{mpsc, Notify};
 use super::super::bridge::bridge_task;
 use super::super::registry::SubscriptionRegistry;
 
-struct Hook {
-    stage: u8,
-    cut: AtomicU64,
-    entered: Notify,
-    release: Notify,
+pub(crate) struct Hook {
+    pub(crate) stage: u8,
+    pub(crate) cut: AtomicU64,
+    pub(crate) entered: Notify,
+    pub(crate) release: Notify,
+}
+
+impl Hook {
+    pub(crate) fn new(stage: u8) -> Self {
+        Self {
+            stage,
+            cut: AtomicU64::new(0),
+            entered: Notify::new(),
+            release: Notify::new(),
+        }
+    }
 }
 
 tokio::task_local! {
-    static HOOK: Arc<Hook>;
+    pub(crate) static HOOK: Arc<Hook>;
 }
 
 // Task-local, so unrelated bridges and parallel tests cannot consume the hook.
@@ -134,6 +145,7 @@ async fn interleaving(stage: u8, resume: bool) {
         .await
         .unwrap();
     let registry = Arc::new(SubscriptionRegistry::new());
+    registry.try_reserve().unwrap();
     registry.try_reserve().unwrap();
     registry.reserve_pending(1);
     let (frames, mut observed) = mpsc::channel(32);
@@ -378,6 +390,7 @@ async fn snapshot_preserves_actor_filters_and_authorization() {
     .unwrap();
     let registry = Arc::new(SubscriptionRegistry::new());
     registry.try_reserve().unwrap();
+    registry.try_reserve().unwrap();
     registry.reserve_pending(1);
     let (frames, mut observed) = mpsc::channel(8);
     let mut bridge = Box::pin(bridge_task(
@@ -434,6 +447,7 @@ async fn snapshot_reauthorizes_reads_as_subscriber() {
         .await
         .unwrap();
     let registry = Arc::new(SubscriptionRegistry::new());
+    registry.try_reserve().unwrap();
     registry.try_reserve().unwrap();
     registry.reserve_pending(1);
     let (frames, mut observed) = mpsc::channel(8);
@@ -498,6 +512,7 @@ async fn cancellation_during_snapshot_releases_pin_and_registry() {
         .await
         .unwrap();
     let registry = Arc::new(SubscriptionRegistry::new());
+    registry.try_reserve().unwrap();
     registry.try_reserve().unwrap();
     registry.reserve_pending(1);
     let (frames, mut observed) = mpsc::channel(8);

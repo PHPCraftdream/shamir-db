@@ -1195,7 +1195,7 @@ fn main() {
             let shamir = block_on_setup(&rt, seeded(100, false));
             let _subscriber = rt
                 .block_on(shamir.subscribe_changelog("bench", "main"))
-                .ok();
+                .expect("subscribe to benchmark changefeed");
             let req = req_insert.clone();
             h.bench_async("changefeed_overhead/with_subscriber", move || {
                 let s = Arc::clone(&shamir);
@@ -1206,10 +1206,8 @@ fn main() {
             });
         }
     }
-
     // ═══════════════════════════════════════════════════════════════════
     // B1b — validator dispatch overhead
-    // ═══════════════════════════════════════════════════════════════════
 
     {
         use shamir_db::engine::validator::WriteOp;

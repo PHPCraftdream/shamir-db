@@ -149,6 +149,7 @@ pub struct ShamirDb {
     /// `execute::admin_replication`). Ordinary READS of a covered repo fail
     /// closed; one atomic load on the healthy path.
     pub(crate) resync_quarantine: Arc<ResyncQuarantineCache>,
+    pub(crate) changelog_receivers: Arc<super::revocation::registry::ChangelogReceiverRegistry>,
 }
 
 impl ShamirDb {
@@ -239,6 +240,9 @@ impl ShamirDb {
             experimental_migration_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             durability_policy: durability,
             resync_quarantine: Arc::new(ResyncQuarantineCache::new()),
+            changelog_receivers: Arc::new(
+                super::revocation::registry::ChangelogReceiverRegistry::new(),
+            ),
         };
 
         if seed {
@@ -520,7 +524,7 @@ impl ShamirDb {
 
         // S5c-X PR8b: rebuild the read-quarantine cache from the persisted
         // subscription rows — a `resync_required` quarantine survives restart.
-        shamir.refresh_resync_quarantine_cache().await;
+        shamir.refresh_resync_quarantine_cache().await?;
 
         Ok(shamir)
     }
