@@ -99,8 +99,9 @@ async fn p1087_phase_b_a_correctness_no_concurrency() {
     let index_def = build_index_def(&tbl, "idx_name", "name").await;
 
     // Run Phase B+A.
+    let permit = tbl.write_domain.admit().await.unwrap();
     let result = tbl
-        .phase_b_a_backfill("idx_name", index_def.clone(), 1000)
+        .phase_b_a_backfill("idx_name", index_def.clone(), 1000, &permit)
         .await
         .expect("phase_b_a_backfill should succeed");
     let _result = result.expect("online build should succeed");
@@ -142,8 +143,10 @@ async fn p1087_phase_b_a_concurrent_write_captured_in_dirty_set() {
     let tbl_clone = tbl.clone();
     let index_def_clone = index_def.clone();
     let backfill_task = tokio::spawn(async move {
+        // Uncontended: nothing else holds this table's repo domain here.
+        let permit = tbl_clone.write_domain.admit().await.unwrap();
         tbl_clone
-            .phase_b_a_backfill("idx_name", index_def_clone, 1)
+            .phase_b_a_backfill("idx_name", index_def_clone, 1, &permit)
             .await
     });
 
@@ -201,8 +204,9 @@ async fn p1087_phase_b_a_fallback_when_changefeed_absent() {
     let name_interned = index_def.name_interned;
 
     // Run Phase B+A.
+    let permit = tbl.write_domain.admit().await.unwrap();
     let result = tbl
-        .phase_b_a_backfill("idx_name", index_def, 1000)
+        .phase_b_a_backfill("idx_name", index_def, 1000, &permit)
         .await
         .expect("phase_b_a_backfill should not error");
     assert!(

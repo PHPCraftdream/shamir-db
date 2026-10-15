@@ -18,6 +18,7 @@ use crate::index2::descriptor::IndexDescriptor;
 use crate::index2::kind::{
     FunctionalConfig, IndexKind, VectorBackendRef, VectorConfig, VectorMetric, VectorQuantization,
 };
+use crate::repo::RepoWritePermit;
 use shamir_index::base_index::index_keys::{build_index_key_from_record, build_posting_key};
 use smallvec::SmallVec;
 
@@ -42,14 +43,26 @@ impl TableManager {
         &self,
         op: &shamir_query_types::admin::CreateIndexOp,
     ) -> DbResult<()> {
+        let permit = self.admit().await?;
+        self.create_index_v2_admitted(op, &permit).await
+    }
+
+    /// S5c-X admitted twin — caller already holds repo admission.
+    pub(crate) async fn create_index_v2_admitted(
+        &self,
+        op: &shamir_query_types::admin::CreateIndexOp,
+        permit: &RepoWritePermit,
+    ) -> DbResult<()> {
         let index_type = op.index_type.as_deref().unwrap_or("btree");
         if index_type == "btree" {
             let paths: Vec<String> = op.fields.iter().map(|segs| segs.join(".")).collect();
             let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
             return if op.unique {
-                self.create_unique_index(&op.create_index, &path_refs).await
+                self.create_unique_index_admitted(&op.create_index, &path_refs, permit)
+                    .await
             } else {
-                self.create_index(&op.create_index, &path_refs).await
+                self.create_index_admitted(&op.create_index, &path_refs, permit)
+                    .await
             };
         }
 
@@ -152,7 +165,7 @@ impl TableManager {
         // in the backend-build match and the backfill), so a failed create
         // never leaves writers stuck on the barrier forever.
         let (_barrier, _uwl_guard) = self
-            .begin_write_barrier(crate::index::write_barrier_flags::INDEX2_CREATE)
+            .begin_write_barrier_admitted(crate::index::write_barrier_flags::INDEX2_CREATE, permit)
             .await;
 
         // R0-C (#1010): cross-family name-uniqueness preflight, done WHILE
@@ -634,6 +647,17 @@ impl TableManager {
     /// `false` a moment before the flag went up — same pattern as
     /// `create_index_v2`.
     pub async fn create_index(&self, name: &str, paths: &[&str]) -> DbResult<()> {
+        let permit = self.admit().await?;
+        self.create_index_admitted(name, paths, &permit).await
+    }
+
+    /// S5c-X admitted twin — caller already holds repo admission.
+    pub(crate) async fn create_index_admitted(
+        &self,
+        name: &str,
+        paths: &[&str],
+        permit: &RepoWritePermit,
+    ) -> DbResult<()> {
         let mut index_def = self.build_index_definition(name, paths).await?;
         // #1003: mark THIS index's name as in-flight for the rest of the
         // method body (RAII guard, dropped on every exit path including an
@@ -669,12 +693,12 @@ impl TableManager {
         // table or a directly-constructed test table), fall back to the whole-barrier
         // path below.
         match self
-            .phase_b_a_backfill(name, index_def.clone(), 1000)
+            .phase_b_a_backfill(name, index_def.clone(), 1000, permit)
             .await?
         {
             Some(phase_ba) => {
                 // Online build available: run Phase C+D (catch-up and publish).
-                self.phase_c_d_catchup_and_publish(index_def.name_interned, phase_ba)
+                self.phase_c_d_catchup_and_publish(index_def.name_interned, phase_ba, permit)
                     .await
             }
             None => {
@@ -689,7 +713,10 @@ impl TableManager {
                 // table. See `TableManager::begin_write_barrier` and
                 // `writer_drain_barrier`'s "F-70" doc section.
                 let (_barrier, _uwl_guard) = self
-                    .begin_write_barrier(crate::index::write_barrier_flags::REGULAR_INDEX_CREATE)
+                    .begin_write_barrier_admitted(
+                        crate::index::write_barrier_flags::REGULAR_INDEX_CREATE,
+                        permit,
+                    )
                     .await;
                 // R0-C (#1010): cross-family name-uniqueness preflight, done WHILE
                 // holding `ddl_admission` (via the barrier above) — see
@@ -757,6 +784,18 @@ impl TableManager {
     /// # Errors
     /// Returns `DbError::UniqueIndexCreationFailed` if duplicate values exist.
     pub async fn create_unique_index(&self, name: &str, paths: &[&str]) -> DbResult<()> {
+        let permit = self.admit().await?;
+        self.create_unique_index_admitted(name, paths, &permit)
+            .await
+    }
+
+    /// S5c-X admitted twin — caller already holds repo admission.
+    pub(crate) async fn create_unique_index_admitted(
+        &self,
+        name: &str,
+        paths: &[&str],
+        permit: &RepoWritePermit,
+    ) -> DbResult<()> {
         // #1003: the in-flight guard is installed inside `create_unique_index_body`
         // (right after the name is interned), not here — see that method's
         // matching comment. This wrapper only acquires the barrier+lock.
@@ -773,7 +812,10 @@ impl TableManager {
         // Tables without unique indexes pay this harmlessly (no contention);
         // this is a low-frequency DDL operation.
         let (_barrier, _uwl_guard) = self
-            .begin_write_barrier(crate::index::write_barrier_flags::UNIQUE_INDEX_CREATE)
+            .begin_write_barrier_admitted(
+                crate::index::write_barrier_flags::UNIQUE_INDEX_CREATE,
+                permit,
+            )
             .await;
         self.create_unique_index_body(name, paths).await
     }
@@ -892,13 +934,27 @@ impl TableManager {
     ///
     /// #1051: accepts `op_id` minted at dispatch time for crash recovery status writes.
     pub async fn drop_index(&self, name: &str, op_id: Option<RecordId>) -> DbResult<bool> {
+        let permit = self.admit().await?;
+        self.drop_index_admitted(name, op_id, &permit).await
+    }
+
+    /// S5c-X admitted twin — caller already holds repo admission.
+    pub(crate) async fn drop_index_admitted(
+        &self,
+        name: &str,
+        op_id: Option<RecordId>,
+        permit: &RepoWritePermit,
+    ) -> DbResult<bool> {
         let name_id = self.intern_string(name).await?;
         // P0-3 (#959): drain-then-lock — raise the REGULAR_INDEX_CREATE bit,
         // drain in-flight fast-path writers, then take `unique_write_lock`.
         // See `create_index`'s matching acquisition for the F-70 ordering
         // rationale.
         let (_barrier, _uwl_guard) = self
-            .begin_write_barrier(crate::index::write_barrier_flags::REGULAR_INDEX_CREATE)
+            .begin_write_barrier_admitted(
+                crate::index::write_barrier_flags::REGULAR_INDEX_CREATE,
+                permit,
+            )
             .await;
         let op_id_str = op_id.map(|id| id.to_string());
         // #1069: pass index_name so IndexManager can write terminal status BEFORE tombstone clear
@@ -918,10 +974,24 @@ impl TableManager {
     ///
     /// #1051: accepts `op_id` minted at dispatch time for crash recovery status writes.
     pub async fn drop_unique_index(&self, name: &str, op_id: Option<RecordId>) -> DbResult<bool> {
+        let permit = self.admit().await?;
+        self.drop_unique_index_admitted(name, op_id, &permit).await
+    }
+
+    /// S5c-X admitted twin — caller already holds repo admission.
+    pub(crate) async fn drop_unique_index_admitted(
+        &self,
+        name: &str,
+        op_id: Option<RecordId>,
+        permit: &RepoWritePermit,
+    ) -> DbResult<bool> {
         let name_id = self.intern_string(name).await?;
         // P0-3 (#959): drain-then-lock — see `drop_index`'s doc.
         let (_barrier, _uwl_guard) = self
-            .begin_write_barrier(crate::index::write_barrier_flags::UNIQUE_INDEX_CREATE)
+            .begin_write_barrier_admitted(
+                crate::index::write_barrier_flags::UNIQUE_INDEX_CREATE,
+                permit,
+            )
             .await;
         let op_id_str = op_id.map(|id| id.to_string());
         // #1069: pass index_name so IndexManager can write terminal status BEFORE tombstone clear
@@ -1003,6 +1073,17 @@ impl TableManager {
     ///
     /// #1051: accepts `op_id` minted at dispatch time for crash recovery status writes.
     pub async fn drop_index2(&self, name: &str, op_id: Option<RecordId>) -> DbResult<bool> {
+        let permit = self.admit().await?;
+        self.drop_index2_admitted(name, op_id, &permit).await
+    }
+
+    /// S5c-X admitted twin — caller already holds repo admission.
+    pub(crate) async fn drop_index2_admitted(
+        &self,
+        name: &str,
+        op_id: Option<RecordId>,
+        permit: &RepoWritePermit,
+    ) -> DbResult<bool> {
         let interner = self.interner.get().await?;
         // `get_ind` is a pure lookup (does NOT mint a new id), so dropping a
         // name that was never interned cannot pollute the interner.
@@ -1010,7 +1091,7 @@ impl TableManager {
             return Ok(false);
         };
         let (_barrier, _uwl_guard) = self
-            .begin_write_barrier(crate::index::write_barrier_flags::INDEX2_CREATE)
+            .begin_write_barrier_admitted(crate::index::write_barrier_flags::INDEX2_CREATE, permit)
             .await;
         let Some(backend) = self.index2_registry.get_by_name(name_key.id()).await else {
             return Ok(false);
@@ -1674,7 +1755,10 @@ impl TableManager {
     /// re-sweep idempotently. Calling recovery twice in a row (without a
     /// restart in between) is also a no-op on the second call because the
     /// first call cleared the tombstone.
-    pub(crate) async fn recover_hash_renames(&self) -> DbResult<()> {
+    pub(crate) async fn recover_hash_renames_admitted(
+        &self,
+        permit: &RepoWritePermit,
+    ) -> DbResult<()> {
         let regular_renames = self.index_manager.load_renaming_list(false).await?;
         let unique_renames = self.index_manager.load_renaming_list(true).await?;
 
@@ -1702,19 +1786,23 @@ impl TableManager {
                              state by a crashed create — dropping partial and re-creating",
                             entry.new_name
                         );
-                        self.drop_index(&entry.new_name, None).await?;
-                        self.create_index(&entry.new_name, &path_refs).await?;
+                        self.drop_index_admitted(&entry.new_name, None, permit)
+                            .await?;
+                        self.create_index_admitted(&entry.new_name, &path_refs, permit)
+                            .await?;
                     }
                     // else Ready — already done, leave as-is
                 }
             } else {
                 // New doesn't exist — crash before/during create. Re-run.
-                self.create_index(&entry.new_name, &path_refs).await?;
+                self.create_index_admitted(&entry.new_name, &path_refs, permit)
+                    .await?;
             }
 
             // Step 2: drop old if still present.
             if self.index_exists(&entry.old_name).await {
-                self.drop_index(&entry.old_name, None).await?;
+                self.drop_index_admitted(&entry.old_name, None, permit)
+                    .await?;
             }
 
             // #1000 test seam — park here (this entry fully reconciled, the
@@ -1788,8 +1876,9 @@ impl TableManager {
                         // Drop + re-create under the barrier (mirrors the
                         // rename path's barrier+lock span).
                         let (_barrier, _uwl_guard) = self
-                            .begin_write_barrier(
+                            .begin_write_barrier_admitted(
                                 crate::index::write_barrier_flags::UNIQUE_INDEX_CREATE,
+                                permit,
                             )
                             .await;
                         self.index_manager
@@ -1805,13 +1894,14 @@ impl TableManager {
                 // present) or crash after drop (SEVERE: both absent).
                 // Either way: create new. The backfill checks uniqueness —
                 // see the doc comment above for why this is safe.
-                self.create_unique_index(&entry.new_name, &path_refs)
+                self.create_unique_index_admitted(&entry.new_name, &path_refs, permit)
                     .await?;
             }
 
             // Step 2: drop old if still present.
             if self.unique_index_exists(&entry.old_name).await {
-                self.drop_unique_index(&entry.old_name, None).await?;
+                self.drop_unique_index_admitted(&entry.old_name, None, permit)
+                    .await?;
             }
 
             // #1000 test seam — same between-entries pause point as the
@@ -2081,6 +2171,19 @@ impl TableManager {
         new_name: &str,
         op_id: Option<shamir_types::types::record_id::RecordId>,
     ) -> DbResult<()> {
+        let permit = self.admit().await?;
+        self.rename_index_admitted(old_name, new_name, op_id, &permit)
+            .await
+    }
+
+    /// S5c-X admitted twin — caller already holds repo admission.
+    pub(crate) async fn rename_index_admitted(
+        &self,
+        old_name: &str,
+        new_name: &str,
+        op_id: Option<shamir_types::types::record_id::RecordId>,
+        permit: &RepoWritePermit,
+    ) -> DbResult<()> {
         let old_id = self.intern_string(old_name).await?;
         let new_id = self.intern_string(new_name).await?;
 
@@ -2189,7 +2292,8 @@ impl TableManager {
                 .await?;
 
             // Create the new index FIRST (registers + backfills under new_id).
-            self.create_index(new_name, &path_refs).await?;
+            self.create_index_admitted(new_name, &path_refs, permit)
+                .await?;
 
             // #997 test seam — park here (tombstone written, new index created,
             // old index NOT yet dropped) if a test installed the pause hook.
@@ -2343,7 +2447,10 @@ impl TableManager {
             // completes strictly before this span begins, regardless of how
             // long the span itself then holds the lock for.
             let (_barrier, _uwl_guard) = self
-                .begin_write_barrier(crate::index::write_barrier_flags::UNIQUE_INDEX_CREATE)
+                .begin_write_barrier_admitted(
+                    crate::index::write_barrier_flags::UNIQUE_INDEX_CREATE,
+                    permit,
+                )
                 .await;
 
             self.index_manager
@@ -2465,7 +2572,10 @@ impl TableManager {
         // DROP/RENAME on the same table's sorted family.
         if is_sorted {
             let (_barrier, _uwl_guard) = self
-                .begin_write_barrier(crate::index::write_barrier_flags::SORTED_INDEX_CREATE)
+                .begin_write_barrier_admitted(
+                    crate::index::write_barrier_flags::SORTED_INDEX_CREATE,
+                    permit,
+                )
                 .await;
             // #1067: thread op_id + the resolved string names down so the
             // terminal DdlOpStatus write (inside rename_index_sorted, before
@@ -2506,7 +2616,10 @@ impl TableManager {
         // `recover_index2_renames` on the next table open.
         if is_index2 {
             let (_barrier, _uwl_guard) = self
-                .begin_write_barrier(crate::index::write_barrier_flags::INDEX2_CREATE)
+                .begin_write_barrier_admitted(
+                    crate::index::write_barrier_flags::INDEX2_CREATE,
+                    permit,
+                )
                 .await;
 
             // #1066: `new_id` (interned above via `self.intern_string(new_name)`
@@ -2677,6 +2790,7 @@ impl TableManager {
         name: &str,
         index_def: crate::index::index_definition::IndexDefinition,
         batch_size: usize,
+        permit: &RepoWritePermit,
     ) -> DbResult<Option<PhaseBAResult>> {
         let name_interned = index_def.name_interned;
 
@@ -2686,7 +2800,10 @@ impl TableManager {
         // `unique_write_lock`. This order is load-bearing (see F-70 deadlock
         // proof in `writer_drain_barrier.rs` and `f70_lock_order_inversion_tests.rs`).
         let (_barrier, _uwl_guard) = self
-            .begin_write_barrier(crate::index::write_barrier_flags::REGULAR_INDEX_CREATE)
+            .begin_write_barrier_admitted(
+                crate::index::write_barrier_flags::REGULAR_INDEX_CREATE,
+                permit,
+            )
             .await;
 
         // R0-C (#1010): cross-family name-uniqueness preflight, done WHILE
@@ -2878,6 +2995,7 @@ impl TableManager {
         &self,
         name_interned: u64,
         phase_ba: PhaseBAResult,
+        permit: &RepoWritePermit,
     ) -> DbResult<()> {
         let PhaseBAResult { guard, pin } = phase_ba;
 
@@ -2907,7 +3025,10 @@ impl TableManager {
 
         // ── Phase D: short publish barrier ──────────────────────────────────
         let (_barrier, _uwl_guard) = self
-            .begin_write_barrier(crate::index::write_barrier_flags::REGULAR_INDEX_CREATE)
+            .begin_write_barrier_admitted(
+                crate::index::write_barrier_flags::REGULAR_INDEX_CREATE,
+                permit,
+            )
             .await;
 
         // P-1060: test seam - pause after barrier acquisition, before final residual drain.

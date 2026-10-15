@@ -241,7 +241,8 @@ impl ShamirAdminExecutor {
                         .begin_write_barrier(
                             shamir_engine::index::write_barrier_flags::REGULAR_INDEX_CREATE,
                         )
-                        .await;
+                        .await
+                        .map_err(|e| err(e.to_string()))?;
                     // base_index regular indexes.
                     let regular_ids: Vec<u64> = table
                         .index_manager_ref()

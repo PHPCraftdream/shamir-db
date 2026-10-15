@@ -27,6 +27,7 @@ use shamir_types::types::value::InnerValue;
 use crate::index::index_definition::IndexDefinition;
 use crate::index::sorted_index_manager::{SortedIndexDefinition, SortedIndexManager};
 use crate::index2::state::IndexState;
+use crate::repo::RepoWritePermit;
 use crate::table::record_cow::RecordCow;
 
 use super::table_manager::TableManager;
@@ -554,6 +555,12 @@ impl TableManager {
     ///    scans data and re-adds entries.
     /// 4. Recount the counter from the data store.
     pub async fn repair(&self) -> DbResult<RepairReport> {
+        let permit = self.admit().await?;
+        self.repair_admitted(&permit).await
+    }
+
+    /// S5c-X admitted twin — caller already holds repo admission.
+    pub(crate) async fn repair_admitted(&self, permit: &RepoWritePermit) -> DbResult<RepairReport> {
         let start = Instant::now();
 
         let regular_defs: Vec<IndexDefinition> = self.index_manager_ref().iter_indexes().collect();
@@ -589,7 +596,10 @@ impl TableManager {
         // barrier) — so acquiring it here once cannot re-enter the
         // non-reentrant `tokio::sync::Mutex`.
         let (_barrier, _uwl_guard) = self
-            .begin_write_barrier(crate::index::write_barrier_flags::REGULAR_INDEX_CREATE)
+            .begin_write_barrier_admitted(
+                crate::index::write_barrier_flags::REGULAR_INDEX_CREATE,
+                permit,
+            )
             .await;
 
         for def in &regular_defs {
@@ -699,7 +709,12 @@ impl TableManager {
         while let Some(batch) = recount_stream.next().await {
             counter_after += batch?.len() as u64;
         }
-        self.counter().set_to(counter_after).await?;
+        // S5c-X: we already hold repo admission (`permit`) — use the
+        // admitted twin; the public `set_to` would re-admit and
+        // self-deadlock on the non-reentrant domain mutex.
+        self.counter()
+            .set_to_admitted(counter_after, permit)
+            .await?;
 
         // F-50 Step 3b — optionally heal any index2 backend stuck in
         // `Building` (or, R0-D / #1013, `Failed`) state. The self-healing

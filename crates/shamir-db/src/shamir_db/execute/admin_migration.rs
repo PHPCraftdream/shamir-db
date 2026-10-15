@@ -10,6 +10,7 @@ use crate::engine::migration::{
 };
 use crate::engine::repo::repo_types::BoxRepoFactory;
 use crate::engine::repo::RepoConfig;
+use crate::engine::repo::RepoWriteDomain;
 use crate::engine::table::TableConfig;
 use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;
@@ -136,6 +137,30 @@ impl ShamirAdminExecutor {
         // a `?` aborts the whole batch, but the dst repo would leak.
         // So unwind explicitly on failure.
         let run = async {
+            // S5c-X PR6b-2a: dual write-admission. Acquire BOTH repositories'
+            // permits in stable identity order (admit_pair sorts by unique
+            // instance token), so A→B and B→A migrations can never deadlock.
+            // The destination repo was created and fully initialized above;
+            // PR6b-2c will move that construction behind the permit. Both
+            // permits are held for the whole `run` block.
+            let src_repo = db.get_repo(&op.repo).ok_or_else(|| {
+                shamir_storage::error::DbError::NotFound(format!(
+                    "Repository '{}' not found",
+                    op.repo
+                ))
+            })?;
+            let dst_repo = db.get_repo(dst_repo_name).ok_or_else(|| {
+                shamir_storage::error::DbError::NotFound(format!(
+                    "Repository '{dst_repo_name}' not found"
+                ))
+            })?;
+            // Held to the end of the block; the underscore-prefixed names are
+            // ownership markers, not unused results.
+            let (_src_permit, _dst_permit) =
+                RepoWriteDomain::admit_pair(src_repo.write_domain(), dst_repo.write_domain())
+                    .await
+                    .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+
             let dst_table = db.get_table(dst_repo_name, table_name).await?;
             let dst_data = Arc::clone(dst_table.table().data_store());
             // Local RAII owns preparation; failed/cancelled replication clears
@@ -373,7 +398,8 @@ impl ShamirAdminExecutor {
             .map_err(|e| err(e.to_string()))?;
         let (src_barrier, src_write_lock) = src_table
             .begin_write_barrier(crate::engine::index::write_barrier_flags::INDEX2_CREATE)
-            .await;
+            .await
+            .map_err(|e| err(e.to_string()))?;
         let tail = coord
             .final_drain_and_commit()
             .await
@@ -417,7 +443,8 @@ impl ShamirAdminExecutor {
         // directly in a later slice (C5); this bridges it at cutover.
         let (barrier, write_lock) = dst_table
             .begin_write_barrier(crate::engine::index::write_barrier_flags::INDEX2_CREATE)
-            .await;
+            .await
+            .map_err(|e| err(e.to_string()))?;
         let progress = coord
             .finalisation_progress()
             .await

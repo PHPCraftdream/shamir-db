@@ -6,6 +6,7 @@ use super::group_commit::GroupCommit;
 use super::repo_types::{BoxRepo, BoxRepoFactory, RepoFactory};
 use crate::query::batch::BatchError;
 use crate::query::write::WriteResult;
+use crate::repo::changelog_store::write_domain::RepoWriteDomain;
 use crate::repo::durability_policy::{DurabilityMetrics, DurabilityPolicy};
 use crate::table::interner_manager::InternerManager;
 #[cfg(test)]
@@ -156,6 +157,9 @@ pub struct RepoInstance {
     #[cfg(test)]
     background_drainer_disabled: Arc<std::sync::atomic::AtomicBool>,
     wal_segment_bytes: u64,
+    /// S5c-X PR6b-2a: repository write-admission domain, constructed BEFORE
+    /// any recovery/publication; every clone shares one instance.
+    pub(super) write_domain: Arc<RepoWriteDomain>,
 }
 
 /// Bundle of the per-repo changefeed and the store it journals into.
@@ -207,6 +211,7 @@ impl Clone for RepoInstance {
             #[cfg(test)]
             background_drainer_disabled: Arc::clone(&self.background_drainer_disabled),
             wal_segment_bytes: self.wal_segment_bytes,
+            write_domain: Arc::clone(&self.write_domain),
         }
     }
 }
@@ -243,6 +248,7 @@ impl RepoInstance {
         let tables: TDashMap<String, Arc<OnceCell<TableManager>>> = new_dash_map_wc(100);
 
         let policy = DurabilityPolicy::default().for_wal_backend(wal_dir.is_some());
+        let write_domain = RepoWriteDomain::new(name.clone());
         Self {
             name,
             commit_visibility_wait: VisibilityWait::Strict,
@@ -283,6 +289,7 @@ impl RepoInstance {
             #[cfg(test)]
             background_drainer_disabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             wal_segment_bytes: super::durability_policy::effective_wal_segment_bytes(),
+            write_domain,
         }
     }
 
@@ -415,6 +422,12 @@ impl RepoInstance {
         Ok(Self::from_box_repo_with_wal_dir(
             name, repo, configs, wal_dir,
         ))
+    }
+
+    /// S5c-X PR6b-2a: this repository's write-admission domain (one per
+    /// repository instance, shared by every clone).
+    pub fn write_domain(&self) -> &Arc<RepoWriteDomain> {
+        &self.write_domain
     }
 
     /// Repository name.
@@ -628,7 +641,13 @@ impl RepoInstance {
         // Complete ALL asynchronous/fallible setup before publication.
         // __data__ is inert under MVCC; __info__ keeps its wrappers.
         let data_store = fully_unwrap_store(&data_store).await;
-        let tbl = TableManager::create(table_name.to_string(), data_store, info_store).await?;
+        let tbl = TableManager::create_with_domain(
+            table_name.to_string(),
+            data_store,
+            info_store,
+            Arc::clone(&self.write_domain),
+        )
+        .await?;
         let repo_interner = self.repo_interner().await?;
         let mvcc = Arc::new(shamir_tx::MvccStore::new(history_store, Arc::clone(&gate)));
 
@@ -732,7 +751,12 @@ impl RepoInstance {
     /// registered table changes `list_table_names()`'s membership, which
     /// `discover_restrict_refs`/`discover_action_refs` scan when rebuilding
     /// the cache.
-    pub fn add_table(&self, config: TableConfig) {
+    ///
+    /// S5c-X PR6b-2a: NOT part of the public admission surface — callers
+    /// must go through the admitted twin
+    /// [`add_table_admitted`](Self::add_table_admitted)
+    /// (write_domain_membership.rs) after acquiring the repo permit.
+    pub(crate) fn add_table(&self, config: TableConfig) {
         // Same synchronous DDL lock order as remove_table. This closes the
         // config/reverse-token re-add window without holding guards over await.
         let _entry = self.tables.entry(config.name.clone());
@@ -747,7 +771,12 @@ impl RepoInstance {
     /// F-28 Step 4 (#831): invalidates the cached reverse-FK map on an
     /// actual removal — same rationale as `add_table` (table membership
     /// changed).
-    pub fn remove_table(&self, table_name: &str) -> bool {
+    ///
+    /// S5c-X PR6b-2a: NOT part of the public admission surface — callers
+    /// must go through the admitted twin
+    /// [`remove_table_admitted`](Self::remove_table_admitted)
+    /// (write_domain_membership.rs) after acquiring the repo permit.
+    pub(crate) fn remove_table(&self, table_name: &str) -> bool {
         // DDL-only synchronous critical section: tables -> configs -> scc.
         // Keep the table shard exclusive until owned MVCC cleanup completes,
         // so a replacement initializer cannot publish in the removal window.

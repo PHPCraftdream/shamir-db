@@ -165,7 +165,8 @@ async fn begin_schema_activation_barrier(
         .map_err(|e| err_code("internal_error", e.to_string()))?;
     let (barrier, uwl_guard) = handle
         .begin_write_barrier(crate::engine::index::write_barrier_flags::SCHEMA_ACTIVATION)
-        .await;
+        .await
+        .map_err(|e| err_code("internal_error", e.to_string()))?;
     Ok((handle, barrier, uwl_guard))
 }
 

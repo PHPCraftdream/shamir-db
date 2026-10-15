@@ -180,7 +180,7 @@ async fn wait_flag(flag: &AtomicBool) {
 /// DDL-A's shape: acquire the write barrier, record "entered", pause
 /// (simulating mid-backfill), then drop guards and record "done".
 async fn ddl_a(x: TableManager, bit: u8, seq: Arc<Sequencer>) {
-    let (guard, lock) = x.begin_write_barrier(bit).await;
+    let (guard, lock) = x.begin_write_barrier(bit).await.unwrap();
     seq.log.record(EV_A_ENTERED);
     seq.a_entered.store(true, Ordering::SeqCst);
 
@@ -202,7 +202,7 @@ async fn ddl_a(x: TableManager, bit: u8, seq: Arc<Sequencer>) {
 /// while DDL-A holds it), record "entered", pause, then drop and record
 /// "done".
 async fn ddl_b(x: TableManager, bit: u8, seq: Arc<Sequencer>) {
-    let (guard, lock) = x.begin_write_barrier(bit).await;
+    let (guard, lock) = x.begin_write_barrier(bit).await.unwrap();
     seq.log.record(EV_B_ENTERED);
     seq.b_entered.store(true, Ordering::SeqCst);
 
@@ -433,7 +433,10 @@ async fn f95_admission_mutex_does_not_reintroduce_f70_deadlock() {
         // someone to wait for (otherwise drain is instant and the test
         // doesn't exercise the wait-while-holding-admission path).
         wait_flag(&a_drain_held_c).await;
-        let (_barrier, _lock) = x_for_ddl.begin_write_barrier(REGULAR_INDEX_CREATE).await;
+        let (_barrier, _lock) = x_for_ddl
+            .begin_write_barrier(REGULAR_INDEX_CREATE)
+            .await
+            .unwrap();
         ddl_done_c.store(true, Ordering::SeqCst);
     });
 
@@ -463,10 +466,11 @@ async fn f95_admission_mutex_does_not_reintroduce_f70_deadlock() {
     );
 }
 
-/// Additional regression: the admission mutex must not prevent a DDL on
-/// table Y from proceeding while a DDL on table X holds X's admission
-/// mutex. Each table has its OWN `ddl_admission`, so cross-table DDLs are
-/// independent.
+/// Additional regression: each table still has its OWN `ddl_admission`
+/// mutex — two DDLs on the SAME table serialize there. (S5c-X note: DDLs on
+/// DIFFERENT tables of the same repository now ALSO serialize, but one level
+/// up, at the shared per-repo `RepoWriteDomain` — that repo-level
+/// serialization is asserted in `tests/write_domain/`, not here.)
 #[tokio::test]
 async fn f95_admission_mutex_is_per_table_not_global() {
     let (_repo, x, y) = make_two_tables().await;
@@ -479,7 +483,7 @@ async fn f95_admission_mutex_is_per_table_not_global() {
     let x_entered_c = Arc::clone(&x_entered);
     let release_x_c = Arc::clone(&release_x);
     let ddl_x = tokio::spawn(async move {
-        let (_guard, _lock) = x.begin_write_barrier(REGULAR_INDEX_CREATE).await;
+        let (_guard, _lock) = x.begin_write_barrier(REGULAR_INDEX_CREATE).await.unwrap();
         x_entered_c.store(true, Ordering::SeqCst);
         release_x_c.notified().await;
     });
@@ -490,18 +494,14 @@ async fn f95_admission_mutex_is_per_table_not_global() {
     // DDL on Y: should proceed immediately — Y has its own admission mutex.
     let y_done_c = Arc::clone(&y_done);
     let ddl_y = tokio::spawn(async move {
-        let (_guard, _lock) = y.begin_write_barrier(REGULAR_INDEX_CREATE).await;
+        let (_guard, _lock) = y.begin_write_barrier(REGULAR_INDEX_CREATE).await.unwrap();
         y_done_c.store(true, Ordering::SeqCst);
     });
-
-    // Y's DDL must complete within a short bound — it is NOT blocked by
-    // X's admission mutex.
-    let y_result = tokio::time::timeout(Duration::from_millis(200), wait_flag(&y_done)).await;
-    assert!(
-        y_result.is_ok(),
-        "DDL on table Y must not be blocked by table X's admission mutex — \
-         ddl_admission is per-table, not global"
-    );
+    // Release X's DDL. (S5c-X: Y's DDL waits on the SHARED per-repo
+    // write-admission domain while X holds it — repo-level serialization
+    // is by design; `ddl_admission` remains the per-table serializer ON
+    // TOP of it. Both DDLs must still complete within the deadlock bound.)
+    release_x.notify_one();
 
     // Release X's DDL.
     release_x.notify_one();

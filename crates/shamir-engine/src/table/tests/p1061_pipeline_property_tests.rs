@@ -173,8 +173,10 @@ async fn p1061_completeness_of_capture_mid_scan_mixed_ops() {
     let tbl_clone = tbl.clone();
     let index_def_clone = index_def.clone();
     let backfill_task = tokio::spawn(async move {
+        // Uncontended: nothing else holds this table's repo domain here.
+        let permit = tbl_clone.write_domain.admit().await.unwrap();
         tbl_clone
-            .phase_b_a_backfill("idx_name", index_def_clone, 1)
+            .phase_b_a_backfill("idx_name", index_def_clone, 1, &permit)
             .await
     });
 
@@ -216,7 +218,8 @@ async fn p1061_completeness_of_capture_mid_scan_mixed_ops() {
         .expect("online build should succeed");
 
     // Run Phase C+D to completion.
-    tbl.phase_c_d_catchup_and_publish(name_interned, phase_ba)
+    let permit = tbl.write_domain.admit().await.unwrap();
+    tbl.phase_c_d_catchup_and_publish(name_interned, phase_ba, &permit)
         .await
         .expect("phase_c_d_catchup_and_publish should succeed");
 
@@ -352,8 +355,9 @@ async fn p1061_convergence_termination_under_sustained_load() {
     let name_interned = index_def.name_interned;
 
     // Run Phase B+A to completion (uninterrupted).
+    let permit = tbl.write_domain.admit().await.unwrap();
     let phase_ba = tbl
-        .phase_b_a_backfill("idx_name", index_def, 1000)
+        .phase_b_a_backfill("idx_name", index_def, 1000, &permit)
         .await
         .expect("phase_b_a_backfill should succeed")
         .expect("online build should succeed");
@@ -375,7 +379,7 @@ async fn p1061_convergence_termination_under_sustained_load() {
     // Wrap in timeout to assert it doesn't hang forever.
     let phase_c_d_result = tokio::time::timeout(
         Duration::from_secs(30),
-        tbl.phase_c_d_catchup_and_publish(name_interned, phase_ba),
+        tbl.phase_c_d_catchup_and_publish(name_interned, phase_ba, &permit),
     )
     .await;
 
@@ -467,8 +471,9 @@ async fn p1061_bounded_barrier_duration_constant_across_sizes() {
 
         // Measure Phase A duration.
         let phase_a_start = std::time::Instant::now();
+        let permit = tbl.write_domain.admit().await.unwrap();
         let phase_ba = tbl
-            .phase_b_a_backfill("idx_name", index_def, 1000)
+            .phase_b_a_backfill("idx_name", index_def, 1000, &permit)
             .await
             .map_err(|e| format!("phase_b_a_backfill error: {:?}", e))?
             .ok_or_else(|| "online build unavailable".to_string())?;
@@ -476,7 +481,7 @@ async fn p1061_bounded_barrier_duration_constant_across_sizes() {
 
         // Measure Phase D duration (no concurrent writes, so Phase C exits immediately).
         let phase_d_start = std::time::Instant::now();
-        tbl.phase_c_d_catchup_and_publish(name_interned, phase_ba)
+        tbl.phase_c_d_catchup_and_publish(name_interned, phase_ba, &permit)
             .await
             .map_err(|e| format!("phase_c_d_catchup_and_publish error: {:?}", e))?;
         let phase_d_duration = phase_d_start.elapsed();

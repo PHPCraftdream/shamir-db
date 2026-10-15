@@ -56,7 +56,8 @@ async fn parked_insert(abort_lower: bool) {
     // Acquiring it while ack is pending proves the writer drain was released.
     let (barrier, lock) = table
         .begin_write_barrier(crate::index::write_barrier_flags::SCHEMA_ACTIVATION)
-        .await;
+        .await
+        .unwrap();
     drop(lock);
     drop(barrier);
     if abort_lower {

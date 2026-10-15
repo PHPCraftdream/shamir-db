@@ -879,8 +879,9 @@ async fn p1000_regular_recovery_interrupted_between_entries_preserves_sibling_to
     mgr.index_manager_ref()
         .set_recover_renames_between_entries_hook(Some(Arc::clone(&hook)));
 
+    let permit = mgr.write_domain.admit().await.unwrap();
     tokio::select! {
-        r = mgr.recover_hash_renames() => {
+        r = mgr.recover_hash_renames_admitted(&permit) => {
             panic!("recovery completed before the between-entries hook fired: {r:?}");
         }
         _ = hook.wait_until_parked() => {
