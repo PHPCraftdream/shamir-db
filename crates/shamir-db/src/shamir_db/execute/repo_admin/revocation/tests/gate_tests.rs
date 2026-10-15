@@ -155,3 +155,64 @@ async fn quarantine_cache_replace_clears_persisted_removal_but_keeps_pending_fai
     cache.install(Vec::<((String, String), String)>::new());
     assert!(cache.reason_for("db", "pending").is_some());
 }
+
+#[tokio::test]
+async fn unresolvable_profile_marking_installs_global_sentinel_read_quarantine() {
+    let db = ShamirDb::init(SystemStoreConfig::InMemory).await.unwrap();
+    let instance = db.create_db("testdb").await;
+    instance
+        .add_repo(
+            RepoConfig::new("main", BoxRepoFactory::in_memory())
+                .add_table(TableConfig::new("users")),
+        )
+        .await
+        .unwrap();
+    let mut batch = shamir_query_builder::batch::Batch::new();
+    batch.id(1);
+    batch.op(
+        "profile",
+        shamir_query_builder::ddl::replication_profile("prof").stream(
+            shamir_query_builder::ddl::repl_scope("testdb")
+                .repo("main")
+                .build(),
+            shamir_query_types::admin::ReplDirection::Pull,
+            shamir_query_types::admin::ReplMode::ReadOnly,
+        ),
+    );
+    batch.op(
+        "sub",
+        shamir_query_builder::ddl::subscription("sub", "tcp://peer:9000", "pub", "prof"),
+    );
+    db.execute("testdb", &batch.to_request_via_msgpack())
+        .await
+        .unwrap();
+    // Remove the profile: the subscription row records no db column, so
+    // profile resolution can no longer produce a per-row (db, repo) key.
+    let mut drop_batch = shamir_query_builder::batch::Batch::new();
+    drop_batch.id(2);
+    drop_batch.op(
+        "profile",
+        shamir_query_builder::ddl::drop_replication_profile("prof"),
+    );
+    db.execute("testdb", &drop_batch.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    // Marking must NOT error — it falls back to the global ("*", "*")
+    // sentinel instead (widest safe scope with no recorded db).
+    db.mark_subscription_resync_required("sub", 7, 3)
+        .await
+        .unwrap();
+
+    // Reads on testdb/main are refused fail-closed, resolved via the
+    // sentinel in `reason_for` (after the (db, repo) and (db, "*") checks).
+    let reason = db
+        .read_quarantine_reason("testdb", "main")
+        .expect("reads must be quarantined via the global sentinel");
+    assert!(
+        reason.contains("unresolvable replication profile 'prof'"),
+        "reason must name the unresolvable profile, got: {reason}"
+    );
+    // And the quarantine covers every other (db, repo) too — global scope.
+    assert!(db.read_quarantine_reason("otherdb", "other").is_some());
+}

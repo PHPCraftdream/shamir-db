@@ -8,6 +8,23 @@ pub(crate) struct ResyncQuarantineCache {
     pending: DashMap<(String, String), (), THasher>,
     count: AtomicUsize,
 }
+/// Global fallback cache key. Subscription rows carry no db column, so when a
+/// quarantined row's replication profile cannot be resolved there is no
+/// recorded `(db, repo)` to quarantine narrowly: the widest key that is
+/// guaranteed safe is the global sentinel, which fails every read closed.
+pub(crate) fn global_sentinel_key() -> (String, String) {
+    ("*".to_string(), "*".to_string())
+}
+
+/// Reason string stored under the global sentinel when a quarantined row's
+/// profile cannot be resolved — it must name the unresolvable profile.
+pub(crate) fn unresolvable_profile_reason(profile: &str) -> String {
+    format!(
+        "global read quarantine: unresolvable replication profile '{profile}' — \
+         reads fail closed until the profile is restored"
+    )
+}
+
 impl ResyncQuarantineCache {
     pub(crate) fn new() -> Self {
         Self {
@@ -26,6 +43,14 @@ impl ResyncQuarantineCache {
         self.entries
             .get(&(db.to_string(), "*".to_string()))
             .map(|reason| reason.value().clone())
+            .or_else(|| {
+                // Global sentinel ("*", "*"): a quarantined row with an
+                // unresolvable profile quarantines reads fail-closed
+                // everywhere, since no db is recorded for it.
+                self.entries
+                    .get(&("*".to_string(), "*".to_string()))
+                    .map(|reason| reason.value().clone())
+            })
     }
     /// Add pre-persistence quarantine keys, retaining them if persistence fails.
     pub(crate) fn publish(&self, entries: impl IntoIterator<Item = ((String, String), String)>) {

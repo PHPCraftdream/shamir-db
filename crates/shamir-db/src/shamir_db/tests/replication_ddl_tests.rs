@@ -519,6 +519,121 @@ async fn mark_resync_required_on_missing_subscription_is_a_noop() {
         .expect("missing subscription must not error the caller");
 }
 
+/// S5c-X round 11: marking a subscription whose profile cannot be resolved
+/// must NOT fail — quarantine is a safety action, so the persisted
+/// `resync_required` state and the durable `quarantined` marker are written
+/// regardless, and the read gate fails closed over the WIDEST safe scope.
+/// Subscription rows record no db column (`handle_create_subscription`
+/// persists only name/upstream/publication/profile/state), so the widest
+/// scope is the global ("*", "*") sentinel: EVERY repo of EVERY db is
+/// refused. The resolution failure is logged and surfaced via the row's
+/// `status_message`, never returned as a marking error.
+#[tokio::test]
+async fn resync_marking_with_unresolvable_profile_fails_closed_globally() {
+    let shamir = setup().await;
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.op(
+        "cs",
+        subscription("sub_a", "tcp://leader:9000", "pub_a", "profile_a"),
+    );
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    // `profile_a` was never created — profile resolution cannot succeed.
+    shamir
+        .mark_subscription_resync_required("sub_a", 100, 42)
+        .await
+        .expect("marking must never fail because the covered set is uncomputable");
+
+    // Persisted state + durable marker were written regardless.
+    assert_eq!(
+        sub_field(&shamir, "sub_a", "state").await,
+        Some("resync_required".into())
+    );
+    let table = shamir.system_store().subscriptions_table().await.unwrap();
+    let interner = table.interner().get().await.unwrap();
+    let refs = crate::types::common::new_map();
+    let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+    let row = table
+        .read(
+            &crate::query::read::ReadQuery::new("subscriptions").filter(
+                crate::query::filter::Filter::Eq {
+                    field: vec!["name".to_string()],
+                    value: crate::query::filter::FilterValue::String("sub_a".to_string()),
+                },
+            ),
+            &ctx,
+        )
+        .await
+        .unwrap()
+        .records
+        .remove(0)
+        .as_value()
+        .into_owned();
+    assert_eq!(row.get("quarantined"), Some(&QueryValue::Bool(true)));
+    let status_message = row
+        .get("status_message")
+        .and_then(|v| v.as_str())
+        .expect("status_message set")
+        .to_string();
+    assert!(
+        status_message.contains("profile resolution failed")
+            && status_message.contains("profile_a"),
+        "status_message must surface the resolution failure: {status_message}"
+    );
+
+    // Reads of the FALLBACK scope are refused with the typed code — for ANY
+    // (db, repo), since no db is recorded on the row (sentinel scope).
+    // The gate in changelog.rs fires BEFORE the db/repo lookup, so an
+    // enforced sentinel quarantine yields Err(ResyncRequired) for ANY pair
+    // — Ok(None) would be the ungated missing-repo result, i.e. a regression.
+    for (db, repo) in [("testdb", "any_repo"), ("otherdb", "other")] {
+        let outcome = shamir.read_changelog_bounded(db, repo, 0, 10).await;
+        let error = match outcome {
+            Err(error) => error,
+            Ok(_) => panic!(
+                "sentinel-scope quarantine must refuse the read (fail closed) \
+                     for {db}/{repo}: global (\"*\", \"*\") fallback missing"
+            ),
+        };
+        assert_eq!(
+            error.code(),
+            Some("resync_required"),
+            "read of {db}/{repo} must be refused with the typed quarantine code"
+        );
+    }
+
+    // status/list show the quarantined state.
+    let mut b = Batch::new();
+    b.id(2);
+    b.op("ls", list_subscriptions());
+    b.op("rs", replication_status());
+    let resp = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    for alias in ["ls", "rs"] {
+        let value = result_value(&resp, alias);
+        let entry = &value
+            .get("subscriptions")
+            .and_then(|v| v.as_array())
+            .unwrap()[0];
+        assert_eq!(
+            entry.get("state").and_then(|v| v.as_str()),
+            Some("resync_required")
+        );
+        assert!(entry
+            .get("status_message")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .contains("profile resolution failed"));
+    }
+}
+
 /// S5c-X 2b: publishing an EPHEMERAL backend (in-memory repo, no persistent
 /// WAL) requires an explicit `replication_serve: completed_reseed` durability
 /// override. A plain in-memory repo + publication fails with the typed code
