@@ -394,6 +394,12 @@ impl Store for MirroredStore {
         self.mirror.flush().await
     }
 
+    async fn flush_drain(&self) -> DbResult<()> {
+        // `primary` is pure in-memory — nothing to drain there. The
+        // backend-wide fsync is deferred to `Repo::persist_once`.
+        self.mirror.flush_drain().await
+    }
+
     async fn apply_buffer_config(&self, config: &MemBufferConfig) -> DbResult<()> {
         // `primary`, being pure in-memory, has no buffer tuning of its
         // own to apply.
