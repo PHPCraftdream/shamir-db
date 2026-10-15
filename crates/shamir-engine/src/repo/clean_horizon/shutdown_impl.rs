@@ -2,6 +2,7 @@
 //! `shutdown_clean`, `worker_reopen_required`, `flush_buffers`.
 
 use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::types::Repo;
 use std::sync::Arc;
 
 use crate::tx::cold_reconcile::lifecycle::{RepoUnitLifecycle, WorkerTerminal};
@@ -94,7 +95,10 @@ impl RepoInstance {
 
     /// Flush this repo's in-memory buffers to their durable backing.
     ///
-    /// Drains the `__tx__` store and every table's data + info stores.
+    /// Drains the `__tx__` store and every table's data + info stores, then
+    /// issues ONE backend persist (`Repo::persist_once`) — the old per-store
+    /// `flush()` loop fsynced fjall's single per-Database journal once per
+    /// store (~N identical full-database fsyncs per shutdown).
     /// In-memory stores are no-ops. Best-effort: individual errors are
     /// logged and skipped; returns the first error encountered (if any)
     /// after attempting all stores.
@@ -118,7 +122,7 @@ impl RepoInstance {
 
         match self.tx_info_store().await {
             Ok(store) => {
-                if let Err(e) = store.flush().await {
+                if let Err(e) = store.flush_drain().await {
                     log::warn!("flush_buffers: tx_info_store {}: {}", self.name, e);
                     if first_err.is_none() {
                         first_err = Some(e);
@@ -148,7 +152,7 @@ impl RepoInstance {
                     continue;
                 }
             };
-            if let Err(e) = table.data_store().flush().await {
+            if let Err(e) = table.data_store().flush_drain().await {
                 log::warn!(
                     "flush_buffers: data_store {}/{}: {}",
                     self.name,
@@ -159,7 +163,7 @@ impl RepoInstance {
                     first_err = Some(e);
                 }
             }
-            if let Err(e) = table.info_store().flush().await {
+            if let Err(e) = table.info_store().flush_drain().await {
                 log::warn!(
                     "flush_buffers: info_store {}/{}: {}",
                     self.name,
@@ -189,6 +193,21 @@ impl RepoInstance {
                 if first_err.is_none() {
                     first_err = Some(e);
                 }
+            }
+        }
+
+        // ONE durability barrier for every store drained above. The old
+        // per-store `flush()` loop fsynced fjall's single per-Database
+        // journal once per store (~N identical full-database fsyncs per
+        // shutdown — the Windows flush-stall multiplier). `flush_drain`
+        // leaves every store's data in the backend's write path; this single
+        // `persist(SyncAll)` makes ALL of it durable, byte-for-byte the same
+        // end state as the loop. Non-fjall backends: default no-op — their
+        // per-store `flush()` semantics are unchanged.
+        if let Err(e) = self.repo.persist_once().await {
+            log::warn!("flush_buffers: persist_once {}: {}", self.name, e);
+            if first_err.is_none() {
+                first_err = Some(e);
             }
         }
 
