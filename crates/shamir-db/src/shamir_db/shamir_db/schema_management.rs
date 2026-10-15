@@ -509,7 +509,8 @@ impl ShamirDb {
         rules: Vec<FieldRule>,
     ) -> DbResult<()> {
         let name = schema_validator_name(db_name, repo_name, table_name);
-        let validator: Arc<dyn RecordValidator> = Arc::new(SchemaValidator::new(rules));
+        // DDL path: the admitted twin rebuilds from `rules`, so clone here.
+        let validator: Arc<dyn RecordValidator> = Arc::new(SchemaValidator::new(rules.clone()));
 
         // Pure registry reads — same classification as master: an ALTER
         // (`name` already registered) is detected before anything else.
