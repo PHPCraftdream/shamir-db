@@ -1,7 +1,7 @@
 //! FG-3: tx-scan read-your-own-writes — merge a tx's staged `write_set`
 //! overlay on top of a committed-store record stream.
 //!
-//! Mirrors `shamir_storage::storage_membuffer::merge_overlay_stream`'s
+//! Mirrors `shamir_storage::types::merge_overlay_stream`'s
 //! algorithm exactly (task #530): a classic 2-way sorted merge between a
 //! sorted overlay snapshot and a sorted `inner` stream. `inner` MUST yield
 //! `RecordId`-ascending batches (every committed-store scan in this crate
