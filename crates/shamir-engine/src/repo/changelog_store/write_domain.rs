@@ -166,8 +166,8 @@ impl RepoWriteDomain {
 
     /// Admit a repository-close write. Ignores the reservation — repository
     /// close must always be admitted.
-    // S5c-X PR6b-2b/2c: lifecycle owner.
-    #[cfg_attr(not(test), allow(dead_code))]
+    // S5c-X PR6b-2b/2c: lifecycle owner (no caller until then).
+    #[allow(dead_code)]
     pub(crate) async fn admit_for_close(self: &Arc<Self>) -> RepoWritePermit {
         let guard = self.mutex.clone().lock_owned().await;
         RepoWritePermit {

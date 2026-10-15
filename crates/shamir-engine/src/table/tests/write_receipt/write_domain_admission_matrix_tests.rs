@@ -41,13 +41,7 @@ where
     let before_bindings: Vec<_> = mgr
         .validator_bindings()
         .iter()
-        .map(|binding| {
-            (
-                binding.validator_id.clone(),
-                binding.ops.clone(),
-                binding.priority,
-            )
-        })
+        .map(|binding| (binding.validator_id, binding.ops.clone(), binding.priority))
         .collect();
 
     let permit = domain.admit().await.expect("admit");
@@ -75,13 +69,7 @@ where
     let after_bindings: Vec<_> = mgr
         .validator_bindings()
         .iter()
-        .map(|binding| {
-            (
-                binding.validator_id.clone(),
-                binding.ops.clone(),
-                binding.priority,
-            )
-        })
+        .map(|binding| (binding.validator_id, binding.ops.clone(), binding.priority))
         .collect();
     assert_eq!(after_bindings, before_bindings);
     observe(mgr);
@@ -304,7 +292,7 @@ async fn add_and_remove_validator_bindings_block_without_effect() {
     let (domain, mgr) = make_manager("adm-validator").await;
     let id = RecordId::system("validator");
     let binding = ValidatorBinding {
-        validator_id: id.clone(),
+        validator_id: id,
         ops: smallvec![WriteOp::Insert],
         priority: 1000,
     };
@@ -403,7 +391,7 @@ async fn repository_replication_helpers_block_without_effect() {
 #[tokio::test]
 async fn migration_freeze_and_leader_write_semantics() {
     let (domain, mgr) = make_manager("adm-freeze").await;
-    blocked_until_released(
+    let _ = blocked_until_released(
         &domain,
         &mgr,
         || mgr.begin_migration_freeze(),
