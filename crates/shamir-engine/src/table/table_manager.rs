@@ -88,6 +88,29 @@ pub fn table_token_for(name: &str) -> u64 {
 ///     let _ = manager.validator_registry();
 /// }
 /// ```
+///
+/// Round 8: the context capability routes. `FilterContext.interner` is
+/// `pub(crate)` — downstream holders of the read-view `filter_context`
+/// cannot reach the interior-mutable dictionary through it:
+///
+/// ```compile_fail
+/// use shamir_engine::query::filter::FilterContext;
+///
+/// fn downstream(ctx: &FilterContext) {
+///     let _ = ctx.interner.touch_ind("x");
+/// }
+/// ```
+///
+/// And `InternerReadView` exposes no mutators at all (its cell is private;
+/// only `get_ind`/`get_str`/`generation`/decode accessors exist):
+///
+/// ```compile_fail
+/// use shamir_engine::table::InternerReadView;
+///
+/// fn downstream(view: &InternerReadView) {
+///     let _ = view.touch_ind("x");
+/// }
+/// ```
 pub struct TableManager {
     pub(super) name: String,
     pub(super) table: Arc<Table>,

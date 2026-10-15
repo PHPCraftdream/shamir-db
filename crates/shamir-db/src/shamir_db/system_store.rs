@@ -154,32 +154,17 @@ impl SystemStore {
             .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", SYSTEM_REPO)))
     }
 
-    /// S5c-X F1 (Round 6): admitted durability tail for a system-catalogue
-    /// write — acquire repo admission on the SYSTEM repo and flush the
-    /// table's interner dictionary chunks. Replaces the old read-view
-    /// `interner_persist` write escape; the admission pattern mirrors
-    /// `admin_table_index.rs`.
-    pub(crate) async fn persist_table_interner(&self, table: &TableManager) -> DbResult<()> {
-        let repo = self.system_repo()?;
-        let permit = repo
-            .write_domain()
-            .admit()
-            .await
-            .map_err(|e| DbError::Internal(e.to_string()))?;
-        table.persist_interner_admitted(&permit).await
-    }
-
-    /// S5c-X Round 7 (L3): single-admission write tail for system-catalogue
-    /// saves whose record must be interned first. Replaces the old
-    /// `to_inner` + `persist_table_interner` pair — the read-view `to_inner`
-    /// was a WRITE-prep interning step mutating through the read view.
-    /// Admits ONCE (the tokio write-domain mutex is non-reentrant), interns
-    /// the record via `intern_query_value_admitted`, then persists the
-    /// dictionary delta — all under the same permit.
-    pub(crate) async fn persist_table_interner_interning(
+    /// Admitted system-catalogue durability tail (F1/R6; merged with the
+    /// R7-L3 interning twin in Round 8): ONE admission on the SYSTEM repo's
+    /// write domain (the tokio write-domain mutex is non-reentrant),
+    /// optional `intern_query_value_admitted` interning of `intern`
+    /// (replaces the old read-view `to_inner` WRITE-prep interning step),
+    /// then `persist_interner_admitted` of the dictionary delta.
+    /// `None` = persist-only call sites.
+    pub(crate) async fn persist_table_interner(
         &self,
         table: &TableManager,
-        record: &QueryValue,
+        intern: Option<&QueryValue>,
     ) -> DbResult<()> {
         let repo = self.system_repo()?;
         let permit = repo
@@ -187,7 +172,9 @@ impl SystemStore {
             .admit()
             .await
             .map_err(|e| DbError::Internal(e.to_string()))?;
-        let _inner = table.intern_query_value_admitted(&permit, record).await?;
+        if let Some(record) = intern {
+            table.intern_query_value_admitted(&permit, record).await?;
+        }
         table.persist_interner_admitted(&permit).await
     }
 
@@ -240,9 +227,7 @@ impl SystemStore {
         .map_err(|e| DbError::Internal(e.to_string()))
     }
 
-    // ========================================================================
     // Database metadata
-    // ========================================================================
 
     /// Save database metadata. Injects the `owner`/`group`/`mode` fields
     /// from `meta` into the record before persisting (P3 metadata plates).
@@ -261,7 +246,7 @@ impl SystemStore {
             value: rec.clone(),
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        self.persist_table_interner_interning(&table, &rec).await?;
+        self.persist_table_interner(&table, Some(&rec)).await?;
         Ok(())
     }
 
@@ -295,9 +280,7 @@ impl SystemStore {
             .collect())
     }
 
-    // ========================================================================
     // Repository metadata
-    // ========================================================================
 
     /// Save repository metadata. Injects `owner`/`group`/`mode` from `meta`
     /// and, when `Some`, the per-repo durability override under the
@@ -326,7 +309,7 @@ impl SystemStore {
             value: record,
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        self.persist_table_interner(&table).await?;
+        self.persist_table_interner(&table, None).await?;
         // DDL must be durable immediately: flush the MemBuffer-wrapped
         // store so a crash right after the admin op can't lose (or, for
         // removes, resurrect) the catalogue entry. DDL is rare → the
@@ -400,9 +383,7 @@ impl SystemStore {
         Ok(None)
     }
 
-    // ========================================================================
     // Table catalogue (per-repo table list — I.2)
-    // ========================================================================
 
     /// Persist one table's catalogue entry. Keyed by
     /// `(db_name, repo_name, table_name)` so re-saving the same table is an
@@ -450,7 +431,7 @@ impl SystemStore {
             value: record,
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        self.persist_table_interner(&table).await?;
+        self.persist_table_interner(&table, None).await?;
         // Durable DDL — see save_repository.
         table.data_store_read_view().flush().await?;
         Ok(())
@@ -506,9 +487,7 @@ impl SystemStore {
             .collect())
     }
 
-    // ========================================================================
     // Settings
-    // ========================================================================
 
     /// Save a setting.
     pub async fn save_setting(&self, key: &str, value: &QueryValue) -> DbResult<()> {
@@ -522,7 +501,7 @@ impl SystemStore {
             value: QueryValue::Map(rec_m),
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        self.persist_table_interner(&table).await?;
+        self.persist_table_interner(&table, None).await?;
         Ok(())
     }
 
@@ -545,9 +524,7 @@ impl SystemStore {
             .and_then(|r| r.get_value_owned("value")))
     }
 
-    // ========================================================================
     // Users & Roles (tables ready, API to be implemented)
-    // ========================================================================
 
     /// Get the users table manager.
     pub async fn users_table(&self) -> DbResult<TableManager> {
@@ -559,9 +536,7 @@ impl SystemStore {
         self.table(TABLE_ROLES).await
     }
 
-    // ========================================================================
     // Replication catalogue (386-a) — profiles / publications / subscriptions
-    // ========================================================================
 
     /// Get the replication-profiles table manager.
     pub async fn replication_profiles_table(&self) -> DbResult<TableManager> {
@@ -578,9 +553,7 @@ impl SystemStore {
         self.table(TABLE_SUBSCRIPTIONS).await
     }
 
-    // ========================================================================
     // Function catalogue (slice 4)
-    // ========================================================================
 
     /// Persist a function catalogue entry. Upsert keyed by `name`.
     /// Injects `owner`/`group`/`mode` from `meta` into the record.
@@ -599,7 +572,7 @@ impl SystemStore {
             value: rec,
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        self.persist_table_interner(&table).await?;
+        self.persist_table_interner(&table, None).await?;
         // Durable DDL — see save_repository.
         table.data_store_read_view().flush().await?;
         Ok(())
@@ -671,9 +644,7 @@ impl SystemStore {
             .map(|r| r.as_value().into_owned()))
     }
 
-    // ========================================================================
     // Groups store (P3 metadata plates)
-    // ========================================================================
 
     /// Persist a group record. `group_id` is allocated by the caller
     /// (see [`ShamirDb::create_group`]). `owner` is the persist-friendly
@@ -705,7 +676,7 @@ impl SystemStore {
             value: record,
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        self.persist_table_interner(&table).await?;
+        self.persist_table_interner(&table, None).await?;
         table.data_store_read_view().flush().await?;
         Ok(())
     }
@@ -840,9 +811,7 @@ impl SystemStore {
         Ok(())
     }
 
-    // ========================================================================
     // Catalogue lookups for resource_meta resolver
-    // ========================================================================
 
     /// Load a single database record by name.
     pub async fn load_database(&self, name: &str) -> DbResult<Option<QueryValue>> {
@@ -939,8 +908,7 @@ impl SystemStore {
             value: record.clone(),
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        self.persist_table_interner_interning(&table, record)
-            .await?;
+        self.persist_table_interner(&table, Some(record)).await?;
         table.data_store_read_view().flush().await?;
         Ok(())
     }
@@ -969,7 +937,7 @@ impl SystemStore {
             value: record.clone(),
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        self.persist_table_interner(&table).await?;
+        self.persist_table_interner(&table, None).await?;
         table.data_store_read_view().flush().await?;
         Ok(())
     }
@@ -1002,14 +970,12 @@ impl SystemStore {
             value: record.clone(),
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        self.persist_table_interner(&table).await?;
+        self.persist_table_interner(&table, None).await?;
         table.data_store_read_view().flush().await?;
         Ok(())
     }
 
-    // ========================================================================
     // Validator catalogue (S1)
-    // ========================================================================
 
     /// Persist a validator catalogue entry. Upsert keyed by `name`.
     /// Injects `owner`/`group`/`mode` from `meta` into the record.
@@ -1028,7 +994,7 @@ impl SystemStore {
             value: rec,
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        self.persist_table_interner(&table).await?;
+        self.persist_table_interner(&table, None).await?;
         // Durable DDL — see save_repository.
         table.data_store_read_view().flush().await?;
         Ok(())
@@ -1094,14 +1060,12 @@ impl SystemStore {
             value: record.clone(),
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        self.persist_table_interner(&table).await?;
+        self.persist_table_interner(&table, None).await?;
         table.data_store_read_view().flush().await?;
         Ok(())
     }
 
-    // ========================================================================
     // Function folder catalogue (#118)
-    // ========================================================================
 
     /// Persist a function folder catalogue entry. Upsert keyed by `path`
     /// (slash-joined, e.g. `"reports/daily"`). Injects `owner`/`group`/`mode`
@@ -1121,7 +1085,7 @@ impl SystemStore {
             value: rec,
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        self.persist_table_interner(&table).await?;
+        self.persist_table_interner(&table, None).await?;
         // Durable DDL — see save_repository.
         table.data_store_read_view().flush().await?;
         Ok(())
@@ -1191,7 +1155,7 @@ impl SystemStore {
             value: record.clone(),
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        self.persist_table_interner(&table).await?;
+        self.persist_table_interner(&table, None).await?;
         table.data_store_read_view().flush().await?;
         Ok(())
     }

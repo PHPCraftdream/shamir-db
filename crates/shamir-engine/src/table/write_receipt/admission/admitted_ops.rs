@@ -192,7 +192,8 @@ impl TableManager {
     /// dictionary and returns the encoded `InnerValue` (callers that don't
     /// need it discard it). The caller holds repo admission; the usual
     /// companion is [`Self::persist_interner_admitted`] with the SAME
-    /// permit (see `SystemStore::persist_table_interner_interning`, which
+    /// permit (see `SystemStore::persist_table_interner` with
+    /// `Some(record)`, which
     /// chains both under a single admission).
     pub async fn intern_query_value_admitted(
         &self,
