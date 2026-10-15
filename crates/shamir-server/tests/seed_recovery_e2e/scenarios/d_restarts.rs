@@ -24,6 +24,10 @@ const WAIT: Duration = Duration::from_secs(30);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn seed_e2e_d_reopen_at_install_resume_and_first_batch_boundaries() {
+    Box::pin(seed_e2e_d_reopen_at_install_resume_and_first_batch_boundaries_body()).await;
+}
+
+async fn seed_e2e_d_reopen_at_install_resume_and_first_batch_boundaries_body() {
     let root = tempfile::tempdir().expect("temp root");
     let leader_dir = root.path().join("leader");
     let home_dir = root.path().join("home");
