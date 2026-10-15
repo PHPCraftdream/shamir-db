@@ -601,7 +601,7 @@ async fn make_pause_test_repo(table_name: &str) -> (RepoInstance, crate::table::
         BoxRepo::InMemory(Arc::new(InMemoryRepo::new())),
         Vec::new(),
     );
-    repo.add_table(TableConfig::new(table_name));
+    repo.add_table_for_test(TableConfig::new(table_name));
     let tbl = repo.get_table(table_name).await.unwrap();
     (repo, tbl)
 }

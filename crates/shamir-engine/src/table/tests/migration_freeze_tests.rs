@@ -26,7 +26,7 @@ async fn fixture() -> (RepoInstance, TableManager, InnerValue) {
         BoxRepo::InMemory(Arc::new(InMemoryRepo::new())),
         Vec::new(),
     );
-    repo.add_table(TableConfig::new("source"));
+    repo.add_table_for_test(TableConfig::new("source"));
     let table = repo.get_table("source").await.unwrap();
     let interner = table.interner().get().await.unwrap();
     let key = match interner.touch_ind("name").unwrap() {

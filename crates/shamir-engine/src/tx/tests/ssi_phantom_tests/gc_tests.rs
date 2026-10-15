@@ -26,7 +26,7 @@ use super::helpers::make_repo;
 #[tokio::test]
 async fn commit_write_log_not_pruned_below_live_snapshot() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     // --- Tx1: Serializable commit → log has one record at V1.
@@ -91,7 +91,7 @@ async fn commit_write_log_not_pruned_below_live_snapshot() {
 #[tokio::test]
 async fn snapshot_workload_leaves_log_empty_and_gc_is_noop() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     // Snapshot-isolation commits do NOT append to the log (gated on
@@ -117,7 +117,7 @@ async fn snapshot_workload_leaves_log_empty_and_gc_is_noop() {
 #[tokio::test]
 async fn snapshot_skips_phase_2bis() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
     let table_token = table_token_for("users");
 

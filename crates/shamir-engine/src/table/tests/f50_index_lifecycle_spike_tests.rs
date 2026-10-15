@@ -114,7 +114,7 @@ async fn functional_lookup(tbl: &TableManager, index_name_id: u64, lowered: &str
 #[tokio::test]
 async fn tx_staging_before_index_register_commits_with_posting_after_fix() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
 
     let name_field = key_id(&tbl, "name").await;
@@ -193,7 +193,7 @@ async fn tx_staging_before_index_register_commits_with_posting_after_fix() {
 #[tokio::test]
 async fn quiescent_tx_unchanged_generation_indexes_via_stage_plan() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
 
     // Create the functional index FIRST — it is live before any tx stages,

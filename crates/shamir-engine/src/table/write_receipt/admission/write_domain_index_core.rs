@@ -1,12 +1,9 @@
 use super::TableManager;
-use crate::index::index_definition::IndexDefinition;
 use crate::repo::RepoWritePermit;
 use futures::StreamExt;
 use shamir_storage::error::DbResult;
-use shamir_types::core::interner::{InternerKey, TouchInd};
+use shamir_types::time::unix_millis;
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::InnerValue;
-use smallvec::SmallVec;
 
 impl TableManager {
     pub async fn create_index_admitted(
@@ -155,7 +152,7 @@ impl TableManager {
                 permit,
             )
             .await;
-        self.create_unique_index_body(name, paths).await
+        self.create_unique_index_body(name, paths, permit).await
     }
 
     /// Inner unique-index create body: snapshot→backfill→register, with NO
@@ -184,7 +181,9 @@ impl TableManager {
         &self,
         name: &str,
         paths: &[&str],
+        permit: &RepoWritePermit,
     ) -> DbResult<()> {
+        self.write_domain.debug_check_permit(permit);
         // R0-C (#1010): cross-family name-uniqueness preflight, done WHILE
         // holding `ddl_admission` — both callers (`create_unique_index` and
         // `rename_index`'s unique branch) already acquired the barrier

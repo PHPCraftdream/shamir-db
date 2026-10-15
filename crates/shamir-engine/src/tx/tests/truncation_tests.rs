@@ -81,7 +81,7 @@ async fn truncation_collapses_wal_after_drain() {
     const N: usize = 12;
 
     let repo = make_mem_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let gate = repo.tx_gate().await.unwrap();
     let wal = repo.repo_wal().await.unwrap();
@@ -151,7 +151,7 @@ async fn truncation_collapses_wal_after_drain() {
 #[tokio::test(flavor = "current_thread")]
 async fn truncate_only_when_truncatable_not_per_commit() {
     let repo = make_mem_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let gate = repo.tx_gate().await.unwrap();
     let wal = repo.repo_wal().await.unwrap();

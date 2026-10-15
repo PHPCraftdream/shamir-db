@@ -122,7 +122,7 @@ fn vec_record(emb_key_id: u64, vec: &[f64]) -> InnerValue {
 #[tokio::test]
 async fn committed_tx_index_postings_visible() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("docs"));
+    repo.add_table_for_test(TableConfig::new("docs"));
     let tbl = repo.get_table("docs").await.unwrap();
     tbl.create_index_v2(&fts_index_op()).await.unwrap();
 
@@ -181,7 +181,7 @@ async fn committed_tx_index_postings_visible() {
 #[serial]
 async fn committed_tx_hnsw_vector_searchable() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     tbl.create_index_v2(&vector_index_op()).await.unwrap();
 
@@ -262,7 +262,7 @@ async fn committed_tx_hnsw_vector_searchable() {
 #[serial]
 async fn aborted_tx_hnsw_staged_cleaned() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     tbl.create_index_v2(&vector_index_op()).await.unwrap();
 
@@ -343,7 +343,7 @@ async fn aborted_tx_hnsw_staged_cleaned() {
 #[serial]
 async fn dropped_tx_staged_vectors_freed_via_raii() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     tbl.create_index_v2(&vector_index_op()).await.unwrap();
 
@@ -398,7 +398,7 @@ async fn dropped_tx_staged_vectors_freed_via_raii() {
 #[serial]
 async fn in_tx_search_sees_own_staged_vector() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     tbl.create_index_v2(&vector_index_op()).await.unwrap();
 
@@ -466,7 +466,7 @@ async fn in_tx_search_sees_own_staged_vector() {
 #[serial]
 async fn failed_post_lock_vector_promote_is_committed_not_deferred() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     tbl.create_index_v2(&vector_index_op()).await.unwrap();
 
@@ -537,7 +537,7 @@ async fn failed_post_lock_vector_promote_is_committed_not_deferred() {
 #[serial]
 async fn failed_pre_publish_delta_append_is_deferred() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     tbl.create_index_v2(&vector_index_op()).await.unwrap();
 
@@ -638,8 +638,8 @@ fn vector_index_op_2() -> CreateIndexOp {
 #[serial]
 async fn committed_tx_multi_table_hnsw_vectors_each_searchable() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
-    repo.add_table(TableConfig::new("vecs2"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs2"));
     let tbl1 = repo.get_table("vecs").await.unwrap();
     let tbl2 = repo.get_table("vecs2").await.unwrap();
     tbl1.create_index_v2(&vector_index_op()).await.unwrap();

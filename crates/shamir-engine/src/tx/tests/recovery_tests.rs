@@ -104,7 +104,7 @@ async fn recover_v2_inflight_handles_multiple_entries() {
 #[tokio::test]
 async fn recover_v2_inflight_replays_put_applies_to_data_store() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let wal = repo.repo_wal().await.unwrap();
@@ -145,7 +145,7 @@ async fn recover_v2_inflight_replays_put_applies_to_data_store() {
 #[tokio::test]
 async fn recover_v2_inflight_replays_delete_removes_from_data_store() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let rid = tbl.insert(&InnerValue::Str("doomed".into())).await.unwrap();
@@ -196,7 +196,7 @@ async fn recover_v2_inflight_skips_counter_delta_replay() {
     // removes the marker; data ops in the same entry replay normally
     // (none here, the test is counter-only).
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let before = tbl.counter().get().await.unwrap();
 
@@ -250,7 +250,7 @@ async fn recover_v2_inflight_unknown_table_skips_gracefully() {
 #[tokio::test]
 async fn recover_v2_inflight_replays_index_put_with_table_id() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let info = tbl.info_store().clone();
 
@@ -283,8 +283,8 @@ async fn recover_v2_inflight_replays_index_put_with_table_id() {
 #[tokio::test]
 async fn recover_v2_inflight_replays_index_put_broadcast() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("a"));
-    repo.add_table(TableConfig::new("b"));
+    repo.add_table_for_test(TableConfig::new("a"));
+    repo.add_table_for_test(TableConfig::new("b"));
     let ta = repo.get_table("a").await.unwrap();
     let tb = repo.get_table("b").await.unwrap();
 
@@ -318,7 +318,7 @@ async fn recover_v2_inflight_replays_index_put_broadcast() {
 #[tokio::test]
 async fn recover_v2_inflight_replays_index_del() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let info = tbl.info_store().clone();
 
@@ -426,7 +426,7 @@ async fn replay_inflight_v2_from_simulated_partial_commit_state() {
         assert!(tbl_pre.get(rid_a).await.is_err(), "data not yet applied");
         assert!(tbl_pre.get(rid_b).await.is_err());
         assert_eq!(tbl_pre.counter().get().await.unwrap(), 0);
-        assert_eq!(wal.recover().await.unwrap().len(), 1);
+        assert_eq!(wal.recover().await.unwrap(), inflight_before);
 
         // === SIMULATED RESTART === drop without clean shutdown.
         drop(repo1);
@@ -490,7 +490,7 @@ async fn replay_inflight_v2_from_simulated_partial_commit_state() {
 #[tokio::test]
 async fn wal_recovery_applies_interner_delta_before_replay() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let token = table_token_for("t");
 
@@ -559,7 +559,7 @@ async fn wal_recovery_applies_interner_delta_before_replay() {
 #[tokio::test]
 async fn recover_v2_inflight_replays_in_commit_version_order() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let token = table_token_for("t");
 
@@ -1007,8 +1007,8 @@ async fn stage_i_cross_table_shared_interner_id() {
     use shamir_tx::IsolationLevel;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("alpha"));
-    repo.add_table(TableConfig::new("beta"));
+    repo.add_table_for_test(TableConfig::new("alpha"));
+    repo.add_table_for_test(TableConfig::new("beta"));
 
     let alpha = repo.get_table("alpha").await.unwrap();
     let beta = repo.get_table("beta").await.unwrap();
@@ -1089,7 +1089,7 @@ async fn stage_i_repo_scope_interner_delta_recovers() {
     use crate::tx::pre_commit::REPO_INTERNER_SCOPE;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let token = table_token_for("t");
 
@@ -1213,7 +1213,7 @@ async fn crit1_history_seed_failure_aborts_recovery() {
     let _g = CRIT1_INJECT_LOCK.lock().await;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     // `get_table` instantiates the TableManager, which attaches an MvccStore —
     // without it `seed_version_cache_for_entry` would skip the table entirely
     // (no MVCC entry in `per_table_mvcc`) and the injection would never fire.
@@ -1280,7 +1280,7 @@ async fn crit1_no_injection_recovery_succeeds() {
     FAIL_HISTORY_SEED_TX_ID.store(0, Ordering::SeqCst);
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let token = table_token_for("t");
 
@@ -1335,8 +1335,8 @@ async fn crit1_multi_table_history_seed_failure_propagates() {
     let _g = CRIT1_INJECT_LOCK.lock().await;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("a"));
-    repo.add_table(TableConfig::new("b"));
+    repo.add_table_for_test(TableConfig::new("a"));
+    repo.add_table_for_test(TableConfig::new("b"));
     // Instantiate BOTH tables' MvccStores so both flow through
     // `seed_version_cache_for_entry`'s per-table loop.
     let _tbl_a = repo.get_table("a").await.unwrap();
@@ -1429,7 +1429,7 @@ use shamir_storage::types::Repo;
 #[tokio::test]
 async fn a11_recovery_persists_interner_delta_before_finalize() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let _tbl = repo.get_table("t").await.unwrap();
     let token = table_token_for("t");
 
@@ -1533,7 +1533,7 @@ async fn a11_recovery_delta_survives_interner_reload() {
         BoxRepo::InMemory(Arc::clone(&backing)),
         Vec::new(),
     );
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let _tbl = repo.get_table("t").await.unwrap();
     let token = table_token_for("t");
 
@@ -1602,7 +1602,7 @@ async fn a11_recovery_delta_survives_interner_reload() {
 #[tokio::test]
 async fn a11_recovery_no_delta_replays_and_finalizes_normally() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let token = table_token_for("t");
 
@@ -1655,7 +1655,7 @@ async fn a11_recovery_no_delta_replays_and_finalizes_normally() {
 #[tokio::test]
 async fn a11_recovery_already_persisted_delta_replays_normally() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let token = table_token_for("t");
 

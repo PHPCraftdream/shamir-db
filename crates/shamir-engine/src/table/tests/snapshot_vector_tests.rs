@@ -41,7 +41,7 @@ async fn fixture(metric: &str) -> (RepoInstance, TableManager, Vec<RecordId>) {
         BoxRepo::InMemory(Arc::new(InMemoryRepo::new())),
         Vec::new(),
     );
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let table = repo.get_table("t").await.unwrap();
     let BatchOp::CreateIndex(op) = ddl::create_index("vec", "t")
         .field("embedding")

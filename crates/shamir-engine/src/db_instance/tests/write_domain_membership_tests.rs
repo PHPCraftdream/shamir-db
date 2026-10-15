@@ -1,10 +1,84 @@
 //! Table-membership mutations are gated by the repository write-admission domain.
 
 use crate::db_instance::db_instance::DbInstance;
-use crate::repo::{BoxRepoFactory, RepoConfig, RepoWriteDomain};
+use crate::repo::{repo_token, BoxRepo, BoxRepoFactory, RepoConfig, RepoInstance, RepoWriteDomain};
 use crate::table::TableConfig;
 use std::future::Future;
+use std::sync::Arc;
 use std::task::{Context, Poll};
+
+use shamir_storage::storage_in_memory::InMemoryRepo;
+use shamir_types::types::record_id::RecordId;
+use shamir_types::types::value::InnerValue;
+use shamir_wal::{WalDurability, WalEntryV2, WalOpV2};
+
+use crate::table::table_manager::table_token_for;
+
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_waits_for_write_domain_before_replaying_wal() {
+    let repo = RepoInstance::new(
+        "test".into(),
+        BoxRepo::InMemory(Arc::new(InMemoryRepo::new())),
+        vec![TableConfig::new("t")],
+    );
+    let table = repo.get_table("t").await.unwrap();
+    let wal = repo.repo_wal().await.unwrap();
+    let info = repo.tx_info_store().await.unwrap();
+    crate::meta::recovery_marker::save_last_committed(&info, 0)
+        .await
+        .unwrap();
+
+    let mut rid_bytes = [0u8; 16];
+    rid_bytes[15] = 73;
+    let rid = RecordId(rid_bytes);
+    let entry = WalEntryV2::new(
+        wal.fresh_txn_id(),
+        repo_token(repo.name()),
+        vec![WalOpV2::Put {
+            table_id_interned: table_token_for("t"),
+            rid,
+            body: InnerValue::Str("recovery-proof".into()).to_bytes().unwrap(),
+        }],
+    )
+    .with_commit_version(7);
+    wal.begin_grouped(&entry, WalDurability::Buffered)
+        .await
+        .unwrap();
+    let inflight_before = wal.recover().await.unwrap();
+    assert_eq!(inflight_before.len(), 1);
+
+    let marker_key = shamir_storage::types::RecordKey::from_slice(
+        crate::meta::MetaKey::LastCommittedVersion
+            .as_record_id()
+            .to_bytes()
+            .as_ref(),
+    );
+    let marker_before = info
+        .get(marker_key.clone())
+        .await
+        .expect("persisted recovery marker");
+    let hold = repo.write_domain().admit().await.unwrap();
+    let mut recovery = Box::pin(repo.recover_v2_inflight());
+    let waker = futures::task::noop_waker_ref();
+    let mut cx = Context::from_waker(waker);
+    assert!(matches!(recovery.as_mut().poll(&mut cx), Poll::Pending));
+    assert!(table.get(rid).await.is_err());
+    assert_eq!(info.get(marker_key.clone()).await.unwrap(), marker_before);
+    assert_eq!(wal.recover().await.unwrap(), inflight_before);
+
+    drop(hold);
+    assert_eq!(recovery.await.unwrap(), 1);
+    assert_eq!(
+        crate::meta::recovery_marker::load_last_committed(&info)
+            .await
+            .unwrap(),
+        Some(7)
+    );
+    assert_eq!(wal.recover().await.unwrap(), inflight_before);
+    assert!(matches!(table.get(rid).await.unwrap(), InnerValue::Str(s) if s == "recovery-proof"));
+    assert_eq!(repo.recover_v2_inflight().await.unwrap(), 1);
+    assert_eq!(wal.recover().await.unwrap(), inflight_before);
+}
 
 fn assert_pending<F: Future>(mut future: std::pin::Pin<&mut F>) {
     let waker = futures::task::noop_waker_ref();
@@ -33,6 +107,7 @@ async fn create_table_blocked_while_permit_held() {
     drop(permit);
     mutation.await.unwrap();
     assert!(db.has_table("r", "t2"));
+    assert!(repo.has_table("t2"));
 }
 
 #[tokio::test(flavor = "current_thread")]

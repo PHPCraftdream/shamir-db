@@ -19,7 +19,7 @@ use super::helpers::{make_repo, test_posting_key};
 #[tokio::test]
 async fn ssi_phantom_indexed_range_aborts_second_commit() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
     let table_token = table_token_for("users");
 
@@ -96,7 +96,7 @@ async fn ssi_phantom_indexed_range_aborts_second_commit() {
 #[tokio::test]
 async fn ssi_phantom_between_range_aborts() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
     let table_token = table_token_for("users");
 
@@ -158,7 +158,7 @@ async fn ssi_phantom_between_range_aborts() {
 #[tokio::test]
 async fn ssi_phantom_disjoint_indexed_ranges_both_commit() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
     let table_token = table_token_for("users");
 
@@ -221,7 +221,7 @@ async fn ssi_phantom_disjoint_indexed_ranges_both_commit() {
 #[tokio::test]
 async fn ssi_phantom_no_index_records_table_scan_and_aborts() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
     let table_token = table_token_for("users");
 
@@ -283,8 +283,8 @@ async fn ssi_phantom_no_index_records_table_scan_and_aborts() {
 #[tokio::test]
 async fn ssi_phantom_other_table_does_not_conflict() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
-    repo.add_table(TableConfig::new("orders"));
+    repo.add_table_for_test(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("orders"));
     let tbl_users = repo.get_table("users").await.unwrap();
     let table_token_users = table_token_for("users");
     let table_token_orders = table_token_for("orders");

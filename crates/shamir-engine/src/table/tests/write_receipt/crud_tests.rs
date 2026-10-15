@@ -32,7 +32,7 @@ async fn fixture() -> (RepoInstance, TableManager, RecordId) {
         Vec::new(),
     )
     .with_commit_visibility_wait(STATUS);
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let table = repo.get_table("t").await.unwrap();
     let id = table.insert(&InnerValue::Int(1)).await.unwrap();
     (repo, table, id)

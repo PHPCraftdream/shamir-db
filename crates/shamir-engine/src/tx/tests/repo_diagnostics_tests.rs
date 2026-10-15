@@ -51,7 +51,7 @@ async fn parked_tail_missing_table_failures_and_successful_retry_are_observed() 
         repo.diagnostics().oldest_blocker.unwrap().class,
         GateBlockerClass::OrphanAwaitingReplay,
     );
-    assert!(repo.remove_table("a"));
+    assert!(repo.remove_table_ungated_for_test("a"));
     for expected in 1..=2 {
         assert_eq!(repo.drainer().drain_step(&repo).await.unwrap(), 0);
         let failed = repo.diagnostics();
@@ -64,7 +64,7 @@ async fn parked_tail_missing_table_failures_and_successful_retry_are_observed() 
             .contains("unavailable"));
         assert!(failed.visible_floor < blocker.version);
     }
-    repo.add_table(TableConfig::new("a"));
+    repo.add_table_ungated_for_test(TableConfig::new("a"));
     let restored = repo.get_table("a").await.unwrap();
     assert_eq!(repo.drainer().drain_step(&repo).await.unwrap(), 1);
     let success = repo.diagnostics();

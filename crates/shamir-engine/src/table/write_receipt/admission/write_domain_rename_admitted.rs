@@ -3,7 +3,6 @@ use std::str::FromStr;
 use super::TableManager;
 use crate::index::index_info_item::IndexInfoItem;
 use crate::index::index_manager::HashRenameTombstone;
-use crate::index2::kind::IndexKind;
 use crate::repo::RepoWritePermit;
 use shamir_query_types::read::{DdlOpKind, DdlOpState, DdlOpStatus};
 use shamir_storage::error::DbResult;
@@ -139,7 +138,7 @@ impl TableManager {
                         self.index_manager
                             .drop_unique_index(new_id, None, Some(entry.new_name.as_str()))
                             .await?;
-                        self.create_unique_index_body(&entry.new_name, &path_refs)
+                        self.create_unique_index_body(&entry.new_name, &path_refs, permit)
                             .await?;
                     }
                     // else Ready — already done
@@ -508,7 +507,10 @@ impl TableManager {
             // the old index is gone but the new one doesn't exist — enrich the
             // error with context AND write a structured `Failed { detail }`
             // to the op-status log.
-            match self.create_unique_index_body(new_name, &path_refs).await {
+            match self
+                .create_unique_index_body(new_name, &path_refs, permit)
+                .await
+            {
                 Ok(_) => {}
                 Err(e) => {
                     let detail = format!(

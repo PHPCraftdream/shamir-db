@@ -39,7 +39,7 @@ use super::helpers::{make_repo, test_bound_key};
 #[tokio::test]
 async fn mvcc1_serializable_aborts_on_conflicting_non_tx_insert_table_scan() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let table_token = table_token_for("t");
 
@@ -106,7 +106,7 @@ async fn mvcc1_serializable_aborts_on_conflicting_non_tx_insert_table_scan() {
 #[tokio::test]
 async fn mvcc1_serializable_aborts_on_conflicting_non_tx_insert_index_range() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let table_token = table_token_for("t");
 
@@ -179,8 +179,8 @@ async fn mvcc1_serializable_aborts_on_conflicting_non_tx_insert_index_range() {
 #[tokio::test]
 async fn mvcc1_non_tx_insert_into_different_table_does_not_abort_serializable_tx() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("watched"));
-    repo.add_table(TableConfig::new("other"));
+    repo.add_table_for_test(TableConfig::new("watched"));
+    repo.add_table_for_test(TableConfig::new("other"));
     let tbl_watched = repo.get_table("watched").await.unwrap();
     let tbl_other = repo.get_table("other").await.unwrap();
     let table_token_watched = table_token_for("watched");
@@ -220,7 +220,7 @@ async fn mvcc1_non_tx_insert_into_different_table_does_not_abort_serializable_tx
 #[tokio::test]
 async fn mvcc1_snapshot_tx_not_aborted_by_non_tx_insert() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let table_token = table_token_for("t");
 

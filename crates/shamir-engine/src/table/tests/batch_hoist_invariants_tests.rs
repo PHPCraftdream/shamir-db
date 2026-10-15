@@ -121,7 +121,7 @@ async fn functional_lookup(tbl: &TableManager, index_name_id: u64, lowered: &str
 #[tokio::test]
 async fn insert_tx_many_detects_duplicate_on_second_hoisted_unique_def() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let email_key = key_id(&tbl, "email").await;
     let city_key = key_id(&tbl, "city").await;
@@ -175,7 +175,7 @@ async fn insert_tx_many_detects_duplicate_on_second_hoisted_unique_def() {
 #[tokio::test]
 async fn insert_tx_many_bytes_detects_duplicate_on_second_hoisted_unique_def() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let email_key = key_id(&tbl, "email").await;
     let city_key = key_id(&tbl, "city").await;
@@ -233,7 +233,7 @@ async fn insert_tx_many_bytes_detects_duplicate_on_second_hoisted_unique_def() {
 #[tokio::test]
 async fn insert_tx_many_all_distinct_batch_commits_and_enforces_both_unique_indexes() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let email_key = key_id(&tbl, "email").await;
     let city_key = key_id(&tbl, "city").await;
@@ -289,7 +289,7 @@ async fn insert_tx_many_all_distinct_batch_commits_and_enforces_both_unique_inde
 #[tokio::test]
 async fn insert_many_hoisted_index2_backends_apply_to_every_record() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let name_key = key_id(&tbl, "name").await;
 
@@ -336,7 +336,7 @@ async fn insert_many_hoisted_index2_backends_apply_to_every_record() {
 #[tokio::test]
 async fn execute_update_tx_hoisted_token_resolves_ryow_row_among_committed_rows() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let interner = tbl.interner().get().await.unwrap();
     let seq_key = key_id(&tbl, "seq").await;

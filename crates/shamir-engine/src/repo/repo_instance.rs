@@ -670,7 +670,7 @@ impl RepoInstance {
         //    `token_names` reverse-index entry, AND the old
         //    `per_table_mvcc` registration (A13) so a future CREATE under
         //    the `from` name re-registers cleanly.
-        let _ = self.remove_table(from);
+        let _ = self.remove_table(from, permit);
 
         // 3. Register the new table config (preserving `enable_indexes`)
         //    and install its reverse-index entry. Reuses `add_table` so
@@ -680,7 +680,7 @@ impl RepoInstance {
             name: to.to_string(),
             enable_indexes: old_config.enable_indexes,
         };
-        self.add_table(new_config);
+        self.add_table(new_config, permit);
 
         // F-68 (#895) cluster D / task #124: exit timestamp, paired with
         // the "enter" log above.

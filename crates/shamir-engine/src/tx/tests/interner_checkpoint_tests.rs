@@ -36,7 +36,7 @@ fn make_repo() -> RepoInstance {
 #[tokio::test]
 async fn interner_checkpoint_gates_wal_truncation() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("items"));
+    repo.add_table_for_test(TableConfig::new("items"));
     let tbl = repo.get_table("items").await.unwrap();
 
     // Touch a new field name via the interner directly (simulating what
@@ -83,7 +83,7 @@ async fn interner_checkpoint_gates_wal_truncation() {
 #[tokio::test]
 async fn graceful_shutdown_flushes_interners() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("things"));
+    repo.add_table_for_test(TableConfig::new("things"));
     let tbl = repo.get_table("things").await.unwrap();
 
     let interner = tbl.interner().get().await.unwrap();

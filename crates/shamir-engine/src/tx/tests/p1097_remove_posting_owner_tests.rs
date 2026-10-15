@@ -47,7 +47,7 @@ fn record_with_str(key: u64, val: &str) -> InnerValue {
 #[tokio::test]
 async fn stale_remove_posting_correctly_preserves_live_claim() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -187,7 +187,7 @@ async fn stale_remove_posting_correctly_preserves_live_claim() {
 #[tokio::test]
 async fn stale_remove_posting_is_not_applied_at_commit() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -288,7 +288,7 @@ async fn stale_remove_posting_is_not_applied_at_commit() {
 #[tokio::test]
 async fn legit_release_then_reclaim_succeeds() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -392,7 +392,7 @@ async fn legit_release_then_reclaim_succeeds() {
 #[tokio::test]
 async fn genuine_double_claim_still_rejects() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -438,7 +438,7 @@ async fn genuine_double_claim_still_rejects() {
 #[tokio::test]
 async fn stale_bare_delete_does_not_clobber_a_concurrently_reclaimed_posting() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await

@@ -103,7 +103,7 @@ fn build_ready_functional_backend(
 #[tokio::test]
 async fn p1038_index2_lease_holds_blocks_drop_until_released() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let name_key = key_id(&tbl, "name").await;
 
@@ -209,7 +209,7 @@ async fn p1038_index2_lease_holds_blocks_drop_until_released() {
 #[tokio::test]
 async fn p1038_index2_lease_returns_drain_error_not_none() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let name_key = key_id(&tbl, "name").await;
 
@@ -294,7 +294,7 @@ async fn p1038_index2_lease_returns_drain_error_not_none() {
 #[tokio::test]
 async fn p1038_index2_backoff_pairing_contended_and_uncontended() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let name_key = key_id(&tbl, "name").await;
 

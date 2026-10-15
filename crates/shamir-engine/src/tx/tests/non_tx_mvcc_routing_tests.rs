@@ -20,7 +20,7 @@ fn make_repo() -> RepoInstance {
 #[tokio::test]
 async fn non_tx_insert_updates_version_cache() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     // Open a snapshot BEFORE the insert so MvccStore actually assigns
@@ -48,7 +48,7 @@ async fn non_tx_insert_updates_version_cache() {
 #[tokio::test]
 async fn non_tx_set_archives_old_value_under_snapshot() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     // Insert v1 first (no snapshot yet → main only, no history yet).
@@ -79,7 +79,7 @@ async fn non_tx_set_archives_old_value_under_snapshot() {
 #[tokio::test]
 async fn non_tx_delete_archives_old_value_under_snapshot() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     // Seed a record.
@@ -117,7 +117,7 @@ async fn non_tx_delete_archives_old_value_under_snapshot() {
 #[tokio::test]
 async fn non_tx_insert_many_updates_version_cache_per_record() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let gate = repo.tx_gate().await.unwrap();

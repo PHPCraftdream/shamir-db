@@ -19,6 +19,16 @@ use tokio::sync::OnceCell;
 use super::RepoInstance;
 
 impl RepoInstance {
+    #[cfg(test)]
+    pub(crate) fn add_table_for_test(&self, config: TableConfig) {
+        self.add_table_inner(config);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remove_table_for_test(&self, table_name: &str) -> bool {
+        self.remove_table_inner(table_name)
+    }
+
     /// Resolve a token while the caller already holds this repository's permit.
     pub async fn table_by_token_admitted(
         &self,
@@ -249,11 +259,13 @@ impl RepoInstance {
     /// `discover_restrict_refs`/`discover_action_refs` scan when rebuilding
     /// the cache.
     ///
-    /// S5c-X PR6b-2a: NOT part of the public admission surface — callers
-    /// must go through the admitted twin
-    /// [`add_table_admitted`](Self::add_table_admitted)
-    /// (write_domain_membership.rs) after acquiring the repo permit.
-    pub(crate) fn add_table(&self, config: TableConfig) {
+    /// S5c-X PR6b-2a: callers must pass a permit for this repository.
+    pub(crate) fn add_table(&self, config: TableConfig, permit: &RepoWritePermit) {
+        self.write_domain.debug_check_permit(permit);
+        self.add_table_inner(config);
+    }
+
+    fn add_table_inner(&self, config: TableConfig) {
         // Same synchronous DDL lock order as remove_table. This closes the
         // config/reverse-token re-add window without holding guards over await.
         let _entry = self.tables.entry(config.name.clone());
@@ -269,11 +281,13 @@ impl RepoInstance {
     /// actual removal — same rationale as `add_table` (table membership
     /// changed).
     ///
-    /// S5c-X PR6b-2a: NOT part of the public admission surface — callers
-    /// must go through the admitted twin
-    /// [`remove_table_admitted`](Self::remove_table_admitted)
-    /// (write_domain_membership.rs) after acquiring the repo permit.
-    pub(crate) fn remove_table(&self, table_name: &str) -> bool {
+    /// S5c-X PR6b-2a: callers must pass a permit for this repository.
+    pub(crate) fn remove_table(&self, table_name: &str, permit: &RepoWritePermit) -> bool {
+        self.write_domain.debug_check_permit(permit);
+        self.remove_table_inner(table_name)
+    }
+
+    fn remove_table_inner(&self, table_name: &str) -> bool {
         // DDL-only synchronous critical section: tables -> configs -> scc.
         // Keep the table shard exclusive until owned MVCC cleanup completes,
         // so a replacement initializer cannot publish in the removal window.

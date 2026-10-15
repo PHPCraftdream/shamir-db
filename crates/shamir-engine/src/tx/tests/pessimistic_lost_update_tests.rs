@@ -63,7 +63,7 @@ fn make_repo() -> Arc<RepoInstance> {
 #[tokio::test]
 async fn pessimistic_read_under_lock_sees_latest_committed_not_snapshot() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     // Seed the record OUTSIDE any tx (v0).
@@ -143,7 +143,7 @@ async fn pessimistic_read_under_lock_sees_latest_committed_not_snapshot() {
 #[tokio::test]
 async fn pessimistic_lock_held_until_publish_visible() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     // Seed v0.
@@ -210,7 +210,7 @@ async fn pessimistic_lock_held_until_publish_visible() {
 #[tokio::test]
 async fn pessimistic_lost_update_end_to_end_no_data_loss() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     // Seed v0.
@@ -264,7 +264,7 @@ async fn pessimistic_lost_update_end_to_end_no_data_loss() {
 #[tokio::test]
 async fn snapshot_read_isolation_unchanged_sees_snapshot_not_latest() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let rid = tbl.insert(&InnerValue::Str("v0".into())).await.unwrap();
@@ -300,7 +300,7 @@ async fn snapshot_read_isolation_unchanged_sees_snapshot_not_latest() {
 #[tokio::test]
 async fn serializable_read_isolation_unchanged_sees_snapshot_not_latest() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let rid = tbl.insert(&InnerValue::Str("v0".into())).await.unwrap();

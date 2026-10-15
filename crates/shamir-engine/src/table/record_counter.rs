@@ -243,6 +243,22 @@ impl RecordCounter {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) async fn persist_unprotected_for_test(&self) -> DbResult<()> {
+        let cache = self.ensure_cache().await?;
+        if cache.load(Ordering::Acquire) == self.last_persisted.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let _guard = self.persist_lock.lock().await;
+        let cur = cache.load(Ordering::Acquire);
+        if cur == self.last_persisted.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.write_through(cur).await?;
+        self.last_persisted.store(cur, Ordering::Release);
+        Ok(())
+    }
+
     /// Cheap, lock-free dirty check — NO admission, NO `ensure_cache`
     /// (an uninitialized `OnceCell` cache means nothing has been written
     /// since construction: every write path (`set`/`set_to`/`increment`)

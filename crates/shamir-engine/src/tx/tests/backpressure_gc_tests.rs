@@ -80,7 +80,7 @@ async fn overlay_gc_collapses_after_drain() {
     const N: usize = 20;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let gate = repo.tx_gate().await.unwrap();
 
@@ -154,7 +154,7 @@ async fn overlay_bounded_across_rounds() {
     const PER_ROUND: usize = 5;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let gate = repo.tx_gate().await.unwrap();
     let drainer = Drainer::new();
@@ -234,7 +234,7 @@ async fn backpressure_fast_path_returns_immediately() {
 #[tokio::test(flavor = "current_thread")]
 async fn backpressure_engages_then_releases_on_drain() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let gate = repo.tx_gate().await.unwrap();
     let token = table_token_for("t");
 

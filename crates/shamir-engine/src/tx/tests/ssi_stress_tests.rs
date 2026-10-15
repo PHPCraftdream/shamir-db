@@ -68,7 +68,7 @@ async fn multikey_opposing_order_no_deadlock_conflict_semantics() {
 
     for round in 0..ROUNDS {
         let repo = make_repo();
-        repo.add_table(TableConfig::new("t"));
+        repo.add_table_for_test(TableConfig::new("t"));
         let tbl = repo.get_table("t").await.unwrap();
 
         // Two records A and B, pre-committed so both txs share a snapshot
@@ -213,7 +213,7 @@ async fn manykey_storm_exactly_one_wins_no_deadlock() {
 
     for round in 0..ROUNDS {
         let repo = make_repo();
-        repo.add_table(TableConfig::new("t"));
+        repo.add_table_for_test(TableConfig::new("t"));
         let tbl = repo.get_table("t").await.unwrap();
         let token = table_token_for("t");
 
@@ -308,7 +308,7 @@ async fn manykey_storm_exactly_one_wins_no_deadlock() {
 #[tokio::test]
 async fn abort_releases_claim_subsequent_writer_succeeds() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let token = table_token_for("t");
 
@@ -379,7 +379,7 @@ async fn repeated_storm_aborts_never_strand_claims() {
     const N: usize = 12;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let token = table_token_for("t");
     let rid = tbl.insert(&InnerValue::Int(0)).await.unwrap();
@@ -446,7 +446,7 @@ async fn crash_then_recover_no_phantom_reservation() {
             BoxRepo::InMemory(Arc::clone(&underlying)),
             Vec::new(),
         );
-        repo1.add_table(TableConfig::new("t"));
+        repo1.add_table_for_test(TableConfig::new("t"));
         let tbl = repo1.get_table("t").await.unwrap();
         let token = table_token_for("t");
 
@@ -471,7 +471,7 @@ async fn crash_then_recover_no_phantom_reservation() {
     // Reopen a fresh instance over the SAME underlying store. Its MvccStore
     // cell map starts EMPTY — no reserved_by can have crossed the restart.
     let repo2 = RepoInstance::new("crash".into(), BoxRepo::InMemory(underlying), Vec::new());
-    repo2.add_table(TableConfig::new("t"));
+    repo2.add_table_for_test(TableConfig::new("t"));
     let tbl2 = repo2.get_table("t").await.unwrap();
     let token = table_token_for("t");
 

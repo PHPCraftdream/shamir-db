@@ -57,7 +57,7 @@ fn map_bytes_with_key(key_id: u64) -> Bytes {
 #[tokio::test]
 async fn a8_referenced_id_above_hwm_recorded_in_delta() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("items"));
+    repo.add_table_for_test(TableConfig::new("items"));
     let tbl = repo.get_table("items").await.unwrap();
     let interner = tbl.interner().get().await.unwrap();
 
@@ -112,7 +112,7 @@ async fn a8_referenced_id_above_hwm_recorded_in_delta() {
 #[tokio::test]
 async fn a8_fast_path_first_interner_still_recorded() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("items"));
+    repo.add_table_for_test(TableConfig::new("items"));
     let tbl = repo.get_table("items").await.unwrap();
     let interner = tbl.interner().get().await.unwrap();
 
@@ -161,7 +161,7 @@ async fn a8_fast_path_first_interner_still_recorded() {
 #[tokio::test]
 async fn a8_no_spurious_delta_for_persisted_ids() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("items"));
+    repo.add_table_for_test(TableConfig::new("items"));
     let tbl = repo.get_table("items").await.unwrap();
     let interner = tbl.interner().get().await.unwrap();
 
@@ -221,7 +221,7 @@ async fn a8_no_spurious_delta_for_persisted_ids() {
 #[tokio::test]
 async fn a8_stage_time_capture_matches_full_decode_for_nested_value() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("items"));
+    repo.add_table_for_test(TableConfig::new("items"));
     let tbl = repo.get_table("items").await.unwrap();
     let mut tx = TxContext::new(TxId::new(50), 0, 0, IsolationLevel::Snapshot);
     // C5 (implicit batch): intern straight into BASE instead of the tx

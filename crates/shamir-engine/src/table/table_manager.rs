@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use futures::FutureExt;
 
-use super::buffer_config;
 use super::interner_manager::InternerManager;
 use super::migration_freeze_guard::MigrationFreezeGuard;
 use super::persistable::PersistRegistry;

@@ -13,6 +13,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+#[cfg(test)]
+use tokio::sync::Notify;
+
 /// Process-global counter producing one unique token per
 /// [`RepoWriteDomain`] construction. Starts at 1 (0 is never handed out).
 static NEXT_REPO_WRITE_DOMAIN_TOKEN: AtomicU64 = AtomicU64::new(1);
@@ -40,6 +43,8 @@ pub struct RepoWriteDomain {
     /// [`RepoWriteDomain::admit_with_reservation`], and already-held permits
     /// proceed. 0 = no reservation.
     reserved_token: AtomicU64,
+    #[cfg(test)]
+    contended_admission: arc_swap::ArcSwapOption<Notify>,
 }
 
 /// Opaque capability issued by [`RepoWriteDomain::admit`].
@@ -113,17 +118,41 @@ impl RepoWriteDomain {
             repo_name: repo_name.into(),
             mutex: Arc::new(tokio::sync::Mutex::new(())),
             reserved_token: AtomicU64::new(0),
+            #[cfg(test)]
+            contended_admission: arc_swap::ArcSwapOption::empty(),
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn install_contended_admission_for_test(&self, notification: Arc<Notify>) {
+        self.contended_admission.store(Some(notification));
+    }
+
     /// Admit an ordinary repository write.
+    ///
     ///
     /// The reservation is checked AFTER acquiring the mutex (a reservation
     /// placed between a pre-lock check and the lock must win, so the single
     /// authoritative check happens inside; rejection is performed by dropping
     /// the guard and returning the error).
     pub async fn admit(self: &Arc<Self>) -> Result<RepoWritePermit, RepoWriteError> {
+        #[cfg(not(test))]
         let guard = self.mutex.clone().lock_owned().await;
+
+        #[cfg(test)]
+        let guard = {
+            let mut lock = std::pin::pin!(self.mutex.clone().lock_owned());
+            futures::future::poll_fn(|cx| {
+                let result = std::future::Future::poll(lock.as_mut(), cx);
+                if result.is_pending() {
+                    if let Some(notification) = self.contended_admission.load_full() {
+                        notification.notify_one();
+                    }
+                }
+                result
+            })
+            .await
+        };
         if self.reserved_token.load(Ordering::Acquire) != 0 {
             return Err(RepoWriteError::Reserved {
                 repo: self.repo_name.clone(),
