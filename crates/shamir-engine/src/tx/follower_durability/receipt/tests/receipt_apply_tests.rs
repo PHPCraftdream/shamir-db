@@ -470,17 +470,35 @@ async fn periodic_persist_cannot_overwrite_committed_counter() {
     close(repo).await;
 }
 
-// Finding 2/3 regression (round 4, DISCRIMINATING): a one-shot failure
-// injected right after the durable Materialized commit of a SECOND batch
-// leaves that batch's versions UNPUBLISHED — the receipt stays
-// Materialized-outstanding, nothing beyond the FIRST batch is published, the
-// repo keeps serving (no reopen, guards held by the worker, not dropped).
-// Re-applying the SAME batch replays the durable Materialized receipt's
-// RECORDED counters (no cache recompute): the absolute counter converges to
-// 3 (1 from the first batch + 2 from the failed batch). A defective
-// recompute-from-cache — which reads the paused batch's own hidden history
-// rows as absent and adopts the wrong absolute value — provably fails these
-// exact-value assertions.
+// Finding 2/3 regression (round 4, round-5 hardened, DISCRIMINATING): a
+// STICKY failure injected after the durable Materialized commit of a SECOND
+// batch must park the pipeline after 3 Storage attempts — including on the
+// Materialized fast path, which previously BYPASSED the seam entirely:
+//   attempt 1: fresh path — commit_materialized_work OK, seam fires
+//              (Storage "injected") → inline retry
+//   attempt 2: run_chunk_tail Materialized fast path → round-5 seam check
+//              fires BEFORE durable_tail → retry
+//   attempt 3: fast path → seam fires → attempt >= 3 → PARK, return Err.
+// Paused state: the Materialized receipt is outstanding, nothing of the
+// second batch is published, the repo keeps serving (no reopen).
+//
+// Counter oracle arithmetic (counter cache = 1 from the first batch; keys 2
+// and 3 are new/hidden — their history rows were durably written but never
+// published, so MVCC "current" reads them as absent):
+//   correct replay (fast path): stored absolute counters 1→3 are REPLAYED;
+//     absolute counter = 3, persisted blob = 3, exactly one history version
+//     per key, parked guards drained.
+//   defective recompute-from-cache (stage::compute_counters): before =
+//     cache.get() = 1, both missing keys read absent → delta +2 → also 3 —
+//     so the ABSOLUTE value alone is NOT discriminating; the discrimination
+//     is structural: a recompute-based retry re-runs the materialize/commit
+//     leg, re-writing the durable batch and re-deriving counters from the
+//     live cache, and fails the exact single-version-per-key history
+//     assertions plus the parked-guards-drained assertion below (a
+//     recompute retry that parks leaves its chunk guards parked ≠ 0, and a
+//     recompute retry that succeeds double-writes/rewrites history rows
+//     instead of replaying the stored ones). The exact-value assertions
+//     pin the replay: counter 3, blob 3, versions [1]/[2]/[3], guards 0.
 #[tokio::test]
 async fn error_pauses_receipt_versions_unpublished() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -536,10 +554,10 @@ async fn error_pauses_receipt_versions_unpublished() {
     drop(table);
 
     // Re-apply the SAME batch: the retry replays the durable Materialized
-    // receipt (recorded counters) — no recompute, no duplicate rows. The
-    // EXACT expected values: absolute counter 3 (a recompute-from-cache
-    // defect adopts a different absolute value), persisted blob 3, and
-    // exactly one history version per key.
+    // receipt (recorded counters) — no recompute, no duplicate rows. Exact
+    // expected values (see the arithmetic trace above): absolute counter 3,
+    // persisted blob 3, exactly one history version per key, and the retry
+    // loop's parked guards drained by the successful publication.
     assert_eq!(
         apply_replicated_batch(&repo, &[event(2, 2), event(3, 3)], 1, ApplyPolicy::Trusted)
             .await

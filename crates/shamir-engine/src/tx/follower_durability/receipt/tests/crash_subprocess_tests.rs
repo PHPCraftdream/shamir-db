@@ -358,6 +358,29 @@ fn assert_child_died(status: std::process::ExitStatus, output: &str, point: &str
         "child at crash point {point} fell through to the fallback panic: the \
          abort hook did not fire inside the pipeline; output: {output}"
     );
+    // Round 5 (review): the death itself is still ambiguous — an unrelated
+    // startup panic (env var missing, repo open failure, …) also produces a
+    // non-zero exit with no "test result: ok". The producer prints
+    // `SHAMIR_RECEIPT_ABORT_FIRED {phase:?}` (test_seam.rs, `phase()`) right
+    // before `std::process::abort()`, so the child MUST have printed the
+    // marker AND the exact `{:?}`-formatted phase name for its crash point.
+    // Missing marker = child died WITHOUT reaching the armed abort hook.
+    assert!(
+        output.contains("SHAMIR_RECEIPT_ABORT_FIRED"),
+        "child at crash point {point} died without reaching the armed abort \
+         hook (no SHAMIR_RECEIPT_ABORT_FIRED marker); output: {output}"
+    );
+    let expected_phase = match point {
+        "prepared" => "ReceiptPrepared",
+        "materialized" => "ReceiptMaterialized",
+        "checkpointed" => "ReceiptCheckpointed",
+        other => panic!("unknown crash point {other}"),
+    };
+    assert!(
+        output.contains(&format!("SHAMIR_RECEIPT_ABORT_FIRED {expected_phase}")),
+        "child at crash point {point} reached an abort hook but for the WRONG \
+         phase: expected `SHAMIR_RECEIPT_ABORT_FIRED {expected_phase}`; output: {output}"
+    );
 }
 
 /// For one crash point: spawn the aborting child, then reopen TWICE, replaying

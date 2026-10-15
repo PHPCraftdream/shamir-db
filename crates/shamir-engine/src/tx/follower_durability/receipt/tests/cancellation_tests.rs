@@ -399,12 +399,11 @@ async fn drop_during_checkpoint_commit_still_completes_and_publishes() {
     // commit is the checkpoint's, so the park fires inside it.
     shamir_storage::storage_fjall::commit_window_park_seam::arm(true);
     hook.resume.notify_waiters();
-    for _ in 0..2000u32 {
-        if shamir_storage::storage_fjall::commit_window_park_seam::reached() {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    // Round 5: deterministic seam-arrival wait (Notify handshake added to
+    // `commit_window_park_seam`) instead of a fixed 2000-yield budget — the
+    // parking thread notifies AFTER storing `reached`, so waking implies
+    // arrival.
+    shamir_storage::storage_fjall::commit_window_park_seam::wait_reached().await;
     assert!(
         shamir_storage::storage_fjall::commit_window_park_seam::reached(),
         "checkpoint commit never reached the physical commit window"

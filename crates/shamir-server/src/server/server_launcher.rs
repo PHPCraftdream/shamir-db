@@ -409,7 +409,7 @@ impl ServerLauncher {
             for (db_name, repo_name, table_name) in snap.iter_entries() {
                 if let Some(db) = shamir.get_db(db_name) {
                     if !db.has_table(repo_name, table_name) {
-                        let _ddl = crate::doctor::boot_table_guard(db, repo_name).await;
+                        let _ddl = crate::doctor::boot_table_guard(&db, repo_name).await;
                         if let Err(e) = db.create_table(repo_name, table_name) {
                             tracing::warn!(
                                 db = db_name,

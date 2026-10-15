@@ -48,6 +48,31 @@ pub(crate) struct Job {
     bookmark: u64,
     policy: ApplyPolicy,
     reply: oneshot::Sender<DbResult<ApplyOutcome>>,
+    /// Repo-side worker handle, threaded into `run_receipt_pipeline` for
+    /// guard park/retire — the loop itself holds no `Arc<ReceiptWorker>`.
+    worker: Arc<ReceiptWorker>,
+}
+
+/// Loop-only state, held as `Arc<LoopState>` by BOTH the spawned loop and
+/// [`ReceiptWorker`]: the loop holds NO `Arc<ReceiptWorker>`, so when the
+/// repo's `OnceCell` (which owns the worker and thus the queue sender)
+/// drops, the sender drops, `recv()` returns `None`, and the loop exits —
+/// the worker task can no longer keep its own queue alive (reviewer P1 #4).
+struct LoopState {
+    /// Jobs currently running (0..1 in practice — the admission mutex
+    /// serializes). Drives the deterministic `wait_idle` test seam.
+    in_flight: AtomicUsize,
+    /// Notified on every 1→0 `in_flight` transition.
+    idle: Notify,
+}
+
+impl LoopState {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            in_flight: AtomicUsize::new(0),
+            idle: Notify::new(),
+        })
+    }
 }
 
 pub(crate) struct ReceiptWorker {
@@ -59,11 +84,8 @@ pub(crate) struct ReceiptWorker {
     /// Fresh chunk guards parked across pipeline errors — see the module
     /// doc. NEVER dropped while the repo keeps serving.
     parked_guards: Mutex<Vec<VersionGuard>>,
-    /// Jobs currently running (0..1 in practice — the admission mutex
-    /// serializes). Drives the deterministic `wait_idle` test seam.
-    in_flight: AtomicUsize,
-    /// Notified on every 1→0 `in_flight` transition.
-    idle: Notify,
+    /// Shared with the spawned loop — see [`LoopState`].
+    state: Arc<LoopState>,
 }
 
 impl ReceiptWorker {
@@ -75,8 +97,7 @@ impl ReceiptWorker {
                 closed: AtomicBool::new(false),
                 handle: Mutex::new(None),
                 parked_guards: Mutex::new(Vec::new()),
-                in_flight: AtomicUsize::new(0),
-                idle: Notify::new(),
+                state: LoopState::new(),
             }),
             receiver,
         )
@@ -91,8 +112,7 @@ impl ReceiptWorker {
             closed: AtomicBool::new(true),
             handle: Mutex::new(None),
             parked_guards: Mutex::new(Vec::new()),
-            in_flight: AtomicUsize::new(0),
-            idle: Notify::new(),
+            state: LoopState::new(),
         })
     }
 
@@ -100,8 +120,13 @@ impl ReceiptWorker {
     /// bounded: a full queue or a shut-down worker is a typed error, never a
     /// spawn. Only the REPLY is awaited — dropping this future at the await
     /// point drops the receiver, and the worker KEEPS RUNNING the job.
+    ///
+    /// The `Arc<Self>` receiver lets the job carry a worker handle into the
+    /// spawned loop (`run_receipt_pipeline` parks/retires guards through it)
+    /// WITHOUT the loop structurally owning one: the Arc lives only inside
+    /// the dequeued job and drops with it (reviewer P1 #4).
     pub(crate) async fn submit(
-        &self,
+        self: &Arc<Self>,
         repo: RepoInstance,
         info: Arc<dyn Store>,
         events: Vec<ReplicatedEvent>,
@@ -122,6 +147,7 @@ impl ReceiptWorker {
             bookmark,
             policy,
             reply: tx,
+            worker: Arc::clone(self),
         };
         let rejected = {
             let sender = self.sender.lock().await;
@@ -179,11 +205,11 @@ impl ReceiptWorker {
     #[cfg(test)]
     pub(crate) async fn wait_idle(&self) {
         loop {
-            let notified = self.idle.notified();
+            let notified = self.state.idle.notified();
             tokio::pin!(notified);
             // Arm before checking: the final decrement may race this waiter.
             notified.as_mut().enable();
-            if self.in_flight.load(Ordering::Acquire) == 0 {
+            if self.state.in_flight.load(Ordering::Acquire) == 0 {
                 return;
             }
             notified.await;
@@ -200,18 +226,27 @@ impl ReceiptWorker {
         // jobs (`recv` returns the rest) before it exits.
         drop(self.sender.lock().await.take());
         let mut handle = self.handle.lock().await;
-        let timed_out = match handle.as_mut() {
+        match handle.as_mut() {
             // Await UNDER the handle mutex: on timeout the handle is left in
             // place — never dropped, never detached.
-            Some(join) => tokio::time::timeout(timeout, &mut *join).await.is_err(),
-            None => false,
-        };
-        if timed_out {
-            return Err(DbError::Internal(
-                "receipt worker shutdown timed out; job still running".into(),
-            ));
+            Some(join) => {
+                let joined = tokio::time::timeout(timeout, &mut *join).await;
+                match joined {
+                    // Timeout: the job is still running — the caller
+                    // quarantines (requires_reopen) and reports the error.
+                    Err(_elapsed) => Err(DbError::Internal(
+                        "receipt worker shutdown timed out; job still running".into(),
+                    )),
+                    // Completed: surface a panicked job as a typed error
+                    // (reviewer P1 #3) instead of swallowing the JoinError.
+                    Ok(Err(join_error)) => Err(DbError::Internal(format!(
+                        "receipt worker task failed: {join_error}"
+                    ))),
+                    Ok(Ok(())) => Ok(()),
+                }
+            }
+            None => Ok(()),
         }
-        Ok(())
     }
 }
 
@@ -221,15 +256,25 @@ impl ReceiptWorker {
 /// panicked job ends the loop; later submitters observe the closed queue as
 /// a typed `Internal` error (same visibility as the old per-call
 /// `JoinHandle` join error, without an orphan spawn per call).
-async fn worker_loop(worker: Arc<ReceiptWorker>, mut receiver: mpsc::Receiver<Job>) {
+async fn worker_loop(state: Arc<LoopState>, mut receiver: mpsc::Receiver<Job>) {
     while let Some(job) = receiver.recv().await {
-        worker.in_flight.fetch_add(1, Ordering::AcqRel);
+        state.in_flight.fetch_add(1, Ordering::AcqRel);
         let _tail = job.repo.commit_tail().enter();
-        let result =
-            run_receipt_pipeline(job.repo, job.info, job.events, job.bookmark, job.policy).await;
+        // The worker handle comes from the JOB (repo side) — the loop itself
+        // holds no `Arc<ReceiptWorker>`, so dropping the repo's OnceCell
+        // closes the queue and ends this loop.
+        let result = run_receipt_pipeline(
+            job.repo,
+            job.info,
+            job.events,
+            job.bookmark,
+            job.policy,
+            &job.worker,
+        )
+        .await;
         let _ = job.reply.send(result);
-        if worker.in_flight.fetch_sub(1, Ordering::AcqRel) == 1 {
-            worker.idle.notify_waiters();
+        if state.in_flight.fetch_sub(1, Ordering::AcqRel) == 1 {
+            state.idle.notify_waiters();
         }
     }
 }
@@ -243,9 +288,11 @@ impl RepoInstance {
             .receipt_worker
             .get_or_try_init(|| async {
                 let (worker, receiver) = ReceiptWorker::new();
-                let handle = tokio::spawn(worker_loop(Arc::clone(&worker), receiver));
+                let handle = tokio::spawn(worker_loop(Arc::clone(&worker.state), receiver));
                 *worker.handle.lock().await = Some(handle);
-                Ok(worker)
+                // E0283: multiple `From<_> for DbError` impls leave the
+                // closure's `E` ambiguous — pin it explicitly.
+                Ok::<Arc<ReceiptWorker>, DbError>(worker)
             })
             .await?;
         // A closed worker (installed by `shutdown_receipt_worker` before any
@@ -280,21 +327,38 @@ impl RepoInstance {
     /// initialized a worker gets a CLOSED worker installed instead, so any
     /// later `receipt_worker()`/submit observes the typed closed error.
     /// Idempotent.
-    pub(crate) async fn shutdown_receipt_worker(&self, timeout: Duration) {
+    ///
+    /// Shutdown contract (reviewer P1 #3): on success the loop has EXITED —
+    /// every queued job was drained through the pipeline (each taking
+    /// `commit_tail`, so a subsequent `quiesce_commits` observes them) and
+    /// the in-flight job reached publication or a durable pause. On error
+    /// the parked guards are STILL quarantined (that is the safe durable
+    /// pause) and the timeout/join error is PROPAGATED to the caller —
+    /// `shutdown_clean` must not report a clean shutdown with a live job.
+    pub(crate) async fn shutdown_receipt_worker(&self, timeout: Duration) -> DbResult<()> {
         let worker = match self.receipt_worker.get() {
             Some(worker) => Arc::clone(worker),
             None => {
-                let _ = self.receipt_worker.set(ReceiptWorker::new_closed());
-                return;
+                // Never-initialized path: install the CLOSED worker. If the
+                // `set` loses to a concurrent initializer (that initializer
+                // is now the stored worker), fall through and shut THAT one
+                // down instead of silently returning with a live worker.
+                let closed = ReceiptWorker::new_closed();
+                match self.receipt_worker.set(closed) {
+                    Ok(()) => return Ok(()),
+                    Err(_winner) => self.receipt_worker().await?,
+                }
             }
         };
-        if let Err(error) = worker.shutdown_core(timeout).await {
+        let shutdown = worker.shutdown_core(timeout).await;
+        if let Err(error) = &shutdown {
             log::error!(
                 "receipt worker shutdown for repo {}: {error}; the task \
                  remains owned and parked guards are quarantined",
                 self.name()
             );
         }
+        // Quarantine runs on BOTH paths: it is the safe durable pause.
         let parked = worker.parked_guards.lock().await.len();
         if parked > 0 {
             log::warn!(
@@ -306,5 +370,6 @@ impl RepoInstance {
             }
             worker.parked_guards.lock().await.clear();
         }
+        shutdown
     }
 }

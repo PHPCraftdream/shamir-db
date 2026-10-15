@@ -903,6 +903,10 @@ pub mod commit_window_park_seam {
     static RELEASED: AtomicBool = AtomicBool::new(false);
     static CONDVAR: Condvar = Condvar::new();
     static WAIT_MUTEX: Mutex<()> = Mutex::new(());
+    /// Async test-side arrival signal (round 5): the parking thread fires
+    /// `notify_waiters()` right after setting `REACHED`, so engine tests can
+    /// await `wait_reached()` instead of spinning on yield budgets.
+    static NOTIFY: tokio::sync::Notify = tokio::sync::Notify::new();
 
     fn lock() -> MutexGuard<'static, ()> {
         WAIT_MUTEX
@@ -924,6 +928,25 @@ pub mod commit_window_park_seam {
         REACHED.load(Ordering::Acquire)
     }
 
+    /// Deterministic async wait for arrival (round 5): replaces the fixed
+    /// `for _ in 0..2000 { yield; }` seam-arrival loops. Arm-then-check
+    /// pattern (mirrors `ReceiptWorker::wait_idle`): the waker is registered
+    /// via `enable()` BEFORE re-checking `reached()`, so a notification fired
+    /// between the check and the registration cannot be missed; the parking
+    /// thread stores `REACHED` (Release) BEFORE `notify_waiters()`, so waking
+    /// implies `reached() == true`. No sleeps, no yield budgets.
+    pub async fn wait_reached() {
+        if reached() {
+            return;
+        }
+        let notified = NOTIFY.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        while !reached() {
+            notified.as_mut().await;
+        }
+    }
+
     /// Release the parked committer; the physical commit proceeds.
     pub fn release() {
         RELEASED.store(true, Ordering::Release);
@@ -936,6 +959,7 @@ pub mod commit_window_park_seam {
     /// then blocks until [`release`].
     pub(crate) fn park() {
         REACHED.store(true, Ordering::Release);
+        NOTIFY.notify_waiters();
         let mut guard = lock();
         while !RELEASED.load(Ordering::Acquire) {
             guard = CONDVAR

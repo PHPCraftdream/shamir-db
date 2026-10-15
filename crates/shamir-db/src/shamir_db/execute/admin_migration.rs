@@ -142,6 +142,19 @@ impl ShamirAdminExecutor {
             .await
             .map_err(|e| err(e.to_string()))?;
 
+        // S5c round 5 (P1 #5): hold the SOURCE repo's `ddl_admission` guard
+        // across the interner/index replication and the snapshot/drain below
+        // (`run`), so none of it interleaves with a follower receipt apply.
+        // Held through the end of `run` (all mutations are inside it). The
+        // dst repo needs NO guard here: `db.get_table`,
+        // `replicate_interner_from`, `replicate_index2_descriptors_from`,
+        // and the coordinator's snapshot/drain/persist calls take no
+        // repo-level `ddl_admission` of their own (verified by grep —
+        // `begin_migration_freeze` takes the per-TABLE `ddl_admission`
+        // mutex, a different mutex from this repo-level one), and the dst
+        // repo is brand-new and not yet visible to the receipt pipeline.
+        let _src_repo_ddl = repo_ddl_guard(&self.shamir, &self.db_name, &op.repo).await?;
+
         // From here on, any error must clean up dst repo
         // (rollback-on-failure). We pull dst_data + run snapshot/drain;
         // a `?` aborts the whole batch, but the dst repo would leak.
@@ -355,6 +368,36 @@ impl ShamirAdminExecutor {
                     .to_string(),
             ));
         }
+        // S5c round 5 (P1 #5): resolve the cutover state and run the
+        // same-repo defensive check BEFORE the guards, then acquire BOTH
+        // repo `ddl_admission` guards BEFORE the Draining-phase
+        // drain/persist block below — so drain, persist_state, and the
+        // finalisation mutations are ALL covered by the interlock against a
+        // follower receipt apply (previously drain/persist ran unguarded).
+        let cutover_state = coord.state().await;
+        // Defensive (S5c round 4): a persisted/recovered state could name the
+        // same repo for src and dst; acquiring the same non-reentrant tokio
+        // Mutex twice below would self-deadlock, so reject before any guard.
+        if cutover_state.dst_repo == cutover_state.src_repo {
+            return Err(err_code(
+                "migration_same_repo",
+                "migration destination repo must differ from the source repo".to_string(),
+            ));
+        }
+        // DDL interlock (repo-level `ddl_admission`, S5c round 4): the
+        // Draining-phase drain/persist AND the finalisation section below
+        // mutate the src and dst tables directly (per-table
+        // `begin_write_barrier` blocks, index2 registry rebuild, mvcc log
+        // seeding) and must not interleave with a follower receipt apply.
+        // Acquire BOTH repo guards here, ONCE each, in a fixed src→dst order
+        // (different mutexes — the tokio Mutex is not reentrant, so the same
+        // repo must never be nested twice; every call below is guard-free
+        // coordinator/manager plumbing). Both are held through the end of
+        // the mutation section (end of function).
+        let _src_repo_ddl =
+            repo_ddl_guard(&self.shamir, &self.db_name, &cutover_state.src_repo).await?;
+        let _dst_repo_ddl =
+            repo_ddl_guard(&self.shamir, &self.db_name, &cutover_state.dst_repo).await?;
         if coord.phase().await == MigrationPhase::Draining {
             let result = coord
                 .drain_until_caught_up(0)
@@ -377,29 +420,6 @@ impl ShamirAdminExecutor {
                 err_code(e.code().unwrap_or("migration_cutover_error"), e.to_string())
             })?;
         }
-        let cutover_state = coord.state().await;
-        // Defensive (S5c round 4): a persisted/recovered state could name the
-        // same repo for src and dst; acquiring the same non-reentrant tokio
-        // Mutex twice below would self-deadlock, so reject before any guard.
-        if cutover_state.dst_repo == cutover_state.src_repo {
-            return Err(err_code(
-                "migration_same_repo",
-                "migration destination repo must differ from the source repo".to_string(),
-            ));
-        }
-        // DDL interlock (repo-level `ddl_admission`, S5c round 4): the
-        // finalisation section below mutates the src and dst tables directly
-        // (per-table `begin_write_barrier` blocks, index2 registry rebuild,
-        // mvcc log seeding) and must not interleave with a follower receipt
-        // apply. Acquire BOTH repo guards here, ONCE each, in a fixed
-        // src→dst order (different mutexes — the tokio Mutex is not
-        // reentrant, so the same repo must never be nested twice; every
-        // call below is guard-free coordinator/manager plumbing). Both are
-        // held through the end of the mutation section (end of function).
-        let _src_repo_ddl =
-            repo_ddl_guard(&self.shamir, &self.db_name, &cutover_state.src_repo).await?;
-        let _dst_repo_ddl =
-            repo_ddl_guard(&self.shamir, &self.db_name, &cutover_state.dst_repo).await?;
         let src_table = db
             .get_table(&cutover_state.src_repo, &cutover_state.table_name)
             .await
@@ -604,6 +624,20 @@ impl ShamirAdminExecutor {
             })?
             .clone();
         let _finalisation = coord.lock_finalisation().await;
+        // S5c round 5 (P1 #5): hold the SOURCE repo's `ddl_admission` guard
+        // across `coord.rollback()`. Rollback touches only source-repo
+        // resources: `MigrationShadowLog` lives on the source table's info
+        // store (`MigrationShadowLog::new(id, info_store)` is constructed
+        // with src's in StartMigration and `::recover(..., src.info_store())`
+        // in Commit), and `rollback()` (coordinator.rs:486-500) purges that
+        // shadow log and persists state through the same info store — the
+        // dst repo is untouched, so no dst guard is taken. Acquired after
+        // `lock_finalisation` so the finalisation lock orders the guard;
+        // single acquisition, src only (src != dst is guaranteed by
+        // StartMigration's same-repo rejection).
+        let rollback_state = coord.state().await;
+        let _src_repo_ddl =
+            repo_ddl_guard(&self.shamir, &self.db_name, &rollback_state.src_repo).await?;
         let _source_freeze = coord.take_migration_freeze();
         coord.rollback().await.map_err(|e| err(e.to_string()))?;
         self.shamir

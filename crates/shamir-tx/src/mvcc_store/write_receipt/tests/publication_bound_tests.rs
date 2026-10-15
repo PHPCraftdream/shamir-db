@@ -504,3 +504,81 @@ async fn zero_floor_hides_unpublished_only() {
         "published version must appear in current_stream: {current:?}"
     );
 }
+
+/// S5c-X PR6b-2 round 5 (review P2 #7) — COLD-BRANCH regression.
+///
+/// `older_published_history_visible_beside_unpublished_version` above calls
+/// `publish_materialized(&ops1, 1)`, which SEEDS the key's cell — so its
+/// point reads take the WARM path (`current_version > 0`) and never reach
+/// the cold `seek_latest_published` scan at all. Reverting the cold-scan
+/// fix would still pass that test. This test forces the COLD path: after
+/// publishing v1 (cell seeded) and materializing unpublished v2, the cell
+/// is evicted via the test-only `evict_current_cell_for_test` helper, so
+/// the next point read must resolve v1 through `seek_latest_published`
+/// (the range-bounded scan). The round-3 post-filter behavior (global max
+/// post-filtered at the floor) would collapse `hist_v` to `None` here and
+/// return None for the point read — exactly what this test pins against.
+#[tokio::test]
+async fn cold_scan_finds_published_v1_beside_unpublished_v2() {
+    let (mvcc, gate) = make_mvcc();
+
+    // v1: materialize AND publish → floor 1, cell seeded (warm state).
+    let ops1 = [set_op(b"k", b"v1")];
+    mvcc.materialize_committed_to_history(&ops1, 1)
+        .await
+        .unwrap();
+    mvcc.publish_materialized(&ops1, 1);
+    assert_eq!(gate.last_committed(), 1);
+    assert_eq!(
+        mvcc.get_current_bytes(b"k").await.unwrap(),
+        Some(Bytes::from_static(b"v1")),
+        "warm path sanity: published v1 visible while the cell is seeded"
+    );
+
+    // v2: materialize WITHOUT publishing (global max version is now 2 > floor 1).
+    let ops2 = [set_op(b"k", b"v2")];
+    mvcc.materialize_committed_to_history(&ops2, 2)
+        .await
+        .unwrap();
+
+    // Evict the cell → the next point read MUST take the cold path
+    // (`current_version == 0` → `seek_latest_published`).
+    mvcc.evict_current_cell_for_test(b"k");
+    assert_eq!(
+        mvcc.current_version(b"k"),
+        0,
+        "eviction must make the cell absent so the cold scan is exercised"
+    );
+
+    // REGRESSION: the cold bounded scan finds the newest PUBLISHED version
+    // (v1) and serves it; the unpublished v2 stays invisible. The round-3
+    // post-filter defect would return None here (global max 2 > floor 1,
+    // filtered out with no fallback to older published history).
+    assert_eq!(
+        mvcc.get_current(RecordKey::from(Bytes::from_static(b"k")))
+            .await
+            .unwrap(),
+        Some(Bytes::from_static(b"v1")),
+        "cold scan must return published v1 beside unpublished v2 (post-filter defect returned None)"
+    );
+
+    // The cold read re-seeded the cell with the published version.
+    assert_eq!(
+        mvcc.current_version(b"k"),
+        1,
+        "cold path must seed the cell with the published version, not the unpublished one"
+    );
+
+    // The re-seeded warm read agrees.
+    assert_eq!(
+        mvcc.get_current_bytes(b"k").await.unwrap(),
+        Some(Bytes::from_static(b"v1"))
+    );
+
+    // Snapshot read at the floor agrees (also cold-anchored via get_at's
+    // range scan for snapshots below the cell version).
+    assert_eq!(
+        mvcc.get_at(b"k", 1).await.unwrap(),
+        Some(Bytes::from_static(b"v1"))
+    );
+}

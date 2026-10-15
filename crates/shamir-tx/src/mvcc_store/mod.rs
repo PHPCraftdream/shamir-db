@@ -1502,6 +1502,16 @@ impl MvccStore {
         self.cells.read_sync(key, |_, c| c.version)
     }
 
+    /// TEST-ONLY: evict the key's in-memory cell so the next point read
+    /// takes the cold path (`seek_latest_published`). Used by the
+    /// cold-branch regression test to force the bounded scan even after a
+    /// publish (which seeds the cell). Synchronous `retain_sync` per the
+    /// #589 deadlock note in `prune_version_cache`; no production behavior.
+    #[cfg(test)]
+    pub(crate) fn evict_current_cell_for_test(&self, key: &[u8]) {
+        self.cells.retain_sync(|k, _| k.as_slice() != key);
+    }
+
     // ========================================================================
     // Level-3 pessimistic locking (wound-wait, deadlock-free).
     //

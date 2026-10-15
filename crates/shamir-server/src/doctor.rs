@@ -264,7 +264,7 @@ pub async fn run(config: &Config, args: &DoctorArgs) -> anyhow::Result<DoctorRep
             if let Some(db) = shamir.get_db(db_name) {
                 if !db.has_table(repo_name, table_name) {
                     // S5c round 3: guard DDL against follower receipt applies.
-                    let _ddl = boot_table_guard(db, repo_name).await;
+                    let _ddl = boot_table_guard(&db, repo_name).await;
                     if let Err(e) = db.create_table(repo_name, table_name) {
                         tracing::warn!(
                             db = db_name,
