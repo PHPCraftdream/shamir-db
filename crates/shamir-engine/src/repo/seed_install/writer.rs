@@ -135,10 +135,14 @@ impl SeedImageWriter {
         save_next_tx_id_snapshot(&info, 1).await?;
         save_last_committed_flushed(&info, 1).await?;
         // Destination identity is minted locally; the source stays in receipt.
-        repo.repo_identity_admitted(&permit).await?;
+        // Round-11 (stack layout): each admitted twin embeds the whole inner
+        // future inline (identity load; cold table init via `get_table_ctx`).
+        // Pinning them keeps that state on the heap instead of widening this
+        // constructor's already-large future (which also holds the permit).
+        Box::pin(repo.repo_identity_admitted(&permit)).await?;
         for table in &tables {
-            repo.add_table_admitted(table.config(), &permit).await?;
-            let manager = repo.get_table_admitted(&table.name, &permit).await?;
+            Box::pin(repo.add_table_admitted(table.config(), &permit)).await?;
+            let manager = Box::pin(repo.get_table_admitted(&table.name, &permit)).await?;
             if manager.mvcc_store().is_none() || manager.has_any_index() {
                 return Err(DbError::Storage(
                     "seed destination must be index-free MVCC".into(),

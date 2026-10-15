@@ -1833,7 +1833,9 @@ impl RepoInstance {
             .admit()
             .await
             .map_err(|error| DbError::Internal(error.to_string()))?;
-        crate::tx::recovery::recover_inflight_v2(self, &permit).await
+        // Round-11 (stack layout): heap-pin the recovery body (replays every
+        // inflight entry through the admitted chain) off this wrapper's frame.
+        Box::pin(crate::tx::recovery::recover_inflight_v2(self, &permit)).await
     }
 
     pub(crate) async fn recover_v2_inflight_admitted(
@@ -1841,7 +1843,8 @@ impl RepoInstance {
         permit: &crate::repo::RepoWritePermit,
     ) -> DbResult<usize> {
         self.write_domain.debug_check_permit(permit);
-        crate::tx::recovery::recover_inflight_v2(self, permit).await
+        // Round-11 (stack layout): see `recover_v2_inflight`.
+        Box::pin(crate::tx::recovery::recover_inflight_v2(self, permit)).await
     }
 
     /// F6b (I2): flush every per-table `history` version-log to disk WITHOUT
