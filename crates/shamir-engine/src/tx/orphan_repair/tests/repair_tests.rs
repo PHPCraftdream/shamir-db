@@ -130,11 +130,11 @@ async fn missing_table_orphan_remains_retryable() {
         .unwrap();
     let version = panic_post_wal(&repo, &hook, tx).await;
     drop(snapshot);
-    assert!(repo.remove_table_ungated_for_test("a"));
+    assert!(repo.remove_table_for_test("a"));
     assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 0);
     assert!(repo.drainer().window_entry(version).is_some());
     assert!(repo.tx_gate().await.unwrap().is_orphaned_post_wal(version));
-    repo.add_table_ungated_for_test(TableConfig::new("a"));
+    repo.add_table_for_test(TableConfig::new("a"));
     assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
     assert!(repo
         .read_changelog_for_replication(version, 1)

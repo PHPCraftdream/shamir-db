@@ -33,7 +33,8 @@ async fn compound_guard_retains_admission_until_drop() {
         .begin_write_barrier(REGULAR_INDEX_CREATE)
         .await
         .expect("barrier");
-    let mut second = Box::pin(Arc::clone(&domain).admit());
+    let second_domain = Arc::clone(&domain);
+    let mut second = Box::pin(second_domain.admit());
     assert!(futures::poll!(second.as_mut()).is_pending());
     drop(guard);
     second.await.expect("admission after compound guard drop");

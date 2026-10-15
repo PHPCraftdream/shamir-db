@@ -362,7 +362,7 @@ async fn l14_data_store_unwrapped_for_mvcc_table() {
 
     // data_store should be raw (unwrapped) — raw_backend returns None.
     assert!(
-        table.data_store().has_raw_backend().await,
+        table.data_store().raw_backend().await.is_none(),
         "__data__ store must be unwrapped (raw) for MVCC tables"
     );
 }

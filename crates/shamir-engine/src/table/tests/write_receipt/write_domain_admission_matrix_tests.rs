@@ -38,7 +38,17 @@ where
         .iter()
         .map(|desc| (desc.id, desc.name.clone(), desc.paths.clone()))
         .collect();
-    let before_bindings = mgr.validator_bindings();
+    let before_bindings: Vec<_> = mgr
+        .validator_bindings()
+        .iter()
+        .map(|binding| {
+            (
+                binding.validator_id.clone(),
+                binding.ops.clone(),
+                binding.priority,
+            )
+        })
+        .collect();
 
     let permit = domain.admit().await.expect("admit");
     let mut mutation = Box::pin(op());
@@ -62,7 +72,18 @@ where
         .map(|desc| (desc.id, desc.name.clone(), desc.paths.clone()))
         .collect();
     assert_eq!(after_index2, before_index2);
-    assert_eq!(mgr.validator_bindings(), before_bindings);
+    let after_bindings: Vec<_> = mgr
+        .validator_bindings()
+        .iter()
+        .map(|binding| {
+            (
+                binding.validator_id.clone(),
+                binding.ops.clone(),
+                binding.priority,
+            )
+        })
+        .collect();
+    assert_eq!(after_bindings, before_bindings);
     observe(mgr);
 
     drop(permit);

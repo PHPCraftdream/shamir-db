@@ -42,7 +42,7 @@ async fn missing_orphan_table_stops_and_restored_registration_retries() {
     let version = panic_post_wal(&repo, &hook, tx).await;
     drop(snapshot);
     let durable = gate.durable_watermark();
-    assert!(repo.remove_table_ungated_for_test("a"));
+    assert!(repo.remove_table_for_test("a"));
     let (mut later_tx, later_snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     let later_rid = b
         .insert_tx(&InnerValue::Str("later-orphan".into()), Some(&mut later_tx))
@@ -64,7 +64,7 @@ async fn missing_orphan_table_stops_and_restored_registration_retries() {
     assert!(repo.drainer().window_entry(version).is_some());
     assert_eq!(repo.drainer().drain_step(&repo).await.unwrap(), 0);
 
-    repo.add_table_ungated_for_test(TableConfig::new("a"));
+    repo.add_table_for_test(TableConfig::new("a"));
     let restored = repo.get_table("a").await.unwrap();
     assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 2);
     assert_eq!(gate.durable_watermark(), later);

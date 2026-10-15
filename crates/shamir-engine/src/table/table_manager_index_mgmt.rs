@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -12,7 +13,6 @@ use shamir_types::types::value::InnerValue;
 use super::table_manager::TableManager;
 use crate::index::index_definition::IndexDefinition;
 use crate::index::index_info_item::IndexInfoItem;
-use crate::repo::RepoWritePermit;
 
 /// Result structure for #1088 Phase C/D: the SnapshotGuard and pin version
 /// must be returned from Phase B+A and kept alive through Phase C/D.
