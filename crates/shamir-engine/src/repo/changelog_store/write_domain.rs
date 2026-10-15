@@ -10,12 +10,16 @@
 //! unique-write-lock barrier sequence, and the terminal `bindings_lock` /
 //! counter `persist_lock`. The leader commit path acquires NOTHING here.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Process-global counter producing one unique token per
 /// [`RepoWriteDomain`] construction. Starts at 1 (0 is never handed out).
 static NEXT_REPO_WRITE_DOMAIN_TOKEN: AtomicU64 = AtomicU64::new(1);
+
+/// Process-global counter producing one unique token per outstanding
+/// reservation (across ALL domains). Starts at 1 (0 means "no reservation").
+static NEXT_REPO_WRITE_RESERVATION_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 /// The repository write-admission domain: one per repository instance.
 ///
@@ -26,18 +30,29 @@ pub struct RepoWriteDomain {
     /// Unique per construction; stamps every permit this domain issues.
     repo_token: u64,
     repo_name: String,
-    mutex: tokio::sync::Mutex<()>,
-    /// Outstanding-reservation hook (S5c-X PR6b-2c will use it for paused
-    /// receipts): while set, ordinary [`RepoWriteDomain::admit`] is rejected;
-    /// only [`RepoWriteDomain::admit_for_close`] and already-held permits
-    /// proceed.
-    reserved: AtomicBool,
+    /// Shared mutex, held as an `Arc` so admission can hand out owned
+    /// guards (`lock_owned` takes `Arc<Self>`; `tokio::sync::Mutex` itself
+    /// is not `Clone`).
+    mutex: Arc<tokio::sync::Mutex<()>>,
+    /// Outstanding-reservation hook (S5c-X PR6b-2c): while non-zero, ordinary
+    /// [`RepoWriteDomain::admit`] is rejected; only
+    /// [`RepoWriteDomain::admit_for_close`], the reservation token holder via
+    /// [`RepoWriteDomain::admit_with_reservation`], and already-held permits
+    /// proceed. 0 = no reservation.
+    reserved_token: AtomicU64,
 }
 
 /// Opaque capability issued by [`RepoWriteDomain::admit`].
 ///
 /// Holds the domain mutex for its lifetime. `Clone` is deliberately NOT
 /// derived: a permit is a unique capability, not a shareable handle.
+///
+/// A permit cannot be forged: it has no public constructor and is not `Clone`.
+///
+/// ```compile_fail
+/// use shamir_engine::repo::RepoWritePermit;
+/// let forged = RepoWritePermit { domain_token: 1, _guard: unimplemented!() };
+/// ```
 pub struct RepoWritePermit {
     domain_token: u64,
     _guard: tokio::sync::OwnedMutexGuard<()>,
@@ -61,17 +76,32 @@ pub enum RepoWriteError {
 }
 
 /// RAII handle for an outstanding write reservation: while alive, ordinary
-/// [`RepoWriteDomain::admit`] calls are rejected. Clears the reservation on
-/// `Drop`.
+/// [`RepoWriteDomain::admit`] calls are rejected. The holder is identified
+/// by this unforgeable reference; the reservation clears its own slot on drop.
 // S5c-X PR6b-2b/2c: lifecycle owner / paused-receipt reservation.
 #[cfg_attr(not(test), allow(dead_code))]
 pub struct RepoWriteReservation {
     domain: Arc<RepoWriteDomain>,
+    token: u64,
+}
+
+impl RepoWriteReservation {
+    /// The unique reservation token (diagnostic only; admission requires the
+    /// opaque reservation reference).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn token(&self) -> u64 {
+        self.token
+    }
 }
 
 impl Drop for RepoWriteReservation {
     fn drop(&mut self) {
-        self.domain.reserved.store(false, Ordering::Release);
+        let _ = self.domain.reserved_token.compare_exchange(
+            self.token,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
 }
 
@@ -81,20 +111,20 @@ impl RepoWriteDomain {
         Arc::new(Self {
             repo_token: NEXT_REPO_WRITE_DOMAIN_TOKEN.fetch_add(1, Ordering::Relaxed),
             repo_name: repo_name.into(),
-            mutex: tokio::sync::Mutex::new(()),
-            reserved: AtomicBool::new(false),
+            mutex: Arc::new(tokio::sync::Mutex::new(())),
+            reserved_token: AtomicU64::new(0),
         })
     }
 
     /// Admit an ordinary repository write.
     ///
-    /// The `reserved` flag is checked AFTER acquiring the mutex (a
-    /// reservation placed between a pre-lock check and the lock must win, so
-    /// the single authoritative check happens inside; rejection is performed
-    /// by dropping the guard and returning the error).
+    /// The reservation is checked AFTER acquiring the mutex (a reservation
+    /// placed between a pre-lock check and the lock must win, so the single
+    /// authoritative check happens inside; rejection is performed by dropping
+    /// the guard and returning the error).
     pub async fn admit(self: &Arc<Self>) -> Result<RepoWritePermit, RepoWriteError> {
         let guard = self.mutex.clone().lock_owned().await;
-        if self.reserved.load(Ordering::Acquire) {
+        if self.reserved_token.load(Ordering::Acquire) != 0 {
             return Err(RepoWriteError::Reserved {
                 repo: self.repo_name.clone(),
             });
@@ -117,25 +147,55 @@ impl RepoWriteDomain {
         }
     }
 
-    /// Place the (single-slot) outstanding write reservation.
+    /// Rejects reservations from another domain, stale references and empty
+    /// slots after acquiring the domain mutex.
+    // S5c-X PR6b-2c: paused-receipt holder admission. Consumed by tests
+    // (db_instance membership tests) in this PR; shamir-db schema/boot paths
+    // take it in the cross-crate chunk.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub async fn admit_with_reservation(
+        self: &Arc<Self>,
+        reservation: &RepoWriteReservation,
+    ) -> Result<RepoWritePermit, RepoWriteError> {
+        let guard = self.mutex.clone().lock_owned().await;
+        if reservation.token == 0
+            || !Arc::ptr_eq(self, &reservation.domain)
+            || self.reserved_token.load(Ordering::Acquire) != reservation.token
+        {
+            return Err(RepoWriteError::Reserved {
+                repo: self.repo_name.clone(),
+            });
+        }
+        Ok(RepoWritePermit {
+            domain_token: self.repo_token,
+            _guard: guard,
+        })
+    }
+
+    /// Place the single outstanding write reservation.
     ///
-    /// Returns `Some(reservation)` on success; `None` if a reservation is
-    /// already outstanding.
+    /// Returns Some only if no reservation is outstanding; token zero is
+    /// reserved for the empty slot and can never authorize admission.
     // S5c-X PR6b-2b/2c: paused-receipt reservation.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn try_place_reservation(self: &Arc<Self>) -> Option<RepoWriteReservation> {
-        self.reserved
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        let token = NEXT_REPO_WRITE_RESERVATION_TOKEN.fetch_add(1, Ordering::Relaxed);
+        if token == 0 {
+            return None;
+        }
+        self.reserved_token
+            .compare_exchange(0, token, Ordering::AcqRel, Ordering::Acquire)
             .ok()
             .map(|_| RepoWriteReservation {
                 domain: Arc::clone(self),
+                token,
             })
     }
 
     // S5c-X PR6b-2b/2c: lifecycle owner / paused-receipt reservation.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn has_outstanding_reservation(&self) -> bool {
-        self.reserved.load(Ordering::Acquire)
+        self.reserved_token.load(Ordering::Acquire) != 0
     }
 
     /// Identity check required by the design: the presented permit must have

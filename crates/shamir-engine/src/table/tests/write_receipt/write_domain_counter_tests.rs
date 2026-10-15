@@ -20,7 +20,7 @@ use shamir_types::codecs::basic::bincode;
 use crate::meta::MetaKey;
 use crate::repo::RepoWriteDomain;
 use crate::table::record_counter::RecordCounter;
-use crate::table::tests::write_domain::shared::{spin, wait, SPIN_BUDGET};
+use crate::table::tests::write_receipt::write_domain_shared::{spin, wait, SPIN_BUDGET};
 use tokio::sync::Notify;
 
 fn count_key() -> RecordKey {
@@ -132,7 +132,10 @@ async fn admitted_persists_serialize_in_order() {
     // it ends — so permit 2 below is only acquired after flush 1 finished.
     wait(task1).await;
 
-    // Flush 2 under permit 2 — acquired only AFTER permit 1 dropped.
+    // Flush 2 under permit 2 — acquired only AFTER permit 1's task was
+    // joined (permit 1 released). The permit is MOVED into task2's async
+    // block and dropped INSIDE it, after the persist; the outer code only
+    // waits on the task and never touches permit2 again.
     let permit2 = domain.admit().await.expect("admit 2");
     counter.increment(4).await.unwrap();
     let done2 = Arc::new(Notify::new());
@@ -144,11 +147,11 @@ async fn admitted_persists_serialize_in_order() {
                 .persist_admitted(&permit2)
                 .await
                 .expect("persist_admitted 2");
+            drop(permit2);
             done2.notify_one();
         }
     });
     done2.notified().await;
-    drop(permit2);
     wait(task2).await;
 
     assert_eq!(

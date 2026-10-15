@@ -1,5 +1,5 @@
 use super::super::table::{TableConfig, TableManager};
-use crate::repo::{DurabilityPolicy, RepoConfig, RepoInstance};
+use crate::repo::{DurabilityPolicy, RepoConfig, RepoInstance, RepoWritePermit};
 use dashmap::DashMap;
 use shamir_funclib::scalar_resolver::UserScalarLayer;
 use shamir_storage::error::{DbError, DbResult};
@@ -72,6 +72,27 @@ impl DbInstance {
         // Includes facade, config-driven and system-store callers.
         self.repos.insert(name, instance);
         Ok(())
+    }
+
+    /// Publish a privately initialized repository while holding its write permit.
+    /// Existing names are never replaced.
+    pub fn publish_repo_admitted(
+        &self,
+        instance: RepoInstance,
+        permit: &RepoWritePermit,
+    ) -> DbResult<()> {
+        instance.write_domain().debug_check_permit(permit);
+        let name = instance.name().to_string();
+        match self.repos.entry(name.clone()) {
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(instance);
+                Ok(())
+            }
+            dashmap::mapref::entry::Entry::Occupied(_entry) => Err(DbError::Conflict(format!(
+                "Repository '{}' already exists",
+                name
+            ))),
+        }
     }
 
     /// Get a table from a specific repository
@@ -171,14 +192,9 @@ impl DbInstance {
     // Table Management
     // ============================================================================
 
-    /// Create a table in a repository.
-    pub fn create_table(&self, repo_name: &str, table_name: &str) -> DbResult<()> {
-        let repo = self
-            .repos
-            .get(repo_name)
-            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
-        repo.add_table(TableConfig::new(table_name));
-        Ok(())
+    /// Create a table in a repository under repository write admission.
+    pub async fn create_table(&self, repo_name: &str, table_name: &str) -> DbResult<()> {
+        self.create_table_checked(repo_name, table_name).await
     }
 
     /// S5c-X PR6b-2a: membership change under the repository write-admission
@@ -211,13 +227,9 @@ impl DbInstance {
         repo.add_table_admitted(config, &permit).await
     }
 
-    /// Drop a table from a repository.
-    pub fn drop_table(&self, repo_name: &str, table_name: &str) -> DbResult<bool> {
-        let repo = self
-            .repos
-            .get(repo_name)
-            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
-        Ok(repo.remove_table(table_name))
+    /// Drop a table from a repository under repository write admission.
+    pub async fn drop_table(&self, repo_name: &str, table_name: &str) -> DbResult<bool> {
+        self.drop_table_checked(repo_name, table_name).await
     }
 
     /// S5c-X PR6b-2a: membership removal under the repository

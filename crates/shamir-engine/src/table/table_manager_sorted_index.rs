@@ -59,13 +59,14 @@ impl TableManager {
     }
 
     /// S5c-X admitted twin — caller already holds repo admission.
-    pub(crate) async fn create_sorted_index_with_include_admitted(
+    pub async fn create_sorted_index_with_include_admitted(
         &self,
         index_name: &str,
         field_path: &[&str],
         included_fields: Vec<Vec<String>>,
         permit: &RepoWritePermit,
     ) -> DbResult<()> {
+        self.write_domain.debug_check_permit(permit);
         let interner = self.interner.get().await?;
         let name_interned = interner
             .touch_ind(index_name)
@@ -361,12 +362,13 @@ impl TableManager {
     }
 
     /// S5c-X admitted twin — caller already holds repo admission.
-    pub(crate) async fn drop_sorted_index_admitted(
+    pub async fn drop_sorted_index_admitted(
         &self,
         index_name: &str,
         op_id: Option<RecordId>,
         permit: &RepoWritePermit,
     ) -> DbResult<bool> {
+        self.write_domain.debug_check_permit(permit);
         let interner = self.interner.get().await?;
         let Some(name_interned) = interner.get_ind(index_name) else {
             return Ok(false);

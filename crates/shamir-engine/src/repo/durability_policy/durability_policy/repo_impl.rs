@@ -20,19 +20,21 @@ impl RepoInstance {
         // open (`tx::clean_horizon::tests::test_journal_seam`); `name` is moved below.
         let pending_journal = test_journal_seam::take(&name);
         let mut instance = Self::from_factory_unrecovered(name, factory, configs).await?;
+        let permit = instance
+            .write_domain()
+            .admit()
+            .await
+            .map_err(|error| DbError::Internal(error.to_string()))?;
         instance.disable_background_drainer_for_test();
         instance.set_wal_segment_bytes_for_test(segment_bytes);
         instance.set_durability(policy)?;
-        instance.repo_identity().await?;
-        // Install BEFORE `recover_v2_inflight`: a disk repo's cold
-        // reconciliation lazily initialises its own feed via
-        // `repo.changefeed()`, which would make the OnceCell assert in
-        // `install_journal_for_test` fail and leave the test's ParkStore
-        // journal disconnected.
+        instance.repo_identity_admitted(&permit).await?;
+        // Install BEFORE recovery: the test feed must remain uninitialized.
         if let Some(handle) = pending_journal {
             instance.install_journal_for_test(handle);
         }
-        instance.recover_v2_inflight().await?;
+        instance.recover_v2_inflight_admitted(&permit).await?;
+        drop(permit);
         Ok(instance)
     }
 
@@ -53,10 +55,14 @@ impl RepoInstance {
         #[cfg(not(test))]
         let instance = Self::from_factory_unrecovered(name, factory, configs).await?;
         instance.set_durability(policy)?;
-        // Exclusive factory open initializes legacy identity before registry
-        // publication. All later cloned handles share marker_write_mutex.
-        instance.repo_identity().await?;
-        instance.recover_v2_inflight().await?;
+        let permit = instance
+            .write_domain()
+            .admit()
+            .await
+            .map_err(|error| DbError::Internal(error.to_string()))?;
+        instance.repo_identity_admitted(&permit).await?;
+        instance.recover_v2_inflight_admitted(&permit).await?;
+        drop(permit);
         Ok(instance)
     }
 

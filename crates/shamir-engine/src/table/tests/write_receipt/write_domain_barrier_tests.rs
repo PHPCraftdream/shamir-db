@@ -10,7 +10,9 @@
 use std::sync::Arc;
 
 use crate::index::write_barrier_flags::REGULAR_INDEX_CREATE;
-use crate::table::tests::write_domain::shared::{make_manager, spin, wait, SPIN_BUDGET};
+use crate::table::tests::write_receipt::write_domain_shared::{
+    make_manager, spin, wait, SPIN_BUDGET,
+};
 
 /// With another task holding repo admission, `begin_write_barrier` blocks
 /// BEFORE touching `ddl_admission` (repo permit first in the lock order).

@@ -21,7 +21,7 @@ impl RepoInstance {
     // No internal await today; PR6b-2c moves admitted store I/O behind this
     // gate, so the async signature is deliberate.
     #[allow(clippy::unused_async)]
-    pub(crate) async fn add_table_admitted(
+    pub async fn add_table_admitted(
         &self,
         config: TableConfig,
         permit: &RepoWritePermit,
@@ -36,7 +36,7 @@ impl RepoInstance {
     // No internal await today; PR6b-2c moves admitted store I/O behind this
     // gate, so the async signature is deliberate.
     #[allow(clippy::unused_async)]
-    pub(crate) async fn remove_table_admitted(
+    pub async fn remove_table_admitted(
         &self,
         table_name: &str,
         permit: &RepoWritePermit,

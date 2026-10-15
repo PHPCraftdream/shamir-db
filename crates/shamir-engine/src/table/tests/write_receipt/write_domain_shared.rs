@@ -50,3 +50,18 @@ pub async fn make_manager(name: &str) -> (Arc<RepoWriteDomain>, TableManager) {
     .expect("table manager with shared domain");
     (domain, mgr)
 }
+
+/// Like [`make_manager`], but reuses a CALLER-SUPPLIED domain (two managers
+/// on the SAME repo domain — the cross-table serialization shape).
+pub async fn make_manager_on(domain: &std::sync::Arc<RepoWriteDomain>, name: &str) -> TableManager {
+    let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let info: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    TableManager::create_with_domain(
+        name.to_string(),
+        Arc::clone(&data),
+        Arc::clone(&info),
+        Arc::clone(domain),
+    )
+    .await
+    .expect("table manager on caller domain")
+}

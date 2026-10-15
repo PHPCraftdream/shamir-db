@@ -45,7 +45,7 @@ impl TableManager {
     }
 
     /// S5c-X admitted twin — caller already holds repo admission.
-    pub(crate) async fn add_validator_binding_admitted(
+    pub async fn add_validator_binding_admitted(
         &self,
         binding: crate::validator::ValidatorBinding,
         permit: &RepoWritePermit,
@@ -80,7 +80,7 @@ impl TableManager {
     }
 
     /// S5c-X admitted twin — caller already holds repo admission.
-    pub(crate) async fn remove_validator_binding_admitted(
+    pub async fn remove_validator_binding_admitted(
         &self,
         validator_id: &RecordId,
         permit: &RepoWritePermit,
