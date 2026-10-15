@@ -56,7 +56,7 @@ fn make_repo() -> Arc<RepoInstance> {
 #[tokio::test]
 async fn pessimistic_deadlock_freedom_wound_wait_terminates() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     // Commit two records OUTSIDE any tx so both Level-3 txs contend on the
@@ -141,7 +141,7 @@ async fn pessimistic_deadlock_freedom_wound_wait_terminates() {
 #[tokio::test]
 async fn pessimistic_lock_released_on_commit_allows_second_tx() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     // Commit a record outside any tx.

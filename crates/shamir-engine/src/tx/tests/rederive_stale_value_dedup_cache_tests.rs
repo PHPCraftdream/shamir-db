@@ -80,7 +80,7 @@ fn record_with_name_email(name_key: u64, name: &str, email_key: u64, email: &str
 #[tokio::test]
 async fn multi_row_delete_and_update_rederive_dedups_correctly() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_index("by_name", &["name"]).await.unwrap();
     tbl.create_unique_index("by_email", &["email"])

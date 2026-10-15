@@ -50,7 +50,7 @@ fn row(pairs: Vec<(&str, QueryValue)>) -> QueryValue {
 #[tokio::test]
 async fn update_matches_staged_insert_fallback_arm() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let table = repo.get_table("t").await.unwrap();
 
     let (mut tx, _guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
@@ -117,7 +117,7 @@ async fn update_matches_staged_insert_fallback_arm() {
 #[tokio::test]
 async fn update_matches_staged_insert_index_arm() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let table = repo.get_table("t").await.unwrap();
 
     // Pre-populate one committed row so the index isn't trivially empty,
@@ -202,7 +202,7 @@ async fn update_matches_staged_insert_index_arm() {
 #[tokio::test]
 async fn delete_matches_staged_insert_fallback_arm() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let table = repo.get_table("t").await.unwrap();
 
     let (mut tx, _guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
@@ -257,7 +257,7 @@ async fn delete_matches_staged_insert_fallback_arm() {
 #[tokio::test]
 async fn delete_matches_staged_insert_index_arm() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let table = repo.get_table("t").await.unwrap();
 
     let interner = table.interner().get().await.unwrap();
@@ -342,7 +342,7 @@ async fn delete_matches_staged_insert_index_arm() {
 #[tokio::test]
 async fn unique_validator_sees_staged_row_in_same_tx() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let mut table = repo.get_table("t").await.unwrap();
 
     let rule = FieldRule {

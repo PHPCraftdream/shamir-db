@@ -168,7 +168,7 @@ fn structural_all_six_bits_compose_without_clobbering() {
 #[tokio::test]
 async fn unique_index_exists_bit_is_the_same_shared_word_table_manager_reads() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
 
     assert!(
@@ -233,7 +233,7 @@ async fn f69_first_unique_index_create_drains_parked_writer_and_rejects_duplicat
     use tokio::sync::Notify;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let email_field = key_id(&tbl, "email").await;
 

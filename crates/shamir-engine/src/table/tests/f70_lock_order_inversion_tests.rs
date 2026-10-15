@@ -119,8 +119,8 @@ async fn wait_flag(flag: &std::sync::atomic::AtomicBool) {
 /// directly rather than through the tx-commit pipeline).
 async fn make_two_tables() -> (RepoInstance, TableManager, TableManager) {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("orders"));
-    repo.add_table(TableConfig::new("customers"));
+    repo.add_table_for_test(TableConfig::new("orders"));
+    repo.add_table_for_test(TableConfig::new("customers"));
     let x = repo.get_table("orders").await.unwrap();
     let y = repo.get_table("customers").await.unwrap();
     (repo, x, y)

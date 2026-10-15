@@ -129,7 +129,7 @@ fn make_repo() -> RepoInstance {
 #[tokio::test]
 async fn a3_read_one_tx_records_snapshot_version_not_current_after_concurrent_commit() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     // Pre-populate a record outside any transaction. This seeds the MVCC
@@ -204,7 +204,7 @@ async fn a3_read_one_tx_records_snapshot_version_not_current_after_concurrent_co
 #[tokio::test]
 async fn a3_read_one_tx_snapshot_isolation_commits_on_same_interleaving() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let rid = tbl.insert(&InnerValue::Str("v0".into())).await.unwrap();
 

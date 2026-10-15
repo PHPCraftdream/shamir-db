@@ -3,7 +3,8 @@
 //! registration point). Restoring early registration strands an entry in
 //! the first two tests and prevents init2 from completing in the race test.
 
-use crate::repo::repo_instance::RepoInstance;
+use crate::repo::changelog_store::write_domain::RepoWriteDomain;
+
 use crate::repo::repo_types::BoxRepo;
 use crate::table::table_manager::table_token_for;
 use crate::table::{TableConfig, TableManager};
@@ -104,35 +105,35 @@ async fn cancelled_setup_retries_with_coherent_mvcc() {
 #[tokio::test]
 async fn retired_initializer_cannot_disrupt_replacement() {
     let repo = make_repo();
+    let contended = Arc::new(Notify::new());
+    repo.write_domain()
+        .install_contended_admission_for_test(Arc::clone(&contended));
+
     let hook = TableInitHook::new(false);
     repo.table_init_hook.store(Some(Arc::clone(&hook)));
     let worker_repo = repo.clone();
     let worker = tokio::spawn(async move { worker_repo.get_table("orders").await });
     hook.entered.notified().await;
-    assert!(repo.remove_table("orders"));
-    repo.add_table(TableConfig::new("orders"));
-    let replacement_worker_repo = repo.clone();
-    let mut replacement_worker = Box::pin(tokio::spawn(async move {
-        replacement_worker_repo.get_table("orders").await
-    }));
-    assert!(matches!(
-        futures::poll!(&mut replacement_worker),
-        std::task::Poll::Pending
-    ));
+    assert!(repo.remove_table_for_test("orders"));
+    repo.add_table_for_test(TableConfig::new("orders"));
+    let replacement_repo = repo.clone();
+    let mut replacement = Box::pin(replacement_repo.get_table("orders"));
+    assert!(futures::poll!(replacement.as_mut()).is_pending());
+    contended.notified().await;
     hook.resume.notify_one();
     let result = worker.await.unwrap();
     assert!(matches!(
         result,
         Err(DbError::Internal(_)) | Err(DbError::NotFound(_))
     ));
-    let replacement = replacement_worker.await.unwrap().unwrap();
+    let replacement = replacement.await.unwrap();
     assert_coherent(&repo, &replacement);
     let current = repo.get_table("orders").await.unwrap();
     assert!(Arc::ptr_eq(
         &replacement.mvcc_store().unwrap(),
         &current.mvcc_store().unwrap(),
     ));
-    assert!(repo.remove_table("orders"));
+    assert!(repo.remove_table_for_test("orders"));
     assert_unregistered(&repo);
 }
 
@@ -146,11 +147,11 @@ async fn dropped_config_rolls_back_retired_publication() {
     let worker_repo = repo.clone();
     let worker = tokio::spawn(async move { worker_repo.get_table("orders").await });
     hook.entered.notified().await;
-    assert!(repo.remove_table("orders"));
+    assert!(repo.remove_table_for_test("orders"));
     hook.resume.notify_one();
     assert!(matches!(worker.await.unwrap(), Err(DbError::NotFound(_))));
     assert_unregistered(&repo);
-    repo.add_table(TableConfig::new("orders"));
+    repo.add_table_for_test(TableConfig::new("orders"));
     let table = repo.get_table("orders").await.unwrap();
     assert_coherent(&repo, &table);
 }
@@ -172,7 +173,7 @@ async fn remove_empty_cell_preserves_foreign_mvcc() {
         repo.get_table("orders").await,
         Err(DbError::Internal(_))
     ));
-    assert!(repo.remove_table("orders"));
+    assert!(repo.remove_table_for_test("orders"));
     let retained = repo
         .per_table_mvcc()
         .read_sync(&token, |_, mvcc| Arc::clone(mvcc))

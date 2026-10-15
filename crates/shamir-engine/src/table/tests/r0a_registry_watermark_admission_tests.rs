@@ -125,7 +125,7 @@ async fn functional_lookup(tbl: &TableManager, index_name_id: u64, lowered: &str
 #[tokio::test]
 async fn create_a_drop_a_stage_create_b_commit_indexes_b() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
 
     // CREATE A, then DROP A — establishes the pre-existing generation churn
@@ -230,7 +230,7 @@ async fn create_a_drop_a_stage_create_b_commit_indexes_b() {
 #[tokio::test]
 async fn drop_sorted_index_acquires_write_barrier() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
     tbl.create_sorted_index("by_age", &["age"]).await.unwrap();
 
@@ -263,7 +263,7 @@ async fn drop_sorted_index_acquires_write_barrier() {
 #[tokio::test]
 async fn drop_index2_acquires_write_barrier() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let name_field = key_id(&tbl, "name").await;
     let _pre = tbl
@@ -303,7 +303,7 @@ async fn drop_index2_acquires_write_barrier() {
 #[tokio::test]
 async fn rename_index_sorted_branch_acquires_write_barrier() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
     tbl.create_sorted_index("by_age", &["age"]).await.unwrap();
 
@@ -337,7 +337,7 @@ async fn rename_index_sorted_branch_acquires_write_barrier() {
 #[tokio::test]
 async fn rename_index_index2_branch_acquires_write_barrier() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let name_field = key_id(&tbl, "name").await;
     let _pre = tbl
@@ -402,7 +402,7 @@ async fn rename_index_index2_branch_acquires_write_barrier() {
 #[tokio::test]
 async fn two_ddls_on_index2_family_are_never_concurrently_inside_barrier() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let name_field = key_id(&tbl, "name").await;
     let _pre = tbl

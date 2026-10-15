@@ -1,5 +1,5 @@
 use crate::repo::RepoWritePermit;
-use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::error::DbResult;
 use shamir_storage::storage_membuffer::MemBufferConfig;
 
 use super::buffer_config;

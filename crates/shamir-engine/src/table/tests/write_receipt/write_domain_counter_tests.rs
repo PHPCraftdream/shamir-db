@@ -1,15 +1,4 @@
-//! S5c-X — counter flushes (`set`/`set_to`/`persist`) acquire repository
-//! admission BEFORE sampling the cache, and write through exactly once.
-//!
-//! Synthetic (d): a counter sharing a repo domain; with the permit held the
-//! flush cannot proceed; once released the durable store holds the new
-//! value exactly once. Two ADMITTED flushes are also shown to serialize via
-//! explicit permit handoff (Notify ordering) — the admitted twins are
-//! `pub(crate)`, so they cannot be reached permit-free from outside the
-//! crate (compile boundary; asserted by construction here).
-//!
-//! Fails on pre-S5c-X code: the public flushes never consulted a domain, so
-//! the "blocked" assertion trips immediately.
+//! Counter persistence must admit before sampling stale cache state.
 
 use std::sync::Arc;
 
@@ -20,14 +9,11 @@ use shamir_types::codecs::basic::bincode;
 use crate::meta::MetaKey;
 use crate::repo::RepoWriteDomain;
 use crate::table::record_counter::RecordCounter;
-use crate::table::tests::write_receipt::write_domain_shared::{spin, wait, SPIN_BUDGET};
-use tokio::sync::Notify;
 
 fn count_key() -> RecordKey {
     RecordKey::from_slice(MetaKey::Count.as_record_id().as_bytes())
 }
 
-/// Read the DURABLE count straight from the info store (no cache).
 async fn durable_count(info: &Arc<dyn Store>) -> Option<u64> {
     match info.get(count_key()).await {
         Ok(bytes) => Some(bincode::from_bytes(&bytes).expect("decode count")),
@@ -40,130 +26,92 @@ fn counter_with(info: &Arc<dyn Store>, domain: &Arc<RepoWriteDomain>) -> RecordC
 }
 
 #[tokio::test]
-async fn set_blocks_while_permit_held_then_writes_durable_value_once() {
+async fn set_blocks_while_permit_held_then_writes_durable_value() {
     let domain = RepoWriteDomain::new("counter-set");
     let info: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let counter = counter_with(&info, &domain);
-
     let permit = domain.admit().await.expect("admit");
-    let task = tokio::spawn({
-        let counter = counter.clone();
-        async move { counter.set(7).await }
-    });
-    spin(SPIN_BUDGET).await;
-    assert!(
-        !task.is_finished(),
-        "set() completed while repo admission was held"
-    );
-    assert_eq!(
-        durable_count(&info).await,
-        None,
-        "durable store must be untouched while the flush is blocked"
-    );
+    let mut mutation = Box::pin(counter.set(7));
+    assert!(futures::poll!(mutation.as_mut()).is_pending());
+    assert_eq!(durable_count(&info).await, None);
     drop(permit);
-    wait(task).await.expect("set after release");
-
-    // Exactly-once: the durable value equals the new value (not a stale or
-    // partially-applied write).
+    mutation.await.expect("set after release");
     assert_eq!(durable_count(&info).await, Some(7));
     assert_eq!(counter.get().await.unwrap(), 7);
 }
 
 #[tokio::test]
 async fn set_to_and_persist_block_while_permit_held() {
-    let domain = RepoWriteDomain::new("counter-set-to");
+    let domain = RepoWriteDomain::new("counter-set-to-persist");
     let info: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let counter = counter_with(&info, &domain);
-
+    counter.increment(3).await.unwrap();
+    counter.set(3).await.unwrap();
     let permit = domain.admit().await.expect("admit");
-    let task = tokio::spawn({
-        let counter = counter.clone();
-        async move { counter.set_to(42).await }
-    });
-    spin(SPIN_BUDGET).await;
-    assert!(
-        !task.is_finished(),
-        "set_to() completed while repo admission was held"
-    );
-
-    let task2 = tokio::spawn({
-        let counter = counter.clone();
-        async move { counter.persist().await }
-    });
-    spin(SPIN_BUDGET).await;
-    assert!(
-        !task2.is_finished(),
-        "persist() completed while repo admission was held"
-    );
-
+    let mut set_to = Box::pin(counter.set_to(42));
+    assert!(futures::poll!(set_to.as_mut()).is_pending());
+    assert_eq!(durable_count(&info).await, Some(3));
+    let mut persist = Box::pin(counter.persist());
+    assert!(futures::poll!(persist.as_mut()).is_pending());
+    assert_eq!(counter.get().await.unwrap(), 3);
     drop(permit);
-    wait(task).await.expect("set_to after release");
-    wait(task2).await.expect("persist after release");
+    set_to.await.expect("set_to after release");
+    persist.await.expect("persist after release");
+    assert_eq!(durable_count(&info).await, Some(42));
+    assert_eq!(counter.get().await.unwrap(), 42);
+}
+#[tokio::test]
+async fn stale_cache_persist_cannot_overwrite_new_absolute_count() {
+    let domain = RepoWriteDomain::new("counter-stale-cache");
+    let info: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let counter = counter_with(&info, &domain);
+    counter.increment(7).await.expect("seed stale cache");
+    assert_eq!(counter.get().await.unwrap(), 7);
+
+    let permit = domain.admit().await.expect("hold admission");
+    info.set(
+        count_key(),
+        bincode::to_bytes(&42_u64).expect("encode absolute"),
+    )
+    .await
+    .expect("durable absolute count");
+    assert_eq!(durable_count(&info).await, Some(42));
+
+    let mut persistence = Box::pin(counter.persist());
+    assert!(futures::poll!(persistence.as_mut()).is_pending());
+    assert_eq!(durable_count(&info).await, Some(42));
+    assert_eq!(counter.get().await.unwrap(), 7);
+
+    counter
+        .set_to_admitted(42, &permit)
+        .await
+        .expect("adopt absolute count");
+    assert_eq!(counter.get().await.unwrap(), 42);
+    assert_eq!(durable_count(&info).await, Some(42));
+    drop(permit);
+    persistence.await.expect("persist after release");
     assert_eq!(durable_count(&info).await, Some(42));
 }
 
-/// Two ADMITTED flushes serialize through the domain: permit 1 is handed
-/// to flush 1, released, then handed to flush 2 — the durable value after
-/// both is exactly the second write (no lost/duplicated write).
 #[tokio::test]
-async fn admitted_persists_serialize_in_order() {
-    let domain = RepoWriteDomain::new("counter-serialize");
+async fn unprotected_stale_cache_persistence_negative_control_overwrites() {
     let info: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-    let counter = counter_with(&info, &domain);
-
-    // Flush 1 under permit 1.
-    let permit1 = domain.admit().await.expect("admit 1");
-    counter.increment(3).await.unwrap();
-    let done1 = Arc::new(Notify::new());
-    let task1 = tokio::spawn({
-        let counter = counter.clone();
-        let done1 = Arc::clone(&done1);
-        async move {
-            counter
-                .persist_admitted(&permit1)
-                .await
-                .expect("persist_admitted 1");
-            done1.notify_one();
-        }
-    });
-    done1.notified().await;
-    assert_eq!(durable_count(&info).await, Some(3));
-    // Join flush 1: its task owns permit 1 and releases repo admission when
-    // it ends — so permit 2 below is only acquired after flush 1 finished.
-    wait(task1).await;
-
-    // Flush 2 under permit 2 — acquired only AFTER permit 1's task was
-    // joined (permit 1 released). The permit is MOVED into task2's async
-    // block and dropped INSIDE it, after the persist; the outer code only
-    // waits on the task and never touches permit2 again.
-    let permit2 = domain.admit().await.expect("admit 2");
-    counter.increment(4).await.unwrap();
-    let done2 = Arc::new(Notify::new());
-    let task2 = tokio::spawn({
-        let counter = counter.clone();
-        let done2 = Arc::clone(&done2);
-        async move {
-            counter
-                .persist_admitted(&permit2)
-                .await
-                .expect("persist_admitted 2");
-            drop(permit2);
-            done2.notify_one();
-        }
-    });
-    done2.notified().await;
-    wait(task2).await;
-
-    assert_eq!(
-        durable_count(&info).await,
-        Some(7),
-        "second admitted flush must land last, exactly once"
-    );
+    let counter = RecordCounter::new(Arc::clone(&info));
+    counter.increment(7).await.expect("seed stale cache");
     assert_eq!(counter.get().await.unwrap(), 7);
+    info.set(
+        count_key(),
+        bincode::to_bytes(&42_u64).expect("encode absolute"),
+    )
+    .await
+    .expect("durable absolute count");
+    counter
+        .persist_unprotected_for_test()
+        .await
+        .expect("unprotected persist");
+    assert_eq!(durable_count(&info).await, Some(7));
 }
 
-/// `increment` stays lock-free: it completes while a permit is held (the
-/// leader write path gains NO admission).
 #[tokio::test]
 async fn increment_gains_no_admission() {
     let domain = RepoWriteDomain::new("counter-increment");

@@ -122,7 +122,7 @@ async fn functional_lookup(tbl: &TableManager, index_name_id: u64, lowered: &str
 #[tokio::test]
 async fn drop_regular_before_commit_no_resurrected_posting() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let name_key = key_id(&tbl, "name").await;
 
@@ -171,7 +171,7 @@ async fn drop_regular_before_commit_no_resurrected_posting() {
 #[tokio::test]
 async fn drop_unique_before_commit_no_resurrected_posting() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let email_key = key_id(&tbl, "email").await;
 
@@ -225,7 +225,7 @@ async fn drop_unique_before_commit_no_resurrected_posting() {
 #[tokio::test]
 async fn drop_sorted_before_commit_no_resurrected_posting() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let score_key = key_id(&tbl, "score").await;
 
@@ -277,7 +277,7 @@ async fn drop_sorted_before_commit_no_resurrected_posting() {
 #[tokio::test]
 async fn drop_index2_before_commit_no_resurrected_posting() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let name_key = key_id(&tbl, "name").await;
 
@@ -352,7 +352,7 @@ async fn drop_index2_before_commit_no_resurrected_posting() {
 #[tokio::test]
 async fn regular_aba_drop_create_same_name_no_field_a_contamination() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let a_key = key_id(&tbl, "a").await;
     let b_key = key_id(&tbl, "b").await;
@@ -415,7 +415,7 @@ async fn regular_aba_drop_create_same_name_no_field_a_contamination() {
 #[tokio::test]
 async fn unique_aba_drop_create_same_name_no_false_conflict() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let a_key = key_id(&tbl, "a").await;
     let b_key = key_id(&tbl, "b").await;
@@ -485,7 +485,7 @@ async fn unique_aba_drop_create_same_name_no_false_conflict() {
 #[tokio::test]
 async fn sorted_rename_between_stage_and_commit_no_orphan_lands_under_new_name() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let score_key = key_id(&tbl, "score").await;
 
@@ -551,7 +551,7 @@ async fn sorted_rename_between_stage_and_commit_no_orphan_lands_under_new_name()
 #[tokio::test]
 async fn multiple_transitions_before_commit_resolve_to_final_instance() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let a_key = key_id(&tbl, "a").await;
     let c_key = key_id(&tbl, "c").await;
@@ -661,7 +661,7 @@ async fn multiple_transitions_before_commit_resolve_to_final_instance() {
 #[tokio::test]
 async fn rollback_after_multiple_rotations_leaves_no_partial_state() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let token = table_token_for("t");
     let name_key = key_id(&tbl, "name").await;
@@ -769,7 +769,7 @@ async fn rollback_after_multiple_rotations_leaves_no_partial_state() {
 #[tokio::test]
 async fn insert_tx_many_index2_posting_survives_unrelated_concurrent_create() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let name_key = key_id(&tbl, "name").await;
 
@@ -814,7 +814,7 @@ async fn insert_tx_many_index2_posting_survives_unrelated_concurrent_create() {
 #[tokio::test]
 async fn insert_tx_many_bytes_index2_posting_survives_unrelated_concurrent_create() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let name_key = key_id(&tbl, "name").await;
 

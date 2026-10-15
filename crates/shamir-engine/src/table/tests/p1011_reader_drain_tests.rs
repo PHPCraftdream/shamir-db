@@ -68,7 +68,7 @@ async fn read_eq_status(tbl: &TableManager, value: &str) -> crate::query::read::
 #[tokio::test]
 async fn p1011_reader_blocks_drop_until_released() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let status_key = key_id(&tbl, "status").await;
     let id_key = key_id(&tbl, "id").await;
@@ -201,7 +201,7 @@ async fn p1011_reader_blocks_drop_until_released() {
 #[tokio::test]
 async fn p1011_reader_backs_off_while_drop_parked() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let status_key = key_id(&tbl, "status").await;
     let id_key = key_id(&tbl, "id").await;
@@ -297,7 +297,7 @@ async fn p1011_reader_backs_off_while_drop_parked() {
 #[tokio::test]
 async fn p1011_uncontended_drop_counts_zero_waits() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let status_key = key_id(&tbl, "status").await;
     let id_key = key_id(&tbl, "id").await;
@@ -343,7 +343,7 @@ async fn p1011_uncontended_drop_counts_zero_waits() {
 #[tokio::test]
 async fn p1011_guard_released_on_error_path() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let status_key = key_id(&tbl, "status").await;
     let id_key = key_id(&tbl, "id").await;

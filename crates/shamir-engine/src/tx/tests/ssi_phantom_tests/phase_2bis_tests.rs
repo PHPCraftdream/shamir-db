@@ -26,7 +26,7 @@ use super::helpers::{make_repo, test_bound_key, test_index_id, test_posting_key}
 #[tokio::test]
 async fn phase_2bis_aborts_armed_predicate_on_concurrent_write() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
     let table_token = table_token_for("users");
     let idx_id = test_index_id("age");
@@ -114,7 +114,7 @@ async fn phase_2bis_aborts_armed_predicate_on_concurrent_write() {
 #[tokio::test]
 async fn phase_2bis_allows_non_conflicting_predicate() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
     let table_token = table_token_for("users");
     let idx_id = test_index_id("age");
@@ -164,7 +164,7 @@ async fn phase_2bis_allows_non_conflicting_predicate() {
 #[tokio::test]
 async fn phase_2bis_table_scan_aborts_on_any_concurrent_write() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
     let table_token = table_token_for("users");
 

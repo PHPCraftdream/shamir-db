@@ -64,7 +64,7 @@ fn record_with_two_str(k1: u64, v1: &str, k2: u64, v2: &str) -> InnerValue {
 #[tokio::test]
 async fn p02_regular_insert_before_create_posting_present() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let name_key = key_id(&tbl, "name").await;
@@ -109,7 +109,7 @@ async fn p02_regular_insert_before_create_posting_present() {
 #[tokio::test]
 async fn p02_regular_update_before_create_posting_present() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let name_key = key_id(&tbl, "name").await;
@@ -156,7 +156,7 @@ async fn p02_regular_update_before_create_posting_present() {
 #[tokio::test]
 async fn p02_regular_delete_before_create_commits_cleanly() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let name_key = key_id(&tbl, "name").await;
@@ -212,7 +212,7 @@ async fn p02_regular_delete_before_create_commits_cleanly() {
 #[tokio::test]
 async fn p02_unique_insert_before_create_posting_and_guard_present() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let email_key = key_id(&tbl, "email").await;
@@ -270,7 +270,7 @@ async fn p02_unique_insert_before_create_posting_and_guard_present() {
 #[tokio::test]
 async fn p02_unique_update_before_create_enforced() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let email_key = key_id(&tbl, "email").await;
@@ -346,7 +346,7 @@ async fn p02_unique_update_before_create_enforced() {
 #[tokio::test]
 async fn p02_unique_concurrent_duplicate_one_wins() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let email_key = key_id(&tbl, "email").await;
@@ -408,7 +408,7 @@ async fn p02_unique_concurrent_duplicate_one_wins() {
 #[tokio::test]
 async fn p02_regular_drop_index_before_commit_no_orphan() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let name_key = key_id(&tbl, "name").await;
@@ -492,7 +492,7 @@ async fn p02_regular_drop_index_before_commit_no_orphan() {
 #[tokio::test]
 async fn p02_unique_drop_index_before_commit_no_orphan() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let email_key = key_id(&tbl, "email").await;
@@ -558,7 +558,7 @@ async fn p02_unique_drop_index_before_commit_no_orphan() {
 #[tokio::test]
 async fn p02_no_indexes_at_stage_rederive_fires() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let name_key = key_id(&tbl, "name").await;
@@ -608,7 +608,7 @@ async fn p02_no_indexes_at_stage_rederive_fires() {
 #[tokio::test]
 async fn p02_unique_multi_field_before_create_enforced() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let a_key = key_id(&tbl, "a").await;
@@ -680,7 +680,7 @@ async fn p02_unique_staged_before_create_conflicts_with_preexisting_committed_ro
     use crate::tx::CommitError;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let email_key = key_id(&tbl, "email").await;

@@ -85,7 +85,7 @@ async fn commit_update(repo: &RepoInstance, tbl: &TableManager, name: &str, new_
 #[tokio::test]
 async fn with_version_returns_per_record_versions() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let _rid1 = insert_row(&tbl, "alice").await;
@@ -122,7 +122,7 @@ async fn with_version_returns_per_record_versions() {
 #[tokio::test]
 async fn version_increases_after_update() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let _rid = insert_row(&tbl, "alice").await;
@@ -153,7 +153,7 @@ async fn version_increases_after_update() {
 #[tokio::test]
 async fn expected_version_matching_succeeds_stale_fails() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let _rid = insert_row(&tbl, "alice").await;
 
@@ -234,7 +234,7 @@ async fn expected_version_matching_succeeds_stale_fails() {
 #[tokio::test]
 async fn expected_version_zero_match_is_noop() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let interner = tbl.interner().get().await.unwrap();
@@ -295,7 +295,7 @@ async fn concurrent_cas_exactly_one_wins() {
     use shamir_types::types::value::QueryValue;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let rid = insert_row(&tbl, "counter").await;
 
@@ -440,7 +440,7 @@ async fn concurrent_cas_exactly_one_wins_under_snapshot() {
     use shamir_types::types::value::QueryValue;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let rid = insert_row(&tbl, "counter").await;
 
@@ -595,7 +595,7 @@ async fn concurrent_cas_exactly_one_wins_under_snapshot() {
 #[serial]
 async fn non_cas_snapshot_writes_to_different_keys_do_not_serialize() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let _rid1 = insert_row(&tbl, "alice").await;
     let _rid2 = insert_row(&tbl, "bob").await;

@@ -59,7 +59,7 @@ use super::commit_phase5_defer_tests::PHASE_5C_INJECT_LOCK;
 #[tokio::test(flavor = "current_thread")]
 async fn async_commit_data_visible_immediately() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let token = table_token_for("t");
 
@@ -112,7 +112,7 @@ async fn async_commit_data_visible_immediately() {
 #[tokio::test(flavor = "current_thread")]
 async fn async_commit_index_converges_after_tail() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let token = table_token_for("t");
 
@@ -173,7 +173,7 @@ async fn async_commit_index_converges_after_tail() {
 async fn async_commit_background_failure_is_recovered() {
     const TX_ID: u64 = ASYNC_INJECT_TX_ID + 2;
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let token = table_token_for("t");
 
@@ -270,7 +270,7 @@ static TRANSIENT_INJECT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const
 async fn async_commit_data_phase_recovers_after_transient_retry() {
     const TX_ID: u64 = ASYNC_INJECT_TX_ID + 3;
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let token = table_token_for("t");
 
@@ -324,7 +324,7 @@ async fn async_commit_data_phase_recovers_after_transient_retry() {
 #[tokio::test(flavor = "current_thread")]
 async fn sync_default_mode_returns_no_background_handle() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let token = table_token_for("t");
 

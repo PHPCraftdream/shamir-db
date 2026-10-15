@@ -93,7 +93,7 @@ fn record_with_str(key: u64, val: &str) -> InnerValue {
 #[tokio::test]
 async fn f48b_drain_catches_tx_commit_that_read_false_before_flag_went_up() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let name_field = key_id(&tbl, "name").await;
 

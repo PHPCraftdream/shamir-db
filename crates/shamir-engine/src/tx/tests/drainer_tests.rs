@@ -63,7 +63,7 @@ async fn seed_from_recover_populates_window_with_inflight_entries() {
 #[tokio::test]
 async fn drain_step_gap_reseed_when_window_empty() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let gate = repo.tx_gate().await.unwrap();
@@ -141,7 +141,7 @@ async fn seed_inflight_entry(repo: &RepoInstance, ops: Vec<WalOpV2>, commit_vers
 #[tokio::test]
 async fn drain_step_replays_visible_prefix_into_history() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     // Build the gate FIRST (durable == visibility == 0) BEFORE any inflight
@@ -189,7 +189,7 @@ async fn drain_step_replays_visible_prefix_into_history() {
 #[tokio::test]
 async fn drain_step_noop_when_durable_at_visibility() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
 
     let gate = repo.tx_gate().await.unwrap();
     // Advance BOTH watermarks to 5: nothing is visible-but-undurable. The
@@ -213,7 +213,7 @@ async fn drain_step_noop_when_durable_at_visibility() {
 #[tokio::test]
 async fn drain_step_is_idempotent() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let gate = repo.tx_gate().await.unwrap();
@@ -240,7 +240,7 @@ async fn drain_step_is_idempotent() {
 #[tokio::test]
 async fn drain_all_flushes_then_stops() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
 
     let gate = repo.tx_gate().await.unwrap();
     for v in 1..=4u64 {
@@ -261,7 +261,7 @@ async fn drain_all_flushes_then_stops() {
 #[tokio::test]
 async fn drain_step_respects_visibility_ceiling() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let gate = repo.tx_gate().await.unwrap();
@@ -298,7 +298,7 @@ async fn drain_step_respects_visibility_ceiling() {
 #[tokio::test]
 async fn drain_step_a5_retains_marker_above_hwm() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let token = table_token_for("t");
 
@@ -372,7 +372,7 @@ async fn drain_step_a5_retains_marker_above_hwm() {
 #[tokio::test]
 async fn drain_step_recovers_data_for_table_missing_from_per_table_mvcc() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let token = table_token_for("t");
 
@@ -510,7 +510,7 @@ async fn drain_step_still_drains_correctly_with_offer_wired() {
     use crate::tx::commit_tx;
 
     let repo = make_repo();
-    repo.add_table(crate::table::TableConfig::new("t"));
+    repo.add_table_for_test(crate::table::TableConfig::new("t"));
 
     for i in 1..=2u64 {
         let mut tx = TxContext::new(TxId::new(i), 0, 0, IsolationLevel::Snapshot);
@@ -555,7 +555,7 @@ async fn drain_step_still_drains_correctly_with_offer_wired() {
 #[tokio::test]
 async fn drain_step_uses_window_not_recover_in_steady_state() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
 
     let gate = repo.tx_gate().await.unwrap();
 
@@ -589,7 +589,7 @@ async fn drain_step_uses_window_not_recover_in_steady_state() {
 #[tokio::test]
 async fn drain_step_window_gap_triggers_one_recover_reseed() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
 
     let gate = repo.tx_gate().await.unwrap();
 
@@ -641,7 +641,7 @@ async fn drain_step_window_gap_triggers_one_recover_reseed() {
 #[tokio::test]
 async fn drain_step_interior_abort_does_not_trigger_spurious_recover() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
 
     let gate = repo.tx_gate().await.unwrap();
     // Seed WAL with entries for v=1 and v=3 only; v=2 was aborted, never
@@ -690,7 +690,7 @@ async fn drain_step_interior_abort_does_not_trigger_spurious_recover() {
 #[tokio::test]
 async fn window_depth_atomic_mirror_matches_tree_across_mutations() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let gate = repo.tx_gate().await.unwrap();
     for v in 1..=4u64 {
         seed_inflight_put(&repo, "t", rid(v as u8), &format!("d{v}"), v).await;
@@ -778,7 +778,7 @@ async fn offer_backpressure_check_uses_atomic_depth_not_tree_walk() {
 #[tokio::test]
 async fn drain_step_empty_window_no_recover_call() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
 
     let gate = repo.tx_gate().await.unwrap();
     gate.publish_committed_max(5);
@@ -857,7 +857,7 @@ async fn drain_step_recovers_dropped_entries_via_gap_reseed() {
     use crate::tx::commit_tx;
 
     let repo = make_repo();
-    repo.add_table(crate::table::TableConfig::new("t"));
+    repo.add_table_for_test(crate::table::TableConfig::new("t"));
 
     // Set a very low watermark so most offers are dropped.
     let drainer = repo.drainer();
@@ -904,8 +904,8 @@ async fn drain_step_recovers_dropped_entries_via_gap_reseed() {
 #[tokio::test]
 async fn drain_step_batches_multiple_index_postings_across_tables() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("a"));
-    repo.add_table(TableConfig::new("b"));
+    repo.add_table_for_test(TableConfig::new("a"));
+    repo.add_table_for_test(TableConfig::new("b"));
     let ta = repo.get_table("a").await.unwrap();
     let tb = repo.get_table("b").await.unwrap();
     let token_a = table_token_for("a");
@@ -975,7 +975,7 @@ async fn drain_step_batches_multiple_index_postings_across_tables() {
 #[tokio::test]
 async fn drain_step_batches_index_postings_across_multiple_entries_same_table() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let token = table_token_for("t");
 
@@ -1019,8 +1019,8 @@ async fn drain_step_batches_index_postings_across_multiple_entries_same_table() 
 #[tokio::test]
 async fn drain_step_index_batch_failure_surfaces_and_blocks_only_that_table() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("a"));
-    repo.add_table(TableConfig::new("b"));
+    repo.add_table_for_test(TableConfig::new("a"));
+    repo.add_table_for_test(TableConfig::new("b"));
     let ta = repo.get_table("a").await.unwrap();
     let tb = repo.get_table("b").await.unwrap();
     let token_a = table_token_for("a");
@@ -1150,7 +1150,7 @@ async fn ticket_pending_blocks_later_orphan_without_recover() {
 async fn ticket_pending_and_unknown_block_reseed_of_missing_published_prefix() {
     for state in [WalTicketState::Pending, WalTicketState::Unknown] {
         let repo = make_repo();
-        repo.add_table(TableConfig::new("t"));
+        repo.add_table_for_test(TableConfig::new("t"));
         let tbl = repo.get_table("t").await.unwrap();
         let gate = repo.tx_gate().await.unwrap();
         let prefix = gate.assign_next_version_guarded();
@@ -1201,7 +1201,7 @@ async fn ticket_pending_and_unknown_block_reseed_of_missing_published_prefix() {
 async fn ticket_written_and_acked_replay_data_and_mark_lazy_pull_gap() {
     for state in [WalTicketState::Written, WalTicketState::Acked] {
         let repo = make_repo();
-        repo.add_table(TableConfig::new("t"));
+        repo.add_table_for_test(TableConfig::new("t"));
         let tbl = repo.get_table("t").await.unwrap();
         let body = InnerValue::Str("ticket-orphan".into()).to_bytes().unwrap();
         let ticket = transfer_pending(
@@ -1293,7 +1293,7 @@ async fn synced_write_then_sync_failure_publishes_data_before_typed_commit_error
         BoxRepo::InMemory(Arc::new(InMemoryRepo::new())),
         Vec::new(),
     );
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let gate = repo.tx_gate().await.unwrap();
     let wal = repo.repo_wal().await.unwrap();

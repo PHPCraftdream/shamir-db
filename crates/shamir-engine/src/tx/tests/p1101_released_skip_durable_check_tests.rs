@@ -71,7 +71,7 @@ fn record_with_str(key: u64, val: &str) -> InnerValue {
 #[tokio::test]
 async fn stale_net_release_does_not_clobber_a_concurrent_reclaim() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -157,7 +157,7 @@ async fn stale_net_release_does_not_clobber_a_concurrent_reclaim() {
 #[tokio::test]
 async fn uncontended_bare_delete_succeeds() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -221,7 +221,7 @@ async fn uncontended_bare_delete_succeeds() {
 #[tokio::test]
 async fn delete_then_reclaim_succeeds() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -293,7 +293,7 @@ async fn delete_then_reclaim_succeeds() {
 #[tokio::test]
 async fn move_off_then_back_onto_key_succeeds() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await

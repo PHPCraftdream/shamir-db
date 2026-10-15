@@ -95,8 +95,8 @@ fn make_repo() -> RepoInstance {
 /// `make_two_tables`. Y is only needed by the F-70 regression test.
 async fn make_two_tables() -> (RepoInstance, TableManager, TableManager) {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("orders"));
-    repo.add_table(TableConfig::new("customers"));
+    repo.add_table_for_test(TableConfig::new("orders"));
+    repo.add_table_for_test(TableConfig::new("customers"));
     let x = repo.get_table("orders").await.unwrap();
     let y = repo.get_table("customers").await.unwrap();
     (repo, x, y)
@@ -466,61 +466,34 @@ async fn f95_admission_mutex_does_not_reintroduce_f70_deadlock() {
     );
 }
 
-/// Additional regression: each table still has its OWN `ddl_admission`
-/// mutex — two DDLs on the SAME table serialize there. (S5c-X note: DDLs on
-/// DIFFERENT tables of the same repository now ALSO serialize, but one level
-/// up, at the shared per-repo `RepoWriteDomain` — that repo-level
-/// serialization is asserted in `tests/write_domain/`, not here.)
+/// Each table has its own `ddl_admission` mutex. With one repository
+/// permit already held, barriers on different tables can both be acquired
+/// and remain held simultaneously.
 #[tokio::test]
 async fn f95_admission_mutex_is_per_table_not_global() {
-    let (_repo, x, y) = make_two_tables().await;
+    let (repo, x, y) = make_two_tables().await;
+    let permit = repo.write_domain().admit().await.unwrap();
 
-    let x_entered = Arc::new(AtomicBool::new(false));
-    let y_done = Arc::new(AtomicBool::new(false));
-    let release_x = Arc::new(Notify::new());
+    let (x_guard, x_lock) = x
+        .begin_write_barrier_admitted(REGULAR_INDEX_CREATE, &permit)
+        .await;
+    assert!(x.needs_write_barrier(), "X barrier must be raised");
 
-    // DDL on X: acquire barrier, pause mid-CS.
-    let x_entered_c = Arc::clone(&x_entered);
-    let release_x_c = Arc::clone(&release_x);
-    let ddl_x = tokio::spawn(async move {
-        let (_guard, _lock) = x.begin_write_barrier(REGULAR_INDEX_CREATE).await.unwrap();
-        x_entered_c.store(true, Ordering::SeqCst);
-        release_x_c.notified().await;
-    });
+    let (y_guard, y_lock) = y
+        .begin_write_barrier_admitted(REGULAR_INDEX_CREATE, &permit)
+        .await;
+    assert!(y.needs_write_barrier(), "Y barrier must be raised");
+    assert!(
+        x.needs_write_barrier(),
+        "X barrier remains raised while Y enters"
+    );
 
-    // Wait for X's DDL to enter its CS.
-    wait_flag(&x_entered).await;
+    drop(y_lock);
+    drop(y_guard);
+    drop(x_lock);
+    drop(x_guard);
+    drop(permit);
 
-    // DDL on Y: should proceed immediately — Y has its own admission mutex.
-    let y_done_c = Arc::clone(&y_done);
-    let ddl_y = tokio::spawn(async move {
-        let (_guard, _lock) = y.begin_write_barrier(REGULAR_INDEX_CREATE).await.unwrap();
-        y_done_c.store(true, Ordering::SeqCst);
-    });
-    // BOUNDED spin asserting Y has NOT completed while X still holds the
-    // repo permit — the ordering assertion the S5c-X cutover had lost. In a
-    // single-threaded runtime the spins give ddl_y chances to run; it can
-    // only finish after X's permit is released, so `!y_done` must hold for
-    // the whole budget. (Fails pre-S5c-X: with no shared domain, Y completes
-    // freely and this assertion trips.)
-    for _ in 0..500 {
-        assert!(
-            !y_done.load(Ordering::SeqCst),
-            "Y's DDL completed while X still held the shared repo write permit"
-        );
-        tokio::task::yield_now().await;
-    }
-
-    // Release X's DDL — ONCE. (S5c-X: Y's DDL waits on the SHARED per-repo
-    // write-admission domain while X holds it — repo-level serialization
-    // is by design; `ddl_admission` remains the per-table serializer ON
-    // TOP of it. Both DDLs must still complete within the deadlock bound.)
-    release_x.notify_one();
-
-    tokio::time::timeout(BOUND, async {
-        ddl_x.await.expect("DDL-X panicked");
-        ddl_y.await.expect("DDL-Y panicked");
-    })
-    .await
-    .expect("DDL tasks did not complete");
+    assert!(!x.needs_write_barrier(), "X barrier must be cleared");
+    assert!(!y.needs_write_barrier(), "Y barrier must be cleared");
 }

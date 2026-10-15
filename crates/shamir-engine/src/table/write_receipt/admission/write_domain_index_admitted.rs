@@ -8,6 +8,8 @@ use crate::index2::kind::{
 };
 use crate::repo::RepoWritePermit;
 use shamir_storage::error::DbResult;
+use shamir_types::core::interner::TouchInd;
+use smallvec::SmallVec;
 
 impl TableManager {
     /// S5c-X admitted twin — caller already holds repo admission.

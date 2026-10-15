@@ -12,7 +12,6 @@ use shamir_types::types::value::InnerValue;
 use super::table_manager::TableManager;
 use crate::index::index_definition::IndexDefinition;
 use crate::index::index_info_item::IndexInfoItem;
-use crate::index2::backend::IndexBackend;
 use crate::repo::RepoWritePermit;
 
 /// Result structure for #1088 Phase C/D: the SnapshotGuard and pin version
@@ -864,7 +863,7 @@ impl TableManager {
     // ============================================================================
 
     /// Intern a single string, returning its u64 ID.
-    async fn intern_string(&self, s: &str) -> DbResult<u64> {
+    pub(crate) async fn intern_string(&self, s: &str) -> DbResult<u64> {
         let interner = self.interner.get().await?;
         match interner.touch_ind(s) {
             Ok(TouchInd::New(key)) | Ok(TouchInd::Exists(key)) => Ok(key.id()),

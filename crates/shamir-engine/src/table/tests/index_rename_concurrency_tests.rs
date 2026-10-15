@@ -54,7 +54,7 @@ fn record_with_str(key: u64, val: &str) -> InnerValue {
 #[tokio::test]
 async fn rename_regular_index_basic() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
 
     // Create a regular index and insert data.
@@ -92,7 +92,7 @@ async fn rename_regular_index_basic() {
 #[tokio::test]
 async fn rename_unique_index_basic() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
 
     // Create a unique index and insert data.
@@ -150,7 +150,7 @@ async fn rename_unique_index_basic() {
 #[tokio::test]
 async fn unique_rename_blocks_concurrent_duplicate_insert() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
 
     // Create a unique index with one record.
@@ -198,7 +198,7 @@ async fn unique_rename_blocks_concurrent_duplicate_insert() {
 #[tokio::test]
 async fn unique_rename_preserves_unique_constraint() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
 
     tbl.create_unique_index("uniq_email", &["email"])
@@ -257,7 +257,7 @@ async fn unique_rename_preserves_unique_constraint() {
 #[tokio::test]
 async fn regular_rename_concurrent_write_not_lost() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
 
     tbl.create_index("by_status", &["status"]).await.unwrap();

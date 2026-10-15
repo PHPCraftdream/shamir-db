@@ -332,7 +332,7 @@ async fn ssi_phantom_no_where_records_table_scan_for_list_stream() {
     use futures::StreamExt;
 
     let repo = make_repo();
-    repo.add_table(crate::table::TableConfig::new("users"));
+    repo.add_table_for_test(crate::table::TableConfig::new("users"));
     let _tbl = repo.get_table("users").await.unwrap();
     let table_token = crate::table::table_manager::table_token_for("users");
 
@@ -371,7 +371,7 @@ async fn ssi_phantom_filter_stream_tx_records_coarse_when_filter_has_no_sorted_i
     use futures::StreamExt;
 
     let repo = make_repo();
-    repo.add_table(crate::table::TableConfig::new("users"));
+    repo.add_table_for_test(crate::table::TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
     let table_token = crate::table::table_manager::table_token_for("users");
 

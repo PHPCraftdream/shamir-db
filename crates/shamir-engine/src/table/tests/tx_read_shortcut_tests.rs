@@ -48,7 +48,7 @@ async fn row(table: &TableManager, score: i64, body: &str) -> InnerValue {
 
 async fn fixture(indexed: bool) -> (RepoInstance, TableManager, Vec<(RecordId, i64, bool)>) {
     let repo = repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let table = repo.get_table("t").await.unwrap();
     let mut rows = Vec::new();
     for (score, matches) in [(10, true), (30, false), (50, true)] {
