@@ -123,7 +123,7 @@ async fn reopened_checkpointed_truncated_history_allows_next_commit() {
         .unwrap();
     segments.sync().await.unwrap();
     drop(segments);
-    let repo = open(&backing, "truncated").await;
+    let repo = open_retry(&backing, "truncated").await;
     assert_eq!(repo.tx_gate().await.unwrap().durable_watermark(), 4);
     assert_eq!(repo.changefeed().await.unwrap().feed.clean_horizon(), 4);
     // Same history-flush + checkpoint + real segment-unlink boundary; no
