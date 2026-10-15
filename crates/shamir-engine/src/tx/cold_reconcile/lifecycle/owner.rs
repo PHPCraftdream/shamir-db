@@ -419,14 +419,20 @@ impl<J: Send, R: Send> RepoWorkerLifecycle<J, R> {
             self.record_joined();
             return Ok(t);
         }
-        match tokio::time::timeout_at(deadline, rx.wait_for(|t| t.is_some())).await {
-            Ok(Ok(guard)) => {
-                let t = guard
+        let result = tokio::time::timeout_at(deadline, async {
+            let value = rx.wait_for(|t| t.is_some()).await?;
+            Ok::<WorkerTerminal, tokio::sync::watch::error::RecvError>(
+                value
                     .as_ref()
                     .cloned()
-                    .expect("wait_for predicate guarantees Some");
+                    .expect("wait_for predicate guarantees Some"),
+            )
+        })
+        .await;
+        match result {
+            Ok(Ok(terminal)) => {
                 self.record_joined();
-                Ok(t)
+                Ok(terminal)
             }
             Ok(Err(_recv_closed)) => {
                 // Unreachable: the sender lives in `core` (`Arc<CoreState>`,

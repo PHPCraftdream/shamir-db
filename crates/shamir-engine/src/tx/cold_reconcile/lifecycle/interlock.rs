@@ -53,18 +53,35 @@ impl PubTermInterlock {
         *self.lock()
     }
 
-    /// Deliberately unsafe-ordering negative-control seam for deterministic tests;
-    /// separates admission-check from callback execution.
+    /// Test-only negative control that reports contention before waiting for termination.
     #[cfg(test)]
-    pub(crate) fn unprotected_publish_for_test<T>(
+    pub(crate) fn terminate_after_observed_contention_for_test(
         &self,
-        after_check: impl FnOnce(),
-        callback: impl FnOnce() -> T,
-    ) -> Result<T, PublicationClosed> {
-        if self.is_terminated() {
-            return Err(PublicationClosed);
+        on_contention: impl FnOnce(),
+    ) -> bool {
+        match self.gate.try_lock() {
+            Ok(mut terminated) => {
+                let newly_terminated = !*terminated;
+                *terminated = true;
+                newly_terminated
+            }
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                let mut terminated = poisoned.into_inner();
+                let newly_terminated = !*terminated;
+                *terminated = true;
+                newly_terminated
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                on_contention();
+                self.terminate()
+            }
         }
-        after_check();
-        Ok(callback())
+    }
+
+    /// Test-only negative control: reports a termination attempt without taking
+    /// or changing the publication gate, so an in-flight callback is not awaited.
+    #[cfg(test)]
+    pub(crate) fn nonwaiting_termination_for_test(&self) -> bool {
+        true
     }
 }

@@ -97,7 +97,14 @@ impl RepoInstance {
     pub async fn flush_buffers(&self) -> DbResult<()> {
         let mut first_err: Option<DbError> = None;
 
-        // Drain the inflight WAL tail before flushing durable stores.
+        // Drain the inflight WAL tail into `history` before flushing durable stores.
+        // Post-cutover the ack-path writes only the in-memory overlay; the value
+        // is durable in `history` only after the drainer replays the WAL entry.
+        // Graceful shutdown drains first so the committed-but-not-yet-drained
+        // tail lands durably (and WAL markers truncate). Without a spawned
+        // drainer (no commit), this is a cheap no-op. A drain error is returned
+        // after subsequent stores are still flushed; recovery on next open can
+        // then converge from WAL.
         if let Err(e) = self.drainer().drain_all(self).await {
             log::warn!("flush_buffers: drain_all {}: {}", self.name, e);
             if first_err.is_none() {
@@ -161,6 +168,10 @@ impl RepoInstance {
             }
         }
 
+        // Stage I: persist the single per-repo interner ONCE on graceful
+        // shutdown. Previously persistence ran per table; the shared manager
+        // now owns the repo-wide namespace, so one persist covers every table.
+        // WAL entries whose deltas cover these ids can be truncated on next boot.
         match self.repo_interner().await {
             Ok(repo_interner) => {
                 if let Err(e) = repo_interner.persist().await {

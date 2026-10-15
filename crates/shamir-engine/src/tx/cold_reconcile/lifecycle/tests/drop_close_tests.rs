@@ -1,8 +1,10 @@
 //! Tests for owner drop and physical resource release.
-use crate::tx::cold_reconcile::lifecycle::{spawn_worker, RepoWorkerLifecycle, WorkerLease};
+use crate::tx::cold_reconcile::lifecycle::{
+    spawn_worker, InstallError, RepoWorkerLifecycle, WorkerLease,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::Notify;
+use tokio::sync::{Barrier, Notify};
 
 struct DropSignal(Arc<Notify>);
 impl Drop for DropSignal {
@@ -75,7 +77,6 @@ async fn owner_drop_active_and_queued_jobs_releases_actual_resource() {
 async fn owner_drop_queued_work_drains_before_resource_drop() {
     let held = Arc::new(AtomicUsize::new(1));
     let dropped = Arc::new(Notify::new());
-    let resource = Arc::clone(&dropped);
     struct LeaseWithCount {
         count: Arc<AtomicUsize>,
         _signal: DropSignal,
@@ -94,7 +95,7 @@ async fn owner_drop_queued_work_drains_before_resource_drop() {
         &owner,
         LeaseWithCount {
             count: Arc::clone(&held),
-            _signal: DropSignal(resource),
+            _signal: DropSignal(Arc::clone(&dropped)),
         },
         move |mut state| async move {
             if let Some(job) = state.next_job().await {
@@ -116,4 +117,43 @@ async fn owner_drop_queued_work_drains_before_resource_drop() {
     second.await.unwrap();
     dropped.notified().await;
     assert_eq!(held.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn close_before_first_install_never_spawns_handler() {
+    let owner = Arc::new(RepoWorkerLifecycle::<(), ()>::new());
+    let called = Arc::new(AtomicUsize::new(0));
+    let barrier = Arc::new(Barrier::new(2));
+    let (o, c, b) = (
+        Arc::clone(&owner),
+        Arc::clone(&called),
+        Arc::clone(&barrier),
+    );
+    let attempted = tokio::spawn(async move {
+        b.wait().await;
+        o.install_worker(
+            Lease {
+                _signal: DropSignal(Arc::new(Notify::new())),
+            },
+            move |_s| async move {
+                c.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+    });
+    owner.close();
+    barrier.wait().await;
+    assert!(matches!(
+        attempted.await.unwrap(),
+        Err(InstallError::ClosedOrForbidden)
+    ));
+    assert_eq!(called.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        owner.install_worker(
+            Lease {
+                _signal: DropSignal(Arc::new(Notify::new()))
+            },
+            |_s| async {}
+        ),
+        Err(InstallError::ClosedOrForbidden)
+    ));
 }

@@ -19,7 +19,7 @@ pub(crate) use owner::{ForegroundLifecycle, RepoUnitLifecycle, WorkerTerminal};
 #[cfg(test)]
 pub(crate) use owner::{InstallError, RepoWorkerLifecycle, ShutdownError};
 #[cfg(test)]
-pub(crate) use worker::{spawn_worker, LifecycleStatus, WorkerLease};
+pub(crate) use worker::{spawn_worker, FailClosedResource, LifecycleStatus, WorkerLease};
 
 #[cfg(test)]
 #[path = "tests/mod.rs"]

@@ -1,9 +1,8 @@
 //! Deterministic tests for synchronous publication/termination serialization.
+use crate::tx::cold_reconcile::lifecycle::PubTermInterlock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
-
-use crate::tx::cold_reconcile::lifecycle::PubTermInterlock;
 
 #[test]
 fn publication_runs_callback_and_termination_is_sticky() {
@@ -22,6 +21,15 @@ fn publication_runs_callback_and_termination_is_sticky() {
 
 #[test]
 fn termination_waits_until_inflight_publication_callback_finishes() {
+    run_inflight_termination(true);
+}
+
+#[test]
+fn nonwaiting_negative_control_returns_before_publication_finishes() {
+    run_inflight_termination(false);
+}
+
+fn run_inflight_termination(protected: bool) {
     let lock = Arc::new(PubTermInterlock::new());
     let entered = Arc::new(Barrier::new(2));
     let release = Arc::new(Barrier::new(2));
@@ -40,26 +48,39 @@ fn termination_waits_until_inflight_publication_callback_finishes() {
         })
     });
     entered.wait();
-    let (term_entered, term_release) = (Arc::new(Barrier::new(2)), Arc::new(Barrier::new(2)));
-    let (te, tr, term_lock) = (
-        Arc::clone(&term_entered),
-        Arc::clone(&term_release),
-        Arc::clone(&lock),
-    );
+    let term_lock = Arc::clone(&lock);
+    let term_value = Arc::clone(&published);
+    let (sample_tx, sample_rx) = std::sync::mpsc::channel();
     let terminator = thread::spawn(move || {
-        te.wait();
-        let result = term_lock.terminate();
-        tr.wait();
-        result
+        let result = if protected {
+            term_lock.terminate_after_observed_contention_for_test(|| sample_tx.send(()).unwrap())
+        } else {
+            let result = term_lock.nonwaiting_termination_for_test();
+            sample_tx.send(()).unwrap();
+            result
+        };
+        let at_return = term_value.load(Ordering::SeqCst);
+        (result, at_return)
     });
-    term_entered.wait();
-    assert_eq!(published.load(Ordering::SeqCst), 0);
-    release.wait();
-    worker.join().unwrap().unwrap();
-    term_release.wait();
-    assert!(terminator.join().unwrap());
-    assert_eq!(published.load(Ordering::SeqCst), 42);
-    assert!(lock.is_terminated());
+    if protected {
+        // Wait until try_lock has observed the callback-owned gate, then let publication finish.
+        sample_rx.recv().unwrap();
+        release.wait();
+        worker.join().unwrap().unwrap();
+        let (result, sample) = terminator.join().unwrap();
+        assert!(result);
+        assert_eq!(sample, 42);
+    } else {
+        // The negative-control return snapshot is observed before releasing callback.
+        sample_rx.recv().unwrap();
+        let (result, sample) = terminator.join().unwrap();
+        assert!(result);
+        assert_eq!(sample, 0);
+        release.wait();
+        worker.join().unwrap().unwrap();
+        assert_eq!(published.load(Ordering::SeqCst), 42);
+    }
+    assert_eq!(lock.is_terminated(), protected);
 }
 
 #[test]
@@ -71,31 +92,4 @@ fn termination_first_prevents_publication_callback() {
         .publish(|| called.fetch_add(1, Ordering::SeqCst))
         .is_err());
     assert_eq!(called.load(Ordering::SeqCst), 0);
-}
-
-#[test]
-fn unprotected_test_seam_demonstrates_stale_admission_race() {
-    let lock = PubTermInterlock::new();
-    let passed_check = Arc::new(Barrier::new(2));
-    let resume = Arc::new(Barrier::new(2));
-    let (p, r, l) = (
-        Arc::clone(&passed_check),
-        Arc::clone(&resume),
-        Arc::new(lock),
-    );
-    let worker_lock = Arc::clone(&l);
-    let worker = thread::spawn(move || {
-        worker_lock.unprotected_publish_for_test(
-            || {
-                p.wait();
-                r.wait();
-            },
-            || 1,
-        )
-    });
-    passed_check.wait();
-    assert!(l.terminate());
-    resume.wait();
-    assert_eq!(worker.join().unwrap(), Ok(1));
-    assert!(l.is_terminated());
 }

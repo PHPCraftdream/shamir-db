@@ -4,10 +4,12 @@ use crate::tx::cold_reconcile::lifecycle::{
     ShutdownError, WorkerLease, WorkerTerminal,
 };
 use futures::FutureExt;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use shamir_tx::RepoTxGate;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
+
 struct NoopLease;
 impl WorkerLease for NoopLease {}
 
@@ -195,7 +197,7 @@ async fn concurrent_shutdown_waiters_are_prepolled_pending_before_release() {
         Box::pin(async move { o.shutdown(Duration::from_secs(3600)).await })
     });
     for waiter in &mut waiters {
-        assert!(matches!(waiter.as_mut().now_or_never(), None));
+        assert!(waiter.as_mut().now_or_never().is_none());
     }
     release.notify_one();
     let [mut a, mut b, mut c, mut d] = waiters;
@@ -223,8 +225,8 @@ async fn concurrent_failure_and_different_deadlines_are_independent() {
     entered.notified().await;
     let mut short = Box::pin(owner.shutdown(Duration::from_secs(10)));
     let mut long = Box::pin(owner.shutdown(Duration::from_secs(3600)));
-    assert!(matches!(short.as_mut().now_or_never(), None));
-    assert!(matches!(long.as_mut().now_or_never(), None));
+    assert!(short.as_mut().now_or_never().is_none());
+    assert!(long.as_mut().now_or_never().is_none());
     tokio::time::advance(Duration::from_secs(11)).await;
     assert!(matches!(
         short.as_mut().now_or_never(),
@@ -234,6 +236,44 @@ async fn concurrent_failure_and_different_deadlines_are_independent() {
     release.notify_one();
     assert!(matches!(long.await, Ok(WorkerTerminal::Failed(_))));
     assert!(owner.supervisor_joined() && owner.quarantined());
+}
+
+#[tokio::test(start_paused = true)]
+async fn concurrent_failed_waiters_and_later_calls_share_cached_terminal() {
+    let release = Arc::new(Notify::new());
+    let worker_release = Arc::clone(&release);
+    let owner = Arc::new(RepoUnitLifecycle::new());
+    spawn_worker(&owner, NoopLease, move |_state| async move {
+        worker_release.notified().await;
+        panic!("shared failure");
+    })
+    .unwrap();
+
+    let mut waiters = [0, 1, 2].map(|_| {
+        let owner = Arc::clone(&owner);
+        Box::pin(async move { owner.shutdown(Duration::from_secs(3600)).await })
+    });
+    for waiter in &mut waiters {
+        assert!(waiter.as_mut().now_or_never().is_none());
+    }
+    release.notify_one();
+
+    let [mut first, mut second, mut third] = waiters;
+    let (first, second, third) = futures::join!(first.as_mut(), second.as_mut(), third.as_mut());
+    let terminal_message = match first {
+        Ok(WorkerTerminal::Failed(message)) => message,
+        other => panic!("expected cached failure, got {other:?}"),
+    };
+    for result in [second, third] {
+        assert!(
+            matches!(result, Ok(WorkerTerminal::Failed(message)) if message == terminal_message)
+        );
+    }
+    assert!(owner.supervisor_joined());
+    assert!(matches!(
+        owner.shutdown(Duration::ZERO).await,
+        Ok(WorkerTerminal::Failed(message)) if message == terminal_message
+    ));
 }
 
 #[tokio::test(start_paused = true)]
@@ -251,7 +291,7 @@ async fn shutdown_waiter_cancellation_keeps_close_applied() {
     let _rx = owner.submit(()).unwrap();
     entered.notified().await;
     let mut waiter = Box::pin(owner.shutdown(Duration::from_secs(3600)));
-    assert!(matches!(waiter.as_mut().now_or_never(), None));
+    assert!(waiter.as_mut().now_or_never().is_none());
     drop(waiter);
     assert!(!owner.admission_open() && !owner.quarantined());
     release.notify_one();
@@ -286,30 +326,36 @@ async fn phase_matrix_notifies_each_next_phase_before_waiting() {
             Arc::clone(&gates[1]),
             Arc::clone(&gates[2]),
         );
-        let next0 = Arc::clone(&phases[1]);
-        let next1 = Arc::clone(&phases[2]);
         let worker_done = Arc::clone(&done);
-        spawn_worker(&owner, NoopLease, move |mut s| async move {
-            let job = s.next_job().await.unwrap();
-            for (i, (p, g)) in [(p0, g0), (p1, g1), (p2, g2)].into_iter().enumerate() {
-                p.notify_one();
-                g.notified().await;
-                if i == 0 {
-                    next0.notify_one();
-                } else if i == 1 {
-                    next1.notify_one();
-                }
+        let versions = Arc::new(Mutex::new(Vec::new()));
+        let worker_versions = Arc::clone(&versions);
+        let highwater = Arc::new(AtomicU64::new(0));
+        let worker_highwater = Arc::clone(&highwater);
+        let gate = Arc::new(RepoTxGate::fresh());
+        let before_visible = gate.completion().watermark();
+        let before_durable = gate.durable_watermark();
+        let worker_gate = Arc::clone(&gate);
+        spawn_worker(&owner, NoopLease, move |mut state| async move {
+            let job = state.next_job().await.unwrap();
+            let guard = worker_gate.assign_next_version_guarded();
+            let version = guard.version();
+            let _protected = state.protect_guard(guard);
+            worker_versions.lock().unwrap().push(version);
+            worker_highwater.fetch_max(version, Ordering::SeqCst);
+            for (phase, phase_gate) in [(p0, g0), (p1, g1), (p2, g2)] {
+                phase.notify_one();
+                phase_gate.notified().await;
             }
             job.reply(());
             worker_done.notify_one();
         })
         .unwrap();
-        let rx = owner.submit(()).unwrap();
+        let mut rx = Some(owner.submit(()).unwrap());
         let mut phase = 0;
         while phase < 3 {
             phases[phase].notified().await;
             if phase == cancel_at {
-                drop(rx);
+                drop(rx.take());
             }
             gates[phase].notify_one();
             phase += 1;
@@ -319,5 +365,10 @@ async fn phase_matrix_notifies_each_next_phase_before_waiting() {
             owner.shutdown(Duration::from_secs(3600)).await,
             Ok(WorkerTerminal::Completed)
         ));
+        assert_eq!(highwater.load(Ordering::SeqCst), 1);
+        assert_eq!(versions.lock().unwrap().as_slice(), &[1]);
+        assert_eq!(gate.completion().watermark(), before_visible);
+        assert_eq!(gate.durable_watermark(), before_durable);
+        assert!(gate.requires_reopen());
     }
 }

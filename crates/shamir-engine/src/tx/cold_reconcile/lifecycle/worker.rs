@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
+use shamir_tx::VersionGuard;
+
 use super::interlock::PubTermInterlock;
 use super::job::LifecycleJob;
 use super::owner::{CoreState, InstallError, RepoWorkerLifecycle};
@@ -33,6 +35,18 @@ impl LifecycleStatus {
     }
 }
 
+/// Capability required for resources whose destructor must fail closed.
+pub trait FailClosedResource {
+    /// Arm fail-closed cleanup before lifecycle ownership begins.
+    fn arm_fail_closed(&mut self);
+}
+
+impl FailClosedResource for VersionGuard {
+    fn arm_fail_closed(&mut self) {
+        self.visibility_started_without_wal();
+    }
+}
+
 /// Owned resource whose destructor must observe quarantine before release
 /// when unwinding. Arbitrary unwrapped handler-local guards are not covered.
 pub struct FailClosedGuard<T> {
@@ -40,7 +54,7 @@ pub struct FailClosedGuard<T> {
     core: Arc<CoreState>,
 }
 
-impl<T> FailClosedGuard<T> {
+impl<T: FailClosedResource> FailClosedGuard<T> {
     fn new(value: T, core: Arc<CoreState>) -> Self {
         Self {
             value: Some(value),
@@ -109,7 +123,8 @@ impl<J, R, L> WorkerExecutionState<J, R, L> {
         LifecycleStatus::new(Arc::clone(&self.core))
     }
     /// Arm an owned sensitive resource; keep the guard outside publication callbacks during unwind.
-    pub fn protect_guard<T>(&self, value: T) -> FailClosedGuard<T> {
+    pub fn protect_guard<T: FailClosedResource>(&self, mut value: T) -> FailClosedGuard<T> {
+        value.arm_fail_closed();
         FailClosedGuard::new(value, Arc::clone(&self.core))
     }
 }

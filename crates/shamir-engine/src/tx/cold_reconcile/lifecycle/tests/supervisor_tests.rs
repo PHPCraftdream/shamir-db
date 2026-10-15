@@ -1,7 +1,10 @@
 //! Supervisor join, lease release, and fail-closed panic tests.
 use crate::tx::cold_reconcile::lifecycle::{
-    spawn_worker, ForegroundLifecycle, RepoUnitLifecycle, WorkerLease, WorkerTerminal,
+    spawn_worker, FailClosedResource, ForegroundLifecycle, JobSubmitError, LifecycleStatus,
+    RepoUnitLifecycle, ShutdownError, WorkerLease, WorkerTerminal,
 };
+use futures::FutureExt;
+use shamir_tx::RepoTxGate;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -62,17 +65,22 @@ async fn lease_is_dropped_after_join_before_terminal() {
 }
 
 struct PanicLease {
-    _status: crate::tx::cold_reconcile::lifecycle::LifecycleStatus,
+    _status: LifecycleStatus,
 }
 impl WorkerLease for PanicLease {}
 struct ProtectedResource {
-    status: crate::tx::cold_reconcile::lifecycle::LifecycleStatus,
+    status: LifecycleStatus,
     observed: Arc<AtomicBool>,
+    dropped: Arc<Notify>,
+}
+impl FailClosedResource for ProtectedResource {
+    fn arm_fail_closed(&mut self) {}
 }
 impl Drop for ProtectedResource {
     fn drop(&mut self) {
         self.observed
             .store(self.status.quarantined(), Ordering::SeqCst);
+        self.dropped.notify_one();
     }
 }
 
@@ -81,7 +89,9 @@ async fn protected_resource_drop_observes_actual_quarantine_during_unwind() {
     let owner = Arc::new(RepoUnitLifecycle::new());
     let owner_status = owner.status();
     let observed = Arc::new(AtomicBool::new(false));
+    let dropped = Arc::new(Notify::new());
     let drop_observed = Arc::clone(&observed);
+    let drop_signal = Arc::clone(&dropped);
     spawn_worker(
         &owner,
         PanicLease {
@@ -91,22 +101,56 @@ async fn protected_resource_drop_observes_actual_quarantine_during_unwind() {
             let _guard = state.protect_guard(ProtectedResource {
                 status: state.status(),
                 observed: drop_observed,
+                dropped: drop_signal,
             });
             panic!("intentional worker panic");
         },
     )
     .unwrap();
+    dropped.notified().await;
+    assert!(!owner.admission_open());
+    assert!(matches!(owner.submit(()), Err(JobSubmitError::Closing)));
+    assert!(owner.quarantined() && owner.reopen_required());
+    assert!(owner.interlock().publish(|| ()).is_err());
+    assert!(observed.load(Ordering::SeqCst));
     assert!(matches!(
         owner.shutdown(Duration::from_secs(3600)).await,
         Ok(WorkerTerminal::Failed(_))
     ));
     assert!(owner.supervisor_joined());
-    assert!(owner.quarantined());
-    assert!(
-        observed.load(Ordering::SeqCst),
-        "protected resource Drop observed quarantine"
-    );
     drop(owner_status);
+}
+
+#[tokio::test(start_paused = true)]
+async fn version_guard_is_armed_by_protection_before_panic() {
+    let owner = Arc::new(RepoUnitLifecycle::new());
+    let gate = Arc::new(RepoTxGate::fresh());
+    let before_visible = gate.completion().watermark();
+    let before_durable = gate.durable_watermark();
+    assert_eq!((before_visible, before_durable), (0, 0));
+    let worker_gate = Arc::clone(&gate);
+    spawn_worker(&owner, NoopLease, move |state| async move {
+        let guard = worker_gate.assign_next_version_guarded();
+        let _protected = state.protect_guard(guard);
+        panic!("version guard panic");
+    })
+    .unwrap();
+    let result = owner.shutdown(Duration::from_secs(3600)).await;
+    let failure = match result {
+        Ok(WorkerTerminal::Failed(message)) => message,
+        other => panic!("expected worker failure, got {other:?}"),
+    };
+    assert!(owner.quarantined() && owner.reopen_required() && owner.supervisor_joined());
+    assert!(gate.requires_reopen());
+    assert_eq!(gate.completion().watermark(), before_visible);
+    assert_eq!(gate.durable_watermark(), before_durable);
+    assert!(
+        matches!(owner.shutdown(Duration::ZERO).await, Ok(WorkerTerminal::Failed(message)) if message == failure)
+    );
+}
+
+impl FailClosedResource for Arc<()> {
+    fn arm_fail_closed(&mut self) {}
 }
 
 #[tokio::test(start_paused = true)]
@@ -125,11 +169,14 @@ async fn protected_local_resource_survives_timeout_until_worker_join() {
     })
     .unwrap();
     drop(resource);
+    let _rx = owner.submit(()).unwrap();
     entered.notified().await;
     assert!(matches!(
         owner.shutdown(Duration::ZERO).await,
-        Err(crate::tx::cold_reconcile::lifecycle::ShutdownError::TimedOut)
+        Err(ShutdownError::TimedOut)
     ));
+    assert!(!owner.admission_open());
+    assert!(matches!(owner.submit(()), Err(JobSubmitError::Closing)));
     assert!(owner.quarantined() && owner.reopen_required());
     assert!(owner.interlock().publish(|| ()).is_err());
     assert!(weak_resource.upgrade().is_some());
@@ -139,6 +186,36 @@ async fn protected_local_resource_survives_timeout_until_worker_join() {
         Ok(WorkerTerminal::Completed)
     ));
     assert!(weak_resource.upgrade().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn concurrent_failure_and_different_deadlines_are_independent() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let (worker_entered, worker_release) = (Arc::clone(&entered), Arc::clone(&release));
+    let owner = Arc::new(RepoUnitLifecycle::new());
+    spawn_worker(&owner, NoopLease, move |mut state| async move {
+        let _ = state.next_job().await.unwrap();
+        worker_entered.notify_one();
+        worker_release.notified().await;
+        panic!("failure");
+    })
+    .unwrap();
+    let _rx = owner.submit(()).unwrap();
+    entered.notified().await;
+    let mut short = Box::pin(owner.shutdown(Duration::from_secs(10)));
+    let mut long = Box::pin(owner.shutdown(Duration::from_secs(3600)));
+    assert!(short.as_mut().now_or_never().is_none());
+    assert!(long.as_mut().now_or_never().is_none());
+    tokio::time::advance(Duration::from_secs(11)).await;
+    assert!(matches!(
+        short.as_mut().now_or_never(),
+        Some(Err(ShutdownError::TimedOut))
+    ));
+    drop(short);
+    release.notify_one();
+    assert!(matches!(long.await, Ok(WorkerTerminal::Failed(_))));
+    assert!(owner.supervisor_joined() && owner.quarantined());
 }
 
 #[tokio::test(start_paused = true)]
@@ -154,22 +231,4 @@ async fn final_foreground_token_closes_shared_lifecycle_without_raw_arc_cycle() 
         lifecycle.shutdown(Duration::ZERO).await,
         Ok(WorkerTerminal::Completed)
     ));
-}
-
-#[tokio::test(start_paused = true)]
-async fn supervisor_joined_after_clean_terminal() {
-    let owner = Arc::new(RepoUnitLifecycle::new());
-    spawn_worker(&owner, NoopLease, |mut state| async move {
-        while let Some(job) = state.next_job().await {
-            job.reply(());
-        }
-    })
-    .unwrap();
-    let rx = owner.submit(()).unwrap();
-    rx.await.unwrap();
-    assert!(matches!(
-        owner.shutdown(Duration::from_secs(3600)).await,
-        Ok(WorkerTerminal::Completed)
-    ));
-    assert!(owner.supervisor_joined());
 }
