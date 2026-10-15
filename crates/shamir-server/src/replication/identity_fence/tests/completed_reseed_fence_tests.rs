@@ -380,10 +380,9 @@ async fn quarantined_subscription_fences_reads_but_not_status() {
     assert!(matches!(err, BatchError::ResyncRequired { .. }));
 
     // (b) the changelog pull path refuses too.
-    let err = follower
-        .read_changelog_bounded("app", "main", 1, 10)
-        .await
-        .unwrap_err();
+    let Err(err) = follower.read_changelog_bounded("app", "main", 1, 10).await else {
+        panic!("changelog pull of a quarantined repo must be refused");
+    };
     assert!(matches!(err, DbError::ResyncRequired { .. }));
 
     // (c) admin status stays readable and shows the quarantine state.

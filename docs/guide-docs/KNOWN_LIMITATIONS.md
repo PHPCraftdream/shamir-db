@@ -678,8 +678,11 @@ artifact).
   (which already echo `state` and `status_message` verbatim), DESCRIBE and
   other admin ops stay readable so the operator can see why; the
   quarantine lifts only through the operator path that flips the
-  subscription state back (admin `Resume` / replacement-seed install per
-  the runbook, or dropping the subscription). Runtime clean-horizon checkpoints
+  subscription state back — and plain admin `Resume` alone no longer
+  suffices: a quarantined `Resume` is refused until a replacement-seed
+  install has bound a fresh `seed_receipt` (durable `resync_from_receipt`
+  comparison on the subscription row), per the runbook, or the subscription
+  is dropped. Runtime clean-horizon checkpoints
   bound the retained local WAL; retention enforcement follows the configured
   refusal or conservative GAP policy. PR4 cold reconciliation means an
   unclean crash alone no longer implies reseeding: a seed is needed when the

@@ -511,11 +511,14 @@ prefix и собственно скорость apply follower; это разн�
    в `resync_required`, чтения (get/query/scan, включая temporal
    AsOf/History) и локальные changefeed/journal pull покрытых репозиториев
    возвращают ошибку `resync_required` (non-retryable) — повтор невозможен
-   до установки replacement seed / `Resume`; оператор видит причину через
+   до установки replacement seed: `Resume` подписки в карантине отклоняется,
+   пока на строке подписки не появится новый `seed_receipt` (сравнение с
+   durable `resync_from_receipt`); оператор видит причину через
    `ReplicationStatus`/`ListSubscriptions` (state + status_message),
    DESCRIBE и статус остаются читаемыми. Порядок действий оператора:
    1) увидеть карантин через status/list; 2) установить replacement seed
-   по runbook (`09-seed-recovery.md`); 3) `Resume` подписки; 4) первое
+   по runbook (`09-seed-recovery.md`); 3) `Resume` подписки (до установки
+   replacement seed отклоняется с кодом `resync_required`); 4) первое
    чтение после этого успешно (автоматического reseed нет). На healthy
    path стоимость — один атомарный load на batch.
 

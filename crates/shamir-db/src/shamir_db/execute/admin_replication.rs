@@ -452,6 +452,30 @@ impl ShamirAdminExecutor {
         }
 
         let mut record = existing.records[0].as_value().into_owned();
+        // S5c-X PR8b: `Resume` of a quarantined (`resync_required`)
+        // subscription is refused until a replacement seed has been bound
+        // since the quarantine began — compared via the durable
+        // `resync_from_receipt` baseline `mark_subscription_terminal` wrote
+        // against the row's current `seed_receipt`. This gate runs FIRST:
+        // no row mutation (and no `seed_resume_validated` flip) happens on
+        // refusal, and the typed error names the runbook.
+        if let SubAction::Resume = &op.action {
+            if record.get("state").and_then(|value| value.as_str()) == Some("resync_required") {
+                let baseline = record.get("resync_from_receipt");
+                let bound = record.get("seed_receipt");
+                let reseeded = matches!((baseline, bound), (Some(from), Some(now)) if from != now);
+                if !reseeded {
+                    return Err(BatchError::query_coded(
+                        "",
+                        "resync_required",
+                        format!(
+                            "subscription '{name}' is quarantined (resync_required): \
+                             install a replacement seed per guide/09-seed-recovery.md, then Resume"
+                        ),
+                    ));
+                }
+            }
+        }
         self.shamir
             .validate_seed_resume_action(&record, &op.action)
             .await
@@ -843,9 +867,11 @@ impl ShamirDb {
     /// echo `state` verbatim). Because `reconcile()` only (re)starts
     /// subscriptions whose row has `state == "active"`, a row left at
     /// `"resync_required"` naturally stays stopped across reconcile ticks,
-    /// exactly like `"paused"` does today. Recovery is the EXISTING
-    /// `Resume` admin action (flips `state` back to `"active"`); no new
-    /// admin action is introduced.
+    /// exactly like `"paused"` does today. Recovery requires a replacement seed
+    /// install (which binds a NEW `seed_receipt` on the row, differing from
+    /// the `resync_from_receipt` baseline captured here) followed by the
+    /// `Resume` admin action — a plain `Resume` of a still-quarantined row
+    /// is refused with a typed error.
     ///
     /// `name` not found → treated as a no-op (logged, not errored): the
     /// subscription may have been dropped concurrently by an admin command
@@ -893,8 +919,18 @@ impl ShamirDb {
         };
 
         let mut record = row.as_value().into_owned();
+        // S5c-X PR8b: capture the row's CURRENT `seed_receipt` as the durable
+        // baseline the quarantine began from (absent ⇒ `Null`). `Resume`'s
+        // gate requires the bound receipt to differ from this value, so a
+        // plain `Resume` can never lift the quarantine without a replacement
+        // seed installed in between.
+        let resync_from_receipt = record
+            .get("seed_receipt")
+            .cloned()
+            .unwrap_or(QueryValue::Null);
         if let QueryValue::Map(ref mut m) = record {
             m.insert("state".to_string(), QueryValue::Str(state.to_string()));
+            m.insert("resync_from_receipt".into(), resync_from_receipt);
         }
         if let QueryValue::Map(ref mut fields) = record {
             fields.insert(

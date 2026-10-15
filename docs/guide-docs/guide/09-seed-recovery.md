@@ -21,8 +21,12 @@ pulls fail with the wire code `resync_required` (non-retryable), so stale
 state is never served. Status/`ReplicationStatus`/`ListSubscriptions`
 (state + `status_message`) and DESCRIBE stay readable. There is no
 automatic reseed: the operator sees the quarantine via status, installs
-the replacement seed per this runbook, `Resume`s the subscription, and the
-first read after that succeeds.
+the replacement seed per this runbook, and only then `Resume`s the
+subscription — a plain `Resume` of a still-quarantined subscription is
+REFUSED with a typed `resync_required` error naming this runbook, because
+the row durably records which `seed_receipt` the quarantine began from
+(`resync_from_receipt`) and `Resume` requires a NEW receipt to have been
+bound since (the first read after that succeeds).
 
 Read this together with:
 

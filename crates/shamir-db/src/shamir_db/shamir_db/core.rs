@@ -142,11 +142,13 @@ pub struct ShamirDb {
     /// Server-default policy, validated at initialization and each repository open.
     pub(super) durability_policy: DurabilityPolicy,
     /// S5c-X PR8b — lock-free cache of `(db, repo)` targets covered by a
-    /// subscription in `state = "resync_required"`. Shared by clone; rebuilt
+    /// subscription in `state = "resync_required"`. Shared by clone via `Arc`
+    /// (ONE instance per process — a deep copy would make refreshes invisible
+    /// to clones); rebuilt
     /// wholesale by `refresh_resync_quarantine_cache` (see
     /// `execute::admin_replication`). Ordinary READS of a covered repo fail
     /// closed; one atomic load on the healthy path.
-    pub(crate) resync_quarantine: ResyncQuarantineCache,
+    pub(crate) resync_quarantine: Arc<ResyncQuarantineCache>,
 }
 
 impl ShamirDb {
@@ -236,7 +238,7 @@ impl ShamirDb {
             principal_resolver: None,
             experimental_migration_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             durability_policy: durability,
-            resync_quarantine: ResyncQuarantineCache::new(),
+            resync_quarantine: Arc::new(ResyncQuarantineCache::new()),
         };
 
         if seed {
