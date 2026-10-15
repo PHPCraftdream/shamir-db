@@ -247,11 +247,13 @@ fn main() {
         let iter_ctr = Arc::clone(&iter_ctr);
         h.bench_batched_async(
             &format!("disjoint_inserts/n_{n}"),
-            move || async move {
-                let repo = make_repo().await;
+            move || {
                 let iter_i = iter_ctr.fetch_add(1, Ordering::Relaxed);
-                let _ = repo.get_table("bench_table").await.unwrap();
-                (repo, iter_i)
+                async move {
+                    let repo = make_repo().await;
+                    let _ = repo.get_table("bench_table").await.unwrap();
+                    (repo, iter_i)
+                }
             },
             move |(repo, iter_i)| async move {
                 let mut handles = Vec::with_capacity(n);
