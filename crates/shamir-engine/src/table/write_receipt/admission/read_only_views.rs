@@ -19,7 +19,10 @@
 //!   `get_ind` and fails closed — it never interns);
 //! * [`ValidatorRegistryReadView`] wraps the validator registry PRIVATELY —
 //!   its `register`/`replace`/`rename`/`remove` mutators are unreachable
-//!   from it.
+//!   from it;
+//! * [`Index2ReadView`] wraps the index2 (FTS / Functional / Vector)
+//!   registry PRIVATELY — its `insert`/`remove_by_id`/`set_state` mutators
+//!   are unreachable from it.
 //!
 //! The interner WRITE path (persisting appended dictionary chunks) is a
 //! rare DDL/catalogue op and lives on the admitted side:
@@ -34,10 +37,12 @@
 
 use std::sync::Arc;
 
+use futures::StreamExt;
 use shamir_index::base_index::ddl_op_log;
 use shamir_index::base_index::index_definition::IndexDefinition;
 use shamir_index::base_index::sorted_index_definition::SortedIndexDefinition;
 use shamir_index::descriptor::IndexDescriptor;
+use shamir_index::IndexBackend;
 use shamir_query_types::filter::Filter;
 use shamir_query_types::read::DdlOpStatus;
 use shamir_storage::error::DbResult;
@@ -166,6 +171,37 @@ impl<'a> TableInfoStoreReadView<'a> {
         id: &str,
     ) -> DbResult<Option<crate::migration::MigrationState>> {
         crate::migration::MigrationCoordinator::load_state(&self.manager.info_store, id).await
+    }
+
+    /// Prefix scan over this table's sidecar metadata (`info`) store.
+    /// Read-only twin of `Store::scan_prefix_stream` — counts / reads
+    /// already-persisted sidecar records (e.g. vector snapshot delta
+    /// chunks) without handing out the raw store handle. Never writes.
+    pub fn scan_prefix_stream(
+        &self,
+        prefix: bytes::Bytes,
+        batch_size: usize,
+    ) -> std::pin::Pin<
+        Box<
+            dyn futures::Stream<
+                    Item = shamir_storage::error::DbResult<Vec<(bytes::Bytes, bytes::Bytes)>>,
+                > + Send
+                + '_,
+        >,
+    > {
+        // `RecordStream`'s item key is the crate-private `RecordKey` — map
+        // it to its `bytes::Bytes` form so the public item type is nameable.
+        let inner = self
+            .manager
+            .info_store
+            .scan_prefix_stream(prefix, batch_size);
+        Box::pin(inner.map(|batch| {
+            batch.map(|rows| {
+                rows.into_iter()
+                    .map(|(key, value)| (key.into(), value))
+                    .collect()
+            })
+        }))
     }
 }
 
@@ -356,6 +392,14 @@ impl TableManager {
         self.index2_registry.all_descriptors().await
     }
 
+    /// Read-only view over the table's index2 registry (FTS / Functional /
+    /// Vector). Read-only twin of the raw `index2_registry()` handle.
+    pub fn index2_read_view(&self) -> Index2ReadView {
+        Index2ReadView {
+            registry: Arc::clone(&self.index2_registry),
+        }
+    }
+
     /// Read-only MVCC snapshot stream (seed-catalogue budget scan). Returns
     /// `None` when this table has no attached `MvccStore`. Read-only twin of
     /// `MvccStore::snapshot_stream`; no version is written.
@@ -370,6 +414,33 @@ impl TableManager {
             + '_,
     > {
         Some(self.mvcc_store_ref()?.snapshot_stream(batch, at_version))
+    }
+}
+
+/// Read-only view over a table's index2 registry (FTS / Functional /
+/// Vector). The registry `Arc` is PRIVATE — every registry mutator
+/// (`insert` / `remove_by_id` / `set_state` / `set_failed` / the rename
+/// slots) is unreachable from this type. Index2 backends are created,
+/// state-flipped and torn down exclusively by the engine's admitted DDL
+/// apply hooks (the `plan_*` computations on `IndexRegistry` are pure
+/// `&self` and need no mutators).
+pub struct Index2ReadView {
+    /// PRIVATE. Mutation goes through the admitted engine DDL paths only.
+    registry: Arc<crate::index2::IndexRegistry>,
+}
+
+impl Index2ReadView {
+    /// Snapshot of every registered backend (read-only twin of
+    /// `IndexRegistry::all_backends`), for read-side probes (FTS hit
+    /// counts, vector delta-chunk scans).
+    pub async fn backends(&self) -> Vec<Arc<dyn IndexBackend>> {
+        self.registry.all_backends().await
+    }
+
+    /// Snapshot of the registry descriptors (read-only twin of
+    /// `IndexRegistry::all_descriptors`).
+    pub async fn all_descriptors(&self) -> Vec<IndexDescriptor> {
+        self.registry.all_descriptors().await
     }
 }
 

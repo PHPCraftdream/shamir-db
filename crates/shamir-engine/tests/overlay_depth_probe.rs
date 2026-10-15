@@ -17,8 +17,8 @@ use shamir_engine::table::table_manager::table_token_for;
 use shamir_engine::table::{TableConfig, TableManager};
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_tx::IsolationLevel;
-use shamir_types::core::interner::{InternerKey, TouchInd};
-use shamir_types::types::value::InnerValue;
+use shamir_types::core::interner::InternerKey;
+use shamir_types::types::value::{InnerValue, QueryValue};
 use std::sync::Arc;
 
 const TABLE: &str = "probe";
@@ -37,11 +37,23 @@ async fn make_fjall_repo(tempdir: &tempfile::TempDir) -> RepoInstance {
         .expect("open fjall repo")
 }
 
-async fn field_id(tbl: &TableManager, name: &str) -> u64 {
-    let interner = tbl.interner().get().await.unwrap();
-    match interner.touch_ind(name).unwrap() {
-        TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
-    }
+async fn field_id(repo: &RepoInstance, tbl: &TableManager, name: &str) -> u64 {
+    // S5c-X: the raw `interner()` handle is `pub(crate)`, and `touch_ind` is
+    // a dictionary WRITE — only reachable through the admitted interning
+    // path now. Intern a one-field record via the admitted WRITE-prep op
+    // (same `touch_ind` semantics underneath) and read the minted id back
+    // from the returned map key.
+    let permit = repo.write_domain().admit().await.unwrap();
+    let mut probe: TMap<String, QueryValue> = TMap::default();
+    probe.insert(name.to_string(), QueryValue::Null);
+    let inner = tbl
+        .intern_query_value_admitted(&permit, &QueryValue::Map(probe))
+        .await
+        .unwrap();
+    let InnerValue::Map(m) = inner else {
+        unreachable!("intern_query_value_admitted of a map returns a map")
+    };
+    m.keys().next().expect("one field key").id()
 }
 
 fn text_record(body_key_id: u64, text: &str) -> InnerValue {
@@ -63,7 +75,7 @@ async fn overlay_len(repo: &RepoInstance) -> usize {
 async fn probe_steady_state_overlay_depth() {
     let repo = make_repo().await;
     let tbl = repo.get_table(TABLE).await.unwrap();
-    let body_id = field_id(&tbl, "body").await;
+    let body_id = field_id(&repo, &tbl, "body").await;
 
     let mut peak = 0usize;
     let mut samples: Vec<(usize, usize)> = Vec::new();
@@ -106,7 +118,7 @@ async fn probe_steady_state_overlay_depth() {
 async fn probe_drain_lag_overlay_depth() {
     let repo = make_repo().await;
     let tbl = repo.get_table(TABLE).await.unwrap();
-    let body_id = field_id(&tbl, "body").await;
+    let body_id = field_id(&repo, &tbl, "body").await;
 
     let mut peak = 0usize;
     let mut samples: Vec<(usize, usize)> = Vec::new();
@@ -149,7 +161,7 @@ async fn probe_drain_lag_overlay_depth() {
 async fn probe_pinned_snapshot_overlay_depth() {
     let repo = make_repo().await;
     let tbl = repo.get_table(TABLE).await.unwrap();
-    let body_id = field_id(&tbl, "body").await;
+    let body_id = field_id(&repo, &tbl, "body").await;
 
     // Hold a Snapshot-isolation tx open through the burst; its guard
     // keeps `min_alive` pinned at the snapshot's version.
@@ -189,7 +201,7 @@ async fn probe_drain_lag_overlay_depth_fjall() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let repo = make_fjall_repo(&tempdir).await;
     let tbl = repo.get_table(TABLE).await.unwrap();
-    let body_id = field_id(&tbl, "body").await;
+    let body_id = field_id(&repo, &tbl, "body").await;
 
     let mut peak = 0usize;
     let mut samples: Vec<(usize, usize)> = Vec::new();
