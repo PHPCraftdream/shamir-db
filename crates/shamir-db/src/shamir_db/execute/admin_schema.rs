@@ -940,7 +940,6 @@ impl ShamirAdminExecutor {
         let table = &op.get_table_schema;
         let repo = &op.repo;
         let db = &self.db_name;
-        let permit = schema_repo_permit(&self.shamir, db, repo).await?;
 
         // Authz: Action::Read on the table (introspection).
         self.shamir

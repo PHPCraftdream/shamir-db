@@ -321,9 +321,7 @@ async fn multi_query_batch_with_query_reference() {
         // Add a second table to the same repo via direct API (admin batch
         // ops are exercised separately in `admin_batch_allowed_for_superuser`).
         let db = shamir.get_db("prod").expect("prod db");
-        db.create_table("main", "orders")
-            .await
-            .expect("add orders table");
+        db.create_table("main", "orders").await.expect("add orders");
     }
     let handler = ShamirDbHandler::new(shamir);
     let session = user_session();

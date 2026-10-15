@@ -489,7 +489,7 @@ pub async fn recover_inflight_v2(repo: &RepoInstance, permit: &RepoWritePermit) 
     // regardless of the CURRENT serve mode (review finding 2a: the Armed
     // obligation survives a config change to `durable`). A failed
     // bump/flush propagates and blocks admission.
-    repo.note_unclean_open_bump().await?;
+    repo.note_unclean_open_bump(permit).await?;
     Ok(count)
 }
 
@@ -601,6 +601,7 @@ async fn seed_version_cache_for_entry(
     repo: &RepoInstance,
     permit: &RepoWritePermit,
 ) -> DbResult<()> {
+    repo.write_domain().debug_check_permit(permit);
     let v = entry.commit_version;
 
     // D2 P1d-2b: group this entry's DATA ops per table and route them through

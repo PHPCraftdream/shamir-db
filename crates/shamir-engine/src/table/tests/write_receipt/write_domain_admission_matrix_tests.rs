@@ -10,7 +10,6 @@
 //! (the task completes while the permit is held).
 
 use std::future::Future;
-use std::pin::pin;
 use std::sync::Arc;
 
 use smallvec::smallvec;

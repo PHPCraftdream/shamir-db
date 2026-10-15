@@ -9,7 +9,6 @@ use crate::engine::migration::{
     MigrationCoordinator, MigrationPhase, MigrationShadowLog, MigrationState,
 };
 use crate::engine::repo::repo_types::BoxRepoFactory;
-use crate::engine::repo::RepoConfig;
 use crate::engine::repo::RepoWriteDomain;
 use crate::engine::table::TableConfig;
 use crate::query::batch::{BatchError, BatchOp};
@@ -151,7 +150,7 @@ impl ShamirAdminExecutor {
             // Local RAII owns preparation; failed/cancelled replication clears
             // the bit. This guard does not retain ddl_admission at cutover.
             let freeze = src_table
-                .begin_migration_freeze()
+                .begin_migration_freeze_admitted(&src_permit)
                 .await
                 .map_err(shamir_storage::error::DbError::from)?;
 
@@ -168,7 +167,9 @@ impl ShamirAdminExecutor {
             // re-encode). Must run before `replicate_index2_descriptors_from`
             // (which re-interns index path segments through dst's interner)
             // and before the snapshot/drain that populates dst's data_store.
-            dst_table.replicate_interner_from(&src_table).await?;
+            dst_table
+                .replicate_interner_from_admitted(&src_table, &dst_permit)
+                .await?;
 
             // Step 2: replicate index2 descriptors (FTS / Functional
             // / Vector) from src → dst. Creates empty backends on
@@ -176,7 +177,7 @@ impl ShamirAdminExecutor {
             // CommitMigration) can fill them. Must happen before
             // any data lands on dst.
             dst_table
-                .replicate_index2_descriptors_from(&src_table)
+                .replicate_index2_descriptors_from_admitted(&src_table, &dst_permit)
                 .await?;
 
             let shadow = Arc::new(MigrationShadowLog::new(migration_id.clone(), info_store));
@@ -496,7 +497,7 @@ impl ShamirAdminExecutor {
                 mvcc.flush_history().await.map_err(|e| err(e.to_string()))?;
             } else {
                 dst_table
-                    .seed_log_from_data_store()
+                    .seed_log_from_data_store_admitted(&dst_permit)
                     .await
                     .map_err(|e| err(e.to_string()))?;
             }
@@ -533,7 +534,7 @@ impl ShamirAdminExecutor {
                     .await
                     .map_err(|e| err(e.to_string()))?;
             }
-            if let Err(e) = dst_table.bulk_populate_index2().await {
+            if let Err(e) = dst_table.bulk_populate_index2_admitted(&dst_permit).await {
                 for backend in registry.all_backends().await {
                     registry
                         .set_failed(backend.descriptor().id, e.to_string())
@@ -630,20 +631,22 @@ impl ShamirAdminExecutor {
             .ok_or_else(|| err(format!("Repository '{}' not found", state.src_repo)))?;
         let dst_repo = db.get_repo(&state.dst_repo);
         let src_permit;
-        let dst_permit;
+        let dst_permit: Option<crate::engine::repo::RepoWritePermit>;
         if let Some(dst_repo) = dst_repo {
-            (src_permit, dst_permit) =
+            let (src, dst) =
                 RepoWriteDomain::admit_pair(src_repo.write_domain(), dst_repo.write_domain())
                     .await
                     .map_err(|e| err(e.to_string()))?;
+            src_permit = src;
             let _src_table = src_repo
                 .get_table_admitted(&state.table_name, &src_permit)
                 .await
                 .map_err(|e| err(e.to_string()))?;
             let _dst_table = dst_repo
-                .get_table_admitted(&state.table_name, &dst_permit)
+                .get_table_admitted(&state.table_name, &dst)
                 .await
                 .map_err(|e| err(e.to_string()))?;
+            dst_permit = Some(dst);
         } else {
             src_permit = src_repo
                 .write_domain()

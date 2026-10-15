@@ -376,4 +376,23 @@ impl ShamirDb {
         table.set_validator_registry(self.validators().clone());
         Ok(table)
     }
+
+    pub(crate) async fn get_table_admitted(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+        permit: &shamir_engine::repo::RepoWritePermit,
+    ) -> DbResult<TableManager> {
+        let db = self
+            .get_db(db_name)
+            .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
+        let mut table = db
+            .get_repo(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?
+            .get_table_admitted(table_name, permit)
+            .await?;
+        table.set_validator_registry(self.validators().clone());
+        Ok(table)
+    }
 }

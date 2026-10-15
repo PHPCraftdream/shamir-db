@@ -36,7 +36,7 @@ impl TableManager {
     /// drain-writers → `unique_write_lock` → terminal
     /// `bindings_lock`/`persist_lock`. The leader write/commit paths never
     /// call this — only DDL and registry-flush paths pay admission.
-    pub(super) async fn admit(&self) -> DbResult<RepoWritePermit> {
+    pub(in crate::table) async fn admit(&self) -> DbResult<RepoWritePermit> {
         self.write_domain
             .admit()
             .await

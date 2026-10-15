@@ -1,3 +1,4 @@
+use crate::repo::RepoWritePermit;
 use futures::StreamExt;
 use shamir_storage::error::DbResult;
 use shamir_types::core::interner::TouchInd;
@@ -32,27 +33,33 @@ impl TableManager {
     /// any data lands on dst. Persists dst's interner so the new mappings
     /// survive a restart of the dst repo.
     pub async fn replicate_interner_from(&self, src: &TableManager) -> DbResult<()> {
+        let permit = self.admit().await?;
+        self.replicate_interner_from_admitted(src, &permit).await
+    }
+
+    /// Replicate src's interner mappings under caller-held repo admission.
+    pub async fn replicate_interner_from_admitted(
+        &self,
+        src: &TableManager,
+        permit: &RepoWritePermit,
+    ) -> DbResult<()> {
+        self.write_domain.debug_check_permit(permit);
         let src_interner = src.interner.get().await?;
         let entries = src_interner.all_entries();
         if entries.is_empty() {
             return Ok(());
         }
-
         let dst_interner = self.interner.get().await?;
         for (interned_key, user_key) in &entries {
             dst_interner
                 .touch_with_id(user_key.as_str(), interned_key.id())
                 .map_err(|e| {
                     shamir_storage::error::DbError::Internal(format!(
-                        "replicate_interner_from: collision replaying (id={}, name='{}'): {} \
-                         — dst repo interner is not empty and conflicts with src",
-                        interned_key.id(),
-                        user_key.as_str(),
-                        e
+                        "replicate_interner_from: collision replaying (id={}, name='{}'): {} — dst repo interner conflicts with src",
+                        interned_key.id(), user_key.as_str(), e
                     ))
                 })?;
         }
-
         self.interner.persist().await?;
         Ok(())
     }
@@ -68,35 +75,49 @@ impl TableManager {
     ///    yet) and register it in this registry.
     /// 4. Persist metadata.
     ///
+    /// Replicate src's index2 descriptors onto this TableManager.
+    ///
+    /// For each non-Btree descriptor on `src`:
+    /// 1. Intern the name + path segments in **this** manager's interner
+    ///    (so `name_interned` and `paths` resolve correctly in the dst
+    ///    address space).
+    /// 2. Allocate a fresh local `id` (src ids are a separate counter).
+    /// 3. Build a backend via `build_index2_backend` (empty — no postings
+    ///    yet) and register it in this registry.
+    /// 4. Persist metadata.
+    ///
     /// Must be called **before** `bulk_populate_index2` and **before**
     /// any writes reach the dst table.
     pub async fn replicate_index2_descriptors_from(&self, src: &TableManager) -> DbResult<()> {
+        let permit = self.admit().await?;
+        self.replicate_index2_descriptors_from_admitted(src, &permit)
+            .await
+    }
+
+    /// Replicate descriptors under caller-held repo admission.
+    pub async fn replicate_index2_descriptors_from_admitted(
+        &self,
+        src: &TableManager,
+        permit: &RepoWritePermit,
+    ) -> DbResult<()> {
+        self.write_domain.debug_check_permit(permit);
         let src_backends = src.index2_registry.all_backends().await;
         if src_backends.is_empty() {
             return Ok(());
         }
-
         let interner = self.interner.get().await?;
-
+        let src_interner = src.interner.get().await?;
         for src_backend in &src_backends {
             let src_desc = src_backend.descriptor();
-
-            // Intern name in dst address space.
             let name_key = match interner
                 .touch_ind(&src_desc.name)
                 .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?
             {
                 TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
             };
-
-            // Intern each path segment in dst address space.
             let mut interned_paths: smallvec::SmallVec<[Vec<u64>; 2]> = smallvec::SmallVec::new();
             for path in &src_desc.paths {
                 let mut seg_ids = Vec::with_capacity(path.len());
-                // The src's `paths` already contain interned u64s from
-                // src's interner — but we need the original field names
-                // to re-intern on dst. Recover them via src's interner.
-                let src_interner = src.interner.get().await?;
                 for &seg_u64 in path {
                     let seg_str = src_interner
                         .get_str(&src_interner.make_key(seg_u64))
@@ -116,7 +137,6 @@ impl TableManager {
                 }
                 interned_paths.push(seg_ids);
             }
-
             let new_id = self.index2_registry.allocate_id();
             let new_desc = crate::index2::descriptor::IndexDescriptor::new(
                 new_id,
@@ -125,7 +145,6 @@ impl TableManager {
                 interned_paths,
                 src_desc.kind.clone(),
             );
-
             let backend = crate::index2::build_index2_backend_with_resolver(
                 new_desc,
                 &self.info_store,
@@ -136,11 +155,9 @@ impl TableManager {
                 .await
                 .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
         }
-
         self.interner.persist().await?;
         crate::index2::persistence::save_index2_metadata(&self.index2_registry, &self.info_store)
             .await?;
-
         Ok(())
     }
 
@@ -155,6 +172,16 @@ impl TableManager {
     /// after `final_drain_and_commit` and before `bulk_populate_index2` (which
     /// streams via the log-backed seam).
     pub async fn seed_log_from_data_store(&self) -> DbResult<()> {
+        let permit = self.admit().await?;
+        self.seed_log_from_data_store_admitted(&permit).await
+    }
+
+    /// Seed the version log under caller-held repo admission.
+    pub async fn seed_log_from_data_store_admitted(
+        &self,
+        permit: &RepoWritePermit,
+    ) -> DbResult<()> {
+        self.write_domain.debug_check_permit(permit);
         let Some(mvcc) = self.mvcc_store_ref() else {
             return Ok(());
         };
@@ -163,13 +190,6 @@ impl TableManager {
         while let Some(batch) = stream.next().await {
             let items = batch?;
             if !items.is_empty() {
-                // task #532: `iter_stream` yields `RecordKey` keys and
-                // `set_versioned_many` is now `RecordKey`-keyed too — feed the
-                // batch straight through, no `RecordKey`→`Bytes` round-trip.
-                // commit_migration in admin_migration holds the destination
-                // barrier/UWL across seeding and index finalisation. Waiting
-                // here cycles: ack -> lower orphan -> drainer Phase B posting
-                // replay -> this barrier -> ack. This cutover bridge is no-wait.
                 mvcc.set_versioned_many_no_wait(items).await?;
             }
         }
@@ -195,14 +215,17 @@ impl TableManager {
     /// `final_drain_and_commit` if any shadow-log entries may have been
     /// written between `drain_until_caught_up` and `mark_cutover_ready`.
     pub async fn bulk_populate_index2(&self) -> DbResult<()> {
+        let permit = self.admit().await?;
+        self.bulk_populate_index2_admitted(&permit).await
+    }
+
+    /// Bulk-populate all index2 backends under caller-held repo admission.
+    pub async fn bulk_populate_index2_admitted(&self, permit: &RepoWritePermit) -> DbResult<()> {
+        self.write_domain.debug_check_permit(permit);
         let backends = self.index2_registry.all_backends().await;
         if backends.is_empty() {
             return Ok(());
         }
-
-        // P4 (pre-refactor boundary): read CURRENT state through the seam
-        // (`self.list_stream` → MvccStore::current_stream when attached) so
-        // collapse-main reroutes index2 backfill in one place.
         let stream = self.list_stream(1000);
         futures::pin_mut!(stream);
         while let Some(batch_result) = stream.next().await {
@@ -219,7 +242,7 @@ impl TableManager {
                 &shamir_types::types::value::InnerValue,
             )> = batch.iter().map(|(rid, val)| (*rid, val)).collect();
             for backend in &backends {
-                for (rid, val) in items.iter() {
+                for (rid, val) in &items {
                     let ops = backend.plan_insert(*rid, *val).await.map_err(|e| {
                         shamir_storage::error::DbError::Internal(format!(
                             "bulk_populate_index2 plan_insert failed: {}",
@@ -237,7 +260,6 @@ impl TableManager {
                 }
             }
         }
-
         Ok(())
     }
 }
