@@ -49,7 +49,6 @@ use std::sync::Arc;
 
 use shamir_collections::{THasher, TMap};
 use shamir_db::query::admin::ReplStream;
-use shamir_db::query::filter::FilterContext;
 use shamir_db::query::read::{QueryResult, ReadQuery};
 use shamir_db::types::value::QueryValue;
 use shamir_db::{SeedRefusal, ShamirDb};
@@ -605,9 +604,10 @@ async fn read_all(
     table: &shamir_db::engine::table::TableManager,
     table_name: &str,
 ) -> shamir_db::DbResult<Vec<QueryValue>> {
-    let interner = table.info_store_read_view().interner_get().await?;
     let refs: TMap<String, QueryResult> = TMap::default();
-    let ctx = FilterContext::new(interner, &refs);
+    // S5c-X F1 (Round 6): the FilterContext is built engine-side; no
+    // `&Interner` crosses the boundary.
+    let ctx = table.info_store_read_view().filter_context(&refs).await?;
     let query = ReadQuery::new(table_name);
     let result = table.read(&query, &ctx).await?;
     Ok(result

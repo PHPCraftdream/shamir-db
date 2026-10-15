@@ -308,9 +308,13 @@ harness = false
 required-features = ["test-util"]
 
 [lib]
-# Doctests are banned project-wide (slow: recompile-per-example). Examples
-# live as illustration; behavioural coverage is in unit/integration tests.
-doctest = false
+# S5c-X P2 (Round 6): doctests are enabled on THIS crate solely so the
+# boundary compile-fail example on `TableManager` is ENFORCED in CI. They
+# still do not run under nextest (nextest cannot run doctests) — the
+# `.github/workflows/ci.yml` jobs run `cargo test --doc -p shamir-engine`
+# explicitly for that. Every other crate keeps doctests off (slow:
+# recompile-per-example); examples live as illustration, behavioural
+# coverage is in unit/integration tests.
 
 [lints]
 workspace = true

@@ -62,8 +62,8 @@ pub fn any_target_interested_indexed(
 /// O(1)-gated full filter match using the target index.
 ///
 /// `bytes_decoded` carries the raw msgpack record bytes and the table's
-/// `Arc<OnceCell<Interner>>` (guaranteed populated) needed to construct a
-/// zero-copy `RecordView` lens for filter evaluation.
+/// `Arc<InternerReadView>` (guaranteed populated read-only view) used for
+/// zero-copy filter evaluation.
 /// Value decoding is not performed here -- that is deferred to the deliver path.
 ///
 /// `filter_slots` is a parallel slice to `targets` — one `CompiledFilterSlot`
@@ -87,14 +87,12 @@ pub(crate) fn matches_any_indexed(
             }
             match (filter, op) {
                 (Some(f), ChangeOp::Put) => match bytes_decoded {
-                    Some((bytes, interner_cell)) => {
+                    Some((bytes, interner)) => {
                         // Use the cached compiled filter if a slot exists;
                         // this skips compile_filter on the hot path.
                         match &filter_slots[i] {
-                            Some(slot) => {
-                                filter_matches_bytes_cached(slot, f, bytes, interner_cell)
-                            }
-                            None => filter_matches_bytes(f, bytes, interner_cell),
+                            Some(slot) => filter_matches_bytes_cached(slot, f, bytes, interner),
+                            None => filter_matches_bytes(f, bytes, interner),
                         }
                     }
                     None => {
@@ -144,7 +142,7 @@ pub fn matches_any(
             }
             match (filter, op) {
                 (Some(f), ChangeOp::Put) => match bytes_decoded {
-                    Some((bytes, interner_cell)) => filter_matches_bytes(f, bytes, interner_cell),
+                    Some((bytes, interner)) => filter_matches_bytes(f, bytes, interner),
                     None => {
                         tracing::warn!(
                             "subscription filter: no bytes for Put value, \

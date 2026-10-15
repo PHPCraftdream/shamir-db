@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use super::ShamirDb;
-use shamir_types::codecs::interned::inner_value_to_query_value;
-use shamir_types::core::interner::Interner;
 use shamir_types::types::value::{InnerValue, QueryValue};
-use tokio::sync::OnceCell;
+
+use crate::engine::table::InternerReadView;
 
 impl ShamirDb {
     /// Decode a changefeed `RecordChange.value` byte slice (MessagePack
@@ -30,22 +29,24 @@ impl ShamirDb {
         let table_manager = repo_instance.get_table(table).await.ok()?;
         let interner = table_manager
             .info_store_read_view()
-            .interner_get()
+            .interner_read_view()
             .await
             .ok()?;
         let inner: InnerValue = rmp_serde::from_slice(bytes).ok()?;
-        inner_value_to_query_value(&inner, interner).ok()
+        // S5c-X F1 (Round 6): the de-intern runs on the engine-owned
+        // read-only view — the raw `&Interner` never crosses the boundary.
+        interner.inner_to_query_value(&inner).ok()
     }
 
     /// Decode a changefeed `RecordChange.value` byte slice into an `InnerValue`
-    /// and return both the decoded value and a shared handle to the table's
-    /// interner cell (needed to resolve interned field-name keys for filter
-    /// evaluation without keeping the `TableManager` alive).
+    /// and return both the decoded value and a shared READ-ONLY handle to the
+    /// table's interner dictionary (needed to resolve interned field-name keys
+    /// for filter evaluation without keeping the `TableManager` alive).
     ///
-    /// After `interner_manager.get().await` completes (which this function does
-    /// internally), the returned `Arc<OnceCell<Interner>>` is already populated.
-    /// Callers can therefore call `cell.get().unwrap()` synchronously for filter
-    /// evaluation without any additional async overhead.
+    /// The returned `Arc<InternerReadView>` is guaranteed populated — callers
+    /// evaluate filters synchronously through its read accessors (S5c-X F1,
+    /// Round 6: the raw `Arc<OnceCell<Interner>>` no longer crosses the
+    /// boundary).
     ///
     /// Cheaper than [`decode_record_value_query_value`] for the filter-only
     /// path: it skips the interner reverse-lookup and `QueryValue` allocation
@@ -58,43 +59,41 @@ impl ShamirDb {
         repo: &str,
         table: &str,
         bytes: &[u8],
-    ) -> Option<(InnerValue, Arc<OnceCell<Interner>>)> {
+    ) -> Option<(InnerValue, Arc<InternerReadView>)> {
         let repo_instance = self.get_db(db)?.get_repo(repo)?;
         let table_manager = repo_instance.get_table(table).await.ok()?;
         // Initialize the interner (no-op if already warm) and grab a
-        // shared handle to the OnceCell so the decode cache can hold it
+        // shared read-only handle so the decode cache can hold it
         // without keeping the TableManager alive.
-        let _ = table_manager
+        let interner = table_manager
             .info_store_read_view()
-            .interner_get()
+            .interner_read_view()
             .await
             .ok()?;
-        let interner_cell = table_manager.info_store_read_view().interner_cell();
         let inner: InnerValue = rmp_serde::from_slice(bytes).ok()?;
-        Some((inner, interner_cell))
+        Some((inner, interner))
     }
 
-    /// Return the table's shared `Arc<OnceCell<Interner>>` (guaranteed populated
-    /// after this call) without decoding any record bytes. Used by the
-    /// subscription bridge to cache raw bytes + interner instead of a decoded
-    /// `InnerValue` tree.
+    /// Return the table's shared read-only interner handle (guaranteed
+    /// populated after this call) without decoding any record bytes. Used by
+    /// the subscription bridge to cache raw bytes + interner instead of a
+    /// decoded `InnerValue` tree.
     ///
     /// Returns `None` when the database / repo / table doesn't exist or the
     /// interner can't be loaded.
-    pub async fn get_table_interner_cell(
+    pub async fn get_table_interner_read_view(
         &self,
         db: &str,
         repo: &str,
         table: &str,
-    ) -> Option<Arc<OnceCell<Interner>>> {
+    ) -> Option<Arc<InternerReadView>> {
         let repo_instance = self.get_db(db)?.get_repo(repo)?;
         let table_manager = repo_instance.get_table(table).await.ok()?;
-        let _ = table_manager
+        table_manager
             .info_store_read_view()
-            .interner_get()
+            .interner_read_view()
             .await
-            .ok()?;
-        Some(table_manager.info_store_read_view().interner_cell())
+            .ok()
     }
 
     // ============================================================================

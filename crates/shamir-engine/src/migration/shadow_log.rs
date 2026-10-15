@@ -123,7 +123,9 @@ impl MigrationShadowLog {
         self.next_lsn.load(Ordering::Relaxed)
     }
 
-    pub async fn append(&self, op: ShadowOp) -> DbResult<u64> {
+    /// S5c-X F3 (Round 6): `pub(crate)` — mutating, and verified to have no
+    /// non-engine callers (only the coordinator and engine tests append).
+    pub(crate) async fn append(&self, op: ShadowOp) -> DbResult<u64> {
         let lsn = self.next_lsn.fetch_add(1, Ordering::Relaxed);
         let entry = ShadowEntry { lsn, op };
         let key = self.entry_key(lsn);
@@ -132,7 +134,8 @@ impl MigrationShadowLog {
         Ok(lsn)
     }
 
-    pub async fn append_batch(&self, ops: Vec<ShadowOp>) -> DbResult<Vec<u64>> {
+    /// S5c-X F3 (Round 6): `pub(crate)` — mutating, engine-internal only.
+    pub(crate) async fn append_batch(&self, ops: Vec<ShadowOp>) -> DbResult<Vec<u64>> {
         if ops.is_empty() {
             return Ok(vec![]);
         }
@@ -176,7 +179,8 @@ impl MigrationShadowLog {
         Ok(entries)
     }
 
-    pub async fn purge(&self) -> DbResult<u64> {
+    /// S5c-X F3 (Round 6): `pub(crate)` — mutating, engine-internal only.
+    pub(crate) async fn purge(&self) -> DbResult<u64> {
         let prefix = self.key_prefix();
         let mut keys = Vec::new();
         let mut stream = self.store.scan_prefix_stream(prefix, MAINT_SCAN_BATCH);

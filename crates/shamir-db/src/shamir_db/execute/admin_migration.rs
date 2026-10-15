@@ -141,6 +141,18 @@ impl ShamirAdminExecutor {
             let src_table = src_repo.get_table_admitted(table_name, &src_permit).await?;
             let dst_table = dst_repo.get_table_admitted(table_name, &dst_permit).await?;
 
+            // F4 (Round 6) — master freeze ordering: the source is frozen
+            // IMMEDIATELY after table resolution, BEFORE the interner
+            // dictionary copy. Round 5 had regressed this by moving the
+            // freeze inside the coordinator factory (after replication),
+            // opening a write window between the dictionary copy and the
+            // freeze. The already-held guard is passed INTO the factory —
+            // no window where the guard is unowned.
+            let freeze = src_table
+                .begin_migration_freeze_admitted(&src_permit)
+                .await
+                .map_err(shamir_storage::error::DbError::from)?;
+
             // Step 1: carry src's repo-interner `(id → name)` mappings
             // into dst's repo interner BEFORE any data lands. The
             // migration coordinator copies raw `data_store` bytes, which
@@ -169,11 +181,11 @@ impl ShamirAdminExecutor {
 
             // S5c-X: the shadow log, raw data-store handles, MVCC log seam
             // and source migration freeze are assembled engine-side by the
-            // admitted coordinator factory (the facade only supplies state
-            // and both permits — no raw store handles cross the boundary).
-            // Q1: the factory captures the source's MvccStore handle so
-            // run_snapshot reads through the log seam (current_stream)
-            // instead of the raw data_store.
+            // admitted coordinator factory (the facade only supplies state,
+            // the freeze guard it already holds, and both permits — no raw
+            // store handles cross the boundary). Q1: the factory captures
+            // the source's MvccStore handle so run_snapshot reads through
+            // the log seam (current_stream) instead of the raw data_store.
             let state = MigrationState::new(
                 migration_id.clone(),
                 table_name.to_string(),
@@ -187,21 +199,34 @@ impl ShamirAdminExecutor {
                     state,
                     migration_id.clone(),
                     &dst_table,
+                    freeze,
                     &src_permit,
                     &dst_permit,
                 )
                 .await
                 .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
 
-            coord.run_snapshot().await?;
-            let caught_up = coord.drain_until_caught_up(0).await?;
+            // S5c-X F3 (Round 6): the coordinator is admitted-capability
+            // gated — every state-changing call goes through the `*_admitted`
+            // twins, which re-verify BOTH permits against the domains
+            // captured at factory time.
+            coord
+                .run_snapshot_admitted(&src_permit, &dst_permit)
+                .await?;
+            let caught_up = coord
+                .drain_until_caught_up_admitted(&src_permit, &dst_permit, 0)
+                .await?;
             if caught_up.residual_lag != 0 {
                 return Err(shamir_storage::error::DbError::Conflict(
                     "frozen migration has residual shadow lag; start again".to_string(),
                 ));
             }
-            coord.mark_cutover_ready().await?;
-            coord.persist_state().await?;
+            coord
+                .mark_cutover_ready_admitted(&src_permit, &dst_permit)
+                .await?;
+            coord
+                .persist_state_admitted(&src_permit, &dst_permit)
+                .await?;
             Ok::<_, shamir_storage::error::DbError>((coord, src_permit, dst_permit))
         }
         .await;
@@ -323,7 +348,7 @@ impl ShamirAdminExecutor {
                             dst_repo_instance.write_domain(),
                         )
                         .await
-                        .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+                        .map_err(|e| err(e.to_string()))?;
                         recovered = Some(
                             src.migration_coordinator_recovered_admitted(
                                 state,
@@ -378,7 +403,7 @@ impl ShamirAdminExecutor {
                 "Migration target changed while acquiring admission".to_string(),
             ));
         }
-        let source_freeze = coord.take_migration_freeze();
+        let source_freeze = coord.take_migration_freeze_admitted(&src_permit, Some(&dst_permit));
 
         if source_freeze.is_none() && coord.phase().await != MigrationPhase::Committed {
             return Err(err_code(
@@ -389,12 +414,12 @@ impl ShamirAdminExecutor {
         }
         if coord.phase().await == MigrationPhase::Draining {
             let result = coord
-                .drain_until_caught_up(0)
+                .drain_until_caught_up_admitted(&src_permit, &dst_permit, 0)
                 .await
                 .map_err(|e| err(e.to_string()))?;
             if result.residual_lag != 0 {
                 coord
-                    .persist_state()
+                    .persist_state_admitted(&src_permit, &dst_permit)
                     .await
                     .map_err(|e| err(e.to_string()))?;
                 return Err(err_code(
@@ -405,9 +430,12 @@ impl ShamirAdminExecutor {
                     ),
                 ));
             }
-            coord.mark_cutover_ready().await.map_err(|e| {
-                err_code(e.code().unwrap_or("migration_cutover_error"), e.to_string())
-            })?;
+            coord
+                .mark_cutover_ready_admitted(&src_permit, &dst_permit)
+                .await
+                .map_err(|e| {
+                    err_code(e.code().unwrap_or("migration_cutover_error"), e.to_string())
+                })?;
         }
         let cutover_state = coord.state().await;
         if cutover_state.id != initial_state.id
@@ -436,7 +464,7 @@ impl ShamirAdminExecutor {
             .await;
 
         let tail = coord
-            .final_drain_and_commit()
+            .final_drain_and_commit_admitted(&src_permit, &dst_permit)
             .await
             .map_err(|e| err(e.to_string()))?;
         drop(src_write_lock);
@@ -492,7 +520,7 @@ impl ShamirAdminExecutor {
                     .map_err(|e| err(e.to_string()))?;
             }
             coord
-                .complete_finalisation_step(1)
+                .complete_finalisation_step_admitted(&src_permit, &dst_permit, 1)
                 .await
                 .map_err(|e| err(e.to_string()))?;
         }
@@ -516,7 +544,7 @@ impl ShamirAdminExecutor {
                 .await
                 .map_err(|e| err(e.to_string()))?;
             coord
-                .complete_finalisation_step(2)
+                .complete_finalisation_step_admitted(&src_permit, &dst_permit, 2)
                 .await
                 .map_err(|e| err(e.to_string()))?;
         }
@@ -630,8 +658,11 @@ impl ShamirAdminExecutor {
                 "Migration target changed while acquiring admission".to_string(),
             ));
         }
-        let _source_freeze = coord.take_migration_freeze();
-        coord.rollback().await.map_err(|e| err(e.to_string()))?;
+        let _source_freeze = coord.take_migration_freeze_admitted(&src_permit, dst_permit.as_ref());
+        coord
+            .rollback_admitted(&src_permit, dst_permit.as_ref())
+            .await
+            .map_err(|e| err(e.to_string()))?;
         drop(dst_permit);
         drop(src_permit);
         self.shamir

@@ -157,15 +157,15 @@ async fn validate_unique_indexes(
             }
 
             let field_name = &rule.path[0];
-            let interner = self_table
+            let has_index = self_table
                 .info_store_read_view()
-                .interner_get()
+                .interned_field_id(field_name)
                 .await
-                .map_err(|e| err_code("internal_error", e.to_string()))?;
-            let has_index = interner.get_ind(field_name).is_some_and(|field_id| {
-                let field_path = [field_id.id()];
-                self_table.find_single_field_index(&field_path).is_some()
-            });
+                .map_err(|e| err_code("internal_error", e.to_string()))?
+                .is_some_and(|field_id| {
+                    let field_path = [field_id];
+                    self_table.find_single_field_index(&field_path).is_some()
+                });
             if !has_index {
                 return Err(err_code(
                     "unique_requires_index",
@@ -294,15 +294,15 @@ async fn validate_fk_indexes(
 
             // Resolve the ref_field to an interner id and check for a
             // single-field index.
-            let interner = ref_table
+            let has_index = ref_table
                 .info_store_read_view()
-                .interner_get()
+                .interned_field_id(&fk.ref_field)
                 .await
-                .map_err(|e| err_code("internal_error", e.to_string()))?;
-            let has_index = interner.get_ind(&fk.ref_field).is_some_and(|field_id| {
-                let field_path = [field_id.id()];
-                ref_table.find_single_field_index(&field_path).is_some()
-            });
+                .map_err(|e| err_code("internal_error", e.to_string()))?
+                .is_some_and(|field_id| {
+                    let field_path = [field_id];
+                    ref_table.find_single_field_index(&field_path).is_some()
+                });
             if !has_index {
                 return Err(err_code(
                     "fk_requires_index",

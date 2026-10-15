@@ -386,14 +386,30 @@ async fn assert_committed_crash_retry(seed_marker: bool) {
     let src = db.get_table("src_repo", "docs").await.unwrap();
     let dst = db.get_table("dst_repo", "docs").await.unwrap();
     let coord = shamir.active_migrations().get(&id).unwrap().value().clone();
-    coord.final_drain_and_commit().await.unwrap();
+    // S5c-X F3 (Round 6): state-changing coordinator calls go through the
+    // admitted twins with permits from the repos' write domains.
+    let src_repo = db.get_repo("src_repo").unwrap();
+    let dst_repo = db.get_repo("dst_repo").unwrap();
+    let (src_permit, dst_permit) = shamir_db::engine::repo::RepoWriteDomain::admit_pair(
+        src_repo.write_domain(),
+        dst_repo.write_domain(),
+    )
+    .await
+    .unwrap();
+    coord
+        .final_drain_and_commit_admitted(&src_permit, &dst_permit)
+        .await
+        .unwrap();
     // Crash after seed but before its stage marker: retry must derive that
     // rows already have current versions instead of allocating new versions.
     dst.seed_log_from_data_store().await.unwrap();
     let mvcc = dst.mvcc_store_for_test().unwrap();
     mvcc.flush_history().await.unwrap();
     if seed_marker {
-        coord.complete_finalisation_step(1).await.unwrap();
+        coord
+            .complete_finalisation_step_admitted(&src_permit, &dst_permit, 1)
+            .await
+            .unwrap();
     }
     let mut records = dst.data_store_for_test().iter_stream(256);
     let key = records.next().await.unwrap().unwrap()[0].0.clone();

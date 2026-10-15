@@ -37,7 +37,9 @@ mod write_domain_online_index;
 #[path = "write_receipt/admission/write_domain_rename_admitted.rs"]
 mod write_domain_rename_admitted;
 
-pub use read_only_views::{TableDataStoreReadView, TableInfoStoreReadView};
+pub use read_only_views::{
+    InternerReadView, TableDataStoreReadView, TableInfoStoreReadView, ValidatorRegistryReadView,
+};
 
 /// Compute the deterministic token for a table name.
 /// Same hash as `TableManager::table_token` (instance method).
@@ -47,6 +49,11 @@ pub fn table_token_for(name: &str) -> u64 {
     h.finish()
 }
 
+/// S5c-X P2 (Round 6): this compile-fail doctest is the ENFORCED boundary
+/// gate. Doctests are enabled on this crate solely so it runs in CI (see
+/// `Cargo.toml` `[lib]` and the `cargo test --doc` workflow step — nextest
+/// cannot run doctests). It must KEEP failing to compile downstream: the raw
+/// component handles and the pre-F2 registry escape are unreachable.
 ///
 /// ```compile_fail
 /// use shamir_engine::table::TableManager;
@@ -54,6 +61,8 @@ pub fn table_token_for(name: &str) -> u64 {
 /// fn downstream(manager: &TableManager) {
 ///     let _ = manager.info_store();
 ///     let _ = manager.data_store();
+///     let _ = manager.interner();
+///     let _ = manager.validator_registry();
 /// }
 /// ```
 pub struct TableManager {

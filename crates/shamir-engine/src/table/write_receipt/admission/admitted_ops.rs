@@ -22,6 +22,7 @@ use super::TableManager;
 use crate::index2::state::IndexState;
 use crate::migration::{MigrationCoordinator, MigrationShadowLog, MigrationState};
 use crate::repo::RepoWritePermit;
+use crate::table::MigrationFreezeGuard;
 
 impl TableManager {
     /// Admitted twin of `ddl_op_log::write_op_status`: write the InProgress
@@ -171,28 +172,40 @@ impl TableManager {
         Ok(())
     }
 
+    /// Admitted interner-dictionary durability flush (S5c-X F1): the WRITE
+    /// tail of a catalogue/DDL op, replacing the old read-view
+    /// `interner_persist` escape hatch. The caller (shamir-db
+    /// system-store / replication-catalogue paths) holds repo admission for
+    /// this rare write.
+    pub async fn persist_interner_admitted(&self, permit: &RepoWritePermit) -> DbResult<()> {
+        self.write_domain.debug_check_permit(permit);
+        self.interner.persist().await
+    }
+
     /// Admitted MIGRATION coordinator factory (fresh START path). Builds the
     /// shadow log on THIS (source) table's info store, captures the source
     /// and destination data-store handles and the source's MVCC log seam,
-    /// and takes over the source migration freeze — all raw work that used
-    /// to be done by the facade with extracted `pub(crate)` handles. Both
-    /// permits are identity-checked against their own repositories.
+    /// and takes over the caller-held source migration freeze — all raw work
+    /// that used to be done by the facade with extracted `pub(crate)`
+    /// handles. Both permits are identity-checked against their own
+    /// repositories, and both write domains are captured on the coordinator
+    /// so its admitted twins can re-verify every later mutation.
+    ///
+    /// F4 (Round 6): the freeze guard is a PARAMETER, acquired by the facade
+    /// immediately after source-table resolution (master ordering — BEFORE
+    /// the interner dictionary copy). There is no window where the guard is
+    /// unowned.
     pub async fn migration_coordinator_admitted(
         &self,
         state: MigrationState,
         migration_id: String,
         dst: &TableManager,
+        freeze: MigrationFreezeGuard,
         src_permit: &RepoWritePermit,
         dst_permit: &RepoWritePermit,
     ) -> DbResult<Arc<MigrationCoordinator>> {
         self.write_domain.debug_check_permit(src_permit);
         dst.write_domain.debug_check_permit(dst_permit);
-        // Local RAII owns preparation; failed/cancelled replication clears
-        // the bit. This guard does not retain ddl_admission at cutover.
-        let freeze = self
-            .begin_migration_freeze_admitted(src_permit)
-            .await
-            .map_err(DbError::from)?;
         let shadow = Arc::new(MigrationShadowLog::new(
             migration_id,
             Arc::clone(&self.info_store),
@@ -205,7 +218,11 @@ impl TableManager {
                 Arc::clone(dst.data_store()),
                 self.mvcc_store(),
             )
-            .with_migration_freeze(freeze),
+            .with_migration_freeze(freeze)
+            .with_domains(
+                Arc::clone(&self.write_domain),
+                Arc::clone(&dst.write_domain),
+            ),
         );
         Ok(coord)
     }
@@ -230,12 +247,21 @@ impl TableManager {
         let shadow = Arc::new(
             MigrationShadowLog::recover(state.id.clone(), Arc::clone(&self.info_store)).await?,
         );
-        Ok(Arc::new(MigrationCoordinator::new(
-            state,
-            shadow,
-            Arc::clone(self.data_store()),
-            Arc::clone(dst.data_store()),
-            self.mvcc_store(),
-        )))
+        Ok(Arc::new(
+            MigrationCoordinator::new(
+                state,
+                shadow,
+                Arc::clone(self.data_store()),
+                Arc::clone(dst.data_store()),
+                self.mvcc_store(),
+            )
+            // Recovery path stays freeze-free (a process-local freeze cannot
+            // be reconstructed from metadata), but the domains are still
+            // captured so the admitted twins re-verify every later mutation.
+            .with_domains(
+                Arc::clone(&self.write_domain),
+                Arc::clone(&dst.write_domain),
+            ),
+        ))
     }
 }

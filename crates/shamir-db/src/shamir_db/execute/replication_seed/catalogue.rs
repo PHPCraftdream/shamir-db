@@ -1,5 +1,4 @@
 use crate::query::admin::{CreateSubscriptionOp, ReplStream};
-use crate::query::filter::FilterContext;
 use crate::query::read::ReadQuery;
 use crate::query::write::SetOp;
 use crate::types::value::QueryValue;
@@ -21,9 +20,8 @@ pub(super) async fn rows(home: &ShamirDb, name: &str) -> DbResult<Vec<QueryValue
             ))
         }
     };
-    let interner = table.info_store_read_view().interner_get().await?;
     let refs = crate::types::common::new_map();
-    let ctx = FilterContext::new(interner, &refs);
+    let ctx = table.info_store_read_view().filter_context(&refs).await?;
     Ok(table
         .read(&ReadQuery::new(name), &ctx)
         .await?
@@ -90,7 +88,7 @@ pub(super) async fn persist(home: &ShamirDb, record: QueryValue) -> DbResult<()>
         value: record,
     };
     home.system_store().set_via_implicit_tx(&table, &op).await?;
-    table.info_store_read_view().interner_persist().await?;
+    home.system_store().persist_table_interner(&table).await?;
     home.flush_seed_catalogue().await
 }
 
@@ -128,7 +126,7 @@ impl ShamirDb {
             value: QueryValue::Map(fields),
         };
         self.system_store().set_via_implicit_tx(&table, &op).await?;
-        table.info_store_read_view().interner_persist().await?;
+        home.system_store().persist_table_interner(&table).await?;
         self.flush_seed_catalogue().await
     }
 

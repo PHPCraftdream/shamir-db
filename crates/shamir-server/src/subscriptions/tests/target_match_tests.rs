@@ -2,17 +2,17 @@ use std::sync::Arc;
 
 use shamir_collections::TMap;
 use shamir_db::core::interner::Interner;
+use shamir_db::engine::table::InternerReadView;
 use shamir_db::types::value::InnerValue;
 use shamir_query_types::filter::{Filter, FilterValue};
 use shamir_query_types::subscribe::event_mask::EventMask;
 use shamir_tx::ChangeOp;
-use tokio::sync::OnceCell;
 
 use crate::subscriptions::target_match::{mask_matches, matches_any};
 
-/// Build a `(Arc<[u8]>, Arc<OnceCell<Interner>>)` tuple from flat key-value
+/// Build a `(Arc<[u8]>, Arc<InternerReadView>)` tuple from flat key-value
 /// pairs, suitable for passing as `bytes_decoded` to `matches_any`.
-fn make_record_bytes(fields: &[(&str, InnerValue)]) -> (Arc<[u8]>, Arc<OnceCell<Interner>>) {
+fn make_record_bytes(fields: &[(&str, InnerValue)]) -> (Arc<[u8]>, Arc<InternerReadView>) {
     let interner = Interner::new();
     let mut map: TMap<_, InnerValue> = TMap::default();
     for (field, val) in fields {
@@ -21,9 +21,10 @@ fn make_record_bytes(fields: &[(&str, InnerValue)]) -> (Arc<[u8]>, Arc<OnceCell<
     }
     let inner = InnerValue::Map(map);
     let bytes: Arc<[u8]> = Arc::from(inner.to_bytes().expect("serialize").as_ref());
-    let cell = OnceCell::new();
-    cell.set(interner).unwrap();
-    (bytes, Arc::new(cell))
+    (
+        bytes,
+        Arc::new(InternerReadView::from_interner_for_test(interner)),
+    )
 }
 
 #[test]

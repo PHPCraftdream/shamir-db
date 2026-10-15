@@ -104,6 +104,22 @@ jobs:
           else
             ./scripts/test.sh --locked $AFFECTED
           fi
+      # S5c-X P2 (Round 6): nextest cannot run doctests, so the boundary
+      # compile-fail example on `TableManager` would never execute — run the
+      # doctests explicitly (shamir-engine is the only crate with doctests
+      # enabled; see its Cargo.toml `[lib]`).
+      - name: doctests (shamir-engine compile-fail gate)
+        if: steps.affected.outputs.args != ''
+        shell: bash
+        run: |
+          if [ "$AFFECTED" = "--workspace" ]; then
+            cargo test --doc -p shamir-engine --locked
+          else
+            case "$AFFECTED" in
+              *shamir-engine*|*--workspace*) cargo test --doc -p shamir-engine --locked ;;
+              *) echo "shamir-engine not affected; skipping doctests" ;;
+            esac
+          fi
 
   fmt:
     name: cargo fmt
@@ -177,6 +193,13 @@ jobs:
       # Parity with the `integration` job's own `shell: bash` below.
       - run: ./scripts/test.sh --locked
         shell: bash
+      # S5c-X P2 (Round 6): nextest cannot run doctests — enforce the
+      # shamir-engine boundary compile-fail gate explicitly (one OS is
+      # enough; the fast-tier affected step covers the rest).
+      - name: doctests (shamir-engine compile-fail gate)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: cargo test --doc -p shamir-engine --locked
 
   # Integration gate: the test files under `crates/*/tests/`. Before this
   # job these only had to COMPILE (clippy --all-targets) — they never RAN
