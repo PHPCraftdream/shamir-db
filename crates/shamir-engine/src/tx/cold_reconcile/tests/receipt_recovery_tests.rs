@@ -139,7 +139,8 @@ async fn cold_reopen_completes_outstanding_receipt() {
     // reopen the Aborted marks are acceptable), so the cold reopen starts
     // from a fresh, clean gate and completes the receipt during reconcile.
     repo.shutdown_receipt_worker(std::time::Duration::from_secs(5))
-        .await;
+        .await
+        .unwrap();
     assert!(repo.tx_gate().await.unwrap().requires_reopen());
     close(repo).await;
 

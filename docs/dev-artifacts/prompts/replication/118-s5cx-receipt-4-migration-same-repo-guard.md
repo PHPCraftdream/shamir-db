@@ -1,6 +1,6 @@
 # 118 / s5cx-receipt-4 — migration same-repo guard fix
 
-Worktree: `D:/dev/rust/shamir-db/worktrees/s5cx-follower-receipt-2` (dirty)
+Worktree: `worktrees/s5cx-follower-receipt-2` (dirty)
 File: `crates/shamir-db/src/shamir_db/execute/admin_migration.rs`
 
 ## Problem

@@ -735,6 +735,27 @@ impl ShamirDb {
                 }
             };
 
+            // S5c round 5: hold the repo-level `ddl_admission` guard across
+            // the validator-binding mutation inside `compile_table_schema`
+            // (which itself takes no guard — only the table's
+            // `bindings_lock`), so the boot pass cannot interleave with a
+            // follower receipt apply. Mirrors doctor's `boot_table_guard`
+            // discipline for boot-replay `create_table`. Single acquisition
+            // per table per boot pass.
+            let repo = match self.get_db(db_name).and_then(|db| db.get_repo(repo_name)) {
+                Some(r) => r,
+                None => {
+                    log::warn!(
+                        "shamir_db::boot_compile_schemas: repo '{}/{}' not found \
+                         — skipping schema for '{}'",
+                        db_name,
+                        repo_name,
+                        table_name,
+                    );
+                    continue;
+                }
+            };
+            let _repo_ddl = repo.ddl_admission_guard().await;
             if let Err(e) = self
                 .compile_table_schema(db_name, repo_name, table_name, id, rules)
                 .await

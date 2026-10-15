@@ -1984,13 +1984,17 @@ impl RepoInstance {
 
     /// Caller MUST stop commit/apply admission before calling this method.
     /// One bounded budget covers quiescence, drain/store flush and checkpoint.
+    /// Receipt worker shutdown runs FIRST: closing the queue makes the loop
+    /// drain queued (not-yet-dequeued) jobs, each taking `commit_tail` — so
+    /// the subsequent `quiesce_commits` observes them too (quiescence before
+    /// shutdown would miss them: they only enter `commit_tail` at dequeue).
     /// cancel-safe: NO — drain/flush may partially finish; J is never requested
     /// after an earlier failure or timeout. Once admitted, checkpoint I/O can
     /// finish independently; a cancelled caller never reports shutdown success.
     pub async fn shutdown_clean(&self, budget: std::time::Duration) -> DbResult<()> {
         let deadline = tokio::time::Instant::now() + budget;
+        self.shutdown_receipt_worker(budget).await?;
         self.quiesce_commits(budget).await?;
-        self.shutdown_receipt_worker(budget).await;
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         tokio::time::timeout(remaining, async {
             self.flush_buffers().await?;

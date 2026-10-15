@@ -24,6 +24,7 @@ use shamir_tx::RepoTxGate;
 use super::super::super::{prepare_event, ApplyOutcome, ApplyPolicy, PreparedEvent};
 #[cfg(test)]
 use super::super::test_seam::{self, Phase};
+use super::resume::ReceiptWorker;
 use super::{checkpoint, publish, resume, stage};
 use crate::meta::repl::bookmark_v3::{load_bookmark_v3, BookmarkV3};
 use crate::meta::repl::{ReceiptBinding, ReceiptPhase, ReplicationReceipt, MAX_RECEIPT_EVENTS};
@@ -61,6 +62,7 @@ pub(crate) async fn run_receipt_pipeline(
     events: Vec<ReplicatedEvent>,
     bookmark: u64,
     policy: ApplyPolicy,
+    worker: &ReceiptWorker,
 ) -> DbResult<ApplyOutcome> {
     let gate = repo.tx_gate().await?;
     if gate.requires_reopen() {
@@ -86,14 +88,32 @@ pub(crate) async fn run_receipt_pipeline(
             clean_through: v3.clean_through,
             outstanding_receipt: None,
         };
-        // Converge both resume phases on the SAME materialize/checkpoint/
-        // publish row building.
-        let work = match outstanding.receipt.phase {
+        // Converge both resume phases on the SAME publication/durability row
+        // building — but NOT on re-commit (reviewer P1 #6): the Materialized
+        // phase is ALREADY durable — its rows, counters and receipt bytes
+        // were committed by the phase that wrote it (mirroring the inline
+        // fast path in `run_chunk_tail`), so re-running
+        // `commit_materialized_work` would be a pure rewrite of durable
+        // state. Control flow:
+        //   Prepared    -> materialize (compute counters vs live pre-state,
+        //                  nothing published yet) -> commit Materialized
+        //                  batch -> publication -> durable_tail
+        //   Materialized-> publication built STRAIGHT from the STORED
+        //                  receipt (decoded downstream events + recorded
+        //                  absolute counters) -> durable_tail
+        let (receipt, publication) = match outstanding.receipt.phase {
             ReceiptPhase::Prepared => {
-                stage::materialize_from_prepared_receipt(&repo, &outstanding.receipt).await?
+                let work =
+                    stage::materialize_from_prepared_receipt(&repo, &outstanding.receipt).await?;
+                let (receipt, _counters) =
+                    stage::commit_materialized_work(&repo, &info, &work, &old).await?;
+                let publication = publish::publication_from_receipt(&repo, &receipt).await?;
+                (receipt, publication)
             }
             ReceiptPhase::Materialized => {
-                stage::materialize_from_materialized_receipt(&outstanding.receipt)?
+                let publication =
+                    publish::publication_from_receipt(&repo, &outstanding.receipt).await?;
+                (outstanding.receipt.clone(), publication)
             }
             ReceiptPhase::Checkpointed => {
                 return Err(DbError::RepoRequiresReopen(
@@ -101,23 +121,22 @@ pub(crate) async fn run_receipt_pipeline(
                 ));
             }
         };
-        let (receipt, _counters) =
-            stage::commit_materialized_work(&repo, &info, &work, &old).await?;
-        let publication = publish::publication_from_receipt(&repo, &receipt).await?;
         let floor = publication.floor;
         let new_bookmark = durable_tail(&repo, &info, &gate, &receipt, publication, &old).await?;
         // Publication succeeded: parked guards' versions are ≤ the watermark
-        // now — retire (drop) them, their Aborted marks are no-ops.
-        repo.receipt_worker().await?.retire_parked_guards().await;
+        // now — retire (drop) them, their Aborted marks are no-ops. The
+        // worker handle is threaded in by the loop (Send confinement: no
+        // `OnceCell::get_or_try_init` future inside the spawned task).
+        worker.retire_parked_guards().await;
         if !tail.is_empty() {
             let tail: Vec<ReplicatedEvent> = tail.into_iter().cloned().collect();
-            apply_fresh(&repo, &info, &gate, &tail, new_bookmark, policy).await?;
+            apply_fresh(&repo, &info, &gate, &tail, new_bookmark, policy, worker).await?;
         }
         return Ok(ApplyOutcome::Applied {
             local_version: floor,
         });
     }
-    apply_fresh(&repo, &info, &gate, &events, bookmark, policy).await
+    apply_fresh(&repo, &info, &gate, &events, bookmark, policy, worker).await
 }
 
 /// The fresh path: translate the whole batch (rejections stay pre-write, like
@@ -130,6 +149,7 @@ async fn apply_fresh(
     events: &[ReplicatedEvent],
     bookmark: u64,
     policy: ApplyPolicy,
+    worker: &ReceiptWorker,
 ) -> DbResult<ApplyOutcome> {
     // Design step 1: the DURABLE bookmark is consulted BEFORE any version
     // allocation, so a replayed pull carrying a stale caller watermark can
@@ -164,7 +184,9 @@ async fn apply_fresh(
         event.version = Some(guard.version());
         guards.push(guard);
     }
-    let worker = repo.receipt_worker().await?;
+    // The worker handle is threaded in by the loop — re-resolving it here
+    // would put the (non-Send) `OnceCell::get_or_try_init` future inside the
+    // spawned `worker_loop` task.
     let floor = gate.version_allocation_high_water_mark();
     let mut old = match load_bookmark_v3(info).await? {
         Some(bookmark) => BookmarkV3 {
@@ -346,6 +368,18 @@ async fn run_chunk_tail(
         // `durable_tail` (journal verify/repair + confirm + checkpoint all
         // happen inside it, so every idempotency property is kept).
         let stored = &stored.expect("matched above").receipt;
+        // Test seam on the FAST path too (reviewer P1 #2): without this
+        // check a sticky `fail_after = ReceiptMaterialized` flag could never
+        // bite after the first Materialized commit — the retry takes this
+        // fast path straight to `durable_tail` and succeeds, so a test
+        // expecting the pipeline to PARK on the sticky flag would observe a
+        // successful retry instead. Attempt trace with the flag sticky:
+        //   attempt 1: no stored receipt -> materialize+commit -> seam fires
+        //              (Storage "injected") -> retry
+        //   attempt 2: fast path -> seam fires again -> retry
+        //   attempt 3: fast path -> seam fires -> attempt >= 3 -> PARK.
+        #[cfg(test)]
+        fail_after(repo.name(), Phase::ReceiptMaterialized)?;
         let counters: Vec<(String, u64)> = stored
             .counters
             .iter()
