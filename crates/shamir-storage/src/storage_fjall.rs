@@ -14,6 +14,31 @@ use std::thread::JoinHandle;
 use tokio::sync::oneshot;
 use tokio::task;
 
+/// Test/verification seam: counts every `Database::persist(PersistMode::SyncAll)`
+/// issued by this module (per-store `flush()`, `persist_once`, atomic-batch
+/// commit). O(1) per call on a rare shutdown/commit path — not a hot path.
+#[doc(hidden)]
+pub static FJALL_PERSIST_SYNC_ALL_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Reset the persist counter (test setup).
+#[doc(hidden)]
+pub fn reset_persist_sync_all_count() {
+    FJALL_PERSIST_SYNC_ALL_COUNT.store(0, std::sync::atomic::Ordering::Release);
+}
+
+/// The ONE place every `SyncAll` persist goes through, so tests can count
+/// full-database fsyncs regardless of the caller.
+///
+/// Returns the RAW fjall error (not a mapped `DbError`): the atomic-batch
+/// commit site wraps it in its own `Uncertain` detail string, while the
+/// per-store `flush()` site maps to `"Fjall persist: {e}"` — a shared
+/// `DbError` here would change one of the two caller's message text.
+fn persist_sync_all(db: &Arc<Database>) -> Result<(), fjall::Error> {
+    FJALL_PERSIST_SYNC_ALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    db.persist(PersistMode::SyncAll)
+}
+
 // ============================================================================
 // Write worker (task #536) — single dedicated OS thread per FjallStore that
 // serializes point-writes with NO embedded read (insert / transact) submitted
@@ -251,7 +276,7 @@ fn exec_atomic_commit(
 
     // The batch is applied; durability is per-backend policy. A persist
     // failure means applied-but-durability-unknown → Uncertain.
-    match db.persist(PersistMode::SyncAll) {
+    match persist_sync_all(db) {
         Ok(()) => Ok(AtomicCommitOutcome::Committed),
         Err(e) => Ok(AtomicCommitOutcome::Uncertain {
             detail: format!("fjall persist after atomic batch: {e}"),
@@ -407,6 +432,21 @@ impl Repo for FjallRepo {
             db: self.db.clone(),
             ops: Vec::new(),
         }))
+    }
+
+    /// ONE `persist(SyncAll)` covers every keyspace: fjall's journal is
+    /// per-Database, not per-keyspace, so a single fsync after all stores
+    /// have drained (via `Store::flush_drain`) is durability-identical to
+    /// the old per-store `flush()` loop that fsynced the SAME journal N
+    /// times (the N−1 redundant fsyncs are the Windows shutdown-stall
+    /// multiplier this replaces).
+    async fn persist_once(&self) -> DbResult<()> {
+        let db = self.db.clone();
+        task::spawn_blocking(move || {
+            persist_sync_all(&db).map_err(|e| DbError::Storage(format!("Fjall persist: {}", e)))
+        })
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))?
     }
 }
 
@@ -656,12 +696,19 @@ impl Store for FjallStore {
     async fn flush(&self) -> DbResult<()> {
         let db = self.db.clone();
         task::spawn_blocking(move || -> DbResult<()> {
-            db.persist(PersistMode::SyncAll)
-                .map_err(|e| DbError::Storage(format!("Fjall persist: {}", e)))?;
+            persist_sync_all(&db).map_err(|e| DbError::Storage(format!("Fjall persist: {}", e)))?;
             Ok(())
         })
         .await
         .map_err(|e| DbError::Internal(e.to_string()))?
+    }
+
+    /// fjall journals every write into the per-Database journal at write
+    /// time; there is NO per-store buffered state to drain, and durability
+    /// is a DATABASE-level act (`persist`). A drain is therefore a no-op —
+    /// the fsync happens once via `FjallRepo::persist_once`.
+    async fn flush_drain(&self) -> DbResult<()> {
+        Ok(())
     }
 
     async fn get_many(&self, keys: Vec<RecordKey>) -> DbResult<Vec<Option<Bytes>>> {
