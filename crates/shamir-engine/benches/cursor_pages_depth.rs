@@ -69,7 +69,7 @@ async fn build_table(n: usize) -> TableManager {
         .await
         .unwrap();
 
-    let interner = mgr.interner().get().await.unwrap();
+    let interner = mgr.interner_for_test().get().await.unwrap();
     let k_y = match interner.touch_ind("y").unwrap() {
         TouchInd::Exists(k) | TouchInd::New(k) => k,
     };
@@ -107,7 +107,7 @@ async fn walk_pages(mgr: &TableManager, depth: usize) -> usize {
             .after(vec![seek.clone()], Some(PAGE_SIZE))
             .build();
 
-        let interner = mgr.interner().get().await.unwrap();
+        let interner = mgr.interner_for_test().get().await.unwrap();
         let refs = new_map();
         let ctx = FilterContext::new(interner, &refs);
         let result = mgr.read(&q, &ctx).await.unwrap();

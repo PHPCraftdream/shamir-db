@@ -4,20 +4,21 @@ use std::sync::Arc;
 use once_cell::sync::Lazy;
 use scc::TreeIndex;
 use shamir_collections::THasher;
-use shamir_db::core::interner::Interner;
-use tokio::sync::OnceCell;
+use shamir_db::engine::table::InternerReadView;
 
 /// Global decode cache shared across ALL bridge tasks (all connections, all
 /// repos). Keyed by `(repo_hash, commit_version, change_index)`.
 ///
-/// Caches `(Arc<[u8]>, Arc<OnceCell<Interner>>)`:
+/// Caches `(Arc<[u8]>, Arc<InternerReadView>)`:
 /// - `Arc<[u8]>` is the raw msgpack-encoded record bytes (zero-decode on
 ///   cache hit — the `RecordView` lens reads fields on demand directly
 ///   from these bytes without materialising an `InnerValue` tree).
-/// - `Arc<OnceCell<Interner>>` is a shared handle to the table's interner;
-///   the cell is guaranteed to be populated before insertion (see
-///   `ShamirDb::get_table_interner_cell`), so callers can do
-///   `cell.get().unwrap()` synchronously for filter field-path resolution.
+/// - `Arc<InternerReadView>` is a shared READ-ONLY handle to the table's
+///   interner dictionary, guaranteed populated before insertion (see
+///   `ShamirDb::get_table_interner_read_view`); callers resolve filter
+///   field paths synchronously through its read accessors (S5c-X F1,
+///   Round 6: the raw `Arc<OnceCell<Interner>>` no longer crosses the
+///   engine boundary).
 ///
 /// Value decoding (`RecordRef` resolution or `InnerValue` construction)
 /// only happens when the event passes the filter and must be delivered,
@@ -43,10 +44,11 @@ static GLOBAL: Lazy<DecodeCache> = Lazy::new(DecodeCache::new);
 /// evaluation. Mirrors the `db_id` dimension the deliver cache already keys on.
 type CacheKey = (u64, u64, u64, usize);
 
-/// Inner tuple cached in the decode table: raw msgpack bytes + initialized interner cell.
-pub(crate) type CachedRecordBytes = (Arc<[u8]>, Arc<OnceCell<Interner>>);
+/// Inner tuple cached in the decode table: raw msgpack bytes + populated
+/// read-only interner view.
+pub(crate) type CachedRecordBytes = (Arc<[u8]>, Arc<InternerReadView>);
 
-/// Cached value: raw msgpack bytes + initialized interner cell.
+/// Cached value: raw msgpack bytes + populated read-only interner view.
 pub(crate) type CachedBytes = Arc<Option<CachedRecordBytes>>;
 
 pub(crate) struct DecodeCache {

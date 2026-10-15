@@ -18,6 +18,9 @@ pub mod version_provider;
 #[cfg(test)]
 pub mod tests;
 
+pub use changelog_store::write_domain::{
+    RepoWriteDomain, RepoWriteError, RepoWritePermit, RepoWriteReservation,
+};
 pub use durability_policy::{DurabilityPolicy, RetentionOverflow, WalCommitTier};
 pub use fk_reverse_cache::{
     build_reverse_fk_entries, FkReverseCache, ReverseFkEntry, TaggedReverseFkEntry,

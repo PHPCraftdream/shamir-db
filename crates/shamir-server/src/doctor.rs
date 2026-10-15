@@ -252,7 +252,7 @@ pub async fn run(config: &Config, args: &DoctorArgs) -> anyhow::Result<DoctorRep
         for (db_name, repo_name, table_name) in snap.iter_entries() {
             if let Some(db) = shamir.get_db(db_name) {
                 if !db.has_table(repo_name, table_name) {
-                    if let Err(e) = db.create_table(repo_name, table_name) {
+                    if let Err(e) = db.create_table_checked(repo_name, table_name).await {
                         tracing::warn!(
                             db = db_name,
                             repo = repo_name,
@@ -437,8 +437,9 @@ async fn resolve_index_names(
             .or_insert_with(|| format!("<name_interned={}>", idx.name_interned));
     }
 
-    // Resolve via interner (mirrors access_tree.rs pattern).
-    if let Ok(interner) = table_mgr.interner().get().await {
+    // Resolve via the engine's read-only interner view (S5c-X F1, Round 6;
+    // mirrors access_tree.rs pattern).
+    if let Ok(interner) = table_mgr.info_store_read_view().interner_read_view().await {
         for (name_interned, name) in name_map.iter_mut() {
             let key = shamir_types::core::interner::InternerKey::new(*name_interned);
             if let Some(s) = interner.get_str(&key) {

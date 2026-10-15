@@ -129,13 +129,13 @@ async fn ddl_hammer(repo: Arc<RepoInstance>, stop: Arc<AtomicBool>) {
         // swallow it, the next iteration re-adds and retries.
         let _ = repo.get_table(name).await;
         // Drop: remove_table → token_names.remove_if_sync + per_table_mvcc.remove_sync.
-        let _ = repo.remove_table(name);
+        let _ = repo.remove_table_for_test(name);
         // Re-register config + token_names mapping so the next attach can
         // succeed (add_table is idempotent and lock-safe under concurrency).
         // (`name` is already `&str` here — `TABLES[i]` indexes into `&[&str]`
         //  — so no deref; the `for name in TABLES` loops below deref their
         //  `&&str`.)
-        repo.add_table(TableConfig::new(name));
+        repo.add_table_for_test(TableConfig::new(name));
         tokio::task::yield_now().await;
         if stop.load(Ordering::Relaxed) {
             return;
@@ -259,7 +259,7 @@ async fn token_names_concurrent_ddl_reads_no_deadlock() {
     // (make_instance already registered them via RepoInstance::new configs,
     //  but re-affirm the mappings are live.)
     for name in TABLES {
-        repo.add_table(TableConfig::new(*name));
+        repo.add_table_for_test(TableConfig::new(*name));
     }
 
     let stop = Arc::new(AtomicBool::new(false));

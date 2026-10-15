@@ -386,16 +386,44 @@ async fn assert_committed_crash_retry(seed_marker: bool) {
     let src = db.get_table("src_repo", "docs").await.unwrap();
     let dst = db.get_table("dst_repo", "docs").await.unwrap();
     let coord = shamir.active_migrations().get(&id).unwrap().value().clone();
-    coord.final_drain_and_commit().await.unwrap();
+    // S5c-X F3 (Round 6): state-changing coordinator calls go through the
+    // admitted twins with permits from the repos' write domains.
+    let src_repo = db.get_repo("src_repo").unwrap();
+    let dst_repo = db.get_repo("dst_repo").unwrap();
+    let (src_permit, dst_permit) = shamir_db::engine::repo::RepoWriteDomain::admit_pair(
+        src_repo.write_domain(),
+        dst_repo.write_domain(),
+    )
+    .await
+    .unwrap();
+    coord
+        .final_drain_and_commit_admitted(&src_permit, &dst_permit)
+        .await
+        .unwrap();
+    // S5c-X (Round 7): the tokio write-domain mutex is non-reentrant — drop the
+    // permits BEFORE the seed/populate/commit calls so each self-admits.
+    drop(src_permit);
+    drop(dst_permit);
     // Crash after seed but before its stage marker: retry must derive that
     // rows already have current versions instead of allocating new versions.
     dst.seed_log_from_data_store().await.unwrap();
-    let mvcc = dst.mvcc_store().unwrap();
+    let mvcc = dst.mvcc_store_for_test().unwrap();
     mvcc.flush_history().await.unwrap();
     if seed_marker {
-        coord.complete_finalisation_step(1).await.unwrap();
+        let (src_permit, dst_permit) = shamir_db::engine::repo::RepoWriteDomain::admit_pair(
+            src_repo.write_domain(),
+            dst_repo.write_domain(),
+        )
+        .await
+        .unwrap();
+        coord
+            .complete_finalisation_step_admitted(&src_permit, &dst_permit, 1)
+            .await
+            .unwrap();
+        drop(src_permit);
+        drop(dst_permit);
     }
-    let mut records = dst.table().data_store().iter_stream(256);
+    let mut records = dst.data_store_for_test().iter_stream(256);
     let key = records.next().await.unwrap().unwrap()[0].0.clone();
     let version = mvcc.version_of(key.as_ref());
     // Crash after population but before the index marker: its BM25 bumps
@@ -403,21 +431,21 @@ async fn assert_committed_crash_retry(seed_marker: bool) {
     dst.bulk_populate_index2().await.unwrap();
     shamir.active_migrations().remove(&id);
     drop(coord);
-    let state = MigrationCoordinator::load_state(src.info_store(), &id)
+    let state = MigrationCoordinator::load_state(&src.info_store_for_test(), &id)
         .await
         .unwrap()
         .unwrap();
     let shadow = Arc::new(
-        MigrationShadowLog::recover(id.clone(), Arc::clone(src.info_store()))
+        MigrationShadowLog::recover(id.clone(), src.info_store_for_test())
             .await
             .unwrap(),
     );
     let rebuilt = Arc::new(MigrationCoordinator::new(
         state,
         shadow,
-        Arc::clone(src.table().data_store()),
-        Arc::clone(dst.table().data_store()),
-        src.mvcc_store(),
+        Arc::clone(src.data_store_for_test()),
+        Arc::clone(dst.data_store_for_test()),
+        src.mvcc_store_for_test(),
     ));
     shamir
         .active_migrations()
@@ -428,8 +456,17 @@ async fn assert_committed_crash_retry(seed_marker: bool) {
     assert_eq!(rebuilt.finalisation_progress().await.unwrap(), 2);
     assert!(shamir.active_migrations().is_empty());
     assert_eq!(mvcc.version_of(key.as_ref()), version);
-    assert!(dst.index2_registry().reader_gate().enter().is_some());
-    let backend = dst.index2_registry().all_backends().await.pop().unwrap();
+    assert!(dst
+        .index2_registry_for_test()
+        .reader_gate()
+        .enter()
+        .is_some());
+    let backend = dst
+        .index2_registry_for_test()
+        .all_backends()
+        .await
+        .pop()
+        .unwrap();
     let ranked = backend
         .as_any()
         .downcast_ref::<shamir_db::engine::index2::fts_ranked_backend::FtsRankedBackend>()

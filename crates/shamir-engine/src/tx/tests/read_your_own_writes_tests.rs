@@ -34,7 +34,7 @@ fn make_repo() -> RepoInstance {
 #[tokio::test]
 async fn tx_reads_its_own_staged_write() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
@@ -59,7 +59,7 @@ async fn tx_reads_its_own_staged_write() {
 #[tokio::test]
 async fn tx_read_after_own_delete_is_not_found() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
@@ -92,7 +92,7 @@ async fn tx_read_after_own_delete_is_not_found() {
 #[tokio::test]
 async fn tx_read_unstaged_key_falls_through_to_base() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     // Commit a record OUTSIDE any tx.
@@ -124,7 +124,7 @@ async fn tx_read_unstaged_key_falls_through_to_base() {
 #[tokio::test]
 async fn tx_read_sees_latest_of_repeated_staged_writes() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();

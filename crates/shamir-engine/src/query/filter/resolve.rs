@@ -3,7 +3,8 @@ use std::cmp::Ordering;
 use num_bigint::BigInt;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
-use shamir_types::codecs::interned::{inner_value_to_query_value, query_value_to_inner};
+use shamir_types::codecs::interned::{inner_value_to_query_value, query_value_to_inner_with};
+use shamir_types::codecs::CodecError;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::RecordRef;
 use shamir_types::types::value::{InnerValue, QueryValue, Value};
@@ -685,10 +686,18 @@ fn eval_filter_expr(
 /// The hot QueryValue paths (aggregate scalar-fn, `project_value`) were
 /// migrated to [`resolve_filter_query`] directly (E6). This entry delegates
 /// to [`resolve_filter_query`] (the name-keyed hot path) and performs a
-/// single trailing `query_value_to_inner` conversion at the legacy boundary
-/// — a documented cold adapter, NOT a hot-path round-trip. The internal
-/// filter eval tree (`FilterNode::matches`) uses `resolve_filter_query`
-/// directly and never crosses this seam.
+/// single trailing `query_value_to_inner_with` conversion at the legacy
+/// boundary — a documented cold adapter, NOT a hot-path round-trip. The
+/// internal filter eval tree (`FilterNode::matches`) uses
+/// `resolve_filter_query` directly and never crosses this seam.
+///
+/// Round 8 (S5c-X D2): the conversion is READ-ONLY. The legacy adapter is
+/// `pub` and reachable through the read-view `filter_context`, whose
+/// `interner` field must never gain ids on caller-controlled data (a
+/// `FilterValue::Param` resolves to caller-supplied params). The name
+/// lookup uses `Interner::get_ind` (pure lookup) and fails with a coded
+/// `CodecError::Decode` when a name is not interned — no `touch_ind`, no
+/// admission.
 ///
 /// §5b floor: survives only for the legacy projection twin; dies with the
 /// InnerValue axis — not reducible within resolve.rs scope.
@@ -698,7 +707,12 @@ pub fn resolve_filter_value(
     ctx: &FilterContext,
 ) -> Option<InnerValue> {
     let qv = resolve_filter_query(fv, record, ctx)?;
-    query_value_to_inner(&qv, ctx.interner).ok()
+    query_value_to_inner_with(&qv, &|name| {
+        ctx.interner
+            .get_ind(name)
+            .ok_or_else(|| CodecError::Decode(format!("field name not interned: {name}")))
+    })
+    .ok()
 }
 
 /// Extract a value from a QueryResult by a simple path like "[0].id".

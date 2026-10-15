@@ -119,8 +119,8 @@ async fn wait_flag(flag: &std::sync::atomic::AtomicBool) {
 /// directly rather than through the tx-commit pipeline).
 async fn make_two_tables() -> (RepoInstance, TableManager, TableManager) {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("orders"));
-    repo.add_table(TableConfig::new("customers"));
+    repo.add_table_for_test(TableConfig::new("orders"));
+    repo.add_table_for_test(TableConfig::new("customers"));
     let x = repo.get_table("orders").await.unwrap();
     let y = repo.get_table("customers").await.unwrap();
     (repo, x, y)
@@ -206,7 +206,7 @@ async fn ddl_drain_then_lock(x: TableManager, seq: Arc<Sequencer>) {
         .store(true, std::sync::atomic::Ordering::SeqCst);
     seq.ddl_ready_to_raise.notify_one();
 
-    let (_barrier, _x_guard) = x.begin_write_barrier(REGULAR_INDEX_CREATE).await;
+    let (_barrier, _x_guard) = x.begin_write_barrier(REGULAR_INDEX_CREATE).await.unwrap();
 }
 
 /// RED: the pre-F-70 DDL order (lock-then-drain) genuinely deadlocks against

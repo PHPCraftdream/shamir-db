@@ -129,7 +129,7 @@ async fn functional_lookup(tbl: &TableManager, index_name_id: u64, lowered: &str
 #[tokio::test]
 async fn insert_during_index2_create_is_not_lost() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
 
     let name_field = key_id(&tbl, "name").await;
@@ -202,7 +202,7 @@ async fn insert_during_index2_create_is_not_lost() {
 #[tokio::test]
 async fn create_index_v2_acquires_write_barrier() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let name_field = key_id(&tbl, "name").await;
     let _pre = tbl
@@ -252,7 +252,7 @@ async fn create_index_v2_acquires_write_barrier() {
 #[tokio::test]
 async fn functional_backfill_indexes_preexisting_rows() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let name_field = key_id(&tbl, "name").await;
 
@@ -413,7 +413,7 @@ async fn without_reserve_persist_crashed_id_would_be_reused() {
 #[tokio::test]
 async fn tx_commit_blocks_on_index2_create_barrier_part_a() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
 
     let name_field = key_id(&tbl, "name").await;
@@ -518,7 +518,7 @@ async fn tx_commit_blocks_on_index2_create_barrier_part_a() {
 #[tokio::test]
 async fn stage_and_commit_inside_window_now_indexes_new_index_part_b_closed() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
 
     let name_field = key_id(&tbl, "name").await;
@@ -636,7 +636,7 @@ async fn f56_create_index_v2_drains_inflight_fast_path_writer() {
     use tokio::sync::Notify;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let name_field = key_id(&tbl, "name").await;
 

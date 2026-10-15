@@ -56,7 +56,7 @@ fn record_with_salary(salary_key: u64, salary: i64, id_key: u64, id: i64) -> Inn
 #[tokio::test]
 async fn p1037_sorted_reader_blocks_drop_until_released() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let salary_key = key_id(&tbl, "salary").await;
     let id_key = key_id(&tbl, "id").await;
@@ -141,7 +141,7 @@ async fn p1037_sorted_reader_blocks_drop_until_released() {
 #[tokio::test]
 async fn p1037_sorted_reader_backs_off_while_drop_parked() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let salary_key = key_id(&tbl, "salary").await;
     let id_key = key_id(&tbl, "id").await;
@@ -227,7 +227,7 @@ async fn p1037_sorted_reader_backs_off_while_drop_parked() {
 #[tokio::test]
 async fn p1037_sorted_uncontended_drop_counts_zero_waits() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let salary_key = key_id(&tbl, "salary").await;
     let id_key = key_id(&tbl, "id").await;
@@ -267,7 +267,7 @@ async fn p1037_sorted_uncontended_drop_counts_zero_waits() {
 #[tokio::test]
 async fn p1037_sorted_guard_released_on_normal_path() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let salary_key = key_id(&tbl, "salary").await;
     let id_key = key_id(&tbl, "id").await;
@@ -312,7 +312,7 @@ async fn p1037_sorted_guard_released_on_normal_path() {
 #[tokio::test]
 async fn p1037_sorted_entry_count_backs_off_during_drop() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let salary_key = key_id(&tbl, "salary").await;
     let id_key = key_id(&tbl, "id").await;
@@ -396,7 +396,7 @@ async fn p1037_sorted_entry_count_backs_off_during_drop() {
 #[tokio::test]
 async fn p1037_sorted_guard_released_on_nonexistent_rollback() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
 
     let gate = tbl.sorted_indexes().reader_gate();

@@ -104,7 +104,7 @@ fn vec_record(emb_key: u64, vec: &[f32]) -> InnerValue {
 #[tokio::test]
 async fn vector_staging_before_index_register_present_after_fix() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
 
     let emb_key = key_id(&tbl, "embedding").await;
@@ -243,7 +243,7 @@ fn fts_index_op(name: &str, table: &str, field: &str) -> CreateIndexOp {
 #[tokio::test]
 async fn fts_quiescent_tx_exactly_one_bumpftsstats_no_double_count() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("docs"));
+    repo.add_table_for_test(TableConfig::new("docs"));
     let tbl = repo.get_table("docs").await.unwrap();
 
     let title_key = key_id(&tbl, "title").await;
@@ -351,7 +351,7 @@ async fn fts_quiescent_tx_exactly_one_bumpftsstats_no_double_count() {
 #[tokio::test]
 async fn sorted_staging_before_register_present_after_fix() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("nums"));
+    repo.add_table_for_test(TableConfig::new("nums"));
     let tbl = repo.get_table("nums").await.unwrap();
 
     let val_key = key_id(&tbl, "val").await;

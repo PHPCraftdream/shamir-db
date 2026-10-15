@@ -75,7 +75,7 @@ async fn seeded_writers_and_parked_commits_preserve_repeated_snapshot_reads() {
     assert!(gate.visible_floor() >= seeded.commit_version);
     drop(seed_pin);
     for writer in 0..4 {
-        repo.add_table(TableConfig::new(format!("w{writer}")));
+        repo.add_table_for_test(TableConfig::new(format!("w{writer}")));
         let table = repo.get_table(&format!("w{writer}")).await.unwrap();
         table.mvcc_store_ref().unwrap().set_test_now(1_000);
         table

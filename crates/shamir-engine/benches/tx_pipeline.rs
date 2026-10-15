@@ -83,7 +83,14 @@ async fn execute_batch(
 fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());
     let instance = RepoInstance::new("bench".into(), BoxRepo::InMemory(repo), Vec::new());
-    instance.add_table(TableConfig::new("bench_table".to_string()));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let permit = rt.block_on(instance.write_domain().admit()).unwrap();
+    rt.block_on(instance.add_table_admitted(TableConfig::new("bench_table".to_string()), &permit))
+        .unwrap();
+    drop(permit);
     instance
 }
 
@@ -429,7 +436,10 @@ fn main() {
             for i in 0..table_count {
                 let name = format!("phase5_tbl_{i}");
                 if !repo.has_table(&name) {
-                    repo.add_table(TableConfig::new(name.clone()));
+                    let permit = rt.block_on(repo.write_domain().admit()).unwrap();
+                    rt.block_on(repo.add_table_admitted(TableConfig::new(name.clone()), &permit))
+                        .unwrap();
+                    drop(permit);
                     rt.block_on(repo.get_table(&name)).unwrap();
                 }
             }
@@ -654,7 +664,7 @@ fn main() {
                         let tbl = repo.get_table("bench_table").await.unwrap();
                         let token = shamir_engine::table::table_token_for("bench_table");
 
-                        let mut staging = StagingStore::new(Arc::clone(tbl.data_store()));
+                        let mut staging = StagingStore::new(Arc::clone(tbl.data_store_for_test()));
                         for i in 0..n {
                             let rid = RecordId::new();
                             let body = InnerValue::Str(format!("v{}", i)).to_bytes().unwrap();
@@ -710,7 +720,7 @@ fn main() {
                         let tbl = repo.get_table("bench_table").await.unwrap();
                         let token = shamir_engine::table::table_token_for("bench_table");
 
-                        let mut staging = StagingStore::new(Arc::clone(tbl.data_store()));
+                        let mut staging = StagingStore::new(Arc::clone(tbl.data_store_for_test()));
                         for i in 0..n {
                             let rid = RecordId::new();
                             let body = InnerValue::Str(format!("v{}", i)).to_bytes().unwrap();

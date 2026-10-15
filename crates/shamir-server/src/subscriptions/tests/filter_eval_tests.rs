@@ -2,15 +2,15 @@ use std::sync::Arc;
 
 use shamir_collections::TMap;
 use shamir_db::core::interner::Interner;
+use shamir_db::engine::table::InternerReadView;
 use shamir_db::types::value::InnerValue;
 use shamir_query_types::filter::{Filter, FilterValue};
-use tokio::sync::OnceCell;
 
 use crate::subscriptions::filter_eval::{filter_matches_bytes, filter_matches_inner};
 
 /// Build an `InnerValue::Map` from flat key-value pairs, serialize it to
-/// bytes, and return `(bytes, InnerValue, Arc<OnceCell<Interner>>)`.
-fn make_record(fields: &[(&str, InnerValue)]) -> (Vec<u8>, InnerValue, Arc<OnceCell<Interner>>) {
+/// bytes, and return `(bytes, InnerValue, Arc<InternerReadView>)`.
+fn make_record(fields: &[(&str, InnerValue)]) -> (Vec<u8>, InnerValue, Arc<InternerReadView>) {
     let interner = Interner::new();
     let mut map: TMap<_, InnerValue> = TMap::default();
     for (field, val) in fields {
@@ -19,9 +19,8 @@ fn make_record(fields: &[(&str, InnerValue)]) -> (Vec<u8>, InnerValue, Arc<OnceC
     }
     let inner = InnerValue::Map(map);
     let bytes = Vec::from(inner.to_bytes().expect("serialize").as_ref());
-    let cell = OnceCell::new();
-    cell.set(interner).unwrap();
-    (bytes, inner, Arc::new(cell))
+    let cell = Arc::new(InternerReadView::from_interner_for_test(interner));
+    (bytes, inner, cell)
 }
 
 #[test]
@@ -80,9 +79,8 @@ fn filter_matches_bytes_nested_field() {
         root_map.insert(addr_key, InnerValue::Map(city_map));
         let inner = InnerValue::Map(root_map);
         let bytes = Vec::from(inner.to_bytes().unwrap().as_ref());
-        let cell = OnceCell::new();
-        cell.set(interner).unwrap();
-        (bytes, inner, Arc::new(cell))
+        let cell = Arc::new(InternerReadView::from_interner_for_test(interner));
+        (bytes, inner, cell)
     };
 
     let (no_bytes, _, cell_no) = {
@@ -95,9 +93,8 @@ fn filter_matches_bytes_nested_field() {
         root_map.insert(addr_key, InnerValue::Map(city_map));
         let inner = InnerValue::Map(root_map);
         let bytes = Vec::from(inner.to_bytes().unwrap().as_ref());
-        let cell = OnceCell::new();
-        cell.set(interner).unwrap();
-        (bytes, inner, Arc::new(cell))
+        let cell = Arc::new(InternerReadView::from_interner_for_test(interner));
+        (bytes, inner, cell)
     };
 
     assert!(filter_matches_bytes(&filter, &yes_bytes, &cell_yes));

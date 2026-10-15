@@ -51,10 +51,10 @@ async fn fixture(root: &Path, clean: bool) -> (u64, Vec<(Vec<u8>, Vec<u8>)>, Cha
         .unwrap();
     let repo = source.get_db("app").unwrap().get_repo("main").unwrap();
     let table = repo.get_table("rows").await.unwrap();
-    let interner = table.interner().get().await.unwrap();
+    let interner = table.interner_for_test().get().await.unwrap();
     let value = query_value_to_inner(&doc! { "name" => "committed" }.into(), interner).unwrap();
     let payload = value.to_bytes().unwrap();
-    let mvcc = table.mvcc_store().unwrap();
+    let mvcc = table.mvcc_store_for_test().unwrap();
     let put_version = mvcc
         .set_versioned_no_wait(RecordKey::from_slice(&[0, 255, 128]), payload.clone())
         .await

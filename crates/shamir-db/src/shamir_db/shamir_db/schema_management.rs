@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use crate::{DbError, DbResult};
 use shamir_engine::query::filter::{query_value_to_filter_value as qv_to_fv_literal, FilterValue};
+use shamir_engine::repo::RepoWritePermit;
 use shamir_engine::validator::schema::{FieldRule, SchemaValidator};
 use shamir_engine::validator::{RecordValidator, ValidatorBinding, WriteOp};
 use shamir_types::core::interner::Interner;
@@ -508,6 +509,105 @@ impl ShamirDb {
         rules: Vec<FieldRule>,
     ) -> DbResult<()> {
         let name = schema_validator_name(db_name, repo_name, table_name);
+        // DDL path: the admitted twin rebuilds from `rules`, so clone here.
+        let validator: Arc<dyn RecordValidator> = Arc::new(SchemaValidator::new(rules.clone()));
+
+        // Pure registry reads — same classification as master: an ALTER
+        // (`name` already registered) is detected before anything else.
+        let freshly_registered = self.validators.id_for_name(&name).is_none();
+        let prior_artifact: Option<Arc<dyn RecordValidator>> = if freshly_registered {
+            None
+        } else {
+            self.validators.get_by_id(&schema_validator_id)
+        };
+
+        // ALTER branch: run the stale-name-collision check on the registry
+        // BEFORE the repository lookup/admission. Master's observable order
+        // surfaces the stale-collision error even when the repo under the
+        // name cannot be resolved (ghost repo), and the collision check runs
+        // on the registry only — it must not depend on the newly
+        // admission-gated repo lookup. If admission subsequently fails, the
+        // OLD artifact is restored below (F-27b restore-on-failure). The
+        // FRESH branch registers only AFTER admission (see
+        // `compile_table_schema_admitted`), preserving the
+        // `compile_table_schema_waits_for_repository_write_admission`
+        // guarantee that the registry is untouched while admission blocks.
+        let mut alter_replaced = false;
+        if !freshly_registered {
+            let replaced = self
+                .validators
+                .replace_artifact(&schema_validator_id, validator.clone());
+            if !replaced {
+                return Err(DbError::Validation(format!(
+                    "schema_validator_id {schema_validator_id} is not the id registered \
+                     under name '{name}' (stale name collision) — refusing to activate"
+                )));
+            }
+            alter_replaced = true;
+        }
+
+        let repo = self
+            .get_db(db_name)
+            .and_then(|db| db.get_repo(repo_name))
+            .ok_or_else(|| {
+                // ALTER path already swapped the NEW artifact in — put the
+                // OLD one back before surfacing the lookup failure.
+                if alter_replaced {
+                    if let Some(old) = &prior_artifact {
+                        self.validators
+                            .replace_artifact(&schema_validator_id, old.clone());
+                    }
+                }
+                DbError::NotFound(format!("Repository '{db_name}.{repo_name}' not found"))
+            })?;
+        let permit = repo.write_domain().admit().await.map_err(|e| {
+            if alter_replaced {
+                if let Some(old) = &prior_artifact {
+                    self.validators
+                        .replace_artifact(&schema_validator_id, old.clone());
+                }
+            }
+            DbError::Internal(format!("repository write admission failed: {e}"))
+        })?;
+        let result = self
+            .compile_table_schema_admitted(
+                db_name,
+                repo_name,
+                table_name,
+                schema_validator_id,
+                rules,
+                &permit,
+            )
+            .await;
+        if result.is_err() {
+            // Symmetric rollback for the steps THIS wrapper performed before
+            // handing off: undo the fresh registration / restore the OLD
+            // artifact. (`compile_table_schema_admitted` already rolled its
+            // own registry steps back; the ALTER restore here replaces its
+            // new-validator-for-new-validator no-op with the true OLD
+            // artifact.)
+            if freshly_registered {
+                self.validators.remove(&schema_validator_id);
+            } else if alter_replaced {
+                if let Some(old) = &prior_artifact {
+                    self.validators
+                        .replace_artifact(&schema_validator_id, old.clone());
+                }
+            }
+        }
+        result
+    }
+
+    pub(crate) async fn compile_table_schema_admitted(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+        schema_validator_id: RecordId,
+        rules: Vec<FieldRule>,
+        permit: &RepoWritePermit,
+    ) -> DbResult<()> {
+        let name = schema_validator_name(db_name, repo_name, table_name);
         let validator: Arc<dyn RecordValidator> = Arc::new(SchemaValidator::new(rules));
 
         // F-24 (#817): track whether THIS call performed a FRESH registration
@@ -578,7 +678,13 @@ impl ShamirDb {
         let activation_result: DbResult<()> = async {
             // Auto-bind to the table (idempotent — the table's info-twin
             // deduplicates by validator_id).
-            let table = self.get_table(db_name, repo_name, table_name).await?;
+            let db = self
+                .get_db(db_name)
+                .ok_or_else(|| DbError::NotFound(format!("Database '{db_name}' not found")))?;
+            let repo = db
+                .get_repo(repo_name)
+                .ok_or_else(|| DbError::NotFound(format!("Repository '{repo_name}' not found")))?;
+            let table = repo.get_table_admitted(table_name, permit).await?;
             let binding = ValidatorBinding {
                 validator_id: schema_validator_id,
                 ops: vec![
@@ -590,7 +696,9 @@ impl ShamirDb {
                 .into(),
                 priority: SCHEMA_VALIDATOR_PRIORITY,
             };
-            table.add_validator_binding(binding).await?;
+            table
+                .add_validator_binding_admitted(binding, permit)
+                .await?;
 
             // Track in the global registry's bound_in.
             let table_ref = Self::table_ref_str(db_name, repo_name, table_name);

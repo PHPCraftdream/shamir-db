@@ -82,7 +82,7 @@ fn record_with_str(key: u64, val: &str) -> InnerValue {
 #[tokio::test]
 async fn two_fts_indexes_different_fields_one_insert_doc_count_and_sum_doc_len_correct() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("docs"));
+    repo.add_table_for_test(TableConfig::new("docs"));
     let tbl = repo.get_table("docs").await.unwrap();
 
     let _title_key = key_id(&tbl, "title").await;
@@ -188,7 +188,7 @@ async fn two_fts_indexes_different_fields_one_insert_doc_count_and_sum_doc_len_c
 #[tokio::test]
 async fn two_fts_indexes_update_one_field_only_owner_stats_change() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("docs"));
+    repo.add_table_for_test(TableConfig::new("docs"));
     let tbl = repo.get_table("docs").await.unwrap();
 
     let _title_key = key_id(&tbl, "title").await;
@@ -301,7 +301,7 @@ async fn two_fts_indexes_update_one_field_only_owner_stats_change() {
 #[tokio::test]
 async fn stale_bump_from_dropped_and_recreated_fts_index_not_applied_to_new_instance() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("docs"));
+    repo.add_table_for_test(TableConfig::new("docs"));
     let tbl = repo.get_table("docs").await.unwrap();
     let title_key = key_id(&tbl, "title").await;
 
@@ -363,7 +363,7 @@ async fn stale_bump_from_dropped_and_recreated_fts_index_not_applied_to_new_inst
 #[tokio::test]
 async fn two_fts_indexes_delete_row_correct_backend_only_decremented() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("docs"));
+    repo.add_table_for_test(TableConfig::new("docs"));
     let tbl = repo.get_table("docs").await.unwrap();
 
     let _title_key = key_id(&tbl, "title").await;
@@ -484,7 +484,7 @@ async fn two_fts_indexes_delete_row_correct_backend_only_decremented() {
 #[tokio::test]
 async fn two_fts_indexes_abort_staged_tx_neither_backend_stats_change() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("docs"));
+    repo.add_table_for_test(TableConfig::new("docs"));
     let tbl = repo.get_table("docs").await.unwrap();
 
     let _title_key = key_id(&tbl, "title").await;

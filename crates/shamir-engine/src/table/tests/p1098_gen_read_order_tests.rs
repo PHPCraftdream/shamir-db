@@ -106,7 +106,7 @@ fn record_with_str(key: u64, val: &str) -> InnerValue {
 #[tokio::test]
 async fn p1098_insert_tx_captures_generation_before_unique_check() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let name_field = key_id(&tbl, "name").await;
 
@@ -130,7 +130,7 @@ async fn p1098_insert_tx_captures_generation_before_unique_check() {
 #[tokio::test]
 async fn p1098_update_tx_captures_generation_before_unique_check() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let name_field = key_id(&tbl, "name").await;
 
@@ -158,7 +158,7 @@ async fn p1098_update_tx_captures_generation_before_unique_check() {
 #[tokio::test]
 async fn p1098_insert_tx_many_captures_generation_before_unique_check() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let name_field = key_id(&tbl, "name").await;
 
@@ -185,7 +185,7 @@ async fn p1098_insert_tx_many_captures_generation_before_unique_check() {
 #[tokio::test]
 async fn p1098_insert_tx_many_bytes_captures_generation_before_unique_check() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let name_field = key_id(&tbl, "name").await;
 
@@ -231,7 +231,7 @@ async fn p1098_insert_tx_many_bytes_captures_generation_before_unique_check() {
 #[tokio::test]
 async fn p1098_all_four_call_sites_follow_correct_ordering_pattern() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let name_field = key_id(&tbl, "name").await;
 
@@ -336,7 +336,7 @@ async fn p1098_all_four_call_sites_follow_correct_ordering_pattern() {
 #[tokio::test]
 async fn p1098_gen_captured_before_seam_closes_race_with_concurrent_create_unique_index() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let email_field = key_id(&tbl, "email").await;
 

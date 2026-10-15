@@ -76,7 +76,7 @@ async fn f57_create_index_drains_inflight_fast_path_writer() {
     use tokio::sync::Notify;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let name_field = key_id(&tbl, "name").await;
 
@@ -201,7 +201,7 @@ async fn f57_create_unique_index_drains_inflight_fast_path_writer_first_unique()
     use tokio::sync::Notify;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let email_field = key_id(&tbl, "email").await;
 
@@ -334,7 +334,7 @@ async fn f57_create_sorted_index_drains_inflight_fast_path_writer() {
     use tokio::sync::Notify;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("nums"));
+    repo.add_table_for_test(TableConfig::new("nums"));
     let tbl = repo.get_table("nums").await.unwrap();
     let val_field = key_id(&tbl, "val").await;
 

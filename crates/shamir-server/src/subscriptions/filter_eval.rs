@@ -1,20 +1,16 @@
 use std::sync::Arc;
 
-use shamir_collections::TMap;
-use shamir_db::core::interner::Interner;
-use shamir_db::query::filter::{compile_filter, FilterContext, FilterNode};
-use shamir_db::query::read::QueryResult;
-use shamir_db::record_view::RecordView;
+use shamir_db::engine::table::InternerReadView;
+use shamir_db::query::filter::FilterNode;
 use shamir_db::types::value::InnerValue;
 use shamir_query_types::filter::Filter;
-use tokio::sync::OnceCell;
 
 /// A compiled subscription filter cached for reuse across events.
 ///
 /// **Correctness**: the interner can grow after subscription time (new field
-/// names are interned as new record shapes appear). `compile_filter` uses
-/// `interner.get_ind()` (read-only lookup) to resolve field paths; if a path
-/// isn't found, the node folds to `FilterNode::False`. A filter compiled
+/// names are interned as new record shapes appear). Compilation uses the
+/// interner's `get_ind()` (read-only lookup) to resolve field paths; if a
+/// path isn't found, the node folds to `FilterNode::False`. A filter compiled
 /// against an early interner state would therefore miss records whose fields
 /// were interned later.
 ///
@@ -41,54 +37,22 @@ pub(crate) type CompiledFilterSlot = arc_swap::ArcSwapOption<CompiledFilter>;
 /// `RecordView` lens, falling back to `InnerValue` decode for bare-scalar
 /// (non-map) records.
 ///
-/// `interner_cell` must already be populated (guaranteed when the cell came
-/// from `ShamirDb::get_table_interner_cell`); panics in debug builds if
-/// the cell is empty (indicates a programming error).
+/// `interner` must be the table's populated read-only interner view (from
+/// `ShamirDb::get_table_interner_read_view`; S5c-X F1 Round 6 — the raw
+/// `&Interner` / `Arc<OnceCell<Interner>>` no longer crosses the boundary).
 ///
 /// Delegates to the engine's compiled `FilterNode::matches(&impl RecordRef)`
-/// evaluator via `compile_filter` + `FilterContext`, so all filter semantics
+/// evaluator (via the view's engine-side `compile_filter` / `matches_bytes`,
+/// which build the `FilterContext` engine-side), so all filter semantics
 /// (Eq/Ne/Gt/Gte/Lt/Lte/In/NotIn/IsNull/IsNotNull/Exists/NotExists/
 /// Like/Regex/Contains/ContainsAny/ContainsAll/Between/Fts/And/Or/Not)
 /// are handled identically to the engine's query path.
 ///
 /// This replaces the previous hand-rolled `filter_matches_inner` path which
 /// walked `InnerValue::Map` manually.
-pub fn filter_matches_bytes(
-    filter: &Filter,
-    bytes: &[u8],
-    interner_cell: &OnceCell<Interner>,
-) -> bool {
-    // SAFETY: the cell is always populated before being stored in the
-    // decode cache (see ShamirDb::get_table_interner_cell).
-    let interner = match interner_cell.get() {
-        Some(i) => i,
-        None => {
-            debug_assert!(false, "interner_cell must be populated before filter eval");
-            return false;
-        }
-    };
-
-    let compiled = compile_filter(filter, interner);
-    let ctx = make_filter_context(interner);
-
-    // Try zero-copy RecordView lens first (handles map-shaped records).
-    match RecordView::new(bytes) {
-        Ok(view) => compiled.matches(&view, &ctx),
-        // Non-map bytes (bare scalar / legacy record): fall back to full
-        // InnerValue decode. Mirrors the engine's doctor/delete/update
-        // fallback path — we never silently drop a record from changefeed
-        // matching.
-        Err(_) => match InnerValue::from_bytes(bytes) {
-            Ok(inner) => compiled.matches(&inner, &ctx),
-            Err(_) => {
-                tracing::warn!(
-                    "subscription filter: failed to decode record bytes \
-                     (both RecordView and InnerValue), skipping (fail-closed)"
-                );
-                false
-            }
-        },
-    }
+pub fn filter_matches_bytes(filter: &Filter, bytes: &[u8], interner: &InternerReadView) -> bool {
+    let compiled = interner.compile_filter(filter);
+    interner.matches_bytes(&compiled, bytes)
 }
 
 /// Backward-compat shim: evaluate a `Filter` against a pre-decoded
@@ -101,29 +65,10 @@ pub fn filter_matches_bytes(
 pub fn filter_matches_inner(
     filter: &Filter,
     value: &InnerValue,
-    interner_cell: &OnceCell<Interner>,
+    interner: &InternerReadView,
 ) -> bool {
-    let interner = match interner_cell.get() {
-        Some(i) => i,
-        None => {
-            debug_assert!(false, "interner_cell must be populated before filter eval");
-            return false;
-        }
-    };
-
-    let compiled = compile_filter(filter, interner);
-    let ctx = make_filter_context(interner);
-    compiled.matches(value, &ctx)
-}
-
-/// Build a minimal `FilterContext` for subscription filter evaluation.
-///
-/// Subscriptions don't use QueryRef, Param, FnCall, or Actor-based filters,
-/// so all auxiliary fields are empty / System.
-fn make_filter_context(interner: &Interner) -> FilterContext<'_> {
-    static EMPTY_REFS: std::sync::OnceLock<TMap<String, QueryResult>> = std::sync::OnceLock::new();
-    let refs = EMPTY_REFS.get_or_init(shamir_collections::new_map);
-    FilterContext::new(interner, refs)
+    let compiled = interner.compile_filter(filter);
+    interner.matches_inner(&compiled, value)
 }
 
 /// Convenience: wrap raw bytes in an `Arc<[u8]>` for cache insertion.
@@ -149,16 +94,8 @@ pub(crate) fn filter_matches_bytes_cached(
     slot: &CompiledFilterSlot,
     filter: &Filter,
     bytes: &[u8],
-    interner_cell: &OnceCell<Interner>,
+    interner: &InternerReadView,
 ) -> bool {
-    let interner = match interner_cell.get() {
-        Some(i) => i,
-        None => {
-            debug_assert!(false, "interner_cell must be populated before filter eval");
-            return false;
-        }
-    };
-
     let cur_gen = interner.generation();
 
     // Load the cached compiled filter (single atomic load).
@@ -175,7 +112,7 @@ pub(crate) fn filter_matches_bytes_cached(
 
     // COLD PATH: first event OR interner grew — compile once and cache.
     let compiled = Arc::new(CompiledFilter {
-        node: compile_filter(filter, interner),
+        node: interner.compile_filter(filter),
         generation: cur_gen,
     });
     slot.store(Some(Arc::clone(&compiled)));
@@ -183,19 +120,9 @@ pub(crate) fn filter_matches_bytes_cached(
 }
 
 /// Evaluate a pre-compiled `FilterNode` against raw bytes + interner.
-fn filter_matches_with_node(node: &FilterNode, bytes: &[u8], interner: &Interner) -> bool {
-    let ctx = make_filter_context(interner);
-    match RecordView::new(bytes) {
-        Ok(view) => node.matches(&view, &ctx),
-        Err(_) => match InnerValue::from_bytes(bytes) {
-            Ok(inner) => node.matches(&inner, &ctx),
-            Err(_) => {
-                tracing::warn!(
-                    "subscription filter: failed to decode record bytes \
-                     (both RecordView and InnerValue), skipping (fail-closed)"
-                );
-                false
-            }
-        },
-    }
+/// Delegates to the engine-side evaluator (the `FilterContext` is built
+/// there from an empty shared refs map — subscriptions never use
+/// QueryRef/Param/FnCall), keeping the raw `&Interner` encapsulated.
+fn filter_matches_with_node(node: &FilterNode, bytes: &[u8], interner: &InternerReadView) -> bool {
+    interner.matches_bytes(node, bytes)
 }

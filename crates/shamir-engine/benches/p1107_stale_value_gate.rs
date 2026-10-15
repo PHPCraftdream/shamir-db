@@ -89,7 +89,7 @@ impl TableResolver for Resolver {
 }
 
 async fn key_id(tbl: &TableManager, name: &str) -> u64 {
-    let interner = tbl.interner().get().await.unwrap();
+    let interner = tbl.interner_for_test().get().await.unwrap();
     match interner.touch_ind(name).unwrap() {
         TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
     }
@@ -126,7 +126,12 @@ fn main() {
                 let repo = Arc::new(InMemoryRepo::new());
                 let instance =
                     RepoInstance::new("bench".into(), BoxRepo::InMemory(repo), Vec::new());
-                instance.add_table(TableConfig::new("users".to_string()));
+                let permit = instance.write_domain().admit().await.unwrap();
+                instance
+                    .add_table_admitted(TableConfig::new("users".to_string()), &permit)
+                    .await
+                    .unwrap();
+                drop(permit);
 
                 // Create table with regular and unique indexes
                 let tbl = instance.get_table("users").await.unwrap();
@@ -276,7 +281,12 @@ fn main() {
                 let repo = Arc::new(InMemoryRepo::new());
                 let instance =
                     RepoInstance::new("bench".into(), BoxRepo::InMemory(repo), Vec::new());
-                instance.add_table(TableConfig::new("users".to_string()));
+                let permit = instance.write_domain().admit().await.unwrap();
+                instance
+                    .add_table_admitted(TableConfig::new("users".to_string()), &permit)
+                    .await
+                    .unwrap();
+                drop(permit);
                 let tbl = instance.get_table("users").await.unwrap();
                 tbl.create_index("idx_email", &["email"]).await.unwrap();
                 let email_key = key_id(&tbl, "email").await;

@@ -116,7 +116,7 @@ fn record_with_score(score_key: u64, label_key: u64, score: i64, label: &str) ->
 /// exercised, not the non-tx direct path.
 async fn make_repo_with_score_table() -> (RepoInstance, TableManager) {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_sorted_index("score_idx", &["score"])
         .await

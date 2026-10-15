@@ -64,7 +64,7 @@ async fn build_table_with_n(n: usize) -> shamir_engine::table::TableManager {
         vec![shamir_engine::table::TableConfig::new("rows".to_string())],
     );
     let table = instance.get_table("rows").await.unwrap();
-    let interner = table.interner().get().await.unwrap();
+    let interner = table.interner_for_test().get().await.unwrap();
 
     // Pre-intern the field names so we can build interned records directly.
     let touch = |s: &str| match interner.touch_ind(s).unwrap() {
@@ -372,7 +372,7 @@ fn main() {
                     let table = table.clone();
                     let q = q.clone();
                     async move {
-                        let interner = table.interner().get().await.unwrap();
+                        let interner = table.interner_for_test().get().await.unwrap();
                         let refs = new_map();
                         let ctx = FilterContext::new(interner, &refs);
                         let r = table.read(&q, &ctx).await.unwrap();
@@ -391,7 +391,7 @@ fn main() {
                     let table = table.clone();
                     let q = q.clone();
                     async move {
-                        let interner = table.interner().get().await.unwrap();
+                        let interner = table.interner_for_test().get().await.unwrap();
                         let refs = new_map();
                         let ctx = FilterContext::new(interner, &refs);
                         let r = table.read(&q, &ctx).await.unwrap();

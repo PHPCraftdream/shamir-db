@@ -73,7 +73,7 @@ fn record_with_str(key: u64, val: &str) -> InnerValue {
 #[tokio::test]
 async fn ssi_records_reads_and_detects_write_skew_end_to_end() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
 
     // Pre-populate a record outside any tx. With no active snapshots this is
@@ -135,7 +135,7 @@ async fn ssi_records_reads_and_detects_write_skew_end_to_end() {
 #[tokio::test]
 async fn ssi_recorded_read_with_no_concurrent_write_commits() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
 
     let rid = tbl.insert(&InnerValue::Str("v".into())).await.unwrap();
@@ -158,7 +158,7 @@ async fn ssi_recorded_read_with_no_concurrent_write_commits() {
 #[tokio::test]
 async fn snapshot_read_one_tx_does_not_record() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
 
     let rid = tbl.insert(&InnerValue::Str("v".into())).await.unwrap();
@@ -182,7 +182,7 @@ async fn snapshot_read_one_tx_does_not_record() {
 #[tokio::test]
 async fn non_tx_unique_insert_blocks_on_unique_write_lock() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -222,7 +222,7 @@ async fn non_tx_unique_insert_blocks_on_unique_write_lock() {
 #[tokio::test]
 async fn non_tx_unique_insert_rejected_after_committed_tx_claim() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -272,7 +272,7 @@ async fn non_tx_unique_insert_rejected_after_committed_tx_claim() {
 #[tokio::test]
 async fn non_tx_unique_write_blocked_during_tx_commit_window() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await

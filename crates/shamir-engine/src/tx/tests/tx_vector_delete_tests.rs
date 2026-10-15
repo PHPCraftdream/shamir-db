@@ -119,7 +119,7 @@ async fn poll_vector_hits(
 #[serial_test::serial]
 async fn tx_delete_removes_vector_from_live_graph() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     tbl.create_index_v2(&vector_index_op()).await.unwrap();
 
@@ -196,7 +196,7 @@ async fn tx_delete_removes_vector_from_live_graph() {
 #[serial_test::serial]
 async fn aborted_tx_delete_leaves_vector_in_graph() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     tbl.create_index_v2(&vector_index_op()).await.unwrap();
 
@@ -263,7 +263,7 @@ async fn aborted_tx_delete_leaves_vector_in_graph() {
 #[serial_test::serial]
 async fn tx_replace_stages_delete_and_insert_together() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     tbl.create_index_v2(&vector_index_op()).await.unwrap();
 
@@ -355,7 +355,7 @@ async fn tx_replace_stages_delete_and_insert_together() {
 #[serial_test::serial]
 async fn non_tx_delete_still_excludes_from_search() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     tbl.create_index_v2(&vector_index_op()).await.unwrap();
 
@@ -406,7 +406,7 @@ async fn non_tx_delete_still_excludes_from_search() {
 #[serial_test::serial]
 async fn tx_delete_on_non_vector_table_stages_no_vector_delete() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("docs"));
+    repo.add_table_for_test(TableConfig::new("docs"));
     let tbl = repo.get_table("docs").await.unwrap();
     // No vector index — just a plain table.
 
@@ -439,7 +439,7 @@ async fn tx_delete_on_non_vector_table_stages_no_vector_delete() {
 #[serial_test::serial]
 async fn tx_update_removing_embedding_tombstones_old_vector() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     tbl.create_index_v2(&vector_index_op()).await.unwrap();
 
@@ -524,7 +524,7 @@ async fn tx_update_removing_embedding_tombstones_old_vector() {
 #[serial_test::serial]
 async fn sequential_tx_vector_promotes_both_searchable() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     tbl.create_index_v2(&vector_index_op()).await.unwrap();
 

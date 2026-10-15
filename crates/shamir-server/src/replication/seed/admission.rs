@@ -21,14 +21,13 @@ pub(crate) async fn admit(
         .await
         .map_err(|error| ReplError::Start(error.to_string()))?;
     let refs = shamir_collections::TMap::default();
-    let ctx = shamir_db::query::filter::FilterContext::new(
-        table
-            .interner()
-            .get()
-            .await
-            .map_err(|error| ReplError::Start(error.to_string()))?,
-        &refs,
-    );
+    // S5c-X F1 (Round 6): the FilterContext is built engine-side; no
+    // `&Interner` crosses the boundary.
+    let ctx = table
+        .info_store_read_view()
+        .filter_context(&refs)
+        .await
+        .map_err(|error| ReplError::Start(error.to_string()))?;
     let result = table
         .read(
             &shamir_db::query::read::ReadQuery::new("subscriptions"),

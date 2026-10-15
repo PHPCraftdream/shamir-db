@@ -40,12 +40,12 @@ async fn artifact(root: &Path) -> String {
     let table = repo.get_table("rows").await.unwrap();
     let value = query_value_to_inner(
         &doc! { "name" => "seeded" }.into(),
-        table.interner().get().await.unwrap(),
+        table.interner_for_test().get().await.unwrap(),
     )
     .unwrap();
     for key in [b"opaque".as_slice(), b"second".as_slice()] {
         table
-            .mvcc_store()
+            .mvcc_store_for_test()
             .unwrap()
             .set_versioned_no_wait(RecordKey::from_slice(key), value.to_bytes().unwrap())
             .await
@@ -107,9 +107,14 @@ fn every_publication_boundary_cold_retry_converges_without_row_replay() {
                     if entry.file_name().to_string_lossy().contains("-attempt-") {
                         let image = open_image(&entry.path(), "main").await.unwrap();
                         if stop == 6 {
-                            image.add_table(TableConfig::new("rows"));
+                            let permit = image.write_domain().admit().await.unwrap();
+                            image
+                                .add_table_admitted(TableConfig::new("rows"), &permit)
+                                .await
+                                .unwrap();
+                            drop(permit);
                             let table = image.get_table("rows").await.unwrap();
-                            let history = table.mvcc_store().unwrap();
+                            let history = table.mvcc_store_for_test().unwrap();
                             assert!(history.get_at(b"opaque", 1).await.unwrap().is_some());
                             assert!(history.get_at(b"second", 1).await.unwrap().is_none());
                             assert_eq!(image.replication_bookmark().await.unwrap(), 0);
@@ -145,11 +150,11 @@ fn every_publication_boundary_cold_retry_converges_without_row_replay() {
             let repo = home.get_db("app").unwrap().get_repo("main").unwrap();
             let rows = repo.get_table("rows").await.unwrap();
             let empty = repo.get_table("empty").await.unwrap();
-            assert_eq!(rows.counter().get().await.unwrap(), 2);
-            assert_eq!(empty.counter().get().await.unwrap(), 0);
+            assert_eq!(rows.counter_for_test().get().await.unwrap(), 2);
+            assert_eq!(empty.counter_for_test().get().await.unwrap(), 0);
             let manager = repo.repo_interner().await.unwrap();
             assert!(manager.get().await.unwrap().get_ind("name").is_some());
-            let history = rows.mvcc_store().unwrap();
+            let history = rows.mvcc_store_for_test().unwrap();
             assert!(history.get_at(b"opaque", 1).await.unwrap().is_some());
             assert!(history.get_at(b"second", 1).await.unwrap().is_some());
             assert_eq!(

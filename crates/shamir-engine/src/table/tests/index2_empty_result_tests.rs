@@ -96,7 +96,7 @@ fn vec_record(emb_key: u64, vec: &[f32], tag_key: u64, tag: &str) -> InnerValue 
 #[serial_test::serial]
 async fn empty_vector_similarity_returns_zero_rows() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     tbl.create_index_v2(&vector_index_op(2)).await.unwrap();
 
@@ -161,7 +161,7 @@ async fn empty_vector_similarity_returns_zero_rows() {
 #[serial_test::serial]
 async fn empty_fts_match_returns_zero_rows() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("docs"));
+    repo.add_table_for_test(TableConfig::new("docs"));
     let tbl = repo.get_table("docs").await.unwrap();
     tbl.create_index_v2(&CreateIndexOp {
         create_index: "body_fts".into(),

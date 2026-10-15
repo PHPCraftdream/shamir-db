@@ -223,7 +223,7 @@ async fn create_replication_profile_persists_streams() {
         .replication_profiles_table()
         .await
         .unwrap();
-    let interner = table.interner().get().await.unwrap();
+    let interner = table.interner_for_test().get().await.unwrap();
     let refs = crate::types::common::new_map();
     let ctx = crate::query::filter::FilterContext::new(interner, &refs);
     let query = crate::query::read::ReadQuery::new("replication_profiles").filter(
@@ -555,7 +555,7 @@ async fn resync_marking_with_unresolvable_profile_fails_closed_globally() {
         Some("resync_required".into())
     );
     let table = shamir.system_store().subscriptions_table().await.unwrap();
-    let interner = table.interner().get().await.unwrap();
+    let interner = table.interner_for_test().get().await.unwrap();
     let refs = crate::types::common::new_map();
     let ctx = crate::query::filter::FilterContext::new(interner, &refs);
     let row = table
@@ -805,7 +805,7 @@ async fn resync_required_subscription_covering_predicate() {
 /// Read one field of the stored subscription record from the system store.
 async fn sub_field(shamir: &ShamirDb, name: &str, field: &str) -> Option<String> {
     let table = shamir.system_store().subscriptions_table().await.unwrap();
-    let interner = table.interner().get().await.unwrap();
+    let interner = table.interner_for_test().get().await.unwrap();
     let refs = crate::types::common::new_map();
     let ctx = crate::query::filter::FilterContext::new(interner, &refs);
     let query = crate::query::read::ReadQuery::new("subscriptions").filter(

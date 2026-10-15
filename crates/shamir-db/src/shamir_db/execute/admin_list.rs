@@ -127,18 +127,24 @@ impl ShamirAdminExecutor {
                     .get_table(repo, table)
                     .await
                     .map_err(|e| err(e.to_string()))?;
-                let interner = tm.interner().get().await.map_err(|e| err(e.to_string()))?;
+                // S5c-X F1 (Round 6): index-name resolution through the engine's
+                // read-only interner view — no &Interner escape.
+                let names = tm
+                    .info_store_read_view()
+                    .interner_read_view()
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
 
                 let mut indexes: Vec<QueryValue> = Vec::new();
-                for def in tm.index_manager_ref().iter_indexes() {
-                    let name = interner
+                for def in tm.index_definitions() {
+                    let name = names
                         .get_str(&crate::core::interner::InternerKey::new(def.name_interned))
                         .map(|arc| arc.to_string())
                         .unwrap_or_else(|| def.name_interned.to_string());
                     indexes.push(mpack!({"name": @(QueryValue::Str(name)), "unique": false}));
                 }
-                for def in tm.index_manager_ref().iter_unique_indexes() {
-                    let name = interner
+                for def in tm.unique_index_definitions() {
+                    let name = names
                         .get_str(&crate::core::interner::InternerKey::new(def.name_interned))
                         .map(|arc| arc.to_string())
                         .unwrap_or_else(|| def.name_interned.to_string());

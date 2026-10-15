@@ -50,7 +50,7 @@ fn record_with_two_str(key1: u64, val1: &str, key2: u64, val2: &str) -> InnerVal
 #[tokio::test]
 async fn tx_delete_then_reclaim_unique_key_succeeds() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -124,7 +124,7 @@ async fn tx_delete_then_reclaim_unique_key_succeeds() {
 #[tokio::test]
 async fn tx_update_off_then_reclaim_unique_key_succeeds() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -240,7 +240,7 @@ async fn tx_update_off_then_reclaim_unique_key_succeeds() {
 #[tokio::test]
 async fn tx_genuine_double_claim_still_rejects() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -282,7 +282,7 @@ async fn tx_genuine_double_claim_still_rejects() {
 #[tokio::test]
 async fn tx_multiple_claim_without_release_still_rejects() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -317,7 +317,7 @@ async fn tx_multiple_claim_without_release_still_rejects() {
 #[tokio::test]
 async fn released_unique_keys_in_tx_walks_correctly() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -425,7 +425,7 @@ async fn released_unique_keys_in_tx_walks_correctly() {
 #[tokio::test]
 async fn insert_tx_many_after_delete_reclaim_succeeds() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -495,7 +495,7 @@ async fn insert_tx_many_after_delete_reclaim_succeeds() {
 #[tokio::test]
 async fn stale_snapshot_release_does_not_bypass_a_concurrent_reclaim() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -589,7 +589,7 @@ async fn stale_snapshot_release_does_not_bypass_a_concurrent_reclaim() {
 #[tokio::test]
 async fn stale_snapshot_release_does_not_bypass_a_concurrent_reclaim_at_commit_time() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -661,7 +661,7 @@ async fn stale_snapshot_release_does_not_bypass_a_concurrent_reclaim_at_commit_t
 #[tokio::test]
 async fn insert_tx_many_bytes_after_delete_reclaim_succeeds() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -707,7 +707,7 @@ async fn insert_tx_many_bytes_after_delete_reclaim_succeeds() {
 #[tokio::test]
 async fn tx_update_reclaims_a_key_released_by_delete_succeeds() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -761,7 +761,7 @@ async fn tx_update_reclaims_a_key_released_by_delete_succeeds() {
 #[tokio::test]
 async fn tx_update_to_a_durably_owned_unreleased_key_still_rejects() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -801,7 +801,7 @@ async fn tx_update_to_a_durably_owned_unreleased_key_still_rejects() {
 #[tokio::test]
 async fn update_tx_bytes_to_a_durably_owned_unreleased_key_still_rejects() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -842,7 +842,7 @@ async fn update_tx_bytes_to_a_durably_owned_unreleased_key_still_rejects() {
 #[tokio::test]
 async fn update_tx_bytes_after_delete_reclaim_succeeds() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -933,7 +933,7 @@ async fn update_tx_bytes_after_delete_reclaim_succeeds() {
 #[tokio::test]
 async fn stale_snapshot_release_does_not_bypass_a_concurrent_reclaim_via_update_tx_bytes() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -1038,7 +1038,7 @@ async fn stale_snapshot_release_does_not_bypass_a_concurrent_reclaim_via_update_
 #[tokio::test]
 async fn stale_snapshot_release_does_not_bypass_a_concurrent_reclaim_via_insert_tx_many() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -1127,7 +1127,7 @@ async fn stale_snapshot_release_does_not_bypass_a_concurrent_reclaim_via_insert_
 #[tokio::test]
 async fn stale_snapshot_release_does_not_bypass_a_concurrent_reclaim_via_insert_tx_many_bytes() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -1218,7 +1218,7 @@ async fn stale_snapshot_release_does_not_bypass_a_concurrent_reclaim_via_insert_
 #[tokio::test]
 async fn stale_snapshot_release_does_not_bypass_a_concurrent_reclaim_via_update_tx() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await

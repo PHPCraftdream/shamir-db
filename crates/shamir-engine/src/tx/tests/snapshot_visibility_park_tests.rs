@@ -182,7 +182,7 @@ async fn parked_snapshot_reads_and_own_commit() {
 #[tokio::test]
 async fn serializable_begin_below_parked_commit_preserves_predicate_window() {
     let (repo, hook) = fixture("serializable_visibility_park").await;
-    repo.add_table(crate::table::TableConfig::new("c"));
+    repo.add_table_for_test(crate::table::TableConfig::new("c"));
     let a = repo.get_table("a").await.unwrap();
     let b = repo.get_table("b").await.unwrap();
     let c = repo.get_table("c").await.unwrap();

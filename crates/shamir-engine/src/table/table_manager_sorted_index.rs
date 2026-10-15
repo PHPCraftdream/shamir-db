@@ -4,6 +4,7 @@ use shamir_types::types::record_id::RecordId;
 
 use super::table_manager::TableManager;
 use crate::index::sorted_index_manager::SortedIndexDefinition;
+use crate::repo::RepoWritePermit;
 
 impl TableManager {
     /// Register a new sorted (B-tree-by-value) index over a single
@@ -34,7 +35,8 @@ impl TableManager {
     /// residual (partial index on `select!`/`timeout`) remains — the doctor's
     /// `repair()` is the documented recovery path.
     pub async fn create_sorted_index(&self, index_name: &str, field_path: &[&str]) -> DbResult<()> {
-        self.create_sorted_index_with_include(index_name, field_path, Vec::new())
+        let permit = self.admit().await?;
+        self.create_sorted_index_with_include_admitted(index_name, field_path, Vec::new(), &permit)
             .await
     }
 
@@ -46,6 +48,25 @@ impl TableManager {
         field_path: &[&str],
         included_fields: Vec<Vec<String>>,
     ) -> DbResult<()> {
+        let permit = self.admit().await?;
+        self.create_sorted_index_with_include_admitted(
+            index_name,
+            field_path,
+            included_fields,
+            &permit,
+        )
+        .await
+    }
+
+    /// S5c-X admitted twin — caller already holds repo admission.
+    pub async fn create_sorted_index_with_include_admitted(
+        &self,
+        index_name: &str,
+        field_path: &[&str],
+        included_fields: Vec<Vec<String>>,
+        permit: &RepoWritePermit,
+    ) -> DbResult<()> {
+        self.write_domain.debug_check_permit(permit);
         let interner = self.interner.get().await?;
         let name_interned = interner
             .touch_ind(index_name)
@@ -109,7 +130,10 @@ impl TableManager {
         // `TableManager::begin_write_barrier` and `writer_drain_barrier`'s
         // "F-70" doc section).
         let (_barrier, _uwl_guard) = self
-            .begin_write_barrier(crate::index::write_barrier_flags::SORTED_INDEX_CREATE)
+            .begin_write_barrier_admitted(
+                crate::index::write_barrier_flags::SORTED_INDEX_CREATE,
+                permit,
+            )
             .await;
         // R0-C (#1010): cross-family name-uniqueness preflight, done WHILE
         // holding `ddl_admission` (via the barrier above) — see
@@ -332,12 +356,28 @@ impl TableManager {
         index_name: &str,
         op_id: Option<RecordId>,
     ) -> DbResult<bool> {
+        let permit = self.admit().await?;
+        self.drop_sorted_index_admitted(index_name, op_id, &permit)
+            .await
+    }
+
+    /// S5c-X admitted twin — caller already holds repo admission.
+    pub async fn drop_sorted_index_admitted(
+        &self,
+        index_name: &str,
+        op_id: Option<RecordId>,
+        permit: &RepoWritePermit,
+    ) -> DbResult<bool> {
+        self.write_domain.debug_check_permit(permit);
         let interner = self.interner.get().await?;
         let Some(name_interned) = interner.get_ind(index_name) else {
             return Ok(false);
         };
         let (_barrier, _uwl_guard) = self
-            .begin_write_barrier(crate::index::write_barrier_flags::SORTED_INDEX_CREATE)
+            .begin_write_barrier_admitted(
+                crate::index::write_barrier_flags::SORTED_INDEX_CREATE,
+                permit,
+            )
             .await;
         self.sorted_indexes
             .drop_index(

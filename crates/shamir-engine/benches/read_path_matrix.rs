@@ -110,7 +110,7 @@ async fn build_table_inner(n: usize, with_mvcc: bool) -> TableFixture {
         mgr = attach_temporal_gate(mgr);
     }
 
-    let interner = mgr.interner().get().await.unwrap();
+    let interner = mgr.interner_for_test().get().await.unwrap();
     let touch = |s: &str| match interner.touch_ind(s).unwrap() {
         TouchInd::Exists(k) | TouchInd::New(k) => k,
     };
@@ -155,7 +155,7 @@ async fn create_sorted_index(mgr: &TableManager, _name: &str, field: &str) {
 
 /// Update ~10% of records to accumulate ts-history for AsOf queries.
 async fn accumulate_history(mgr: &TableManager, record_ids: &[RecordId]) {
-    let interner = mgr.interner().get().await.unwrap();
+    let interner = mgr.interner_for_test().get().await.unwrap();
     let touch = |s: &str| match interner.touch_ind(s).unwrap() {
         TouchInd::Exists(k) | TouchInd::New(k) => k,
     };
@@ -258,7 +258,7 @@ fn main() {
                 let mgr = mgr.clone();
                 let q = q.clone();
                 async move {
-                    let interner = mgr.interner().get().await.unwrap();
+                    let interner = mgr.interner_for_test().get().await.unwrap();
                     let refs = new_map();
                     let ctx = FilterContext::new(interner, &refs);
                     std::hint::black_box(mgr.read(&q, &ctx).await.unwrap());
@@ -275,7 +275,7 @@ fn main() {
                 let mgr = mgr.clone();
                 let q = q.clone();
                 async move {
-                    let interner = mgr.interner().get().await.unwrap();
+                    let interner = mgr.interner_for_test().get().await.unwrap();
                     let refs = new_map();
                     let ctx = FilterContext::new(interner, &refs);
                     std::hint::black_box(mgr.read(&q, &ctx).await.unwrap());
@@ -292,7 +292,7 @@ fn main() {
                 let mgr = mgr.clone();
                 let q = q.clone();
                 async move {
-                    let interner = mgr.interner().get().await.unwrap();
+                    let interner = mgr.interner_for_test().get().await.unwrap();
                     let refs = new_map();
                     let ctx = FilterContext::new(interner, &refs);
                     std::hint::black_box(mgr.read(&q, &ctx).await.unwrap());
@@ -321,7 +321,7 @@ fn main() {
                 let mgr = mgr.clone();
                 let q = q.clone();
                 async move {
-                    let interner = mgr.interner().get().await.unwrap();
+                    let interner = mgr.interner_for_test().get().await.unwrap();
                     let refs = new_map();
                     let ctx = FilterContext::new(interner, &refs);
                     std::hint::black_box(mgr.read(&q, &ctx).await.unwrap());
@@ -342,7 +342,7 @@ fn main() {
                 let mgr = mgr.clone();
                 let q = q.clone();
                 async move {
-                    let interner = mgr.interner().get().await.unwrap();
+                    let interner = mgr.interner_for_test().get().await.unwrap();
                     let refs = new_map();
                     let ctx = FilterContext::new(interner, &refs);
                     std::hint::black_box(mgr.read(&q, &ctx).await.unwrap());
@@ -363,10 +363,10 @@ fn main() {
             // races. Every initial version is stamped 1_000, updates 2_000.
             let (fixture, ts_millis) = rt.block_on(async {
                 let f = build_table_mvcc(n).await;
-                f.mgr.mvcc_store().unwrap().set_test_now(2_000);
+                f.mgr.mvcc_store_for_test().unwrap().set_test_now(2_000);
                 accumulate_history(&f.mgr, &f.record_ids).await;
                 let current = f.mgr.get(f.record_ids[0]).await.unwrap();
-                let interner = f.mgr.interner().get().await.unwrap();
+                let interner = f.mgr.interner_for_test().get().await.unwrap();
                 let k_x = interner.touch_ind("x").unwrap().into_key();
                 match current {
                     InnerValue::Map(m) => {
@@ -382,7 +382,7 @@ fn main() {
                 let mgr = mgr.clone();
                 let q = q.clone();
                 async move {
-                    let interner = mgr.interner().get().await.unwrap();
+                    let interner = mgr.interner_for_test().get().await.unwrap();
                     let refs = new_map();
                     let ctx = FilterContext::new(interner, &refs);
                     let result = mgr.read(&q, &ctx).await.unwrap();

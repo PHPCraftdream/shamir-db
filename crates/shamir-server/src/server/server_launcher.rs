@@ -410,7 +410,7 @@ impl ServerLauncher {
             for (db_name, repo_name, table_name) in snap.iter_entries() {
                 if let Some(db) = shamir.get_db(db_name) {
                     if !db.has_table(repo_name, table_name) {
-                        if let Err(e) = db.create_table(repo_name, table_name) {
+                        if let Err(e) = db.create_table_checked(repo_name, table_name).await {
                             tracing::warn!(
                                 db = db_name,
                                 repo = repo_name,

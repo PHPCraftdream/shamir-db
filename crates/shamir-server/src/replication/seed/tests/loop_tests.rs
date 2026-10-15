@@ -348,8 +348,10 @@ async fn supervisor_preserves_typed_terminal_reason_without_advancing_bookmark()
     .await;
     let table = home.system_store().subscriptions_table().await.unwrap();
     let refs = shamir_collections::TMap::default();
-    let ctx =
-        shamir_db::query::filter::FilterContext::new(table.interner().get().await.unwrap(), &refs);
+    let ctx = shamir_db::query::filter::FilterContext::new(
+        table.interner_for_test().get().await.unwrap(),
+        &refs,
+    );
     let result = table
         .read(
             &shamir_db::query::read::ReadQuery::new("subscriptions"),

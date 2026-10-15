@@ -130,10 +130,14 @@ loom = "0.7"
 [[bench]]
 name = "keyset_seek"
 harness = false
+# Benches that call the test-only raw TableManager handles (`*_for_test`)
+# must opt into the feature (see permission_check above):
+required-features = ["test-util"]
 
 [[bench]]
 name = "cursor_pages_depth"
 harness = false
+required-features = ["test-util"]
 
 [[bench]]
 name = "interner_concurrent"
@@ -166,6 +170,7 @@ harness = false
 [[bench]]
 name = "select_pipeline"
 harness = false
+required-features = ["test-util"]
 
 [[bench]]
 name = "permission_check"
@@ -187,6 +192,7 @@ harness = false
 [[bench]]
 name = "fts_indexed"
 harness = false
+required-features = ["test-util"]
 
 [[bench]]
 name = "order_by_pipeline"
@@ -195,6 +201,7 @@ harness = false
 [[bench]]
 name = "streaming_topk"
 harness = false
+required-features = ["test-util"]
 
 [[bench]]
 name = "select_projection"
@@ -203,10 +210,12 @@ harness = false
 [[bench]]
 name = "tx_pipeline"
 harness = false
+required-features = ["test-util"]
 
 [[bench]]
 name = "tx_aware_reads"
 harness = false
+required-features = ["test-util"]
 
 [[bench]]
 name = "replication_apply"
@@ -237,6 +246,7 @@ required-features = ["fjall"]
 [[bench]]
 name = "read_path_matrix"
 harness = false
+required-features = ["test-util"]
 
 [[bench]]
 name = "drain_cost_vs_depth"
@@ -258,18 +268,22 @@ harness = false
 [[bench]]
 name = "batch_stage_parallelism"
 harness = false
+required-features = ["test-util"]
 
 [[bench]]
 name = "when_skip_eval"
 harness = false
+required-features = ["test-util"]
 
 [[bench]]
 name = "for_each_eval"
 harness = false
+required-features = ["test-util"]
 
 [[bench]]
 name = "fk_cascade_index"
 harness = false
+required-features = ["test-util"]
 
 [[bench]]
 name = "f78_writer_latency"
@@ -286,15 +300,21 @@ harness = false
 [[bench]]
 name = "p1107_stale_value_gate"
 harness = false
+required-features = ["test-util"]
 
 [[bench]]
 name = "p1108_released_unique_growth"
 harness = false
+required-features = ["test-util"]
 
 [lib]
-# Doctests are banned project-wide (slow: recompile-per-example). Examples
-# live as illustration; behavioural coverage is in unit/integration tests.
-doctest = false
+# S5c-X P2 (Round 6): doctests are enabled on THIS crate solely so the
+# boundary compile-fail example on `TableManager` is ENFORCED in CI. They
+# still do not run under nextest (nextest cannot run doctests) — the
+# `.github/workflows/ci.yml` jobs run `cargo test --doc -p shamir-engine`
+# explicitly for that. Every other crate keeps doctests off (slow:
+# recompile-per-example); examples live as illustration, behavioural
+# coverage is in unit/integration tests.
 
 [lints]
 workspace = true

@@ -62,8 +62,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Notify;
-
 use crate::index::write_barrier_flags::{
     INDEX2_CREATE, REGULAR_INDEX_CREATE, SCHEMA_ACTIVATION, SORTED_INDEX_CREATE,
     UNIQUE_INDEX_CREATE,
@@ -95,8 +93,8 @@ fn make_repo() -> RepoInstance {
 /// `make_two_tables`. Y is only needed by the F-70 regression test.
 async fn make_two_tables() -> (RepoInstance, TableManager, TableManager) {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("orders"));
-    repo.add_table(TableConfig::new("customers"));
+    repo.add_table_for_test(TableConfig::new("orders"));
+    repo.add_table_for_test(TableConfig::new("customers"));
     let x = repo.get_table("orders").await.unwrap();
     let y = repo.get_table("customers").await.unwrap();
     (repo, x, y)
@@ -180,7 +178,7 @@ async fn wait_flag(flag: &AtomicBool) {
 /// DDL-A's shape: acquire the write barrier, record "entered", pause
 /// (simulating mid-backfill), then drop guards and record "done".
 async fn ddl_a(x: TableManager, bit: u8, seq: Arc<Sequencer>) {
-    let (guard, lock) = x.begin_write_barrier(bit).await;
+    let (guard, lock) = x.begin_write_barrier(bit).await.unwrap();
     seq.log.record(EV_A_ENTERED);
     seq.a_entered.store(true, Ordering::SeqCst);
 
@@ -202,7 +200,7 @@ async fn ddl_a(x: TableManager, bit: u8, seq: Arc<Sequencer>) {
 /// while DDL-A holds it), record "entered", pause, then drop and record
 /// "done".
 async fn ddl_b(x: TableManager, bit: u8, seq: Arc<Sequencer>) {
-    let (guard, lock) = x.begin_write_barrier(bit).await;
+    let (guard, lock) = x.begin_write_barrier(bit).await.unwrap();
     seq.log.record(EV_B_ENTERED);
     seq.b_entered.store(true, Ordering::SeqCst);
 
@@ -433,7 +431,10 @@ async fn f95_admission_mutex_does_not_reintroduce_f70_deadlock() {
         // someone to wait for (otherwise drain is instant and the test
         // doesn't exercise the wait-while-holding-admission path).
         wait_flag(&a_drain_held_c).await;
-        let (_barrier, _lock) = x_for_ddl.begin_write_barrier(REGULAR_INDEX_CREATE).await;
+        let (_barrier, _lock) = x_for_ddl
+            .begin_write_barrier(REGULAR_INDEX_CREATE)
+            .await
+            .unwrap();
         ddl_done_c.store(true, Ordering::SeqCst);
     });
 
@@ -463,53 +464,34 @@ async fn f95_admission_mutex_does_not_reintroduce_f70_deadlock() {
     );
 }
 
-/// Additional regression: the admission mutex must not prevent a DDL on
-/// table Y from proceeding while a DDL on table X holds X's admission
-/// mutex. Each table has its OWN `ddl_admission`, so cross-table DDLs are
-/// independent.
+/// Each table has its own `ddl_admission` mutex. With one repository
+/// permit already held, barriers on different tables can both be acquired
+/// and remain held simultaneously.
 #[tokio::test]
 async fn f95_admission_mutex_is_per_table_not_global() {
-    let (_repo, x, y) = make_two_tables().await;
+    let (repo, x, y) = make_two_tables().await;
+    let permit = repo.write_domain().admit().await.unwrap();
 
-    let x_entered = Arc::new(AtomicBool::new(false));
-    let y_done = Arc::new(AtomicBool::new(false));
-    let release_x = Arc::new(Notify::new());
+    let (x_guard, x_lock) = x
+        .begin_write_barrier_admitted(REGULAR_INDEX_CREATE, &permit)
+        .await;
+    assert!(x.needs_write_barrier(), "X barrier must be raised");
 
-    // DDL on X: acquire barrier, pause mid-CS.
-    let x_entered_c = Arc::clone(&x_entered);
-    let release_x_c = Arc::clone(&release_x);
-    let ddl_x = tokio::spawn(async move {
-        let (_guard, _lock) = x.begin_write_barrier(REGULAR_INDEX_CREATE).await;
-        x_entered_c.store(true, Ordering::SeqCst);
-        release_x_c.notified().await;
-    });
-
-    // Wait for X's DDL to enter its CS.
-    wait_flag(&x_entered).await;
-
-    // DDL on Y: should proceed immediately — Y has its own admission mutex.
-    let y_done_c = Arc::clone(&y_done);
-    let ddl_y = tokio::spawn(async move {
-        let (_guard, _lock) = y.begin_write_barrier(REGULAR_INDEX_CREATE).await;
-        y_done_c.store(true, Ordering::SeqCst);
-    });
-
-    // Y's DDL must complete within a short bound — it is NOT blocked by
-    // X's admission mutex.
-    let y_result = tokio::time::timeout(Duration::from_millis(200), wait_flag(&y_done)).await;
+    let (y_guard, y_lock) = y
+        .begin_write_barrier_admitted(REGULAR_INDEX_CREATE, &permit)
+        .await;
+    assert!(y.needs_write_barrier(), "Y barrier must be raised");
     assert!(
-        y_result.is_ok(),
-        "DDL on table Y must not be blocked by table X's admission mutex — \
-         ddl_admission is per-table, not global"
+        x.needs_write_barrier(),
+        "X barrier remains raised while Y enters"
     );
 
-    // Release X's DDL.
-    release_x.notify_one();
+    drop(y_lock);
+    drop(y_guard);
+    drop(x_lock);
+    drop(x_guard);
+    drop(permit);
 
-    tokio::time::timeout(BOUND, async {
-        ddl_x.await.expect("DDL-X panicked");
-        ddl_y.await.expect("DDL-Y panicked");
-    })
-    .await
-    .expect("DDL tasks did not complete");
+    assert!(!x.needs_write_barrier(), "X barrier must be cleared");
+    assert!(!y.needs_write_barrier(), "Y barrier must be cleared");
 }

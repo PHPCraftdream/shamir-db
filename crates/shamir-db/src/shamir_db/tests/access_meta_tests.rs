@@ -747,15 +747,22 @@ async fn shamir_with_failing_databases_table(
     let data_store = std::sync::Arc::new(failing_store::FailingStore::new());
     let info_store: std::sync::Arc<dyn shamir_storage::types::Store> =
         std::sync::Arc::new(shamir_storage::storage_in_memory::InMemoryStore::new());
-    let tbl = TableManager::create(
+    // Build the replacement table on the SYSTEM_REPO's OWN write domain —
+    // `TableManager::create` would mint a fresh, private `RepoWriteDomain`, so
+    // every read of this table with a permit admitted on the repo's domain
+    // would trip `debug_check_permit` (permit issued by a different domain
+    // instance). The table must live in the same domain that owns the repo
+    // it is installed into.
+    let system_repo = shamir.system_store().system_repo().unwrap();
+    let tbl = TableManager::create_with_domain(
         "databases".to_string(),
         data_store.clone() as std::sync::Arc<dyn shamir_storage::types::Store>,
         info_store,
+        std::sync::Arc::clone(system_repo.write_domain()),
     )
     .await
     .unwrap();
 
-    let system_repo = shamir.system_store().system_repo().unwrap();
     system_repo.install_table_for_test("databases", tbl);
 
     (shamir, data_store)
@@ -842,15 +849,18 @@ async fn shamir_with_failing_groups_table(
     let data_store = std::sync::Arc::new(failing_store::FailingStore::new());
     let info_store: std::sync::Arc<dyn shamir_storage::types::Store> =
         std::sync::Arc::new(shamir_storage::storage_in_memory::InMemoryStore::new());
-    let tbl = TableManager::create(
+    // Same reasoning as `shamir_with_failing_databases_table` above: the
+    // replacement table must be created on the SYSTEM_REPO's own write domain.
+    let system_repo = shamir.system_store().system_repo().unwrap();
+    let tbl = TableManager::create_with_domain(
         "groups".to_string(),
         data_store.clone() as std::sync::Arc<dyn shamir_storage::types::Store>,
         info_store,
+        std::sync::Arc::clone(system_repo.write_domain()),
     )
     .await
     .unwrap();
 
-    let system_repo = shamir.system_store().system_repo().unwrap();
     system_repo.install_table_for_test("groups", tbl);
 
     (shamir, data_store)

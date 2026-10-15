@@ -406,19 +406,23 @@ async fn drop_index_refuses_genuine_cross_family_collision() {
     //    now refuses this.
     let table = db.get_table("testdb", "main", "users").await.unwrap();
     let name_interned = {
-        let interner = table.interner().get().await.unwrap();
+        let interner = table.interner_for_test().get().await.unwrap();
         match interner.touch_ind("shared_name").unwrap() {
             TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
         }
     };
     let field_key = {
-        let interner = table.interner().get().await.unwrap();
+        let interner = table.interner_for_test().get().await.unwrap();
         match interner.touch_ind("name").unwrap() {
             TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
         }
     };
     let sorted_def = SortedIndexDefinition::new(name_interned, vec![field_key]);
-    table.sorted_indexes().register(sorted_def).await.unwrap();
+    table
+        .sorted_indexes_for_test()
+        .register(sorted_def)
+        .await
+        .unwrap();
 
     // 3. DROP INDEX "shared_name" over the wire must refuse with
     //    cross_family_collision — not silently drop only the regular index

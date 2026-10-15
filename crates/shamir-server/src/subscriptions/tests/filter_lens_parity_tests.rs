@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use shamir_collections::TMap;
 use shamir_db::core::interner::Interner;
+use shamir_db::engine::table::InternerReadView;
 use shamir_db::types::value::InnerValue;
 use shamir_query_types::filter::{Filter, FilterValue};
-use tokio::sync::OnceCell;
 
 use crate::subscriptions::filter_eval::{filter_matches_bytes, filter_matches_inner};
 
@@ -22,8 +22,8 @@ use crate::subscriptions::filter_eval::{filter_matches_bytes, filter_matches_inn
 // ---------------------------------------------------------------------------
 
 /// Build a record from flat `(field_name, value)` pairs.
-/// Returns `(bytes, InnerValue, Arc<OnceCell<Interner>>)`.
-fn make_record(fields: &[(&str, InnerValue)]) -> (Vec<u8>, InnerValue, Arc<OnceCell<Interner>>) {
+/// Returns `(bytes, InnerValue, Arc<InternerReadView>)`.
+fn make_record(fields: &[(&str, InnerValue)]) -> (Vec<u8>, InnerValue, Arc<InternerReadView>) {
     let interner = Interner::new();
     let mut map: TMap<_, InnerValue> = TMap::default();
     for (field, val) in fields {
@@ -32,9 +32,8 @@ fn make_record(fields: &[(&str, InnerValue)]) -> (Vec<u8>, InnerValue, Arc<OnceC
     }
     let inner = InnerValue::Map(map);
     let bytes = Vec::from(inner.to_bytes().expect("serialize").as_ref());
-    let cell = OnceCell::new();
-    cell.set(interner).unwrap();
-    (bytes, inner, Arc::new(cell))
+    let cell = Arc::new(InternerReadView::from_interner_for_test(interner));
+    (bytes, inner, cell)
 }
 
 /// Build a nested record: `{ outer: { inner_field: inner_val } }`.
@@ -42,7 +41,7 @@ fn make_nested_record(
     outer: &str,
     inner_field: &str,
     inner_val: InnerValue,
-) -> (Vec<u8>, InnerValue, Arc<OnceCell<Interner>>) {
+) -> (Vec<u8>, InnerValue, Arc<InternerReadView>) {
     let interner = Interner::new();
     let inner_key = interner.touch_ind(inner_field).unwrap().into_key();
     let outer_key = interner.touch_ind(outer).unwrap().into_key();
@@ -52,9 +51,8 @@ fn make_nested_record(
     root.insert(outer_key, InnerValue::Map(inner_map));
     let inner = InnerValue::Map(root);
     let bytes = Vec::from(inner.to_bytes().unwrap().as_ref());
-    let cell = OnceCell::new();
-    cell.set(interner).unwrap();
-    (bytes, inner, Arc::new(cell))
+    let cell = Arc::new(InternerReadView::from_interner_for_test(interner));
+    (bytes, inner, cell)
 }
 
 /// Assert that lens-based and InnerValue-based evaluation agree for a given
@@ -64,7 +62,7 @@ fn assert_parity(
     filter: &Filter,
     bytes: &[u8],
     inner: &InnerValue,
-    cell: &OnceCell<Interner>,
+    cell: &InternerReadView,
 ) {
     let lens_result = filter_matches_bytes(filter, bytes, cell);
     let inner_result = filter_matches_inner(filter, inner, cell);
@@ -500,9 +498,7 @@ fn parity_bare_scalar_filter_fail_closed() {
     let bytes = Vec::from(inner.to_bytes().unwrap().as_ref());
     let interner = Interner::new();
     let _ = interner.touch_ind("name");
-    let cell = OnceCell::new();
-    cell.set(interner).unwrap();
-    let cell = Arc::new(cell);
+    let cell = Arc::new(InternerReadView::from_interner_for_test(interner));
 
     let lens_result = filter_matches_bytes(&filter, &bytes, &cell);
     let inner_result = filter_matches_inner(&filter, &inner, &cell);

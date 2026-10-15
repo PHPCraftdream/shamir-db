@@ -63,7 +63,7 @@ fn make_repo() -> RepoInstance {
 #[tokio::test]
 async fn dropped_tx_vector_index_leaves_no_postings() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
 
     // Vector index over field "embedding", dim=3.
@@ -189,7 +189,7 @@ async fn dropped_tx_vector_index_leaves_no_postings() {
 #[tokio::test]
 async fn base_index_routed_through_insert_tx_on_commit() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     // base_index btree-style index on field "name".
@@ -242,7 +242,7 @@ async fn base_index_routed_through_insert_tx_on_commit() {
 #[tokio::test]
 async fn dropped_tx_data_side_leaves_no_record() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
 
     let staged_rid = {

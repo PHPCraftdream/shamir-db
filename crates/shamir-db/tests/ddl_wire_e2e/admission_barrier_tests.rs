@@ -43,7 +43,7 @@ async fn drop_table_cascade_acquires_write_barrier() {
     // `begin_write_barrier` takes as Step 3 (after admission + drain).
     let db_inst = db.get_db("testdb").unwrap();
     let tbl = db_inst.get_table("main", "users").await.unwrap();
-    let guard = tbl.unique_write_lock().lock_owned().await;
+    let guard = tbl.unique_write_lock_for_test().lock_owned().await;
 
     let mut b = Batch::new();
     b.id("dt");

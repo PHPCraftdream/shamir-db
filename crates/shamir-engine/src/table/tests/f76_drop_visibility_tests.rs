@@ -101,7 +101,7 @@ async fn f76_regular_hash_drop_invisible_during_sweep() {
     use shamir_index::base_index::backfill_pause_hook::BackfillPauseHook;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let status_key = key_id(&tbl, "status").await;
     let id_key = key_id(&tbl, "id").await;
@@ -198,7 +198,7 @@ async fn f76_regular_hash_drop_invisible_during_sweep() {
 #[tokio::test]
 async fn f76_index2_drop_invisible_during_sweep() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let name_field = key_id(&tbl, "name").await;
 
@@ -306,7 +306,7 @@ async fn f76_unique_hash_drop_retires_definition_before_sweep() {
     use shamir_index::base_index::backfill_pause_hook::BackfillPauseHook;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let email_field = key_id(&tbl, "email").await;
 

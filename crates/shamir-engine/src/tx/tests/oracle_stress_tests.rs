@@ -57,7 +57,7 @@ async fn oracle_stress_disjoint_table_concurrent_monotonic() {
     let tables: Vec<String> = (0..N).map(|i| format!("tbl_{i}")).collect();
     let repo = make_repo();
     for t in &tables {
-        repo.add_table(TableConfig::new(t.as_str()));
+        repo.add_table_for_test(TableConfig::new(t.as_str()));
     }
 
     let mut handles = Vec::with_capacity(N);
@@ -126,7 +126,7 @@ async fn oracle_stress_same_table_snapshot_all_succeed() {
     const M: usize = 30;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("shared"));
+    repo.add_table_for_test(TableConfig::new("shared"));
     let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
 
     let mut handles = Vec::with_capacity(M);
@@ -209,7 +209,7 @@ async fn oracle_stress_same_table_serializable_posthoc_readset_staleness() {
     const M: usize = 40;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("ser"));
+    repo.add_table_for_test(TableConfig::new("ser"));
 
     let table_token = table_token_for("ser");
     // raw_key is an arbitrary fixed byte sequence that tx A writes and B-txs read.
@@ -537,7 +537,7 @@ async fn oracle_stress_abort_does_not_stall_watermark() {
     const TOTAL: usize = 80;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
 
     // Barrier ensures all TOTAL tasks enter commit_tx concurrently.
     let barrier = Arc::new(tokio::sync::Barrier::new(TOTAL));

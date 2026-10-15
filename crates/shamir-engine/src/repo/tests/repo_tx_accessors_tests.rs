@@ -149,7 +149,7 @@ fn repo_token_deterministic() {
 #[tokio::test]
 async fn create_table_context_populates_per_table_mvcc() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let _ = repo.get_table("users").await.unwrap();
 
     let token = crate::table::table_manager::table_token_for("users");

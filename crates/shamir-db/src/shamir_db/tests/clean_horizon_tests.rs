@@ -80,7 +80,7 @@ fn hard_reopen_certifies_before_registry_and_clean_reopen_does_not_widen() {
         .unwrap();
         let repo = db.get_repo("repo").unwrap();
         let table = repo.get_table("items").await.unwrap();
-        let interner = table.interner().get().await.unwrap();
+        let interner = table.interner_for_test().get().await.unwrap();
         let value = query_value_to_inner(&doc().set("name", "value").build(), interner).unwrap();
         let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
         table.insert_tx(&value, Some(&mut tx)).await.unwrap();

@@ -28,7 +28,6 @@
 //! [`parse_schema`]: shamir_db::shamir_db::schema_management::parse_schema
 
 use crate::access::{Action, ResourcePath};
-use crate::engine::table::TableManager;
 use crate::query::admin::{
     AddSchemaRuleOp, CompareDto, ConstraintsDto, FieldRuleDto, FkAction, ForeignKeyDto,
     GetTableSchemaOp, NumDto, RemoveSchemaRuleOp, SetTableSchemaOp,
@@ -52,31 +51,15 @@ use shamir_types::types::record_id::RecordId;
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::helpers::admin_result;
 
-// ── error helpers ──────────────────────────────────────────────────────────
-
-fn err_code(code: &str, msg: impl Into<String>) -> BatchError {
-    BatchError::QueryError {
-        alias: String::new(),
-        message: msg.into(),
-        code: Some(code.to_string()),
-    }
-}
+#[path = "repo_admin/admin_schema_admission.rs"]
+mod admission;
+use admission::{begin_schema_activation_barrier, err_code, schema_lock_key, schema_repo_permit};
 
 fn err_access(e: shamir_types::access::AccessError) -> BatchError {
     err_code("access_denied", e.to_string())
 }
 
 // ── per-table RMW lock ─────────────────────────────────────────────────────
-
-/// Build the lock key for a per-table schema RMW op.
-///
-/// The lock lives in `ShamirDb::admin_user_locks` (a `DashMap<String,
-/// Arc<Mutex<()>>>`); we reuse that map with a schema-specific key prefix
-/// so schema mutations serialise against each other without colliding with
-/// user-lifecycle locks (which key on the bare username).
-fn schema_lock_key(db: &str, repo: &str, table: &str) -> String {
-    format!("schema:{db}/{repo}/{table}")
-}
 
 /// Acquire the per-table schema RMW lock using the canonical pattern from
 /// `admin_users_roles.rs`: clone the Arc out of the DashMap, then lock it.
@@ -132,43 +115,6 @@ async fn lock_schema_rmw(
 // lock-order hierarchy" doc section for the full derivation; this DDL uses
 // the SAME canonical entry point as every `shamir-engine` CREATE INDEX path,
 // so the hierarchy cannot drift between the two crates.
-
-/// Begin the schema-activation write barrier for `table`: resolve the table
-/// handle and acquire the barrier via
-/// [`TableManager::begin_write_barrier`](crate::engine::table::TableManager::begin_write_barrier)
-/// (`SCHEMA_ACTIVATION` bit) — raise the intent bit, drain in-flight
-/// fast-path writers, THEN take `unique_write_lock`, in that order (F-70,
-/// #897). Returns the table handle plus both RAII guards; the caller keeps
-/// all three alive for the ENTIRE count→persist→activate sequence (drop
-/// order: barrier clears first, then the lock releases — reverse declaration
-/// order).
-///
-/// Call this immediately BEFORE the `stamp_keyset_safe` count-proof read so
-/// the subsequent count→persist→activate sequence is a genuine snapshot no
-/// concurrent writer can invalidate.
-async fn begin_schema_activation_barrier(
-    shamir: &ShamirDb,
-    db: &str,
-    repo: &str,
-    table: &str,
-) -> Result<
-    (
-        TableManager,
-        crate::engine::table::WriteBarrierGuard,
-        tokio::sync::OwnedMutexGuard<()>,
-    ),
-    BatchError,
-> {
-    let handle = shamir
-        .get_table(db, repo, table)
-        .await
-        .map_err(|e| err_code("internal_error", e.to_string()))?;
-    let (barrier, uwl_guard) = handle
-        .begin_write_barrier(crate::engine::index::write_barrier_flags::SCHEMA_ACTIVATION)
-        .await;
-    Ok((handle, barrier, uwl_guard))
-}
-
 /// Validate that all unique-constrained fields in the rule set have a
 /// backing index on the SAME table.  Returns an error
 /// (`unique_requires_index`) if any unique field lacks a single-field
@@ -179,6 +125,7 @@ async fn begin_schema_activation_barrier(
 /// scan per insert).
 async fn validate_unique_indexes(
     shamir: &ShamirDb,
+    permit: &shamir_engine::repo::RepoWritePermit,
     db: &str,
     repo: &str,
     table: &str,
@@ -187,7 +134,7 @@ async fn validate_unique_indexes(
     for rule in rules {
         if rule.constraints.unique == Some(true) {
             // The unique field lives on the SAME table being constrained.
-            let self_table = match shamir.get_table(db, repo, table).await {
+            let self_table = match shamir.get_table_admitted(db, repo, table, permit).await {
                 Ok(t) => t,
                 Err(_) => {
                     return Err(err_code(
@@ -210,15 +157,15 @@ async fn validate_unique_indexes(
             }
 
             let field_name = &rule.path[0];
-            let interner = self_table
-                .interner()
-                .get()
+            let has_index = self_table
+                .info_store_read_view()
+                .interned_field_id(field_name)
                 .await
-                .map_err(|e| err_code("internal_error", e.to_string()))?;
-            let has_index = interner.get_ind(field_name).is_some_and(|field_id| {
-                let field_path = [field_id.id()];
-                self_table.find_single_field_index(&field_path).is_some()
-            });
+                .map_err(|e| err_code("internal_error", e.to_string()))?
+                .is_some_and(|field_id| {
+                    let field_path = [field_id];
+                    self_table.find_single_field_index(&field_path).is_some()
+                });
             if !has_index {
                 return Err(err_code(
                     "unique_requires_index",
@@ -321,6 +268,7 @@ fn validate_no_self_referential_cascade(
 /// an FK without an index is never persisted.
 async fn validate_fk_indexes(
     shamir: &ShamirDb,
+    permit: &shamir_engine::repo::RepoWritePermit,
     db: &str,
     repo: &str,
     rules: &[FieldRuleDto],
@@ -328,7 +276,10 @@ async fn validate_fk_indexes(
     for rule in rules {
         if let Some(fk) = &rule.constraints.foreign_key {
             // Resolve the referenced table.
-            let ref_table = match shamir.get_table(db, repo, &fk.ref_table).await {
+            let ref_table = match shamir
+                .get_table_admitted(db, repo, &fk.ref_table, permit)
+                .await
+            {
                 Ok(t) => t,
                 Err(_) => {
                     return Err(err_code(
@@ -343,15 +294,15 @@ async fn validate_fk_indexes(
 
             // Resolve the ref_field to an interner id and check for a
             // single-field index.
-            let interner = ref_table
-                .interner()
-                .get()
+            let has_index = ref_table
+                .info_store_read_view()
+                .interned_field_id(&fk.ref_field)
                 .await
-                .map_err(|e| err_code("internal_error", e.to_string()))?;
-            let has_index = interner.get_ind(&fk.ref_field).is_some_and(|field_id| {
-                let field_path = [field_id.id()];
-                ref_table.find_single_field_index(&field_path).is_some()
-            });
+                .map_err(|e| err_code("internal_error", e.to_string()))?
+                .is_some_and(|field_id| {
+                    let field_path = [field_id];
+                    ref_table.find_single_field_index(&field_path).is_some()
+                });
             if !has_index {
                 return Err(err_code(
                     "fk_requires_index",
@@ -383,13 +334,14 @@ async fn validate_fk_indexes(
 /// overwrites it unconditionally here.
 async fn stamp_keyset_safe(
     shamir: &ShamirDb,
+    permit: &shamir_engine::repo::RepoWritePermit,
     db: &str,
     repo: &str,
     table: &str,
     prev_rules: &[FieldRuleDto],
     new_rules: &mut [FieldRuleDto],
 ) -> Result<(), BatchError> {
-    let table_handle = match shamir.get_table(db, repo, table).await {
+    let table_handle = match shamir.get_table_admitted(db, repo, table, permit).await {
         Ok(t) => t,
         Err(_) => {
             return Err(err_code(
@@ -426,6 +378,7 @@ impl ShamirAdminExecutor {
         let table = &op.set_table_schema;
         let repo = &op.repo;
         let db = &self.db_name;
+        let permit = schema_repo_permit(&self.shamir, db, repo).await?;
 
         // Authz: Action::Write on the table.
         self.shamir
@@ -475,10 +428,10 @@ impl ShamirAdminExecutor {
             .map_err(|e| err_code("internal_error", e.to_string()))?;
 
         // Phase C2 — validate FK index requirements before persisting.
-        validate_fk_indexes(&self.shamir, db, repo, &op.schema).await?;
+        validate_fk_indexes(&self.shamir, &permit, db, repo, &op.schema).await?;
 
         // Phase C3 — validate unique index requirements before persisting.
-        validate_unique_indexes(&self.shamir, db, repo, table, &op.schema).await?;
+        validate_unique_indexes(&self.shamir, &permit, db, repo, table, &op.schema).await?;
 
         // Reject nested-path default/auto_now/auto_now_add rules at DDL time
         // (the write path silently skips multi-segment paths — convert that
@@ -511,7 +464,7 @@ impl ShamirAdminExecutor {
         // canonical drain-then-lock path (raise → drain → lock) — see that
         // function's doc.
         let (_barrier_handle, _barrier, _uwl_guard) =
-            begin_schema_activation_barrier(&self.shamir, db, repo, table).await?;
+            begin_schema_activation_barrier(&self.shamir, db, repo, table, &permit).await?;
 
         // F-17 (#810) — stamp the server-computed `keyset_safe` proof onto
         // each rule. Read the PREVIOUS rules from the catalogue so that
@@ -526,6 +479,7 @@ impl ShamirAdminExecutor {
         let mut stamped_rules = op.schema.clone();
         stamp_keyset_safe(
             &self.shamir,
+            &permit,
             db,
             repo,
             table,
@@ -613,7 +567,7 @@ impl ShamirAdminExecutor {
         // best-effort cleanup pattern used elsewhere, e.g. restore.rs).
         if let Err(activation_err) = self
             .shamir
-            .compile_table_schema(db, repo, table, schema_validator_id, rules)
+            .compile_table_schema_admitted(db, repo, table, schema_validator_id, rules, &permit)
             .await
         {
             if let Err(rollback_err) = self.shamir.system_store().save_table_meta(&rec_prev).await {
@@ -642,6 +596,7 @@ impl ShamirAdminExecutor {
         let table = &op.add_schema_rule;
         let repo = &op.repo;
         let db = &self.db_name;
+        let permit = schema_repo_permit(&self.shamir, db, repo).await?;
 
         self.shamir
             .authorize_access(
@@ -691,11 +646,19 @@ impl ShamirAdminExecutor {
         }
 
         // Phase C2 — validate FK index requirements for the new/updated rule.
-        validate_fk_indexes(&self.shamir, db, repo, std::slice::from_ref(new_rule)).await?;
+        validate_fk_indexes(
+            &self.shamir,
+            &permit,
+            db,
+            repo,
+            std::slice::from_ref(new_rule),
+        )
+        .await?;
 
         // Phase C3 — validate unique index requirements for the new/updated rule.
         validate_unique_indexes(
             &self.shamir,
+            &permit,
             db,
             repo,
             table,
@@ -720,13 +683,22 @@ impl ShamirAdminExecutor {
         // F-70 (#897, P0): acquired via the canonical drain-then-lock path
         // (see `begin_schema_activation_barrier`'s doc).
         let (_barrier_handle, _barrier, _uwl_guard) =
-            begin_schema_activation_barrier(&self.shamir, db, repo, table).await?;
+            begin_schema_activation_barrier(&self.shamir, db, repo, table, &permit).await?;
 
         // F-17 (#810) — stamp the server-computed `keyset_safe` proof. Only
         // the upserted rule (new path or type-changed) gets a fresh
         // `table.count() == 0` check; all other rules preserve their prior
         // proof from the catalogue.
-        stamp_keyset_safe(&self.shamir, db, repo, table, &prev_rules, &mut rules).await?;
+        stamp_keyset_safe(
+            &self.shamir,
+            &permit,
+            db,
+            repo,
+            table,
+            &prev_rules,
+            &mut rules,
+        )
+        .await?;
 
         // Re-serialise + persist.
         let schema_qv = serialise_rules(&rules, interner);
@@ -791,7 +763,14 @@ impl ShamirAdminExecutor {
         // (see handle_set_table_schema for the full rationale).
         if let Err(activation_err) = self
             .shamir
-            .compile_table_schema(db, repo, table, schema_validator_id, compiled_rules)
+            .compile_table_schema_admitted(
+                db,
+                repo,
+                table,
+                schema_validator_id,
+                compiled_rules,
+                &permit,
+            )
             .await
         {
             if let Err(rollback_err) = self.shamir.system_store().save_table_meta(&rec_prev).await {
@@ -820,6 +799,7 @@ impl ShamirAdminExecutor {
         let table = &op.remove_schema_rule;
         let repo = &op.repo;
         let db = &self.db_name;
+        let permit = schema_repo_permit(&self.shamir, db, repo).await?;
 
         self.shamir
             .authorize_access(
@@ -923,7 +903,14 @@ impl ShamirAdminExecutor {
         // (see handle_set_table_schema for the full rationale).
         if let Err(activation_err) = self
             .shamir
-            .compile_table_schema(db, repo, table, schema_validator_id, compiled_rules)
+            .compile_table_schema_admitted(
+                db,
+                repo,
+                table,
+                schema_validator_id,
+                compiled_rules,
+                &permit,
+            )
             .await
         {
             if let Err(rollback_err) = self.shamir.system_store().save_table_meta(&rec_prev).await {
