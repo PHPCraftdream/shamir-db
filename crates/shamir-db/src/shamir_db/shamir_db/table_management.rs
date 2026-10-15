@@ -377,11 +377,7 @@ impl ShamirDb {
         table_name: &str,
     ) -> DbResult<TableManager> {
         if let Some(reason) = self.quarantined_read_reason(db_name, repo_name) {
-            return Err(DbError::ResyncRequired {
-                db: db_name.to_string(),
-                repo: repo_name.to_string(),
-                reason,
-            });
+            return Err(DbError::resync_required(db_name, repo_name, reason));
         }
         let db = self
             .get_db(db_name)

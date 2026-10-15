@@ -218,11 +218,14 @@ impl ShamirAdminExecutor {
             // S5c-X PR8b (P2#8): surface the typed quarantine refusal with
             // its wire code intact instead of folding it into a codeless
             // QueryError.
-            Err(shamir_storage::error::DbError::ResyncRequired { db, repo, reason }) => {
+            Err(shamir_storage::error::DbError::ResyncRequired(info)) => {
                 return Err(BatchError::query_coded(
                     "",
                     "resync_required",
-                    format!("repository {db}/{repo} is quarantined: {reason}"),
+                    format!(
+                        "repository {}/{} is quarantined: {}",
+                        info.db, info.repo, info.reason
+                    ),
                 ));
             }
             Err(e) => {
