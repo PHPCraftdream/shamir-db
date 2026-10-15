@@ -125,7 +125,12 @@ const N_WRITERS: usize = 64;
 async fn make_table(n_rows: usize) -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());
     let instance = RepoInstance::new("bench".into(), BoxRepo::InMemory(repo), Vec::new());
-    instance.add_table(TableConfig::new("bench_table".to_string()));
+    let permit = instance.write_domain().admit().await.unwrap();
+    instance
+        .add_table_admitted(TableConfig::new("bench_table".to_string()), &permit)
+        .await
+        .unwrap();
+    drop(permit);
     let tbl = instance.get_table("bench_table").await.unwrap();
     // Populate with `n_rows` bare rows. They need NOT carry the indexed field:
     // the build still scans + decodes every row (its dominant cost), giving the

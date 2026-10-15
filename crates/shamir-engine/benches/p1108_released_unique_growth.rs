@@ -67,7 +67,12 @@ fn main() {
                 let repo = Arc::new(InMemoryRepo::new());
                 let instance =
                     RepoInstance::new("bench".into(), BoxRepo::InMemory(repo), Vec::new());
-                instance.add_table(TableConfig::new("users".to_string()));
+                let permit = instance.write_domain().admit().await.unwrap();
+                instance
+                    .add_table_admitted(TableConfig::new("users".to_string()), &permit)
+                    .await
+                    .unwrap();
+                drop(permit);
 
                 let tbl = instance.get_table("users").await.unwrap();
                 tbl.create_unique_index("uniq_email", &["email"])

@@ -14,7 +14,6 @@ use shamir_engine::repo::{BoxRepoFactory, RepoInstance};
 use shamir_engine::table::TableConfig;
 use shamir_query_builder::write::doc;
 use shamir_storage::storage_fjall::{reset_persist_sync_all_count, FJALL_PERSIST_SYNC_ALL_COUNT};
-use shamir_types::codecs::interned::{inner_value_to_query_value, query_value_to_inner};
 use tempfile::tempdir;
 use tokio::runtime::Builder;
 
@@ -39,8 +38,13 @@ fn flush_buffers_persists_once_per_pass_and_data_survives_reopen() {
         .await
         .unwrap();
         let table = repo.get_table("a").await.unwrap();
-        let interner = table.interner().get().await.unwrap();
-        let value = query_value_to_inner(&doc().set("k", "v").build(), interner).unwrap();
+        let request = doc().set("k", "v").build();
+        let permit = repo.write_domain().admit().await.unwrap();
+        let value = table
+            .intern_query_value_admitted(&permit, &request)
+            .await
+            .unwrap();
+        drop(permit);
         let rid = table.insert(&value).await.unwrap();
 
         // Settle the interner delta FIRST: the table write path does not
@@ -48,7 +52,9 @@ fn flush_buffers_persists_once_per_pass_and_data_survives_reopen() {
         // inside `flush_buffers` would run its real chunk write + flush
         // (an extra counted persist). After this call the interner's
         // persist takes its `cur_len == last` no-op fast path.
-        table.interner().persist().await.unwrap();
+        let permit = repo.write_domain().admit().await.unwrap();
+        table.persist_interner_admitted(&permit).await.unwrap();
+        drop(permit);
 
         // Reset AFTER the write: the write path (and interner persist)
         // may legitimately issue persists of their own — only the flush
@@ -81,9 +87,13 @@ fn flush_buffers_persists_once_per_pass_and_data_survives_reopen() {
         let table = repo.get_table("a").await.unwrap();
         let reopened = table.get(rid).await.unwrap();
         assert_eq!(reopened, value);
-        let interner = table.interner().get().await.unwrap();
+        let interner = table
+            .info_store_read_view()
+            .interner_read_view()
+            .await
+            .unwrap();
         assert_eq!(
-            inner_value_to_query_value(&reopened, interner).unwrap(),
+            interner.inner_to_query_value(&reopened).unwrap(),
             doc().set("k", "v").build()
         );
     });
