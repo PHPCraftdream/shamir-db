@@ -257,6 +257,13 @@ pub(crate) async fn bridge_task(
             let push = &push;
             let seq = &seq;
             async move {
+                // S5c-X PR8b: an in-flight journal page read BEFORE the quarantine must
+                // not deliver after the flip — re-probe per event. Empty cache = one
+                // Relaxed load, no allocation. `false` makes JournalDrain::run fail the
+                // drain ("required event rejected") and terminates the bridge.
+                if db.read_quarantine_reason(db_name, repo).is_some() {
+                    return false;
+                }
                 for (change_idx, change) in event.changes.iter().enumerate() {
                     // O(1) pre-check via target index: skip the async
                     // interner lookup entirely when no target could match.

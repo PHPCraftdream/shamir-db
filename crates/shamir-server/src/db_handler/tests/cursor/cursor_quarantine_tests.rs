@@ -20,7 +20,7 @@ use shamir_db::ShamirDb;
 
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl::{repl_scope, replication_profile, subscription};
-use shamir_query_builder::write::insert;
+use shamir_query_builder::write::Insert;
 use shamir_query_types::admin::{ReplDirection, ReplMode};
 use shamir_query_types::read::ReadQuery;
 use shamir_query_types::wire::{CursorId, DbRequest, DbResponse};
@@ -74,7 +74,7 @@ async fn build_handler() -> ShamirDbHandler {
         for (k, v) in [("k000", 0i64), ("k001", 1i64), ("k002", 2i64)] {
             b.insert(
                 format!("i_{repo}_{k}"),
-                insert::with_repo(repo, "items").row(doc! { "id" => k, "v" => v }),
+                Insert::with_repo(repo, "items").row(doc! { "id" => k, "v" => v }),
             );
         }
     }

@@ -93,7 +93,8 @@ use super::admin::{
     is_coarse_admin_gate_exempt, set_replicator, set_superuser, AdminGlue,
 };
 use super::config::{CursorLimitsCap, NodeMode, QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
-use super::cursor_handlers::{authorize_cursor_read, error_response};
+use super::cursor_handlers::error_response;
+use super::cursor_support::authorize_cursor_read;
 use super::repo_audit;
 use super::subscribe_handler;
 

@@ -1,6 +1,8 @@
 mod admin;
 mod config;
 mod cursor_handlers;
+#[path = "repo_admin/cursor_support.rs"]
+mod cursor_support;
 mod handler;
 mod repl_handler;
 #[path = "repo_admin/repo_audit.rs"]
