@@ -128,11 +128,16 @@ async fn seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues_body() {
         },
     )
     .await;
-    assert_eq!(
-        ops::data_fingerprint(&home1).await,
-        before,
-        "no payload may apply past a gap above the bookmark",
-    );
+    // PR8b: a quarantined destination refuses ordinary reads, so the frozen
+    // payload can no longer be re-observed row-wise (same semantics scenario
+    // A asserts); the no-mutation guarantee is carried by the unchanged
+    // bookmark plus the typed refusal on every table read.
+    for table in wire::TABLES {
+        assert!(
+            follower::read_refused_resync(&home1, table).await,
+            "{table} must be refused while resync_required",
+        );
+    }
     assert_eq!(follower::bookmark(&home1).await, bookmark1);
     loop1.stop_all().await;
 
