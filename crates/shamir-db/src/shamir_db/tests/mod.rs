@@ -13,6 +13,8 @@ mod enforcement_tests;
 mod execute_tests;
 mod facade_gateway_acl_tests;
 mod flush_all_tests;
+#[cfg(feature = "fjall")]
+mod flush_persist_once_tests;
 mod group_tests;
 mod hybrid_repo_ddl_tests;
 mod interner_ops_tests;

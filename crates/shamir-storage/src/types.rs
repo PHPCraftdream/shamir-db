@@ -98,6 +98,24 @@ pub trait Store: Send + Sync {
         Ok(())
     }
 
+    /// Drain this store's buffered state into its durable backing WITHOUT
+    /// forcing a backend-level durability barrier.
+    ///
+    /// Contract: after `flush_drain()` returns Ok, every value written
+    /// through this store is in the durable backend's write path (journal /
+    /// WAL / memtable), exactly as after `flush()` — the ONLY thing it may
+    /// skip is the backend-wide fsync. Callers that drain many stores and
+    /// then fsync the backend ONCE (see `Repo::persist_once`) use this to
+    /// avoid N identical full-database fsyncs per shutdown pass.
+    ///
+    /// Default impl = `self.flush().await`: for backends where `flush()` IS
+    /// the drain (in-memory no-op, backends that fsync per write), the two
+    /// are equivalent, so non-participating backends keep today's behaviour
+    /// unchanged. Buffered wrappers (MemBuffer, Cached) and Fjall override.
+    async fn flush_drain(&self) -> DbResult<()> {
+        self.flush().await
+    }
+
     /// Apply a hot-reload of MemBuffer config. Default no-op
     /// (raw backends don't have a buffer layer). `MemBufferStore`
     /// overrides this to update its atomic config fields; wrappers
@@ -509,6 +527,20 @@ pub trait Repo: Send + Sync {
             }
             dst.set_many(batch).await?;
         }
+        Ok(())
+    }
+
+    /// Force ONE backend-wide durability barrier for every store of this
+    /// repository: after it returns Ok, all data drained by `flush_drain()`
+    /// (or written directly) is as durable as a per-store `flush()` loop.
+    ///
+    /// Default: `Ok(())` — backends whose `Store::flush()` already persists
+    /// per store (or that have nothing to persist, in-memory) need no second
+    /// barrier. Backends with ONE database-wide journal (fjall) override and
+    /// fsync once; their per-store `flush()` MUST then not be called in the
+    /// same pass (the caller pairs `flush_drain` with this).
+    async fn persist_once(&self) -> DbResult<()> {
+        let _ = self;
         Ok(())
     }
 

@@ -367,6 +367,19 @@ impl CachedStore {
         inner_result
     }
 
+    /// Drain pending async writes into the inner backend WITHOUT the inner
+    /// `flush()` — the shutdown flush pass drains every store first and then
+    /// persists the backend ONCE (`Repo::persist_once`), so calling the
+    /// inner flush here would reintroduce one full-database fsync per
+    /// buffered store. With no `inner.flush()` there is only the background
+    /// error to surface (no bg/inner priority merge, unlike `flush`).
+    pub async fn flush_drain(&self) -> DbResult<()> {
+        if matches!(self.mode, WriteMode::Sync) {
+            return Ok(());
+        }
+        self.wait_for_async_writes().await
+    }
+
     /// Park until every job the background write worker has already
     /// dequeued has finished (`pending_writes == 0`), then surface the
     /// most recent background write/remove failure, if any, as an `Err`
@@ -713,6 +726,14 @@ impl Store for CachedStore {
     /// could silently diverge.
     async fn flush(&self) -> DbResult<()> {
         self.flush().await
+    }
+
+    /// Drain pending async writes into the inner backend; the
+    /// backend-wide fsync is deferred to `Repo::persist_once`.
+    /// Delegates to the inherent [`CachedStore::flush_drain`] (same
+    /// one-implementation pattern as `flush` above).
+    async fn flush_drain(&self) -> DbResult<()> {
+        self.flush_drain().await
     }
 }
 
