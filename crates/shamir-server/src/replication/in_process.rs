@@ -13,15 +13,37 @@
 //! `hello` advertises durable identity and certified intervals for every repo.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use shamir_db::ShamirDb;
 use shamir_query_types::wire::repl::{ReplRepoInfo, ReplResponse};
 use tokio::sync::Mutex;
+#[cfg(test)]
+use tokio::sync::Notify;
+
+#[cfg(test)]
+pub(crate) struct PullRetryHook {
+    pub(crate) entered: Notify,
+    pub(crate) release: Notify,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static PULL_RETRY_HOOK: Arc<PullRetryHook>;
+}
+
+#[cfg(test)]
+async fn pause_before_retry_page() {
+    if let Some(hook) = PULL_RETRY_HOOK.try_with(Arc::clone).ok() {
+        hook.entered.notify_one();
+        hook.release.notified().await;
+    }
+}
 
 use super::error::ReplError;
 use super::source::ReplSource;
-
 pub(crate) const MAX_PULL_EVENTS: u32 = 1024;
 
 /// In-process [`ReplSource`] backed directly by a leader `Arc<ShamirDb>`.
@@ -82,6 +104,20 @@ impl ReplSource for InProcessReplSource {
                 let Some(instance) = database.get_repo(&repo) else {
                     continue;
                 };
+                if self
+                    .leader
+                    .has_resync_required_subscription_covering(&db, &repo)
+                    .await
+                    .map_err(|error| ReplError::Transport(error.to_string()))?
+                {
+                    return Ok(ReplResponse::Error {
+                        leader_epoch: self.epoch(),
+                        code: "downstream_resync_required".into(),
+                        message: format!(
+                            "repository '{db}/{repo}' is quarantined (resync_required)"
+                        ),
+                    });
+                }
                 let identity = instance
                     .repo_identity()
                     .await
@@ -153,15 +189,28 @@ impl ReplSource for InProcessReplSource {
         // Reuse the same journal-read path as the wire handler.
         // Effective limit floor of 1, mirroring `handle_pull`.
         let effective_limit = limit.clamp(1, MAX_PULL_EVENTS) as usize;
-        let mut jr = match instance
-            .read_changelog_for_replication(from_version, effective_limit)
+        let mut jr = match self
+            .leader
+            .read_changelog_for_replication(db, repo, from_version, effective_limit)
             .await
         {
-            Ok(jr) => jr,
+            Ok(Some(jr)) => jr,
+            Ok(None) => {
+                return Ok(ReplResponse::Error {
+                    leader_epoch: self.epoch(),
+                    code: "unknown_repo".into(),
+                    message: format!("repository '{db}/{repo}' not found"),
+                });
+            }
             Err(error) => {
                 return Ok(ReplResponse::Error {
                     leader_epoch: self.epoch(),
-                    code: "replication_read_error".into(),
+                    code: if matches!(error, shamir_db::DbError::ResyncRequired { .. }) {
+                        "downstream_resync_required"
+                    } else {
+                        "replication_read_error"
+                    }
+                    .into(),
                     message: error.to_string(),
                 });
             }
@@ -183,18 +232,45 @@ impl ReplSource for InProcessReplSource {
                         let remaining = deadline - now;
                         let step = remaining.min(std::time::Duration::from_millis(50));
                         tokio::time::sleep(step).await;
-                        match instance
-                            .read_changelog_for_replication(from_version, effective_limit)
+                        #[cfg(test)]
+                        pause_before_retry_page().await;
+                        match self
+                            .leader
+                            .read_changelog_for_replication(db, repo, from_version, effective_limit)
                             .await
                         {
-                            Ok(fresh) => jr = fresh,
+                            Ok(Some(fresh)) => jr = fresh,
+                            Ok(None) => {
+                                return Ok(ReplResponse::Error {
+                                    leader_epoch: self.epoch(),
+                                    code: "unknown_repo".into(),
+                                    message: format!("repository '{db}/{repo}' not found"),
+                                });
+                            }
                             Err(error) => {
                                 return Ok(ReplResponse::Error {
                                     leader_epoch: self.epoch(),
-                                    code: "replication_read_error".into(),
+                                    code: if matches!(
+                                        error,
+                                        shamir_db::DbError::ResyncRequired { .. }
+                                    ) {
+                                        "downstream_resync_required"
+                                    } else {
+                                        "replication_read_error"
+                                    }
+                                    .into(),
                                     message: error.to_string(),
                                 });
                             }
+                        }
+                        if let Some(reason) = self.leader.read_quarantine_reason(db, repo) {
+                            return Ok(ReplResponse::Error {
+                                leader_epoch: self.epoch(),
+                                code: "downstream_resync_required".into(),
+                                message: format!(
+                                    "repository '{db}/{repo}' is quarantined (resync_required): {reason}"
+                                ),
+                            });
                         }
                     }
                 }
@@ -204,8 +280,9 @@ impl ReplSource for InProcessReplSource {
         let events_bytes = rmp_serde::to_vec_named(&jr.0)
             .map_err(|e| ReplError::Transport(format!("encode events: {e}")))?;
 
-        let current_version = instance
-            .current_commit_version()
+        let current_version = self
+            .leader
+            .current_commit_version(db, repo)
             .await
             .unwrap_or(from_version);
 
@@ -226,11 +303,20 @@ impl ReplSource for InProcessReplSource {
             }
         };
 
+        let schema_digest = super::source::seed::fence::live_schema(&self.leader, db, repo).await?;
+        if let Some(reason) = self.leader.read_quarantine_reason(db, repo) {
+            return Ok(ReplResponse::Error {
+                leader_epoch: self.epoch(),
+                code: "downstream_resync_required".into(),
+                message: format!(
+                    "repository '{db}/{repo}' is quarantined (resync_required): {reason}"
+                ),
+            });
+        }
+
         Ok(ReplResponse::Pull {
             leader_epoch: self.epoch(),
-            schema_digest: Some(
-                super::source::seed::fence::live_schema(&self.leader, db, repo).await?,
-            ),
+            schema_digest: Some(schema_digest),
             events: events_bytes,
             repo_lineage_id: Some(identity.lineage_id),
             history_epoch: Some(identity.history_epoch),

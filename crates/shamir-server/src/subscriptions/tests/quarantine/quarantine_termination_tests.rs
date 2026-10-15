@@ -29,9 +29,10 @@ use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl::{repl_scope, replication_profile, subscription};
 use shamir_query_builder::doc;
 use shamir_query_builder::write::insert;
+use shamir_query_types::admin::types::repl_ops::{ReplDirection, ReplMode};
 use shamir_query_types::batch::BatchLimits;
 use shamir_query_types::subscribe::deliver_mode::DeliverMode;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 use super::super::super::bridge::bridge_task;
 use super::super::super::registry::SubscriptionRegistry;
@@ -54,7 +55,7 @@ async fn database() -> ShamirDb {
 /// The batch runs as `Actor::System`: creating a replication profile is a
 /// root-only `Manage` action on System-owned meta (`0o751`), which a plain
 /// user actor is not permitted.
-async fn quarantine(db: &ShamirDb) {
+pub(super) async fn quarantine(db: &ShamirDb) {
     let mut b = Batch::new();
     b.id(1);
     b.op(
@@ -134,14 +135,14 @@ fn row_id(frame: &PushEnvelope) -> String {
     let Some(QueryValue::Str(key)) = value.get("_id") else {
         panic!("row must contain its string _id");
     };
-    key
+    key.clone()
 }
 
 /// Same shape as `bridge_snapshot_cut_tests.rs::database`, but for the
 /// `app`/`main`/`users` triple this file's ACL fixture uses; every ancestor
 /// and the source table get `ResourceMeta::open()` exactly like the
 /// snapshot-cut fixture does, so the bridge's per-table read-ACL checks pass.
-async fn bridge_database() -> Arc<ShamirDb> {
+pub(super) async fn bridge_database() -> Arc<ShamirDb> {
     let db = Arc::new(ShamirDb::init_memory().await.expect("init shamir"));
     let owner = Actor::User(principal64([0xAB; 16]));
     db.create_db_as("app", owner.clone()).await;
@@ -163,7 +164,7 @@ async fn bridge_database() -> Arc<ShamirDb> {
     db
 }
 
-async fn write_user(db: &Arc<ShamirDb>, key: &str) {
+pub(super) async fn write_user(db: &Arc<ShamirDb>, key: &str) {
     let mut b = Batch::new();
     b.id(key.len() as u64);
     b.insert("u", insert("users").row(doc! { "_id" => key }));
@@ -172,6 +173,8 @@ async fn write_user(db: &Arc<ShamirDb>, key: &str) {
         .unwrap();
 }
 
+/// The original implementation only probed at event entry: this test also
+/// requires idle-transition notification, so it fails without revocation.
 /// A bridge attached BEFORE the quarantine receives its snapshot + live
 /// event, then terminates with `PushKind::Closed` once the repo is
 /// quarantined, and never delivers the post-quarantine row (its delivery
@@ -183,7 +186,7 @@ async fn live_bridge_terminates_on_quarantine_and_stops_delivery() {
 
     let registry = Arc::new(SubscriptionRegistry::new());
     registry.try_reserve().unwrap();
-    registry.reserve_pending(1);
+    registry.reserve_pending(7);
     let (frames, mut observed) = mpsc::channel(32);
     let bridge = tokio::spawn(bridge_task(
         7,
@@ -199,10 +202,7 @@ async fn live_bridge_terminates_on_quarantine_and_stops_delivery() {
         registry.clone(),
     ));
 
-    // Post-subscribe live write.
-    write_user(&db, "live").await;
-
-    // Snapshot: the seed row event, then the Ready frame.
+    // Snapshot seed event, then Ready; the latter must precede the live write.
     let first = tokio::time::timeout(std::time::Duration::from_secs(5), observed.recv())
         .await
         .expect("snapshot event must arrive")
@@ -214,6 +214,10 @@ async fn live_bridge_terminates_on_quarantine_and_stops_delivery() {
         .expect("Ready must arrive")
         .expect("sender alive");
     assert_eq!(ready.push, PushKind::Ready);
+
+    // Create the active subscription and wait for the Ready handshake before
+    // writing live data, so the test observes a genuinely live event.
+    write_user(&db, "live").await;
 
     // Exactly ONE live event (the "live" row) — the bridge is now attached.
     let live = tokio::time::timeout(std::time::Duration::from_secs(5), observed.recv())

@@ -1,8 +1,7 @@
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::ShamirDb;
-use crate::shamir_db::execute::SKIP_READ_QUARANTINE_FOR_TEST;
+use crate::shamir_db::execute::skip_read_quarantine_for_test;
 use shamir_storage::error::DbError;
 use shamir_types::codecs::interned::inner_value_to_query_value;
 use shamir_types::core::interner::Interner;
@@ -95,38 +94,22 @@ impl ShamirDb {
     /// Subscribe to a repo's live changefeed (Phase 3b).
     ///
     /// Returns `Ok(None)` when the database or repository does not exist. The
-    /// returned `broadcast::Receiver` yields every `ChangelogEvent` emitted
-    /// after the call; a subscriber that lags the bounded ring receives
-    /// `RecvError::Lagged` and should re-sync the missed window via
-    /// [`read_changelog_from`](Self::read_changelog_from).
+    /// returned revocable receiver reports Tokio-compatible `Lagged`/`Closed`
+    /// errors. Quarantine discards queued events and revokes attached receivers;
+    /// use its delivery gate to guard synchronous downstream acceptance.
     ///
     /// S5c-X PR8b: a quarantined (`resync_required`) replication destination
-    /// is refused with `DbError::ResyncRequired` BEFORE the broadcast is
-    /// resolved (fail closed) — no live event stream may attach to a repo
-    /// whose reads are quarantined. Same gate as
-    /// [`read_changelog_bounded`](Self::read_changelog_bounded).
-    ///
-    /// Why a raw receiver is still returned (P1#4/#3 residual): tokio's
-    /// broadcast channel has no receiver-revocation API — a receiver minted
-    /// BEFORE the quarantine flip cannot be closed by the server. This
-    /// facade is process-local, however; the wire `Subscribe` path goes
-    /// through the server bridge, whose journal drain reads through the
-    /// gated [`read_changelog_bounded`](Self::read_changelog_bounded) and
-    /// therefore cannot deliver post-quarantine data. A pre-quarantine raw
-    /// receiver can thus only ever observe events already queued in the
-    /// bounded broadcast ring at flip time; any NEW commit after the
-    /// quarantine is visible only through gated paths.
+    /// is refused before resolving the broadcast; the live receiver also
+    /// closes on transition. A raw Tokio receiver is never exposed.
     pub async fn subscribe_changelog(
         &self,
         db: &str,
         repo: &str,
-    ) -> shamir_storage::error::DbResult<
-        Option<tokio::sync::broadcast::Receiver<std::sync::Arc<shamir_engine::ChangelogEvent>>>,
-    > {
+    ) -> shamir_storage::error::DbResult<Option<ChangelogReceiver>> {
         // S5c-X PR8b: refuse a quarantined repo before resolving the
         // broadcast (fail closed). Negative-control seam, test builds only —
         // mirrors `read_changelog_bounded` above.
-        let skip_seam = cfg!(test) && SKIP_READ_QUARANTINE_FOR_TEST.load(Ordering::Relaxed);
+        let skip_seam = skip_read_quarantine_for_test();
         if !skip_seam {
             if let Some(reason) = self.quarantined_read_reason(db, repo) {
                 return Err(DbError::ResyncRequired {
@@ -139,7 +122,29 @@ impl ShamirDb {
         let Some(repo_instance) = self.get_db(db).and_then(|d| d.get_repo(repo)) else {
             return Ok(None);
         };
-        Ok(repo_instance.subscribe_changelog().await.ok())
+        let _control = self.replication_control_lock.lock().await;
+        let receiver = repo_instance.subscribe_changelog().await.ok();
+        let wrapped = receiver.map(|receiver| {
+            super::revocation::receiver::ChangelogReceiver::new(
+                receiver,
+                (*self.changelog_receivers).clone(),
+                db.to_string(),
+                repo.to_string(),
+            )
+        });
+        if let Some(wrapped) = &wrapped {
+            self.changelog_receivers
+                .register(db, repo, wrapped.delivery_gate());
+            if self.quarantined_read_reason(db, repo).is_some() {
+                wrapped.delivery_gate().close();
+            }
+        }
+        drop(_control);
+        if let Some(wrapped) = wrapped {
+            Ok(Some(wrapped))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Resumable pull from a repo's durable changelog journal (Phase 3b).
@@ -216,7 +221,7 @@ impl ShamirDb {
         // S5c-X PR8b: refuse a quarantined repo before serving journal data
         // (fail closed). Negative-control seam, test builds only — mirrors
         // `read_changelog_bounded` below.
-        let skip_seam = cfg!(test) && SKIP_READ_QUARANTINE_FOR_TEST.load(Ordering::Relaxed);
+        let skip_seam = skip_read_quarantine_for_test();
         if !skip_seam {
             if let Some(reason) = self.quarantined_read_reason(db, repo) {
                 return Err(DbError::ResyncRequired {
@@ -253,7 +258,7 @@ impl ShamirDb {
         // S5c-X PR8b: a quarantined (`resync_required`) destination refuses
         // changelog pulls (fail closed) — the follower must reseed instead.
         // Negative-control seam is only compiled into test builds.
-        let skip_seam = cfg!(test) && SKIP_READ_QUARANTINE_FOR_TEST.load(Ordering::Relaxed);
+        let skip_seam = skip_read_quarantine_for_test();
         if !skip_seam {
             if let Some(reason) = self.quarantined_read_reason(db, repo) {
                 return Err(DbError::ResyncRequired {
@@ -308,7 +313,7 @@ impl ShamirDb {
         // S5c-X PR8b: a quarantined (`resync_required`) destination refuses
         // changelog reads (fail closed) — the follower must reseed instead.
         // Negative-control seam is only compiled into test builds.
-        let skip_seam = cfg!(test) && SKIP_READ_QUARANTINE_FOR_TEST.load(Ordering::Relaxed);
+        let skip_seam = skip_read_quarantine_for_test();
         if !skip_seam {
             if let Some(reason) = self.quarantined_read_reason(db, repo) {
                 return Err(DbError::ResyncRequired {

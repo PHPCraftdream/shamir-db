@@ -175,4 +175,3 @@ CI must simulate **loss of unsynced bytes**, not merely kill a process:
 Replace “S = fsynced maximum” with contiguous **recoverability coverage R**; add mandatory universal fencing and crash-safe lifecycle state before offering fast mode. Keep I3 for same-epoch exact repair; never silently enable exact continuity in fast mode after an unclean restart.
 
 **Files changed: none. Builds/tests run: none, as requested; CI verification remains outstanding.**
-

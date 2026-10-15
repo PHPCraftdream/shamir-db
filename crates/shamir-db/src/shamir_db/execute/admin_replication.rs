@@ -392,7 +392,10 @@ impl ShamirAdminExecutor {
         if result {
             // S5c-X PR8b: dropping a subscription can remove a
             // `resync_required` row and lift a quarantine.
-            self.shamir.refresh_resync_quarantine_cache().await;
+            self.shamir
+                .refresh_resync_quarantine_cache()
+                .await
+                .map_err(|e| err(e.to_string()))?;
         }
         Ok(admin_result(mpack!({
             "dropped_subscription": @(QueryValue::Str(name)),
@@ -584,7 +587,10 @@ impl ShamirAdminExecutor {
         // S5c-X PR8b: Pause/Resume/SetProfile can flip the subscription's
         // persisted `state`; rebuild the read-quarantine cache after the
         // write commits.
-        self.shamir.refresh_resync_quarantine_cache().await;
+        self.shamir
+            .refresh_resync_quarantine_cache()
+            .await
+            .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
             "altered_subscription": @(QueryValue::Str(name)),
         })))
@@ -743,7 +749,9 @@ impl ShamirDb {
     /// with the row's `status_message` (or a constant reason when absent).
     /// Consumed by both [`Self::has_resync_required_subscription_covering`]
     /// and [`Self::refresh_resync_quarantine_cache`].
-    async fn resync_quarantine_entries(&self) -> DbResult<Vec<((String, String), String)>> {
+    pub(crate) async fn resync_quarantine_entries(
+        &self,
+    ) -> DbResult<Vec<((String, String), String)>> {
         let mut entries = Vec::new();
         let table = self.system_store().subscriptions_table().await?;
         let interner = table.interner().get().await?;
@@ -757,19 +765,22 @@ impl ShamirDb {
             if !row_is_quarantined(&row) {
                 continue;
             }
-            let Some(profile) = row.get("profile").and_then(|value| value.as_str()) else {
-                continue;
-            };
+            let profile = row
+                .get("profile")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| {
+                    DbError::Validation("quarantined subscription has no profile".into())
+                })?;
             let reason = row
                 .get("status_message")
                 .and_then(|value| value.as_str())
                 .unwrap_or("subscription requires resync")
                 .to_string();
-            let Ok(streams) = super::replication_seed::catalogue::streams(self, profile).await
-            else {
-                // Missing/unreadable profile: not a covering stream.
-                continue;
-            };
+            let streams = super::replication_seed::catalogue::streams(self, profile)
+                .await
+                .map_err(|error| {
+                    DbError::Validation(format!("quarantined profile resolution failed: {error}"))
+                })?;
             for stream in streams {
                 if !matches!(stream.direction, ReplDirection::Pull) {
                     continue;
@@ -779,17 +790,6 @@ impl ShamirDb {
             }
         }
         Ok(entries)
-    }
-
-    /// Recompute the read-quarantine cache from the persisted subscription
-    /// rows and install it wholesale. Errors are logged and swallowed: the
-    /// cache is an optimised read filter and a failed refresh must never
-    /// break the mutation that triggered it (the next refresh retries).
-    pub(crate) async fn refresh_resync_quarantine_cache(&self) {
-        match self.resync_quarantine_entries().await {
-            Ok(entries) => self.resync_quarantine.install(entries),
-            Err(e) => log::warn!("refresh_resync_quarantine_cache: {e}"),
-        }
     }
 
     /// Quarantine reason for an ordinary READ of `(db_name, repo_name)`, or
@@ -864,6 +864,7 @@ impl ShamirDb {
         message: &str,
     ) -> DbResult<()> {
         let _control = self.replication_control_lock.lock().await;
+        let mut next_entries = self.resync_quarantine_entries().await?;
         let table = self.system_store().subscriptions_table().await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
@@ -884,6 +885,30 @@ impl ShamirDb {
             return Ok(());
         };
 
+        if state == "resync_required" {
+            let profile = row
+                .as_value()
+                .get("profile")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    DbError::Validation("quarantined subscription has no profile".into())
+                })?;
+            let reason = message.to_string();
+            let streams = super::replication_seed::catalogue::streams(self, &profile)
+                .await
+                .map_err(|error| {
+                    DbError::Validation(format!("quarantined profile resolution failed: {error}"))
+                })?;
+            for stream in streams {
+                if matches!(stream.direction, ReplDirection::Pull) {
+                    let repo = stream.scope.repo.unwrap_or_else(|| "*".to_string());
+                    next_entries.push(((stream.scope.db, repo), reason.clone()));
+                }
+            }
+            self.resync_quarantine.publish(next_entries);
+            self.revoke_quarantined_receivers().await;
+        }
         let mut record = row.as_value().into_owned();
         // S5c-X PR8b: capture the row's CURRENT `seed_receipt` as the durable
         // baseline the quarantine began from (absent ⇒ `Null`). `Resume`'s
@@ -924,10 +949,7 @@ impl ShamirDb {
             .await?;
         table.interner().persist().await?;
         self.flush_seed_catalogue().await?;
-        // S5c-X PR8b: the row's `state` just changed (resync_required set or
-        // cleared); rebuild the read-quarantine cache so ordinary reads
-        // observe the new state immediately.
-        self.refresh_resync_quarantine_cache().await;
+        self.refresh_resync_quarantine_cache().await?;
         Ok(())
     }
 }

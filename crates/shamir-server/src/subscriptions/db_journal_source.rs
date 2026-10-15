@@ -10,6 +10,10 @@ pub(super) struct DbJournalSource<'a> {
 }
 
 impl JournalSource for DbJournalSource<'_> {
+    fn quarantined(&self, repo: &str) -> bool {
+        self.db.read_quarantine_reason(self.name, repo).is_some()
+    }
+
     async fn read(&self, repo: &str, from: u64) -> Result<BoundedJournalRead, String> {
         self.db
             .read_changelog_bounded(self.name, repo, from, JOURNAL_BACKFILL_LIMIT)

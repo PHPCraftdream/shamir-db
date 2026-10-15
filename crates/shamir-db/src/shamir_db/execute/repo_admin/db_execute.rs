@@ -1,10 +1,7 @@
 //! `impl ShamirDb { execute, execute_as }`.
 
-use dashmap::DashMap;
-use shamir_collections::{THasher, TSet};
 use shamir_query_types::batch::tree_visitor::BatchTreeVisitor;
 use shamir_query_types::batch::{BatchOp, ExecPolicy};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::access::Actor;
 use crate::query::batch::{execute_batch, Authorized, BatchError, BatchRequest, BatchResponse};
@@ -15,6 +12,7 @@ use super::super::shamir_db::ShamirDb;
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::ambient_interner::attach_interner_delta;
 use super::function_invoker::ShamirFunctionInvoker;
+use super::quarantine_cache::{skip_read_quarantine_for_test, ResyncQuarantineCache};
 use super::table_resolver::DbTableResolver;
 
 impl ShamirDb {
@@ -79,7 +77,7 @@ impl ShamirDb {
         // repo fail closed. Fast path is one `Relaxed` load (empty cache ⇒
         // no ops are touched, no allocation). Writes and admin ops are NOT
         // gated — status/DESCRIBE stay readable by design.
-        let skip_seam = cfg!(test) && SKIP_READ_QUARANTINE_FOR_TEST.load(Ordering::Relaxed);
+        let skip_seam = skip_read_quarantine_for_test();
         if !skip_seam && !self.resync_quarantine.is_empty() {
             if let Some((alias, repo, reason)) =
                 quarantined_read_hit(db_name, request, &self.resync_quarantine)
@@ -154,81 +152,3 @@ pub(crate) fn quarantined_read_hit(
     }
     None
 }
-
-// ----------------------------------------------------------------------
-// S5c-X PR8b read-quarantine cache (moved from admin_replication.rs to
-// keep that file under the 1000-line ratchet; the batch read gate lives
-// here topically).
-// ----------------------------------------------------------------------
-/// S5c-X PR8b — lock-free read-quarantine cache.
-///
-/// Mirrors the full set of `(db, repo)` (or `(db, "*")` for scope.repo `None`
-/// pull streams) targets covered by a subscription whose persisted row has
-/// `state = "resync_required"`, with the row's `status_message` as the value.
-/// Rebuilt wholesale by [`ShamirDb::refresh_resync_quarantine_cache`] after
-/// every subscription-state mutation (and at init), so reads pay one atomic
-/// `is_empty` load on the healthy path and never take a lock.
-pub(crate) struct ResyncQuarantineCache {
-    entries: DashMap<(String, String), String, THasher>,
-    count: AtomicUsize,
-}
-
-impl Default for ResyncQuarantineCache {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ResyncQuarantineCache {
-    pub(crate) fn new() -> Self {
-        Self {
-            entries: DashMap::with_hasher(THasher::default()),
-            count: AtomicUsize::new(0),
-        }
-    }
-
-    /// Cheap healthy-path probe: one `Relaxed` load. Empty ⇒ no quarantine.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.count.load(Ordering::Relaxed) == 0
-    }
-
-    /// Quarantine reason for `(db, repo)`, checking the exact repo first and
-    /// then the whole-db wildcard installed for `scope.repo: None` streams.
-    pub(crate) fn reason_for(&self, db: &str, repo: &str) -> Option<String> {
-        if let Some(reason) = self.entries.get(&(db.to_string(), repo.to_string())) {
-            return Some(reason.value().clone());
-        }
-        self.entries
-            .get(&(db.to_string(), "*".to_string()))
-            .map(|reason| reason.value().clone())
-    }
-
-    /// Atomically replace the whole set — fail-closed. NEW entries are
-    /// inserted first (overwrites win), THEN keys that are no longer
-    /// quarantined are dropped via `retain`. A concurrent reader therefore
-    /// never observes an EMPTY map mid-refresh: at worst it sees the union
-    /// (old ∪ new) — a fail-closed superset — never the fail-open empty
-    /// window a clear-then-fill would expose. No lock anywhere; the refresh
-    /// is idempotent and derived from the same persisted rows.
-    pub(crate) fn install(&self, entries: impl IntoIterator<Item = ((String, String), String)>) {
-        let mut fresh_keys: TSet<(String, String)> = TSet::default();
-        for (key, reason) in entries {
-            self.entries.insert(key.clone(), reason);
-            fresh_keys.insert(key);
-        }
-        // len must be the DEDUPED count — the set's size, not the iterator's.
-        let len = fresh_keys.len();
-        // DashMap 6.1.0 `retain(&self, impl FnMut(&K, &mut V) -> bool)`
-        // (verified against vendored sources).
-        self.entries.retain(|key, _| fresh_keys.contains(key));
-        self.count.store(len, Ordering::Release);
-    }
-}
-
-/// Negative-control seam for tests: when set, the read guards skip the
-/// `resync_required` quarantine and serve (stale) reads anyway (mirrors
-/// `SKIP_FENCE_QUARANTINE_FOR_TEST` in `shamir-server`'s
-/// `replication/identity_fence/checks.rs`). Always compiled; the guards read
-/// it behind `cfg!(test)` so the branch is elided in production and the
-/// static is never dead on any platform.
-pub(crate) static SKIP_READ_QUARANTINE_FOR_TEST: AtomicBool = AtomicBool::new(false);

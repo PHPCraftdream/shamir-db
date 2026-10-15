@@ -11,7 +11,6 @@
 //! engine re-export (`crate::engine::tx::*`) — the same concrete `shamir-tx`
 //! types the server names. See `docs/dev-artifacts/roadmap/PHASE_B_INTERACTIVE_TX.md` §5.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -22,7 +21,7 @@ use crate::query::batch::{
     execute_in_open_tx, open_interactive_tx, Authorized, BatchError, BatchRequest, BatchResponse,
     TransactionInfo,
 };
-use crate::shamir_db::execute::SKIP_READ_QUARANTINE_FOR_TEST;
+use crate::shamir_db::execute::skip_read_quarantine_for_test;
 
 use super::super::shamir_db::ShamirDb;
 use super::admin_dispatch::ShamirAdminExecutor;
@@ -43,7 +42,7 @@ fn tx_read_quarantine_refusal(
     alias: &str,
     repo_name: &str,
 ) -> Option<BatchError> {
-    let skip_seam = cfg!(test) && SKIP_READ_QUARANTINE_FOR_TEST.load(Ordering::Relaxed);
+    let skip_seam = skip_read_quarantine_for_test();
     if skip_seam {
         return None;
     }
@@ -265,7 +264,7 @@ impl ShamirDb {
         // in `repo_admin/db_execute.rs` (incl. the test-only skip seam).
         // Authorization comes FIRST so unauthorized callers get `access_denied`
         // and never learn the repo's quarantine state.
-        let skip_seam = cfg!(test) && SKIP_READ_QUARANTINE_FOR_TEST.load(Ordering::Relaxed);
+        let skip_seam = skip_read_quarantine_for_test();
         if !skip_seam {
             if let Some(err) = tx_read_quarantine_refusal_for_request(self, db_name, request) {
                 return Err(err);
