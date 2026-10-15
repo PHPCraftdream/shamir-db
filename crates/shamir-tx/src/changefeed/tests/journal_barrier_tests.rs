@@ -13,7 +13,7 @@ use tokio::sync::{broadcast, mpsc, Notify};
 
 use super::super::{
     drain_and_persist, gap_marker_key, journal_writer_loop, version_key, ChangelogEvent,
-    ChangelogStore, GapMarker, JournalMsg, RepoChangefeed, BROADCAST_CAPACITY,
+    ChangelogStore, GapMarker, JournalMsg, RepairPending, RepoChangefeed, BROADCAST_CAPACITY,
 };
 
 #[derive(Default)]
@@ -83,6 +83,7 @@ fn fixture(capacity: usize) -> (RepoChangefeed, mpsc::Receiver<JournalMsg>) {
             gap,
             confirmed_through: Arc::new(AtomicU64::new(0)),
             barrier_notify: Arc::new(Notify::new()),
+            repair_pending: Arc::new(RepairPending::new()),
             writer_done: tokio::sync::watch::channel(false).1,
             clean_horizon: Arc::new(AtomicU64::new(0)),
             confirm_timeouts: AtomicU64::new(0),
@@ -105,6 +106,7 @@ fn writer(
         feed.gap.clone(),
         feed.confirmed_through.clone(),
         feed.barrier_notify.clone(),
+        feed.repair_pending().clone(),
     )
 }
 
@@ -241,23 +243,74 @@ async fn journal_barrier_idle_fast_path_sends_nothing() {
 }
 
 #[tokio::test]
-async fn journal_barrier_full_and_closed_enqueue_mark_gap_immediately() {
+async fn journal_barrier_full_defers_then_closed_marks_gap() {
     let store: Arc<dyn ChangelogStore> = Arc::new(BarrierStore::default());
-    let (feed, rx) = fixture(1);
+    // Capacity 2, in this order: event(11) takes slot 1, the manual Barrier
+    // takes slot 2, and event(10) then deterministically hits Full (a
+    // capacity-1 channel would make the try_send itself panic; enqueueing
+    // 10 before the barrier would let 10 take slot 2 and never defer).
+    let (feed, mut rx) = fixture(2);
     feed.journal_enqueue(&Arc::new(event(11)));
+    feed.journal_tx.try_send(JournalMsg::Barrier(11)).unwrap();
     feed.journal_enqueue(&Arc::new(event(10)));
-    assert_eq!(feed.first_gap_version(), 10);
+    // Full no longer gaps: the over-capacity event is deferred to the
+    // repair-pending set instead.
     assert_eq!(feed.journal_dropped(), 1);
     assert_eq!(
-        feed.read_from_bounded(&store, 9, 0, 0).await.gap_at,
-        Some(10),
+        feed.first_gap_version(),
+        0,
+        "channel overflow defers, it does not gap"
     );
+    assert_eq!(feed.repair_pending_depth(), 1);
+    assert_eq!(feed.repair_pending().min_pending(), Some(10));
+    assert_eq!(feed.repair_pending().channel_full_total(), 1);
+    // The pending hole at 10 must hold back the confirmed prefix: process the
+    // queued messages manually and confirm the clamped watermark.
+    drain_and_persist(
+        &mut rx,
+        &store,
+        &feed.last_persisted_version,
+        &feed.gap,
+        &feed.confirmed_through,
+        &feed.barrier_notify,
+        &feed.repair_pending,
+    )
+    .await;
+    assert_eq!(
+        feed.confirm_through(11, Duration::ZERO).await,
+        9,
+        "the pending hole at 10 clamps the confirmed prefix below 10"
+    );
+    assert_eq!(feed.confirm_timeouts(), 1);
+    // No gap exists, so a bounded read reports none.
+    assert_eq!(feed.read_from_bounded(&store, 9, 0, 0).await.gap_at, None);
+    // Closed arm: dropping the receiver closes the channel; the next enqueue
+    // marks the gap instead of deferring.
     drop(rx);
     feed.journal_enqueue(&Arc::new(event(8)));
     assert_eq!(feed.first_gap_version(), 8);
-    assert_eq!(feed.confirm_through(11, Duration::from_secs(1)).await, 0);
-    assert_eq!(feed.confirm_timeouts(), 0);
+    // Closed send: `confirm_through` short-circuits on the failed send and
+    // returns the CURRENT confirmed bound — the clamped prefix 9 — without
+    // recording another timeout.
+    assert_eq!(
+        feed.confirm_through(11, Duration::from_secs(1)).await,
+        9,
+        "a closed writer cannot advance the confirmed prefix past the clamped bound"
+    );
+    assert_eq!(
+        feed.confirm_timeouts(),
+        1,
+        "no additional timeout after the closed-send short-circuit"
+    );
     assert_eq!(feed.read_from(&store, 0, 8).await.gap_at, Some(8));
+    // on_writer_closed retired only the Closed-enqueued version 8 (never
+    // pending — no-op); the deferred version 10 REMAINS repair-pending.
+    assert_eq!(
+        feed.repair_pending_depth(),
+        1,
+        "only version 8 was closed; version 10 stays repair-pending"
+    );
+    assert_eq!(feed.repair_pending().gaps_writer_closed_total(), 1);
 }
 
 #[tokio::test]
@@ -347,6 +400,7 @@ async fn journal_barrier_shutdown_and_explicit_drain_process_every_message() {
                 &feed.gap,
                 &feed.confirmed_through,
                 &feed.barrier_notify,
+                &feed.repair_pending,
             )
             .await;
         }

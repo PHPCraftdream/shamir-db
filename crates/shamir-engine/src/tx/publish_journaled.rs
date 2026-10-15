@@ -8,8 +8,10 @@ use crate::repo::RepoInstance;
 /// crash/failure exit. No event is ever enqueued for a version that never
 /// publishes: preparation alone has no journal/gap side effect, and this
 /// synchronous enqueue-or-gap + commit pair has no await or fallible step
-/// between them. Cancellation cannot split the pair. Full/Closed mark a gap
-/// in `journal_enqueue`; failed initialization records its gap here, not at
+/// between them. Cancellation cannot split the pair. Closed marks a gap in
+/// `journal_enqueue`; Full defers the event into the repair-pending set
+/// (`repair_pending`) and the drainer's `drain_repair_pending` lands it on a
+/// later pass. Failed initialization records its gap here, not at
 /// preparation time. The returned Arc is the SAME allocation used by the
 /// channel and later live broadcast (one allocation, as in the old emit).
 #[inline]
