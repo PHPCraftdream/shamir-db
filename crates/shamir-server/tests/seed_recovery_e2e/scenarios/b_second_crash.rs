@@ -28,6 +28,10 @@ const WAIT: Duration = Duration::from_secs(30);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues() {
+    Box::pin(seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues_body()).await;
+}
+
+async fn seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues_body() {
     let root = tempfile::tempdir().expect("temp root");
     let leader_dir = root.path().join("leader");
     let seed1 = root.path().join("seed-1");

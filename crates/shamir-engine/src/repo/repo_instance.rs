@@ -10,6 +10,7 @@ use crate::repo::durability_policy::{DurabilityMetrics, DurabilityPolicy};
 use crate::table::interner_manager::InternerManager;
 #[cfg(test)]
 use crate::tx::clean_horizon::checkpoint::test_seam;
+use crate::tx::cold_reconcile::lifecycle::ForegroundLifecycle;
 use crate::tx::CommitTailBarrier;
 use shamir_query_types::batch::VisibilityWait;
 use shamir_storage::error::{DbError, DbResult};
@@ -28,6 +29,9 @@ use tokio::sync::OnceCell;
 
 #[path = "clean_horizon/repo_impl.rs"]
 mod clean_horizon_impl;
+
+#[path = "clean_horizon/shutdown_impl.rs"]
+mod shutdown_impl;
 
 #[path = "cold_reconcile/repo_impl.rs"]
 mod cold_reconcile_impl;
@@ -95,13 +99,15 @@ pub struct RepoInstance {
     ///
     /// `std::sync::OnceLock` (not tokio's async `OnceCell`): the
     /// [`drainer`](Self::drainer) accessor is SYNC (called from the commit
-    /// tail to `wake()`), and init does no `.await` — it only constructs the
-    /// drainer + `tokio::spawn`s the loop. Single-init is guaranteed by
+    /// tail to `wake()`), and init does no `.await` — it only constructs
+    /// the drainer + `tokio::spawn`s the loop. Single-init is guaranteed by
     /// `OnceLock::get_or_init`: the closure runs EXACTLY once even under
     /// concurrent callers (the loser waits for the winner's value and
     /// returns the same `Arc<Drainer>`), so there is no "lost race" — every
     /// caller observes the one-and-only drainer.
     drainer: Arc<std::sync::OnceLock<Arc<crate::tx::drainer::Drainer>>>,
+    /// Fixed-size foreground lifecycle token; background clones omit it.
+    worker_lifecycle: Option<Arc<ForegroundLifecycle>>,
     /// Per-repo string interner (Stage I — moved from per-table to per-repo).
     /// Backed by the dedicated `"__interner__"` store. Built once on first
     /// access (lazy) and shared via [`Arc::clone`] so every
@@ -188,6 +194,7 @@ impl Clone for RepoInstance {
             journal_publish_hook: Arc::clone(&self.journal_publish_hook),
             wal_dir: self.wal_dir.clone(),
             drainer: Arc::clone(&self.drainer),
+            worker_lifecycle: self.worker_lifecycle.clone(),
             repo_interner: Arc::clone(&self.repo_interner),
             // Foreground clone: carries a strong liveness ref. If `self` is
             // itself the background clone (`None`) this stays `None` — a clone
@@ -231,8 +238,8 @@ impl RepoInstance {
         configs: Vec<TableConfig>,
         wal_dir: Option<std::path::PathBuf>,
     ) -> Self {
-        let configs_map: TDashMap<String, TableConfig> = new_dash_map_wc(configs.len().max(16));
         let initial_cap = configs.len().max(16);
+        let configs_map: TDashMap<String, TableConfig> = new_dash_map_wc(initial_cap);
         let token_names: scc::HashMap<u64, String, THasher> =
             scc::HashMap::with_capacity_and_hasher(initial_cap, THasher::default());
         for cfg in configs {
@@ -257,6 +264,7 @@ impl RepoInstance {
             )),
             token_names: Arc::new(token_names),
             tx_metrics: Arc::new(shamir_tx::TxMetrics::new()),
+            worker_lifecycle: Some(Arc::new(ForegroundLifecycle::new())),
             commit_tail: Arc::new(CommitTailBarrier::default()),
             group_commit: Arc::new(GroupCommit::new()),
             changefeed: Arc::new(OnceCell::new()),
@@ -313,13 +321,16 @@ impl RepoInstance {
     }
 
     /// D2 P1d-2b: produce a BACKGROUND clone for the drain task to own.
-    /// Identical to a foreground [`Clone`] except `live = None`, so the task's
-    /// owned handle does NOT count toward repo liveness — the loop exits and
-    /// the inner `Arc`s are released once the last foreground clone drops.
+    /// Identical to a foreground [`Clone`] except `live = None` (the task
+    /// does not count toward repo liveness) and `worker_lifecycle = None`
+    /// (the task does not retain foreground lifecycle ownership).
     /// See [`Drainer::spawn`](crate::tx::drainer::Drainer::spawn).
     fn clone_for_background(&self) -> Self {
         let mut bg = self.clone();
         bg.live = None;
+        // Background handles own only drainer resources, never foreground
+        // lifecycle ownership.
+        bg.worker_lifecycle = None;
         bg
     }
 
@@ -1959,132 +1970,6 @@ impl RepoInstance {
     /// Returns the count of recovered entries.
     pub async fn recover_v2_inflight(&self) -> DbResult<usize> {
         crate::tx::recovery::recover_inflight_v2(self).await
-    }
-
-    /// Caller MUST stop commit/apply admission before calling this method.
-    /// One bounded budget covers quiescence, drain/store flush and checkpoint.
-    /// cancel-safe: NO — drain/flush may partially finish; J is never requested
-    /// after an earlier failure or timeout. Once admitted, checkpoint I/O can
-    /// finish independently; a cancelled caller never reports shutdown success.
-    pub async fn shutdown_clean(&self, budget: std::time::Duration) -> DbResult<()> {
-        let deadline = tokio::time::Instant::now() + budget;
-        self.quiesce_commits(budget).await?;
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        tokio::time::timeout(remaining, async {
-            self.flush_buffers().await?;
-            self.finish_clean_shutdown(deadline).await
-        })
-        .await
-        .map_err(|_| DbError::Storage("clean shutdown timed out".into()))?
-    }
-
-    /// Flush this repo's in-memory buffers to their durable backing.
-    ///
-    /// Drains the `__tx__` store and every table's data + info stores.
-    /// In-memory stores are no-ops. Best-effort: individual errors are
-    /// logged and skipped; returns the first error encountered (if any)
-    /// after attempting all stores.
-    pub async fn flush_buffers(&self) -> DbResult<()> {
-        let mut first_err: Option<DbError> = None;
-
-        // D2 P1d-2b: drain the inflight WAL tail into `history` before flushing
-        // the durable stores. Post-cutover the ack-path writes only the
-        // in-memory overlay; the value is durable in `history` only after the
-        // drainer replays the WAL entry. A graceful flush therefore drains
-        // first so the committed-but-not-yet-drained tail lands durably (and
-        // the WAL markers truncate). If no drainer was ever spawned (no commit
-        // happened) this is a cheap no-op pass. Best-effort: a drain error is
-        // logged and recovery on the next open still converges.
-        if let Err(e) = self.drainer().drain_all(self).await {
-            log::warn!("flush_buffers: drain_all {}: {}", self.name, e);
-            if first_err.is_none() {
-                first_err = Some(e);
-            }
-        }
-
-        match self.tx_info_store().await {
-            Ok(store) => {
-                if let Err(e) = store.flush().await {
-                    log::warn!("flush_buffers: tx_info_store {}: {}", self.name, e);
-                    if first_err.is_none() {
-                        first_err = Some(e);
-                    }
-                }
-            }
-            Err(e) => {
-                if first_err.is_none() {
-                    first_err = Some(e);
-                }
-            }
-        }
-
-        for table_name in self.list_table_names() {
-            let table = match self.get_table(&table_name).await {
-                Ok(t) => t,
-                Err(e) => {
-                    log::warn!(
-                        "flush_buffers: get_table {}/{}: {}",
-                        self.name,
-                        table_name,
-                        e
-                    );
-                    if first_err.is_none() {
-                        first_err = Some(e);
-                    }
-                    continue;
-                }
-            };
-
-            if let Err(e) = table.data_store().flush().await {
-                log::warn!(
-                    "flush_buffers: data_store {}/{}: {}",
-                    self.name,
-                    table_name,
-                    e
-                );
-                if first_err.is_none() {
-                    first_err = Some(e);
-                }
-            }
-            if let Err(e) = table.info_store().flush().await {
-                log::warn!(
-                    "flush_buffers: info_store {}/{}: {}",
-                    self.name,
-                    table_name,
-                    e
-                );
-                if first_err.is_none() {
-                    first_err = Some(e);
-                }
-            }
-        }
-
-        // Stage I: persist the single per-repo interner ONCE on graceful
-        // shutdown. Pre-Stage-I this was a per-table loop; now that every
-        // table shares the repo interner, one persist covers all of them
-        // (the manager is Arc-shared so any table's `interner()` handle is
-        // the same live state). After this, WAL entries whose deltas covered
-        // these ids can be safely truncated on next boot.
-        match self.repo_interner().await {
-            Ok(repo_interner) => {
-                if let Err(e) = repo_interner.persist().await {
-                    log::warn!("flush_buffers: repo interner persist {}: {}", self.name, e);
-                    if first_err.is_none() {
-                        first_err = Some(e);
-                    }
-                }
-            }
-            Err(e) => {
-                if first_err.is_none() {
-                    first_err = Some(e);
-                }
-            }
-        }
-
-        match first_err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
     }
 
     /// F6b (I2): flush every per-table `history` version-log to disk WITHOUT
