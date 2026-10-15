@@ -204,13 +204,10 @@ async fn execute_batch(
     execute_batch_raw(auth, resolver, admin, invoker).await
 }
 
-async fn make_repo() -> RepoInstance {
+fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());
-    let instance = RepoInstance::new("bench".into(), BoxRepo::InMemory(repo), Vec::new());
-    let permit = instance.write_domain().admit().await.unwrap();
-    let config = TableConfig::new("bench_table".to_string());
-    instance.add_table_admitted(config, &permit).await.unwrap();
-    instance
+    let tables = vec![TableConfig::new("bench_table".to_string())];
+    RepoInstance::new("bench".into(), BoxRepo::InMemory(repo), tables)
 }
 
 fn make_mvcc() -> Arc<MvccStore> {
@@ -245,9 +242,9 @@ fn main() {
         h.bench_batched_async(
             &format!("disjoint_inserts/n_{n}"),
             move || {
+                let repo = make_repo();
                 let iter_i = iter_ctr.fetch_add(1, Ordering::Relaxed);
                 async move {
-                    let repo = make_repo().await;
                     let _ = repo.get_table("bench_table").await.unwrap();
                     (repo, iter_i)
                 }
@@ -287,15 +284,12 @@ fn main() {
             &format!("disjoint_tables/n_{n}"),
             move || async move {
                 let storage = Arc::new(InMemoryRepo::new());
-                let repo =
-                    RepoInstance::new("bench".into(), BoxRepo::InMemory(storage), Vec::new());
+                let names: Vec<String> = (0..n).map(|w| format!("writer_{w}")).collect();
+                let configs = names.iter().cloned().map(TableConfig::new).collect();
+                let repo = RepoInstance::new("bench".into(), BoxRepo::InMemory(storage), configs);
                 let mut tables = Vec::with_capacity(n);
-                for w in 0..n {
-                    let name = format!("writer_{w}");
-                    let permit = repo.write_domain().admit().await.unwrap();
-                    let config = TableConfig::new(name.clone());
-                    repo.add_table_admitted(config, &permit).await.unwrap();
-                    tables.push(repo.get_table(&name).await.unwrap());
+                for name in &names {
+                    tables.push(repo.get_table(name).await.unwrap());
                 }
                 (repo, tables)
             },
@@ -349,12 +343,14 @@ fn main() {
         let counters = Arc::clone(&hot_key_snapshot_counts);
         h.bench_batched_async(
             &format!("hot_key_snapshot/n_{n}"),
-            move || async move {
-                let repo = make_repo().await;
-                let tbl = repo.get_table("bench_table").await.unwrap();
-                let rid = tbl.insert(&InnerValue::Str("seed".into())).await.unwrap();
-                drop(tbl);
-                (repo, rid)
+            move || {
+                let repo = make_repo();
+                async move {
+                    let tbl = repo.get_table("bench_table").await.unwrap();
+                    let rid = tbl.insert(&InnerValue::Str("seed".into())).await.unwrap();
+                    drop(tbl);
+                    (repo, rid)
+                }
             },
             move |(repo, rid)| {
                 let counters = Arc::clone(&counters);
@@ -419,12 +415,14 @@ fn main() {
         let counters = Arc::clone(&hot_key_serializable_counts);
         h.bench_batched_async(
             &format!("hot_key_serializable/n_{n}"),
-            move || async move {
-                let repo = make_repo().await;
-                let tbl = repo.get_table("bench_table").await.unwrap();
-                let rid = tbl.insert(&InnerValue::Str("seed".into())).await.unwrap();
-                drop(tbl);
-                (repo, rid)
+            move || {
+                let repo = make_repo();
+                async move {
+                    let tbl = repo.get_table("bench_table").await.unwrap();
+                    let rid = tbl.insert(&InnerValue::Str("seed".into())).await.unwrap();
+                    drop(tbl);
+                    (repo, rid)
+                }
             },
             move |(repo, rid)| {
                 let counters = Arc::clone(&counters);
