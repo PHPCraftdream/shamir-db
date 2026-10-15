@@ -94,18 +94,20 @@ impl ShamirAdminExecutor {
                 self.db_name, op.alter_repo
             )));
         }
-        let record = self
-            .shamir
-            .system_store()
-            .load_repository_record(&self.db_name, &op.alter_repo)
-            .await
-            .map_err(|e| err(e.to_string()))?
-            .ok_or_else(|| {
-                err(format!(
-                    "repository catalogue record for '{}/{}' not found",
-                    self.db_name, op.alter_repo
-                ))
-            })?;
+        let record = Box::pin(
+            self.shamir
+                .system_store()
+                // Round-11 (item 5): boxed — await state off the handler frame.
+                .load_repository_record(&self.db_name, &op.alter_repo),
+        )
+        .await
+        .map_err(|e| err(e.to_string()))?
+        .ok_or_else(|| {
+            err(format!(
+                "repository catalogue record for '{}/{}' not found",
+                self.db_name, op.alter_repo
+            ))
+        })?;
 
         let repo = db.get_repo(&op.alter_repo).ok_or_else(|| {
             err(format!(
@@ -145,18 +147,17 @@ impl ShamirAdminExecutor {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         let meta = crate::access::ResourceMeta::from_record(&record);
-        self.shamir
-            .system_store()
-            .save_repository(
-                &self.db_name,
-                &op.alter_repo,
-                &engine,
-                path.as_deref(),
-                &meta,
-                Some(&merged),
-            )
-            .await
-            .map_err(|e| err(e.to_string()))?;
+        // Round-11 (item 5): boxed — await state off the handler frame.
+        Box::pin(self.shamir.system_store().save_repository(
+            &self.db_name,
+            &op.alter_repo,
+            &engine,
+            path.as_deref(),
+            &meta,
+            Some(&merged),
+        ))
+        .await
+        .map_err(|e| err(e.to_string()))?;
 
         // Live swap after successful persistence. The engine prepared path
         // cannot fail: policy validation used the identical captured segment;

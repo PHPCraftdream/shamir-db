@@ -508,25 +508,93 @@ impl ShamirDb {
         schema_validator_id: RecordId,
         rules: Vec<FieldRule>,
     ) -> DbResult<()> {
+        let name = schema_validator_name(db_name, repo_name, table_name);
+        let validator: Arc<dyn RecordValidator> = Arc::new(SchemaValidator::new(rules));
+
+        // Pure registry reads — same classification as master: an ALTER
+        // (`name` already registered) is detected before anything else.
+        let freshly_registered = self.validators.id_for_name(&name).is_none();
+        let prior_artifact: Option<Arc<dyn RecordValidator>> = if freshly_registered {
+            None
+        } else {
+            self.validators.get_by_id(&schema_validator_id)
+        };
+
+        // ALTER branch: run the stale-name-collision check on the registry
+        // BEFORE the repository lookup/admission. Master's observable order
+        // surfaces the stale-collision error even when the repo under the
+        // name cannot be resolved (ghost repo), and the collision check runs
+        // on the registry only — it must not depend on the newly
+        // admission-gated repo lookup. If admission subsequently fails, the
+        // OLD artifact is restored below (F-27b restore-on-failure). The
+        // FRESH branch registers only AFTER admission (see
+        // `compile_table_schema_admitted`), preserving the
+        // `compile_table_schema_waits_for_repository_write_admission`
+        // guarantee that the registry is untouched while admission blocks.
+        let mut alter_replaced = false;
+        if !freshly_registered {
+            let replaced = self
+                .validators
+                .replace_artifact(&schema_validator_id, validator.clone());
+            if !replaced {
+                return Err(DbError::Validation(format!(
+                    "schema_validator_id {schema_validator_id} is not the id registered \
+                     under name '{name}' (stale name collision) — refusing to activate"
+                )));
+            }
+            alter_replaced = true;
+        }
+
         let repo = self
             .get_db(db_name)
             .and_then(|db| db.get_repo(repo_name))
             .ok_or_else(|| {
+                // ALTER path already swapped the NEW artifact in — put the
+                // OLD one back before surfacing the lookup failure.
+                if alter_replaced {
+                    if let Some(old) = &prior_artifact {
+                        self.validators
+                            .replace_artifact(&schema_validator_id, old.clone());
+                    }
+                }
                 DbError::NotFound(format!("Repository '{db_name}.{repo_name}' not found"))
             })?;
-        let permit =
-            repo.write_domain().admit().await.map_err(|e| {
-                DbError::Internal(format!("repository write admission failed: {e}"))
-            })?;
-        self.compile_table_schema_admitted(
-            db_name,
-            repo_name,
-            table_name,
-            schema_validator_id,
-            rules,
-            &permit,
-        )
-        .await
+        let permit = repo.write_domain().admit().await.map_err(|e| {
+            if alter_replaced {
+                if let Some(old) = &prior_artifact {
+                    self.validators
+                        .replace_artifact(&schema_validator_id, old.clone());
+                }
+            }
+            DbError::Internal(format!("repository write admission failed: {e}"))
+        })?;
+        let result = self
+            .compile_table_schema_admitted(
+                db_name,
+                repo_name,
+                table_name,
+                schema_validator_id,
+                rules,
+                &permit,
+            )
+            .await;
+        if result.is_err() {
+            // Symmetric rollback for the steps THIS wrapper performed before
+            // handing off: undo the fresh registration / restore the OLD
+            // artifact. (`compile_table_schema_admitted` already rolled its
+            // own registry steps back; the ALTER restore here replaces its
+            // new-validator-for-new-validator no-op with the true OLD
+            // artifact.)
+            if freshly_registered {
+                self.validators.remove(&schema_validator_id);
+            } else if alter_replaced {
+                if let Some(old) = &prior_artifact {
+                    self.validators
+                        .replace_artifact(&schema_validator_id, old.clone());
+                }
+            }
+        }
+        result
     }
 
     pub(crate) async fn compile_table_schema_admitted(
