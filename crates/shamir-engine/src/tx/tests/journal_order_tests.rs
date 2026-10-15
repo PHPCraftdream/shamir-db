@@ -148,7 +148,24 @@ async fn idle_engine_journal_read_does_not_send_another_barrier() {
         }
     }
     assert_eq!(feed.journal_dropped(), dropped + 1);
-    assert_eq!(feed.first_gap_version(), outcome.commit_version);
+    // Overflow DEFERS: no gap is marked, the seed version is recorded for
+    // deferred repair instead.
+    assert_eq!(
+        feed.first_gap_version(),
+        0,
+        "overflow defers to repair-pending instead of gapping"
+    );
+    let dropped_now = feed.journal_dropped() - dropped;
+    assert!(dropped_now >= 1);
+    assert_eq!(
+        feed.repair_pending().channel_full_total(),
+        dropped_now,
+        "every dropped event is a recorded channel-full admission"
+    );
+    assert!(
+        feed.repair_pending_depth() >= 1,
+        "the deferred version is recorded in the repair-pending set"
+    );
     let idle = repo.read_changelog_from(outcome.commit_version + 1, 0);
     tokio::pin!(idle);
     let polled = poll!(idle.as_mut());
@@ -158,7 +175,7 @@ async fn idle_engine_journal_read_does_not_send_another_barrier() {
         std::task::Poll::Pending => panic!("idle read must not wait for a new writer barrier"),
     };
     assert!(read.events.is_empty());
-    // Overflow marked the seed version, which precedes this read's start.
+    // Overflow deferred the seed version; no gap exists for this read's start.
     assert_eq!(read.gap_at, None);
     assert_eq!(feed.journal_dropped(), dropped + 1);
     assert_eq!(feed.confirm_timeouts(), timeouts);
