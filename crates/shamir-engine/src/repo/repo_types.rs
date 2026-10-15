@@ -285,6 +285,21 @@ impl Repo for BoxRepo {
             BoxRepo::Hybrid(c) => c.stores_list_routed().await,
         }
     }
+
+    /// BoxRepo forwards every `Repo` method explicitly — without this
+    /// override `persist_once` would fall through to the trait's default
+    /// no-op and `flush_buffers`' single shutdown persist would never run.
+    async fn persist_once(&self) -> DbResult<()> {
+        match self {
+            BoxRepo::InMemory(repo) => repo.persist_once().await,
+            #[cfg(feature = "fjall")]
+            BoxRepo::Fjall(repo) => repo.persist_once().await,
+            BoxRepo::MemBuffer(c) => c.inner.persist_once().await,
+            BoxRepo::Cached(c) => c.inner.persist_once().await,
+            #[cfg(feature = "fjall")]
+            BoxRepo::Hybrid(c) => c.disk.persist_once().await,
+        }
+    }
 }
 
 impl From<Arc<InMemoryRepo>> for BoxRepo {
