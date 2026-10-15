@@ -3,7 +3,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use shamir_engine::query::filter::eval_context::FilterContext;
 use shamir_engine::query::read::order::TopKHeap;
 use shamir_engine::repo::changelog_store::StoreChangelog;
 use shamir_engine::table::TableManager;
@@ -108,8 +107,11 @@ async fn empty_pagination_and_journal_preallocations_are_bounded() {
                 .unwrap();
             table.create_index("base_idx", &["status"]).await.unwrap();
         }
-        let interner = table.interner().get().await.unwrap();
-        let ctx = FilterContext::new(interner, &refs);
+        let ctx = table
+            .info_store_read_view()
+            .filter_context(&refs)
+            .await
+            .unwrap();
         let queries = [
             Query::from("t")
                 .order_by_asc("score")
