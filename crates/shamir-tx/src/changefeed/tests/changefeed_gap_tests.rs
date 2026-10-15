@@ -13,7 +13,8 @@ use tokio::sync::{broadcast, mpsc, Notify};
 
 use super::super::{
     decode_gap_marker, gap_marker_key, journal_writer_loop, version_key, ChangelogEvent,
-    ChangelogStore, GapMarker, RepoChangefeed, BROADCAST_CAPACITY, JOURNAL_CHANNEL_CAPACITY,
+    ChangelogStore, GapMarker, RepairPending, RepoChangefeed, BROADCAST_CAPACITY,
+    JOURNAL_CHANNEL_CAPACITY,
 };
 
 #[derive(Default)]
@@ -245,6 +246,7 @@ async fn failed_marker_put_retains_gap_and_retries_on_next_hint() {
         gap: gap.clone(),
         confirmed_through: Arc::new(AtomicU64::new(0)),
         barrier_notify: Arc::new(Notify::new()),
+        repair_pending: Arc::new(RepairPending::new()),
         writer_done: tokio::sync::watch::channel(false).1,
         clean_horizon: Arc::new(AtomicU64::new(0)),
         confirm_timeouts: AtomicU64::new(0),
@@ -258,6 +260,7 @@ async fn failed_marker_put_retains_gap_and_retries_on_next_hint() {
         gap,
         feed.confirmed_through.clone(),
         feed.barrier_notify.clone(),
+        feed.repair_pending().clone(),
     );
     tokio::pin!(writer);
 

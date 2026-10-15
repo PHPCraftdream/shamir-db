@@ -14,6 +14,7 @@
 
 pub(crate) mod checkpoint;
 pub(crate) mod recovery_floor;
+pub(crate) mod repair_pending_drain;
 pub(crate) mod retention;
 pub(crate) mod retention_gate;
 

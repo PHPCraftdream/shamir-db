@@ -204,7 +204,7 @@ async fn post_enqueue_checkpoint_failure_is_retryable_without_gap() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn full_journal_channel_records_exact_orphan_gap() {
+async fn full_journal_channel_defers_orphan_event() {
     let (repo, hook, store) = counted_fixture("orphan_full_channel").await;
     let table = repo.get_table("a").await.unwrap();
     let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
@@ -245,17 +245,34 @@ async fn full_journal_channel_records_exact_orphan_gap() {
     }
 
     store.release_lookup.notify_one();
-    assert_eq!(drain.await.unwrap().unwrap(), 1);
-    assert_eq!(feed.first_gap_version(), version);
+    // PR5b: a channel-full enqueue no longer declares a gap — the orphan's
+    // event was deferred into the repair-pending set and the orphan itself
+    // stays unresolved for a later pass.
+    assert_eq!(drain.await.unwrap().unwrap(), 0);
+    assert_eq!(feed.first_gap_version(), 0);
     assert_eq!(feed.journal_dropped(), 1);
+    assert_eq!(feed.repair_pending_depth(), 1);
 
+    // Release the writer; once it has persisted the parked filler and the
+    // queued backlog the channel has room again.
     store.release_filler.notify_one();
+    for _ in 0..200_000 {
+        if feed.last_persisted_version() >= u64::MAX - 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    // Retry: the repair-pending drain admits the deferred event and the
+    // orphan settles from the now-present journal event — no gap, depth 0.
+    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    assert_eq!(feed.first_gap_version(), 0);
+    assert_eq!(feed.repair_pending_depth(), 0);
     feed.shutdown_and_wait().await.unwrap();
     let journal: Arc<dyn ChangelogStore> = Arc::clone(&store) as Arc<dyn ChangelogStore>;
-    let read = feed.read_from(&journal, version, 1).await;
+    let read = feed.read_from(&journal, version, 10).await;
+    assert_eq!(read.gap_at, None);
     assert!(read
         .events
         .iter()
-        .all(|event| event.commit_version != version));
-    assert_eq!(feed.certified_gap_interval(), Some((version, version)));
+        .any(|event| event.commit_version == version));
 }
