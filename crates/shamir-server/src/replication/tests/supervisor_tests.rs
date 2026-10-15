@@ -501,7 +501,12 @@ async fn partial_history_failure_stops_supervisor_and_refuses_paused_resume() {
     let follower = build_db().await;
     create_profile_and_subscription(&follower).await;
     let destination = follower.get_db("app").unwrap().get_repo("main").unwrap();
-    destination.add_table(TableConfig::new("other"));
+    let permit = destination.write_domain().admit().await.unwrap();
+    destination
+        .add_table_admitted(TableConfig::new("other"), &permit)
+        .await
+        .unwrap();
+    drop(permit);
     let gate = destination.tx_gate().await.unwrap();
     let mut changes = Vec::new();
     let mut order = shamir_collections::TFxMap::default();

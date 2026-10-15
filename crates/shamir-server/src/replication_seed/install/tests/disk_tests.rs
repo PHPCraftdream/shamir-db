@@ -107,7 +107,12 @@ fn every_publication_boundary_cold_retry_converges_without_row_replay() {
                     if entry.file_name().to_string_lossy().contains("-attempt-") {
                         let image = open_image(&entry.path(), "main").await.unwrap();
                         if stop == 6 {
-                            image.add_table(TableConfig::new("rows"));
+                            let permit = image.write_domain().admit().await.unwrap();
+                            image
+                                .add_table_admitted(TableConfig::new("rows"), &permit)
+                                .await
+                                .unwrap();
+                            drop(permit);
                             let table = image.get_table("rows").await.unwrap();
                             let history = table.mvcc_store_for_test().unwrap();
                             assert!(history.get_at(b"opaque", 1).await.unwrap().is_some());
