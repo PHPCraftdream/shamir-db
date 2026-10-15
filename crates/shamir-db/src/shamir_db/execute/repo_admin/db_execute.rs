@@ -134,6 +134,7 @@ impl ShamirDb {
 /// (`BatchOp::Read` — the `Action::Read`-classified variant) are checked;
 /// writes and admin/status/DESCRIBE ops pass through. Shared by the batch
 /// (above) and the interactive-tx gate in `db_tx.rs`.
+#[inline(never)]
 pub(crate) fn quarantined_read_hit(
     db_name: &str,
     request: &BatchRequest,
