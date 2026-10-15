@@ -1,21 +1,18 @@
 use crate::engine::repo::repo_types::BoxRepoFactory;
 use crate::engine::repo::RepoConfig;
 use crate::engine::table::TableConfig;
+use crate::shamir_db::shamir_db::revocation::registry::ChangelogReceiverRegistry;
 use crate::shamir_db::SystemStoreConfig;
+use crate::shamir_db::{ChangelogDeliveryGate, ChangelogReceiver};
 use crate::ShamirDb;
 
 #[tokio::test]
 async fn close_discards_queued_feed_events_and_leaves_healthy_receiver() {
     let (tx, rx) = tokio::sync::broadcast::channel(4);
-    let registry = super::super::registry::ChangelogReceiverRegistry::new();
-    let mut revoked = super::super::receiver::ChangelogReceiver::new(
-        rx,
-        registry.clone(),
-        "testdb".into(),
-        "main".into(),
-    );
+    let registry = ChangelogReceiverRegistry::new();
+    let mut revoked = ChangelogReceiver::new(rx, registry.clone(), "testdb".into(), "main".into());
     let gate = revoked.delivery_gate();
-    let mut healthy = super::super::receiver::ChangelogReceiver::new(
+    let mut healthy = ChangelogReceiver::new(
         tx.subscribe(),
         registry.clone(),
         "testdb".into(),
@@ -98,7 +95,7 @@ async fn persisted_quarantine_flip_revokes_idle_receiver_without_post_flip_write
 
 #[tokio::test]
 async fn wait_idle_stays_pending_until_active_delivery_lease_releases() {
-    let gate = super::super::receiver::ChangelogDeliveryGate::new();
+    let gate = ChangelogDeliveryGate::new();
     let worker_gate = gate.clone();
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -130,7 +127,7 @@ async fn wait_idle_stays_pending_until_active_delivery_lease_releases() {
 
 #[tokio::test]
 async fn delivery_gate_is_panic_safe_when_closed() {
-    let gate = super::super::receiver::ChangelogDeliveryGate::new();
+    let gate = ChangelogDeliveryGate::new();
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = gate.try_with_delivery(|| panic!("lease panic"));
     }));

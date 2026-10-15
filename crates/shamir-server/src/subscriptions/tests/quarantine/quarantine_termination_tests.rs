@@ -32,7 +32,7 @@ use shamir_query_builder::write::insert;
 use shamir_query_types::admin::types::repl_ops::{ReplDirection, ReplMode};
 use shamir_query_types::batch::BatchLimits;
 use shamir_query_types::subscribe::deliver_mode::DeliverMode;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::mpsc;
 
 use super::super::super::bridge::bridge_task;
 use super::super::super::registry::SubscriptionRegistry;

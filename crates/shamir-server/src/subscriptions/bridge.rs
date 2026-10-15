@@ -1,5 +1,6 @@
-use std::future::Future;
 use std::hash::{BuildHasher, Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use shamir_collections::TFxMap;
@@ -120,110 +121,109 @@ pub(crate) async fn bridge_task(
         h.finish()
     };
 
-    let terminal_gates = delivery_gates.clone();
     let run = async {
-        let bridge_work = async {
-            // CRIT-5 (#439): Per-table read-ACL enforcement.
-            //
-            // `BatchOp::Subscribe` is classified at the session layer as
-            // `(Action::Read, Resource::Global)` — a coarse "can this actor
-            // subscribe at all?" gate. The per-table checks the classifier
-            // comment promises ("actual table checks happen when the
-            // subscription is activated") MUST happen here, in the bridge,
-            // where the full `sources` list is known. Without this loop a user
-            // with global `read` but no `read` on table `secrets` would receive
-            // every live insert/update/delete from `secrets`.
-            //
-            // Strategy: authorize each source's table via `authorize_access`;
-            // keep only the authorized subset. Denied sources are logged and
-            // silently excluded (not a hard failure — mirrors the existing
-            // "changefeed not available" partial-reject path). If ALL sources
-            // are denied, bail out before subscribing to any changefeed (no
-            // receiver created, no push).
-            let mut authorized_sources: Vec<SubscriptionSource> = Vec::with_capacity(sources.len());
-            for source in sources {
-                let path = ResourcePath::Table {
-                    db: db_name.clone(),
-                    store: source.table.repo.clone(),
-                    table: source.table.table.clone(),
-                };
-                match db.authorize_access(&actor, &path, Action::Read).await {
-                    Ok(()) => authorized_sources.push(source),
-                    Err(_) => {
-                        tracing::warn!(
-                            sub_id,
-                            repo = %source.table.repo,
-                            table = %source.table.table,
-                            "subscription source denied by read-ACL; excluding from delivery",
-                        );
-                    }
-                }
-            }
-            if authorized_sources.is_empty() {
-                tracing::warn!(
-                    sub_id,
-                    "all subscription sources denied by read-ACL; aborting bridge"
-                );
-                return;
-            }
-            let sources = authorized_sources;
-
-            let targets: Vec<(String, String, EventMask, Option<Filter>)> = sources
-                .iter()
-                .map(|s| {
-                    (
-                        s.table.repo.clone(),
-                        s.table.table.clone(),
-                        s.events.clone(),
-                        s.filter.clone(),
-                    )
-                })
-                .collect();
-
-            // Gather unique repos.
-            let repos: Vec<String> = {
-                let mut r: Vec<String> =
-                    targets.iter().map(|(repo, _, _, _)| repo.clone()).collect();
-                r.sort();
-                r.dedup();
-                r
+        // CRIT-5 (#439): Per-table read-ACL enforcement.
+        //
+        // `BatchOp::Subscribe` is classified at the session layer as
+        // `(Action::Read, Resource::Global)` — a coarse "can this actor
+        // subscribe at all?" gate. The per-table checks the classifier
+        // comment promises ("actual table checks happen when the
+        // subscription is activated") MUST happen here, in the bridge,
+        // where the full `sources` list is known. Without this loop a user
+        // with global `read` but no `read` on table `secrets` would receive
+        // every live insert/update/delete from `secrets`.
+        //
+        // Strategy: authorize each source's table via `authorize_access`;
+        // keep only the authorized subset. Denied sources are logged and
+        // silently excluded (not a hard failure — mirrors the existing
+        // "changefeed not available" partial-reject path). If ALL sources
+        // are denied, bail out before subscribing to any changefeed (no
+        // receiver created, no push).
+        let mut authorized_sources: Vec<SubscriptionSource> = Vec::with_capacity(sources.len());
+        for source in sources {
+            let path = ResourcePath::Table {
+                db: db_name.clone(),
+                store: source.table.repo.clone(),
+                table: source.table.table.clone(),
             };
-
-            // Subscribe to each repo's changefeed FIRST -- before journal backfill --
-            // so we don't miss events between journal read and live subscription.
-            let mut receivers = Vec::with_capacity(repos.len());
-            let mut delivery_gates: Vec<ChangelogDeliveryGate> = Vec::with_capacity(repos.len());
-            let mut states = Vec::with_capacity(repos.len());
-            for repo in &repos {
-                match db.subscribe_changelog(&db_name, repo).await {
-                    Ok(Some(rx)) => {
-                        delivery_gates.push(rx.delivery_gate());
-                        receivers.push(rx);
-                        // Attach before sampling W; never use a post-snapshot maximum.
-                        let Some(w) = db.changelog_visible_floor(&db_name, repo).await else {
-                            tracing::warn!(sub_id, repo, "activation cut unavailable");
-                            return;
-                        };
-                        // Journal versions start at 1: resume 0 includes all history,
-                        // just like resume 1; saturating subtraction preserves both.
-                        let cursor = from_version.map_or(w, |fv| fv.saturating_sub(1));
-                        states.push(JournalDrain::new(cursor));
-                    }
-                    // S5c-X PR8b: a quarantined (`resync_required`) repo is
-                    // refused (`DbError::ResyncRequired`) — the bridge must NOT
-                    // attach a live event stream (nor run the initial snapshot)
-                    // against a repo whose reads are quarantined.
-                    Ok(None) => {
-                        tracing::warn!(sub_id, repo = %repo, "changefeed not available");
-                        return;
-                    }
-                    Err(error) => {
-                        tracing::warn!(sub_id, repo = %repo, %error, "changefeed refused");
-                        return;
-                    }
+            match db.authorize_access(&actor, &path, Action::Read).await {
+                Ok(()) => authorized_sources.push(source),
+                Err(_) => {
+                    tracing::warn!(
+                        sub_id,
+                        repo = %source.table.repo,
+                        table = %source.table.table,
+                        "subscription source denied by read-ACL; excluding from delivery",
+                    );
                 }
             }
+        }
+        if authorized_sources.is_empty() {
+            tracing::warn!(
+                sub_id,
+                "all subscription sources denied by read-ACL; aborting bridge"
+            );
+            return;
+        }
+        let sources = authorized_sources;
 
+        let targets: Vec<(String, String, EventMask, Option<Filter>)> = sources
+            .iter()
+            .map(|s| {
+                (
+                    s.table.repo.clone(),
+                    s.table.table.clone(),
+                    s.events.clone(),
+                    s.filter.clone(),
+                )
+            })
+            .collect();
+
+        // Gather unique repos.
+        let repos: Vec<String> = {
+            let mut r: Vec<String> = targets.iter().map(|(repo, _, _, _)| repo.clone()).collect();
+            r.sort();
+            r.dedup();
+            r
+        };
+
+        // Subscribe to each repo's changefeed FIRST -- before journal backfill --
+        // so we don't miss events between journal read and live subscription.
+        let mut receivers = Vec::with_capacity(repos.len());
+        let mut delivery_gates: Vec<ChangelogDeliveryGate> = Vec::with_capacity(repos.len());
+        let mut states = Vec::with_capacity(repos.len());
+        for repo in &repos {
+            match db.subscribe_changelog(&db_name, repo).await {
+                Ok(Some(rx)) => {
+                    delivery_gates.push(rx.delivery_gate());
+                    receivers.push(rx);
+                    // Attach before sampling W; never use a post-snapshot maximum.
+                    let Some(w) = db.changelog_visible_floor(&db_name, repo).await else {
+                        tracing::warn!(sub_id, repo, "activation cut unavailable");
+                        return;
+                    };
+                    // Journal versions start at 1: resume 0 includes all history,
+                    // just like resume 1; saturating subtraction preserves both.
+                    let cursor = from_version.map_or(w, |fv| fv.saturating_sub(1));
+                    states.push(JournalDrain::new(cursor));
+                }
+                // S5c-X PR8b: a quarantined (`resync_required`) repo is
+                // refused (`DbError::ResyncRequired`) — the bridge must NOT
+                // attach a live event stream (nor run the initial snapshot)
+                // against a repo whose reads are quarantined.
+                Ok(None) => {
+                    tracing::warn!(sub_id, repo = %repo, "changefeed not available");
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(sub_id, repo = %repo, %error, "changefeed refused");
+                    return;
+                }
+            }
+        }
+
+        let terminal_gates = delivery_gates.clone();
+        let bridge_work = async {
             // repo name -> index (built once; repos are fixed at subscribe time).
             let repo_idx: TFxMap<String, usize> = repos
                 .iter()

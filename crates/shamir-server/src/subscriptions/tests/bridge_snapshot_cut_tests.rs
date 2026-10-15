@@ -146,7 +146,6 @@ async fn interleaving(stage: u8, resume: bool) {
         .unwrap();
     let registry = Arc::new(SubscriptionRegistry::new());
     registry.try_reserve().unwrap();
-    registry.try_reserve().unwrap();
     registry.reserve_pending(1);
     let (frames, mut observed) = mpsc::channel(32);
     let hook = Arc::new(Hook {
@@ -390,7 +389,6 @@ async fn snapshot_preserves_actor_filters_and_authorization() {
     .unwrap();
     let registry = Arc::new(SubscriptionRegistry::new());
     registry.try_reserve().unwrap();
-    registry.try_reserve().unwrap();
     registry.reserve_pending(1);
     let (frames, mut observed) = mpsc::channel(8);
     let mut bridge = Box::pin(bridge_task(
@@ -447,7 +445,6 @@ async fn snapshot_reauthorizes_reads_as_subscriber() {
         .await
         .unwrap();
     let registry = Arc::new(SubscriptionRegistry::new());
-    registry.try_reserve().unwrap();
     registry.try_reserve().unwrap();
     registry.reserve_pending(1);
     let (frames, mut observed) = mpsc::channel(8);
@@ -512,7 +509,6 @@ async fn cancellation_during_snapshot_releases_pin_and_registry() {
         .await
         .unwrap();
     let registry = Arc::new(SubscriptionRegistry::new());
-    registry.try_reserve().unwrap();
     registry.try_reserve().unwrap();
     registry.reserve_pending(1);
     let (frames, mut observed) = mpsc::channel(8);
