@@ -14,6 +14,10 @@ impl RepoInstance {
     /// buffer flush and clean-horizon checkpoint. Any error quarantines an
     /// installed lifecycle; a never-installed lifecycle completes immediately.
     pub async fn shutdown_clean(&self, budget: std::time::Duration) -> DbResult<()> {
+        Box::pin(self.shutdown_clean_inner(budget)).await
+    }
+
+    async fn shutdown_clean_inner(&self, budget: std::time::Duration) -> DbResult<()> {
         let deadline = tokio::time::Instant::now() + budget;
         let lifecycle = self.worker_lifecycle();
         if let Some(lifecycle) = lifecycle {
@@ -22,7 +26,7 @@ impl RepoInstance {
 
         let result = tokio::time::timeout_at(deadline, async {
             if let Some(lifecycle) = lifecycle {
-                match lifecycle.shutdown_until(deadline).await {
+                match Box::pin(lifecycle.shutdown_until(deadline)).await {
                     Ok(WorkerTerminal::Completed) => {}
                     Ok(WorkerTerminal::Failed(msg)) => {
                         return Err(DbError::Storage(format!("worker failed: {msg}")));

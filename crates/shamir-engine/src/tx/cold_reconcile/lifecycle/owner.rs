@@ -400,13 +400,21 @@ impl<J: Send, R: Send> RepoWorkerLifecycle<J, R> {
         deadline: tokio::time::Instant,
     ) -> Result<WorkerTerminal, ShutdownError> {
         self.close();
-        let mut rx = self.terminal.clone();
+        let rx = self.terminal.clone();
         if let Some(t) = rx.borrow().clone() {
             // Cached terminal: the supervisor already joined and published;
             // never repoll the worker.
             self.record_joined();
             return Ok(t);
         }
+        Box::pin(self.wait_terminal_until(deadline, rx)).await
+    }
+
+    async fn wait_terminal_until(
+        &self,
+        deadline: tokio::time::Instant,
+        mut rx: tokio::sync::watch::Receiver<Option<WorkerTerminal>>,
+    ) -> Result<WorkerTerminal, ShutdownError> {
         let result = tokio::time::timeout_at(deadline, async {
             let value = rx.wait_for(|t| t.is_some()).await?;
             Ok::<WorkerTerminal, tokio::sync::watch::error::RecvError>(
