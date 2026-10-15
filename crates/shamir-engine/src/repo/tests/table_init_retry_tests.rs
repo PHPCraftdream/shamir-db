@@ -3,8 +3,7 @@
 //! registration point). Restoring early registration strands an entry in
 //! the first two tests and prevents init2 from completing in the race test.
 
-use crate::repo::changelog_store::write_domain::RepoWriteDomain;
-
+use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_types::BoxRepo;
 use crate::table::table_manager::table_token_for;
 use crate::table::{TableConfig, TableManager};

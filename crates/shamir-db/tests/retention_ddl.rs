@@ -7,6 +7,9 @@
 //!   migration) and the new policy governs subsequent writes.
 //! - A principal without `Manage` permission is denied `SetRetention`.
 
+use std::future::Future;
+use std::task::Poll;
+
 use shamir_db::access::Actor;
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
@@ -151,6 +154,64 @@ async fn set_retention_changes_live_table_policy() {
     // The live MvccStore now reports the new policy.
     let after = table_retention(&shamir, "testdb", "main", "users").await;
     assert_eq!(after.max_count, Some(5));
+}
+
+/// Repository retention DDL waits for repository write admission before
+/// changing the live MVCC policy.
+#[tokio::test]
+async fn set_retention_waits_for_repository_write_admission() {
+    let shamir = setup_shamir().await;
+    let before = table_retention(&shamir, "testdb", "main", "users").await;
+    assert_eq!(before.max_count, Some(0));
+
+    let repo = shamir
+        .get_db("testdb")
+        .expect("db exists")
+        .get_repo("main")
+        .expect("repo exists");
+    let permit = repo.write_domain().admit().await.unwrap();
+
+    let mut batch = Batch::new();
+    batch.id(1);
+    batch.set_retention(
+        "sr",
+        ddl::set_retention(
+            "users",
+            Retention {
+                max_count: Some(7),
+                ..Default::default()
+            },
+        )
+        .repo("main"),
+    );
+    let request = batch.to_request_via_msgpack();
+    let mut execution = Box::pin(shamir.execute("testdb", &request));
+    let waker = futures::task::noop_waker();
+    let mut context = std::task::Context::from_waker(&waker);
+    assert!(matches!(
+        Future::poll(execution.as_mut(), &mut context),
+        Poll::Pending
+    ));
+    assert_eq!(
+        table_retention(&shamir, "testdb", "main", "users")
+            .await
+            .max_count,
+        Some(0),
+        "retention must not change before write admission"
+    );
+
+    drop(permit);
+    let response = execution.await.unwrap();
+    assert_eq!(
+        response.results["sr"].records[0].get_value_bool("ok"),
+        Some(true)
+    );
+    assert_eq!(
+        table_retention(&shamir, "testdb", "main", "users")
+            .await
+            .max_count,
+        Some(7)
+    );
 }
 
 /// `SetRetention` with all three knobs round-trips and takes effect.

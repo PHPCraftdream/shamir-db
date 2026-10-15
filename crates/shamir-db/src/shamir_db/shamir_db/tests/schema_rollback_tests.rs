@@ -115,6 +115,59 @@ async fn db_without_tables() -> ShamirDb {
 // ═══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
+async fn compile_table_schema_waits_for_repository_write_admission() {
+    let db = db_without_tables().await;
+    let mut batch = Batch::new();
+    batch.id(1);
+    batch.create_repo("cr", ddl::create_repo("main").tables(["users"]));
+    db.execute("testdb", &batch.to_request_via_msgpack())
+        .await
+        .expect("create_repo must succeed");
+
+    let repo = db
+        .get_db("testdb")
+        .and_then(|db| db.get_repo("main"))
+        .expect("seeded repository must exist");
+    let table = db
+        .get_table("testdb", "main", "users")
+        .await
+        .expect("seeded table must exist");
+    let id = RecordId::system("admission_schema");
+    let name = schema_validator_name("testdb", "main", "users");
+    let initial_bindings = table.validator_bindings();
+    assert!(initial_bindings.is_empty());
+
+    let permit = repo
+        .write_domain()
+        .admit()
+        .await
+        .expect("test must hold repository admission");
+    let db_ref = &db;
+    let compile = db_ref.compile_table_schema("testdb", "main", "users", id, no_rules());
+    tokio::pin!(compile);
+
+    assert!(
+        futures::poll!(compile.as_mut()).is_pending(),
+        "compile must wait while another operation holds the repository permit"
+    );
+    assert!(db.validators().id_for_name(&name).is_none());
+    assert!(db.validators().get_by_id(&id).is_none());
+    assert!(table.validator_bindings().is_empty());
+
+    drop(permit);
+    compile
+        .await
+        .expect("schema activation must complete after admission");
+
+    assert_eq!(db.validators().id_for_name(&name), Some(id));
+    assert!(db.validators().get_by_id(&id).is_some());
+    let bindings = table.validator_bindings();
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].validator_id, id);
+    assert_eq!(bindings[0].priority, 500);
+}
+
+#[tokio::test]
 async fn fresh_register_is_undone_when_activation_fails() {
     let db = db_without_tables().await;
     let name = schema_validator_name("testdb", "main", "ghost_table");
