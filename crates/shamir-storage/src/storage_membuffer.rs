@@ -1005,6 +1005,15 @@ impl Store for MemBufferStore {
         self.inner.flush().await
     }
 
+    /// Drain the buffer into the inner store WITHOUT the inner
+    /// `flush()` — the shutdown flush pass drains every store first and
+    /// then persists the backend ONCE (`Repo::persist_once`); calling the
+    /// inner flush here would reintroduce one full-database fsync per
+    /// buffered store.
+    async fn flush_drain(&self) -> DbResult<()> {
+        self.drain_all().await
+    }
+
     async fn apply_buffer_config(&self, config: &MemBufferConfig) -> DbResult<()> {
         self.apply_config(config).await?;
         self.inner.apply_buffer_config(config).await

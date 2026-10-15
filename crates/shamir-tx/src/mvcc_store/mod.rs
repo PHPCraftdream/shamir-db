@@ -469,6 +469,13 @@ impl MvccStore {
         self.history.flush().await
     }
 
+    /// Drain buffered history entries into the backing store WITHOUT the
+    /// store-level durability barrier — the shutdown flush pass persists
+    /// the backend once (`Repo::persist_once`) after all drains.
+    pub async fn flush_history_drain(&self) -> DbResult<()> {
+        self.history.flush_drain().await
+    }
+
     /// Approximate number of live in-memory record cells (keys with a
     /// current version). Formerly used by `RENAME TABLE` to refuse
     /// populated-table renames; Phase F.2 replaced that guard with
