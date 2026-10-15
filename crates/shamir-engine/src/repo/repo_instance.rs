@@ -107,8 +107,9 @@ pub struct RepoInstance {
     /// caller observes the one-and-only drainer.
     drainer: Arc<std::sync::OnceLock<Arc<crate::tx::drainer::Drainer>>>,
     /// PR6b-2b (inactive): lifecycle owner of the repository background
-    /// worker; close-on-drop + one absolute shutdown deadline.
-    worker_lifecycle: Arc<RepoUnitLifecycle>,
+    /// worker; lazily created on first use; close-on-drop applies to the
+    /// created instance; PR6b-2c owns the lifetime of an ACTIVE worker.
+    worker_lifecycle: Arc<std::sync::OnceLock<Arc<RepoUnitLifecycle>>>,
     /// Per-repo string interner (Stage I — moved from per-table to per-repo).
     /// Backed by the dedicated `"__interner__"` store. Built once on first
     /// access (lazy) and shared via [`Arc::clone`] so every
@@ -265,7 +266,7 @@ impl RepoInstance {
             )),
             token_names: Arc::new(token_names),
             tx_metrics: Arc::new(shamir_tx::TxMetrics::new()),
-            worker_lifecycle: Arc::new(RepoUnitLifecycle::default()),
+            worker_lifecycle: Arc::new(std::sync::OnceLock::new()),
             commit_tail: Arc::new(CommitTailBarrier::default()),
             group_commit: Arc::new(GroupCommit::new()),
             changefeed: Arc::new(OnceCell::new()),

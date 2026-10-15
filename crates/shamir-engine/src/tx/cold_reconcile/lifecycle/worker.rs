@@ -1,8 +1,9 @@
 //! Worker execution state + lease hook (S5c-X PR6b-2b).
 //!
-//! The worker's execution state carries the job receiver, the repository
-//! resource lease, a generation number, and a clone of the shared
-//! publication/termination interlock. It holds NO sender and NO
+//! The worker's execution state carries the job receiver, an `Arc` to the
+//! repository resource lease, a generation number, and an `Arc` to the
+//! shared owner/supervisor/worker core state (which owns the
+//! publication/termination interlock). It holds NO sender and NO
 //! lifecycle-owner reference (not even a `Weak`): the worker cannot reach
 //! back into the owner, which keeps the ownership graph one-directional.
 
@@ -12,7 +13,7 @@ use tokio::sync::mpsc;
 
 use super::interlock::PubTermInterlock;
 use super::job::LifecycleJob;
-use super::owner::{InstallError, RepoWorkerLifecycle};
+use super::owner::{CoreState, InstallError, RepoWorkerLifecycle};
 
 /// The repository resource lease hook. The receipt pipeline implements
 /// `on_quarantine` to run the FAIL-CLOSED unsettled drop for parked
@@ -30,9 +31,12 @@ pub trait WorkerLease: Send + 'static {
 /// reference, no sender (see module doc).
 pub struct WorkerExecutionState<J, R, L> {
     receiver: mpsc::Receiver<LifecycleJob<J, R>>,
-    lease: L,
+    /// Shared with the supervisor, which drops the LAST `Arc<L>` strictly
+    /// after joining the worker task — the physical lease lifetime ends
+    /// after join.
+    lease: Arc<L>,
     generation: u64,
-    interlock: Arc<PubTermInterlock>,
+    core: Arc<CoreState>,
 }
 
 impl<J, R, L> WorkerExecutionState<J, R, L> {
@@ -40,15 +44,15 @@ impl<J, R, L> WorkerExecutionState<J, R, L> {
     /// `install_worker`).
     pub(crate) fn new(
         receiver: mpsc::Receiver<LifecycleJob<J, R>>,
-        lease: L,
+        lease: Arc<L>,
         generation: u64,
-        interlock: Arc<PubTermInterlock>,
+        core: Arc<CoreState>,
     ) -> Self {
         Self {
             receiver,
             lease,
             generation,
-            interlock,
+            core,
         }
     }
 
@@ -73,16 +77,16 @@ impl<J, R, L> WorkerExecutionState<J, R, L> {
         self.lease.on_quarantine();
     }
 
-    /// Clone of the shared publication/termination interlock handle.
-    pub fn interlock(&self) -> &Arc<PubTermInterlock> {
-        &self.interlock
+    /// Handle to the shared publication/termination interlock.
+    pub fn interlock(&self) -> &PubTermInterlock {
+        self.core.interlock()
     }
 }
 
 /// Thin wrapper over [`RepoWorkerLifecycle::install_worker`]: installs a
 /// worker task on `owner` with the given lease and job handler. Returns
 /// an error (WITHOUT spawning) if admission is closed, a worker is
-/// already installed, or the join slot is busy.
+/// already installed, or the install slot is busy.
 pub fn spawn_worker<J, R, L, F, Fut>(
     owner: &Arc<RepoWorkerLifecycle<J, R>>,
     lease: L,
