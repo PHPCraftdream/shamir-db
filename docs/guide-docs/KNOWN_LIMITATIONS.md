@@ -636,9 +636,19 @@ artifact).
   new admissions until successful truncation brings retained bytes under the
   cap. `declare_gap` persists a real GAP where possible but does not evict WAL
   whose data/history is not known safe; a failed journal writer falls back to
-  refusal. Memory/hybrid WAL bypass these controls. Runtime orphan replay and
-  channel-full gap repair remain PR5 and are not implemented: such existing
-  gaps are not cleared by cold reconciliation. Followers have no WAL: since PR6c their cold start certifies through the
+  refusal. Memory/hybrid WAL bypass these controls. Runtime orphan replay is
+  implemented, and a channel-full journal (4096 slots) no longer produces an
+  unavoidable replication GAP (S5c-X PR5b): the version goes into an
+  in-memory repair-pending set (`shamir_tx::changefeed::RepairPending`) and
+  the background drainer re-enqueues the event rebuilt from the retained WAL
+  entry once the channel has room, with journal-writer barriers and the
+  clean-horizon checkpoint ceiling clamped below the oldest repair-pending
+  version so no bounded reader silently skips it. Repair-pending state is in
+  memory only: an unclean shutdown with versions still repair-pending falls
+  back to cold reconciliation from the WAL on restart, which rebuilds those
+  events. A repair is impossible once the WAL segment is gone — the retention
+  policy (`refuse_writes` / `declare_gap`) still wins when its policy says so
+  — and such existing gaps are not cleared by cold reconciliation. Followers have no WAL: since PR6c their cold start certifies through the
   journal horizon J in the bookmark record and marks only the in-flight batch
   (`in_flight_range`) as an uncertain GAP; an unknown J keeps the conservative
   whole-window fallback. Since PR6b-2 the follower apply path is receipt-protected:

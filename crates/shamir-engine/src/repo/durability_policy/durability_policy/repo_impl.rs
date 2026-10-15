@@ -4,6 +4,9 @@ use super::*;
 use crate::repo::durability_policy::{resolve, DurabilityMetricsSnapshot};
 use shamir_query_types::{DurabilityOverride, ReplicationServe};
 
+#[cfg(test)]
+use crate::tx::clean_horizon::tests::test_journal_seam;
+
 impl RepoInstance {
     #[cfg(test)]
     pub(crate) async fn from_factory_with_test_segment_bytes(
@@ -13,11 +16,22 @@ impl RepoInstance {
         policy: DurabilityPolicy,
         segment_bytes: u64,
     ) -> DbResult<Self> {
+        // Test-only seam: consume a handle the test registered BEFORE this
+        // open (`tx::clean_horizon::tests::test_journal_seam`); `name` is moved below.
+        let pending_journal = test_journal_seam::take(&name);
         let mut instance = Self::from_factory_unrecovered(name, factory, configs).await?;
         instance.disable_background_drainer_for_test();
         instance.set_wal_segment_bytes_for_test(segment_bytes);
         instance.set_durability(policy)?;
         instance.repo_identity().await?;
+        // Install BEFORE `recover_v2_inflight`: a disk repo's cold
+        // reconciliation lazily initialises its own feed via
+        // `repo.changefeed()`, which would make the OnceCell assert in
+        // `install_journal_for_test` fail and leave the test's ParkStore
+        // journal disconnected.
+        if let Some(handle) = pending_journal {
+            instance.install_journal_for_test(handle);
+        }
         instance.recover_v2_inflight().await?;
         Ok(instance)
     }

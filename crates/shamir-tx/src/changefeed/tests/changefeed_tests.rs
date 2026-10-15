@@ -318,8 +318,9 @@ async fn cf2_last_persisted_version_starts_at_zero() {
 
 // --- CF-1: first_gap_version + JournalRead gap signal ---
 
-/// `read_from` returns `gap_at = Some(g)` when `first_gap_version` is set
-/// and `g >= from_version`.
+/// Channel overflow defers (repair-pending) and does NOT gap; a CLOSED
+/// journal writer gaps, and `read_from` returns `gap_at = Some(g)` when
+/// `first_gap_version` is set and `g >= from_version`.
 #[tokio::test]
 async fn cf1_read_from_signals_gap_at_when_gap_version_set() {
     let store: Arc<dyn ChangelogStore> = Arc::new(MemChangelogStore::default());
@@ -352,42 +353,68 @@ async fn cf1_read_from_signals_gap_at_when_gap_version_set() {
     let feed2 = RepoChangefeed::new(Arc::clone(&store2));
 
     // Fill channel to JOURNAL_CHANNEL_CAPACITY (4096) + push one more to
-    // trigger the Full branch and set first_gap_version.
+    // trigger the Full branch. Under the new contract Full DEFERS (records
+    // the version in the repair-pending set); it does NOT mark a gap.
     use crate::changefeed::JOURNAL_CHANNEL_CAPACITY;
     for v in 1u64..=(JOURNAL_CHANNEL_CAPACITY as u64 + 1) {
         let tx = tx_with_writes(v).await;
         feed2.emit(project_event(&tx, "main", v).unwrap());
     }
 
-    // At this point journal_dropped >= 1 and first_gap_version is set.
+    // Overflow dropped exactly the over-capacity event(s) and deferred them.
     assert!(
         feed2.journal_dropped() >= 1,
         "at least one event must have been dropped"
     );
-    let gap = feed2.first_gap_version();
-    assert!(gap > 0, "first_gap_version must be set after a drop");
+    assert_eq!(
+        feed2.first_gap_version(),
+        0,
+        "channel overflow defers, it does not gap"
+    );
+    assert!(
+        feed2.repair_pending_depth() >= 1,
+        "the deferred version is recorded in the repair-pending set"
+    );
+    assert!(
+        feed2.repair_pending().channel_full_total() >= 1,
+        "the channel-full admission must be counted"
+    );
+
+    // Overflow produces no gap, so `read_from` reports none.
+    let jr = feed2.read_from(&store2, 1, 10).await;
+    assert_eq!(jr.gap_at, None, "overflow must not surface as a gap");
+
+    // The gap_at signal itself stays alive through the CLOSED arm: stop the
+    // writer (its receiver is dropped → the channel closes), then enqueue one
+    // more event — the Closed branch marks the gap.
+    feed2.shutdown_and_wait().await.unwrap();
+    let closed_version = JOURNAL_CHANNEL_CAPACITY as u64 + 2;
+    let tx = tx_with_writes(closed_version).await;
+    let ev = Arc::new(project_event(&tx, "main", closed_version).unwrap());
+    feed2.journal_enqueue(&ev);
+    assert_eq!(feed2.first_gap_version(), closed_version);
 
     // read_from with from_version <= gap must return Some(gap).
     let jr = feed2.read_from(&store2, 1, 10).await;
     assert_eq!(
         jr.gap_at,
-        Some(gap),
+        Some(closed_version),
         "gap_at must be Some when gap >= from_version"
     );
 
     // read_from with from_version > gap must return None.
-    let jr_past = feed2.read_from(&store2, gap + 1, 10).await;
+    let jr_past = feed2.read_from(&store2, closed_version + 1, 10).await;
     assert_eq!(
         jr_past.gap_at, None,
         "gap_at must be None when from_version > gap"
     );
 }
 
-/// `journal_dropped` counter still increments correctly alongside
-/// `first_gap_version` being set (CF-1 + existing counter — both observability
-/// paths must work together).
+/// `journal_dropped` counter still increments correctly when overflow DEFERS
+/// events (CF-1 + repair-pending — both observability paths must work
+/// together; no gap is marked by overflow).
 #[tokio::test]
-async fn cf1_journal_dropped_still_counted_alongside_gap() {
+async fn cf1_journal_dropped_defers_without_gap() {
     let store: Arc<dyn ChangelogStore> = Arc::new(MemChangelogStore::default());
     let feed = RepoChangefeed::new(Arc::clone(&store));
 
@@ -403,8 +430,17 @@ async fn cf1_journal_dropped_still_counted_alongside_gap() {
         feed.journal_dropped() >= 5,
         "at least 5 events must have been dropped"
     );
+    assert_eq!(
+        feed.first_gap_version(),
+        0,
+        "channel overflow defers, it does not gap"
+    );
     assert!(
-        feed.first_gap_version() > 0,
-        "first_gap_version must be set when events are dropped"
+        feed.repair_pending_depth() >= 5,
+        "every deferred version must be recorded in the repair-pending set"
+    );
+    assert!(
+        feed.repair_pending().channel_full_total() >= 5,
+        "every channel-full admission must be counted"
     );
 }

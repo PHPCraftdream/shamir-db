@@ -144,8 +144,14 @@ follower-of-follower работает тем же протоколом без н
 - **Durable journal** per-repo, ключ — BE-u64 `commit_version`
   (лексикографический порядок = числовой); фоновый writer вне
   commit-critical-path; `last_persisted_version` watermark;
-  **`gap_at`-сигнал** при drop'е из-за overflow (`JournalRead { events,
-  gap_at }`).
+  **`gap_at`-сигнал** в read-API остаётся для легаси/retention-потерь; с
+  PR5b переполнение канала (4096 слотов) больше **не** создаёт drop+gap:
+  версия попадает в lock-free in-memory repair-pending set
+  (`shamir_tx::changefeed::RepairPending`), фоновый дренаж заново ставит в канал
+  событие, восстановленное из сохранённой WAL-записи, барьеры writer'а и
+  checkpoint-ceiling зажимаются ниже старейшей repair-pending версии, а
+  durable GAP объявляется только когда WAL-запись утрачена (retention) или
+  writer закрыт.
 - **Live broadcast** — `tokio::sync::broadcast` per-repo; отставший
   подписчик получает `Lagged` и достирает окно из журнала.
 
@@ -672,7 +678,10 @@ reconnect_backoff_ms = { min = 200, max = 30_000 }   # + jitter
   оператора.
 - Гап/reseed: `gap_at` останавливает follower до применения payload и
   требует операторского восстановления, если residual gap пересекает его
-  bookmark/следующую версию. После S5c-X PR4 unclean restart сам по себе не
+  bookmark/следующую версию. Переполнение журнального канала (channel-full,
+  PR5b) само по себе больше не создаёт gap: событие откладывается в
+  repair-pending и восстанавливается из WAL, так что после overflow reseed
+  не нужен. После S5c-X PR4 unclean restart сам по себе не
   означает GAP: cold open восстанавливает выводимые события v3 из WAL;
   неизвестный legacy WAL или отсутствующие evidence могут оставить
   минимальный консервативный gap. Offline seed остаётся ручным; автоматического
@@ -708,7 +717,10 @@ unbenchmarked.** До serving recovery идемпотентно восстана
 или отсутствующие evidence могут оставить минимальный консервативный GAP;
 pre-existing GAP не очищаются. Journal и recovery floor flush'ятся до записи
 J=H, затем J сохраняется до serving. Unclean shutdown сам по себе не требует
-reseed. PR5 (runtime orphan/channel-full gap repair) реализован; с PR6c WAL-less follower
+reseed. PR5 (runtime orphan repair) и PR5b (channel-full repair: переполнение
+канала на 4096 слотов откладывается в in-memory repair-pending set и
+восстанавливается из WAL; durable GAP — только при утраченной WAL-записи или
+закрытом writer'е) реализованы; с PR6c WAL-less follower
 при холодном старте сертифицирует журнал через J из своей bookmark-записи,
 оставляя минимальный uncertain GAP только для in-flight батча; с PR6b-2 этот
 in-flight батч закрывается receipt-resume с идентичным allocation (retry-safe

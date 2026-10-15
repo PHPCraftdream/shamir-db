@@ -22,6 +22,16 @@ pub(in crate::tx::drainer) async fn settle_event(
     };
     match outcome {
         Outcome::Repaired => drainer.orphan_repair_metrics.repaired(),
+        Outcome::EnqueuePending => {
+            // Deferred by a full journal channel: the repair-pending drain
+            // lands the event; the orphan itself stays unresolved so a later
+            // pass retries it. No failure counters, no gap.
+            log::debug!(
+                "drain_step: orphan {version} journal channel full; event deferred to \
+                 repair-pending; leaving orphan unresolved"
+            );
+            return Ok(false);
+        }
         Outcome::Gap(reason) => {
             if let Err(error) = repo.mark_changefeed_gap(version).await {
                 drainer.record_orphan_failure(orphan_failed, &error);
