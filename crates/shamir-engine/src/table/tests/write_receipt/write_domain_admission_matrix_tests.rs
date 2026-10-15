@@ -351,7 +351,6 @@ async fn buffer_config_mutations_block_without_effect() {
     )
     .await
     .expect("set buffer config");
-    let before = mgr.get_buffer_config().await.unwrap().unwrap();
     let altered_config = mgr.alter_buffer_config(|config| {
         config.max_entries = 321;
     });
