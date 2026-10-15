@@ -994,7 +994,7 @@ async fn quarantine_row_entries(
         }
         Err(error) => (
             vec![(global_sentinel_key(), unresolvable_profile_reason(profile))],
-            Some(format!("quarantined profile resolution failed: {error}")),
+            Some(format!("profile resolution failed ({profile}): {error}")),
         ),
     }
 }
