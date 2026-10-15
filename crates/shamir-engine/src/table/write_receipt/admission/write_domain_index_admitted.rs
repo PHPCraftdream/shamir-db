@@ -69,26 +69,15 @@ impl TableManager {
         // once the DROP releases admission, rather than being rejected) —
         // not a correctness bug: no double-registration, no orphaned
         // postings, no stale tombstone state.
-        let dropping_ids =
-            crate::index2::persistence::load_dropping_index2(&self.info_store).await?;
-        if !dropping_ids.is_empty() {
-            if let Some(persisted) =
-                crate::index2::persistence::load_index2_metadata(&self.info_store).await?
-            {
-                for d in &persisted.descriptors {
-                    if dropping_ids.iter().any(|(id, _, _)| *id == d.id)
-                        && d.name == op.create_index
-                    {
-                        return Err(shamir_storage::error::DbError::Internal(format!(
-                            "Cannot create index '{}': a DROP INDEX for this name is \
-                             still in progress. Retry after the drop completes.",
-                            op.create_index
-                        )));
-                    }
-                }
-            }
-        }
+        // Same P0-3b fast-reject as the pre-admission pre-check in
+        // `create_index_v2` (shared helper): admitted callers (e.g. the
+        // shamir-db DDL path) are rejected here without waiting for a DROP
+        // parked at its pre-sweep hook — the parked drop holds the repo
+        // permit, so the admitted twin itself must not block behind it.
+        self.reject_create_while_drop_in_flight(&op.create_index)
+            .await?;
 
+        // #534 finding 1 (write-barrier, Option B — mirrors
         // #534 finding 1 (write-barrier, Option B — mirrors
         // `create_unique_index`'s own audit-A9 precedent). Hold the table-wide
         // `unique_write_lock` across the ENTIRE reserve-id → backfill →

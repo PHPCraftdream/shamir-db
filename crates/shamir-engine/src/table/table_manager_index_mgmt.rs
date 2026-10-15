@@ -35,8 +35,54 @@ impl TableManager {
         &self,
         op: &shamir_query_types::admin::CreateIndexOp,
     ) -> DbResult<()> {
+        // P0-3b (#988) sub-bug 3b: the name-reuse fast-reject MUST run BEFORE
+        // repository admission. `drop_index2` holds the repo permit across its
+        // ENTIRE critical section — including while parked at the F-76
+        // pre-sweep test hook (`drop_index2_pause_hook`, in
+        // `write_domain_index_core.rs`) and across its reader-drain wait — so
+        // a `create_index_v2` that admitted FIRST would block on the
+        // non-reentrant domain mutex until the parked drop completes. Under
+        // `p03b_index2_name_reuse_rejected_during_drop` the only task that can
+        // release the hook is the SAME task issuing the create → deadlock
+        // (test timeout). The cheap persisted-tombstone read below rejects
+        // without touching the domain; the same check re-runs inside the
+        // admitted body (closing the admit→check race for admitted callers).
+        let index_type = op.index_type.as_deref().unwrap_or("btree");
+        if index_type != "btree" {
+            self.reject_create_while_drop_in_flight(&op.create_index)
+                .await?;
+        }
         let permit = self.admit().await?;
         self.create_index_v2_admitted(op, &permit).await
+    }
+
+    /// P0-3b (#988): reject a CREATE whose name's DROP is still in flight,
+    /// by reading the persisted drop tombstone. Pure reads — safe to run
+    /// WITHOUT repo admission (used pre-admission by
+    /// [`TableManager::create_index_v2`] and under a held permit inside
+    /// [`TableManager::create_index_v2_admitted`]).
+    pub(in crate::table) async fn reject_create_while_drop_in_flight(
+        &self,
+        index_name: &str,
+    ) -> DbResult<()> {
+        let dropping_ids =
+            crate::index2::persistence::load_dropping_index2(&self.info_store).await?;
+        if dropping_ids.is_empty() {
+            return Ok(());
+        }
+        if let Some(persisted) =
+            crate::index2::persistence::load_index2_metadata(&self.info_store).await?
+        {
+            for d in &persisted.descriptors {
+                if dropping_ids.iter().any(|(id, _, _)| *id == d.id) && d.name == index_name {
+                    return Err(shamir_storage::error::DbError::Internal(format!(
+                        "Cannot create index '{index_name}': a DROP INDEX for this name is \
+                         still in progress. Retry after the drop completes."
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Populate a single freshly-created index2 backend from the records that

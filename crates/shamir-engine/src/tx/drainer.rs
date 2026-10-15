@@ -1629,7 +1629,17 @@ impl Drainer {
     /// backstop so a missed wakeup still makes progress. The single-owner
     /// contract (exactly one task per repo) is the caller's responsibility
     /// (spawn once behind the repo's `OnceCell<Arc<Drainer>>`).
-    pub fn spawn(self: &Arc<Self>, repo: RepoInstance, live: Weak<()>, interval: Duration) {
+    pub fn spawn(
+        self: &Arc<Self>,
+        repo: RepoInstance,
+        live: Weak<()>,
+        // Round 11 item 3: fired (synchronously, from `Drop`) when the last
+        // foreground repo clone drops; wakes the park below immediately so the
+        // task's background repo clone — which pins every fjall store handle —
+        // is released deterministically instead of up to one interval later.
+        drop_notify: Option<tokio::sync::Notify>,
+        interval: Duration,
+    ) {
         #[cfg(any(test, feature = "test-util"))]
         if crate::tx::commit::TEST_POST_WAL_PRE_PUBLISH_HOOK
             .get()
@@ -1673,8 +1683,22 @@ impl Drainer {
                 // so a quiescent system can release it.
                 match drainer.upgrade() {
                     Some(this) => {
+                        // Round 11 item 3: `drop_notify` fires the instant the
+                        // last foreground clone drops, so the exit check right
+                        // after this park runs without waiting out the interval
+                        // backstop. The `Option` is `None` only for a task
+                        // spawned from a background clone (never on the commit
+                        // path); such a loop keeps the pure-interval park.
+                        let closed = async {
+                            match &drop_notify {
+                                Some(notify) => notify.notified().await,
+                                None => std::future::pending::<()>().await,
+                            }
+                        };
+                        tokio::pin!(closed);
                         tokio::select! {
                             _ = this.notify.notified() => {}
+                            _ = closed => {}
                             _ = tokio::time::sleep(interval) => {}
                         }
                     }

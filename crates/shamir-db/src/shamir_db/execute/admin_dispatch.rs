@@ -1,9 +1,13 @@
 //! `AdminExecutor` trait impl + thin `execute_admin` dispatcher.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use crate::access::{Action, Actor, ResourcePath};
 use crate::query::batch::{AdminExecutor, BatchError, BatchOp};
 use crate::query::read::QueryResult;
 use crate::shamir_db::ports::RepoAdminObserver;
+use shamir_query_types::admin::AlterRepoOp;
 
 use super::super::shamir_db::ShamirDb;
 
@@ -31,7 +35,11 @@ impl AdminExecutor for ShamirAdminExecutor {
             BatchOp::CreateRepo(op) => self.handle_create_repo(op).await,
             BatchOp::DropRepo(op) => self.handle_drop_repo(op).await,
             BatchOp::RenameRepo(op) => self.handle_rename_repo(op).await,
-            BatchOp::AlterRepo(op) => self.handle_alter_repo(op).await,
+            // S5c-X Round-11 (item 5): routed through `dispatch_alter_repo`
+            // so the durability-swap arm's await state stays out of
+            // `execute_admin`'s own future (nested-Batch Windows stack
+            // overflow; same mechanism as the Round-14 replication fix).
+            BatchOp::AlterRepo(op) => Self::dispatch_alter_repo(self, op).await,
             BatchOp::DescribeRepo(op) => self.handle_describe_repo(op).await,
             BatchOp::RenameDb(op) => self.handle_rename_db(op).await,
 
@@ -124,7 +132,24 @@ impl AdminExecutor for ShamirAdminExecutor {
     }
 }
 
+/// Mirror of the Round-14 `ReplDispatchFuture` pattern (batch_execute.rs):
+/// keeps the boxed dispatcher future's type off `dispatch_alter_repo`'s
+/// signature so `clippy::type_complexity` stays quiet under `-D warnings`.
+type AlterRepoDispatchFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<QueryResult, BatchError>> + Send + 'a>>;
+
 impl ShamirAdminExecutor {
+    /// S5c-X Round-11 (item 5): ALTER REPO dispatcher, kept OUT of
+    /// `execute_admin`'s own future. `#[inline(never)]` + explicit boxing
+    /// means the durability path's (admission, catalogue persist, live
+    /// policy swap) await state lives on the heap, not in every
+    /// `execute_admin` state machine along the nested-Batch/ForEach
+    /// recursion (Windows stack overflow in the repo_audit tests).
+    #[inline(never)]
+    fn dispatch_alter_repo<'a>(&'a self, op: &'a AlterRepoOp) -> AlterRepoDispatchFuture<'a> {
+        Box::pin(async move { self.handle_alter_repo(op).await })
+    }
+
     /// Authorize a user-lifecycle op (`CreateUser` / `DropUser`) under the
     /// owner-delegation model.
     ///
