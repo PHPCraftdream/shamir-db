@@ -579,8 +579,8 @@ impl ShamirAdminExecutor {
             .persist_table_interner(&table, None)
             .await
             .map_err(|e| err(e.to_string()))?;
-        self.shamir
-            .flush_seed_catalogue()
+        // Round-12 (stack layout): pinned like the refresh below.
+        Box::pin(self.shamir.flush_seed_catalogue())
             .await
             .map_err(|e| err(e.to_string()))?;
         // PR8b: Pause/Resume/SetProfile can flip the persisted `state`; rebuild

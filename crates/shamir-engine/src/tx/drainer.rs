@@ -101,7 +101,7 @@ use crate::tx::clean_horizon::repair_pending_drain::entry_interner_max_id;
 mod orphan_repair;
 #[cfg(test)]
 use crate::tx::clean_horizon::checkpoint::test_seam;
-use crate::tx::{materialize::interner_delta_safe_to_truncate, recovery::replay_v2_op};
+use crate::tx::materialize::interner_delta_safe_to_truncate;
 
 /// Test-only injection: when set to a non-zero `table_id`, the Phase B
 /// index-posting batch write for that table returns a synthetic error
@@ -850,7 +850,7 @@ impl Drainer {
                         // lookup failure stops at this entry, not its prefix.
                     }
                     _ => {
-                        if let Err(e) = Box::pin(replay_v2_op(op, repo)).await {
+                        if let Err(e) = crate::tx::recovery::replay_v2_op(op, repo).await {
                             log::warn!(
                                 "drain_step: non-data op replay for tx {} \
                                  commit_version {} failed: {e}; stopping this pass",
