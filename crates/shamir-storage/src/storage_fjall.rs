@@ -276,7 +276,7 @@ fn exec_atomic_commit(
 
     // The batch is applied; durability is per-backend policy. A persist
     // failure means applied-but-durability-unknown → Uncertain.
-    match persist_sync_all(&db) {
+    match persist_sync_all(db) {
         Ok(()) => Ok(AtomicCommitOutcome::Committed),
         Err(e) => Ok(AtomicCommitOutcome::Uncertain {
             detail: format!("fjall persist after atomic batch: {e}"),
