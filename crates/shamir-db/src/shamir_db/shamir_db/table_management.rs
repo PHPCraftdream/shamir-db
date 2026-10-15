@@ -49,9 +49,14 @@ impl ShamirDb {
         if enable_indexes {
             config = config.with_indexes();
         }
-        db.get_repo(repo_name)
-            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?
-            .add_table(config);
+        let repo = db
+            .get_repo(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
+        // DDL interlock (repo-level `ddl_admission`): table create must not
+        // interleave with a follower receipt apply. Single acquisition per
+        // path — `add_table` itself takes no guard.
+        let _ddl = repo.ddl_admission_guard().await;
+        repo.add_table(config);
 
         if let Err(e) = self
             .system_store
@@ -87,6 +92,14 @@ impl ShamirDb {
         let db = self
             .get_db(db_name)
             .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
+        let repo = db
+            .get_repo(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
+        // DDL interlock (repo-level `ddl_admission`): table drop must not
+        // interleave with a follower receipt apply. Single acquisition per
+        // path — `drop_table_cleaning_validators` delegates here, so it must
+        // NOT take a second (non-reentrant) guard.
+        let _ddl = repo.ddl_admission_guard().await;
         let removed = db.drop_table(repo_name, table_name)?;
 
         // Always clear the catalogue entry (idempotent), even if the

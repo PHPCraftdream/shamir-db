@@ -8,8 +8,9 @@
 //! notify/notify_waiters handshake — no sleeps anywhere.
 
 use bytes::Bytes;
+use futures::StreamExt;
 use shamir_storage::error::DbError;
-use shamir_storage::types::{RecordKey, Repo as _, Store};
+use shamir_storage::types::{RecordKey, Store};
 use shamir_tx::{decode_version_key, encode_version_key, ChangeOp, ChangelogEvent, RecordChange};
 use shamir_types::access::Actor;
 use shamir_types::codecs::basic::bincode as bincode_codec;
@@ -28,7 +29,7 @@ use crate::tx::apply_replicated::follower_durability::test_seam::{self, Phase};
 use crate::tx::apply_replicated::{apply_replicated_batch, ApplyOutcome, ApplyPolicy};
 use crate::tx::ReplicatedEvent;
 
-use super::super::activation::disable_receipt_lookup;
+use super::super::resume::activation::disable_receipt_lookup;
 use super::super::stage::set_simulate_uncertain;
 
 fn event(leader_version: u64, id: u8) -> ReplicatedEvent {
@@ -104,7 +105,7 @@ fn count_key() -> RecordKey {
 }
 
 async fn history_row(repo: &RepoInstance, key: &[u8], version: u64) -> Option<Bytes> {
-    let store = repo.repo.store_get("__history__items").await.unwrap();
+    let store = repo.raw_store("__history__items").await.unwrap();
     store
         .get(RecordKey::from_slice(&encode_version_key(key, version)))
         .await
@@ -113,7 +114,7 @@ async fn history_row(repo: &RepoInstance, key: &[u8], version: u64) -> Option<By
 
 /// Every local version at which `key` has a history row.
 async fn history_versions(repo: &RepoInstance, key: &[u8]) -> Vec<u64> {
-    let store = repo.repo.store_get("__history__items").await.unwrap();
+    let store = repo.raw_store("__history__items").await.unwrap();
     let mut versions = Vec::new();
     for batch in store.iter_stream(128).collect::<Vec<_>>().await {
         for (record_key, _) in batch.unwrap() {
@@ -129,7 +130,7 @@ async fn history_versions(repo: &RepoInstance, key: &[u8]) -> Vec<u64> {
 }
 
 async fn persisted_count(repo: &RepoInstance) -> u64 {
-    let store = repo.repo.store_get("__info__items").await.unwrap();
+    let store = repo.raw_store("__info__items").await.unwrap();
     let bytes = store.get(count_key()).await.unwrap();
     bincode_codec::from_bytes::<u64>(&bytes).unwrap()
 }
@@ -154,7 +155,7 @@ async fn outstanding_state(repo: &RepoInstance) -> (Option<[u8; 16]>, Option<Rec
 async fn crash_at_prepared(repo: &RepoInstance, name: &str, events: &[ReplicatedEvent]) {
     let hook = Arc::new(test_seam::Hook::default());
     *hook.park_at.lock().unwrap() = Some(Phase::ReceiptPrepared);
-    test_seam::install(name, Arc::clone(&hook));
+    test_seam::install(&name, Arc::clone(&hook));
     let mut apply = Box::pin(apply_replicated_batch(
         repo,
         events,
@@ -181,7 +182,9 @@ async fn key_bytes(id: u8) -> Vec<u8> {
 
 // One fresh batch of two events goes through the whole pipeline atomically:
 // journal rows, history rows, absolute counters, an advanced v3 bookmark
-// with no outstanding receipt, and no receipt left behind.
+// with no outstanding receipt, and no receipt left behind. The outcome's
+// `local_version` is the pipeline's allocation high-water mark — 2 for a
+// two-event batch (versions 1 and 2).
 #[tokio::test]
 async fn fresh_apply_writes_receipt_pipeline_atomically() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -192,7 +195,7 @@ async fn fresh_apply_writes_receipt_pipeline_atomically() {
         apply_replicated_batch(&repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted)
             .await
             .unwrap(),
-        ApplyOutcome::Applied { local_version: 1 }
+        ApplyOutcome::Applied { local_version: 2 }
     );
 
     let info = repo.tx_info_store().await.unwrap();
@@ -331,7 +334,8 @@ async fn identity_rejection_is_fail_closed() {
 
 // With the simulated-Uncertain seam on, the Materialized commit's read-back
 // reconcile runs and still leaves exactly one set of rows: no double-write
-// and no error.
+// and no error. The outcome is the allocation high-water mark (2 for the
+// two-event batch).
 #[tokio::test]
 async fn uncertain_materialization_reconciles_by_read_back() {
     set_simulate_uncertain(false);
@@ -344,7 +348,7 @@ async fn uncertain_materialization_reconciles_by_read_back() {
     let outcome =
         apply_replicated_batch(&repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted).await;
     set_simulate_uncertain(false);
-    assert_eq!(outcome.unwrap(), ApplyOutcome::Applied { local_version: 1 });
+    assert_eq!(outcome.unwrap(), ApplyOutcome::Applied { local_version: 2 });
     assert_eq!(history_versions(&repo, &keys[0]).await, vec![1]);
     assert_eq!(history_versions(&repo, &keys[1]).await, vec![2]);
     let counter = repo.get_table("items").await.unwrap().counter().clone();
@@ -355,7 +359,8 @@ async fn uncertain_materialization_reconciles_by_read_back() {
 
 // A PUT followed by a DELETE of the same key lands the tombstone row
 // (empty value), keeps the absolute counter at zero, and the published
-// snapshot read returns None.
+// snapshot read returns None. The outcome is the allocation high-water
+// mark — 2 for the two-event batch.
 #[tokio::test]
 async fn receipt_path_writes_absolute_counters() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -372,7 +377,7 @@ async fn receipt_path_writes_absolute_counters() {
         )
         .await
         .unwrap(),
-        ApplyOutcome::Applied { local_version: 1 }
+        ApplyOutcome::Applied { local_version: 2 }
     );
 
     let tombstone = history_row(&repo, &key, 2).await.unwrap();

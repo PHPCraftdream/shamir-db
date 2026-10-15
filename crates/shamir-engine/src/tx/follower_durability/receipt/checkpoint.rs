@@ -4,18 +4,125 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(test)]
+use tokio::sync::Notify;
+
 use bytes::Bytes;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{AtomicBatch, AtomicCommitOutcome, RecordKey, Store};
-use shamir_tx::version_key;
+use shamir_tx::{version_key, RepoTxGate};
 
-use super::stage;
+use super::{publish, stage};
 use crate::meta::repl::bookmark_v3::{encode_bookmark_v3, load_bookmark_v3, BookmarkV3};
 use crate::meta::repl::receipt::receipt_key;
 use crate::meta::repl::ReplicationReceipt;
 use crate::repo::RepoInstance;
 
 const TX_STORE: &str = "__tx__";
+
+/// Test-only seam: after a `Committed` checkpoint outcome, pretend it was
+/// `Uncertain` so the read-back reconcile path runs in tests (mirrors
+/// stage.rs's `SIMULATE_UNCERTAIN`).
+#[cfg(test)]
+static SIMULATE_CHECKPOINT_UNCERTAIN: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+#[allow(dead_code)] // driven by the PR6b-2 test chunk
+pub(crate) fn set_simulate_checkpoint_uncertain(on: bool) {
+    SIMULATE_CHECKPOINT_UNCERTAIN.store(on, Ordering::Release);
+}
+
+/// Test-only observable seam: counts how many times the checkpoint's
+/// read-back/reconcile branch actually ran (one increment per Uncertain
+/// outcome). Lets tests prove the reconcile path executed instead of merely
+/// inferring it from the settled state.
+#[cfg(test)]
+static CHECKPOINT_RECONCILES: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+#[allow(dead_code)] // driven by the PR6b-2 test chunk
+pub(crate) fn checkpoint_reconciles() -> usize {
+    CHECKPOINT_RECONCILES.load(Ordering::Acquire)
+}
+
+/// Test-only serialization: the seams below are process-global, so the
+/// tests that touch them (or the reconcile counter) take this lock to stay
+/// deterministic under cargo's parallel test threads.
+#[cfg(test)]
+static CHECKPOINT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+#[allow(dead_code)] // driven by the PR6b-2 test chunk
+pub(crate) fn checkpoint_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    CHECKPOINT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Commit-park gate for cancellation tests: parks `checkpoint()` AFTER the
+/// WAL group resolution and BEFORE staging the batch, so a test can drop
+/// the CALLER future (and its JoinHandle await) while the repository-owned
+/// worker is mid-checkpoint — and then watch the detached worker complete.
+#[cfg(test)]
+static COMMIT_PARK_ARMED: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static COMMIT_PARK_REACHED: Notify = Notify::const_new();
+#[cfg(test)]
+static COMMIT_PARK_RELEASE: Notify = Notify::const_new();
+
+#[cfg(test)]
+#[allow(dead_code)] // driven by the PR6b-2 test chunk
+pub(crate) fn arm_commit_park(on: bool) {
+    COMMIT_PARK_ARMED.store(on, Ordering::Release);
+}
+
+#[cfg(test)]
+#[allow(dead_code)] // driven by the PR6b-2 test chunk
+pub(crate) async fn wait_commit_park_reached() {
+    let notified = COMMIT_PARK_REACHED.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    notified.await;
+}
+
+#[cfg(test)]
+#[allow(dead_code)] // driven by the PR6b-2 test chunk
+pub(crate) fn release_commit_park() {
+    COMMIT_PARK_RELEASE.notify_waiters();
+}
+
+/// Same gate, INSIDE the Uncertain reconcile branch (immediately before the
+/// read-back): parks the reconcile path so a test can drop the caller
+/// future before the reconcile completes.
+#[cfg(test)]
+static RECONCILE_PARK_ARMED: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static RECONCILE_PARK_REACHED: Notify = Notify::const_new();
+#[cfg(test)]
+static RECONCILE_PARK_RELEASE: Notify = Notify::const_new();
+
+#[cfg(test)]
+#[allow(dead_code)] // driven by the PR6b-2 test chunk
+pub(crate) fn arm_reconcile_park(on: bool) {
+    RECONCILE_PARK_ARMED.store(on, Ordering::Release);
+}
+
+#[cfg(test)]
+#[allow(dead_code)] // driven by the PR6b-2 test chunk
+pub(crate) async fn wait_reconcile_park_reached() {
+    let notified = RECONCILE_PARK_REACHED.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    notified.await;
+}
+
+#[cfg(test)]
+#[allow(dead_code)] // driven by the PR6b-2 test chunk
+pub(crate) fn release_reconcile_park() {
+    RECONCILE_PARK_RELEASE.notify_waiters();
+}
 
 /// Matches `barrier::CONFIRM_BUDGET` (private to the barrier module).
 const RECEIPT_CONFIRM_BUDGET: Duration = Duration::from_secs(1);
@@ -103,18 +210,51 @@ async fn stage_checkpoint_batch(
 }
 
 /// Step 4b: advance the bookmark, J, and retire the receipt in ONE atomic
-/// batch; flush the info store afterwards.
+/// batch, then publish to RAM in the SAME poll (the synchronous
+/// `publish::apply_publication` runs directly after the commit's poll
+/// resolves, with no `.await` in between), and flush the info store
+/// afterwards.
 pub(crate) async fn checkpoint(
     repo: &RepoInstance,
     info: &Arc<dyn Store>,
     receipt: &ReplicationReceipt,
     old: &BookmarkV3,
+    gate: &Arc<RepoTxGate>,
+    publication: &publish::Publication,
 ) -> DbResult<()> {
+    // Resolve the WAL group BEFORE the commit so nothing awaits between the
+    // commit's poll resolving and the RAM publication (see the cancellation
+    // proof on `publish::apply_publication`).
+    let group = repo.wal_group().await.ok();
+    #[cfg(test)]
+    if COMMIT_PARK_ARMED.load(Ordering::Acquire) {
+        COMMIT_PARK_REACHED.notify_waiters();
+        COMMIT_PARK_RELEASE.notified().await;
+    }
     let outcome = stage_checkpoint_batch(repo, receipt, old)
         .await?
         .commit()
         .await?;
+    #[cfg(test)]
+    let outcome = if outcome == AtomicCommitOutcome::Committed
+        && SIMULATE_CHECKPOINT_UNCERTAIN.load(Ordering::Acquire)
+    {
+        AtomicCommitOutcome::Uncertain {
+            detail: "injected checkpoint".into(),
+        }
+    } else {
+        outcome
+    };
     if let AtomicCommitOutcome::Uncertain { detail } = outcome {
+        // The read-back/reconcile branch RAN — observable in tests via
+        // `checkpoint_reconciles()`.
+        #[cfg(test)]
+        CHECKPOINT_RECONCILES.fetch_add(1, Ordering::AcqRel);
+        #[cfg(test)]
+        if RECONCILE_PARK_ARMED.load(Ordering::Acquire) {
+            RECONCILE_PARK_REACHED.notify_waiters();
+            RECONCILE_PARK_RELEASE.notified().await;
+        }
         // Reconcile by reading back: advanced bookmark AND retired receipt.
         let settled = match load_bookmark_v3(info).await {
             Ok(Some(bookmark)) => {
@@ -143,6 +283,11 @@ pub(crate) async fn checkpoint(
             );
         }
     }
+    // RAM publication: synchronous, in the same poll as the commit above.
+    publish::apply_publication(gate, group.as_ref(), publication);
+    // ReceiptCheckpointed fires only AFTER the publication has completed —
+    // a test that drops the apply future at this phase can never observe
+    // the commit-without-publication window.
     #[cfg(test)]
     super::super::test_seam::phase(
         repo.name(),

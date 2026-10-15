@@ -16,6 +16,13 @@ use shamir_storage::types::Store;
 #[path = "changelog_store/follower_durability.rs"]
 mod follower_durability;
 
+// Test-side reachability: the submodule is private, so re-export the DDL
+// interlock hook accessor for `tx/follower_durability/receipt/tests`.
+// (`DdlGuard`/`ddl_admission_lock` need no re-export — they are reached as
+// methods on `RepoInstance`.)
+#[cfg(test)]
+pub(crate) use follower_durability::ddl_hook;
+
 /// Per-repo durable changelog journal backed by a `Store`.
 pub struct StoreChangelog {
     store: Arc<dyn Store>,

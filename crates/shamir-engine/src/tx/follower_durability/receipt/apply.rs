@@ -1,7 +1,16 @@
 //! Orchestration (S5c-X PR6b-2): route one pull batch through the receipt
 //! pipeline — resume an outstanding receipt if any, otherwise chunk the
-//! prepared events and run Prepared → Materialized → checkpoint → publish
-//! per chunk.
+//! prepared events and run Prepared → Materialized → adopt-counters →
+//! checkpoint (bookmark commit + RAM publication in one poll) per chunk.
+//!
+//! Cancellation: the pipeline runs on a REPOSITORY-OWNED bounded worker
+//! (`tokio::spawn` of `run_receipt_pipeline`). The caller awaits the
+//! worker's `JoinHandle`; dropping the caller future drops only that await
+//! — the worker keeps its cheap `Arc` clone of the repo and runs the
+//! operation to completion or to a durable pause point. The worker is
+//! BOUNDED because the admission mutex inside the pipeline serializes
+//! applies (one at a time): concurrent callers queue on the mutex rather
+//! than piling up unbounded work.
 
 use std::sync::Arc;
 
@@ -25,18 +34,54 @@ pub(crate) async fn apply_batch_receipt(
     bookmark: u64,
     policy: ApplyPolicy,
 ) -> DbResult<ApplyOutcome> {
+    // Repository-owned bounded worker (S5c-X design, failure matrix
+    // "Cancellation"): the pipeline runs on a DETACHED task that owns a
+    // cheap Arc clone of the repo. Dropping the caller's future drops only
+    // the JoinHandle await — the operation runs to completion or to a
+    // durable pause point. Bounded: the admission mutex inside the pipeline
+    // serializes applies (one at a time), so concurrent callers queue on
+    // the mutex rather than piling up unbounded work.
+    let mut handle = tokio::spawn(run_receipt_pipeline(
+        repo.clone(),
+        Arc::clone(info),
+        events.to_vec(),
+        bookmark,
+        policy,
+    ));
+    match (&mut handle).await {
+        Ok(result) => result,
+        Err(join_error) if join_error.is_cancelled() => Err(DbError::RepoRequiresReopen(
+            "receipt apply task cancelled".into(),
+        )),
+        Err(join_error) => Err(DbError::Internal(format!(
+            "receipt apply worker panicked: {join_error}"
+        ))),
+    }
+}
+
+async fn run_receipt_pipeline(
+    repo: RepoInstance,
+    info: Arc<dyn Store>,
+    events: Vec<ReplicatedEvent>,
+    bookmark: u64,
+    policy: ApplyPolicy,
+) -> DbResult<ApplyOutcome> {
     let gate = repo.tx_gate().await?;
     if gate.requires_reopen() {
         return Err(DbError::RepoRequiresReopen(repo.name().to_string()));
     }
     // Repository write-admission domain for the receipt path: serializes
-    // receipt applies against marker/floor persistence. The contention model
-    // is ONE follower apply at a time — bounded, and off any read path.
+    // receipt applies against marker/floor persistence AND against local DDL
+    // (both take `ddl_admission` — a follower apply can never interleave
+    // with a create/drop/rename index mid-pipeline). The contention model is
+    // ONE follower apply at a time — this mutex is what bounds the
+    // repository-owned worker queue, and the path stays off any read path.
     let _admission = repo.marker_write_mutex().lock().await;
-    if let Some(outstanding) = resume::lookup(repo, info).await? {
-        resume::match_offered(&outstanding.receipt, events)?;
-        let tail = resume::tail_events(&outstanding.receipt, events);
-        let v3 = load_bookmark_v3(info).await?.ok_or_else(|| {
+    let _ddl = repo.ddl_admission_lock().await;
+    if let Some(outstanding) = resume::lookup(&repo, &info).await? {
+        resume::match_offered(&outstanding.receipt, &events)?;
+        let tail = resume::tail_events(&outstanding.receipt, &events);
+        let v3 = load_bookmark_v3(&info).await?.ok_or_else(|| {
             DbError::RepoRequiresReopen("replication bookmark vanished during resume".into())
         })?;
         let old = BookmarkV3 {
@@ -49,7 +94,7 @@ pub(crate) async fn apply_batch_receipt(
         // publish row building.
         let work = match outstanding.receipt.phase {
             ReceiptPhase::Prepared => {
-                stage::materialize_from_prepared_receipt(repo, &outstanding.receipt).await?
+                stage::materialize_from_prepared_receipt(&repo, &outstanding.receipt).await?
             }
             ReceiptPhase::Materialized => {
                 stage::materialize_from_materialized_receipt(&outstanding.receipt)?
@@ -60,19 +105,20 @@ pub(crate) async fn apply_batch_receipt(
                 ));
             }
         };
-        let (receipt, _counters) = stage::commit_materialized_work(repo, info, &work, &old).await?;
-        let publication = publish::publication_from_receipt(repo, &receipt).await?;
+        let (receipt, _counters) =
+            stage::commit_materialized_work(&repo, &info, &work, &old).await?;
+        let publication = publish::publication_from_receipt(&repo, &receipt).await?;
         let floor = publication.floor;
-        let new_bookmark = durable_tail(repo, info, &gate, &receipt, publication, &old).await?;
+        let new_bookmark = durable_tail(&repo, &info, &gate, &receipt, publication, &old).await?;
         if !tail.is_empty() {
             let tail: Vec<ReplicatedEvent> = tail.into_iter().cloned().collect();
-            apply_fresh(repo, info, &gate, &tail, new_bookmark, policy).await?;
+            apply_fresh(&repo, &info, &gate, &tail, new_bookmark, policy).await?;
         }
         return Ok(ApplyOutcome::Applied {
             local_version: floor,
         });
     }
-    apply_fresh(repo, info, &gate, events, bookmark, policy).await
+    apply_fresh(&repo, &info, &gate, &events, bookmark, policy).await
 }
 
 /// The fresh path: translate the whole batch (rejections stay pre-write, like
@@ -86,10 +132,18 @@ async fn apply_fresh(
     bookmark: u64,
     policy: ApplyPolicy,
 ) -> DbResult<ApplyOutcome> {
+    // Design step 1: the DURABLE bookmark is consulted BEFORE any version
+    // allocation, so a replayed pull carrying a stale caller watermark can
+    // never allocate replacement versions over versions the durable state
+    // already owns. (The resume path already consults the receipt before
+    // anything else.) The caller-supplied `bookmark` is kept for
+    // compatibility, but the durable floor always applies.
+    let durable_bookmark = load_replication_bookmark(info).await?;
+    let watermark = bookmark.max(durable_bookmark);
     let mut prepared: Vec<PreparedEvent> = Vec::with_capacity(events.len());
     let mut origins: Vec<usize> = Vec::new();
     for (index, event) in events.iter().enumerate() {
-        match prepare_event(repo, &event.event, &event.field_bindings, bookmark, policy).await? {
+        match prepare_event(repo, &event.event, &event.field_bindings, watermark, policy).await? {
             Ok(event) => {
                 prepared.push(event);
                 origins.push(index);
@@ -162,31 +216,46 @@ async fn apply_fresh(
         )
         .await?;
         stage::commit_prepared(repo, info, &plan, &old).await?;
-        // From here the durable receipt owns this chunk's versions. If a
-        // later step fails, the guards drop and mark Aborted — a transient
-        // state: the resume path re-owns the EXACT versions via
-        // `resume_version_guard`, whose `commit()` overwrites the mark, and
-        // the completion watermark logic tolerates the rewrite (it only
-        // skips versions ≤ the watermark). The bookmark advance and the
-        // receipt make the data arrive at resume either way. No reopen is
-        // set for ordinary I/O failures — that is this PR's headline change.
-        for guard in guards.drain(0..end - start) {
-            drop(guard);
-        }
-        let work = stage::materialize_from_plan(repo, &mut plan).await?;
-        let (receipt, counters) = stage::commit_materialized_work(repo, info, &work, &old).await?;
-        let publication = publish::publication_from_plan(repo, &plan, &counters).await?;
-        let new_bookmark = durable_tail(repo, info, gate, &receipt, publication, &old).await?;
-        let local_end = receipt
-            .mapping
-            .iter()
-            .map(|mapping| mapping.local_version)
-            .max()
-            .unwrap_or(0);
+        // From here the durable receipt owns this chunk's versions. The
+        // guards are NEVER dropped before publication: the worker owns them
+        // across materialize → Materialized batch → publication build →
+        // durable_tail, so no Aborted mark can advance the watermark past an
+        // unpublished version (the repository-owned worker cannot be dropped
+        // mid-pipeline — only its caller's await can). Ordinary Storage I/O
+        // failures retry the idempotent materialization inline (the durable
+        // receipt is the redo authority); the 3rd failure or any
+        // NON-retryable error (RepoRequiresReopen = quarantine, decode
+        // errors) drops the chunk guards and returns — the reopen path,
+        // where a watermark advance is then acceptable.
+        let mut attempt = 0usize;
+        let (new_bookmark, chunk_local_end) = loop {
+            match run_chunk_tail(repo, info, gate, &mut plan, &old).await {
+                Ok(done) => break done,
+                Err(error) => {
+                    attempt += 1;
+                    if !matches!(error, DbError::Storage(_)) || attempt >= 3 {
+                        guards.drain(0..end - start);
+                        return Err(error);
+                    }
+                    log::warn!(
+                        "follower receipt chunk tail failed (attempt {attempt}/3), \
+                         retrying: {error}"
+                    );
+                }
+            }
+        };
+        // By now the publication inside `checkpoint` has run
+        // `publish_materialized` + `mark_durable` via the resume guards, so
+        // the fresh guards' Drop Aborted marks land at versions already ≤
+        // the watermark and are no-ops.
+        guards.drain(0..end - start);
         old = BookmarkV3 {
             fence: old.fence.clone(),
             bookmark: new_bookmark,
-            clean_through: Some(old.clean_through.map_or(local_end, |j| j.max(local_end))),
+            clean_through: Some(
+                old.clean_through
+                    .map_or(chunk_local_end, |j| j.max(chunk_local_end)),
+            ),
             outstanding_receipt: None,
         };
         start = end;
@@ -196,10 +265,34 @@ async fn apply_fresh(
     })
 }
 
+/// Post-Prepared tail of one fresh chunk: the idempotent materialization,
+/// the durable Materialized batch, the publication build, and the
+/// durability tail. Returns `(new_bookmark, chunk_local_end)`.
+async fn run_chunk_tail(
+    repo: &RepoInstance,
+    info: &Arc<dyn Store>,
+    gate: &Arc<RepoTxGate>,
+    plan: &mut stage::BatchPlan,
+    old: &BookmarkV3,
+) -> DbResult<(u64, u64)> {
+    let work = stage::materialize_from_plan(repo, plan).await?;
+    let (receipt, counters) = stage::commit_materialized_work(repo, info, &work, old).await?;
+    let publication = publish::publication_from_plan(repo, plan, &counters).await?;
+    let chunk_local_end = receipt
+        .mapping
+        .iter()
+        .map(|mapping| mapping.local_version)
+        .max()
+        .unwrap_or(0);
+    let new_bookmark = durable_tail(repo, info, gate, &receipt, publication, old).await?;
+    Ok((new_bookmark, chunk_local_end))
+}
+
 /// Shared post-materialization durability tail: verify journal coverage
 /// (repairing through the WRITER, never direct writes, when a Materialized
-/// receipt's rows are missing), confirm the feed, checkpoint bookmark+J,
-/// then publish and broadcast.
+/// receipt's rows are missing), confirm the feed, adopt the absolute
+/// counters, checkpoint bookmark+J WITH the RAM publication in the same
+/// poll, then broadcast.
 async fn durable_tail(
     repo: &RepoInstance,
     info: &Arc<dyn Store>,
@@ -229,9 +322,9 @@ async fn durable_tail(
         .max()
         .unwrap_or(0);
     checkpoint::confirm_journal(repo, local_end).await?;
-    checkpoint::checkpoint(repo, info, receipt, old).await?;
+    publish::adopt_counters(repo, &publication).await?;
+    checkpoint::checkpoint(repo, info, receipt, old, gate, &publication).await?;
     let floor = publication.floor;
-    publish::apply_publication(repo, gate, &publication).await?;
     for event in &publication.events {
         repo.broadcast_changefeed_event(Some(Arc::clone(&event.downstream)));
     }

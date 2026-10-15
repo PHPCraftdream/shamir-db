@@ -378,6 +378,14 @@ impl ShamirAdminExecutor {
             .shamir
             .get_db(&self.db_name)
             .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
+        // DDL interlock (repo-level `ddl_admission`): the handler below calls
+        // TableManager index DDL DIRECTLY (not the already-guarded
+        // RepoInstance wrappers), so it must take the repo guard itself —
+        // exactly once per path.
+        let repo = db
+            .get_repo(&op.repo)
+            .ok_or_else(|| err(format!("Repository '{}' not found", op.repo)))?;
+        let _ddl = repo.ddl_admission_guard().await;
         let table = db
             .get_table(&op.repo, &op.table)
             .await
@@ -629,6 +637,14 @@ impl ShamirAdminExecutor {
             .shamir
             .get_db(&self.db_name)
             .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
+        // DDL interlock (repo-level `ddl_admission`): the handler below calls
+        // TableManager index DDL DIRECTLY (not the already-guarded
+        // RepoInstance wrappers), so it must take the repo guard itself —
+        // exactly once per path.
+        let repo = db
+            .get_repo(&op.repo)
+            .ok_or_else(|| err(format!("Repository '{}' not found", op.repo)))?;
+        let _ddl = repo.ddl_admission_guard().await;
         let table = db
             .get_table(&op.repo, &op.table)
             .await
@@ -859,6 +875,14 @@ impl ShamirAdminExecutor {
             .shamir
             .get_db(&self.db_name)
             .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
+        // DDL interlock (repo-level `ddl_admission`): the handler below calls
+        // TableManager index DDL DIRECTLY (not the already-guarded
+        // RepoInstance wrappers), so it must take the repo guard itself —
+        // exactly once per path.
+        let repo = db
+            .get_repo(&op.repo)
+            .ok_or_else(|| err(format!("Repository '{}' not found", op.repo)))?;
+        let _ddl = repo.ddl_admission_guard().await;
         let table = db
             .get_table(&op.repo, &op.table)
             .await

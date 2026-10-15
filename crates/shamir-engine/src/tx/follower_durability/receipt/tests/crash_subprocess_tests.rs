@@ -11,7 +11,8 @@
 //! synchronization).
 
 use bytes::Bytes;
-use shamir_storage::types::{RecordKey, Repo as _, Store};
+use futures::StreamExt;
+use shamir_storage::types::{RecordKey, Store};
 use shamir_tx::{decode_version_key, ChangeOp, ChangelogEvent, RecordChange};
 use shamir_types::access::Actor;
 use shamir_types::types::record_id::RecordId;
@@ -20,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::super::activation::disable_receipt_lookup;
+use super::super::resume::activation::disable_receipt_lookup;
 use crate::meta::repl::bookmark_v3::load_bookmark_v3;
 use crate::meta::repl::receipt::receipt_key;
 use crate::repo::{BoxRepoFactory, RepoInstance};
@@ -120,7 +121,7 @@ async fn journal_bytes(repo: &RepoInstance, version: u64) -> Option<Bytes> {
 
 /// All history rows of `keys`, sorted: `(key, version, value)`.
 async fn history_rows(repo: &RepoInstance, keys: &[Vec<u8>]) -> Vec<(Vec<u8>, u64, Bytes)> {
-    let store = repo.repo.store_get("__history__items").await.unwrap();
+    let store = repo.raw_store("__history__items").await.unwrap();
     let mut rows = Vec::new();
     for batch in store.iter_stream(128).collect::<Vec<_>>().await {
         for (record_key, value) in batch.unwrap() {
@@ -139,6 +140,8 @@ async fn history_rows(repo: &RepoInstance, keys: &[Vec<u8>]) -> Vec<(Vec<u8>, u6
 
 #[derive(Clone, Copy)]
 struct Scenario {
+    /// Crash point passed to the child (`SHAMIR_RECEIPT_CRASH_POINT`).
+    point: &'static str,
     multi: bool,
     tombstone: bool,
 }
@@ -267,10 +270,10 @@ async fn receipt_crash_child_scenario() {
     assert_eq!(scenario, "receipt-crash");
     let path = PathBuf::from(std::env::var("SHAMIR_RECEIPT_CRASH_PATH").unwrap());
     let point = std::env::var("SHAMIR_RECEIPT_CRASH_POINT").unwrap();
-    let phase = match point.as_str() {
-        "prepared" => Phase::ReceiptPrepared,
-        "materialized" => Phase::ReceiptMaterialized,
-        "checkpointed" => Phase::ReceiptCheckpointed,
+    let (phase, phase_str): (Phase, &'static str) = match point.as_str() {
+        "prepared" => (Phase::ReceiptPrepared, "prepared"),
+        "materialized" => (Phase::ReceiptMaterialized, "materialized"),
+        "checkpointed" => (Phase::ReceiptCheckpointed, "checkpointed"),
         other => panic!("unknown crash point {other}"),
     };
 
@@ -284,7 +287,11 @@ async fn receipt_crash_child_scenario() {
 
     let multi = std::env::var("SHAMIR_RECEIPT_CRASH_MULTI").is_ok_and(|v| v == "1");
     let tombstone = std::env::var("SHAMIR_RECEIPT_CRASH_TOMBSTONE").is_ok_and(|v| v == "1");
-    let scenario = Scenario { multi, tombstone };
+    let scenario = Scenario {
+        point: phase_str,
+        multi,
+        tombstone,
+    };
     let events = scenario.events();
 
     let hook = Arc::new(test_seam::Hook::default());
@@ -419,11 +426,13 @@ async fn crash_reopen_replay_convergence_matrix() {
     // MULTI (repeated key → absolute counter) and TOMBSTONE (delete row)
     // variants: one crash point each keeps the total runtime modest.
     run_point(Scenario {
+        point: "materialized",
         multi: true,
         tombstone: false,
     })
     .await;
     run_point(Scenario {
+        point: "checkpointed",
         multi: false,
         tombstone: true,
     })
