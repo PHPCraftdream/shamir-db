@@ -6,10 +6,128 @@ use futures::stream::Stream;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::storage_membuffer::Slot;
+
 pub type RecordKey = KeyBytes;
 
 pub(crate) type RecordStream =
     Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>;
+
+/// Audit finding 2.3 (task #530) — merge a sorted dirty-overlay snapshot on
+/// top of a sorted `inner` record stream, WITHOUT draining the overlay to
+/// disk first.
+///
+/// This is a classic 2-way sorted merge (mirrors
+/// `MvccStore::current_stream`'s overlay-vs-history merge): both the `overlay`
+/// snapshot and the `inner` stream are key-sorted (ascending when
+/// `reverse == false`, descending when `reverse == true` — the overlay is
+/// pre-sorted by the caller to match), so a single linear pass yields a merged
+/// key-ordered stream. Semantics:
+///
+/// * An overlay entry ALWAYS wins over `inner` for the same key (it is the
+///   newer, not-yet-flushed value). `Slot::Live` → emit the overlay value;
+///   `Slot::Tombstone` → EXCLUDE the key (even if `inner` still holds stale
+///   data for it).
+/// * Overlay-only keys (present in the dirty buffer but not yet in `inner`)
+///   are emitted in their sorted position during the merge, and any that sort
+///   after the last `inner` key are flushed in the overlay-only tail phase.
+/// * Ordering across the merged output is preserved, so range / prefix scans
+///   keep their ascending / descending guarantee.
+///
+/// `inner` MUST yield keys in the requested order (ascending, or descending
+/// for reverse) — every `Store` scan upholds this per the trait contract.
+pub(crate) fn merge_overlay_stream(
+    overlay: Vec<(RecordKey, Slot)>,
+    inner: RecordStream,
+    batch_size: usize,
+    reverse: bool,
+) -> RecordStream {
+    Box::pin(async_stream::stream! {
+        let batch_cap = batch_size.max(1);
+        let mut ov = overlay.into_iter().peekable();
+        let mut out: Vec<(RecordKey, Bytes)> = Vec::with_capacity(batch_cap);
+
+        // `ord(a, b)` is the "a should come before b in output order" test.
+        // Ascending: a < b. Descending: a > b.
+        let before = |a: &RecordKey, b: &RecordKey| -> bool {
+            if reverse {
+                a > b
+            } else {
+                a < b
+            }
+        };
+
+        futures::pin_mut!(inner);
+        while let Some(batch) = futures::StreamExt::next(&mut inner).await {
+            let batch = match batch {
+                Ok(b) => b,
+                Err(e) => {
+                    yield Err(e);
+                    return;
+                }
+            };
+            for (ik, iv) in batch {
+                // Emit every overlay entry that sorts strictly before the
+                // current inner key (overlay-only keys interleaved in order).
+                while let Some((ok, _)) = ov.peek() {
+                    if before(ok, &ik) {
+                        let (ok, oslot) = ov.next().unwrap();
+                        if let Slot::Live(v) = oslot {
+                            out.push((ok, v));
+                            if out.len() >= batch_cap {
+                                yield Ok(std::mem::take(&mut out));
+                                out = Vec::with_capacity(batch_cap);
+                            }
+                        }
+                        // Tombstone-only overlay key: nothing to emit.
+                    } else {
+                        break;
+                    }
+                }
+                // Overlay entry for the EXACT inner key wins (newer write).
+                if let Some((ok, _)) = ov.peek() {
+                    if *ok == ik {
+                        let (ok, oslot) = ov.next().unwrap();
+                        match oslot {
+                            Slot::Live(v) => {
+                                out.push((ok, v));
+                                if out.len() >= batch_cap {
+                                    yield Ok(std::mem::take(&mut out));
+                                    out = Vec::with_capacity(batch_cap);
+                                }
+                            }
+                            // Tombstone masks the stale inner value → skip.
+                            Slot::Tombstone => {}
+                        }
+                        continue;
+                    }
+                }
+                // No overlay entry for this key → inner value stands.
+                out.push((ik, iv));
+                if out.len() >= batch_cap {
+                    yield Ok(std::mem::take(&mut out));
+                    out = Vec::with_capacity(batch_cap);
+                }
+            }
+        }
+
+        // Overlay-only tail: any remaining overlay entries (keys `inner` never
+        // yielded). Live entries are emitted; tombstones are dropped.
+        for (ok, oslot) in ov {
+            if let Slot::Live(v) = oslot {
+                out.push((ok, v));
+                if out.len() >= batch_cap {
+                    yield Ok(std::mem::take(&mut out));
+                    out = Vec::with_capacity(batch_cap);
+                }
+            }
+        }
+
+        if !out.is_empty() {
+            yield Ok(out);
+        }
+    })
+}
 
 /// A single mixed-op for `Store::transact`. Represents either a
 /// `set` or a `remove` against a `RecordKey`.

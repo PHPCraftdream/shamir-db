@@ -372,12 +372,29 @@ impl CachedStore {
     /// persists the backend ONCE (`Repo::persist_once`), so calling the
     /// inner flush here would reintroduce one full-database fsync per
     /// buffered store. With no `inner.flush()` there is only the background
-    /// error to surface (no bg/inner priority merge, unlike `flush`).
+    /// error to surface (no bg/inner priority merge, unlike `flush`). The
+    /// inner drain is recursive — a `Cached` stacked over `MemBuffer` drains
+    /// the whole wrapper chain; fjall's no-op `flush_drain` terminates it.
     pub async fn flush_drain(&self) -> DbResult<()> {
-        if matches!(self.mode, WriteMode::Sync) {
-            return Ok(());
+        let bg_result = if matches!(self.mode, WriteMode::Sync) {
+            Ok(())
+        } else {
+            self.wait_for_async_writes().await
+        };
+        let inner_result = self.inner.flush_drain().await;
+        match inner_result {
+            Ok(()) => bg_result,
+            Err(e) => {
+                if let Err(ref bg) = bg_result {
+                    log::error!(
+                        "storage_cached flush_drain: inner.flush_drain() failed AND a prior \
+                         background write also failed ({bg}); returning inner's error, \
+                         background failure logged here"
+                    );
+                }
+                Err(e)
+            }
         }
-        self.wait_for_async_writes().await
     }
 
     /// Park until every job the background write worker has already
