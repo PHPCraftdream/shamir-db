@@ -2,12 +2,8 @@
 
 use std::sync::Arc;
 
-use futures::StreamExt;
-
 use crate::access::{Action, ResourcePath};
-use crate::engine::migration::{
-    MigrationCoordinator, MigrationPhase, MigrationShadowLog, MigrationState,
-};
+use crate::engine::migration::{MigrationPhase, MigrationState};
 use crate::engine::repo::repo_types::BoxRepoFactory;
 use crate::engine::repo::RepoWriteDomain;
 use crate::engine::table::TableConfig;
@@ -143,16 +139,7 @@ impl ShamirAdminExecutor {
                     .await
                     .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
             let src_table = src_repo.get_table_admitted(table_name, &src_permit).await?;
-            let src_data = Arc::clone(src_table.table().data_store());
-            let info_store = Arc::clone(src_table.info_store());
             let dst_table = dst_repo.get_table_admitted(table_name, &dst_permit).await?;
-            let dst_data = Arc::clone(dst_table.table().data_store());
-            // Local RAII owns preparation; failed/cancelled replication clears
-            // the bit. This guard does not retain ddl_admission at cutover.
-            let freeze = src_table
-                .begin_migration_freeze_admitted(&src_permit)
-                .await
-                .map_err(shamir_storage::error::DbError::from)?;
 
             // Step 1: carry src's repo-interner `(id → name)` mappings
             // into dst's repo interner BEFORE any data lands. The
@@ -180,7 +167,13 @@ impl ShamirAdminExecutor {
                 .replicate_index2_descriptors_from_admitted(&src_table, &dst_permit)
                 .await?;
 
-            let shadow = Arc::new(MigrationShadowLog::new(migration_id.clone(), info_store));
+            // S5c-X: the shadow log, raw data-store handles, MVCC log seam
+            // and source migration freeze are assembled engine-side by the
+            // admitted coordinator factory (the facade only supplies state
+            // and both permits — no raw store handles cross the boundary).
+            // Q1: the factory captures the source's MvccStore handle so
+            // run_snapshot reads through the log seam (current_stream)
+            // instead of the raw data_store.
             let state = MigrationState::new(
                 migration_id.clone(),
                 table_name.to_string(),
@@ -189,14 +182,16 @@ impl ShamirAdminExecutor {
                 op.dst_engine.clone(),
                 op.dst_path.clone(),
             );
-            // Q1: capture the source's MvccStore handle so
-            // run_snapshot reads through the log seam
-            // (current_stream) instead of the raw data_store.
-            let src_mvcc = src_table.mvcc_store();
-            let coord = Arc::new(
-                MigrationCoordinator::new(state, shadow, src_data, dst_data, src_mvcc)
-                    .with_migration_freeze(freeze),
-            );
+            let coord = src_table
+                .migration_coordinator_admitted(
+                    state,
+                    migration_id.clone(),
+                    &dst_table,
+                    &src_permit,
+                    &dst_permit,
+                )
+                .await
+                .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
 
             coord.run_snapshot().await?;
             let caught_up = coord.drain_until_caught_up(0).await?;
@@ -290,10 +285,11 @@ impl ShamirAdminExecutor {
                         .get_table(&repo, &table)
                         .await
                         .map_err(|e| err(e.to_string()))?;
-                    if let Some(state) =
-                        MigrationCoordinator::load_state(src.info_store(), &op.commit_migration)
-                            .await
-                            .map_err(|e| err(e.to_string()))?
+                    if let Some(state) = src
+                        .info_store_read_view()
+                        .load_migration_state(&op.commit_migration)
+                        .await
+                        .map_err(|e| err(e.to_string()))?
                     {
                         // A process-local freeze cannot be reconstructed from
                         // metadata. Refreezing now would miss intervening writes.
@@ -312,21 +308,32 @@ impl ShamirAdminExecutor {
                             .get_table(&state.dst_repo, &state.table_name)
                             .await
                             .map_err(|e| err(e.to_string()))?;
-                        let shadow = Arc::new(
-                            MigrationShadowLog::recover(
-                                state.id.clone(),
-                                Arc::clone(src.info_store()),
+                        // S5c-X: rebuild engine-side under repo admission —
+                        // the admitted recovery factory rebinds the shadow
+                        // log and the raw source/destination data-store
+                        // handles without exposing them to the facade.
+                        let src_repo_instance = db.get_repo(&state.src_repo).ok_or_else(|| {
+                            err(format!("Repository '{}' not found", state.src_repo))
+                        })?;
+                        let dst_repo_instance = db.get_repo(&state.dst_repo).ok_or_else(|| {
+                            err(format!("Repository '{}' not found", state.dst_repo))
+                        })?;
+                        let (rec_src_permit, rec_dst_permit) = RepoWriteDomain::admit_pair(
+                            src_repo_instance.write_domain(),
+                            dst_repo_instance.write_domain(),
+                        )
+                        .await
+                        .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+                        recovered = Some(
+                            src.migration_coordinator_recovered_admitted(
+                                state,
+                                &dst,
+                                &rec_src_permit,
+                                &rec_dst_permit,
                             )
                             .await
                             .map_err(|e| err(e.to_string()))?,
                         );
-                        recovered = Some(Arc::new(MigrationCoordinator::new(
-                            state,
-                            shadow,
-                            Arc::clone(src.table().data_store()),
-                            Arc::clone(dst.table().data_store()),
-                            src.mvcc_store(),
-                        )));
                         break 'repos;
                     }
                 }
@@ -474,28 +481,11 @@ impl ShamirAdminExecutor {
         if progress < 1 {
             // Seed only absent current versions. A crash between a row write and
             // the stage marker must not allocate a second version for that row.
-            if let Some(mvcc) = dst_table.mvcc_store() {
-                let mut stream = dst_table.table().data_store().iter_stream(256);
-                while let Some(batch) = stream.next().await {
-                    for (key, value) in batch.map_err(|e| err(e.to_string()))? {
-                        if mvcc
-                            .get_current(key.clone())
-                            .await
-                            .map_err(|e| err(e.to_string()))?
-                            .is_none()
-                        {
-                            // commit_migration retains destination barrier/UWL
-                            // through index finalisation. No wait: ack -> lower
-                            // orphan -> drainer Phase B posting replay -> this
-                            // barrier -> ack would deadlock.
-                            mvcc.set_versioned_many_no_wait(vec![(key, value)])
-                                .await
-                                .map_err(|e| err(e.to_string()))?;
-                        }
-                    }
-                }
-                mvcc.flush_history().await.map_err(|e| err(e.to_string()))?;
-            } else {
+            let seeded = dst_table
+                .seed_current_versions_admitted(&dst_permit)
+                .await
+                .map_err(|e| err(e.to_string()))?;
+            if !seeded {
                 dst_table
                     .seed_log_from_data_store_admitted(&dst_permit)
                     .await
@@ -514,45 +504,14 @@ impl ShamirAdminExecutor {
             // and would NOT reset an already populated instance. Constructors
             // do not restore persisted state, so counts start at zero even
             // when table-open recovery populated the previous instance.
-            let registry = dst_table.index2_registry();
-            let readers = registry.reader_gate().begin_drop();
-            readers.wait_for_drain().await;
             let resolver =
                 shamir_funclib::scalar_resolver::ScalarResolver::new(Arc::clone(db.scalars()));
-            for mut descriptor in registry.all_descriptors().await {
-                // Cancellation releases the reader gate via RAII. Keep an
-                // incomplete replacement planner-invisible until full replay.
-                descriptor.state = crate::engine::index2::IndexState::Building;
-                let backend = crate::engine::index2::build_index2_backend_with_resolver(
-                    descriptor.clone(),
-                    dst_table.info_store(),
-                    Some(resolver.clone()),
-                );
-                registry.remove_by_id(descriptor.id).await;
-                registry
-                    .insert(backend)
-                    .await
-                    .map_err(|e| err(e.to_string()))?;
-            }
-            if let Err(e) = dst_table.bulk_populate_index2_admitted(&dst_permit).await {
-                for backend in registry.all_backends().await {
-                    registry
-                        .set_failed(backend.descriptor().id, e.to_string())
-                        .await;
-                }
-                return Err(err(e.to_string()));
-            }
-            // Recovered Failed entries become usable only after complete replay.
-            for backend in registry.all_backends().await {
-                registry
-                    .set_state(
-                        backend.descriptor().id,
-                        crate::engine::index2::IndexState::Ready,
-                    )
-                    .await;
-            }
             dst_table
-                .info_store()
+                .reset_and_populate_index2_admitted(&dst_permit, &resolver)
+                .await
+                .map_err(|e| err(e.to_string()))?;
+            dst_table
+                .info_store_read_view()
                 .flush()
                 .await
                 .map_err(|e| err(e.to_string()))?;
@@ -560,7 +519,6 @@ impl ShamirAdminExecutor {
                 .complete_finalisation_step(2)
                 .await
                 .map_err(|e| err(e.to_string()))?;
-            drop(readers);
         }
         drop(write_lock);
         drop(barrier);

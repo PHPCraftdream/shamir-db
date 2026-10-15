@@ -115,7 +115,7 @@ fn flush_all_persists_detached_post_wal_tail() {
         .unwrap();
         let repo = db.get_repo(REPO).unwrap();
         let table = repo.get_table("items").await.unwrap();
-        let interner = table.interner().get().await.unwrap();
+        let interner = table.interner_for_test().get().await.unwrap();
         let value = query_value_to_inner(&doc().set("name", "durable").build(), interner).unwrap();
         let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
         let rid = table.insert_tx(&value, Some(&mut tx)).await.unwrap();
@@ -151,7 +151,7 @@ fn flush_all_persists_detached_post_wal_tail() {
         let table = repo.get_table("items").await.unwrap();
         let reopened = table.get(rid).await.unwrap();
         assert_eq!(reopened, value);
-        let interner = table.interner().get().await.unwrap();
+        let interner = table.interner_for_test().get().await.unwrap();
         assert_eq!(
             inner_value_to_query_value(&reopened, interner).unwrap(),
             doc().set("name", "durable").build()
@@ -181,7 +181,7 @@ fn quiescence_timeout_leaves_j_absent_and_hard_reopen_certifies() {
         .unwrap();
         let repo = db.get_repo(REPO).unwrap();
         let table = repo.get_table("items").await.unwrap();
-        let interner = table.interner().get().await.unwrap();
+        let interner = table.interner_for_test().get().await.unwrap();
         let value =
             query_value_to_inner(&doc().set("name", "late-tail").build(), interner).unwrap();
         let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
@@ -250,7 +250,7 @@ fn quiescence_timeout_leaves_j_absent_and_hard_reopen_certifies() {
             from_h.events[0].changes[0].value.as_deref(),
             Some(reopened_bytes.as_ref())
         );
-        let interner = table.interner().get().await.unwrap();
+        let interner = table.interner_for_test().get().await.unwrap();
         assert_eq!(
             inner_value_to_query_value(&reopened, interner).unwrap(),
             doc().set("name", "late-tail").build()
@@ -272,7 +272,7 @@ async fn detached_tail_in_memory() {
         .unwrap();
     let repo = shamir.get_db("app").unwrap().get_repo(REPO).unwrap();
     let table = repo.get_table("items").await.unwrap();
-    let interner = table.interner().get().await.unwrap();
+    let interner = table.interner_for_test().get().await.unwrap();
     let value = query_value_to_inner(&doc().set("name", "survivor").build(), interner).unwrap();
     let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     let rid = table.insert_tx(&value, Some(&mut tx)).await.unwrap();
@@ -318,7 +318,7 @@ async fn flush_all_warns_and_continues_past_wedged_tail() {
         .unwrap();
     let repo = shamir.get_db("app").unwrap().get_repo(REPO).unwrap();
     let table = repo.get_table("items").await.unwrap();
-    let interner = table.interner().get().await.unwrap();
+    let interner = table.interner_for_test().get().await.unwrap();
     let value = query_value_to_inner(&doc().set("name", "wedged").build(), interner).unwrap();
     let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     let rid = table.insert_tx(&value, Some(&mut tx)).await.unwrap();

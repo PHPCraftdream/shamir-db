@@ -7,6 +7,9 @@ description = "ShamirDB facade — re-exports types/storage/engine/query and pro
 license = "MIT OR Apache-2.0"
 
 [features]
+# Test-only raw TableManager handles are exposed through this opt-in feature
+# for integration tests/fixtures; never enable it in production dependencies.
+test-util = ["shamir-engine/test-util"]
 # Cascade backend feature flags from shamir-storage / shamir-engine all
 # the way through the facade. Default = all backends, so consumers
 # that didn't pick features explicitly see no change. Embedded

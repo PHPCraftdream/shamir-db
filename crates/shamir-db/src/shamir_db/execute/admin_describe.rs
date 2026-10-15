@@ -92,14 +92,14 @@ impl ShamirAdminExecutor {
             .map_err(|e| err(e.to_string()))?;
 
         let mut indexes: Vec<QueryValue> = Vec::new();
-        for def in tm.index_manager_ref().iter_indexes() {
+        for def in tm.index_definitions() {
             let name = interner
                 .get_str(&InternerKey::new(def.name_interned))
                 .map(|arc| arc.to_string())
                 .unwrap_or_else(|| def.name_interned.to_string());
             indexes.push(mpack!({"name": @(QueryValue::Str(name)), "unique": false}));
         }
-        for def in tm.index_manager_ref().iter_unique_indexes() {
+        for def in tm.unique_index_definitions() {
             let name = interner
                 .get_str(&InternerKey::new(def.name_interned))
                 .map(|arc| arc.to_string())

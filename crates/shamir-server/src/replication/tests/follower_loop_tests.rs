@@ -737,7 +737,7 @@ async fn assert_supervisor_rejection_marks_resync(unknown_table: bool) {
     assert!(supervisor.is_running("payload_validation"));
     supervisor.wait_for_subscription("payload_validation").await;
     let subscriptions = follower.system_store().subscriptions_table().await.unwrap();
-    let interner = subscriptions.interner().get().await.unwrap();
+    let interner = subscriptions.interner_for_test().get().await.unwrap();
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
     let query = Query::from("subscriptions").build();

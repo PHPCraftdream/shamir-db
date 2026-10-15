@@ -654,7 +654,7 @@ fn main() {
                         let tbl = repo.get_table("bench_table").await.unwrap();
                         let token = shamir_engine::table::table_token_for("bench_table");
 
-                        let mut staging = StagingStore::new(Arc::clone(tbl.data_store()));
+                        let mut staging = StagingStore::new(Arc::clone(tbl.data_store_for_test()));
                         for i in 0..n {
                             let rid = RecordId::new();
                             let body = InnerValue::Str(format!("v{}", i)).to_bytes().unwrap();
@@ -710,7 +710,7 @@ fn main() {
                         let tbl = repo.get_table("bench_table").await.unwrap();
                         let token = shamir_engine::table::table_token_for("bench_table");
 
-                        let mut staging = StagingStore::new(Arc::clone(tbl.data_store()));
+                        let mut staging = StagingStore::new(Arc::clone(tbl.data_store_for_test()));
                         for i in 0..n {
                             let rid = RecordId::new();
                             let body = InnerValue::Str(format!("v{}", i)).to_bytes().unwrap();

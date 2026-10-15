@@ -76,12 +76,12 @@ async fn drop_index2_backend_by_name_via_ddl() {
     //    [index_id LE u32][type_tag u8 = FUNCTIONAL].
     let (info_store, posting_prefix) = {
         let table = db.get_table("testdb", "main", "users").await.unwrap();
-        let interner = table.interner().get().await.unwrap();
+        let interner = table.interner_for_test().get().await.unwrap();
         let name_key = interner
             .get_ind("func_idx")
             .expect("func_idx should be interned");
         let backend = table
-            .index2_registry()
+            .index2_registry_for_test()
             .get_by_name(name_key.id())
             .await
             .expect("functional backend should be registered");
@@ -92,7 +92,7 @@ async fn drop_index2_backend_by_name_via_ddl() {
         prefix.push(type_tag::FUNCTIONAL);
         let prefix = bytes::Bytes::from(prefix);
 
-        let info_store = std::sync::Arc::clone(table.info_store());
+        let info_store = table.info_store_for_test();
         let before = count_prefix(&info_store, prefix.clone()).await;
         assert!(
             before > 0,
@@ -118,7 +118,7 @@ async fn drop_index2_backend_by_name_via_ddl() {
 
     // (a) gone from the live index2_registry.
     let table = db.get_table("testdb", "main", "users").await.unwrap();
-    let backends = table.index2_registry().all_backends().await;
+    let backends = table.index2_registry_for_test().all_backends().await;
     assert!(
         backends.iter().all(|b| b.descriptor().name != "func_idx"),
         "index2 backend must be gone from the registry after drop"
@@ -216,7 +216,7 @@ async fn drop_sorted_index_by_name_via_ddl() {
     // (b) persist round-trip: reload the persisted sorted defs (what reopen
     //     reads) from the info_store via a fresh `SortedIndexManager` and
     //     confirm the dropped name does NOT resurrect.
-    let info_store = std::sync::Arc::clone(table.info_store());
+    let info_store = table.info_store_for_test();
     let reloaded = SortedIndexManager::new(info_store).await.unwrap();
     let defs = reloaded.iter_indexes();
     assert!(

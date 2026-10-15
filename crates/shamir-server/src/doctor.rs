@@ -438,7 +438,7 @@ async fn resolve_index_names(
     }
 
     // Resolve via interner (mirrors access_tree.rs pattern).
-    if let Ok(interner) = table_mgr.interner().get().await {
+    if let Ok(interner) = table_mgr.info_store_read_view().interner_get().await {
         for (name_interned, name) in name_map.iter_mut() {
             let key = shamir_types::core::interner::InternerKey::new(*name_interned);
             if let Some(s) = interner.get_str(&key) {

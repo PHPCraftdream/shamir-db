@@ -57,7 +57,7 @@ impl ShamirDb {
 }
 
 async fn read_records(table: &TableManager, name: &str) -> DbResult<Vec<QueryValue>> {
-    let interner = table.interner().get().await?;
+    let interner = table.info_store_read_view().interner_get().await?;
     let refs = shamir_types::types::common::new_map();
     let context = FilterContext::new(interner, &refs);
     let result = table.read(&ReadQuery::new(name), &context).await?;

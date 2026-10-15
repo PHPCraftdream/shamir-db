@@ -74,7 +74,7 @@ fn main() {
                     .await
                     .unwrap();
 
-                let interner = tbl.interner().get().await.unwrap();
+                let interner = tbl.interner_for_test().get().await.unwrap();
                 let email_field = match interner.touch_ind("email").unwrap() {
                     TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
                 };

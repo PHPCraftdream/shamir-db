@@ -534,7 +534,7 @@ async fn covering_index_include_stored_in_meta() {
 
     // Inspect the in-memory sorted-index catalogue.
     let table = shamir.get_table("testdb", "main", "users").await.unwrap();
-    let defs = table.sorted_indexes().iter_indexes();
+    let defs = table.sorted_index_definitions();
     assert_eq!(defs.len(), 1, "expected exactly one sorted index");
     let def = &defs[0];
     assert_eq!(

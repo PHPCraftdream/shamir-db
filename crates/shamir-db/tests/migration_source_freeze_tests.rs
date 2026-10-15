@@ -197,14 +197,14 @@ async fn r4_failed_start_releases_source_freeze() {
     exec(&db, batch.to_request_via_msgpack()).await;
     let database = db.get_db("testdb").unwrap();
     let source = database.get_table("src", "docs").await.unwrap();
-    let registry = source.index2_registry();
+    let registry = source.index2_registry_for_test();
     let original = registry.all_descriptors().await.pop().unwrap();
     let mut broken = original.clone();
     broken.paths[0][0] = u64::MAX;
     let (barrier, lock) = source.begin_write_barrier(INDEX2_CREATE).await;
     registry.remove_by_id(original.id).await.unwrap();
     registry
-        .insert(build_index2_backend(broken, source.info_store()))
+        .insert(build_index2_backend(broken, &source.info_store_for_test()))
         .await
         .unwrap();
     drop(lock);
@@ -221,7 +221,10 @@ async fn r4_failed_start_releases_source_freeze() {
     let (barrier, lock) = source.begin_write_barrier(INDEX2_CREATE).await;
     registry.remove_by_id(original.id).await.unwrap();
     registry
-        .insert(build_index2_backend(original, source.info_store()))
+        .insert(build_index2_backend(
+            original,
+            &source.info_store_for_test(),
+        ))
         .await
         .unwrap();
     drop(lock);
@@ -244,7 +247,7 @@ async fn r5_commit_error_after_final_drain_releases_source_freeze() {
     let database = db.get_db("testdb").unwrap();
     let source = database.get_table("src", "docs").await.unwrap();
     source
-        .info_store()
+        .info_store_for_test()
         .set(
             RecordKey::from(format!("__migration_finalise_{id}").into_bytes()),
             Bytes::from_static(&[255]),
@@ -266,11 +269,14 @@ async fn r5_commit_error_after_final_drain_releases_source_freeze() {
     );
     assert_eq!(coord.phase().await, MigrationPhase::Committed);
     assert_eq!(
-        shamir_db::engine::migration::MigrationCoordinator::load_state(source.info_store(), &id)
-            .await
-            .unwrap()
-            .unwrap()
-            .phase,
+        shamir_db::engine::migration::MigrationCoordinator::load_state(
+            &source.info_store_for_test(),
+            &id
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .phase,
         MigrationPhase::Committed,
     );
     exec(&db, insert("after commit error")).await;

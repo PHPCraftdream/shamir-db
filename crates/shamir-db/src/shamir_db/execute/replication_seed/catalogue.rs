@@ -21,7 +21,7 @@ pub(super) async fn rows(home: &ShamirDb, name: &str) -> DbResult<Vec<QueryValue
             ))
         }
     };
-    let interner = table.interner().get().await?;
+    let interner = table.info_store_read_view().interner_get().await?;
     let refs = crate::types::common::new_map();
     let ctx = FilterContext::new(interner, &refs);
     Ok(table
@@ -90,7 +90,7 @@ pub(super) async fn persist(home: &ShamirDb, record: QueryValue) -> DbResult<()>
         value: record,
     };
     home.system_store().set_via_implicit_tx(&table, &op).await?;
-    table.interner().persist().await?;
+    table.info_store_read_view().interner_persist().await?;
     home.flush_seed_catalogue().await
 }
 
@@ -128,7 +128,7 @@ impl ShamirDb {
             value: QueryValue::Map(fields),
         };
         self.system_store().set_via_implicit_tx(&table, &op).await?;
-        table.interner().persist().await?;
+        table.info_store_read_view().interner_persist().await?;
         self.flush_seed_catalogue().await
     }
 

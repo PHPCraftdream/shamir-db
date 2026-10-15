@@ -489,7 +489,7 @@ async fn boot_audit_runs_without_mutating_stores() {
 /// none of which are reachable through any live write path anymore.
 async fn seed_store_b_user(shamir: &ShamirDb, name: &str, roles: &[&str]) {
     let table = shamir.system_store().users_table().await.unwrap();
-    let interner = table.interner().get().await.unwrap();
+    let interner = table.interner_for_test().get().await.unwrap();
     let qv = mpack!({
         "name": @(QueryValue::Str(name.to_string())),
         "roles": @(QueryValue::List(

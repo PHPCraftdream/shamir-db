@@ -563,11 +563,12 @@ async fn binding_persists_in_info_twin() {
     // round-trips. We access the TableManager's info_store and call
     // the persistence loader.
     let table = db.get_table("testdb", "main", "users").await.unwrap();
-    let loaded =
-        shamir_engine::validator::persistence::load_validators_metadata(table.info_store())
-            .await
-            .unwrap()
-            .expect("should have persisted bindings");
+    let loaded = shamir_engine::validator::persistence::load_validators_metadata(
+        &table.info_store_for_test(),
+    )
+    .await
+    .unwrap()
+    .expect("should have persisted bindings");
 
     assert_eq!(loaded.bindings.len(), 1);
     let id = db.validator_id("v1").unwrap();

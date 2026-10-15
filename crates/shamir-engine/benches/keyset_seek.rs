@@ -68,7 +68,7 @@ async fn build_table(n: usize) -> TableManager {
         .await
         .unwrap();
 
-    let interner = mgr.interner().get().await.unwrap();
+    let interner = mgr.interner_for_test().get().await.unwrap();
     let k_y = match interner.touch_ind("y").unwrap() {
         TouchInd::Exists(k) | TouchInd::New(k) => k,
     };
@@ -109,7 +109,7 @@ fn main() {
             let mgr = mgr.clone();
             let q = q.clone();
             async move {
-                let interner = mgr.interner().get().await.unwrap();
+                let interner = mgr.interner_for_test().get().await.unwrap();
                 let refs = new_map();
                 let ctx = FilterContext::new(interner, &refs);
                 std::hint::black_box(mgr.read(&q, &ctx).await.unwrap());

@@ -29,6 +29,7 @@ path = "src/main.rs"
 #   cargo bench -p shamir-server --features bench-mimalloc       # mimalloc
 #   cargo bench -p shamir-server                                 # system
 [features]
+test-util = ["shamir-db/test-util"]
 bench-sefer       = []
 bench-sefer-tuned = []
 bench-mimalloc    = ["dep:mimalloc"]
@@ -150,6 +151,10 @@ windows-service = "0.8"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
+# S5c-X: server integration tests that poke raw TableManager internals use the
+# `*_for_test` handles, which only exist with the opt-in `test-util` feature.
+# Dev-only; production builds of shamir-server never enable it.
+shamir-db = { path = "../shamir-db", features = ["test-util"] }
 serial_test = "3"
 # W-2/W-3 (#789): construct QueryValue::Dec/Big test fixtures for keyset
 # cursor bookmark-typing regression tests (cursor_handler_tests.rs). Same

@@ -85,7 +85,7 @@ async fn p1065_inprogress_written_before_mutation() {
 
     let pause_hook = Arc::new(BackfillPauseHook::new());
     table
-        .index_manager_ref()
+        .index_manager_ref_for_test()
         .set_drop_index_pause_hook(Some(Arc::clone(&pause_hook)));
 
     // Client-supplied request_id so we know the op_id up front and can poll
@@ -110,7 +110,7 @@ async fn p1065_inprogress_written_before_mutation() {
     // it's not durable at all.
     pause_hook.wait_until_parked().await;
 
-    let status = ddl_op_log::read_op_status(table.info_store(), &known_op_id)
+    let status = ddl_op_log::read_op_status(&table.info_store_for_test(), &known_op_id)
         .await
         .expect("read_op_status must not error")
         .expect("InProgress status must already be durable while parked");
@@ -154,14 +154,14 @@ async fn p1065_terminal_status_durable_before_tombstone_clear_inline() {
 
     let pause_hook = Arc::new(BackfillPauseHook::new());
     table
-        .index_manager_ref()
+        .index_manager_ref_for_test()
         .set_drop_index_status_pause_hook(Some(Arc::clone(&pause_hook)));
 
     // The interned id for "idx_city" — used to check the tombstone's own
     // durable state directly (the actual invariant the write-order fix
     // protects), not just that the status record exists.
     let name_interned = {
-        let interner = table.interner().get().await.unwrap();
+        let interner = table.interner_for_test().get().await.unwrap();
         match interner.touch_ind("idx_city").unwrap() {
             shamir_types::core::interner::TouchInd::Exists(k)
             | shamir_types::core::interner::TouchInd::New(k) => k.id(),
@@ -184,7 +184,7 @@ async fn p1065_terminal_status_durable_before_tombstone_clear_inline() {
 
     pause_hook.wait_until_parked().await;
 
-    let status = ddl_op_log::read_op_status(table.info_store(), &op_id)
+    let status = ddl_op_log::read_op_status(&table.info_store_for_test(), &op_id)
         .await
         .expect("read_op_status must not error")
         .expect(
@@ -209,7 +209,7 @@ async fn p1065_terminal_status_durable_before_tombstone_clear_inline() {
     let dropping =
         shamir_index::base_index::index_manager::IndexManager::load_dropping_set_standalone(
             false,
-            table.info_store(),
+            &table.info_store_for_test(),
         )
         .await
         .expect("load_dropping_set_standalone must not error");
@@ -320,7 +320,7 @@ async fn p1065_status_write_failure_not_silently_swallowed() {
     // tombstone write or the reduced-IndexInfo persist, both of which also
     // go through the same info_store and would fail the wrong write).
     let pause_hook = Arc::new(BackfillPauseHook::new());
-    mgr.index_manager_ref()
+    mgr.index_manager_ref_for_test()
         .set_drop_index_post_sweep_hook(Some(Arc::clone(&pause_hook)));
 
     let op_id = RecordId::new();
@@ -403,7 +403,7 @@ async fn p1065_client_supplied_correlation_id_round_trips() {
     // supplied (not the returned one, though they must be equal — this
     // proves polling works even if the client only ever knew its own id,
     // e.g. because the response was lost).
-    let status = ddl_op_log::read_op_status(table.info_store(), &client_supplied_id)
+    let status = ddl_op_log::read_op_status(&table.info_store_for_test(), &client_supplied_id)
         .await
         .unwrap()
         .expect("status should be found by the client-supplied id");
@@ -489,7 +489,7 @@ async fn p1065_idempotent_retry_does_not_reexecute() {
     // with a fresh timestamp from a real second run in a way we can't
     // detect; at minimum, it must still read back as Succeeded and be the
     // one and only record for this op_id.
-    let status = ddl_op_log::read_op_status(table.info_store(), &client_supplied_id)
+    let status = ddl_op_log::read_op_status(&table.info_store_for_test(), &client_supplied_id)
         .await
         .unwrap()
         .expect("status should be written");
@@ -594,7 +594,7 @@ async fn p1065_rename_ddlopkind_family_classification() {
     let regular_req = br.to_request_via_msgpack();
     shamir.execute("testdb", &regular_req).await.unwrap();
 
-    let regular_status = ddl_op_log::read_op_status(table.info_store(), &regular_op_id)
+    let regular_status = ddl_op_log::read_op_status(&table.info_store_for_test(), &regular_op_id)
         .await
         .unwrap()
         .expect("regular rename status should exist");
@@ -621,7 +621,7 @@ async fn p1065_rename_ddlopkind_family_classification() {
     let unique_req = bu.to_request_via_msgpack();
     shamir.execute("testdb", &unique_req).await.unwrap();
 
-    let unique_status = ddl_op_log::read_op_status(table.info_store(), &unique_op_id)
+    let unique_status = ddl_op_log::read_op_status(&table.info_store_for_test(), &unique_op_id)
         .await
         .unwrap()
         .expect("unique rename status should exist");

@@ -102,8 +102,8 @@ impl ShamirAdminExecutor {
             .await
             .map_err(|e| err(e.to_string()))?;
         table
-            .interner()
-            .persist()
+            .info_store_read_view()
+            .interner_persist()
             .await
             .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
@@ -228,8 +228,8 @@ impl ShamirAdminExecutor {
             .await
             .map_err(|e| err(e.to_string()))?;
         table
-            .interner()
-            .persist()
+            .info_store_read_view()
+            .interner_persist()
             .await
             .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
@@ -347,8 +347,8 @@ impl ShamirAdminExecutor {
             .await
             .map_err(|e| err(e.to_string()))?;
         table
-            .interner()
-            .persist()
+            .info_store_read_view()
+            .interner_persist()
             .await
             .map_err(|e| err(e.to_string()))?;
         self.shamir
@@ -420,8 +420,8 @@ impl ShamirAdminExecutor {
             .await
             .map_err(|e| err(e.to_string()))?;
         let interner = table
-            .interner()
-            .get()
+            .info_store_read_view()
+            .interner_get()
             .await
             .map_err(|e| err(e.to_string()))?;
         let refs = crate::types::common::new_map();
@@ -532,8 +532,8 @@ impl ShamirAdminExecutor {
             .await
             .map_err(|e| err(e.to_string()))?;
         table
-            .interner()
-            .persist()
+            .info_store_read_view()
+            .interner_persist()
             .await
             .map_err(|e| err(e.to_string()))?;
         self.shamir
@@ -605,7 +605,7 @@ impl ShamirAdminExecutor {
         table: &crate::engine::table::TableManager,
         table_name: &str,
     ) -> crate::DbResult<Vec<QueryValue>> {
-        let interner = table.interner().get().await?;
+        let interner = table.info_store_read_view().interner_get().await?;
         let refs = crate::types::common::new_map();
         let ctx = crate::query::filter::FilterContext::new(interner, &refs);
         let query = crate::query::read::ReadQuery::new(table_name);
@@ -640,7 +640,7 @@ impl ShamirAdminExecutor {
         let result = repo
             .run_implicit_batch_tx(Actor::System, "", move |tx| {
                 Box::pin(async move {
-                    let interner = owned_table.interner().get().await?;
+                    let interner = owned_table.info_store_read_view().interner_get().await?;
                     let refs = crate::types::common::new_map();
                     let ctx = crate::query::filter::FilterContext::new(interner, &refs);
                     owned_table
@@ -685,7 +685,7 @@ impl ShamirDb {
         repo_name: &str,
     ) -> DbResult<bool> {
         let table = self.system_store().subscriptions_table().await?;
-        let interner = table.interner().get().await?;
+        let interner = table.info_store_read_view().interner_get().await?;
         let refs = crate::types::common::new_map();
         let ctx = crate::query::filter::FilterContext::new(interner, &refs);
         let result = table
@@ -767,7 +767,7 @@ impl ShamirDb {
     ) -> DbResult<()> {
         let _control = self.replication_control_lock.lock().await;
         let table = self.system_store().subscriptions_table().await?;
-        let interner = table.interner().get().await?;
+        let interner = table.info_store_read_view().interner_get().await?;
         let refs = crate::types::common::new_map();
         let ctx = crate::query::filter::FilterContext::new(interner, &refs);
         let lookup = crate::query::read::ReadQuery::new("subscriptions").filter(
@@ -808,7 +808,7 @@ impl ShamirDb {
         self.system_store()
             .set_via_implicit_tx(&table, &set_op)
             .await?;
-        table.interner().persist().await?;
+        table.info_store_read_view().interner_persist().await?;
         self.flush_seed_catalogue().await?;
         Ok(())
     }

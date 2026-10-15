@@ -232,7 +232,11 @@ async fn build_fixture(n: usize, with_index: bool) -> FkBenchResolver {
     // per-row batch/validator overhead — only the row POPULATION matters for
     // the cascade scan; the FK is discovered from the validator bound above).
     let match_count = (n as f64 * MATCH_FRACTION).ceil() as usize;
-    let interner = child_table.interner().get().await.expect("interner");
+    let interner = child_table
+        .interner_for_test()
+        .get()
+        .await
+        .expect("interner");
     let k_parent_id = match interner.touch_ind("parent_id").expect("touch parent_id") {
         TouchInd::Exists(k) | TouchInd::New(k) => k,
     };

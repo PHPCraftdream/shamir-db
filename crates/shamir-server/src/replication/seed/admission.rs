@@ -23,8 +23,8 @@ pub(crate) async fn admit(
     let refs = shamir_collections::TMap::default();
     let ctx = shamir_db::query::filter::FilterContext::new(
         table
-            .interner()
-            .get()
+            .info_store_read_view()
+            .interner_get()
             .await
             .map_err(|error| ReplError::Start(error.to_string()))?,
         &refs,
