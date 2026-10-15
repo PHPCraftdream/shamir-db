@@ -5,19 +5,18 @@
 //! journal coverage and retires the receipt atomically with the bookmark
 //! advance, `resume` re-owns an outstanding receipt after a crash, `publish`
 //! raises visibility post-durability, and `apply` orchestrates the whole
-//! batch. `activation` decides when this path replaces the legacy apply.
+//! batch. `resume::activation` decides when this path replaces the legacy apply.
 
-mod activation;
 mod apply;
 // Cold-start recovery (cold_reconcile) reaches the pipeline internals
 // through these modules.
 pub(crate) mod checkpoint;
-mod publish;
-mod resume;
+pub(crate) mod publish;
+pub(crate) mod resume;
 pub(crate) mod stage;
 
-pub(crate) use activation::receipt_path_selected;
 pub(crate) use apply::apply_batch_receipt;
+pub(crate) use resume::activation::receipt_path_selected;
 
 #[cfg(test)]
 #[path = "tests/mod.rs"]

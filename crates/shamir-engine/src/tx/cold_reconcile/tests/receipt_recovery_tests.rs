@@ -8,7 +8,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use shamir_storage::types::{RecordKey, Repo as _, Store};
+use futures::StreamExt;
+use shamir_storage::types::{RecordKey, Store};
 use shamir_tx::{decode_version_key, encode_version_key, ChangeOp, ChangelogEvent, RecordChange};
 use shamir_types::access::Actor;
 use shamir_types::types::record_id::RecordId;
@@ -84,7 +85,7 @@ async fn assert_completed_state(repo: &RepoInstance) {
         .await
         .expect("journal row at local version 1");
     assert!(!journal_bytes.is_empty());
-    let history = repo.repo.store_get("__history__items").await.unwrap();
+    let history = repo.raw_store("__history__items").await.unwrap();
     let key = RecordId([1; 16]).to_bytes();
     let row = history
         .get(RecordKey::from_slice(&encode_version_key(key.as_ref(), 1)))

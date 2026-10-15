@@ -129,6 +129,8 @@ pub struct RepoInstance {
     /// passed to it. Shared across clones (one mutex per underlying repo,
     /// not per handle).
     marker_write_mutex: Arc<tokio::sync::Mutex<()>>,
+    /// DDL-only write-admission guard — doc on the accessor (changelog_store/follower_durability.rs).
+    pub(super) ddl_admission: Arc<tokio::sync::Mutex<()>>,
     /// F-28 Step 4 (#831): cached per-repo reverse-FK map (parent table name
     /// → its reverse-FK entries) plus the child→parents reverse-reverse
     /// index, replacing the O(tables) `collect_fk_refs()` scan
@@ -194,6 +196,7 @@ impl Clone for RepoInstance {
             // of the background handle must not resurrect liveness.
             live: self.live.clone(),
             marker_write_mutex: Arc::clone(&self.marker_write_mutex),
+            ddl_admission: Arc::clone(&self.ddl_admission),
             fk_reverse_cache: Arc::clone(&self.fk_reverse_cache),
             #[cfg(test)]
             table_init_hook: Arc::clone(&self.table_init_hook),
@@ -268,6 +271,7 @@ impl RepoInstance {
             repo_interner: Arc::new(OnceCell::new()),
             live: Some(Arc::new(())),
             marker_write_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            ddl_admission: Arc::new(tokio::sync::Mutex::new(())),
             fk_reverse_cache: Arc::new(FkReverseCache::new()),
             #[cfg(test)]
             table_init_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
@@ -786,6 +790,8 @@ impl RepoInstance {
     /// the catalogue is the source of truth). If the caller also needs
     /// the old stores gone, follow up with `store_delete` per namespace.
     pub async fn rename_table_stores(&self, from: &str, to: &str) -> DbResult<bool> {
+        // DDL interlock: see `RepoInstance::ddl_admission_lock`'s doc (changelog_store/follower_durability.rs).
+        let _ddl = self.ddl_admission_lock().await;
         // F-68 (#895) cluster D / task #124 diagnostic instrumentation:
         // timestamped entry/exit — NOT a behavior change, logging only.
         let rts_started = std::time::Instant::now();
@@ -1791,6 +1797,8 @@ impl RepoInstance {
         index_name: &str,
         paths: &[&str],
     ) -> DbResult<()> {
+        // DDL interlock: see `RepoInstance::ddl_admission_lock`'s doc (changelog_store/follower_durability.rs).
+        let _ddl = self.ddl_admission_lock().await;
         let table = self.get_table(table_name).await?;
         table.create_index(index_name, paths).await
     }
@@ -1806,6 +1814,8 @@ impl RepoInstance {
         index_name: &str,
         paths: &[&str],
     ) -> DbResult<()> {
+        // DDL interlock: see `RepoInstance::ddl_admission_lock`'s doc (changelog_store/follower_durability.rs).
+        let _ddl = self.ddl_admission_lock().await;
         let table = self.get_table(table_name).await?;
         table.create_unique_index(index_name, paths).await
     }
@@ -1816,6 +1826,8 @@ impl RepoInstance {
     ///
     /// Drop a regular index from a table.
     pub async fn drop_index(&self, table_name: &str, index_name: &str) -> DbResult<bool> {
+        // DDL interlock: see `RepoInstance::ddl_admission_lock`'s doc (changelog_store/follower_durability.rs).
+        let _ddl = self.ddl_admission_lock().await;
         let table = self.get_table(table_name).await?;
         table.drop_index(index_name, None).await
     }
@@ -1825,6 +1837,8 @@ impl RepoInstance {
     ///
     /// Drop a unique index from a table.
     pub async fn drop_unique_index(&self, table_name: &str, index_name: &str) -> DbResult<bool> {
+        // DDL interlock: see `RepoInstance::ddl_admission_lock`'s doc (changelog_store/follower_durability.rs).
+        let _ddl = self.ddl_admission_lock().await;
         let table = self.get_table(table_name).await?;
         table.drop_unique_index(index_name, None).await
     }
@@ -2291,19 +2305,5 @@ fn register_token(token_names: &scc::HashMap<u64, String, THasher>, name: &str) 
                 attempted
             );
         }
-    }
-}
-
-/// Convert the wire DTO [`shamir_query_types::admin::Retention`] into the
-/// engine-internal [`shamir_tx::Retention`]. The orphan rule forbids a
-/// cross-crate `From` impl, so this free fn bridges the two types.
-///
-/// Call `Retention::validate()` on the DTO first; this fn performs no
-/// validation (it is a pure field copy).
-pub fn to_mvcc_retention(r: &shamir_query_types::admin::Retention) -> shamir_tx::Retention {
-    shamir_tx::Retention {
-        max_age_secs: r.max_age_secs,
-        max_count: r.max_count,
-        min_count: r.min_count,
     }
 }

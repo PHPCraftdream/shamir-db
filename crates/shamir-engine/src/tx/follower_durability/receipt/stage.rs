@@ -21,8 +21,9 @@ use crate::meta::repl::bookmark::load_fence_record;
 use crate::meta::repl::bookmark_v3::{encode_bookmark_v3, load_bookmark_v3, BookmarkV3};
 use crate::meta::repl::receipt::{decode_receipt, load_outstanding_receipt, receipt_key};
 use crate::meta::repl::{
-    receipt_id, ReceiptBinding, ReceiptCounterDelta, ReceiptOp, ReceiptPhase, ReceiptTimestamp,
-    ReceiptVersionMapping, ReplicationReceipt, MAX_RECEIPT_EVENTS, MAX_RECEIPT_OPS,
+    encode_receipt, receipt_id, ReceiptBinding, ReceiptCounterDelta, ReceiptOp, ReceiptPhase,
+    ReceiptTimestamp, ReceiptVersionMapping, ReplicationReceipt, MAX_RECEIPT_EVENTS,
+    MAX_RECEIPT_OPS,
 };
 use crate::meta::{MetaEnvelope, MetaKey};
 use crate::repo::RepoInstance;
@@ -667,11 +668,12 @@ fn table_rows(work: &MaterializedWork) -> DbResult<Vec<(String, String, String, 
     }
     let mut rows = Vec::with_capacity(order.len());
     for table in order {
-        let Some((_, after)) = work.counters.iter().find(|delta| delta.table == table) else {
+        let Some(delta) = work.counters.iter().find(|delta| delta.table == table) else {
             return Err(DbError::RepoRequiresReopen(format!(
                 "materialized work has no counter for table {table}"
             )));
         };
+        let after = delta.after;
         rows.push((
             table,
             format!("__history__{table}"),
@@ -745,5 +747,11 @@ pub(crate) async fn commit_materialized_work(
         receipt.upstream_end,
         repo.name()
     );
+    #[cfg(test)]
+    super::super::test_seam::phase(
+        repo.name(),
+        super::super::test_seam::Phase::ReceiptMaterialized,
+    )
+    .await;
     Ok((receipt, counters))
 }

@@ -129,16 +129,30 @@ pub(crate) async fn publication_from_receipt(
     })
 }
 
-/// Publish a durable batch: raise visibility per (table, version), adopt the
-/// absolute counters, then advance the durability tracker and settle the
+/// Publish a durable batch (SYNCHRONOUS): raise visibility per (table,
+/// version), then advance the durability tracker and settle the
 /// recoverability prefix. The `resume_version_guard` re-owns the exact
 /// versions the receipt recorded (allocation-free); its `commit()` marks
 /// visibility Materialized and advances the committed watermark.
-pub(crate) async fn apply_publication(
-    repo: &RepoInstance,
+///
+/// PROOF (cancellation, S5c-X PR6b-2 item 6): between the checkpoint batch's
+/// atomic commit and the end of this function there is NO `.await`: an
+/// executor can only cancel a future at an await point, so once the commit's
+/// poll resolves, durability and RAM publication complete atomically with
+/// respect to caller cancellation. Earlier awaits are covered by the durable
+/// Prepared/Materialized receipt, which owns the versions; guards dropped
+/// mid-pipeline mark Aborted (transient — the resume path re-owns the exact
+/// versions via `resume_version_guard`, whose `commit()` rewrites the mark;
+/// the completion watermark never wedges because Aborted is terminal).
+///
+/// The wal group is resolved by the async caller and passed in — resolving
+/// it here would need a `.await`, which is exactly what this function must
+/// not contain.
+pub(crate) fn apply_publication(
     gate: &Arc<RepoTxGate>,
+    group: Option<&Arc<shamir_wal::WalGroupCommit>>,
     publication: &Publication,
-) -> DbResult<()> {
+) {
     for event in &publication.events {
         let guard = gate.resume_version_guard(event.local_version);
         for (mvcc, ops) in &event.groups {
@@ -147,17 +161,25 @@ pub(crate) async fn apply_publication(
         }
         guard.commit();
     }
-    // adopt_absolute only touches RAM under a lock — it cannot realistically
-    // fail here (post-commit); errors are propagated anyway.
-    for (counter, after) in &publication.counters {
-        counter.adopt_absolute(*after).await?;
-    }
-    let group = repo.wal_group().await.ok();
     for event in &publication.events {
         gate.mark_durable(event.local_version);
-        if let Some(group) = &group {
+        if let Some(group) = group {
             group.settle(event.local_version);
         }
+    }
+}
+
+/// Adopt the absolute counters of a published batch — the single remaining
+/// await of the old inline publication, extracted so `apply_publication` can
+/// be synchronous. `adopt_absolute` only touches RAM under a lock — it
+/// cannot realistically fail here (post-commit); errors are propagated
+/// anyway.
+pub(crate) async fn adopt_counters(
+    _repo: &RepoInstance,
+    publication: &Publication,
+) -> DbResult<()> {
+    for (counter, after) in &publication.counters {
+        counter.adopt_absolute(*after).await?;
     }
     Ok(())
 }

@@ -9,7 +9,8 @@
 //! (`receipt::stage` / `receipt::checkpoint`, including the Uncertain
 //! read-back reconciles), minus guard publication — a cold start has no live
 //! gate watermark obligation; the cold gate seeds from the persisted markers.
-//! Journal coverage is verified (and repaired through the sole journal
+//! The checkpoint tail also runs the synchronous RAM publication
+//! (`receipt::publish`) exactly like the warm path. Journal coverage is verified (and repaired through the sole journal
 //! writer if an Uncertain commit lost rows) before any bookmark advance, so
 //! any decode/IO failure refuses the cold open, matching the PR4 policy.
 
@@ -22,7 +23,7 @@ use crate::meta::repl::bookmark_v3::{load_bookmark_v3, BookmarkV3};
 use crate::meta::repl::receipt::load_outstanding_receipt;
 use crate::meta::repl::{ReceiptPhase, ReplicationReceipt};
 use crate::repo::RepoInstance;
-use crate::tx::apply_replicated::follower_durability::receipt::{checkpoint, stage};
+use crate::tx::apply_replicated::follower_durability::receipt::{checkpoint, publish, stage};
 
 /// Complete the receipt referenced by the persisted bookmark v3 pointer, if
 /// any. Must run before the cold classification reads the clean horizon.
@@ -79,8 +80,12 @@ pub(crate) async fn complete_outstanding_receipt(
     }
     let local_end = local_end(&receipt);
     checkpoint::confirm_journal(repo, local_end).await?;
-    // One atomic batch: bookmark advance + receipt retirement (+ info flush).
-    checkpoint::checkpoint(repo, info, &receipt, &old).await?;
+    let publication = publish::publication_from_receipt(repo, &receipt).await?;
+    publish::adopt_counters(repo, &publication).await?;
+    let gate = repo.tx_gate().await?;
+    // One atomic batch: bookmark advance + receipt retirement, with the RAM
+    // publication in the same poll (+ info flush).
+    checkpoint::checkpoint(repo, info, &receipt, &old, &gate, &publication).await?;
     log::info!(
         "cold receipt recovery: completed receipt upstream {}..={} through \
          local version {} on repo {}",

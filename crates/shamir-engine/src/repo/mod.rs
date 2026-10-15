@@ -23,8 +23,9 @@ pub use fk_reverse_cache::{
     build_reverse_fk_entries, FkReverseCache, ReverseFkEntry, TaggedReverseFkEntry,
 };
 pub use repo_config::RepoConfig;
-pub use repo_instance::{repo_token, to_mvcc_retention, RepoInstance};
+pub use repo_instance::{repo_token, RepoInstance};
 pub use repo_types::{BoxRepo, BoxRepoFactory, RepoFactory};
+pub use version_provider::to_mvcc_retention;
 pub use version_provider::RepoVersionProvider;
 
 /// Re-export the engine-internal retention policy so downstream crates
