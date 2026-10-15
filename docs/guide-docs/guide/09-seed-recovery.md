@@ -14,6 +14,16 @@ path for residual gaps. It is "R2-lite": an offline, whole-repository
 logical seed — NOT an online snapshot, NOT automatic reseeding,
 NOT promotion/failover, and NOT full-server disaster recovery.
 
+While a subscription is in `resync_required` quarantine, ordinary reads of
+the covered repository are also refused (PR8b): client reads
+(get/query/scan, incl. temporal AsOf/History) and local changefeed/journal
+pulls fail with the wire code `resync_required` (non-retryable), so stale
+state is never served. Status/`ReplicationStatus`/`ListSubscriptions`
+(state + `status_message`) and DESCRIBE stay readable. There is no
+automatic reseed: the operator sees the quarantine via status, installs
+the replacement seed per this runbook, `Resume`s the subscription, and the
+first read after that succeeds.
+
 Read this together with:
 
 * [`../architecture/SEED_FORMAT.md`](../architecture/SEED_FORMAT.md) — the

@@ -22,9 +22,12 @@ use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
 use crate::types::value::QueryValue;
 use crate::{DbResult, ShamirDb};
+use dashmap::DashMap;
+use shamir_collections::THasher;
 use shamir_query_types::admin::ReplDirection;
 use shamir_query_types::ReplicationServe;
 use shamir_types::mpack;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::helpers::{admin_result, to_qv};
@@ -389,6 +392,11 @@ impl ShamirAdminExecutor {
             expected_version: None,
         };
         let result = self.delete_repl(&table, &del_op).await?;
+        if result {
+            // S5c-X PR8b: dropping a subscription can remove a
+            // `resync_required` row and lift a quarantine.
+            self.shamir.refresh_resync_quarantine_cache().await;
+        }
         Ok(admin_result(mpack!({
             "dropped_subscription": @(QueryValue::Str(name)),
             "existed": @(QueryValue::Bool(result)),
@@ -540,6 +548,10 @@ impl ShamirAdminExecutor {
             .flush_seed_catalogue()
             .await
             .map_err(|e| err(e.to_string()))?;
+        // S5c-X PR8b: Pause/Resume/SetProfile can flip the subscription's
+        // persisted `state`; rebuild the read-quarantine cache after the
+        // write commits.
+        self.shamir.refresh_resync_quarantine_cache().await;
         Ok(admin_result(mpack!({
             "altered_subscription": @(QueryValue::Str(name)),
         })))
@@ -653,6 +665,72 @@ impl ShamirAdminExecutor {
     }
 }
 
+/// S5c-X PR8b — lock-free read-quarantine cache.
+///
+/// Mirrors the full set of `(db, repo)` (or `(db, "*")` for scope.repo `None`
+/// pull streams) targets covered by a subscription whose persisted row has
+/// `state = "resync_required"`, with the row's `status_message` as the value.
+/// Rebuilt wholesale by [`ShamirDb::refresh_resync_quarantine_cache`] after
+/// every subscription-state mutation (and at init), so reads pay one atomic
+/// `is_empty` load on the healthy path and never take a lock.
+pub(crate) struct ResyncQuarantineCache {
+    entries: DashMap<(String, String), String, THasher>,
+    count: AtomicUsize,
+}
+
+impl Default for ResyncQuarantineCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ResyncQuarantineCache {
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: DashMap::with_hasher(THasher::default()),
+            count: AtomicUsize::new(0),
+        }
+    }
+
+    /// Cheap healthy-path probe: one `Relaxed` load. Empty ⇒ no quarantine.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.count.load(Ordering::Relaxed) == 0
+    }
+
+    /// Quarantine reason for `(db, repo)`, checking the exact repo first and
+    /// then the whole-db wildcard installed for `scope.repo: None` streams.
+    pub(crate) fn reason_for(&self, db: &str, repo: &str) -> Option<String> {
+        if let Some(reason) = self.entries.get(&(db.to_string(), repo.to_string())) {
+            return Some(reason.value().clone());
+        }
+        self.entries
+            .get(&(db.to_string(), "*".to_string()))
+            .map(|reason| reason.value().clone())
+    }
+
+    /// Atomically replace the whole set. No lock anywhere: the map is
+    /// cleared and repopulated lock-free; readers see either the old or the
+    /// new complete set (never a mix that matters — the refresh is idempotent
+    /// and derived from the same persisted rows).
+    pub(crate) fn install(&self, entries: impl IntoIterator<Item = ((String, String), String)>) {
+        self.entries.clear();
+        let mut len = 0usize;
+        for (key, reason) in entries {
+            self.entries.insert(key, reason);
+            len += 1;
+        }
+        self.count.store(len, Ordering::Release);
+    }
+}
+
+/// Negative-control seam for tests: when set, the read guards skip the
+/// `resync_required` quarantine and serve (stale) reads anyway (mirrors
+/// `SKIP_FENCE_QUARANTINE_FOR_TEST` in `shamir-server`'s
+/// `replication/identity_fence/checks.rs`). Always compiled; the guards read
+/// it behind `cfg!(test)` so the branch is elided in production and the
+/// static is never dead on any platform.
+pub(crate) static SKIP_READ_QUARANTINE_FOR_TEST: AtomicBool = AtomicBool::new(false);
+
 // ----------------------------------------------------------------------
 // Follower-side gap visibility (Part 2, RI-10)
 // ----------------------------------------------------------------------
@@ -684,6 +762,21 @@ impl ShamirDb {
         db_name: &str,
         repo_name: &str,
     ) -> DbResult<bool> {
+        let entries = self.resync_quarantine_entries().await?;
+        Ok(entries
+            .iter()
+            .any(|((db, repo), _)| db == db_name && (repo == "*" || repo == repo_name)))
+    }
+
+    /// Single source of truth for the quarantine set: walk the
+    /// `system/subscriptions` table rows with `state == "resync_required"`
+    /// and resolve each row's profile `Pull` streams into cache keys
+    /// `(db, repo)` (or `(db, "*")` when `scope.repo` is `None`), valued
+    /// with the row's `status_message` (or a constant reason when absent).
+    /// Consumed by both [`Self::has_resync_required_subscription_covering`]
+    /// and [`Self::refresh_resync_quarantine_cache`].
+    async fn resync_quarantine_entries(&self) -> DbResult<Vec<((String, String), String)>> {
+        let mut entries = Vec::new();
         let table = self.system_store().subscriptions_table().await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
@@ -691,18 +784,19 @@ impl ShamirDb {
         let result = table
             .read(&crate::query::read::ReadQuery::new("subscriptions"), &ctx)
             .await?;
-        let rows: Vec<QueryValue> = result
-            .records
-            .into_iter()
-            .map(|row| row.as_value().into_owned())
-            .collect();
-        for row in &rows {
+        for record in result.records {
+            let row = record.as_value().into_owned();
             if row.get("state").and_then(|value| value.as_str()) != Some("resync_required") {
                 continue;
             }
             let Some(profile) = row.get("profile").and_then(|value| value.as_str()) else {
                 continue;
             };
+            let reason = row
+                .get("status_message")
+                .and_then(|value| value.as_str())
+                .unwrap_or("subscription requires resync")
+                .to_string();
             let Ok(streams) = super::replication_seed::catalogue::streams(self, profile).await
             else {
                 // Missing/unreadable profile: not a covering stream.
@@ -712,17 +806,29 @@ impl ShamirDb {
                 if !matches!(stream.direction, ReplDirection::Pull) {
                     continue;
                 }
-                if stream.scope.db != db_name {
-                    continue;
-                }
-                match &stream.scope.repo {
-                    None => return Ok(true),
-                    Some(repo) if repo == repo_name => return Ok(true),
-                    Some(_) => {}
-                }
+                let repo = stream.scope.repo.unwrap_or_else(|| "*".to_string());
+                entries.push(((stream.scope.db, repo), reason.clone()));
             }
         }
-        Ok(false)
+        Ok(entries)
+    }
+
+    /// Recompute the read-quarantine cache from the persisted subscription
+    /// rows and install it wholesale. Errors are logged and swallowed: the
+    /// cache is an optimised read filter and a failed refresh must never
+    /// break the mutation that triggered it (the next refresh retries).
+    pub(crate) async fn refresh_resync_quarantine_cache(&self) {
+        match self.resync_quarantine_entries().await {
+            Ok(entries) => self.resync_quarantine.install(entries),
+            Err(e) => log::warn!("refresh_resync_quarantine_cache: {e}"),
+        }
+    }
+
+    /// Quarantine reason for an ordinary READ of `(db_name, repo_name)`, or
+    /// `None` when the repo is readable. One `Relaxed` load on the healthy
+    /// path (callers short-circuit on [`ResyncQuarantineCache::is_empty`]).
+    pub(crate) fn quarantined_read_reason(&self, db_name: &str, repo_name: &str) -> Option<String> {
+        self.resync_quarantine.reason_for(db_name, repo_name)
     }
 
     /// Persist `state = "resync_required"` on subscription `name`'s row in
@@ -810,6 +916,10 @@ impl ShamirDb {
             .await?;
         table.interner().persist().await?;
         self.flush_seed_catalogue().await?;
+        // S5c-X PR8b: the row's `state` just changed (resync_required set or
+        // cleared); rebuild the read-quarantine cache so ordinary reads
+        // observe the new state immediately.
+        self.refresh_resync_quarantine_cache().await;
         Ok(())
     }
 }

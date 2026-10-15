@@ -132,6 +132,17 @@ pub enum DbError {
     /// supported by this backend.
     #[error("Repository-wide atomic batch is not supported by this backend: {0}")]
     AtomicBatchUnsupported(String),
+
+    /// S5c-X PR8b: an ordinary read hit a replication destination that is in
+    /// `resync_required` quarantine (identity/epoch fence tripped or terminal
+    /// journal gap). The destination's local state is stale/diverged; reads are
+    /// refused until a replacement seed is installed and the quarantine cleared.
+    #[error("repository {db}/{repo} is quarantined (resync_required): {reason}")]
+    ResyncRequired {
+        db: String,
+        repo: String,
+        reason: String,
+    },
 }
 
 impl From<CodecError> for DbError {
@@ -160,6 +171,7 @@ impl DbError {
             DbError::VersionConflict(_) => Some("version_conflict"),
             DbError::Conflict(_) => Some("tx_conflict"),
             DbError::IndexDrainInProgress(_) => Some("index_drain_in_progress"),
+            DbError::ResyncRequired { .. } => Some("resync_required"),
             _ => None,
         }
     }

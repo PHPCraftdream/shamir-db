@@ -1,9 +1,12 @@
 //! `impl ShamirDb { execute, execute_as }`.
 
-use shamir_query_types::batch::ExecPolicy;
+use shamir_query_types::batch::tree_visitor::BatchTreeVisitor;
+use shamir_query_types::batch::{BatchOp, ExecPolicy};
+use std::sync::atomic::Ordering;
 
 use crate::access::Actor;
 use crate::query::batch::{execute_batch, Authorized, BatchError, BatchRequest, BatchResponse};
+use crate::shamir_db::execute::{ResyncQuarantineCache, SKIP_READ_QUARANTINE_FOR_TEST};
 use crate::shamir_db::ports::RepoAdminObserver;
 
 use super::super::shamir_db::ShamirDb;
@@ -69,6 +72,25 @@ impl ShamirDb {
         let auth = Authorized::authorize(request, actor, db_name, self)
             .await?
             .with_policy(policy);
+
+        // S5c-X PR8b: ordinary READS of a quarantined (`resync_required`)
+        // repo fail closed. Fast path is one `Relaxed` load (empty cache ⇒
+        // no ops are touched, no allocation). Writes and admin ops are NOT
+        // gated — status/DESCRIBE stay readable by design.
+        let skip_seam = cfg!(test) && SKIP_READ_QUARANTINE_FOR_TEST.load(Ordering::Relaxed);
+        if !skip_seam && !self.resync_quarantine.is_empty() {
+            if let Some((alias, repo, reason)) =
+                quarantined_read_hit(db_name, request, &self.resync_quarantine)
+            {
+                return Err(BatchError::ResyncRequired {
+                    alias,
+                    db: db_name.to_string(),
+                    repo,
+                    reason,
+                });
+            }
+        }
+
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),
             message: format!("Database '{}' not found", db_name),
@@ -104,4 +126,26 @@ impl ShamirDb {
 
         Ok(response)
     }
+}
+
+/// Walk the whole query tree (nested `Batch`/`ForEach` bodies included —
+/// mirroring the authorization walk) and return the first READ op whose
+/// target repo is quarantined, as `(alias, repo, reason)`. Only data reads
+/// (`BatchOp::Read` — the `Action::Read`-classified variant) are checked;
+/// writes and admin/status/DESCRIBE ops pass through.
+fn quarantined_read_hit(
+    db_name: &str,
+    request: &BatchRequest,
+    cache: &ResyncQuarantineCache,
+) -> Option<(String, String, String)> {
+    for visit in BatchTreeVisitor::new(&request.queries) {
+        let BatchOp::Read(query) = &visit.entry.op else {
+            continue;
+        };
+        let repo = &query.from.repo;
+        if let Some(reason) = cache.reason_for(db_name, repo) {
+            return Some((visit.alias.to_string(), repo.clone(), reason));
+        }
+    }
+    None
 }

@@ -2,7 +2,7 @@ import { ShamirDbError } from '../errors.js';
 import { position } from './positions.js';
 
 const codes = new Set(['as_of_visibility_timeout', 'as_of_future_version',
-  'as_of_reopen_required', 'visibility_future_version', 'visibility_wait_invalid',
+  'as_of_reopen_required', 'resync_required', 'visibility_future_version', 'visibility_wait_invalid',
   'write_committed_visibility_pending']);
 
 /** Only AsOf timeout currently has structured positions on the wire. */
