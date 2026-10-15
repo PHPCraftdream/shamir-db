@@ -78,7 +78,12 @@ impl RepoInstance {
         permit: &RepoWritePermit,
     ) -> DbResult<TableManager> {
         self.write_domain.debug_check_permit(permit);
-        self.get_table_ctx(table_name, permit).await
+        // S5c-X Round-11 (stack layout): `get_table_ctx` embeds the whole
+        // cold-init chain (`create_table_context` →
+        // `create_with_domain_admitted`) inline; pinning it keeps that
+        // await state on the heap instead of widening every admitted
+        // caller's future along the seed-install / replay poll chains.
+        Box::pin(self.get_table_ctx(table_name, permit)).await
     }
 
     async fn get_table_ctx(

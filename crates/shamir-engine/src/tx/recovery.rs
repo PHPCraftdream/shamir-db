@@ -59,10 +59,24 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
         .admit()
         .await
         .map_err(|error| DbError::Internal(error.to_string()))?;
-    replay_v2_op_admitted(op, repo, &permit).await
+    // S5c-X Round-11 (stack layout): the admitted body's future is enormous
+    // (per-op table resolution reaches `get_table_admitted` → `get_table_ctx`
+    // → `create_table_context` → `create_with_domain_admitted` inline). The
+    // `#[inline(never)]` boxed dispatcher keeps that await state on the heap,
+    // off every caller frame along the resume/recovery poll chain.
+    Box::pin(replay_v2_op_admitted(op, repo, &permit)).await
 }
 
-async fn replay_v2_op_admitted(
+#[inline(never)]
+fn replay_v2_op_admitted<'a>(
+    op: &'a WalOpV2,
+    repo: &'a RepoInstance,
+    permit: &'a RepoWritePermit,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = DbResult<()>> + Send + 'a>> {
+    Box::pin(replay_v2_op_admitted_inner(op, repo, permit))
+}
+
+async fn replay_v2_op_admitted_inner(
     op: &WalOpV2,
     repo: &RepoInstance,
     permit: &RepoWritePermit,
@@ -513,10 +527,20 @@ pub async fn replay_v2_entry(entry: &shamir_wal::WalEntryV2, repo: &RepoInstance
         .admit()
         .await
         .map_err(|error| DbError::Internal(error.to_string()))?;
-    replay_v2_entry_admitted(entry, repo, &permit).await
+    // Round-11 (stack layout): same heap-pinning rationale as `replay_v2_op`.
+    Box::pin(replay_v2_entry_admitted(entry, repo, &permit)).await
 }
 
-async fn replay_v2_entry_admitted(
+#[inline(never)]
+fn replay_v2_entry_admitted<'a>(
+    entry: &'a shamir_wal::WalEntryV2,
+    repo: &'a RepoInstance,
+    permit: &'a RepoWritePermit,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = DbResult<()>> + Send + 'a>> {
+    Box::pin(replay_v2_entry_admitted_inner(entry, repo, permit))
+}
+
+async fn replay_v2_entry_admitted_inner(
     entry: &shamir_wal::WalEntryV2,
     repo: &RepoInstance,
     permit: &RepoWritePermit,
