@@ -49,9 +49,8 @@ impl ShamirDb {
         if enable_indexes {
             config = config.with_indexes();
         }
-        db.get_repo(repo_name)
-            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?
-            .add_table(config);
+        db.create_table_checked_with_config(repo_name, config)
+            .await?;
 
         if let Err(e) = self
             .system_store
@@ -87,7 +86,7 @@ impl ShamirDb {
         let db = self
             .get_db(db_name)
             .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
-        let removed = db.drop_table(repo_name, table_name)?;
+        let removed = db.drop_table_checked(repo_name, table_name).await?;
 
         // Always clear the catalogue entry (idempotent), even if the
         // in-memory table was already gone, so a stale record can't

@@ -181,6 +181,36 @@ impl DbInstance {
         Ok(())
     }
 
+    /// S5c-X PR6b-2a: membership change under the repository write-admission
+    /// permit. Resolves the repo, acquires its domain, then performs the
+    /// admitted registration. Rejects with `DbError::Internal` while a write
+    /// reservation is outstanding (`RepoWriteError::Reserved`).
+    pub async fn create_table_checked(&self, repo_name: &str, table_name: &str) -> DbResult<()> {
+        self.create_table_checked_with_config(repo_name, TableConfig::new(table_name))
+            .await
+    }
+
+    /// S5c-X PR6b-2a: like [`create_table_checked`](Self::create_table_checked)
+    /// but with a caller-supplied `TableConfig` (e.g. `with_indexes`).
+    pub async fn create_table_checked_with_config(
+        &self,
+        repo_name: &str,
+        config: TableConfig,
+    ) -> DbResult<()> {
+        // Clone the `RepoInstance` out and DROP the DashMap shard guard
+        // BEFORE the admission `.await` — same pattern as `get_table` above.
+        let repo = self
+            .repos
+            .get(repo_name)
+            .map(|r| r.clone())
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
+        let permit =
+            repo.write_domain().admit().await.map_err(|e| {
+                DbError::Internal(format!("repository write admission failed: {e}"))
+            })?;
+        repo.add_table_admitted(config, &permit).await
+    }
+
     /// Drop a table from a repository.
     pub fn drop_table(&self, repo_name: &str, table_name: &str) -> DbResult<bool> {
         let repo = self
@@ -188,6 +218,23 @@ impl DbInstance {
             .get(repo_name)
             .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
         Ok(repo.remove_table(table_name))
+    }
+
+    /// S5c-X PR6b-2a: membership removal under the repository
+    /// write-admission permit. See
+    /// [`create_table_checked`](Self::create_table_checked).
+    pub async fn drop_table_checked(&self, repo_name: &str, table_name: &str) -> DbResult<bool> {
+        // Drop the DashMap shard guard before the admission `.await`.
+        let repo = self
+            .repos
+            .get(repo_name)
+            .map(|r| r.clone())
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
+        let permit =
+            repo.write_domain().admit().await.map_err(|e| {
+                DbError::Internal(format!("repository write admission failed: {e}"))
+            })?;
+        repo.remove_table_admitted(table_name, &permit).await
     }
 
     // ============================================================================

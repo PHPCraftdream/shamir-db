@@ -13,8 +13,9 @@ use super::table::Table;
 use crate::index::index_manager::IndexManager;
 use crate::index::sorted_index_manager::SortedIndexManager;
 use crate::index2::kind::{StemLanguage, TokenizerKind};
+use crate::repo::{RepoWriteDomain, RepoWritePermit};
 use crate::tx::CommitError;
-use shamir_storage::error::DbResult;
+use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::Store;
 
 /// Compute the deterministic token for a table name.
@@ -147,6 +148,14 @@ pub struct TableManager {
     /// `unique_write_lock`. No writer or committer ever acquires
     /// `ddl_admission`, so no cycle involving it can form.
     pub(super) ddl_admission: Arc<tokio::sync::Mutex<()>>,
+    /// S5c-X — per-REPOSITORY write-admission domain, shared with every
+    /// other table in the same repository and the repo's registry/counter
+    /// flushers. DDL entry points acquire the repo permit FIRST (before
+    /// `ddl_admission` and every per-table lock) via
+    /// [`admit`](Self::admit); the permit rides inside the returned
+    /// [`WriteBarrierGuard`] (or the caller's own binding for `_admitted`
+    /// twins) for the whole critical section.
+    pub(super) write_domain: Arc<RepoWriteDomain>,
     /// F-48 (#859, P0) — reusable writer-drain barrier. Fast-path writers
     /// (those that read `needs_write_barrier() == false`) bump this counter
     /// before their flag check and drop it after their full
@@ -390,6 +399,8 @@ impl Clone for TableManager {
             // clone's begin_write_barrier, same rationale as the other
             // shared-Arc fields.
             ddl_admission: Arc::clone(&self.ddl_admission),
+            // S5c-X — the SAME per-repo domain is shared across clones.
+            write_domain: Arc::clone(&self.write_domain),
             // F-48 — shared across clones (Arc<AtomicUsize> inside).
             writer_drain: self.writer_drain.clone(),
             // #1003 — shared across clones (Arc<Mutex<BTreeMap<..>>> inside),
@@ -471,13 +482,33 @@ impl TableManager {
     ///
     /// This is the preferred way to create a TableManager - it handles
     /// internal Table creation and all component initialization.
+    ///
+    /// S5c-X: constructs a fresh, private per-repo write-admission domain
+    /// and delegates to [`create_with_domain`](Self::create_with_domain).
     pub async fn create(
         name: String,
         data_store: Arc<dyn Store>,
         info_store: Arc<dyn Store>,
     ) -> DbResult<Self> {
+        let write_domain = RepoWriteDomain::new(name.clone());
+        Self::create_with_domain(name, data_store, info_store, write_domain).await
+    }
+
+    /// S5c-X: like [`create`](Self::create), but sharing a CALLER-SUPPLIED
+    /// per-repo [`RepoWriteDomain`] — the normal production path, where a
+    /// repository's tables must serialize DDL against each other and the
+    /// registry flushers through the SAME domain.
+    pub async fn create_with_domain(
+        name: String,
+        data_store: Arc<dyn Store>,
+        info_store: Arc<dyn Store>,
+        write_domain: Arc<RepoWriteDomain>,
+    ) -> DbResult<Self> {
         let interner = InternerManager::new(Arc::clone(&info_store));
-        let counter = Arc::new(RecordCounter::new(Arc::clone(&info_store)));
+        let counter = Arc::new(RecordCounter::new_with_domain(
+            Arc::clone(&info_store),
+            Arc::clone(&write_domain),
+        ));
 
         // Build the persist registry — cloning interner shares all its
         // internal Arcs (same underlying data), wrapping in Arc<dyn Persistable>
@@ -556,6 +587,8 @@ impl TableManager {
             write_barrier_flags,
             // F-95 (#957) — fresh per-table admission mutex.
             ddl_admission: Arc::new(tokio::sync::Mutex::new(())),
+            // S5c-X — shared per-repo write-admission domain.
+            write_domain: Arc::clone(&write_domain),
             writer_drain: super::writer_drain_barrier::WriterDrainBarrier::new(),
             in_flight_creates: super::in_flight_create_guard::InFlightCreateSet::new(),
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
@@ -752,6 +785,14 @@ impl TableManager {
         // #1069: index2 DROP recovery now writes SucceededViaCrashRecovery status
         // directly within recover_index2_drops(), BEFORE clearing the tombstone.
         // No pre-load or post-write needed here.
+        // S5c-X: open-path recovery runs under the repo's own (fresh,
+        // uncontended) admission permit — recover_hash_renames takes the
+        // per-table write barrier internally.
+        let open_permit = write_domain.admit().await.map_err(|e| {
+            DbError::Internal(format!(
+                "repository write admission failed during table open recovery: {e}"
+            ))
+        })?;
         mgr.recover_index2_drops().await?;
 
         // #1066: recover any index2 RENAME operations interrupted by a
@@ -775,7 +816,7 @@ impl TableManager {
         // from nothing — essential for the unique path, which drops the OLD
         // definition FIRST. See `recover_hash_renames`'s doc for the full
         // crash-state matrix.
-        mgr.recover_hash_renames().await?;
+        mgr.recover_hash_renames_admitted(&open_permit).await?;
 
         // Restore in-memory state from persisted data.
         //
@@ -848,7 +889,10 @@ impl TableManager {
                     .is_some()
                 || !mgr.sorted_indexes().iter_indexes().is_empty();
             if has_legacy {
-                mgr.repair().await?;
+                // S5c-X: the open path already holds `open_permit` — use the
+                // admitted twin (public `repair()` would re-admit and
+                // self-deadlock on the non-reentrant domain mutex).
+                mgr.repair_admitted(&open_permit).await?;
             }
             crate::index2::persistence::save_legacy_index_version(&mgr.info_store).await?;
         }
@@ -923,6 +967,8 @@ impl TableManager {
             unique_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             write_barrier_flags,
             ddl_admission: Arc::new(tokio::sync::Mutex::new(())),
+            // S5c-X — tests constructing directly get a private domain.
+            write_domain: RepoWriteDomain::new(name.clone()),
             writer_drain: super::writer_drain_barrier::WriterDrainBarrier::new(),
             in_flight_creates: super::in_flight_create_guard::InFlightCreateSet::new(),
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
@@ -1290,10 +1336,46 @@ impl TableManager {
     /// (`shamir-db::execute::admin_schema`) is a DIFFERENT crate and must use
     /// this SAME entry point for `SCHEMA_ACTIVATION` — see
     /// `write_barrier_flags`'s bit constants, all of which are `pub`.
+    /// S5c-X — public DDL entry point: acquire repository admission FIRST,
+    /// then run the canonical raise→drain→lock sequence under it. The repo
+    /// permit is retained inside the returned [`WriteBarrierGuard`] (and
+    /// released only when the guard drops, AFTER the barrier bit is
+    /// cleared), so the entire caller critical section holds repo
+    /// admission. Prefer the `_admitted` twin when a permit is already
+    /// held (see [`begin_write_barrier_admitted`](Self::begin_write_barrier_admitted)).
     pub async fn begin_write_barrier(
         &self,
         bit: u8,
-    ) -> (WriteBarrierGuard, tokio::sync::OwnedMutexGuard<()>) {
+    ) -> DbResult<(WriteBarrierGuard, tokio::sync::OwnedMutexGuard<()>)> {
+        let permit = self.admit().await?;
+        let (guard, lock) = self.begin_write_barrier_admitted(bit, &permit).await?;
+        Ok((guard.retaining_permit(permit), lock))
+    }
+
+    /// S5c-X — acquire per-REPOSITORY write admission. Lock order (BINDING):
+    /// repo permit FIRST → per-table `ddl_admission` → raise-intent →
+    /// drain-writers → `unique_write_lock` → terminal
+    /// `bindings_lock`/`persist_lock`. The leader write/commit paths never
+    /// call this — only DDL and registry-flush paths pay admission.
+    pub(super) async fn admit(&self) -> DbResult<RepoWritePermit> {
+        self.write_domain
+            .admit()
+            .await
+            .map_err(|e| DbError::Internal(format!("repository write admission failed: {e}")))
+    }
+
+    /// S5c-X — admitted twin of [`begin_write_barrier`](Self::begin_write_barrier):
+    /// the caller ALREADY holds repo admission (`permit`); this verifies the
+    /// permit belongs to this repository's domain, then runs the existing
+    /// sequence unchanged. The caller keeps ownership of `permit` (it is
+    /// only borrowed here for the debug identity check), so repo admission
+    /// spans the whole surrounding critical section.
+    pub(crate) async fn begin_write_barrier_admitted(
+        &self,
+        bit: u8,
+        permit: &RepoWritePermit,
+    ) -> DbResult<(WriteBarrierGuard, tokio::sync::OwnedMutexGuard<()>)> {
+        self.write_domain.debug_check_permit(permit);
         // Step 0 (F-95, #957): acquire the per-table DDL admission mutex
         // FIRST. This serializes concurrent DDL operations that would
         // share the same bit: without it, DDL-B can drain and park on
@@ -1309,7 +1391,7 @@ impl TableManager {
         let admission = self.ddl_admission.clone().lock_owned().await;
         // Step 1: raise the intent bit FIRST — new writers now take the slow
         // (locked) path.
-        let guard = WriteBarrierGuard::set(self.write_barrier_flags.clone(), bit, admission);
+        let guard = WriteBarrierGuard::set(self.write_barrier_flags.clone(), bit, admission, None);
         // Step 2: drain every writer that read the flag as `false` BEFORE
         // step 1 and is still mid-flight. Cheap (one SeqCst load) when none
         // are active.
@@ -1317,7 +1399,7 @@ impl TableManager {
         // Step 3: ONLY NOW acquire the lock — see the module doc for why
         // this order (not the reverse) is what closes the F-70 cycle.
         let lock_guard = self.unique_write_lock.clone().lock_owned().await;
-        (guard, lock_guard)
+        Ok((guard, lock_guard))
     }
 
     /// Freeze source writes until the returned guard is dropped.
@@ -1662,6 +1744,14 @@ pub struct WriteBarrierGuard {
     // section, reopening the exact multi-owner race this guard closes.
     #[allow(dead_code)]
     admission: tokio::sync::OwnedMutexGuard<()>,
+    /// S5c-X — the per-repo admission permit, retained so the caller's
+    /// ENTIRE critical section holds repository admission. `Some` when the
+    /// permit was minted by [`TableManager::begin_write_barrier`] itself;
+    /// `None` on the `_admitted` path, where the caller keeps ownership of
+    /// its own permit (dropping it at the end of the enclosing `_admitted`
+    /// method — after this guard drops — releases admission).
+    #[allow(dead_code)]
+    permit: Option<RepoWritePermit>,
 }
 
 impl WriteBarrierGuard {
@@ -1669,13 +1759,23 @@ impl WriteBarrierGuard {
         flags: crate::index::write_barrier_flags::WriteBarrierFlags,
         bit: u8,
         admission: tokio::sync::OwnedMutexGuard<()>,
+        permit: Option<RepoWritePermit>,
     ) -> Self {
         flags.set(bit);
         Self {
             flags,
             bit,
             admission,
+            permit,
         }
+    }
+
+    /// Attach the caller-minted admission permit to a guard produced by the
+    /// `_admitted` path, so the returned compound guard releases repo
+    /// admission only when it drops.
+    fn retaining_permit(mut self, permit: RepoWritePermit) -> Self {
+        self.permit = Some(permit);
+        self
     }
 }
 

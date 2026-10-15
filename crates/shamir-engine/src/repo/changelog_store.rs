@@ -16,6 +16,15 @@ use shamir_storage::types::Store;
 #[path = "changelog_store/follower_durability.rs"]
 mod follower_durability;
 
+#[path = "changelog_store/write_domain.rs"]
+pub mod write_domain;
+
+#[path = "changelog_store/write_domain_membership.rs"]
+mod write_domain_membership;
+
+#[cfg(test)]
+mod tests;
+
 /// Per-repo durable changelog journal backed by a `Store`.
 pub struct StoreChangelog {
     store: Arc<dyn Store>,
