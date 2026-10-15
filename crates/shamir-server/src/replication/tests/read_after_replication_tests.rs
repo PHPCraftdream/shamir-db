@@ -189,7 +189,11 @@ async fn assert_read(
             assert_eq!(ids.len(), expected.len());
             for (id, expected) in ids.iter().zip(expected) {
                 let value = table.get(*id).await.expect("replicated point get");
-                let interner = table.interner_for_test().get().await.expect("follower interner");
+                let interner = table
+                    .interner_for_test()
+                    .get()
+                    .await
+                    .expect("follower interner");
                 assert_eq!(
                     inner_value_to_query_value(&value, interner).expect("decode follower names"),
                     *expected,
@@ -567,7 +571,11 @@ async fn matrix_secondary_index_lookup() {
             create_index("by_v", "items").repo("main").field("v"),
         );
         execute(db, &batch).await;
-        let interner = table.interner_for_test().get().await.expect("post-DDL interner");
+        let interner = table
+            .interner_for_test()
+            .get()
+            .await
+            .expect("post-DDL interner");
         let pairs: Vec<_> = ["label", "v", "by_v"]
             .into_iter()
             .map(|name| {

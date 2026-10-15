@@ -242,7 +242,11 @@ async fn sorted_registry_exports_full_descriptors_and_rows() {
     let hash = export_open(&source, "app", "main", &out, 1024)
         .await
         .unwrap();
-    let definition = table.sorted_indexes_for_test().iter_indexes().pop().unwrap();
+    let definition = table
+        .sorted_indexes_for_test()
+        .iter_indexes()
+        .pop()
+        .unwrap();
     let name = interner
         .get_str(&InternerKey::new(definition.name_interned))
         .unwrap();
