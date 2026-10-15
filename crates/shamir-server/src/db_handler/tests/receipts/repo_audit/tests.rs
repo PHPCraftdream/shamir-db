@@ -289,7 +289,7 @@ fn audit_writer_builds_a_per_execution_observer() {
 mod zz_stack_diag {
     use super::*;
 
-    fn zz_size_of_future<F: std::future::Future>(fut: &F) -> usize {
+    fn zz_size_of_future<F: std::future::Future>(_fut: &F) -> usize {
         std::mem::size_of::<F>()
     }
 
@@ -363,7 +363,6 @@ mod zz_stack_diag {
 
     #[tokio::test]
     async fn zz_stack_diag_execute_batch() {
-        let db = ShamirDb::init_memory().await.unwrap();
         let actor = Actor::User(principal64([3; 16]));
         let batch = alter_batch("alter", "main", false);
         let auth = shamir_db::engine::query::batch::Authorized::unchecked(&batch, actor, "app");
