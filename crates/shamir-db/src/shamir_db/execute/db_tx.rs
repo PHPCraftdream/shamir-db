@@ -58,15 +58,27 @@ fn tx_read_quarantine_refusal(
 }
 
 /// Request-shaped twin of [`tx_read_quarantine_refusal`] for the
-/// `tx_execute*` family: mirrors the batch gate's whole-query-tree walk so a
-/// read op targeting a quarantined repo is refused even inside a
+/// `tx_execute*` family — and the SINGLE shared implementation of the
+/// request-shaped quarantine gate, also called by the batch path in
+/// `repo_admin/db_execute.rs`. Mirrors the batch gate's whole-query-tree
+/// walk so a read op targeting a quarantined repo is refused even inside a
 /// pre-quarantine tx.
-fn tx_read_quarantine_refusal_for_request(
+///
+/// Deliberately SYNCHRONOUS (no `.await`) and fully self-contained (skip
+/// seam + `is_empty` fast path live here, not at the call sites): the async
+/// callers keep only a one-line `if let Some(err) = ...` in their bodies,
+/// so the tree-walk's locals (visitor, per-op bindings) never become fields
+/// of the callers' generated `Future` state machines. Inlining the walk
+/// into an async fn inflates that future, and under nested
+/// `Batch`/`ForEach` recursion the future is held on the stack once per
+/// recursion level — the Round-12 Windows stack overflow traced to exactly
+/// that. Keep this helper sync.
+pub(crate) fn tx_read_quarantine_refusal_for_request(
     shamir: &ShamirDb,
     db_name: &str,
     request: &BatchRequest,
 ) -> Option<BatchError> {
-    if shamir.resync_quarantine.is_empty() {
+    if skip_read_quarantine_for_test() || shamir.resync_quarantine.is_empty() {
         return None;
     }
     quarantined_read_hit(db_name, request, &shamir.resync_quarantine).map(
@@ -261,14 +273,13 @@ impl ShamirDb {
 
         // S5c-X PR8b: ordinary READS of a quarantined repo fail closed, even
         // for a tx opened BEFORE the quarantine. Same shape as the batch gate
-        // in `repo_admin/db_execute.rs` (incl. the test-only skip seam).
-        // Authorization comes FIRST so unauthorized callers get `access_denied`
-        // and never learn the repo's quarantine state.
-        let skip_seam = skip_read_quarantine_for_test();
-        if !skip_seam {
-            if let Some(err) = tx_read_quarantine_refusal_for_request(self, db_name, request) {
-                return Err(err);
-            }
+        // in `repo_admin/db_execute.rs`. The test-only skip seam and the
+        // `is_empty` fast path live INSIDE the shared sync helper, so only
+        // this one-line call sits in the async state machine.
+        // Authorization comes FIRST so unauthorized callers get
+        // `access_denied` and never learn the repo's quarantine state.
+        if let Some(err) = tx_read_quarantine_refusal_for_request(self, db_name, request) {
+            return Err(err);
         }
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),

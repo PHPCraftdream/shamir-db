@@ -6,13 +6,13 @@ use shamir_query_types::batch::{BatchOp, ExecPolicy};
 use crate::access::Actor;
 use crate::query::batch::{execute_batch, Authorized, BatchError, BatchRequest, BatchResponse};
 use crate::shamir_db::ports::RepoAdminObserver;
-use shamir_query_types::batch::ResyncRequiredDetail;
 
+use super::super::db_tx::tx_read_quarantine_refusal_for_request;
 use super::super::shamir_db::ShamirDb;
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::ambient_interner::attach_interner_delta;
 use super::function_invoker::ShamirFunctionInvoker;
-use super::quarantine_cache::{skip_read_quarantine_for_test, ResyncQuarantineCache};
+use super::quarantine_cache::ResyncQuarantineCache;
 use super::table_resolver::DbTableResolver;
 
 impl ShamirDb {
@@ -77,20 +77,18 @@ impl ShamirDb {
         // repo fail closed. Fast path is one `Relaxed` load (empty cache ⇒
         // no ops are touched, no allocation). Writes and admin ops are NOT
         // gated — status/DESCRIBE stay readable by design.
-        let skip_seam = skip_read_quarantine_for_test();
-        if !skip_seam && !self.resync_quarantine.is_empty() {
-            if let Some((alias, repo, reason)) =
-                quarantined_read_hit(db_name, request, &self.resync_quarantine)
-            {
-                return Err(BatchError::ResyncRequired {
-                    alias,
-                    detail: Box::new(ResyncRequiredDetail {
-                        db: db_name.to_string(),
-                        repo,
-                        reason,
-                    }),
-                });
-            }
+        //
+        // The gate is a single call to the shared SYNCHRONOUS helper
+        // (`tx_read_quarantine_refusal_for_request` in `db_tx.rs` — no
+        // `.await` inside). Keeping the whole-query-tree walk OUT of this
+        // async fn body is what matters for stack safety: any code inlined
+        // here becomes fields of this fn's generated `Future` state machine,
+        // and under nested `Batch`/`ForEach` recursion that future is held
+        // on the stack once per recursion level (Round-12 Windows overflow).
+        // The sync helper's locals live in its own plain stack frame and the
+        // returned `Option<BatchError>` is dropped before `execute_batch`.
+        if let Some(err) = tx_read_quarantine_refusal_for_request(self, db_name, request) {
+            return Err(err);
         }
 
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
