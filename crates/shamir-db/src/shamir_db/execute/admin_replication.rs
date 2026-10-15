@@ -391,10 +391,9 @@ impl ShamirAdminExecutor {
         };
         let result = self.delete_repl(&table, &del_op).await?;
         if result {
-            // S5c-X PR8b: dropping a subscription can remove a
-            // `resync_required` row and lift a quarantine.
-            self.shamir
-                .refresh_resync_quarantine_cache()
+            // PR8b: dropping may remove a `resync_required` row and lift the
+            // quarantine. Boxed (Round-14): await state off the caller's frame.
+            Box::pin(self.shamir.refresh_resync_quarantine_cache())
                 .await
                 .map_err(|e| err(e.to_string()))?;
         }
@@ -585,11 +584,10 @@ impl ShamirAdminExecutor {
             .flush_seed_catalogue()
             .await
             .map_err(|e| err(e.to_string()))?;
-        // S5c-X PR8b: Pause/Resume/SetProfile can flip the subscription's
-        // persisted `state`; rebuild the read-quarantine cache after the
-        // write commits.
-        self.shamir
-            .refresh_resync_quarantine_cache()
+        // PR8b: Pause/Resume/SetProfile can flip the persisted `state`; rebuild
+        // the read-quarantine cache post-commit. Boxed (Round-14): await state
+        // off the caller's frame.
+        Box::pin(self.shamir.refresh_resync_quarantine_cache())
             .await
             .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
@@ -904,7 +902,7 @@ impl ShamirDb {
                 resolution_failure = Some(failure.clone());
             }
             self.resync_quarantine.publish(next_entries);
-            self.revoke_quarantined_receivers().await;
+            Box::pin(self.revoke_quarantined_receivers()).await; // Round-14 boxed
         }
         let mut record = row.as_value().into_owned();
         // S5c-X PR8b: capture the row's CURRENT `seed_receipt` as the durable
@@ -949,7 +947,7 @@ impl ShamirDb {
             .await?;
         table.interner().persist().await?;
         self.flush_seed_catalogue().await?;
-        self.refresh_resync_quarantine_cache().await?;
+        Box::pin(self.refresh_resync_quarantine_cache()).await?; // Round-14 boxed
         Ok(())
     }
 }

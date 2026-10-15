@@ -278,3 +278,135 @@ fn audit_writer_builds_a_per_execution_observer() {
         assert_eq!(appender.0.lock().len(), 1);
     });
 }
+
+// ── Round-14 stack diagnostic (zz_stack_diag) ──────────────────────────────
+// The nested_batch_alter_is_audited lib test stack-overflows on this PR
+// (master is green). These tests are NOT behavioural: each one constructs
+// the futures along the failing call chain WITHOUT polling them and prints
+// the concrete `Future` state-machine size via `eprintln!` (prefix
+// `zz_stack_diag`) so the CI log can be grepped. Nothing is asserted.
+#[cfg(test)]
+mod zz_stack_diag {
+    use super::*;
+
+    fn zz_size_of_future<F: std::future::Future>(fut: &F) -> usize {
+        std::mem::size_of::<F>()
+    }
+
+    /// Thin unboxed wrapper so the engine `execute_batch` future's size can
+    /// be measured (`execute_batch` itself is not boxed, but its inner
+    /// `execute_batch_impl` recursion is `Box::pin`'d at each `Batch` level).
+    #[inline(never)]
+    async fn zz_measure_execute_batch<'a>(
+        auth: shamir_db::engine::query::batch::Authorized<'a>,
+        resolver: &dyn shamir_db::engine::query::batch::TableResolver,
+    ) -> Result<
+        shamir_db::engine::query::batch::BatchResponse,
+        shamir_db::engine::query::batch::BatchError,
+    > {
+        shamir_db::engine::query::batch::execute_batch(auth, resolver, None, None).await
+    }
+
+    struct ZzResolver;
+
+    #[async_trait::async_trait]
+    impl shamir_db::engine::query::batch::TableResolver for ZzResolver {
+        async fn resolve(
+            &self,
+            _: &shamir_db::engine::query::TableRef,
+        ) -> shamir_db::DbResult<shamir_db::engine::table::TableManager> {
+            Err(shamir_db::DbError::NotFound("zz_stack_diag".into()))
+        }
+
+        async fn resolve_repo(
+            &self,
+            _: &str,
+        ) -> shamir_db::DbResult<shamir_db::engine::repo::RepoInstance> {
+            Err(shamir_db::DbError::NotFound("zz_stack_diag".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn zz_stack_diag_execute_as() {
+        let db = ShamirDb::init_memory().await.unwrap();
+        let actor = Actor::User(principal64([3; 16]));
+        let batch = alter_batch("alter", "main", false);
+
+        let fut = db.execute_as(actor.clone(), "app", &batch);
+        eprintln!(
+            "zz_stack_diag execute_as fut size = {}",
+            zz_size_of_future(&fut)
+        );
+        drop(fut);
+
+        let fut = db.execute_with_policy_and_repo_observer(
+            actor.clone(),
+            "app",
+            &batch,
+            shamir_query_types::batch::ExecPolicy::EMBEDDED,
+            None,
+        );
+        eprintln!(
+            "zz_stack_diag execute_with_policy_and_repo_observer fut size = {}",
+            zz_size_of_future(&fut)
+        );
+        drop(fut);
+
+        eprintln!(
+            "zz_stack_diag size_of BatchError = {} DbError = {} QueryResult = {} BatchResponse = {}",
+            std::mem::size_of::<shamir_db::engine::query::batch::BatchError>(),
+            std::mem::size_of::<shamir_db::DbError>(),
+            std::mem::size_of::<shamir_db::engine::query::read::QueryResult>(),
+            std::mem::size_of::<shamir_db::engine::query::batch::BatchResponse>(),
+        );
+    }
+
+    #[tokio::test]
+    async fn zz_stack_diag_execute_batch() {
+        let db = ShamirDb::init_memory().await.unwrap();
+        let actor = Actor::User(principal64([3; 16]));
+        let batch = alter_batch("alter", "main", false);
+        let auth = shamir_db::engine::query::batch::Authorized::unchecked(&batch, actor, "app");
+        let resolver = ZzResolver;
+
+        let fut = zz_measure_execute_batch(auth, &resolver);
+        eprintln!(
+            "zz_stack_diag execute_batch (unboxed wrapper) fut size = {}",
+            zz_size_of_future(&fut)
+        );
+        drop(fut);
+    }
+
+    #[tokio::test]
+    async fn zz_stack_diag_alter_repo() {
+        let db = ShamirDb::init_memory().await.unwrap();
+
+        let fut = db.get_table("app", "main", "items");
+        eprintln!(
+            "zz_stack_diag get_table fut size = {}",
+            zz_size_of_future(&fut)
+        );
+        drop(fut);
+
+        // execute_admin is `async_trait` — already boxed at the trait
+        // boundary, so its inner state machine is heap-allocated
+        // (`size_of_val` of the boxed future would just be 16).
+        eprintln!("zz_stack_diag execute_admin fut is boxed (Pin<Box> = 16)");
+    }
+
+    #[tokio::test]
+    async fn zz_stack_diag_dispatch() {
+        let (handler, _appender, session) = fixture().await;
+        let batch = alter_batch("alter", "main", false);
+        let conn = ConnectionServices::without_push(0);
+
+        // `handle` returns `DbResponse` via a boxed closure — measure the
+        // unboxed `execute` future instead (handler.rs:533, the real body).
+        let fut = handler.execute(&session, CURRENT_QUERY_LANG_VERSION, "app", batch, &conn);
+        eprintln!(
+            "zz_stack_diag handler.execute fut size = {}",
+            zz_size_of_future(&fut)
+        );
+        drop(fut);
+    }
+}
