@@ -103,7 +103,7 @@ impl ShamirAdminExecutor {
             .map_err(|e| err(e.to_string()))?;
         self.shamir
             .system_store()
-            .persist_table_interner(&table)
+            .persist_table_interner(&table, None)
             .await
             .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
@@ -229,7 +229,7 @@ impl ShamirAdminExecutor {
             .map_err(|e| err(e.to_string()))?;
         self.shamir
             .system_store()
-            .persist_table_interner(&table)
+            .persist_table_interner(&table, None)
             .await
             .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
@@ -348,7 +348,7 @@ impl ShamirAdminExecutor {
             .map_err(|e| err(e.to_string()))?;
         self.shamir
             .system_store()
-            .persist_table_interner(&table)
+            .persist_table_interner(&table, None)
             .await
             .map_err(|e| err(e.to_string()))?;
         self.shamir
@@ -532,7 +532,7 @@ impl ShamirAdminExecutor {
             .map_err(|e| err(e.to_string()))?;
         self.shamir
             .system_store()
-            .persist_table_interner(&table)
+            .persist_table_interner(&table, None)
             .await
             .map_err(|e| err(e.to_string()))?;
         self.shamir
@@ -806,7 +806,9 @@ impl ShamirDb {
         self.system_store()
             .set_via_implicit_tx(&table, &set_op)
             .await?;
-        self.system_store().persist_table_interner(&table).await?;
+        self.system_store()
+            .persist_table_interner(&table, None)
+            .await?;
         self.flush_seed_catalogue().await?;
         Ok(())
     }

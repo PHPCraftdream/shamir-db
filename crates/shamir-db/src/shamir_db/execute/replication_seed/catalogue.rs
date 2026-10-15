@@ -88,7 +88,9 @@ pub(super) async fn persist(home: &ShamirDb, record: QueryValue) -> DbResult<()>
         value: record,
     };
     home.system_store().set_via_implicit_tx(&table, &op).await?;
-    home.system_store().persist_table_interner(&table).await?;
+    home.system_store()
+        .persist_table_interner(&table, None)
+        .await?;
     home.flush_seed_catalogue().await
 }
 
@@ -126,7 +128,9 @@ impl ShamirDb {
             value: QueryValue::Map(fields),
         };
         self.system_store().set_via_implicit_tx(&table, &op).await?;
-        self.system_store().persist_table_interner(&table).await?;
+        self.system_store()
+            .persist_table_interner(&table, None)
+            .await?;
         self.flush_seed_catalogue().await
     }
 

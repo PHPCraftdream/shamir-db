@@ -13,7 +13,10 @@
 //! * the interner dictionary itself NEVER escapes — no method returns
 //!   `&Interner`, `&InternerManager`, or `Arc<OnceCell<Interner>>`. The two
 //!   types that wrap it ([`InternerReadView`] and [`FilterContext`], via
-//!   [`TableInfoStoreReadView::filter_context`]) expose read accessors only;
+//!   [`TableInfoStoreReadView::filter_context`]) expose read accessors only
+//!   (Round 8: `resolve_filter_value`, the one public converter reachable
+//!   through a context-borrowed interner, now resolves names with
+//!   `get_ind` and fails closed — it never interns);
 //! * [`ValidatorRegistryReadView`] wraps the validator registry PRIVATELY —
 //!   its `register`/`replace`/`rename`/`remove` mutators are unreachable
 //!   from it.
@@ -67,7 +70,7 @@ use crate::query::filter::{compile_filter, FilterContext, FilterNode};
 ///   mutated through the read view; that interning now lives behind
 ///   admission in `TableManager::intern_query_value_admitted`, chained with
 ///   the dictionary-delta persist by
-///   `SystemStore::persist_table_interner_interning`.)
+///   `SystemStore::persist_table_interner` (called with `Some(record)`).)
 /// * [`load_migration_state`](Self::load_migration_state) — read a persisted
 ///   migration state record for COMMIT MIGRATION retry.
 pub struct TableInfoStoreReadView<'a> {

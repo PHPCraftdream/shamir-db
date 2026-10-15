@@ -41,6 +41,14 @@ pub struct ShadowEntry {
 const SHADOW_LOG_VERSION: u8 = 0x01;
 
 /// Encode a `ShadowEntry` as `[VERSION_BYTE | bincode(entry)]`.
+///
+/// Round 8: `#[cfg(test)]` — the only writers of shadow entries are the
+/// engine tests that seed the log. Production never appends: commit
+/// `0c59f555` (#1220) froze source writes for the whole migration instead
+/// of building write interception, so the shadow log is currently
+/// test-seeded and drained (`read_from`) only. Restore to non-test code
+/// together with `append` when real write interception lands.
+#[cfg(test)]
 fn encode_entry(entry: &ShadowEntry) -> DbResult<Bytes> {
     let body =
         bincode::serialize(entry).map_err(|e| DbError::Codec(format!("shadow_log encode: {e}")))?;
@@ -123,8 +131,14 @@ impl MigrationShadowLog {
         self.next_lsn.load(Ordering::Relaxed)
     }
 
-    /// S5c-X F3 (Round 6): `pub(crate)` — mutating, and verified to have no
-    /// non-engine callers (only the coordinator and engine tests append).
+    /// Round 8: `#[cfg(test)]` — the only writers of shadow entries are the
+    /// engine tests that seed the log. Production never appends: commit
+    /// `0c59f555` (#1220) froze source writes for the whole migration
+    /// instead of building write interception (master's `append` was `pub`
+    /// and likewise had zero non-test callers — the Round 6 `pub(crate)`
+    /// demotion merely exposed that). Restore to non-test code when real
+    /// write interception lands.
+    #[cfg(test)]
     pub(crate) async fn append(&self, op: ShadowOp) -> DbResult<u64> {
         let lsn = self.next_lsn.fetch_add(1, Ordering::Relaxed);
         let entry = ShadowEntry { lsn, op };
@@ -134,7 +148,8 @@ impl MigrationShadowLog {
         Ok(lsn)
     }
 
-    /// S5c-X F3 (Round 6): `pub(crate)` — mutating, engine-internal only.
+    /// Round 8: `#[cfg(test)]` — test seeding helper only (see `append`).
+    #[cfg(test)]
     pub(crate) async fn append_batch(&self, ops: Vec<ShadowOp>) -> DbResult<Vec<u64>> {
         if ops.is_empty() {
             return Ok(vec![]);
@@ -204,6 +219,9 @@ impl MigrationShadowLog {
         ShadowKey::scan_prefix(migration_id)
     }
 
+    /// Round 8: `#[cfg(test)]` — helper of the test-only `append`/
+    /// `append_batch` seeding path.
+    #[cfg(test)]
     fn entry_key(&self, lsn: u64) -> shamir_storage::types::RecordKey {
         ShadowKey::new(&self.migration_id, lsn).to_record_key()
     }

@@ -312,13 +312,6 @@ impl MigrationCoordinator {
         self.state.lock().await.id.clone()
     }
 
-    /// S5c-X F3: crate-internal — the log's `append`/`purge` are mutating
-    /// and no longer reachable downstream; reads go through
-    /// [`Self::shadow_lag`] / [`Self::current_lsn`].
-    pub(crate) fn shadow_log(&self) -> &Arc<MigrationShadowLog> {
-        &self.shadow_log
-    }
-
     /// Admitted twin of [`Self::run_snapshot`] (S5c-X F3).
     pub async fn run_snapshot_admitted(
         &self,
