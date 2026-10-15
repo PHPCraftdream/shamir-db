@@ -8,6 +8,7 @@ use crate::access::Actor;
 use crate::query::batch::{execute_batch, Authorized, BatchError, BatchRequest, BatchResponse};
 use crate::shamir_db::execute::{ResyncQuarantineCache, SKIP_READ_QUARANTINE_FOR_TEST};
 use crate::shamir_db::ports::RepoAdminObserver;
+use shamir_query_types::batch::ResyncRequiredDetail;
 
 use super::super::shamir_db::ShamirDb;
 use super::admin_dispatch::ShamirAdminExecutor;
@@ -84,7 +85,7 @@ impl ShamirDb {
             {
                 return Err(BatchError::ResyncRequired {
                     alias,
-                    detail: std::boxed::Box::new(shamir_query_types::batch::ResyncRequiredDetail {
+                    detail: Box::new(ResyncRequiredDetail {
                         db: db_name.to_string(),
                         repo,
                         reason,
