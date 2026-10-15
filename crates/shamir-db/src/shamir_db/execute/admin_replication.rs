@@ -21,7 +21,7 @@ use crate::query::admin::{
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
 use crate::types::value::QueryValue;
-use crate::{DbResult, ShamirDb};
+use crate::{DbError, DbResult, ShamirDb};
 use shamir_query_types::admin::ReplDirection;
 use shamir_query_types::ReplicationServe;
 use shamir_types::mpack;

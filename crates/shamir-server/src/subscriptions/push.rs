@@ -151,6 +151,7 @@ pub(super) async fn try_push_event_gated(
 /// The caller must stop delivery on `false`; terminal notifications are best-effort.
 /// cancel-safe: NO - cancellation discards the retained frame; only cancel when
 /// terminating the subscription, never cancel and resume ordinary delivery.
+#[cfg(test)]
 pub(super) async fn push_required(
     push: &Arc<dyn PushSink>,
     sub_id: u64,

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use super::ShamirDb;
 use crate::shamir_db::execute::skip_read_quarantine_for_test;
+use crate::shamir_db::ChangelogReceiver;
 use shamir_storage::error::DbError;
 use shamir_types::codecs::interned::inner_value_to_query_value;
 use shamir_types::core::interner::Interner;
