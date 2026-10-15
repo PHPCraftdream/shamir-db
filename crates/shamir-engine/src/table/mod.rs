@@ -51,8 +51,8 @@ pub use persistable::{PersistRegistry, Persistable};
 pub use record_counter::RecordCounter;
 pub use table_config::TableConfig;
 pub use table_manager::{
-    table_token_for, InternerReadView, TableDataStoreReadView, TableInfoStoreReadView,
-    TableManager, ValidatorRegistryReadView, WriteBarrierGuard,
+    table_token_for, Index2ReadView, InternerReadView, TableDataStoreReadView,
+    TableInfoStoreReadView, TableManager, ValidatorRegistryReadView, WriteBarrierGuard,
 };
 
 #[cfg(test)]

@@ -46,10 +46,10 @@ use std::path::{Path, PathBuf};
 use futures::StreamExt;
 use shamir_query_types::admin::CreateIndexOp;
 use shamir_tx::IsolationLevel;
-use shamir_types::core::interner::{InternerKey, TouchInd};
+use shamir_types::core::interner::InternerKey;
 use shamir_types::mpack;
-use shamir_types::types::common::new_map_wc;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::common::{new_map, new_map_wc};
+use shamir_types::types::value::{InnerValue, QueryValue};
 
 use shamir_engine::index2::backend::{FtsMode, IndexQuery, IndexResult};
 use shamir_engine::index2::tokenizer::token_hash;
@@ -144,11 +144,23 @@ fn fts_index_op() -> CreateIndexOp {
     }
 }
 
-async fn field_id(tbl: &TableManager, name: &str) -> u64 {
-    let interner = tbl.interner().get().await.unwrap();
-    match interner.touch_ind(name).unwrap() {
-        TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
-    }
+async fn field_id(repo: &RepoInstance, tbl: &TableManager, name: &str) -> u64 {
+    // S5c-X: the raw `interner()` handle is `pub(crate)`, and `touch_ind` is
+    // a dictionary WRITE — only reachable through the admitted interning
+    // path now. Intern a one-field record via the admitted WRITE-prep op
+    // (same `touch_ind` semantics underneath) and read the minted id back
+    // from the returned map key.
+    let permit = repo.write_domain().admit().await.unwrap();
+    let mut probe = new_map();
+    probe.insert(name.to_string(), QueryValue::Null);
+    let inner = tbl
+        .intern_query_value_admitted(&permit, &QueryValue::Map(probe))
+        .await
+        .unwrap();
+    let InnerValue::Map(m) = inner else {
+        unreachable!("intern_query_value_admitted of a map returns a map")
+    };
+    m.keys().next().expect("one field key").id()
 }
 
 fn text_record(body_key_id: u64, text: &str) -> InnerValue {
@@ -212,7 +224,7 @@ async fn fts_hit_count(tbl: &TableManager) -> usize {
     // CHILD's interned name id, which need not equal a freshly-interned
     // "body_fts" in the restarted parent. On the clean-abort path the
     // descriptor was never made durable, so the registry is empty → 0.
-    let backends = tbl.index2_registry().all_backends().await;
+    let backends = tbl.index2_read_view().backends().await;
     let Some(backend) = backends.first() else {
         return 0;
     };
@@ -277,7 +289,7 @@ async fn run_child_scenario(path: PathBuf) {
     let tbl = repo.get_table(TABLE).await.unwrap();
     tbl.create_index_v2(&fts_index_op()).await.unwrap();
 
-    let body_id = field_id(&tbl, "body").await;
+    let body_id = field_id(&repo, &tbl, "body").await;
 
     let (mut tx, guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     tbl.insert_tx(
@@ -500,8 +512,8 @@ async fn run_child_scenario_multi_table(path: PathBuf) {
     let tbl_a = repo.get_table(TABLE).await.unwrap();
     let tbl_b = repo.get_table(TABLE_B).await.unwrap();
 
-    let body_id_a = field_id(&tbl_a, "body").await;
-    let body_id_b = field_id(&tbl_b, "body").await;
+    let body_id_a = field_id(&repo, &tbl_a, "body").await;
+    let body_id_b = field_id(&repo, &tbl_b, "body").await;
 
     let (mut tx, guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     tbl_a
@@ -563,7 +575,7 @@ fn child_entrypoint_multi_table() {
 async fn run_child_scenario_trunc(path: PathBuf) {
     let repo = open_repo(&path).await;
     let tbl = repo.get_table(TABLE).await.unwrap();
-    let body_id = field_id(&tbl, "body").await;
+    let body_id = field_id(&repo, &tbl, "body").await;
     let wal = repo.repo_wal().await.unwrap();
     let sidecar = path.with_extension("childcount");
 
@@ -1060,15 +1072,20 @@ fn spawn_child_w2d(phase: &str, repo_path: &Path, implicit: bool) -> std::proces
 /// Read back all records from a table after recovery and return them as
 /// QueryValues for comparison.
 async fn read_all_records(tbl: &TableManager) -> Vec<shamir_types::types::value::QueryValue> {
-    use shamir_types::codecs::interned::inner_value_to_query_value;
     let stream = tbl.list_stream(256);
     futures::pin_mut!(stream);
     let mut records = Vec::new();
-    let interner = tbl.interner().get().await.unwrap();
+    let interner = tbl
+        .info_store_read_view()
+        .interner_read_view()
+        .await
+        .unwrap();
     while let Some(batch) = stream.next().await {
         for (_id, cow) in batch.expect("list_stream batch") {
             let record = cow.into_inner().expect("decode record");
-            let qv = inner_value_to_query_value(&record, interner).expect("to_query_value");
+            let qv = interner
+                .inner_to_query_value(&record)
+                .expect("to_query_value");
             records.push(qv);
         }
     }
@@ -1242,7 +1259,7 @@ async fn run_child_scenario_vec(path: PathBuf) {
     let tbl = repo.get_table(TABLE_VEC).await.unwrap();
     tbl.create_index_v2(&vector_index_op()).await.unwrap();
 
-    let emb_id = field_id(&tbl, "embedding").await;
+    let emb_id = field_id(&repo, &tbl, "embedding").await;
 
     let (mut tx, guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     tbl.insert_tx(&vec_record(emb_id, &[1.0, 0.0, 0.0]), Some(&mut tx))
@@ -1294,15 +1311,16 @@ fn spawn_child_vec(phase: &str, repo_path: &Path) -> std::process::ExitStatus {
 /// (the first chunk). A prefix-scan count is the unambiguous oracle.
 async fn delta_chunk_count(tbl: &TableManager) -> usize {
     use futures::StreamExt;
-    let backends = tbl.index2_registry().all_backends().await;
+    let backends = tbl.index2_read_view().backends().await;
     let Some(backend) = backends.first() else {
         return 0;
     };
     let id = backend.descriptor().id;
     let keyspace = format!("__vec_snap__{id}");
     let prefix = format!("{keyspace}.delta.");
-    let info_store = tbl.info_store().clone();
-    let mut stream = info_store.scan_prefix_stream(prefix.into(), 100);
+    let mut stream = tbl
+        .info_store_read_view()
+        .scan_prefix_stream(prefix.into(), 100);
     let mut count = 0usize;
     while let Some(batch) = stream.next().await {
         if let Ok(rows) = batch {
@@ -1486,7 +1504,7 @@ const CHILD_SENTINEL_CRIT1: &str = "SHAMIR_TEST_CRASH_CHILD_CRIT1";
 async fn run_child_scenario_crit1(path: PathBuf) {
     let repo = open_repo(&path).await;
     let tbl = repo.get_table(TABLE).await.unwrap();
-    let body_id = field_id(&tbl, "body").await;
+    let body_id = field_id(&repo, &tbl, "body").await;
 
     let (mut tx, guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     let _ = tbl

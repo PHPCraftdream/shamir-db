@@ -38,7 +38,8 @@ mod write_domain_online_index;
 mod write_domain_rename_admitted;
 
 pub use read_only_views::{
-    InternerReadView, TableDataStoreReadView, TableInfoStoreReadView, ValidatorRegistryReadView,
+    Index2ReadView, InternerReadView, TableDataStoreReadView, TableInfoStoreReadView,
+    ValidatorRegistryReadView,
 };
 
 /// Compute the deterministic token for a table name.
