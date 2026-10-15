@@ -26,7 +26,11 @@ const TABLE: &str = "probe";
 async fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());
     let r = RepoInstance::new("probe".into(), BoxRepo::InMemory(repo), Vec::new());
-    r.add_table(TableConfig::new(TABLE));
+    let permit = r.write_domain().admit().await.unwrap();
+    r.add_table_admitted(TableConfig::new(TABLE), &permit)
+        .await
+        .unwrap();
+    drop(permit);
     r
 }
 

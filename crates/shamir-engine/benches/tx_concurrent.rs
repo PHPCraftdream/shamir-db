@@ -204,10 +204,15 @@ async fn execute_batch(
     execute_batch_raw(auth, resolver, admin, invoker).await
 }
 
-fn make_repo() -> RepoInstance {
+async fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());
     let instance = RepoInstance::new("bench".into(), BoxRepo::InMemory(repo), Vec::new());
-    instance.add_table(TableConfig::new("bench_table".to_string()));
+    let permit = instance.write_domain().admit().await.unwrap();
+    instance
+        .add_table_admitted(TableConfig::new("bench_table".to_string()), &permit)
+        .await
+        .unwrap();
+    drop(permit);
     instance
 }
 
@@ -242,13 +247,11 @@ fn main() {
         let iter_ctr = Arc::clone(&iter_ctr);
         h.bench_batched_async(
             &format!("disjoint_inserts/n_{n}"),
-            move || {
-                let repo = make_repo();
+            move || async move {
+                let repo = make_repo().await;
                 let iter_i = iter_ctr.fetch_add(1, Ordering::Relaxed);
-                async move {
-                    let _ = repo.get_table("bench_table").await.unwrap();
-                    (repo, iter_i)
-                }
+                let _ = repo.get_table("bench_table").await.unwrap();
+                (repo, iter_i)
             },
             move |(repo, iter_i)| async move {
                 let mut handles = Vec::with_capacity(n);
@@ -290,7 +293,11 @@ fn main() {
                 let mut tables = Vec::with_capacity(n);
                 for w in 0..n {
                     let name = format!("writer_{w}");
-                    repo.add_table(TableConfig::new(name.clone()));
+                    let permit = repo.write_domain().admit().await.unwrap();
+                    repo.add_table_admitted(TableConfig::new(name.clone()), &permit)
+                        .await
+                        .unwrap();
+                    drop(permit);
                     tables.push(repo.get_table(&name).await.unwrap());
                 }
                 (repo, tables)
@@ -345,14 +352,12 @@ fn main() {
         let counters = Arc::clone(&hot_key_snapshot_counts);
         h.bench_batched_async(
             &format!("hot_key_snapshot/n_{n}"),
-            move || {
-                let repo = make_repo();
-                async move {
-                    let tbl = repo.get_table("bench_table").await.unwrap();
-                    let rid = tbl.insert(&InnerValue::Str("seed".into())).await.unwrap();
-                    drop(tbl);
-                    (repo, rid)
-                }
+            move || async move {
+                let repo = make_repo().await;
+                let tbl = repo.get_table("bench_table").await.unwrap();
+                let rid = tbl.insert(&InnerValue::Str("seed".into())).await.unwrap();
+                drop(tbl);
+                (repo, rid)
             },
             move |(repo, rid)| {
                 let counters = Arc::clone(&counters);
@@ -417,14 +422,12 @@ fn main() {
         let counters = Arc::clone(&hot_key_serializable_counts);
         h.bench_batched_async(
             &format!("hot_key_serializable/n_{n}"),
-            move || {
-                let repo = make_repo();
-                async move {
-                    let tbl = repo.get_table("bench_table").await.unwrap();
-                    let rid = tbl.insert(&InnerValue::Str("seed".into())).await.unwrap();
-                    drop(tbl);
-                    (repo, rid)
-                }
+            move || async move {
+                let repo = make_repo().await;
+                let tbl = repo.get_table("bench_table").await.unwrap();
+                let rid = tbl.insert(&InnerValue::Str("seed".into())).await.unwrap();
+                drop(tbl);
+                (repo, rid)
             },
             move |(repo, rid)| {
                 let counters = Arc::clone(&counters);

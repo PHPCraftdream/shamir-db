@@ -38,6 +38,8 @@
 //! live from `info_store` — a non-zero hit means the tx's index postings
 //! were materialized. Both must move together (all-or-nothing): a crash
 //! before Phase 4 leaves zero of each; a crash at/after it recovers both.
+#[path = "clean_horizon/admitted_field_id.rs"]
+mod admitted_field_id;
 #[path = "clean_horizon/crash_matrix.rs"]
 mod clean_horizon_crash_matrix;
 
@@ -48,8 +50,10 @@ use shamir_query_types::admin::CreateIndexOp;
 use shamir_tx::IsolationLevel;
 use shamir_types::core::interner::InternerKey;
 use shamir_types::mpack;
-use shamir_types::types::common::{new_map, new_map_wc};
-use shamir_types::types::value::{InnerValue, QueryValue};
+use shamir_types::types::common::new_map_wc;
+use shamir_types::types::value::InnerValue;
+
+use admitted_field_id::field_id;
 
 use shamir_engine::index2::backend::{FtsMode, IndexQuery, IndexResult};
 use shamir_engine::index2::tokenizer::token_hash;
@@ -142,25 +146,6 @@ fn fts_index_op() -> CreateIndexOp {
         include: Vec::new(),
         if_not_exists: false,
     }
-}
-
-async fn field_id(repo: &RepoInstance, tbl: &TableManager, name: &str) -> u64 {
-    // S5c-X: the raw `interner()` handle is `pub(crate)`, and `touch_ind` is
-    // a dictionary WRITE — only reachable through the admitted interning
-    // path now. Intern a one-field record via the admitted WRITE-prep op
-    // (same `touch_ind` semantics underneath) and read the minted id back
-    // from the returned map key.
-    let permit = repo.write_domain().admit().await.unwrap();
-    let mut probe = new_map();
-    probe.insert(name.to_string(), QueryValue::Null);
-    let inner = tbl
-        .intern_query_value_admitted(&permit, &QueryValue::Map(probe))
-        .await
-        .unwrap();
-    let InnerValue::Map(m) = inner else {
-        unreachable!("intern_query_value_admitted of a map returns a map")
-    };
-    m.keys().next().expect("one field key").id()
 }
 
 fn text_record(body_key_id: u64, text: &str) -> InnerValue {
@@ -1075,18 +1060,12 @@ async fn read_all_records(tbl: &TableManager) -> Vec<shamir_types::types::value:
     let stream = tbl.list_stream(256);
     futures::pin_mut!(stream);
     let mut records = Vec::new();
-    let interner = tbl
-        .info_store_read_view()
-        .interner_read_view()
-        .await
-        .unwrap();
+    let view = tbl.info_store_read_view();
+    let interner = view.interner_read_view().await.unwrap();
     while let Some(batch) = stream.next().await {
         for (_id, cow) in batch.expect("list_stream batch") {
             let record = cow.into_inner().expect("decode record");
-            let qv = interner
-                .inner_to_query_value(&record)
-                .expect("to_query_value");
-            records.push(qv);
+            records.push(interner.inner_to_query_value(&record).expect("to_qv"));
         }
     }
     records
