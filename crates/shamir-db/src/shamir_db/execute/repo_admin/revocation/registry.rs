@@ -33,9 +33,12 @@ impl ShamirDb {
     }
 }
 
+/// Live receiver gates keyed by `(db, repo)`.
+type ReceiverGates = DashMap<(String, String), Vec<Weak<GateState>>, THasher>;
+
 #[derive(Clone)]
 pub(crate) struct ChangelogReceiverRegistry {
-    entries: Arc<DashMap<(String, String), Vec<Weak<GateState>>, THasher>>,
+    entries: Arc<ReceiverGates>,
 }
 impl ChangelogReceiverRegistry {
     pub(crate) fn new() -> Self {

@@ -36,7 +36,7 @@ async fn close_discards_queued_feed_events_and_leaves_healthy_receiver() {
         revoked.try_recv(),
         Err(tokio::sync::broadcast::error::TryRecvError::Closed)
     ));
-    assert!(matches!(healthy.try_recv(), Ok(_)));
+    assert!(healthy.try_recv().is_ok());
     assert!(!healthy.delivery_gate().closed_now());
     drop(revoked);
     assert!(!registry
