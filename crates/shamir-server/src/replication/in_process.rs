@@ -138,6 +138,18 @@ impl ReplSource for InProcessReplSource {
                 message: format!("repository '{db}/{repo}' not found"),
             });
         };
+        // S5c-X PR8b: refuse to serve a quarantined repo — the same
+        // serve-entry refusal the wire handler performs via
+        // `has_resync_required_subscription_covering`.
+        if let Some(reason) = self.leader.read_quarantine_reason(db, repo) {
+            return Ok(ReplResponse::Error {
+                leader_epoch: self.epoch(),
+                code: "downstream_resync_required".into(),
+                message: format!(
+                    "repository '{db}/{repo}' is quarantined (resync_required): {reason}"
+                ),
+            });
+        }
         // Reuse the same journal-read path as the wire handler.
         // Effective limit floor of 1, mirroring `handle_pull`.
         let effective_limit = limit.clamp(1, MAX_PULL_EVENTS) as usize;

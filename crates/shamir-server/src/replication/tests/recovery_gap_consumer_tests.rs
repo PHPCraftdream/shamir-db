@@ -179,7 +179,8 @@ fn cold_reopen_reconciles_events_for_consumer_and_supervisor() {
         let journal = leader
             .read_changelog_from_journal("app", "main", 1, 100)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("journal present");
         assert_eq!(journal.gap_at, None);
         assert_eq!(journal.events.len(), 1);
         assert_eq!(journal.events[0].commit_version, h);

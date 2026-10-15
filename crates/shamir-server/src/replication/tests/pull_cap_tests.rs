@@ -57,7 +57,8 @@ async fn committed_fixture(n: usize, payload_bytes: usize) -> (ShamirDb, Vec<Cha
             let journal = db
                 .read_changelog_from_journal("app", "main", version, 1)
                 .await
-                .expect("journal available");
+                .expect("journal read")
+                .expect("journal present");
             assert_eq!(journal.gap_at, None, "fixture journal gap");
             if let Some(event) = journal.events.into_iter().next() {
                 assert_eq!(event.commit_version, version);

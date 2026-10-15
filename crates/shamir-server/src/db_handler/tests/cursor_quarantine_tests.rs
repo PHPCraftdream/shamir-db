@@ -10,6 +10,7 @@ use std::sync::Arc;
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::conn_services::ConnectionServices;
+use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::{Session, SessionPermissions};
 
 use shamir_db::access::{principal64, Actor};
@@ -19,7 +20,7 @@ use shamir_db::ShamirDb;
 
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl::{repl_scope, replication_profile, subscription};
-use shamir_query_builder::write::{insert, with_repo};
+use shamir_query_builder::write::insert;
 use shamir_query_types::admin::{ReplDirection, ReplMode};
 use shamir_query_types::read::ReadQuery;
 use shamir_query_types::wire::{CursorId, DbRequest, DbResponse};
@@ -63,15 +64,19 @@ async fn build_handler() -> ShamirDbHandler {
             .expect("add repo");
     }
 
-    // Seed one row into each repo's `items` (cursor tests need a non-empty
-    // first page for `side` and `other`, and `main` needs one for (b)).
+    // Seed three rows into each repo's `items` (page_size-1 cursors need a
+    // non-empty FIRST page with `has_more == true` — production never
+    // registers a cursor whose first page has no more rows — plus rows left
+    // for the follow-up FetchNext in tests (b) and (c)).
     let mut b = Batch::new();
     b.id(1);
     for repo in ["main", "side", "other"] {
-        b.insert(
-            format!("i_{repo}"),
-            with_repo(repo, "items").row(doc! { "id" => "k000", "v" => 0i64 }),
-        );
+        for (k, v) in [("k000", 0i64), ("k001", 1i64), ("k002", 2i64)] {
+            b.insert(
+                format!("i_{repo}_{k}"),
+                insert::with_repo(repo, "items").row(doc! { "id" => k, "v" => v }),
+            );
+        }
     }
     shamir
         .execute_as(owner, "app", &b.build())
@@ -146,9 +151,12 @@ fn expect_resync_required(resp: DbResponse, context: &str) {
 fn expect_first_page(resp: DbResponse) -> CursorId {
     match resp {
         DbResponse::CursorPage {
-            cursor_id, page, ..
+            cursor_id,
+            page,
+            has_more,
         } => {
             assert!(!page.records.is_empty(), "first page must have rows");
+            assert!(has_more, "first page must have more rows pending");
             cursor_id
         }
         other => panic!("expected CursorPage, got {other:?}"),

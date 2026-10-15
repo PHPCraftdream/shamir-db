@@ -129,7 +129,12 @@ async fn write_rows(leader: &ShamirDb, n: usize) {
 
     // The journal writer is async; poll until all n events are durable.
     for _ in 0..200 {
-        if let Some(jr) = leader.read_changelog_from_journal(DB, REPO, 0, 1000).await {
+        if let Some(jr) = leader
+            .read_changelog_from_journal(DB, REPO, 0, 1000)
+            .await
+            .ok()
+            .flatten()
+        {
             if jr.events.len() >= n {
                 return;
             }

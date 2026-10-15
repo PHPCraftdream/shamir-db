@@ -55,6 +55,6 @@ mod visibility_sample;
 mod tests;
 
 // S5c-X PR8b: the read-quarantine cache + its negative-control seam live in
-// the private `admin_replication` module but are consumed by
+// the private `repo_admin::db_execute` module but are consumed by
 // `shamir_db::shamir_db::{core, changelog}`; re-export for the crate tree.
-pub(crate) use admin_replication::{ResyncQuarantineCache, SKIP_READ_QUARANTINE_FOR_TEST};
+pub(crate) use db_execute::{ResyncQuarantineCache, SKIP_READ_QUARANTINE_FOR_TEST};
