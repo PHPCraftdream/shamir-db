@@ -9,6 +9,7 @@ use shamir_connect::server::conn_services::PushSink;
 use shamir_db::access::{Action, Actor, ResourcePath};
 use shamir_db::core::interner::Interner;
 use shamir_db::record_view::{RecordRef, RecordView};
+use shamir_db::shamir_db::ChangelogDeliveryGate;
 use shamir_db::types::value::{InnerValue, QueryValue};
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
@@ -26,7 +27,8 @@ use super::decode_cache::{cache_evict_up_to, cache_get, cache_insert, CachedByte
 use super::deliver_cache::{deliver_cache_evict_up_to, deliver_cache_get, deliver_cache_insert};
 use super::filter_eval::{bytes_to_arc, CompiledFilterSlot};
 use super::journal_drain::JournalDrain;
-use super::push::{make_deliver_data, push_required, try_push_event};
+use super::journal_source::wait_for_closed;
+use super::push::{make_deliver_data, push_required_gated, try_push_event_gated};
 use super::registry::SubscriptionRegistry;
 use super::target_match::{any_target_interested_indexed, build_target_index, matches_any_indexed};
 
@@ -188,10 +190,12 @@ pub(crate) async fn bridge_task(
         // Subscribe to each repo's changefeed FIRST -- before journal backfill --
         // so we don't miss events between journal read and live subscription.
         let mut receivers = Vec::with_capacity(repos.len());
+        let mut delivery_gates: Vec<ChangelogDeliveryGate> = Vec::with_capacity(repos.len());
         let mut states = Vec::with_capacity(repos.len());
         for repo in &repos {
             match db.subscribe_changelog(&db_name, repo).await {
-                Some(rx) => {
+                Ok(Some(rx)) => {
+                    delivery_gates.push(rx.delivery_gate());
                     receivers.push(rx);
                     // Attach before sampling W; never use a post-snapshot maximum.
                     let Some(w) = db.changelog_visible_floor(&db_name, repo).await else {
@@ -203,361 +207,410 @@ pub(crate) async fn bridge_task(
                     let cursor = from_version.map_or(w, |fv| fv.saturating_sub(1));
                     states.push(JournalDrain::new(cursor));
                 }
-                None => {
+                // S5c-X PR8b: a quarantined (`resync_required`) repo is
+                // refused (`DbError::ResyncRequired`) — the bridge must NOT
+                // attach a live event stream (nor run the initial snapshot)
+                // against a repo whose reads are quarantined.
+                Ok(None) => {
                     tracing::warn!(sub_id, repo = %repo, "changefeed not available");
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(sub_id, repo = %repo, %error, "changefeed refused");
                     return;
                 }
             }
         }
 
-        // repo name -> index (built once; repos are fixed at subscribe time).
-        let repo_idx: TFxMap<String, usize> = repos
-            .iter()
-            .enumerate()
-            .map(|(i, r)| (r.clone(), i))
-            .collect();
-        // O(1) target index: (repo_idx, table) -> target indices.
-        // Built once at subscribe time; replaces the two O(T) linear scans.
-        let target_index = build_target_index(&targets, &repo_idx);
+        let terminal_gates = delivery_gates.clone();
+        let bridge_work = async {
+            // repo name -> index (built once; repos are fixed at subscribe time).
+            let repo_idx: TFxMap<String, usize> = repos
+                .iter()
+                .enumerate()
+                .map(|(i, r)| (r.clone(), i))
+                .collect();
+            // O(1) target index: (repo_idx, table) -> target indices.
+            // Built once at subscribe time; replaces the two O(T) linear scans.
+            let target_index = build_target_index(&targets, &repo_idx);
 
-        // Per-target compiled-filter cache slots (parallel to `targets`).
-        // `Some(slot)` for targets with a filter (lazily populated on first
-        // event, recompiled when the interner grows); `None` for targets
-        // without a filter. This avoids re-running `compile_filter` (which
-        // includes `Regex::new`, `TSet` construction, `String` clones) on
-        // every event × every subscriber.
-        let filter_slots: Vec<Option<CompiledFilterSlot>> = targets
-            .iter()
-            .map(|(_, _, _, filter)| filter.as_ref().map(|_| ArcSwapOption::empty()))
-            .collect();
-        // The activation W remains the live-only floor; initial snapshots
-        // replace it with their pinned transaction cut before live delivery.
-        let source = DbJournalSource {
-            db: &db,
-            name: &db_name,
-        };
-        let deliver_event = |ri: usize, event: shamir_tx::ChangelogEvent| {
-            let repo = &repos[ri];
-            let targets = &targets;
-            let target_index = &target_index;
-            let filter_slots = &filter_slots;
-            let deliver = &deliver;
-            let db = &db;
-            let db_name = &db_name;
-            let actor = &actor;
-            let query_limits = &query_limits;
-            let push = &push;
-            let seq = &seq;
-            async move {
-                for (change_idx, change) in event.changes.iter().enumerate() {
-                    // O(1) pre-check via target index: skip the async
-                    // interner lookup entirely when no target could match.
-                    if !any_target_interested_indexed(
-                        targets,
-                        target_index,
-                        ri,
-                        &change.table,
-                        &change.op,
-                    ) {
-                        continue;
+            // Per-target compiled-filter cache slots (parallel to `targets`).
+            // `Some(slot)` for targets with a filter (lazily populated on first
+            // event, recompiled when the interner grows); `None` for targets
+            // without a filter. This avoids re-running `compile_filter` (which
+            // includes `Regex::new`, `TSet` construction, `String` clones) on
+            // every event × every subscriber.
+            let filter_slots: Vec<Option<CompiledFilterSlot>> = targets
+                .iter()
+                .map(|(_, _, _, filter)| filter.as_ref().map(|_| ArcSwapOption::empty()))
+                .collect();
+            // The activation W remains the live-only floor; initial snapshots
+            // replace it with their pinned transaction cut before live delivery.
+            let source = DbJournalSource {
+                db: &db,
+                name: &db_name,
+            };
+            let deliver_event = |ri: usize, event: shamir_tx::ChangelogEvent| {
+                let repo = &repos[ri];
+                let gate = &delivery_gates[ri];
+                let targets = &targets;
+                let target_index = &target_index;
+                let filter_slots = &filter_slots;
+                let deliver = &deliver;
+                let db = &db;
+                let db_name = &db_name;
+                let actor = &actor;
+                let query_limits = &query_limits;
+                let push = &push;
+                let seq = &seq;
+                async move {
+                    // Any page may have been read before quarantine. A closed gate
+                    // aborts before examining or accepting page contents.
+                    if gate.closed_now() {
+                        return false;
                     }
-                    // Cache raw bytes + interner per event across all
-                    // bridge tasks: the cache deduplicates the interner
-                    // lookup so that N subscribers pay O(1).
-                    // No InnerValue decode on the filter path -- the
-                    // RecordView lens reads fields zero-copy.
-                    let decoded_arc: CachedBytes = match (&change.op, change.value.as_deref()) {
-                        (ChangeOp::Put, Some(bytes)) => {
-                            if let Some(cached) =
-                                cache_get(db_disc, repo, event.commit_version, change_idx)
-                            {
-                                cached
-                            } else {
-                                let entry = db
-                                    .get_table_interner_cell(db_name, repo, &change.table)
-                                    .await
-                                    .map(|interner_cell| (bytes_to_arc(bytes), interner_cell));
-                                cache_insert(db_disc, repo, event.commit_version, change_idx, entry)
-                            }
+                    for (change_idx, change) in event.changes.iter().enumerate() {
+                        // O(1) pre-check via target index: skip the async
+                        // interner lookup entirely when no target could match.
+                        if !any_target_interested_indexed(
+                            targets,
+                            target_index,
+                            ri,
+                            &change.table,
+                            &change.op,
+                        ) {
+                            continue;
                         }
-                        _ => {
-                            static NONE_ARC: std::sync::OnceLock<CachedBytes> =
-                                std::sync::OnceLock::new();
-                            Arc::clone(NONE_ARC.get_or_init(|| Arc::new(None)))
-                        }
-                    };
-                    let bytes_ref = (*decoded_arc).as_ref();
-                    if !matches_any_indexed(
-                        targets,
-                        filter_slots,
-                        target_index,
-                        ri,
-                        &change.table,
-                        &change.op,
-                        bytes_ref,
-                    ) {
-                        continue;
-                    }
-                    // Lazy decode of the interner-encoded value into a
-                    // QueryValue. Only `DeliverMode::Records` reads it
-                    // (via `make_event_data`); Keys/Batch/Call never do.
-                    // We therefore defer the de-intern until we know we're
-                    // on a Records deliver-cache MISS -- on cache hits and
-                    // in every other mode the decode is skipped entirely.
-                    let deliver_mode_disc = match deliver {
-                        DeliverMode::Records => Some(0u8),
-                        DeliverMode::Keys => Some(1u8),
-                        _ => None,
-                    };
-                    // For Records/Keys the payload is shared via Arc --
-                    // we borrow it for serialization (zero-copy fan-out).
-                    // For Batch/Call the payload is built per-subscriber.
-                    let cached_arc;
-                    let owned_buf;
-                    let data_ref: &[u8] = if let Some(mode) = deliver_mode_disc {
-                        if let Some(arc) =
-                            deliver_cache_get(db_disc, repo, event.commit_version, change_idx, mode)
-                        {
-                            cached_arc = arc;
-                            &cached_arc
-                        } else {
-                            // Cache MISS in the Records/Keys shared branch.
-                            // Only Records actually consumes value_qv
-                            // (`make_event_data`); Keys/Batch/Call ignore
-                            // it, so gate the de-intern on Records (mode 0)
-                            // to skip it entirely in Keys mode.
-                            let value_qv: Option<QueryValue> = if mode == 0 {
-                                match bytes_ref {
-                                    Some((bytes, cell)) => bytes_to_query_value(bytes, cell),
-                                    None => None,
+                        // Cache raw bytes + interner per event across all
+                        // bridge tasks: the cache deduplicates the interner
+                        // lookup so that N subscribers pay O(1).
+                        // No InnerValue decode on the filter path -- the
+                        // RecordView lens reads fields zero-copy.
+                        let decoded_arc: CachedBytes = match (&change.op, change.value.as_deref()) {
+                            (ChangeOp::Put, Some(bytes)) => {
+                                if let Some(cached) =
+                                    cache_get(db_disc, repo, event.commit_version, change_idx)
+                                {
+                                    cached
+                                } else {
+                                    let entry = db
+                                        .get_table_interner_cell(db_name, repo, &change.table)
+                                        .await
+                                        .map(|interner_cell| (bytes_to_arc(bytes), interner_cell));
+                                    cache_insert(
+                                        db_disc,
+                                        repo,
+                                        event.commit_version,
+                                        change_idx,
+                                        entry,
+                                    )
                                 }
-                            } else {
-                                None
-                            };
-                            let built = make_deliver_data(
-                                deliver,
-                                db,
-                                db_name,
-                                actor,
-                                change,
-                                value_qv.as_ref(),
-                                event.commit_version,
-                                query_limits,
-                            )
-                            .await;
-                            cached_arc = deliver_cache_insert(
+                            }
+                            _ => {
+                                static NONE_ARC: std::sync::OnceLock<CachedBytes> =
+                                    std::sync::OnceLock::new();
+                                Arc::clone(NONE_ARC.get_or_init(|| Arc::new(None)))
+                            }
+                        };
+                        let bytes_ref = (*decoded_arc).as_ref();
+                        if !matches_any_indexed(
+                            targets,
+                            filter_slots,
+                            target_index,
+                            ri,
+                            &change.table,
+                            &change.op,
+                            bytes_ref,
+                        ) {
+                            continue;
+                        }
+                        // Lazy decode of the interner-encoded value into a
+                        // QueryValue. Only `DeliverMode::Records` reads it
+                        // (via `make_event_data`); Keys/Batch/Call never do.
+                        // We therefore defer the de-intern until we know we're
+                        // on a Records deliver-cache MISS -- on cache hits and
+                        // in every other mode the decode is skipped entirely.
+                        let deliver_mode_disc = match deliver {
+                            DeliverMode::Records => Some(0u8),
+                            DeliverMode::Keys => Some(1u8),
+                            _ => None,
+                        };
+                        // For Records/Keys the payload is shared via Arc --
+                        // we borrow it for serialization (zero-copy fan-out).
+                        // For Batch/Call the payload is built per-subscriber.
+                        let cached_arc;
+                        let owned_buf;
+                        let data_ref: &[u8] = if let Some(mode) = deliver_mode_disc {
+                            if let Some(arc) = deliver_cache_get(
                                 db_disc,
                                 repo,
                                 event.commit_version,
                                 change_idx,
                                 mode,
-                                built,
-                            );
-                            &cached_arc
+                            ) {
+                                cached_arc = arc;
+                                &cached_arc
+                            } else {
+                                // Cache MISS in the Records/Keys shared branch.
+                                // Only Records actually consumes value_qv
+                                // (`make_event_data`); Keys/Batch/Call ignore
+                                // it, so gate the de-intern on Records (mode 0)
+                                // to skip it entirely in Keys mode.
+                                let value_qv: Option<QueryValue> = if mode == 0 {
+                                    match bytes_ref {
+                                        Some((bytes, cell)) => bytes_to_query_value(bytes, cell),
+                                        None => None,
+                                    }
+                                } else {
+                                    None
+                                };
+                                let built = make_deliver_data(
+                                    deliver,
+                                    db,
+                                    db_name,
+                                    actor,
+                                    change,
+                                    value_qv.as_ref(),
+                                    event.commit_version,
+                                    query_limits,
+                                )
+                                .await;
+                                cached_arc = deliver_cache_insert(
+                                    db_disc,
+                                    repo,
+                                    event.commit_version,
+                                    change_idx,
+                                    mode,
+                                    built,
+                                );
+                                &cached_arc
+                            }
+                        } else {
+                            // Batch/Call: `make_deliver_data` ignores the
+                            // value_qv arg, so pass None and skip the decode.
+                            owned_buf = make_deliver_data(
+                                deliver,
+                                db,
+                                db_name,
+                                actor,
+                                change,
+                                None,
+                                event.commit_version,
+                                query_limits,
+                            )
+                            .await;
+                            &owned_buf
+                        };
+                        if !try_push_event_gated(gate, push, sub_id, seq, data_ref).await {
+                            return false;
                         }
-                    } else {
-                        // Batch/Call: `make_deliver_data` ignores the
-                        // value_qv arg, so pass None and skip the decode.
-                        owned_buf = make_deliver_data(
-                            deliver,
-                            db,
-                            db_name,
-                            actor,
-                            change,
-                            None,
-                            event.commit_version,
-                            query_limits,
-                        )
-                        .await;
-                        &owned_buf
+                    }
+                    // Eviction is performance-only: slower subscribers rebuild misses
+                    // from their own journal pages; cursors need not agree.
+                    if event.commit_version > 1 {
+                        cache_evict_up_to(event.commit_version - 1);
+                        deliver_cache_evict_up_to(event.commit_version - 1);
+                    }
+                    true
+                }
+            };
+            let emit_gap = |at| {
+                let push = &push;
+                let seq = &seq;
+                async move {
+                    let envelope = PushEnvelope {
+                        push: PushKind::Gap,
+                        sub: sub_id,
+                        seq: seq.load(Ordering::Relaxed),
+                        data: None,
+                        gap_at: Some(at),
                     };
-                    if !try_push_event(push, sub_id, seq, data_ref).await {
-                        return false;
+                    if let Ok(frame) = rmp_serde::to_vec_named(&envelope) {
+                        let _ = push.try_push(frame);
                     }
                 }
-                // Eviction is performance-only: slower subscribers rebuild misses
-                // from their own journal pages; cursors need not agree.
-                if event.commit_version > 1 {
-                    cache_evict_up_to(event.commit_version - 1);
-                    deliver_cache_evict_up_to(event.commit_version - 1);
+            };
+            if from_version.is_some() {
+                if let Err(error) = JournalDrain::run(
+                    &source,
+                    &repos,
+                    &mut receivers,
+                    &mut states,
+                    true,
+                    deliver_event,
+                    emit_gap,
+                )
+                .await
+                {
+                    tracing::warn!(sub_id, %error, "journal resume terminated");
+                    return;
                 }
-                true
             }
-        };
-        let emit_gap = |at| {
-            let push = &push;
-            let seq = &seq;
-            async move {
-                let envelope = PushEnvelope {
-                    push: PushKind::Gap,
+
+            // Initial snapshot: read existing records for subscribed tables.
+            if initial {
+                #[cfg(test)]
+                super::tests::bridge_snapshot_cut_tests::pause(0, 0).await;
+                for (ri, repo) in repos.iter().enumerate() {
+                    let (mut tx, guard) = match db
+                        .tx_begin_as(actor.clone(), &db_name, repo, "snapshot")
+                        .await
+                    {
+                        Ok(open) => open,
+                        Err(error) => {
+                            tracing::warn!(sub_id, %error, "initial snapshot begin failed");
+                            return;
+                        }
+                    };
+                    let cut = tx.snapshot_version;
+                    #[cfg(test)]
+                    super::tests::bridge_snapshot_cut_tests::pause(1, cut).await;
+                    #[cfg(test)]
+                    let mut first_target_of_repo = true;
+                    for (target_repo, target_table, _mask, filter) in targets.iter() {
+                        if target_repo != repo {
+                            continue;
+                        }
+                        let mut query =
+                            Query::with_repo(target_repo.as_str(), target_table.as_str()).build();
+                        if filter.is_some() {
+                            query.r#where = filter.clone();
+                        }
+                        let mut batch = Batch::new();
+                        batch.query("_snapshot", query);
+                        batch.return_all();
+                        // Match the existing server-owned reactive-read limits policy.
+                        // Each target read has its own cooperative execution budget.
+                        batch.limits(query_limits.clone());
+                        let find_req = batch.build();
+
+                        match db
+                            .tx_execute_as(actor.clone(), &db_name, &find_req, &mut tx)
+                            .await
+                        {
+                            Ok(response) => {
+                                #[cfg(test)]
+                                super::tests::bridge_snapshot_cut_tests::pause(4, cut).await;
+                                for qr in response.results.values() {
+                                    for record in &qr.records {
+                                        let record_val = record.as_value();
+                                        let key_qv: QueryValue = record_val
+                                            .get("_id")
+                                            .cloned()
+                                            .unwrap_or(QueryValue::Null);
+                                        let value_qv: QueryValue = record_val.into_owned();
+                                        #[derive(serde::Serialize)]
+                                        struct SnapshotEvent<'x> {
+                                            table: &'x str,
+                                            op: &'x str,
+                                            key: &'x QueryValue,
+                                            value: &'x QueryValue,
+                                            commit_version: u64,
+                                        }
+                                        let obj = SnapshotEvent {
+                                            table: target_table,
+                                            op: "put",
+                                            key: &key_qv,
+                                            value: &value_qv,
+                                            commit_version: 0,
+                                        };
+                                        let data = match rmp_serde::to_vec_named(&obj) {
+                                            Ok(data) => data,
+                                            Err(error) => {
+                                                tracing::warn!(
+                                                    sub_id,
+                                                    %error,
+                                                    "snapshot serialization failed",
+                                                );
+                                                return;
+                                            }
+                                        };
+                                        if delivery_gates[ri].closed_now() {
+                                            return;
+                                        }
+                                        if !try_push_event_gated(
+                                            &delivery_gates[ri],
+                                            &push,
+                                            sub_id,
+                                            &seq,
+                                            &data,
+                                        )
+                                        .await
+                                        {
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    sub_id,
+                                    table = %target_table,
+                                    "initial snapshot failed: {e}",
+                                );
+                                return;
+                            }
+                        }
+                        #[cfg(test)]
+                        if std::mem::take(&mut first_target_of_repo) {
+                            super::tests::bridge_snapshot_cut_tests::pause(2, cut).await;
+                        }
+                    }
+                    // Read-only rollback is synchronous: TxContext drops staged
+                    // state without I/O; SnapshotGuard removes the GC pin on every
+                    // exit, including query/push failure and task cancellation.
+                    drop(tx);
+                    drop(guard);
+                    states[ri].cursor = states[ri].cursor.max(cut);
+                }
+
+                let s = seq.load(Ordering::Relaxed);
+                let ready = PushEnvelope {
+                    push: PushKind::Ready,
                     sub: sub_id,
-                    seq: seq.load(Ordering::Relaxed),
+                    seq: s,
                     data: None,
-                    gap_at: Some(at),
+                    gap_at: None,
                 };
-                if let Ok(frame) = rmp_serde::to_vec_named(&envelope) {
-                    // Either outcome is terminal; no ordinary suffix follows Gap.
-                    push_required(push, sub_id, seq, frame).await;
+                let frame = match rmp_serde::to_vec_named(&ready) {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        tracing::warn!(sub_id, %error, "control serialization failed");
+                        return;
+                    }
+                };
+                if let Some(gate) = delivery_gates.first() {
+                    if !push_required_gated(gate, &push, sub_id, &seq, frame).await {
+                        return;
+                    }
                 }
             }
-        };
-        if from_version.is_some() {
+
+            // Initial drain is mandatory even without a future broadcast hint.
+            for state in &mut states {
+                state.request_drain();
+            }
             if let Err(error) = JournalDrain::run(
                 &source,
                 &repos,
                 &mut receivers,
                 &mut states,
-                true,
+                false,
                 deliver_event,
                 emit_gap,
             )
             .await
             {
-                tracing::warn!(sub_id, %error, "journal resume terminated");
-                return;
+                tracing::warn!(sub_id, %error, "journal subscription terminated");
             }
+        };
+        let first_closed = wait_for_closed(&terminal_gates);
+        tokio::select! {
+            biased;
+            _ = first_closed => (),
+            () = bridge_work => (),
         }
-
-        // Initial snapshot: read existing records for subscribed tables.
-        if initial {
-            #[cfg(test)]
-            super::tests::bridge_snapshot_cut_tests::pause(0, 0).await;
-            for (ri, repo) in repos.iter().enumerate() {
-                let (mut tx, guard) = match db
-                    .tx_begin_as(actor.clone(), &db_name, repo, "snapshot")
-                    .await
-                {
-                    Ok(open) => open,
-                    Err(error) => {
-                        tracing::warn!(sub_id, %error, "initial snapshot begin failed");
-                        return;
-                    }
-                };
-                let cut = tx.snapshot_version;
-                #[cfg(test)]
-                super::tests::bridge_snapshot_cut_tests::pause(1, cut).await;
-                #[cfg(test)]
-                let mut first_target_of_repo = true;
-                for (target_repo, target_table, _mask, filter) in targets.iter() {
-                    if target_repo != repo {
-                        continue;
-                    }
-                    let mut query =
-                        Query::with_repo(target_repo.as_str(), target_table.as_str()).build();
-                    if filter.is_some() {
-                        query.r#where = filter.clone();
-                    }
-                    let mut batch = Batch::new();
-                    batch.query("_snapshot", query);
-                    batch.return_all();
-                    // Match the existing server-owned reactive-read limits policy.
-                    // Each target read has its own cooperative execution budget.
-                    batch.limits(query_limits.clone());
-                    let find_req = batch.build();
-
-                    match db
-                        .tx_execute_as(actor.clone(), &db_name, &find_req, &mut tx)
-                        .await
-                    {
-                        Ok(response) => {
-                            for qr in response.results.values() {
-                                for record in &qr.records {
-                                    let record_val = record.as_value();
-                                    let key_qv: QueryValue =
-                                        record_val.get("_id").cloned().unwrap_or(QueryValue::Null);
-                                    let value_qv: QueryValue = record_val.into_owned();
-                                    #[derive(serde::Serialize)]
-                                    struct SnapshotEvent<'x> {
-                                        table: &'x str,
-                                        op: &'x str,
-                                        key: &'x QueryValue,
-                                        value: &'x QueryValue,
-                                        commit_version: u64,
-                                    }
-                                    let obj = SnapshotEvent {
-                                        table: target_table,
-                                        op: "put",
-                                        key: &key_qv,
-                                        value: &value_qv,
-                                        commit_version: 0,
-                                    };
-                                    let data = match rmp_serde::to_vec_named(&obj) {
-                                        Ok(data) => data,
-                                        Err(error) => {
-                                            tracing::warn!(
-                                                sub_id,
-                                                %error,
-                                                "snapshot serialization failed",
-                                            );
-                                            return;
-                                        }
-                                    };
-                                    if !try_push_event(&push, sub_id, &seq, &data).await {
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                sub_id,
-                                table = %target_table,
-                                "initial snapshot failed: {e}",
-                            );
-                            return;
-                        }
-                    }
-                    #[cfg(test)]
-                    if std::mem::take(&mut first_target_of_repo) {
-                        super::tests::bridge_snapshot_cut_tests::pause(2, cut).await;
-                    }
-                }
-                // Read-only rollback is synchronous: TxContext drops staged
-                // state without I/O; SnapshotGuard removes the GC pin on every
-                // exit, including query/push failure and task cancellation.
-                drop(tx);
-                drop(guard);
-                states[ri].cursor = states[ri].cursor.max(cut);
-            }
-
-            let s = seq.load(Ordering::Relaxed);
-            let ready = PushEnvelope {
-                push: PushKind::Ready,
-                sub: sub_id,
-                seq: s,
-                data: None,
-                gap_at: None,
-            };
-            let frame = match rmp_serde::to_vec_named(&ready) {
-                Ok(frame) => frame,
-                Err(error) => {
-                    tracing::warn!(sub_id, %error, "control serialization failed");
-                    return;
-                }
-            };
-            if !push_required(&push, sub_id, &seq, frame).await {
-                return;
-            }
-        }
-
-        // Initial drain is mandatory even without a future broadcast hint.
-        for state in &mut states {
-            state.request_drain();
-        }
-        if let Err(error) = JournalDrain::run(
-            &source,
-            &repos,
-            &mut receivers,
-            &mut states,
-            false,
-            deliver_event,
-            emit_gap,
-        )
-        .await
-        {
-            tracing::warn!(sub_id, %error, "journal subscription terminated");
-        }
-    }; // end of async block
+    };
 
     run.await;
 

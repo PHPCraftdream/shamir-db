@@ -124,6 +124,7 @@ async fn capture_change_bytes(row: QueryValue) -> (Arc<ShamirDb>, Bytes) {
     let mut rx = shamir
         .subscribe_changelog(DB, REPO)
         .await
+        .unwrap()
         .expect("subscribe_changelog");
 
     let mut bch = Batch::new();

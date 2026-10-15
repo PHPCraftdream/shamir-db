@@ -25,6 +25,30 @@
 
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use tokio::sync::Notify;
+
+#[cfg(test)]
+pub(crate) struct PullRetryHook {
+    pub(crate) entered: Notify,
+    pub(crate) release: Notify,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static PULL_RETRY_HOOK: Arc<PullRetryHook>;
+}
+
+#[cfg(test)]
+async fn pause_before_retry_page() {
+    if let Ok(hook) = PULL_RETRY_HOOK.try_with(Arc::clone) {
+        hook.entered.notify_one();
+        hook.release.notified().await;
+    }
+}
+
 use shamir_connect::server::session::Session;
 use shamir_db::access::{Action, ResourcePath};
 use shamir_query_types::wire::repl::{
@@ -354,15 +378,28 @@ impl ShamirDbHandler {
 
         // First read — if we get events or the caller didn't ask to wait,
         // return immediately.
-        let mut jr = match instance
-            .read_changelog_for_replication(from_version, effective_limit)
+        let mut jr = match self
+            .db
+            .read_changelog_for_replication(db, repo, from_version, effective_limit)
             .await
         {
-            Ok(jr) => jr,
+            Ok(Some(jr)) => jr,
+            Ok(None) => {
+                return ReplResponse::Error {
+                    leader_epoch: self.leader_epoch,
+                    code: "unknown_repo".into(),
+                    message: format!("repository '{db}/{repo}' not found"),
+                };
+            }
             Err(error) => {
                 return ReplResponse::Error {
                     leader_epoch: self.leader_epoch,
-                    code: "replication_read_error".into(),
+                    code: if matches!(error, shamir_db::DbError::ResyncRequired { .. }) {
+                        "downstream_resync_required"
+                    } else {
+                        "replication_read_error"
+                    }
+                    .into(),
                     message: error.to_string(),
                 };
             }
@@ -387,15 +424,33 @@ impl ShamirDbHandler {
                         let remaining = deadline - now;
                         tokio::time::sleep(remaining.min(POLL_STEP)).await;
 
-                        match instance
-                            .read_changelog_for_replication(from_version, effective_limit)
+                        #[cfg(test)]
+                        pause_before_retry_page().await;
+                        match self
+                            .db
+                            .read_changelog_for_replication(db, repo, from_version, effective_limit)
                             .await
                         {
-                            Ok(fresh) => jr = fresh,
+                            Ok(Some(fresh)) => jr = fresh,
+                            Ok(None) => {
+                                return ReplResponse::Error {
+                                    leader_epoch: self.leader_epoch,
+                                    code: "unknown_repo".into(),
+                                    message: format!("repository '{db}/{repo}' not found"),
+                                };
+                            }
                             Err(error) => {
                                 return ReplResponse::Error {
                                     leader_epoch: self.leader_epoch,
-                                    code: "replication_read_error".into(),
+                                    code: if matches!(
+                                        error,
+                                        shamir_db::DbError::ResyncRequired { .. }
+                                    ) {
+                                        "downstream_resync_required"
+                                    } else {
+                                        "replication_read_error"
+                                    }
+                                    .into(),
                                     message: error.to_string(),
                                 };
                             }
@@ -450,6 +505,15 @@ impl ShamirDbHandler {
                 }
             }
         };
+        if let Some(reason) = self.db.read_quarantine_reason(db, repo) {
+            return ReplResponse::Error {
+                leader_epoch: self.leader_epoch,
+                code: "downstream_resync_required".into(),
+                message: format!(
+                    "repository '{db}/{repo}' is quarantined (resync_required): {reason}"
+                ),
+            };
+        }
         ReplResponse::Pull {
             schema_digest: Some(schema_digest),
             leader_epoch: self.leader_epoch,

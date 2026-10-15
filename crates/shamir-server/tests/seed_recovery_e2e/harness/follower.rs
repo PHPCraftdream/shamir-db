@@ -16,6 +16,7 @@ use shamir_db::SystemStoreConfig;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_builder::query::Query;
+use shamir_query_types::batch::BatchError;
 use shamir_query_types::wire::repl::ReplRequest;
 use shamir_server::replication::prod_factory::build_prod_factory;
 use shamir_server::replication::supervisor::SubscriptionSupervisor;
@@ -50,6 +51,18 @@ pub async fn open_home(data_dir: &Path) -> ShamirDb {
     ))
     .await
     .expect("open follower home")
+}
+
+/// True when an ordinary read of `table` is refused with the typed
+/// `resync_required` quarantine error (S5c-X PR8b).
+pub async fn read_refused_resync(home: &ShamirDb, table: &str) -> bool {
+    let mut batch = Batch::new();
+    batch.id("read");
+    batch.query("rows", Query::with_repo(wire::REPO, table));
+    matches!(
+        home.execute(wire::DB, &batch.build()).await,
+        Err(BatchError::ResyncRequired { .. })
+    )
 }
 
 pub async fn rows(home: &ShamirDb, table: &str) -> Vec<QueryValue> {

@@ -1,0 +1,3 @@
+Added a deterministic active-lease close/wait test to `crates/shamir-db/src/shamir_db/execute/repo_admin/revocation/tests/gate_tests.rs`. A dedicated std thread holds a delivery lease behind an mpsc rendezvous; the async test waits for lease entry, closes the gate, polls `wait_idle` against an immediately-ready future (without runtime-blocking sleeps), releases the lease, and confirms `wait_idle` had not completed early.
+
+No production edits and no builds/tests/cargo/git commands were performed. Test behavior was assessed from source only.

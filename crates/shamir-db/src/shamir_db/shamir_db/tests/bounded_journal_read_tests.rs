@@ -51,10 +51,13 @@ async fn bounded_journal_wrappers_distinguish_missing_and_present_repo() {
             .unwrap(),
         Some(VisibleOutcome::Visible),
     );
+    // `Ok(None)` means only that the db/repo is absent; real journal errors
+    // propagate as `Err` instead of being swallowed into `Ok(None)`.
     let legacy = db
         .read_changelog_from_journal("journal-db", "main", 1, 10)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("repo exists");
     assert_eq!(legacy.events, page.read.events);
     assert_eq!(legacy.gap_at, page.read.gap_at);
 }

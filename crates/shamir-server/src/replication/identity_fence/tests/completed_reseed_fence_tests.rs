@@ -18,12 +18,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use shamir_db::types::value::QueryValue;
-use shamir_db::{SeedRefusal, ShamirDb};
+use shamir_db::{DbError, SeedRefusal, ShamirDb};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl::{
     repl_scope, replication_profile, replication_status, subscription,
 };
+use shamir_query_builder::Query;
 use shamir_query_types::admin::{ReplDirection, ReplMode};
+use shamir_query_types::batch::BatchError;
 use shamir_query_types::wire::repl::{ReplRepoInfo, ReplResponse};
 use tokio_util::sync::CancellationToken;
 
@@ -303,5 +305,89 @@ async fn negative_control_without_quarantine_state_is_not_resync_required() {
     assert_eq!(
         state.as_deref(),
         Some(SeedRefusal::WrongHistoryEpoch.code())
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 5 — the persisted quarantine fences ordinary READS on the follower
+// ---------------------------------------------------------------------------
+
+/// The real supervisor fence path (epoch mismatch → quarantine marking), but
+/// keeps the follower's `ShamirDb` handle so the fenced read surface can be
+/// exercised. Mirrors [`epoch_mismatch_subscription_state`] with
+/// `skip_quarantine = false` and owns the same seam lock.
+async fn quarantined_follower() -> Arc<ShamirDb> {
+    let _guard = QUARANTINE_SEAM_LOCK.lock().await;
+    checks::SKIP_FENCE_QUARANTINE_FOR_TEST.store(false, Ordering::SeqCst);
+
+    let leader = build_memory().await;
+    write_rows(&leader, 0, 2).await;
+    let inner = InProcessReplSource::new(leader.clone());
+    repo(&leader).bump_history_epoch().await.unwrap();
+    let hello = inner.hello("probe").await.unwrap();
+    repo(&leader).bump_history_epoch().await.unwrap();
+    let source = Arc::new(StaticHelloSource {
+        hello,
+        inner: Arc::new(InProcessReplSource::new(leader)),
+        pulls: AtomicUsize::new(0),
+    });
+
+    let follower = Arc::new(build_memory().await);
+    let mut batch = Batch::new();
+    batch.op(
+        "profile",
+        replication_profile("prof_reseed").stream(
+            repl_scope("app").repo("main").build(),
+            ReplDirection::Pull,
+            ReplMode::ReadOnly,
+        ),
+    );
+    batch.op(
+        "sub",
+        subscription("sub_reseed", "tcp://leader:9000", "pub", "prof_reseed"),
+    );
+    let created = follower.execute("app", &batch.build()).await.unwrap();
+    assert!(!created.results.contains_key("__error"), "{created:?}");
+
+    let shared = source.clone();
+    let factory: ReplSourceFactory = Arc::new(move |_| shared.clone());
+    let supervisor = SubscriptionSupervisor::new(follower.clone(), factory, "probe")
+        .with_poll_wait_ms(0)
+        .with_max_iterations(1);
+    supervisor.reconcile().await;
+    // Join the loop task: once it is joined the quarantine marking (inside
+    // the task) is durably in the catalogue — no sleeps needed.
+    supervisor.wait_for_subscription("sub_reseed").await;
+    supervisor.stop_all().await;
+    checks::SKIP_FENCE_QUARANTINE_FOR_TEST.store(false, Ordering::SeqCst);
+    follower
+}
+/// After the REAL fence trip persisted `resync_required`:
+///   (a) ordinary reads through the same handle fail with the typed
+///       `BatchError` code `resync_required`;
+///   (b) `read_changelog_bounded` fails with `DbError::ResyncRequired`;
+///   (c) the admin status read still succeeds and still reports the
+///       quarantined state.
+#[tokio::test]
+async fn quarantined_subscription_fences_reads_but_not_status() {
+    let follower = quarantined_follower().await;
+
+    // (a) ordinary SELECT of the destination repo is refused.
+    let mut read = Batch::new();
+    read.query("r", Query::with_repo("main", "items"));
+    let err = follower.execute("app", &read.build()).await.unwrap_err();
+    assert_eq!(err.code(), Some("resync_required"));
+    assert!(matches!(err, BatchError::ResyncRequired { .. }));
+
+    // (b) the changelog pull path refuses too.
+    let Err(err) = follower.read_changelog_bounded("app", "main", 1, 10).await else {
+        panic!("changelog pull of a quarantined repo must be refused");
+    };
+    assert!(matches!(err, DbError::ResyncRequired { .. }));
+
+    // (c) admin status stays readable and shows the quarantine state.
+    assert_eq!(
+        subscription_state(&follower, "sub_reseed").await.as_deref(),
+        Some("resync_required"),
     );
 }

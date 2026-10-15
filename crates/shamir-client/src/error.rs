@@ -40,6 +40,8 @@ pub enum ClientError {
     AsOfFutureVersion { message: String },
     #[error("as_of_reopen_required: {message}")]
     AsOfReopenRequired { message: String },
+    #[error("resync_required: {message}")]
+    ResyncRequired { message: String },
     #[error("visibility_future_version: {message}")]
     VisibilityFutureVersion { message: String },
     #[error("visibility_wait_invalid: {message}")]
