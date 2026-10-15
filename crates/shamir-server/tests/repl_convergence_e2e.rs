@@ -132,8 +132,7 @@ async fn write_rows(leader: &ShamirDb, n: usize) {
         if let Some(jr) = leader
             .read_changelog_from_journal(DB, REPO, 0, 1000)
             .await
-            .ok()
-            .flatten()
+            .expect("leader journal read succeeds")
         {
             if jr.events.len() >= n {
                 return;

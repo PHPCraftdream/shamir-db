@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use tokio::time::timeout;
 
+use shamir_db::shamir_db::ChangelogReceiver;
 use shamir_db::ShamirDb;
 use shamir_engine::ChangeOp;
 use shamir_query_builder::batch::Batch;
@@ -82,9 +83,7 @@ async fn insert_user(shamir: &ShamirDb, name: &str) {
 
 /// Receive the next live event within a bounded timeout (so a hang in the
 /// feed surfaces as a test failure, not an indefinite block).
-async fn recv_event(
-    rx: &mut tokio::sync::broadcast::Receiver<std::sync::Arc<shamir_engine::ChangelogEvent>>,
-) -> std::sync::Arc<shamir_engine::ChangelogEvent> {
+async fn recv_event(rx: &mut ChangelogReceiver) -> std::sync::Arc<shamir_engine::ChangelogEvent> {
     timeout(Duration::from_secs(5), rx.recv())
         .await
         .expect("changefeed event within 5s")
