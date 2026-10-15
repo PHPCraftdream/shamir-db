@@ -73,17 +73,15 @@
 //! `drain_all().await` first, so no data is lost. This is rare
 //! (DDL-driven only), so the rebuild cost is amortised.
 
-use super::types::{RecordKey, Store};
+use super::types::{merge_overlay_stream, RecordKey, RecordStream, Store};
 use crate::error::{DbError, DbResult};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use bytes::Bytes;
 use dashmap::DashMap;
-use futures::stream::Stream;
 use moka::future::Cache as MokaCache;
 use shamir_collections::THasher;
 use shamir_types::types::record_id::RecordId;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -128,7 +126,7 @@ impl Default for MemBufferConfig {
 /// In-cache slot — either a live value or a tombstone for a
 /// previously-removed key (cached negative result).
 #[derive(Clone, Debug, PartialEq)]
-enum Slot {
+pub(crate) enum Slot {
     Live(Bytes),
     Tombstone,
 }
@@ -625,124 +623,6 @@ impl Drop for MemBufferStore {
     }
 }
 
-type RecordStream = Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>;
-
-/// Audit finding 2.3 (task #530) — merge a sorted dirty-overlay snapshot on
-/// top of a sorted `inner` record stream, WITHOUT draining the overlay to
-/// disk first.
-///
-/// This is a classic 2-way sorted merge (mirrors
-/// `MvccStore::current_stream`'s overlay-vs-history merge): both the `overlay`
-/// snapshot and the `inner` stream are key-sorted (ascending when
-/// `reverse == false`, descending when `reverse == true` — the overlay is
-/// pre-sorted by the caller to match), so a single linear pass yields a merged
-/// key-ordered stream. Semantics:
-///
-/// * An overlay entry ALWAYS wins over `inner` for the same key (it is the
-///   newer, not-yet-flushed value). `Slot::Live` → emit the overlay value;
-///   `Slot::Tombstone` → EXCLUDE the key (even if `inner` still holds stale
-///   data for it).
-/// * Overlay-only keys (present in the dirty buffer but not yet in `inner`)
-///   are emitted in their sorted position during the merge, and any that sort
-///   after the last `inner` key are flushed in the overlay-only tail phase.
-/// * Ordering across the merged output is preserved, so range / prefix scans
-///   keep their ascending / descending guarantee.
-///
-/// `inner` MUST yield keys in the requested order (ascending, or descending
-/// for reverse) — every `Store` scan upholds this per the trait contract.
-fn merge_overlay_stream(
-    overlay: Vec<(RecordKey, Slot)>,
-    inner: RecordStream,
-    batch_size: usize,
-    reverse: bool,
-) -> RecordStream {
-    Box::pin(async_stream::stream! {
-        let batch_cap = batch_size.max(1);
-        let mut ov = overlay.into_iter().peekable();
-        let mut out: Vec<(RecordKey, Bytes)> = Vec::with_capacity(batch_cap);
-
-        // `ord(a, b)` is the "a should come before b in output order" test.
-        // Ascending: a < b. Descending: a > b.
-        let before = |a: &RecordKey, b: &RecordKey| -> bool {
-            if reverse {
-                a > b
-            } else {
-                a < b
-            }
-        };
-
-        futures::pin_mut!(inner);
-        while let Some(batch) = futures::StreamExt::next(&mut inner).await {
-            let batch = match batch {
-                Ok(b) => b,
-                Err(e) => {
-                    yield Err(e);
-                    return;
-                }
-            };
-            for (ik, iv) in batch {
-                // Emit every overlay entry that sorts strictly before the
-                // current inner key (overlay-only keys interleaved in order).
-                while let Some((ok, _)) = ov.peek() {
-                    if before(ok, &ik) {
-                        let (ok, oslot) = ov.next().unwrap();
-                        if let Slot::Live(v) = oslot {
-                            out.push((ok, v));
-                            if out.len() >= batch_cap {
-                                yield Ok(std::mem::take(&mut out));
-                                out = Vec::with_capacity(batch_cap);
-                            }
-                        }
-                        // Tombstone-only overlay key: nothing to emit.
-                    } else {
-                        break;
-                    }
-                }
-                // Overlay entry for the EXACT inner key wins (newer write).
-                if let Some((ok, _)) = ov.peek() {
-                    if *ok == ik {
-                        let (ok, oslot) = ov.next().unwrap();
-                        match oslot {
-                            Slot::Live(v) => {
-                                out.push((ok, v));
-                                if out.len() >= batch_cap {
-                                    yield Ok(std::mem::take(&mut out));
-                                    out = Vec::with_capacity(batch_cap);
-                                }
-                            }
-                            // Tombstone masks the stale inner value → skip.
-                            Slot::Tombstone => {}
-                        }
-                        continue;
-                    }
-                }
-                // No overlay entry for this key → inner value stands.
-                out.push((ik, iv));
-                if out.len() >= batch_cap {
-                    yield Ok(std::mem::take(&mut out));
-                    out = Vec::with_capacity(batch_cap);
-                }
-            }
-        }
-
-        // Overlay-only tail: any remaining overlay entries (keys `inner` never
-        // yielded). Live entries are emitted; tombstones are dropped.
-        for (ok, oslot) in ov {
-            if let Slot::Live(v) = oslot {
-                out.push((ok, v));
-                if out.len() >= batch_cap {
-                    yield Ok(std::mem::take(&mut out));
-                    out = Vec::with_capacity(batch_cap);
-                }
-            }
-        }
-
-        if !out.is_empty() {
-            yield Ok(out);
-        }
-    })
-}
-
 #[async_trait]
 impl Store for MemBufferStore {
     async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
@@ -1003,6 +883,18 @@ impl Store for MemBufferStore {
     async fn flush(&self) -> DbResult<()> {
         self.drain_all().await?;
         self.inner.flush().await
+    }
+
+    /// Drain the buffer into the inner store WITHOUT the inner
+    /// `flush()` — the shutdown flush pass drains every store first and
+    /// then persists the backend ONCE (`Repo::persist_once`); calling the
+    /// inner flush here would reintroduce one full-database fsync per
+    /// buffered store. The inner drain is recursive — a `MemBuffer` stacked
+    /// over another wrapper drains the whole chain; fjall's no-op
+    /// `flush_drain` terminates it.
+    async fn flush_drain(&self) -> DbResult<()> {
+        self.drain_all().await?;
+        self.inner.flush_drain().await
     }
 
     async fn apply_buffer_config(&self, config: &MemBufferConfig) -> DbResult<()> {
