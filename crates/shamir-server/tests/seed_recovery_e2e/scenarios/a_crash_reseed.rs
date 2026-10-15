@@ -93,9 +93,11 @@ async fn seed_e2e_a_kill_resync_offline_seed_resume_converges() {
     .await;
     assert_eq!(follower::bookmark(&fresh).await, 0, "bookmark unchanged");
     for table in wire::TABLES {
+        // PR8b: a quarantined destination refuses ordinary reads, so the
+        // gap-batch payload can never be observed.
         assert!(
-            follower::rows(&fresh, table).await.is_empty(),
-            "{table} must stay empty: the gap-batch payload must not apply",
+            follower::read_refused_resync(&fresh, table).await,
+            "{table} must be refused while resync_required",
         );
     }
     fresh_loop.stop_all().await;
