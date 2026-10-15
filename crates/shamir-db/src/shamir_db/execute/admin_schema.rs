@@ -28,7 +28,6 @@
 //! [`parse_schema`]: shamir_db::shamir_db::schema_management::parse_schema
 
 use crate::access::{Action, ResourcePath};
-use crate::engine::table::TableManager;
 use crate::query::admin::{
     AddSchemaRuleOp, CompareDto, ConstraintsDto, FieldRuleDto, FkAction, ForeignKeyDto,
     GetTableSchemaOp, NumDto, RemoveSchemaRuleOp, SetTableSchemaOp,
@@ -50,6 +49,7 @@ use shamir_types::mpack;
 use shamir_types::types::record_id::RecordId;
 
 use super::admin_dispatch::ShamirAdminExecutor;
+use super::ddl_admission::{begin_schema_activation_barrier, repo_ddl_guard};
 use super::helpers::admin_result;
 
 // ── error helpers ──────────────────────────────────────────────────────────
@@ -133,41 +133,9 @@ async fn lock_schema_rmw(
 // the SAME canonical entry point as every `shamir-engine` CREATE INDEX path,
 // so the hierarchy cannot drift between the two crates.
 
-/// Begin the schema-activation write barrier for `table`: resolve the table
-/// handle and acquire the barrier via
-/// [`TableManager::begin_write_barrier`](crate::engine::table::TableManager::begin_write_barrier)
-/// (`SCHEMA_ACTIVATION` bit) — raise the intent bit, drain in-flight
-/// fast-path writers, THEN take `unique_write_lock`, in that order (F-70,
-/// #897). Returns the table handle plus both RAII guards; the caller keeps
-/// all three alive for the ENTIRE count→persist→activate sequence (drop
-/// order: barrier clears first, then the lock releases — reverse declaration
-/// order).
-///
-/// Call this immediately BEFORE the `stamp_keyset_safe` count-proof read so
-/// the subsequent count→persist→activate sequence is a genuine snapshot no
-/// concurrent writer can invalidate.
-async fn begin_schema_activation_barrier(
-    shamir: &ShamirDb,
-    db: &str,
-    repo: &str,
-    table: &str,
-) -> Result<
-    (
-        TableManager,
-        crate::engine::table::WriteBarrierGuard,
-        tokio::sync::OwnedMutexGuard<()>,
-    ),
-    BatchError,
-> {
-    let handle = shamir
-        .get_table(db, repo, table)
-        .await
-        .map_err(|e| err_code("internal_error", e.to_string()))?;
-    let (barrier, uwl_guard) = handle
-        .begin_write_barrier(crate::engine::index::write_barrier_flags::SCHEMA_ACTIVATION)
-        .await;
-    Ok((handle, barrier, uwl_guard))
-}
+// NOTE (S5c round 3): `begin_schema_activation_barrier` now lives in
+// `super::ddl_admission` (it also acquires the repo-level `ddl_admission`
+// guard so schema DDL cannot interleave with a follower receipt apply).
 
 /// Validate that all unique-constrained fields in the rule set have a
 /// backing index on the SAME table.  Returns an error
@@ -510,7 +478,7 @@ impl ShamirAdminExecutor {
         // F-70 (#897, P0): `begin_schema_activation_barrier` acquires via the
         // canonical drain-then-lock path (raise → drain → lock) — see that
         // function's doc.
-        let (_barrier_handle, _barrier, _uwl_guard) =
+        let (_barrier_handle, _barrier, _uwl_guard, _repo_ddl) =
             begin_schema_activation_barrier(&self.shamir, db, repo, table).await?;
 
         // F-17 (#810) — stamp the server-computed `keyset_safe` proof onto
@@ -719,7 +687,7 @@ impl ShamirAdminExecutor {
         //
         // F-70 (#897, P0): acquired via the canonical drain-then-lock path
         // (see `begin_schema_activation_barrier`'s doc).
-        let (_barrier_handle, _barrier, _uwl_guard) =
+        let (_barrier_handle, _barrier, _uwl_guard, _repo_ddl) =
             begin_schema_activation_barrier(&self.shamir, db, repo, table).await?;
 
         // F-17 (#810) — stamp the server-computed `keyset_safe` proof. Only
@@ -831,6 +799,12 @@ impl ShamirAdminExecutor {
             .map_err(err_access)?;
 
         let _guard = lock_schema_rmw(&self.shamir, db, repo, table).await;
+
+        // S5c round 3: this handler rewrites the catalogue record and the
+        // validator registry directly (no `begin_write_barrier` call like
+        // set/add-rule), so it takes the repo-level `ddl_admission` guard —
+        // exactly once per path (lock_schema_rmw is a separate axis).
+        let _repo_ddl = repo_ddl_guard(&self.shamir, db, repo).await?;
 
         let mut rec = self
             .shamir

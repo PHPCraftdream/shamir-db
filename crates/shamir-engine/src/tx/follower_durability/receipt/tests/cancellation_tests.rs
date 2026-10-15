@@ -328,50 +328,96 @@ async fn watermark_never_passes_unpublished_receipt_versions() {
 }
 
 /// Bounded deterministic condition wait (yield spin, no sleeps): poll until
-/// `condition` holds, giving the detached worker task scheduling room.
+/// the detached worker has settled — durable bookmark AND receipt retired
+/// AND the RAM publication visible (`last_committed`/`durable_watermark` at
+/// 2; the bookmark/receipt can land before publication, so the publication
+/// fields are part of the settled condition, review finding 7b).
 async fn spin_until_settled(repo: &RepoInstance) {
-    for _ in 0..500u32 {
+    let gate = repo.tx_gate().await.unwrap();
+    for _ in 0..2000u32 {
         let info = repo.tx_info_store().await.unwrap();
         let settled = load_bookmark_v3(&info)
             .await
             .unwrap()
             .is_some_and(|v3| v3.bookmark >= 2 && v3.outstanding_receipt.is_none())
-            && outstanding_phase(repo).await.is_none();
+            && outstanding_phase(repo).await.is_none()
+            && gate.last_committed() == 2
+            && gate.durable_watermark() == 2;
         drop(info);
         if settled {
             return;
         }
         tokio::task::yield_now().await;
     }
-    panic!("detached worker did not complete");
+    panic!("detached worker did not complete (including publication)");
 }
 
-// Item 2a: aborting the CALLER task (whose future awaits only the worker's
-// JoinHandle) while the repository-owned worker is parked before the
-// checkpoint commit must leave the DETACHED worker in control — it completes
-// the commit AND the RAM publication, and the repo settles identically to an
-// uninterrupted run.
+// Item 2a (revised, review finding 7a): aborting the CALLER task while the
+// repository-owned worker is parked INSIDE the physical fjall commit window
+// (commit_window_park_seam parks the spawn_blocking thread after staging,
+// before the batch is applied) must leave the DETACHED worker in control —
+// it completes the commit AND the RAM publication, and the repo settles
+// identically to an uninterrupted run. The global seams are serialized with
+// `checkpoint_test_lock()`; the commit-window park is a blocking primitive
+// (Condvar) because it runs on a `spawn_blocking` thread.
 #[tokio::test]
 async fn drop_during_checkpoint_commit_still_completes_and_publishes() {
     let temp = tempfile::TempDir::new().unwrap();
     let name = repo_name("cancel-commit-park", temp.path());
     let repo = open(temp.path(), &name).await;
 
-    checkpoint::arm_commit_park(true);
+    // The checkpoint/commit seams are process-global: serialize against the
+    // other tests that arm them or read the reconcile counter.
+    let _lock = checkpoint::checkpoint_test_lock();
+    checkpoint::arm_commit_park(false); // ensure the PRE-stage park is inert
+                                        // Park the worker at ReceiptMaterialized (AFTER the Materialized batch is
+                                        // durable), then arm the commit-window seam and release: the worker's
+                                        // NEXT atomic commit is the checkpoint's, so the commit-window park
+                                        // provably fires inside the checkpoint commit — not inside the earlier
+                                        // Prepared/Materialized commits.
+    let hook = Arc::new(test_seam::Hook::default());
+    *hook.park_at.lock().unwrap() = Some(Phase::ReceiptMaterialized);
+    test_seam::install(&name, Arc::clone(&hook));
+    // Register the `reached` waker BEFORE spawning the caller so the
+    // notification cannot be missed (notify_waiters wakes only registered
+    // waiters).
+    let reached = hook.reached.notified();
+    tokio::pin!(reached);
+    reached.as_mut().enable();
     let worker_repo = repo.clone();
     let events = vec![event(1, 1), event(2, 2)];
     let caller = tokio::spawn(async move {
         apply_replicated_batch(&worker_repo, &events, 0, ApplyPolicy::Trusted).await
     });
-    checkpoint::wait_commit_park_reached().await;
+    // Deterministic wait until the worker is parked at ReceiptMaterialized.
+    reached.await;
+    test_seam::remove(&name);
+    // Arm the commit window and release the parked worker: its next atomic
+    // commit is the checkpoint's, so the park fires inside it.
+    shamir_storage::storage_fjall::commit_window_park_seam::arm(true);
+    hook.resume.notify_waiters();
+    for _ in 0..2000u32 {
+        if shamir_storage::storage_fjall::commit_window_park_seam::reached() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        shamir_storage::storage_fjall::commit_window_park_seam::reached(),
+        "checkpoint commit never reached the physical commit window"
+    );
     caller.abort();
-    checkpoint::release_commit_park();
+    shamir_storage::storage_fjall::commit_window_park_seam::release();
+    // Reap the aborted caller: dropping the JoinHandle await is not enough —
+    // the task must be observed dead before the assertions below.
+    let _ = caller.await;
 
     spin_until_settled(&repo).await;
     assert_eq!(history_versions(&repo, &key_bytes(1).await).await, vec![1]);
     assert_eq!(history_versions(&repo, &key_bytes(2).await).await, vec![2]);
     let gate = repo.tx_gate().await.unwrap();
     assert!(!gate.requires_reopen());
+    assert_eq!(gate.last_committed(), 2, "publication must be visible");
     assert_eq!(gate.durable_watermark(), 2);
     assert_eq!(outstanding_phase(&repo).await, None);
     let info = repo.tx_info_store().await.unwrap();
@@ -380,7 +426,7 @@ async fn drop_during_checkpoint_commit_still_completes_and_publishes() {
         Err(DbError::NotFound(_))
     ));
 
-    checkpoint::arm_commit_park(false);
+    shamir_storage::storage_fjall::commit_window_park_seam::arm(false);
     close(repo).await;
 }
 
@@ -408,6 +454,9 @@ async fn drop_during_uncertain_readback_still_completes_and_publishes() {
     checkpoint::wait_reconcile_park_reached().await;
     caller.abort();
     checkpoint::release_reconcile_park();
+    // Reap the aborted caller (its future awaited only the worker's
+    // JoinHandle; the detached worker completes on its own).
+    let _ = caller.await;
 
     spin_until_settled(&repo).await;
     checkpoint::set_simulate_checkpoint_uncertain(false);

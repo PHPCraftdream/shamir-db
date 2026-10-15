@@ -8,7 +8,6 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use futures::StreamExt;
 use shamir_storage::types::{RecordKey, Store};
 use shamir_tx::{decode_version_key, encode_version_key, ChangeOp, ChangelogEvent, RecordChange};
 use shamir_types::access::Actor;
@@ -117,28 +116,31 @@ async fn cold_reopen_completes_outstanding_receipt() {
     let name = repo_name("receipt-cold", temp.path());
     let repo = open(temp.path(), &name).await;
 
+    // Drive the batch through the repository-owned worker until the sticky
+    // `fail_after = ReceiptPrepared` flag exhausts the 3 retries: the worker
+    // parks the chunk guards, returns Err, goes IDLE, and leaves the durable
+    // Prepared receipt outstanding — the same durable state a crash leaves.
     let hook = Arc::new(test_seam::Hook::default());
-    *hook.park_at.lock().unwrap() = Some(Phase::ReceiptPrepared);
+    *hook.fail_after.lock().unwrap() = Some(Phase::ReceiptPrepared);
+    hook.fail_after_sticky
+        .store(true, std::sync::atomic::Ordering::Release);
     test_seam::install(&name, Arc::clone(&hook));
     let events = [event(1, 1)];
-    let mut apply = Box::pin(apply_replicated_batch(
-        &repo,
-        &events,
-        0,
-        ApplyPolicy::Trusted,
-    ));
-    let reached = hook.reached.notified();
-    tokio::pin!(reached);
-    reached.as_mut().enable();
-    tokio::select! {
-        _ = &mut reached => {}
-        result = &mut apply => {
-            panic!("apply completed before ReceiptPrepared: {result:?}")
-        }
-    }
-    drop(apply);
-    hook.resume.notify_waiters();
+    let error = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, shamir_storage::error::DbError::Storage(_)),
+        "expected the injected Storage failure, got {error:?}"
+    );
     test_seam::remove(&name);
+    // Graceful close: the worker shutdown QUARANTINES the parked guards
+    // (sets requires_reopen on the in-RAM gate and drops them — after a
+    // reopen the Aborted marks are acceptable), so the cold reopen starts
+    // from a fresh, clean gate and completes the receipt during reconcile.
+    repo.shutdown_receipt_worker(std::time::Duration::from_secs(5))
+        .await;
+    assert!(repo.tx_gate().await.unwrap().requires_reopen());
     close(repo).await;
 
     for _ in 0..2 {

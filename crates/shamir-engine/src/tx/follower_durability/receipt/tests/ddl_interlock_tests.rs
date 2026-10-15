@@ -50,7 +50,7 @@ async fn open(path: &Path, name: &str, tables: &[&str]) -> RepoInstance {
     RepoInstance::from_factory(
         name.into(),
         BoxRepoFactory::fjall_raw(path),
-        tables.iter().map(|t| TableConfig::new(t)).collect(),
+        tables.iter().map(|t| TableConfig::new(*t)).collect(),
     )
     .await
     .unwrap()
@@ -103,9 +103,10 @@ async fn parked_apply_blocks_ddl_until_dropped() {
     let hook = Arc::new(test_seam::Hook::default());
     *hook.park_at.lock().unwrap() = Some(Phase::ReceiptPrepared);
     test_seam::install(&name, Arc::clone(&hook));
+    let events = [event(1, 1)];
     let mut apply = Box::pin(apply_replicated_batch(
         &repo,
-        &[event(1, 1)],
+        &events,
         0,
         ApplyPolicy::Trusted,
     ));

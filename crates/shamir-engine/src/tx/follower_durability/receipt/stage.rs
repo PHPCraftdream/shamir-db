@@ -675,7 +675,7 @@ fn table_rows(work: &MaterializedWork) -> DbResult<Vec<(String, String, String, 
         };
         let after = delta.after;
         rows.push((
-            table,
+            table.clone(),
             format!("__history__{table}"),
             format!("__info__{table}"),
             after,

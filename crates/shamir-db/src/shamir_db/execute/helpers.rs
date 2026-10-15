@@ -195,6 +195,10 @@ pub(super) async fn apply_table_retention(
     let repo_instance = db
         .get_repo(repo)
         .ok_or_else(|| err(format!("Repository '{}' not found", repo)))?;
+    // S5c round 3: retention set rewrites MVCC store policy metadata; hold
+    // the repo-level `ddl_admission` guard so it cannot interleave with a
+    // follower receipt apply (exactly once — no caller pre-holds it).
+    let _ddl = repo_instance.ddl_admission_guard().await;
     let token = crate::engine::table::table_token_for(table);
     if let Some(entry) = repo_instance.per_table_mvcc().get_sync(&token) {
         entry

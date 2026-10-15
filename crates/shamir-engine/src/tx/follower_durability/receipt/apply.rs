@@ -3,14 +3,16 @@
 //! prepared events and run Prepared → Materialized → adopt-counters →
 //! checkpoint (bookmark commit + RAM publication in one poll) per chunk.
 //!
-//! Cancellation: the pipeline runs on a REPOSITORY-OWNED bounded worker
-//! (`tokio::spawn` of `run_receipt_pipeline`). The caller awaits the
-//! worker's `JoinHandle`; dropping the caller future drops only that await
-//! — the worker keeps its cheap `Arc` clone of the repo and runs the
-//! operation to completion or to a durable pause point. The worker is
-//! BOUNDED because the admission mutex inside the pipeline serializes
-//! applies (one at a time): concurrent callers queue on the mutex rather
-//! than piling up unbounded work.
+//! Cancellation: the pipeline runs on the REPOSITORY-OWNED bounded worker
+//! (`resume::ReceiptWorker`, ONE lifecycle spawn per repo — see worker.rs).
+//! The caller submits a job and awaits only the oneshot reply; dropping the
+//! caller future drops that await only — the worker retains the job (with
+//! its own repo clone) and runs it to completion or to a durable pause
+//! point. Bounded: `try_send` into a capacity-4 queue; the admission mutex
+//! inside the pipeline serializes applies (one at a time). Errors while
+//! fresh chunk guards are held PARK those guards in the worker (finding 2);
+//! retries re-load the durable receipt so the recorded counters are never
+//! recomputed from the live cache after Materialized committed (finding 3).
 
 use std::sync::Arc;
 
@@ -20,9 +22,13 @@ use shamir_storage::types::Store;
 use shamir_tx::RepoTxGate;
 
 use super::super::super::{prepare_event, ApplyOutcome, ApplyPolicy, PreparedEvent};
+#[cfg(test)]
+use super::super::test_seam::{self, Phase};
 use super::{checkpoint, publish, resume, stage};
 use crate::meta::repl::bookmark_v3::{load_bookmark_v3, BookmarkV3};
-use crate::meta::repl::{ReceiptBinding, ReceiptPhase, ReplicationReceipt, MAX_RECEIPT_EVENTS};
+use crate::meta::repl::{
+    receipt_id, ReceiptBinding, ReceiptPhase, ReplicationReceipt, MAX_RECEIPT_EVENTS,
+};
 use crate::meta::repl_bookmark::{load_fence_record, load_replication_bookmark};
 use crate::repo::RepoInstance;
 use crate::tx::ReplicatedEvent;
@@ -34,32 +40,24 @@ pub(crate) async fn apply_batch_receipt(
     bookmark: u64,
     policy: ApplyPolicy,
 ) -> DbResult<ApplyOutcome> {
-    // Repository-owned bounded worker (S5c-X design, failure matrix
-    // "Cancellation"): the pipeline runs on a DETACHED task that owns a
-    // cheap Arc clone of the repo. Dropping the caller's future drops only
-    // the JoinHandle await — the operation runs to completion or to a
-    // durable pause point. Bounded: the admission mutex inside the pipeline
-    // serializes applies (one at a time), so concurrent callers queue on
-    // the mutex rather than piling up unbounded work.
-    let mut handle = tokio::spawn(run_receipt_pipeline(
-        repo.clone(),
-        Arc::clone(info),
-        events.to_vec(),
-        bookmark,
-        policy,
-    ));
-    match (&mut handle).await {
-        Ok(result) => result,
-        Err(join_error) if join_error.is_cancelled() => Err(DbError::RepoRequiresReopen(
-            "receipt apply task cancelled".into(),
-        )),
-        Err(join_error) => Err(DbError::Internal(format!(
-            "receipt apply worker panicked: {join_error}"
-        ))),
-    }
+    // Repository-owned bounded worker (review finding 4, round 2): the
+    // pipeline runs on the repo's single lazily-spawned worker task. Only
+    // the oneshot reply is awaited — a cancelled caller drops the receiver,
+    // and the worker KEEPS RUNNING the job with its own repo clone. No
+    // orphan `tokio::spawn` outside the worker's single lifecycle spawn.
+    let worker = repo.receipt_worker().await?;
+    worker
+        .submit(
+            repo.clone(),
+            Arc::clone(info),
+            events.to_vec(),
+            bookmark,
+            policy,
+        )
+        .await
 }
 
-async fn run_receipt_pipeline(
+pub(crate) async fn run_receipt_pipeline(
     repo: RepoInstance,
     info: Arc<dyn Store>,
     events: Vec<ReplicatedEvent>,
@@ -110,6 +108,9 @@ async fn run_receipt_pipeline(
         let publication = publish::publication_from_receipt(&repo, &receipt).await?;
         let floor = publication.floor;
         let new_bookmark = durable_tail(&repo, &info, &gate, &receipt, publication, &old).await?;
+        // Publication succeeded: parked guards' versions are ≤ the watermark
+        // now — retire (drop) them, their Aborted marks are no-ops.
+        repo.receipt_worker().await?.retire_parked_guards().await;
         if !tail.is_empty() {
             let tail: Vec<ReplicatedEvent> = tail.into_iter().cloned().collect();
             apply_fresh(&repo, &info, &gate, &tail, new_bookmark, policy).await?;
@@ -165,6 +166,7 @@ async fn apply_fresh(
         event.version = Some(guard.version());
         guards.push(guard);
     }
+    let worker = repo.receipt_worker().await?;
     let floor = gate.version_allocation_high_water_mark();
     let mut old = match load_bookmark_v3(info).await? {
         Some(bookmark) => BookmarkV3 {
@@ -203,51 +205,48 @@ async fn apply_fresh(
             combined += cost;
             end += 1;
         }
-        let bindings = collect_bindings(events, &origins[start..end]);
-        let leader_start = prepared[start].event.commit_version;
-        let leader_end = prepared[end - 1].event.commit_version;
-        let mut plan = stage::build_plan(
-            repo,
-            &prepared[start..end],
-            bindings,
-            old.bookmark,
-            leader_start,
-            leader_end,
-        )
-        .await?;
-        stage::commit_prepared(repo, info, &plan, &old).await?;
-        // From here the durable receipt owns this chunk's versions. The
-        // guards are NEVER dropped before publication: the worker owns them
-        // across materialize → Materialized batch → publication build →
-        // durable_tail, so no Aborted mark can advance the watermark past an
-        // unpublished version (the repository-owned worker cannot be dropped
-        // mid-pipeline — only its caller's await can). Ordinary Storage I/O
-        // failures retry the idempotent materialization inline (the durable
-        // receipt is the redo authority); the 3rd failure or any
-        // NON-retryable error (RepoRequiresReopen = quarantine, decode
-        // errors) drops the chunk guards and returns — the reopen path,
-        // where a watermark advance is then acceptable.
+        // Guard ownership across errors (finding 2): from allocation until
+        // publication the worker OWNS these guards — on ANY failure they are
+        // PARKED in the worker (never dropped), because a dropped guard
+        // marks Aborted and advances the watermarks past still-unpublished
+        // versions while the repo keeps serving. Storage failures retry the
+        // idempotent pipeline inline (the durable receipt is the redo
+        // authority); the 3rd failure or any NON-retryable error parks and
+        // returns. Parked guards retire on the next successful publication,
+        // or at worker shutdown under quarantine (requires_reopen).
         let mut attempt = 0usize;
         let (new_bookmark, chunk_local_end) = loop {
-            match run_chunk_tail(repo, info, gate, &mut plan, &old).await {
+            match try_chunk(
+                repo,
+                info,
+                gate,
+                events,
+                &origins[start..end],
+                &prepared[start..end],
+                &old,
+            )
+            .await
+            {
                 Ok(done) => break done,
                 Err(error) => {
                     attempt += 1;
                     if !matches!(error, DbError::Storage(_)) || attempt >= 3 {
-                        guards.drain(0..end - start);
+                        let parked: Vec<_> = guards.drain(0..end - start).collect();
+                        worker.park_guards(parked).await;
                         return Err(error);
                     }
                     log::warn!(
-                        "follower receipt chunk tail failed (attempt {attempt}/3), \
+                        "follower receipt chunk failed (attempt {attempt}/3), \
                          retrying: {error}"
                     );
                 }
             }
         };
-        // By now the publication inside `checkpoint` has run
-        // `publish_materialized` + `mark_durable` via the resume guards, so
-        // the fresh guards' Drop Aborted marks land at versions already ≤
-        // the watermark and are no-ops.
+        // The chunk published (apply_publication ran `mark_durable` inside
+        // the checkpoint): any guards parked by EARLIER failed chunks are now
+        // ≤ the watermark — retire them; then retire this chunk's own guards
+        // (their Aborted marks are no-ops at versions already durable).
+        worker.retire_parked_guards().await;
         guards.drain(0..end - start);
         old = BookmarkV3 {
             fence: old.fence.clone(),
@@ -265,6 +264,52 @@ async fn apply_fresh(
     })
 }
 
+/// One retryable attempt of one fresh chunk: build the plan, durably commit
+/// the Prepared receipt (idempotent — same receipt bytes — so a fallible
+/// flush after the Prepared commit retries instead of dropping the chunk's
+/// guards), then the post-Prepared tail.
+#[allow(clippy::too_many_arguments)]
+async fn try_chunk(
+    repo: &RepoInstance,
+    info: &Arc<dyn Store>,
+    gate: &Arc<RepoTxGate>,
+    events: &[ReplicatedEvent],
+    origins: &[usize],
+    prepared: &[PreparedEvent],
+    old: &BookmarkV3,
+) -> DbResult<(u64, u64)> {
+    let bindings = collect_bindings(events, origins);
+    let leader_start = prepared[0].event.commit_version;
+    let leader_end = prepared[prepared.len() - 1].event.commit_version;
+    let mut plan = stage::build_plan(
+        repo,
+        prepared,
+        bindings,
+        old.bookmark,
+        leader_start,
+        leader_end,
+    )
+    .await?;
+    // Phase-aware retry (finding 3): once this chunk's Materialized receipt
+    // is durable, rewriting the Prepared-phase bytes over it would ERASE the
+    // recorded absolute counters and force the retry to recompute them from
+    // the live cache (where the batch's own history rows read back as
+    // pre-existing) — skip the rewrite and let `run_chunk_tail` replay the
+    // recorded Materialized receipt.
+    let already_materialized = matches!(
+        resume::lookup(repo, info).await?.as_ref(),
+        Some(outstanding)
+            if outstanding.receipt.phase == ReceiptPhase::Materialized
+                && receipt_id(&outstanding.receipt) == receipt_id(&plan.receipt),
+    );
+    if !already_materialized {
+        stage::commit_prepared(repo, info, &plan, old).await?;
+        #[cfg(test)]
+        fail_after(repo.name(), Phase::ReceiptPrepared)?;
+    }
+    run_chunk_tail(repo, info, gate, &mut plan, old).await
+}
+
 /// Post-Prepared tail of one fresh chunk: the idempotent materialization,
 /// the durable Materialized batch, the publication build, and the
 /// durability tail. Returns `(new_bookmark, chunk_local_end)`.
@@ -275,8 +320,28 @@ async fn run_chunk_tail(
     plan: &mut stage::BatchPlan,
     old: &BookmarkV3,
 ) -> DbResult<(u64, u64)> {
-    let work = stage::materialize_from_plan(repo, plan).await?;
+    // Phase-aware, counter-idempotent retry (finding 3): on EACH attempt,
+    // load the durable outstanding receipt FIRST. If this chunk's
+    // Materialized receipt is already durable, build the work from its
+    // RECORDED absolute counters (`materialize_from_materialized_receipt`) —
+    // never recompute from the live cache/MVCC, where the batch's own
+    // history rows read back as pre-existing and the absolute count would be
+    // overwritten with a wrong value. Only when no Materialized receipt is
+    // durable yet is `materialize_from_plan` used (counters computed once
+    // against the true pre-state).
+    let stored = resume::lookup(repo, info).await?;
+    let work = match stored {
+        Some(outstanding)
+            if outstanding.receipt.phase == ReceiptPhase::Materialized
+                && receipt_id(&outstanding.receipt) == receipt_id(&plan.receipt) =>
+        {
+            stage::materialize_from_materialized_receipt(&outstanding.receipt)?
+        }
+        _ => stage::materialize_from_plan(repo, plan).await?,
+    };
     let (receipt, counters) = stage::commit_materialized_work(repo, info, &work, old).await?;
+    #[cfg(test)]
+    fail_after(repo.name(), Phase::ReceiptMaterialized)?;
     let publication = publish::publication_from_plan(repo, plan, &counters).await?;
     let chunk_local_end = receipt
         .mapping
@@ -335,6 +400,17 @@ async fn durable_tail(
         receipt.upstream_end
     );
     Ok(old.bookmark.max(receipt.upstream_end))
+}
+
+/// Inject the test seam's one-shot (or sticky) post-phase failure: returns
+/// `DbError::Storage("injected")` exactly when the flag fires for `phase`.
+#[cfg(test)]
+fn fail_after(repo_name: &str, phase: Phase) -> DbResult<()> {
+    if test_seam::take_fail_after(repo_name, phase) {
+        Err(DbError::Storage("injected".into()))
+    } else {
+        Ok(())
+    }
 }
 
 /// Deduplicated `(interned_id, name)` bindings of the chunk's original

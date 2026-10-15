@@ -24,6 +24,13 @@ pub(crate) struct Hook {
     pub fail_history_flush: AtomicBool,
     pub park_at: Mutex<Option<Phase>>,
     pub abort_at: Mutex<Option<Phase>>,
+    /// One-shot post-phase failure (S5c-X round 3): when the pipeline passes
+    /// `phase` and this is `Some(phase)`, the pipeline returns
+    /// `DbError::Storage("injected")`. Consumed on first fire — the flag does
+    /// not fire again — UNLESS `fail_after_sticky` is set, in which case it
+    /// stays armed (every retry fails too) until the test clears `fail_after`.
+    pub fail_after: Mutex<Option<Phase>>,
+    pub fail_after_sticky: AtomicBool,
     pub reached: Notify,
     pub resume: Notify,
 }
@@ -59,6 +66,26 @@ pub(crate) fn fail_history_flush(repo_name: &str) -> bool {
         .unwrap()
         .get(repo_name)
         .is_some_and(|hook| hook.fail_history_flush.load(Ordering::Acquire))
+}
+
+/// Consume the one-shot post-`phase` failure flag for `repo_name` (armed
+/// only when it holds exactly this phase). Returns `true` exactly when the
+/// caller must return the injected `DbError::Storage("injected")`. Sticky
+/// mode leaves the flag armed so every retry attempt fails too.
+pub(crate) fn take_fail_after(repo_name: &str, phase: Phase) -> bool {
+    let hooks = hooks().lock().unwrap();
+    let Some(hook) = hooks.get(repo_name) else {
+        return false;
+    };
+    let mut slot = hook.fail_after.lock().unwrap();
+    if *slot != Some(phase) {
+        return false;
+    }
+    if !hook.fail_after_sticky.load(Ordering::Acquire) {
+        // One-shot: consumed by this firing.
+        *slot = None;
+    }
+    true
 }
 
 #[cfg(test)]

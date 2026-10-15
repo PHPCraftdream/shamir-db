@@ -1329,11 +1329,25 @@ impl MvccStore {
             // Cold-start: the cell is absent. `seek_latest_version` scans
             // history; an overlay-only key (committed but not yet drained) is
             // invisible to that scan. P1b: also consult the overlay so an
-            // overlay-only key is found. Cap the overlay probe at the floor
-            // (visibility gate); floor == 0 means bootstrap → use u64::MAX so
-            // nothing is hidden, matching the R3 "no restriction" semantics.
-            let ov_cap = if floor > 0 { floor } else { u64::MAX };
-            let hist_v = self.seek_latest_version(key).await?;
+            // overlay-only key is found.
+            //
+            // I3 (history readers must not expose materialized-but-unpublished
+            // versions): both probes are capped at the published floor. There
+            // is NO floor==0 bootstrap exemption: versions start at 1, so
+            // floor 0 means nothing is published yet, and every path that
+            // writes history rows above 0 either raises the floor in the same
+            // step (leader `write_committed_to_history`) or persists the
+            // recovery marker first (`reserve_floor`) so a restart re-seeds
+            // the floor before serving. A floor-0 gate with durable rows is
+            // therefore only the follower receipt's materialize→publish
+            // window, and those rows must stay invisible here.
+            let ov_cap = floor;
+            let hist_v = self
+                .seek_latest_version(key)
+                .await?
+                // Never seed a cell above the floor (I3): an unpublished
+                // version must not become the key's cached current version.
+                .filter(|&h| h <= floor);
             let ov_v = self.overlay.newest_visible(key, ov_cap).map(|(ver, _)| ver);
             // Cold path: `seed_version` takes an owned `RecordKey`. Build it
             // inline from the borrowed slice (alloc-free for the ≤23-byte
@@ -1357,12 +1371,12 @@ impl MvccStore {
                 (None, None) => return Ok(None),
             }
         };
-        // R3: if the committed floor is non-zero (gate initialized) and the
-        // resolved version exceeds it, fall back to snapshot read at the
-        // floor (range-scan for newest <= floor — overlay-aware via
-        // resolve_read). Floor == 0 means bootstrap / recovery — no
-        // visibility restriction applied.
-        if floor > 0 && v > floor {
+        // R3 + I3: if the resolved version exceeds the committed floor, fall
+        // back to a snapshot read at the floor (range-scan for newest <= floor
+        // — overlay-aware via resolve_read). There is no floor==0 exemption:
+        // versions start at 1, so a floor of 0 makes every version invisible
+        // (see the I3 comment in the cold path above).
+        if v > floor {
             return self.get_at(key, floor).await;
         }
         // P1b: overlay-probe BEFORE the durable log for the exact `(key, v)`.

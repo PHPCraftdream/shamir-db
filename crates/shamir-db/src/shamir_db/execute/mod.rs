@@ -45,6 +45,8 @@ mod ambient_interner;
 #[path = "repo_admin/db_execute.rs"]
 mod db_execute;
 mod db_tx;
+#[path = "repo_admin/ddl_admission.rs"]
+pub(crate) mod ddl_admission;
 mod function_invoker;
 mod helpers;
 pub(crate) mod replication_seed;

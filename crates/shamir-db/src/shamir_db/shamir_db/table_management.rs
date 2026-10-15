@@ -97,9 +97,28 @@ impl ShamirDb {
             .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
         // DDL interlock (repo-level `ddl_admission`): table drop must not
         // interleave with a follower receipt apply. Single acquisition per
-        // path — `drop_table_cleaning_validators` delegates here, so it must
-        // NOT take a second (non-reentrant) guard.
+        // path — `drop_table_inner` (and the validators-cleaning variant)
+        // are guard-free; `DbInstance::drop_table` below them is sync and
+        // takes no guard.
         let _ddl = repo.ddl_admission_guard().await;
+        self.drop_table_inner(db_name, repo_name, table_name).await
+    }
+
+    /// Guard-free inner body of [`drop_table`] (S5c round 3): the caller
+    /// MUST already hold the repo-level `ddl_admission` guard. Exists so a
+    /// handler that needs one guard spanning additional mutations (e.g. the
+    /// wire executor's DROP TABLE CASCADE) can include the table removal in
+    /// the same critical section without a second, non-reentrant
+    /// acquisition.
+    pub(crate) async fn drop_table_inner(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+    ) -> DbResult<bool> {
+        let db = self
+            .get_db(db_name)
+            .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
         let removed = db.drop_table(repo_name, table_name)?;
 
         // Always clear the catalogue entry (idempotent), even if the
@@ -124,11 +143,35 @@ impl ShamirDb {
 
     /// Drop a table, cleaning up any validator `bound_in` references first.
     ///
-    /// This is the canonical "drop table" entry point for the executor:
-    /// it removes the table from the repo, clears the table catalogue,
-    /// AND unbinds every validator that was bound to this table so that
-    /// `is_bound` does not reference a ghost table.
+    /// This is the canonical "drop table" entry point for non-cascade
+    /// callers: it removes the table from the repo, clears the table
+    /// catalogue, AND unbinds every validator that was bound to this table
+    /// so that `is_bound` does not reference a ghost table.
+    ///
+    /// Takes the repo-level `ddl_admission` guard ONCE, covering the
+    /// validator cleanup AND the table removal (previously the validator
+    /// cleanup ran before the guard — S5c round 3 review finding).
     pub async fn drop_table_cleaning_validators(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+    ) -> DbResult<bool> {
+        let db = self
+            .get_db(db_name)
+            .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
+        let repo = db
+            .get_repo(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
+        let _ddl = repo.ddl_admission_guard().await;
+        self.drop_table_cleaning_validators_inner(db_name, repo_name, table_name)
+            .await
+    }
+
+    /// Guard-free inner body of [`drop_table_cleaning_validators`] (S5c
+    /// round 3): the caller MUST already hold the repo-level
+    /// `ddl_admission` guard (see [`drop_table_inner`]).
+    pub(crate) async fn drop_table_cleaning_validators_inner(
         &self,
         db_name: &str,
         repo_name: &str,
@@ -145,8 +188,8 @@ impl ShamirDb {
         //    no id/name leak in the registry after the table is gone.
         self.drop_schema_validator(db_name, repo_name, table_name);
 
-        // 3. Drop the table itself.
-        self.drop_table(db_name, repo_name, table_name).await
+        // 3. Drop the table itself (guard-free inner — caller holds guard).
+        self.drop_table_inner(db_name, repo_name, table_name).await
     }
 
     /// Rename a table. Convenience wrapper around [`rename_table_as`]

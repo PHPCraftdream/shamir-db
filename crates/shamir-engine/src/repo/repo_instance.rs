@@ -8,6 +8,7 @@ use crate::query::batch::BatchError;
 use crate::query::write::WriteResult;
 use crate::repo::durability_policy::{DurabilityMetrics, DurabilityPolicy};
 use crate::table::interner_manager::InternerManager;
+use crate::tx::apply_replicated::follower_durability::receipt::resume::ReceiptWorker;
 #[cfg(test)]
 use crate::tx::clean_horizon::checkpoint::test_seam;
 use crate::tx::CommitTailBarrier;
@@ -48,6 +49,9 @@ pub struct RepoInstance {
     tables: Arc<TDashMap<String, Arc<OnceCell<TableManager>>>>,
     /// Lazy-initialized RepoTxGate. Created on first call to `tx_gate()`.
     tx_gate: Arc<OnceCell<Arc<shamir_tx::RepoTxGate>>>,
+    /// Lazy-initialized repository-owned bounded receipt apply worker (S5c-X
+    /// round 3); all logic lives in `receipt::resume::worker.rs` impl blocks.
+    pub(crate) receipt_worker: Arc<OnceCell<Arc<ReceiptWorker>>>,
     /// Lazy-initialized RepoWalManager. Created on first call to `repo_wal()`.
     repo_wal: Arc<OnceCell<Arc<shamir_tx::RepoWalManager>>>,
     /// Shared initialized WAL coordinator for durable replication pulls.
@@ -178,6 +182,7 @@ impl Clone for RepoInstance {
             configs: Arc::clone(&self.configs),
             tables: Arc::clone(&self.tables),
             tx_gate: Arc::clone(&self.tx_gate),
+            receipt_worker: Arc::clone(&self.receipt_worker),
             repo_wal: Arc::clone(&self.repo_wal),
             per_table_mvcc: Arc::clone(&self.per_table_mvcc),
             token_names: Arc::clone(&self.token_names),
@@ -253,6 +258,7 @@ impl RepoInstance {
             configs: Arc::new(configs_map),
             tables: Arc::new(tables),
             tx_gate: Arc::new(OnceCell::new()),
+            receipt_worker: Arc::new(OnceCell::new()),
             repo_wal: Arc::new(OnceCell::new()),
             per_table_mvcc: Arc::new(scc::HashMap::with_capacity_and_hasher(
                 initial_cap,
@@ -1983,6 +1989,7 @@ impl RepoInstance {
     pub async fn shutdown_clean(&self, budget: std::time::Duration) -> DbResult<()> {
         let deadline = tokio::time::Instant::now() + budget;
         self.quiesce_commits(budget).await?;
+        self.shutdown_receipt_worker(budget).await;
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         tokio::time::timeout(remaining, async {
             self.flush_buffers().await?;

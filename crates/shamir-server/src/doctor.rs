@@ -252,6 +252,15 @@ pub async fn run(config: &Config, args: &DoctorArgs) -> anyhow::Result<DoctorRep
         for (db_name, repo_name, table_name) in snap.iter_entries() {
             if let Some(db) = shamir.get_db(db_name) {
                 if !db.has_table(repo_name, table_name) {
+                    // S5c round 3: `DbInstance::create_table` is the sync,
+                    // UNGUARDED `repo.add_table` path — acquire the
+                    // repo-level `ddl_admission` guard here so it cannot
+                    // interleave with a follower receipt apply.
+                    let repo = db.get_repo(repo_name);
+                    let _ddl = match &repo {
+                        Some(repo) => Some(repo.ddl_admission_guard().await),
+                        None => None,
+                    };
                     if let Err(e) = db.create_table(repo_name, table_name) {
                         tracing::warn!(
                             db = db_name,
