@@ -658,7 +658,7 @@ async fn intra_tx_two_different_unique_indexes_no_collision() {
 /// `(K_x, A)` then `(K_x, B)` (different owners) and aborted, even though A
 /// had legitimately moved off `x` before B claimed it.
 ///
-/// ```
+/// ```text
 /// INSERT A {email: "x"}   → guard (K_x, A), SetPosting(K_x, A)
 /// UPDATE A SET email = "z" → guard (K_z, A), RemovePosting(K_x), SetPosting(K_z, A)
 /// INSERT B {email: "x"}   → guard (K_x, B), SetPosting(K_x, B)
@@ -723,7 +723,7 @@ async fn intra_tx_update_off_then_reclaim_same_key() {
 /// (from the two inserts) and false-rejected — the delete's RemovePosting was
 /// invisible to the claims-only check.
 ///
-/// ```
+/// ```text
 /// INSERT A {email: "x"} → guard (K_x, A), SetPosting(K_x, A)
 /// DELETE A              → RemovePosting(K_x)   [no guard pushed]
 /// INSERT B {email: "x"} → guard (K_x, B), SetPosting(K_x, B)

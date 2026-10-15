@@ -2,7 +2,6 @@ use shamir_engine::table::TableManager;
 use shamir_query_types::admin::{ReplDirection, ReplStream};
 use shamir_types::types::value::QueryValue;
 
-use crate::query::filter::FilterContext;
 use crate::query::read::ReadQuery;
 use crate::{DbError, DbResult, ShamirDb};
 
@@ -57,9 +56,8 @@ impl ShamirDb {
 }
 
 async fn read_records(table: &TableManager, name: &str) -> DbResult<Vec<QueryValue>> {
-    let interner = table.info_store_read_view().interner_get().await?;
     let refs = shamir_types::types::common::new_map();
-    let context = FilterContext::new(interner, &refs);
+    let context = table.info_store_read_view().filter_context(&refs).await?;
     let result = table.read(&ReadQuery::new(name), &context).await?;
     Ok(result
         .records

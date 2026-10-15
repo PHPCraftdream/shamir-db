@@ -101,9 +101,9 @@ impl ShamirAdminExecutor {
             .set_via_implicit_tx(&table, &set_op)
             .await
             .map_err(|e| err(e.to_string()))?;
-        table
-            .info_store_read_view()
-            .interner_persist()
+        self.shamir
+            .system_store()
+            .persist_table_interner(&table)
             .await
             .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
@@ -227,9 +227,9 @@ impl ShamirAdminExecutor {
             .set_via_implicit_tx(&table, &set_op)
             .await
             .map_err(|e| err(e.to_string()))?;
-        table
-            .info_store_read_view()
-            .interner_persist()
+        self.shamir
+            .system_store()
+            .persist_table_interner(&table)
             .await
             .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
@@ -346,9 +346,9 @@ impl ShamirAdminExecutor {
             .set_via_implicit_tx(&table, &set_op)
             .await
             .map_err(|e| err(e.to_string()))?;
-        table
-            .info_store_read_view()
-            .interner_persist()
+        self.shamir
+            .system_store()
+            .persist_table_interner(&table)
             .await
             .map_err(|e| err(e.to_string()))?;
         self.shamir
@@ -419,13 +419,12 @@ impl ShamirAdminExecutor {
             .subscriptions_table()
             .await
             .map_err(|e| err(e.to_string()))?;
-        let interner = table
+        let refs = crate::types::common::new_map();
+        let ctx = table
             .info_store_read_view()
-            .interner_get()
+            .filter_context(&refs)
             .await
             .map_err(|e| err(e.to_string()))?;
-        let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
         let lookup = crate::query::read::ReadQuery::new("subscriptions").filter(
             crate::query::filter::Filter::Eq {
                 field: vec!["name".to_string()],
@@ -531,9 +530,9 @@ impl ShamirAdminExecutor {
             .set_via_implicit_tx(&table, &set_op)
             .await
             .map_err(|e| err(e.to_string()))?;
-        table
-            .info_store_read_view()
-            .interner_persist()
+        self.shamir
+            .system_store()
+            .persist_table_interner(&table)
             .await
             .map_err(|e| err(e.to_string()))?;
         self.shamir
@@ -605,9 +604,8 @@ impl ShamirAdminExecutor {
         table: &crate::engine::table::TableManager,
         table_name: &str,
     ) -> crate::DbResult<Vec<QueryValue>> {
-        let interner = table.info_store_read_view().interner_get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let query = crate::query::read::ReadQuery::new(table_name);
         let result = table.read(&query, &ctx).await?;
         Ok(result
@@ -640,9 +638,11 @@ impl ShamirAdminExecutor {
         let result = repo
             .run_implicit_batch_tx(Actor::System, "", move |tx| {
                 Box::pin(async move {
-                    let interner = owned_table.info_store_read_view().interner_get().await?;
                     let refs = crate::types::common::new_map();
-                    let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+                    let ctx = owned_table
+                        .info_store_read_view()
+                        .filter_context(&refs)
+                        .await?;
                     owned_table
                         .execute_delete_tx(&owned_op, &ctx, tx, None, &Actor::System)
                         .await
@@ -685,9 +685,8 @@ impl ShamirDb {
         repo_name: &str,
     ) -> DbResult<bool> {
         let table = self.system_store().subscriptions_table().await?;
-        let interner = table.info_store_read_view().interner_get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let result = table
             .read(&crate::query::read::ReadQuery::new("subscriptions"), &ctx)
             .await?;
@@ -767,9 +766,8 @@ impl ShamirDb {
     ) -> DbResult<()> {
         let _control = self.replication_control_lock.lock().await;
         let table = self.system_store().subscriptions_table().await?;
-        let interner = table.info_store_read_view().interner_get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let lookup = crate::query::read::ReadQuery::new("subscriptions").filter(
             crate::query::filter::Filter::Eq {
                 field: vec!["name".to_string()],
@@ -808,7 +806,7 @@ impl ShamirDb {
         self.system_store()
             .set_via_implicit_tx(&table, &set_op)
             .await?;
-        table.info_store_read_view().interner_persist().await?;
+        self.system_store().persist_table_interner(&table).await?;
         self.flush_seed_catalogue().await?;
         Ok(())
     }

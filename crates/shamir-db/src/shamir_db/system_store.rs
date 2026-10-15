@@ -7,7 +7,6 @@
 use std::time::Duration;
 
 use shamir_types::access::{Actor, ResourceMeta};
-use shamir_types::codecs::interned::query_value_to_inner;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
@@ -155,6 +154,21 @@ impl SystemStore {
             .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", SYSTEM_REPO)))
     }
 
+    /// S5c-X F1 (Round 6): admitted durability tail for a system-catalogue
+    /// write — acquire repo admission on the SYSTEM repo and flush the
+    /// table's interner dictionary chunks. Replaces the old read-view
+    /// `interner_persist` write escape; the admission pattern mirrors
+    /// `admin_table_index.rs`.
+    pub(crate) async fn persist_table_interner(&self, table: &TableManager) -> DbResult<()> {
+        let repo = self.system_repo()?;
+        let permit = repo
+            .write_domain()
+            .admit()
+            .await
+            .map_err(|e| DbError::Internal(e.to_string()))?;
+        table.persist_interner_admitted(&permit).await
+    }
+
     /// Route a single non-tx DELETE through the implicit-tx file-WAL path
     /// (mirrors the `query_runner` non-tx Delete branch). Maps the
     /// [`BatchError`] surfaced by the implicit tx onto a [`DbError`].
@@ -168,9 +182,11 @@ impl SystemStore {
         let owned_table = table.clone();
         repo.run_implicit_batch_tx(Actor::System, "", move |tx| {
             Box::pin(async move {
-                let interner = owned_table.info_store_read_view().interner_get().await?;
                 let refs = crate::types::common::new_map();
-                let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+                let ctx = owned_table
+                    .info_store_read_view()
+                    .filter_context(&refs)
+                    .await?;
                 owned_table
                     .execute_delete_tx(&owned_op, &ctx, tx, None, &Actor::System)
                     .await
@@ -217,16 +233,14 @@ impl SystemStore {
         let mut rec = record.clone();
         meta.inject_into(&mut rec);
         let table = self.table(TABLE_DATABASES).await?;
-        let interner = table.info_store_read_view().interner_get().await?;
-        let _inner =
-            query_value_to_inner(&rec, interner).map_err(|e| DbError::Codec(e.to_string()))?;
+        let _inner = table.info_store_read_view().to_inner(&rec).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_DATABASES),
             key: qv_map1("name", QueryValue::Str(name.to_string())),
             value: rec,
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        table.info_store_read_view().interner_persist().await?;
+        self.persist_table_interner(&table).await?;
         Ok(())
     }
 
@@ -249,9 +263,8 @@ impl SystemStore {
     /// Load all database records.
     pub async fn load_databases(&self) -> DbResult<Vec<QueryValue>> {
         let table = self.table(TABLE_DATABASES).await?;
-        let interner = table.info_store_read_view().interner_get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let query = crate::query::read::ReadQuery::new(TABLE_DATABASES);
         let result = table.read(&query, &ctx).await?;
         Ok(result
@@ -292,7 +305,7 @@ impl SystemStore {
             value: record,
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        table.info_store_read_view().interner_persist().await?;
+        self.persist_table_interner(&table).await?;
         // DDL must be durable immediately: flush the MemBuffer-wrapped
         // store so a crash right after the admin op can't lose (or, for
         // removes, resurrect) the catalogue entry. DDL is rare → the
@@ -330,9 +343,8 @@ impl SystemStore {
     /// Load all repository records.
     pub async fn load_repositories(&self) -> DbResult<Vec<QueryValue>> {
         let table = self.table(TABLE_REPOSITORIES).await?;
-        let interner = table.info_store_read_view().interner_get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let query = crate::query::read::ReadQuery::new(TABLE_REPOSITORIES);
         let result = table.read(&query, &ctx).await?;
         Ok(result
@@ -417,7 +429,7 @@ impl SystemStore {
             value: record,
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        table.info_store_read_view().interner_persist().await?;
+        self.persist_table_interner(&table).await?;
         // Durable DDL — see save_repository.
         table.data_store_read_view().flush().await?;
         Ok(())
@@ -462,9 +474,8 @@ impl SystemStore {
     /// caller filters by `db_name` / `repo_name`.
     pub async fn load_tables(&self) -> DbResult<Vec<QueryValue>> {
         let table = self.table(TABLE_TABLES).await?;
-        let interner = table.info_store_read_view().interner_get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let query = crate::query::read::ReadQuery::new(TABLE_TABLES);
         let result = table.read(&query, &ctx).await?;
         Ok(result
@@ -490,16 +501,15 @@ impl SystemStore {
             value: QueryValue::Map(rec_m),
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        table.info_store_read_view().interner_persist().await?;
+        self.persist_table_interner(&table).await?;
         Ok(())
     }
 
     /// Load a setting.
     pub async fn load_setting(&self, key: &str) -> DbResult<Option<QueryValue>> {
         let table = self.table(TABLE_SETTINGS).await?;
-        let interner = table.info_store_read_view().interner_get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let query = crate::query::read::ReadQuery::new(TABLE_SETTINGS).filter(
             crate::query::filter::Filter::Eq {
                 field: vec!["key".to_string()],
@@ -568,7 +578,7 @@ impl SystemStore {
             value: rec,
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        table.info_store_read_view().interner_persist().await?;
+        self.persist_table_interner(&table).await?;
         // Durable DDL — see save_repository.
         table.data_store_read_view().flush().await?;
         Ok(())
@@ -596,9 +606,8 @@ impl SystemStore {
     /// callers that surface these must strip secret fields themselves).
     pub async fn load_users(&self) -> DbResult<Vec<QueryValue>> {
         let table = self.table(TABLE_USERS).await?;
-        let interner = table.info_store_read_view().interner_get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let query = crate::query::read::ReadQuery::new(TABLE_USERS);
         let result = table.read(&query, &ctx).await?;
         Ok(result
@@ -611,9 +620,8 @@ impl SystemStore {
     /// Load every persisted function catalogue record.
     pub async fn load_functions(&self) -> DbResult<Vec<QueryValue>> {
         let table = self.table(TABLE_FUNCTIONS).await?;
-        let interner = table.info_store_read_view().interner_get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let query = crate::query::read::ReadQuery::new(TABLE_FUNCTIONS);
         let result = table.read(&query, &ctx).await?;
         Ok(result
@@ -626,9 +634,8 @@ impl SystemStore {
     /// Load a single function catalogue record by name.
     pub async fn load_function(&self, name: &str) -> DbResult<Option<QueryValue>> {
         let table = self.table(TABLE_FUNCTIONS).await?;
-        let interner = table.info_store_read_view().interner_get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let query = crate::query::read::ReadQuery::new(TABLE_FUNCTIONS).filter(
             crate::query::filter::Filter::Eq {
                 field: vec!["name".to_string()],
@@ -677,7 +684,7 @@ impl SystemStore {
             value: record,
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        table.info_store_read_view().interner_persist().await?;
+        self.persist_table_interner(&table).await?;
         table.data_store_read_view().flush().await?;
         Ok(())
     }
@@ -685,9 +692,8 @@ impl SystemStore {
     /// Load all group records.
     pub async fn load_groups(&self) -> DbResult<Vec<QueryValue>> {
         let table = self.table(TABLE_GROUPS).await?;
-        let interner = table.info_store_read_view().interner_get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let query = crate::query::read::ReadQuery::new(TABLE_GROUPS);
         let result = table.read(&query, &ctx).await?;
         Ok(result
@@ -700,9 +706,8 @@ impl SystemStore {
     /// Load a single group record by id.
     pub async fn load_group(&self, group_id: u64) -> DbResult<Option<QueryValue>> {
         let table = self.table(TABLE_GROUPS).await?;
-        let interner = table.info_store_read_view().interner_get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let query = crate::query::read::ReadQuery::new(TABLE_GROUPS).filter(
             crate::query::filter::Filter::Eq {
                 field: vec!["group_id".to_string()],
@@ -821,9 +826,8 @@ impl SystemStore {
     /// Load a single database record by name.
     pub async fn load_database(&self, name: &str) -> DbResult<Option<QueryValue>> {
         let table = self.table(TABLE_DATABASES).await?;
-        let interner = table.info_store_read_view().interner_get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let query = crate::query::read::ReadQuery::new(TABLE_DATABASES).filter(
             crate::query::filter::Filter::Eq {
                 field: vec!["name".to_string()],
@@ -845,9 +849,8 @@ impl SystemStore {
         repo_name: &str,
     ) -> DbResult<Option<QueryValue>> {
         let table = self.table(TABLE_REPOSITORIES).await?;
-        let interner = table.info_store_read_view().interner_get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let query = crate::query::read::ReadQuery::new(TABLE_REPOSITORIES).filter(
             crate::query::filter::Filter::And {
                 filters: vec![
@@ -878,9 +881,8 @@ impl SystemStore {
         table_name: &str,
     ) -> DbResult<Option<QueryValue>> {
         let table = self.table(TABLE_TABLES).await?;
-        let interner = table.info_store_read_view().interner_get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let query = crate::query::read::ReadQuery::new(TABLE_TABLES).filter(
             crate::query::filter::Filter::And {
                 filters: vec![
@@ -910,16 +912,14 @@ impl SystemStore {
     /// Persist a replacement database record (for `set_resource_meta`).
     pub async fn save_database_meta(&self, name: &str, record: &QueryValue) -> DbResult<()> {
         let table = self.table(TABLE_DATABASES).await?;
-        let interner = table.info_store_read_view().interner_get().await?;
-        let _inner =
-            query_value_to_inner(record, interner).map_err(|e| DbError::Codec(e.to_string()))?;
+        let _inner = table.info_store_read_view().to_inner(record).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_DATABASES),
             key: qv_map1("name", QueryValue::Str(name.to_string())),
             value: record.clone(),
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        table.info_store_read_view().interner_persist().await?;
+        self.persist_table_interner(&table).await?;
         table.data_store_read_view().flush().await?;
         Ok(())
     }
@@ -948,7 +948,7 @@ impl SystemStore {
             value: record.clone(),
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        table.info_store_read_view().interner_persist().await?;
+        self.persist_table_interner(&table).await?;
         table.data_store_read_view().flush().await?;
         Ok(())
     }
@@ -981,7 +981,7 @@ impl SystemStore {
             value: record.clone(),
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        table.info_store_read_view().interner_persist().await?;
+        self.persist_table_interner(&table).await?;
         table.data_store_read_view().flush().await?;
         Ok(())
     }
@@ -1007,7 +1007,7 @@ impl SystemStore {
             value: rec,
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        table.info_store_read_view().interner_persist().await?;
+        self.persist_table_interner(&table).await?;
         // Durable DDL — see save_repository.
         table.data_store_read_view().flush().await?;
         Ok(())
@@ -1034,9 +1034,8 @@ impl SystemStore {
     /// Load every persisted validator catalogue record.
     pub async fn load_validators(&self) -> DbResult<Vec<QueryValue>> {
         let table = self.table(TABLE_VALIDATORS).await?;
-        let interner = table.info_store_read_view().interner_get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let query = crate::query::read::ReadQuery::new(TABLE_VALIDATORS);
         let result = table.read(&query, &ctx).await?;
         Ok(result
@@ -1049,9 +1048,8 @@ impl SystemStore {
     /// Load a single validator catalogue record by name.
     pub async fn load_validator(&self, name: &str) -> DbResult<Option<QueryValue>> {
         let table = self.table(TABLE_VALIDATORS).await?;
-        let interner = table.info_store_read_view().interner_get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let query = crate::query::read::ReadQuery::new(TABLE_VALIDATORS).filter(
             crate::query::filter::Filter::Eq {
                 field: vec!["name".to_string()],
@@ -1075,7 +1073,7 @@ impl SystemStore {
             value: record.clone(),
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        table.info_store_read_view().interner_persist().await?;
+        self.persist_table_interner(&table).await?;
         table.data_store_read_view().flush().await?;
         Ok(())
     }
@@ -1102,7 +1100,7 @@ impl SystemStore {
             value: rec,
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        table.info_store_read_view().interner_persist().await?;
+        self.persist_table_interner(&table).await?;
         // Durable DDL — see save_repository.
         table.data_store_read_view().flush().await?;
         Ok(())
@@ -1129,9 +1127,8 @@ impl SystemStore {
     /// Load every persisted function folder catalogue record.
     pub async fn load_function_folders(&self) -> DbResult<Vec<QueryValue>> {
         let table = self.table(TABLE_FUNCTION_FOLDERS).await?;
-        let interner = table.info_store_read_view().interner_get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let query = crate::query::read::ReadQuery::new(TABLE_FUNCTION_FOLDERS);
         let result = table.read(&query, &ctx).await?;
         Ok(result
@@ -1144,9 +1141,8 @@ impl SystemStore {
     /// Load a single function folder catalogue record by path key.
     pub async fn load_function_folder(&self, path_key: &str) -> DbResult<Option<QueryValue>> {
         let table = self.table(TABLE_FUNCTION_FOLDERS).await?;
-        let interner = table.info_store_read_view().interner_get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let query = crate::query::read::ReadQuery::new(TABLE_FUNCTION_FOLDERS).filter(
             crate::query::filter::Filter::Eq {
                 field: vec!["path".to_string()],
@@ -1174,7 +1170,7 @@ impl SystemStore {
             value: record.clone(),
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        table.info_store_read_view().interner_persist().await?;
+        self.persist_table_interner(&table).await?;
         table.data_store_read_view().flush().await?;
         Ok(())
     }

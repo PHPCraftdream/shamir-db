@@ -96,7 +96,6 @@
 
 use shamir_connect::server::session::Session;
 use shamir_db::engine::query::filter::eval_context::FilterContext;
-use shamir_db::engine::query::filter::resolve::intern_field_path;
 use shamir_db::engine::repo::RepoInstance;
 use shamir_db::engine::table::TableManager;
 use shamir_db::engine::validator::schema::TypeTag;
@@ -107,7 +106,6 @@ use shamir_db::query::read::{
 };
 use shamir_query_types::filter::query_value_to_filter_value;
 use shamir_query_types::wire::CursorId;
-use shamir_types::core::interner::Interner;
 use shamir_types::types::common::{new_map, TMap};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
@@ -360,27 +358,18 @@ async fn enforce_page_budget(
 
 /// Build the `FilterContext` a cursor's `FetchNext` reads through — mirrors
 /// the non-tx bare-single-read shape `query_runner.rs` builds (empty
-/// `resolved_refs`/`params`).
-///
-/// Scope note: this uses `FilterContext::new`'s default scalar resolver
-/// (`ScalarResolver::builtins_only()`) rather than the per-DB resolver with
-/// user-registered scalars (`DbTableResolver::scalar_resolver()` in
-/// `shamir-db`, which needs a direct `shamir-funclib` dependency this
-/// crate does not otherwise carry). A cursor's WHERE clause calling a
-/// user-registered scalar function is therefore out of scope for FG-5b —
-/// the same narrow limitation the brief accepts for temporal reads; a
-/// future task can thread the per-DB resolver through if this proves
-/// necessary in practice.
+/// `resolved_refs`/`params`). Built engine-side (S5c-X F1, Round 6; default
+/// `builtins_only()` scalar resolver — see the FG-5b scope note). The
+/// returned borrow is tied to the MANAGER lifetime (not the temporary read view), so it composes with the caller's `table.read(...)`.
 async fn build_filter_context<'a>(
     table: &'a TableManager,
     resolved_refs: &'a TMap<String, shamir_db::query::read::QueryResult>,
 ) -> Result<FilterContext<'a>, BatchError> {
-    let interner = table
+    table
         .info_store_read_view()
-        .interner_get()
+        .filter_context(resolved_refs)
         .await
-        .map_err(wrap_engine_err)?;
-    Ok(FilterContext::new(interner, resolved_refs))
+        .map_err(wrap_engine_err)
 }
 
 /// Build the INCLUSIVE boundary filter `field >= seek_key` (ASC) /
@@ -475,25 +464,34 @@ fn pagination_mode_for_query(query: &ReadQuery) -> PaginationMode {
 /// already handles the data-shape edge cases those two `Keyset`-specific
 /// safety probes exist for, so running them here would be unnecessary work,
 /// not a correctness gap (design memo §2.1).
-fn probe_index_seek_eligible(
+async fn probe_index_seek_eligible(
     table: &TableManager,
     query: &ReadQuery,
-    interner: &Interner,
-) -> Option<u64> {
+) -> shamir_db::DbResult<Option<u64>> {
     if query.r#where.is_some() {
-        return None;
+        return Ok(None);
     }
-    let order_by = query.order_by.as_ref()?;
+    let Some(order_by) = query.order_by.as_ref() else {
+        return Ok(None);
+    };
     if order_by.items.len() != 1 {
-        return None;
+        return Ok(None);
     }
     let item = &order_by.items[0];
     if item.field.len() != 1 {
-        return None;
+        return Ok(None);
     }
-    let field_path = intern_field_path(&item.field, interner)?;
-    let def = table.sorted_index_definition_by_field(&field_path)?;
-    Some(def.name_interned)
+    // S5c-X F1 (Round 6): the path is interned through the engine's
+    // read-only view (`get_ind` lookups only) — no `&Interner` parameter.
+    let field_path = table
+        .info_store_read_view()
+        .intern_field_path(&item.field)
+        .await?;
+    let Some(field_path) = field_path else {
+        return Ok(None);
+    };
+    let def = table.sorted_index_definition_by_field(&field_path);
+    Ok(def.map(|d| d.name_interned))
 }
 
 /// F-1 (#792, release blocker): is `query`'s sole ORDER BY column provably
@@ -529,7 +527,9 @@ fn probe_index_seek_eligible(
 /// `Bin`, see above), or a matched rule whose `keyset_safe` proof is
 /// `false`.
 fn order_by_column_is_schema_typed_scalar(table: &TableManager, field: &[String]) -> bool {
-    let Some(registry) = table.validator_registry() else {
+    // S5c-X F2 (Round 6): read-only view — no `&Arc<ValidatorRegistry>`
+    // (with its register/replace/rename/remove mutators) escapes.
+    let Some(registry) = table.validator_registry_read_view() else {
         return false;
     };
     let bindings = table.validator_bindings();
@@ -1226,7 +1226,7 @@ impl ShamirDbHandler {
         // does not (`validator_registry` is a plain `Option<Arc<..>>` field,
         // not shared via `ArcSwap`/a cell, so it only affects whichever
         // clone it's set on). Without this, `order_by_column_is_schema_typed_
-        // scalar`'s `table.validator_registry()` would always see `None`
+        // scalar`'s `table.validator_registry_read_view()` would always see `None`
         // regardless of what's bound via `bind_validator`, silently
         // defeating the new schema-typed-scalar gate for every cursor. Reads
         // don't otherwise need the registry (validators are a write-path
@@ -1308,54 +1308,49 @@ impl ShamirDbHandler {
         // WHOLE cursor falls back to `PaginationMode::Offset` from
         // creation, closing the null/missing case unconditionally.
         //
-        // F-53b Step 4 (#880): try `IndexSeek` eligibility FIRST, ahead of
-        // the existing `Keyset`/`Offset` decision chain — see the design
-        // memo §2.1 and `probe_index_seek_eligible`'s doc comment. When
-        // eligible, the existing `order_by_column_is_schema_typed_scalar` +
+        // F-53b Step 4 (#880): try `IndexSeek` eligibility FIRST — when
+        // eligible, the `order_by_column_is_schema_typed_scalar` +
         // `order_by_column_contains_null` probes are skipped entirely (the
         // seek arm's own per-candidate MVCC classifier already handles the
-        // data-shape edge cases those two `Keyset`-specific safety probes
-        // exist for). Only when `probe_index_seek_eligible` returns `None`
-        // does the existing chain run, completely unchanged.
-        let interner = match table.info_store_read_view().interner_get().await {
-            Ok(i) => i,
+        // data-shape edge cases they exist for). Only when
+        // `probe_index_seek_eligible` returns `None` does the existing
+        // chain run, completely unchanged.
+        let mode = match probe_index_seek_eligible(&table, &query).await {
             Err(e) => return error_response(&wrap_engine_err(e)),
-        };
-        let mode = if probe_index_seek_eligible(&table, &query, interner).is_some() {
-            PaginationMode::IndexSeek
-        } else {
-            // F-1 (#792, release blocker): BEFORE that probe, gate keyset
-            // eligibility on the ORDER BY column's SCHEMA-enforced type.
-            // F-17 (#810) adds a `keyset_safe` proof requirement: the schema
-            // must have been bound while the table was empty (verified via a
-            // persisted `table.count() == 0`-at-bind-time check), so a
-            // schema declared onto an already-populated table's column falls
-            // back to `Offset`. When the gate DOES pass, the null probe
-            // below still runs — this gate proves "no second non-null type
-            // is possible", not "never null".
-            let mut mode = pagination_mode_for_query(&query);
-            if mode == PaginationMode::Keyset {
-                // `pagination_mode_for_query` only returns `Keyset` when
-                // `query.order_by` is `Some` with exactly one single-segment
-                // field — both already validated, so this is infallible here.
-                let order_by_field = &query
-                    .order_by
-                    .as_ref()
-                    .expect("pagination_mode_for_query returned Keyset without an order_by")
-                    .items[0]
-                    .field;
-                if !order_by_column_is_schema_typed_scalar(&table, order_by_field) {
-                    mode = PaginationMode::Offset;
+            Ok(Some(_)) => PaginationMode::IndexSeek,
+            Ok(None) => {
+                // F-1 (#792, release blocker) + F-17 (#810): gate keyset
+                // eligibility on the ORDER BY column's SCHEMA-enforced type.
+                // `keyset_safe` is only stamped when the schema was bound while
+                // the table was empty, so a schema declared onto an
+                // already-populated column falls back to `Offset`. When the gate
+                // DOES pass, the null probe below still runs — this gate proves
+                // "no second non-null type is possible", not "never null".
+                let mut mode = pagination_mode_for_query(&query);
+                if mode == PaginationMode::Keyset {
+                    // `pagination_mode_for_query` only returns `Keyset` when
+                    // `query.order_by` is `Some` with exactly one single-segment
+                    // field — both already validated, so this is infallible here.
+                    let order_by_field = &query
+                        .order_by
+                        .as_ref()
+                        .expect("pagination_mode_for_query returned Keyset without an order_by")
+                        .items[0]
+                        .field;
+                    if !order_by_column_is_schema_typed_scalar(&table, order_by_field) {
+                        mode = PaginationMode::Offset;
+                    }
                 }
-            }
-            if mode == PaginationMode::Keyset {
-                match order_by_column_contains_null(&table, &ctx, &query, pinned_version).await {
-                    Ok(true) => mode = PaginationMode::Offset,
-                    Ok(false) => {}
-                    Err(e) => return error_response(&e),
+                if mode == PaginationMode::Keyset {
+                    match order_by_column_contains_null(&table, &ctx, &query, pinned_version).await
+                    {
+                        Ok(true) => mode = PaginationMode::Offset,
+                        Ok(false) => {}
+                        Err(e) => return error_response(&e),
+                    }
                 }
+                mode
             }
-            mode
         };
 
         // CR-B4: fetch one extra "peek" row beyond the client-visible

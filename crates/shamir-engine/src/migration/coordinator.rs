@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use super::shadow_log::{MigrationShadowLog, ShadowEntry, ShadowOp};
+use crate::repo::{RepoWriteDomain, RepoWritePermit};
 use crate::table::MigrationFreezeGuard;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +107,16 @@ pub struct MigrationCoordinator {
     /// `None` preserves the raw-store fallback path used by unit tests that
     /// construct the coordinator with plain in-memory stores.
     src_mvcc: Option<Arc<shamir_tx::MvccStore>>,
+    /// S5c-X F3 (Round 6): the source/destination repositories' write
+    /// domains, captured by the admitted factories. Every admitted twin
+    /// (`*_admitted`) debug-checks the presented permits against THESE
+    /// domains, so a coordinator handed out by the shamir-db facade can
+    /// never be driven through a state-changing call without repo admission
+    /// — even though the owned `Arc` escapes the factory. `None` (direct
+    /// `MigrationCoordinator::new` in cross-crate tests with raw stores)
+    /// skips the check.
+    src_domain: Option<Arc<RepoWriteDomain>>,
+    dst_domain: Option<Arc<RepoWriteDomain>>,
 }
 
 impl MigrationCoordinator {
@@ -146,6 +157,37 @@ impl MigrationCoordinator {
             src_data,
             dst_data,
             src_mvcc,
+            src_domain: None,
+            dst_domain: None,
+        }
+    }
+
+    /// Capture the source/destination write domains (admitted factories
+    /// only). Chain after `with_migration_freeze`.
+    pub fn with_domains(
+        mut self,
+        src_domain: Arc<RepoWriteDomain>,
+        dst_domain: Arc<RepoWriteDomain>,
+    ) -> Self {
+        self.src_domain = Some(src_domain);
+        self.dst_domain = Some(dst_domain);
+        self
+    }
+
+    /// S5c-X F3: identity-check the presented permits against the captured
+    /// domains. Debug-only (mirrors `RepoWriteDomain::debug_check_permit`).
+    /// The destination check is skipped when no destination permit is
+    /// presented (rollback after the destination repository was removed).
+    fn debug_check_admission(
+        &self,
+        src_permit: &RepoWritePermit,
+        dst_permit: Option<&RepoWritePermit>,
+    ) {
+        if let Some(domain) = &self.src_domain {
+            domain.debug_check_permit(src_permit);
+        }
+        if let (Some(domain), Some(permit)) = (&self.dst_domain, dst_permit) {
+            domain.debug_check_permit(permit);
         }
     }
 
@@ -163,11 +205,26 @@ impl MigrationCoordinator {
     /// active finaliser's freeze. Body cancellation/errors then drop the guard
     /// even if this coordinator is retained in the map or by another Arc.
     /// An uncommitted retry without a guard cannot safely resume its snapshot.
-    pub fn take_migration_freeze(&self) -> Option<MigrationFreezeGuard> {
+    ///
+    /// S5c-X F3: admitted twin `take_migration_freeze_admitted` is the public
+    /// surface; this plain form is crate-internal.
+    pub(crate) fn take_migration_freeze(&self) -> Option<MigrationFreezeGuard> {
         self.source_freeze
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take()
+    }
+
+    /// Admitted twin of [`Self::take_migration_freeze`] (S5c-X F3): the
+    /// caller holds both repositories' write permits; they are
+    /// identity-checked against the domains captured at factory time.
+    pub fn take_migration_freeze_admitted(
+        &self,
+        src_permit: &RepoWritePermit,
+        dst_permit: Option<&RepoWritePermit>,
+    ) -> Option<MigrationFreezeGuard> {
+        self.debug_check_admission(src_permit, dst_permit);
+        self.take_migration_freeze()
     }
 
     /// Serialize admin retries without holding a map or state guard over I/O.
@@ -184,7 +241,9 @@ impl MigrationCoordinator {
     }
 
     /// Persist the unchanged bincode state layout under a separate keyspace.
-    pub async fn persist_state(&self) -> DbResult<()> {
+    /// S5c-X F3: crate-internal; the facade goes through
+    /// [`Self::persist_state_admitted`].
+    pub(crate) async fn persist_state(&self) -> DbResult<()> {
         let state = self.state().await;
         let bytes = bincode::serialize(&state)
             .map_err(|e| DbError::Codec(format!("migration state: {e}")))?;
@@ -225,7 +284,9 @@ impl MigrationCoordinator {
         }
     }
 
-    pub async fn complete_finalisation_step(&self, stage: u8) -> DbResult<()> {
+    /// S5c-X F3: crate-internal; see
+    /// [`Self::complete_finalisation_step_admitted`].
+    pub(crate) async fn complete_finalisation_step(&self, stage: u8) -> DbResult<()> {
         if self.phase().await != MigrationPhase::Committed || !(1..=2).contains(&stage) {
             return Err(DbError::Validation(
                 "invalid migration finalisation step".into(),
@@ -251,11 +312,25 @@ impl MigrationCoordinator {
         self.state.lock().await.id.clone()
     }
 
-    pub fn shadow_log(&self) -> &Arc<MigrationShadowLog> {
+    /// S5c-X F3: crate-internal — the log's `append`/`purge` are mutating
+    /// and no longer reachable downstream; reads go through
+    /// [`Self::shadow_lag`] / [`Self::current_lsn`].
+    pub(crate) fn shadow_log(&self) -> &Arc<MigrationShadowLog> {
         &self.shadow_log
     }
 
-    pub async fn run_snapshot(&self) -> DbResult<u64> {
+    /// Admitted twin of [`Self::run_snapshot`] (S5c-X F3).
+    pub async fn run_snapshot_admitted(
+        &self,
+        src_permit: &RepoWritePermit,
+        dst_permit: &RepoWritePermit,
+    ) -> DbResult<u64> {
+        self.debug_check_admission(src_permit, Some(dst_permit));
+        self.run_snapshot().await
+    }
+
+    /// S5c-X F3: crate-internal; see [`Self::run_snapshot_admitted`].
+    pub(crate) async fn run_snapshot(&self) -> DbResult<u64> {
         {
             let mut s = self.state.lock().await;
             if s.phase != MigrationPhase::ShadowStarted {
@@ -356,7 +431,9 @@ impl MigrationCoordinator {
         Ok(entries.len() as u64)
     }
 
-    pub async fn drain_shadow_log(&self) -> DbResult<u64> {
+    /// S5c-X F3: crate-internal (called by the drain loops); the facade
+    /// goes through [`Self::drain_until_caught_up_admitted`].
+    pub(crate) async fn drain_shadow_log(&self) -> DbResult<u64> {
         let start_lsn = {
             let s = self.state.lock().await;
             if s.phase != MigrationPhase::Draining {
@@ -387,7 +464,19 @@ impl MigrationCoordinator {
         current.saturating_sub(last_applied.max(snapshot_lsn))
     }
 
-    pub async fn drain_until_caught_up(&self, max_lag: u64) -> DbResult<DrainCatchUpResult> {
+    /// Admitted twin of [`Self::drain_until_caught_up`] (S5c-X F3).
+    pub async fn drain_until_caught_up_admitted(
+        &self,
+        src_permit: &RepoWritePermit,
+        dst_permit: &RepoWritePermit,
+        max_lag: u64,
+    ) -> DbResult<DrainCatchUpResult> {
+        self.debug_check_admission(src_permit, Some(dst_permit));
+        self.drain_until_caught_up(max_lag).await
+    }
+
+    /// S5c-X F3: crate-internal; see [`Self::drain_until_caught_up_admitted`].
+    pub(crate) async fn drain_until_caught_up(&self, max_lag: u64) -> DbResult<DrainCatchUpResult> {
         let mut total = 0u64;
         let mut passes = 0usize;
         let mut lag = self.shadow_lag().await;
@@ -407,7 +496,18 @@ impl MigrationCoordinator {
         })
     }
 
-    pub async fn mark_cutover_ready(&self) -> DbResult<()> {
+    /// Admitted twin of [`Self::mark_cutover_ready`] (S5c-X F3).
+    pub async fn mark_cutover_ready_admitted(
+        &self,
+        src_permit: &RepoWritePermit,
+        dst_permit: &RepoWritePermit,
+    ) -> DbResult<()> {
+        self.debug_check_admission(src_permit, Some(dst_permit));
+        self.mark_cutover_ready().await
+    }
+
+    /// S5c-X F3: crate-internal; see [`Self::mark_cutover_ready_admitted`].
+    pub(crate) async fn mark_cutover_ready(&self) -> DbResult<()> {
         let mut s = self.state.lock().await;
         if s.phase != MigrationPhase::Draining {
             return Err(DbError::Internal(format!(
@@ -430,7 +530,10 @@ impl MigrationCoordinator {
 
     /// Caller must quiesce source writers and serialize coordinator operations.
     /// Failed page application leaves its cursor unchanged and can be replayed.
-    pub async fn final_drain_and_commit(&self) -> DbResult<u64> {
+    ///
+    /// S5c-X F3: admitted twin `final_drain_and_commit_admitted` is the
+    /// public surface; this plain form is crate-internal.
+    pub(crate) async fn final_drain_and_commit(&self) -> DbResult<u64> {
         {
             let s = self.state.lock().await;
             if s.phase == MigrationPhase::Committed {
@@ -483,7 +586,8 @@ impl MigrationCoordinator {
         Ok(applied)
     }
 
-    pub async fn rollback(&self) -> DbResult<()> {
+    /// S5c-X F3: crate-internal; see [`Self::rollback_admitted`].
+    pub(crate) async fn rollback(&self) -> DbResult<()> {
         let phase = self.phase().await;
         if phase == MigrationPhase::Committed {
             return Err(DbError::Internal(
@@ -539,5 +643,48 @@ impl MigrationCoordinator {
         }
 
         Ok((src_count, dst_count))
+    }
+
+    /// Admitted twin of [`Self::persist_state`] (S5c-X F3).
+    pub async fn persist_state_admitted(
+        &self,
+        src_permit: &RepoWritePermit,
+        dst_permit: &RepoWritePermit,
+    ) -> DbResult<()> {
+        self.debug_check_admission(src_permit, Some(dst_permit));
+        self.persist_state().await
+    }
+
+    /// Admitted twin of [`Self::final_drain_and_commit`] (S5c-X F3).
+    pub async fn final_drain_and_commit_admitted(
+        &self,
+        src_permit: &RepoWritePermit,
+        dst_permit: &RepoWritePermit,
+    ) -> DbResult<u64> {
+        self.debug_check_admission(src_permit, Some(dst_permit));
+        self.final_drain_and_commit().await
+    }
+
+    /// Admitted twin of [`Self::rollback`] (S5c-X F3). The destination
+    /// permit is `None` when the destination repository was already removed
+    /// (crash-recovery rollback); the destination check is skipped then.
+    pub async fn rollback_admitted(
+        &self,
+        src_permit: &RepoWritePermit,
+        dst_permit: Option<&RepoWritePermit>,
+    ) -> DbResult<()> {
+        self.debug_check_admission(src_permit, dst_permit);
+        self.rollback().await
+    }
+
+    /// Admitted twin of [`Self::complete_finalisation_step`] (S5c-X F3).
+    pub async fn complete_finalisation_step_admitted(
+        &self,
+        src_permit: &RepoWritePermit,
+        dst_permit: &RepoWritePermit,
+        stage: u8,
+    ) -> DbResult<()> {
+        self.debug_check_admission(src_permit, Some(dst_permit));
+        self.complete_finalisation_step(stage).await
     }
 }
