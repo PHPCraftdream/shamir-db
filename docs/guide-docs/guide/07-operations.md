@@ -507,6 +507,25 @@ prefix и собственно скорость apply follower; это разн�
    RAM-backed — каждый reopen, чистый или нет, выпускает новую
    incarnation/new lineage); для репликации такие репозитории
    обслуживаются только с явным `completed_reseed`.
+7. Карантин исключает обычные чтения (ordinary reads, PR8b): пока подписка
+   в `resync_required`, чтения (get/query/scan, включая temporal
+   AsOf/History) и локальные changefeed/journal pull покрытых репозиториев
+   возвращают ошибку `resync_required` (non-retryable). Карантин хранится
+   как durable-маркер `quarantined` на строке подписки (плюс baseline
+   `resync_from_receipt`), поэтому он ПЕРЕЖИВАЕТ Pause/SetProfile: Pause,
+   SetProfile и обычный `Resume` карантинной подписки отклоняются той же
+   типизированной ошибкой `resync_required` — сменой состояния карантин не
+   снять. Оператор видит причину через `ReplicationStatus`/
+   `ListSubscriptions` (state + status_message), DESCRIBE и статус остаются
+   читаемыми. Порядок действий оператора: 1) увидеть карантин через
+   status/list; 2) `DROP` карантинной подписки; 3) установить replacement
+   seed настоящим установщиком по runbook (`09-seed-recovery.md`) — в НОВЫЙ
+   каталог данных follower'а (установщик отклоняет существующую обычную
+   репозиторий/БД назначения — `check_seed_target` в `seed/catalogue.rs`) —
+   он создаёт СВЕЖУЮ paused-подписку с новым `seed_receipt` (без маркера);
+   4) `Resume` новой подписки; 5) первое чтение после этого успешно
+   (автоматического reseed нет). На healthy path стоимость — один
+   атомарный load на batch.
 
 `wal_commit` (`buffered|synced`) независим от `replication_serve`:
 запросная `durability` может УСИЛИТЬ подтверждение, но никогда не может

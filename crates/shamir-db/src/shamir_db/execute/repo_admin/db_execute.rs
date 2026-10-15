@@ -1,6 +1,7 @@
 //! `impl ShamirDb { execute, execute_as }`.
 
-use shamir_query_types::batch::ExecPolicy;
+use shamir_query_types::batch::tree_visitor::BatchTreeVisitor;
+use shamir_query_types::batch::{BatchOp, ExecPolicy};
 
 use crate::access::Actor;
 use crate::query::batch::{execute_batch, Authorized, BatchError, BatchRequest, BatchResponse};
@@ -9,7 +10,9 @@ use crate::shamir_db::ports::RepoAdminObserver;
 use super::super::shamir_db::ShamirDb;
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::ambient_interner::attach_interner_delta;
+use super::db_tx::tx_read_quarantine_refusal_for_request;
 use super::function_invoker::ShamirFunctionInvoker;
+use super::quarantine_cache::ResyncQuarantineCache;
 use super::table_resolver::DbTableResolver;
 
 impl ShamirDb {
@@ -69,6 +72,25 @@ impl ShamirDb {
         let auth = Authorized::authorize(request, actor, db_name, self)
             .await?
             .with_policy(policy);
+
+        // S5c-X PR8b: ordinary READS of a quarantined (`resync_required`)
+        // repo fail closed. Fast path is one `Relaxed` load (empty cache ⇒
+        // no ops are touched, no allocation). Writes and admin ops are NOT
+        // gated — status/DESCRIBE stay readable by design.
+        //
+        // The gate is a single call to the shared SYNCHRONOUS helper
+        // (`tx_read_quarantine_refusal_for_request` in `db_tx.rs` — no
+        // `.await` inside). Keeping the whole-query-tree walk OUT of this
+        // async fn body is what matters for stack safety: any code inlined
+        // here becomes fields of this fn's generated `Future` state machine,
+        // and under nested `Batch`/`ForEach` recursion that future is held
+        // on the stack once per recursion level (Round-12 Windows overflow).
+        // The sync helper's locals live in its own plain stack frame and the
+        // returned `Option<BatchError>` is dropped before `execute_batch`.
+        if let Some(err) = tx_read_quarantine_refusal_for_request(self, db_name, request) {
+            return Err(err);
+        }
+
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),
             message: format!("Database '{}' not found", db_name),
@@ -104,4 +126,28 @@ impl ShamirDb {
 
         Ok(response)
     }
+}
+
+/// Walk the whole query tree (nested `Batch`/`ForEach` bodies included —
+/// mirroring the authorization walk) and return the first READ op whose
+/// target repo is quarantined, as `(alias, repo, reason)`. Only data reads
+/// (`BatchOp::Read` — the `Action::Read`-classified variant) are checked;
+/// writes and admin/status/DESCRIBE ops pass through. Shared by the batch
+/// (above) and the interactive-tx gate in `db_tx.rs`.
+#[inline(never)]
+pub(crate) fn quarantined_read_hit(
+    db_name: &str,
+    request: &BatchRequest,
+    cache: &ResyncQuarantineCache,
+) -> Option<(String, String, String)> {
+    for visit in BatchTreeVisitor::new(&request.queries) {
+        let BatchOp::Read(query) = &visit.entry.op else {
+            continue;
+        };
+        let repo = &query.from.repo;
+        if let Some(reason) = cache.reason_for(db_name, repo) {
+            return Some((visit.alias.to_string(), repo.clone(), reason));
+        }
+    }
+    None
 }

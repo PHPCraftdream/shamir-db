@@ -6,6 +6,7 @@ use serde::Serialize;
 use shamir_connect::common::push_envelope::{PushEnvelope, PushKind};
 use shamir_connect::server::conn_services::PushSink;
 use shamir_db::access::Actor;
+use shamir_db::shamir_db::ChangelogDeliveryGate;
 use shamir_db::types::value::QueryValue;
 use shamir_db::ShamirDb;
 use shamir_query_types::batch::BatchLimits;
@@ -77,10 +78,80 @@ pub(super) async fn make_deliver_data(
 // required frame (executor scheduling can add latency). No commit-path wait.
 const PUSH_RETRY_DELAY: Duration = Duration::from_millis(5);
 
+/// Retry only while the delivery lease is open; sink acceptance and sequence
+/// advancement are one synchronous lease operation, linearized with closure.
+pub(super) async fn push_required_gated(
+    gate: &ChangelogDeliveryGate,
+    push: &Arc<dyn PushSink>,
+    sub_id: u64,
+    seq: &AtomicU64,
+    frame: Vec<u8>,
+) -> bool {
+    for attempt in 0..SLOW_CONSUMER_THRESHOLD {
+        if let Some(accepted) = gate.try_with_delivery(|| push.try_push(frame.clone()).is_ok()) {
+            if accepted {
+                seq.fetch_add(1, Ordering::Relaxed);
+                return true;
+            }
+        } else {
+            return false;
+        }
+        if attempt + 1 < SLOW_CONSUMER_THRESHOLD {
+            tokio::select! {
+                _ = gate.closed() => return false,
+                () = tokio::time::sleep(PUSH_RETRY_DELAY) => {}
+            }
+        }
+    }
+
+    let slow_consumer = PushEnvelope {
+        push: PushKind::SlowConsumer,
+        sub: sub_id,
+        seq: seq.load(Ordering::Relaxed),
+        data: None,
+        gap_at: None,
+    };
+    if let Ok(frame) = rmp_serde::to_vec_named(&slow_consumer) {
+        if let Some(accepted) = gate.try_with_delivery(|| push.try_push(frame).is_ok()) {
+            if accepted {
+                seq.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    tracing::warn!(sub_id, "slow consumer - closing subscription");
+    false
+}
+
+/// Serialize an Event and retry each sink acceptance under a delivery lease.
+pub(super) async fn try_push_event_gated(
+    gate: &ChangelogDeliveryGate,
+    push: &Arc<dyn PushSink>,
+    sub_id: u64,
+    seq: &AtomicU64,
+    data: &[u8],
+) -> bool {
+    let envelope = PushEnvelopeRef {
+        push: PushKind::Event,
+        sub: sub_id,
+        seq: seq.load(Ordering::Relaxed),
+        data: Some(data),
+        gap_at: None,
+    };
+    let frame = match rmp_serde::to_vec_named(&envelope) {
+        Ok(frame) => frame,
+        Err(error) => {
+            tracing::warn!(sub_id, %error, "event serialization failed - closing subscription");
+            return false;
+        }
+    };
+    push_required_gated(gate, push, sub_id, seq, frame).await
+}
+
 /// Retain a serialized required frame until accepted, or close on exhaustion.
 /// The caller must stop delivery on `false`; terminal notifications are best-effort.
 /// cancel-safe: NO - cancellation discards the retained frame; only cancel when
 /// terminating the subscription, never cancel and resume ordinary delivery.
+#[cfg(test)]
 pub(super) async fn push_required(
     push: &Arc<dyn PushSink>,
     sub_id: u64,
@@ -119,6 +190,7 @@ pub(super) async fn push_required(
 /// Serialize an Event once and retry its frame; `false` terminates the bridge.
 /// Seq advances only after acceptance, never for a rejected event.
 /// cancel-safe: NO - cancellation must terminate the subscription, not resume it.
+#[cfg(test)]
 pub(super) async fn try_push_event(
     push: &Arc<dyn PushSink>,
     sub_id: u64,

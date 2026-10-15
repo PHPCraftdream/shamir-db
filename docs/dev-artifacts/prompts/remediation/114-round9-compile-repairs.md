@@ -1,0 +1,15 @@
+Round9 IMPLEMENTATION — current worktree: D:/dev/rust/shamir-db/worktrees/s5cx-quarantine-reads
+
+NO builds/tests/clippy/rustc/nextest. NO cargo until parent final formatting. NO git writes. Read AGENTS.md, CLAUDE.md, and C:/Users/Computer/.agents/skills/rust-intel/SKILL.md before edits. Never run git reset/checkout/clean/stash/restore/rm or any git command that mutates the working tree/index. Edit files only; orchestrator handles commits. Explicit no-git-writes prohibition waives prompt-first commit. Persist this exact task brief before code; do not commit it.
+
+Fix ONLY Round9 compile/test problems; no design refactor:
+- changelog.rs: add missing `ChangelogReceiver` import via verified public reexport `crate::shamir_db::ChangelogReceiver`.
+- admin_replication.rs: add missing `DbError` in `use crate::{DbError, DbResult, ShamirDb};`, checking actual header.
+- Revocation gate_tests is mounted directly into `revocation::tests` using `#[path]`, not nested `tests::gate_tests`: replace `super::super::registry/receiver` with imports from actual crate paths: `crate::shamir_db::shamir_db::revocation::registry::ChangelogReceiverRegistry` and public `crate::shamir_db::{ChangelogReceiver, ChangelogDeliveryGate}`. Verify privacy: revocation is private but child descendant access is allowed; registry is pub(super) visible to parent. Prefer imports over inline paths >5 segments.
+- bridge.rs: add missing `Arc`, `AtomicU64`, `Ordering` imports; remove unused `Future`. `terminal_gates = delivery_gates.clone()` currently precedes its scope. Minimally restructure lexical scope: perform ACL/target/repo/receiver attachment outside cancellable nested `bridge_work`; only after attach clone attached gates and construct nested body from filter/source/delivery/snapshot/drain. Outer run keeps early-return handling, final Closed, and slot guard. Do NOT create empty collection waiter before attachment (it would immediately win). Keep local borrow lifetimes valid with refs; no extra registry reserve or new shared locks. Preserve page checks, gated pushes, idle revocation notification.
+- snapshot-cut tests: four duplicate `try_reserve` calls; remove exactly the second consecutive call, leaving ONE reservation before pending1. Read actual registry `try_reserve`/remove definitions and all `count0` assertions.
+- quarantine_termination_tests: remove unused `Notify`.
+- push.rs: ungated `push_required` only has test callers; after searching ALL refs, add `#[cfg(test)]` analogous to `try_push_event`.
+- Search other unused changed items and real CI imports/compile paths; fix narrowly only.
+
+No gratuitous comments, config/deps/lockfile changes. Layout ratchet <=1000 files and <=7 new dirs: existing overlimit means no growth vs master; benchmark must remain 1365. Read before edit. Use edit/write tools only (no shell mutation). Final reread entire bridge and explain exact gate scope/lifetime; check imports/types. Final list files and lines per finding, what was actually inspected (signatures/callers), and explicitly do not claim compiler/tests passed. Finish autonomously; no questions for routine edits.

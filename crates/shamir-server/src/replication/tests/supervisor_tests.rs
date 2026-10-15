@@ -84,6 +84,8 @@ async fn write_rows(leader: &ShamirDb, base: usize, n: usize) {
     let before = leader
         .read_changelog_from_journal("app", "main", 0, 100_000)
         .await
+        .ok()
+        .flatten()
         .map(|jr| jr.events.len())
         .unwrap_or(0);
     for i in base..(base + n) {
@@ -111,6 +113,8 @@ async fn write_rows(leader: &ShamirDb, base: usize, n: usize) {
         if let Some(jr) = leader
             .read_changelog_from_journal("app", "main", 0, 100_000)
             .await
+            .ok()
+            .flatten()
         {
             if jr.events.len() >= want {
                 return;

@@ -73,6 +73,14 @@ pub(crate) async fn export_open_with_index_limit(
     let db = source
         .get_db(db_name)
         .ok_or_else(|| invalid("unknown database"))?;
+    // PR8b: a replication destination in `resync_required` must not serve
+    // its stale data as a seed — fail closed before any artifact is written.
+    if let Some(reason) = source.read_quarantine_reason(db_name, repo_name) {
+        return Err(invalid(format!(
+            "repository {db_name}/{repo_name} is quarantined (resync_required) \
+             and must not be exported: {reason}"
+        )));
+    }
     let repo = db
         .get_repo(repo_name)
         .ok_or_else(|| invalid("unknown repository"))?;

@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use tokio::time::timeout;
 
+use shamir_db::shamir_db::ChangelogReceiver;
 use shamir_db::ShamirDb;
 use shamir_engine::ChangeOp;
 use shamir_query_builder::batch::Batch;
@@ -82,9 +83,7 @@ async fn insert_user(shamir: &ShamirDb, name: &str) {
 
 /// Receive the next live event within a bounded timeout (so a hang in the
 /// feed surfaces as a test failure, not an indefinite block).
-async fn recv_event(
-    rx: &mut tokio::sync::broadcast::Receiver<std::sync::Arc<shamir_engine::ChangelogEvent>>,
-) -> std::sync::Arc<shamir_engine::ChangelogEvent> {
+async fn recv_event(rx: &mut ChangelogReceiver) -> std::sync::Arc<shamir_engine::ChangelogEvent> {
     timeout(Duration::from_secs(5), rx.recv())
         .await
         .expect("changefeed event within 5s")
@@ -98,6 +97,7 @@ async fn live_insert_update_delete_emit_expected_events() {
     let mut rx = shamir
         .subscribe_changelog("testdb", "main")
         .await
+        .unwrap()
         .expect("repo exists");
 
     // ── INSERT → Put with the new value ──────────────────────────────
@@ -169,8 +169,16 @@ async fn live_insert_update_delete_emit_expected_events() {
 async fn multiple_live_subscribers_receive_same_event() {
     let shamir = setup().await;
 
-    let mut a = shamir.subscribe_changelog("testdb", "main").await.unwrap();
-    let mut b = shamir.subscribe_changelog("testdb", "main").await.unwrap();
+    let mut a = shamir
+        .subscribe_changelog("testdb", "main")
+        .await
+        .unwrap()
+        .unwrap();
+    let mut b = shamir
+        .subscribe_changelog("testdb", "main")
+        .await
+        .unwrap()
+        .unwrap();
 
     insert_alice(&shamir).await;
 
@@ -195,6 +203,7 @@ async fn commit_without_subscribers_succeeds() {
         events = shamir
             .read_changelog_from("testdb", "main", 0, 100)
             .await
+            .unwrap()
             .unwrap();
         if !events.is_empty() {
             break;
@@ -220,6 +229,7 @@ async fn journal_resumable_read_from_in_order() {
         events = shamir
             .read_changelog_from("testdb", "main", 0, 100)
             .await
+            .unwrap()
             .unwrap();
         if events.len() == 3 {
             break;
@@ -241,6 +251,7 @@ async fn journal_resumable_read_from_in_order() {
     let tail = shamir
         .read_changelog_from("testdb", "main", versions[0] + 1, 100)
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(tail.len(), 2, "two events after the first version");
     assert_eq!(tail[0].commit_version, versions[1]);
@@ -250,6 +261,7 @@ async fn journal_resumable_read_from_in_order() {
     let limited = shamir
         .read_changelog_from("testdb", "main", 0, 1)
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(limited.len(), 1);
     assert_eq!(limited[0].commit_version, versions[0]);
@@ -270,6 +282,7 @@ async fn late_subscriber_catches_past_via_journal_then_live() {
         past = shamir
             .read_changelog_from("testdb", "main", 0, 100)
             .await
+            .unwrap()
             .unwrap();
         if past.len() == 2 {
             break;
@@ -284,7 +297,11 @@ async fn late_subscriber_catches_past_via_journal_then_live() {
     let last_seen = past.iter().map(|e| e.commit_version).max().unwrap();
 
     // Now subscribe and commit a third — caught live.
-    let mut rx = shamir.subscribe_changelog("testdb", "main").await.unwrap();
+    let mut rx = shamir
+        .subscribe_changelog("testdb", "main")
+        .await
+        .unwrap()
+        .unwrap();
     insert_user(&shamir, "carol").await;
 
     let live = recv_event(&mut rx).await;
@@ -328,6 +345,7 @@ async fn nontx_insert_update_delete_emit_expected_events() {
     let mut rx = shamir
         .subscribe_changelog("testdb", "main")
         .await
+        .unwrap()
         .expect("repo exists");
 
     // ── NON-TX INSERT → Put with the new value ───────────────────────
@@ -409,6 +427,7 @@ async fn nontx_writes_journaled_in_order_without_subscriber() {
         events = shamir
             .read_changelog_from("testdb", "main", 0, 100)
             .await
+            .unwrap()
             .unwrap();
         if events.len() == 3 {
             break;
@@ -442,6 +461,7 @@ async fn mixed_tx_and_nontx_versions_are_consistently_monotonic() {
     let mut rx = shamir
         .subscribe_changelog("testdb", "main")
         .await
+        .unwrap()
         .expect("repo exists");
 
     // Interleave: non-tx insert, tx insert, non-tx insert, tx insert.
@@ -490,6 +510,7 @@ async fn nontx_insert_versions_have_no_double_bump_gap() {
     let mut rx = shamir
         .subscribe_changelog("testdb", "main")
         .await
+        .unwrap()
         .expect("repo exists");
 
     // Three back-to-back non-tx inserts (single-record each).
@@ -531,6 +552,7 @@ async fn nontx_update_batch_version_is_max_of_per_record_writes() {
     let mut rx = shamir
         .subscribe_changelog("testdb", "main")
         .await
+        .unwrap()
         .expect("repo exists");
 
     // Seed two rows (non-tx).
@@ -588,6 +610,7 @@ async fn mixed_tx_nontx_versions_no_gap_from_double_bump() {
     let mut rx = shamir
         .subscribe_changelog("testdb", "main")
         .await
+        .unwrap()
         .expect("repo exists");
 
     // Sequence: non-tx, non-tx, tx, non-tx.
@@ -639,6 +662,7 @@ async fn commit_without_subscribers_still_journals() {
         events = shamir
             .read_changelog_from("testdb", "main", 0, 100)
             .await
+            .unwrap()
             .unwrap();
         if events.len() >= 2 {
             break;
@@ -666,10 +690,19 @@ async fn commit_without_subscribers_still_journals() {
 #[tokio::test]
 async fn subscribe_unknown_repo_returns_none() {
     let shamir = setup().await;
-    assert!(shamir.subscribe_changelog("testdb", "nope").await.is_none());
-    assert!(shamir.subscribe_changelog("nodb", "main").await.is_none());
+    assert!(shamir
+        .subscribe_changelog("testdb", "nope")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(shamir
+        .subscribe_changelog("nodb", "main")
+        .await
+        .unwrap()
+        .is_none());
     assert!(shamir
         .read_changelog_from("nodb", "main", 0, 10)
         .await
+        .unwrap()
         .is_none());
 }

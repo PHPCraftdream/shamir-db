@@ -112,6 +112,19 @@ describe('visibility wire adoption', () => {
     } finally { await f.client.close(); }
   });
 
+  it('maps resync_required from real response fields', async () => {
+    const f = await fixture();
+    try {
+      const result = f.client.waitForVisibility('db', 'main', 1n, { mode: 'bounded', timeout_ms: 0 });
+      const rejected = expect(result).rejects.toBeInstanceOf(VisibilityError);
+      await f.nextRequest();
+      f.respond({ kind: 'error', code: 'resync_required', message: 'detail' });
+      await rejected;
+      const error = await result.catch((e: unknown) => e);
+      expect(error).toMatchObject({ code: 'resync_required', retryable: false });
+    } finally { await f.client.close(); }
+  });
+
   it.each([undefined, { state: 'pending', reason: 'timeout', visible_through: 3, blocking_version: 5 },
     { state: 'pending', reason: 'invalid', visible_through: 3, blocking_version: 4 }])('rejects malformed metadata', async (visibility) => {
     const f = await fixture();

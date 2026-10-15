@@ -53,7 +53,7 @@ pub mod visibility_wait;
 mod tests;
 
 pub use alias::extract_base_alias;
-pub use batch_error::BatchError;
+pub use batch_error::{BatchError, ResyncRequiredDetail};
 pub use batch_limits::BatchLimits;
 pub use batch_op::BatchOp;
 pub use batch_plan::BatchPlan;

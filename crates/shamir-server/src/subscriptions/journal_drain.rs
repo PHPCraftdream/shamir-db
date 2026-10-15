@@ -1,15 +1,13 @@
 use std::future::Future;
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use shamir_tx::ChangelogEvent;
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
-use tokio::sync::broadcast::Receiver;
 use tokio::time::Instant;
 
-use super::journal_source::JournalSource;
+use super::journal_source::{JournalReceiver, JournalSource};
 
 /// Task-local processed-through state, not the last frame version.
 pub(super) struct JournalDrain {
@@ -51,7 +49,7 @@ impl JournalDrain {
     pub async fn run<S, D, F, G, GF>(
         source: &S,
         repos: &[String],
-        receivers: &mut [Receiver<Arc<ChangelogEvent>>],
+        receivers: &mut [impl JournalReceiver],
         states: &mut [Self],
         stop_when_clean: bool,
         mut deliver: D,
@@ -76,6 +74,14 @@ impl JournalDrain {
                     continue;
                 };
                 let page = source.read(&repos[ri], from).await?;
+                // Deterministic post-read / pre-processing interleaving for quarantine tests.
+                #[cfg(test)]
+                if !page.read.events.is_empty() {
+                    super::tests::bridge_snapshot_cut_tests::pause(3, from).await;
+                }
+                if source.quarantined(&repos[ri]) {
+                    return Err("journal repository quarantined".to_owned());
+                }
                 if let Some(at) = page.read.gap_at {
                     gap(at).await;
                     return Err("journal gap requires resynchronization".to_owned());

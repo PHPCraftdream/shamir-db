@@ -21,6 +21,7 @@ pub(crate) fn map_response(response: DbResponse) -> Result<DbResponse, ClientErr
         DbResponse::Error { code, message } => Err(match code.as_str() {
             "as_of_future_version" => ClientError::AsOfFutureVersion { message },
             "as_of_reopen_required" => ClientError::AsOfReopenRequired { message },
+            "resync_required" => ClientError::ResyncRequired { message },
             "visibility_future_version" => ClientError::VisibilityFutureVersion { message },
             "visibility_wait_invalid" => ClientError::VisibilityWaitInvalid { message },
             "write_committed_visibility_pending" => {

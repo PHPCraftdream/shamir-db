@@ -86,6 +86,7 @@ fn typed_errors_use_wire_fields_not_message_parsing() {
     for code in [
         "as_of_future_version",
         "as_of_reopen_required",
+        "resync_required",
         "visibility_future_version",
         "visibility_wait_invalid",
         "write_committed_visibility_pending",
@@ -98,6 +99,7 @@ fn typed_errors_use_wire_fields_not_message_parsing() {
         let message = match (code, result) {
             ("as_of_future_version", ClientError::AsOfFutureVersion { message })
             | ("as_of_reopen_required", ClientError::AsOfReopenRequired { message })
+            | ("resync_required", ClientError::ResyncRequired { message })
             | ("visibility_future_version", ClientError::VisibilityFutureVersion { message })
             | ("visibility_wait_invalid", ClientError::VisibilityWaitInvalid { message })
             | (

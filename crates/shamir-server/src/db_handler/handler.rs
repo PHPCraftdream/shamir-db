@@ -93,7 +93,8 @@ use super::admin::{
     is_coarse_admin_gate_exempt, set_replicator, set_superuser, AdminGlue,
 };
 use super::config::{CursorLimitsCap, NodeMode, QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
-use super::cursor_handlers::{authorize_cursor_read, error_response};
+use super::cursor_handlers::error_response;
+use super::cursor_support::authorize_cursor_read;
 use super::repo_audit;
 use super::subscribe_handler;
 
@@ -853,6 +854,9 @@ pub(super) fn error_code(e: &BatchError) -> &str {
         // `max_result_size_bytes`; rejected outright, never truncated.
         BatchError::CursorPageTooLarge { .. } => "cursor_page_too_large",
         BatchError::AsOfVisibilityTimeout { .. } => "as_of_visibility_timeout",
+        // S5c-X PR8b: read refused — replication destination in
+        // `resync_required` quarantine; non-retryable until reseed.
+        BatchError::ResyncRequired { .. } => "resync_required",
     }
 }
 

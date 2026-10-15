@@ -1,9 +1,35 @@
 use shamir_connect::server::session::Session;
-use shamir_query_types::batch::VisibilityWait;
+use shamir_db::query::batch::BatchError;
+use shamir_db::ShamirDb;
+use shamir_query_types::batch::{ResyncRequiredDetail, VisibilityWait};
 use shamir_query_types::wire::DbResponse;
 
 use super::cursor_handlers::error_response;
 use super::handler::{session_actor, ShamirDbHandler};
+
+/// S5c-X PR8b: cursor reads (`CreateCursor`/`FetchNext`) bypass shamir-db's
+/// batch read gate, so the `resync_required` quarantine is probed here
+/// directly. One atomic-map probe — the empty-cache fast path lives inside
+/// the cache itself.
+///
+/// `alias` has no batch-op name on the cursor path; `"cursor"` labels the
+/// quarantined read in the wire message (see `BatchError::ResyncRequired`'s
+/// `Display`: `query '{alias}': repository db/repo is quarantined ...`).
+pub(super) fn quarantine_cursor_error(
+    db: &ShamirDb,
+    db_name: &str,
+    repo_name: &str,
+) -> Option<BatchError> {
+    db.read_quarantine_reason(db_name, repo_name)
+        .map(|reason| BatchError::ResyncRequired {
+            alias: "cursor".to_string(),
+            detail: Box::new(ResyncRequiredDetail {
+                db: db_name.to_string(),
+                repo: repo_name.to_string(),
+                reason,
+            }),
+        })
+}
 
 impl ShamirDbHandler {
     #[allow(clippy::too_many_arguments)]
