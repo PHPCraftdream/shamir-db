@@ -257,6 +257,37 @@ pub enum BatchError {
         /// The configured `max_result_size_bytes` cap.
         max: usize,
     },
+
+    /// S5c-X PR8b: a read op targeted a replication destination in
+    /// `resync_required` quarantine; refused until a replacement seed is installed.
+    ///
+    /// The payload is boxed behind [`ResyncRequiredDetail`] so the enum's
+    /// inline size stays minimal: nested `Batch`/`ForEach` execution recurses
+    /// through boxed futures that each hold `Result<_, BatchError>`-sized
+    /// locals, so enum growth multiplies across nesting depth. Inference,
+    /// not a measured fact: the CI stack overflows in the nested-batch audit
+    /// tests (`nested_batch_alter_is_audited` /
+    /// `foreach_execution_audits_each_alter_iteration`) are CONSISTENT with
+    /// the enum growth introduced with this variant, but no size measurement
+    /// or overflow-site trace was taken. Boxing is kept regardless — it is
+    /// also the right shape for a 3-string payload.
+    ResyncRequired {
+        alias: String,
+        detail: std::boxed::Box<ResyncRequiredDetail>,
+    },
+}
+
+/// S5c-X PR8b: heap-boxed payload of [`BatchError::ResyncRequired`], keeping
+/// the enum's inline size minimal (see the variant's doc: boxing against deep
+/// nested-batch recursion is an inference, kept for payload shape as well).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResyncRequiredDetail {
+    /// Database name of the quarantined destination.
+    pub db: String,
+    /// Repository name of the quarantined destination.
+    pub repo: String,
+    /// Why the destination is quarantined (journal gap / epoch mismatch).
+    pub reason: String,
 }
 
 impl std::fmt::Display for BatchError {
@@ -396,6 +427,14 @@ impl std::fmt::Display for BatchError {
                     size, max
                 )
             }
+            BatchError::ResyncRequired { alias, detail } => {
+                write!(
+                    f,
+                    "query '{alias}': repository {}/{} is quarantined \
+                     (resync_required): {}",
+                    detail.db, detail.repo, detail.reason
+                )
+            }
         }
     }
 }
@@ -421,6 +460,7 @@ impl BatchError {
         match self {
             BatchError::QueryError { code, .. } => code.as_deref(),
             BatchError::AsOfVisibilityTimeout { .. } => Some("as_of_visibility_timeout"),
+            BatchError::ResyncRequired { .. } => Some("resync_required"),
             _ => None,
         }
     }

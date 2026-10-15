@@ -146,6 +146,7 @@ fn main() {
                 let events = s
                     .read_changelog_from(DB, REPO, from_version, limit)
                     .await
+                    .expect("read ok")
                     .expect("repo exists");
                 black_box(events);
             }

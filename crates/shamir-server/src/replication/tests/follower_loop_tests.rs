@@ -106,6 +106,8 @@ async fn write_rows(leader: &ShamirDb, n: usize) {
         if let Some(jr) = leader
             .read_changelog_from_journal("app", "main", 0, 1000)
             .await
+            .ok()
+            .flatten()
         {
             if jr.events.len() >= n {
                 return;
@@ -206,7 +208,8 @@ async fn apply_n_events_convergence() {
     let follower_jr = follower
         .read_changelog_from_journal("app", "main", 0, 1000)
         .await
-        .expect("follower journal");
+        .expect("follower journal")
+        .expect("journal present");
     assert!(
         follower_jr.events.len() >= N,
         "follower changefeed should carry >= {N} re-emitted events, got {}",
@@ -260,7 +263,8 @@ async fn idempotent_restart_after_catchup() {
     let jr_before = follower
         .read_changelog_from_journal("app", "main", 0, 1000)
         .await
-        .expect("follower journal");
+        .expect("follower journal")
+        .expect("journal present");
     let events_before = jr_before.events.len();
 
     assert!(
@@ -295,7 +299,8 @@ async fn idempotent_restart_after_catchup() {
     let jr_after = follower
         .read_changelog_from_journal("app", "main", 0, 1000)
         .await
-        .expect("follower journal");
+        .expect("follower journal")
+        .expect("journal present");
     assert_eq!(
         jr_after.events.len(),
         events_before,
@@ -495,7 +500,8 @@ async fn assert_gap_stops_loop(gap_at: u64) {
     let follower_jr = follower
         .read_changelog_from_journal("app", "main", 0, 1000)
         .await
-        .expect("follower journal");
+        .expect("follower journal")
+        .expect("journal present");
     assert!(
         follower_jr.events.is_empty(),
         "no event should have been applied when a gap is reported"
@@ -654,7 +660,8 @@ async fn validate_payload_rejection_is_terminal_without_bookmark_or_version() {
     let journal = follower
         .read_changelog_from_journal("app", "main", 0, 10)
         .await
-        .expect("follower journal");
+        .expect("follower journal")
+        .expect("journal present");
     assert!(journal.events.is_empty());
 }
 

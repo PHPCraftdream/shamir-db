@@ -1,6 +1,9 @@
 mod access_control;
 mod artifact_kind;
 mod changelog;
+#[path = "../execute/repo_admin/revocation/mod.rs"]
+mod revocation;
+pub use revocation::receiver::{ChangelogDeliveryGate, ChangelogReceiver};
 mod core;
 mod db_gateway;
 mod db_management;

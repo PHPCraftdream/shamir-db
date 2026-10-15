@@ -146,7 +146,12 @@ async fn write_rows(handler: &ShamirDbHandler, n: usize) {
     // until all n events are durable, matching the pattern in
     // `changefeed_e2e.rs::commit_without_subscribers_succeeds`.
     for _ in 0..100 {
-        if let Some(jr) = db.read_changelog_from_journal("app", "main", 0, 1000).await {
+        if let Some(jr) = db
+            .read_changelog_from_journal("app", "main", 0, 1000)
+            .await
+            .ok()
+            .flatten()
+        {
             if jr.events.len() >= n {
                 return;
             }
