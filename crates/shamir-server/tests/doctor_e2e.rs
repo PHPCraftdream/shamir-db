@@ -130,6 +130,7 @@ async fn corrupt_table_counter(data_dir: &Path) {
     // so we must re-register it before we can open the TableManager.
     if !db.has_table("main", "test_table") {
         db.create_table("main", "test_table")
+            .await
             .expect("create_table for corruption");
     }
     let repo = db.get_repo("main").expect("main repo exists");
@@ -141,7 +142,7 @@ async fn corrupt_table_counter(data_dir: &Path) {
     // Corrupt: set counter to a value that cannot match the actual record
     // count (0 records exist), making verify() report counter_consistent=false.
     table_mgr
-        .counter()
+        .counter_for_test()
         .set_to(999)
         .await
         .expect("corrupt counter");

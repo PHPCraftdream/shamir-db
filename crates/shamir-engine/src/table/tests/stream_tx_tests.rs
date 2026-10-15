@@ -245,7 +245,7 @@ async fn a3_record_scan_reads_records_snapshot_version_not_current_after_concurr
 
     let repo = Arc::new(InMemoryRepo::new());
     let repo = RepoInstance::new("test".into(), BoxRepo::InMemory(repo), Vec::new());
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     // Pre-populate a record outside any tx — seeds the MVCC cell at V0.

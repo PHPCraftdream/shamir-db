@@ -79,7 +79,7 @@ const MULTI_TABLE_INJECT_TX_ID: u64 = 7_000_010;
 #[tokio::test(flavor = "current_thread")]
 async fn post_commit_phase5_failure_is_committed_then_recovered() {
     let (repo, _) = fixture("phase5_deferred_replay").await;
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let token = table_token_for("t");
 
@@ -193,7 +193,7 @@ async fn pre_commit_failure_aborts_and_leaves_nothing() {
     }
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
 
     let mut tx = TxContext::new(TxId::new(424_242), 0, 1, IsolationLevel::Serializable);
     tx.record_read(table_token_for("t"), Bytes::from_static(b"k"), 0);
@@ -234,7 +234,7 @@ async fn deferred_materialization_increments_metric() {
     const METRIC_INJECT_TX_ID: u64 = 7_000_002;
 
     let (repo, _) = fixture("phase5_deferred_metric").await;
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let token = table_token_for("t");
 

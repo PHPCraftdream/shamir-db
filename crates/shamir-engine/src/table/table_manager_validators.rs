@@ -6,6 +6,7 @@ use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
 use crate::query::TableResolver;
+use crate::repo::RepoWritePermit;
 use crate::validator::{
     record_fields::{OwnedFields, ViewFields},
     record_validator::ValidatorCtx,
@@ -24,7 +25,9 @@ impl TableManager {
     /// Borrow the global validator registry wired into this table, if any.
     /// `None` for system tables / tables without validators. Used by Phase D.2
     /// (SET NULL nullable enforcement) to inspect `SchemaValidator` rules.
-    pub fn validator_registry_ref(&self) -> Option<&Arc<crate::validator::ValidatorRegistry>> {
+    pub(crate) fn validator_registry_ref(
+        &self,
+    ) -> Option<&Arc<crate::validator::ValidatorRegistry>> {
         self.validator_registry.as_ref()
     }
 
@@ -37,6 +40,19 @@ impl TableManager {
         &self,
         binding: crate::validator::ValidatorBinding,
     ) -> shamir_storage::error::DbResult<()> {
+        // S5c-X: repo admission BEFORE `bindings_lock` (lock order: repo
+        // permit FIRST → terminal `bindings_lock`).
+        let permit = self.admit().await?;
+        self.add_validator_binding_admitted(binding, &permit).await
+    }
+
+    /// S5c-X admitted twin — caller already holds repo admission.
+    pub async fn add_validator_binding_admitted(
+        &self,
+        binding: crate::validator::ValidatorBinding,
+        permit: &RepoWritePermit,
+    ) -> shamir_storage::error::DbResult<()> {
+        self.write_domain.debug_check_permit(permit);
         let _guard = self.bindings_lock.lock().await;
         let mut bindings = (**self.validator_bindings.load()).clone();
         if let Some(pos) = bindings
@@ -59,6 +75,19 @@ impl TableManager {
         &self,
         validator_id: &RecordId,
     ) -> shamir_storage::error::DbResult<bool> {
+        // S5c-X: repo admission BEFORE `bindings_lock`.
+        let permit = self.admit().await?;
+        self.remove_validator_binding_admitted(validator_id, &permit)
+            .await
+    }
+
+    /// S5c-X admitted twin — caller already holds repo admission.
+    pub async fn remove_validator_binding_admitted(
+        &self,
+        validator_id: &RecordId,
+        permit: &RepoWritePermit,
+    ) -> shamir_storage::error::DbResult<bool> {
+        self.write_domain.debug_check_permit(permit);
         let _guard = self.bindings_lock.lock().await;
         let mut bindings = (**self.validator_bindings.load()).clone();
         let before = bindings.len();

@@ -93,14 +93,15 @@ async fn p1088_phase_c_d_no_concurrent_writes() {
     let name_interned = index_def.name_interned;
 
     // Run Phase B+A.
+    let permit = tbl.write_domain.admit().await.unwrap();
     let phase_ba = tbl
-        .phase_b_a_backfill("idx_name", index_def.clone(), 1000)
+        .phase_b_a_backfill("idx_name", index_def.clone(), 1000, &permit)
         .await
         .expect("phase_b_a_backfill should succeed")
         .expect("online build should succeed");
 
     // Run Phase C+D.
-    tbl.phase_c_d_catchup_and_publish(name_interned, phase_ba)
+    tbl.phase_c_d_catchup_and_publish(name_interned, phase_ba, &permit)
         .await
         .expect("phase_c_d_catchup_and_publish should succeed");
 
@@ -145,8 +146,9 @@ async fn p1088_phase_c_d_insert_during_window() {
     let name_interned = index_def.name_interned;
 
     // Run Phase B+A.
+    let permit = tbl.write_domain.admit().await.unwrap();
     let phase_ba = tbl
-        .phase_b_a_backfill("idx_name", index_def.clone(), 1000)
+        .phase_b_a_backfill("idx_name", index_def.clone(), 1000, &permit)
         .await
         .expect("phase_b_a_backfill should succeed")
         .expect("online build should succeed");
@@ -165,7 +167,7 @@ async fn p1088_phase_c_d_insert_during_window() {
     let new_rid = tbl.insert(&value).await.unwrap();
 
     // Run Phase C+D.
-    tbl.phase_c_d_catchup_and_publish(name_interned, phase_ba)
+    tbl.phase_c_d_catchup_and_publish(name_interned, phase_ba, &permit)
         .await
         .expect("phase_c_d_catchup_and_publish should succeed");
 
@@ -216,8 +218,9 @@ async fn p1088_phase_c_d_update_to_different_value_during_window() {
     let name_interned = index_def.name_interned;
 
     // Run Phase B+A.
+    let permit = tbl.write_domain.admit().await.unwrap();
     let phase_ba = tbl
-        .phase_b_a_backfill("idx_name", index_def.clone(), 1000)
+        .phase_b_a_backfill("idx_name", index_def.clone(), 1000, &permit)
         .await
         .expect("phase_b_a_backfill should succeed")
         .expect("online build should succeed");
@@ -234,7 +237,7 @@ async fn p1088_phase_c_d_update_to_different_value_during_window() {
         .expect("set should succeed");
 
     // Run Phase C+D.
-    tbl.phase_c_d_catchup_and_publish(name_interned, phase_ba)
+    tbl.phase_c_d_catchup_and_publish(name_interned, phase_ba, &permit)
         .await
         .expect("phase_c_d_catchup_and_publish should succeed");
 
@@ -302,8 +305,9 @@ async fn p1088_phase_c_d_delete_during_window() {
     let name_interned = index_def.name_interned;
 
     // Run Phase B+A.
+    let permit = tbl.write_domain.admit().await.unwrap();
     let phase_ba = tbl
-        .phase_b_a_backfill("idx_name", index_def.clone(), 1000)
+        .phase_b_a_backfill("idx_name", index_def.clone(), 1000, &permit)
         .await
         .expect("phase_b_a_backfill should succeed")
         .expect("online build should succeed");
@@ -314,7 +318,7 @@ async fn p1088_phase_c_d_delete_during_window() {
         .expect("delete should succeed");
 
     // Run Phase C+D.
-    tbl.phase_c_d_catchup_and_publish(name_interned, phase_ba)
+    tbl.phase_c_d_catchup_and_publish(name_interned, phase_ba, &permit)
         .await
         .expect("phase_c_d_catchup_and_publish should succeed");
 
@@ -360,8 +364,9 @@ async fn p1088_phase_c_d_hard_iteration_cap() {
     let name_interned = index_def.name_interned;
 
     // Run Phase B+A.
+    let permit = tbl.write_domain.admit().await.unwrap();
     let phase_ba = tbl
-        .phase_b_a_backfill("idx_name", index_def.clone(), 1000)
+        .phase_b_a_backfill("idx_name", index_def.clone(), 1000, &permit)
         .await
         .expect("phase_b_a_backfill should succeed")
         .expect("online build should succeed");
@@ -381,7 +386,7 @@ async fn p1088_phase_c_d_hard_iteration_cap() {
     }
 
     // Run Phase C+D.
-    tbl.phase_c_d_catchup_and_publish(name_interned, phase_ba)
+    tbl.phase_c_d_catchup_and_publish(name_interned, phase_ba, &permit)
         .await
         .expect("phase_c_d_catchup_and_publish should succeed");
 
@@ -434,14 +439,15 @@ async fn p1088_phase_c_d_post_phase_d_normal_writes() {
     let name_interned = index_def.name_interned;
 
     // Run Phase B+A.
+    let permit = tbl.write_domain.admit().await.unwrap();
     let phase_ba = tbl
-        .phase_b_a_backfill("idx_name", index_def.clone(), 1000)
+        .phase_b_a_backfill("idx_name", index_def.clone(), 1000, &permit)
         .await
         .expect("phase_b_a_backfill should succeed")
         .expect("online build should succeed");
 
     // Run Phase C+D.
-    tbl.phase_c_d_catchup_and_publish(name_interned, phase_ba)
+    tbl.phase_c_d_catchup_and_publish(name_interned, phase_ba, &permit)
         .await
         .expect("phase_c_d_catchup_and_publish should succeed");
 

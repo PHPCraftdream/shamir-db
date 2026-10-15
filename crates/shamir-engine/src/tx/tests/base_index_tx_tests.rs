@@ -90,7 +90,7 @@ async fn apply_staged_index_ops(info_store: &Arc<dyn Store>, tx: &TxContext) {
 #[tokio::test]
 async fn committed_tx_populates_secondary_index() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     repo.create_index("t", "by_name", &["name"]).await.unwrap();
     let name_id = key_id(&tbl, "name").await;
@@ -125,7 +125,7 @@ async fn committed_tx_populates_secondary_index() {
 #[tokio::test]
 async fn committed_tx_populates_sorted_index() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_sorted_index("by_age", &["age"]).await.unwrap();
     let age_id = key_id(&tbl, "age").await;
@@ -166,7 +166,7 @@ async fn committed_tx_populates_sorted_index() {
 #[tokio::test]
 async fn dropped_tx_no_secondary_postings() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     repo.create_index("t", "by_name", &["name"]).await.unwrap();
     let name_id = key_id(&tbl, "name").await;
@@ -200,7 +200,7 @@ async fn dropped_tx_no_secondary_postings() {
 #[tokio::test]
 async fn committed_tx_populates_unique_index_and_rejects_duplicate() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -246,7 +246,7 @@ async fn committed_tx_populates_unique_index_and_rejects_duplicate() {
 #[tokio::test]
 async fn staged_keys_match_non_tx_planner_output() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     repo.create_index("t", "by_name", &["name"]).await.unwrap();
     tbl.create_sorted_index("by_name_sorted", &["name"])
@@ -323,7 +323,7 @@ async fn concurrent_tx_unique_violation_one_aborts() {
     use crate::tx::CommitError;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -389,7 +389,7 @@ async fn concurrent_tx_unique_violation_one_aborts() {
 #[tokio::test]
 async fn tx_update_to_own_unique_value_is_not_violation() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -431,7 +431,7 @@ async fn intra_tx_unique_collision_silently_overwrites() {
     use crate::tx::CommitError;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -490,7 +490,7 @@ async fn intra_tx_unique_collision_across_two_batches() {
     use crate::tx::CommitError;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -532,7 +532,7 @@ async fn intra_tx_unique_collision_across_two_batches() {
 #[tokio::test]
 async fn intra_tx_self_write_same_key_is_not_violation() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -588,7 +588,7 @@ async fn intra_tx_self_write_same_key_is_not_violation() {
 #[tokio::test]
 async fn intra_tx_two_different_unique_indexes_no_collision() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -658,7 +658,7 @@ async fn intra_tx_two_different_unique_indexes_no_collision() {
 /// `(K_x, A)` then `(K_x, B)` (different owners) and aborted, even though A
 /// had legitimately moved off `x` before B claimed it.
 ///
-/// ```
+/// ```text
 /// INSERT A {email: "x"}   → guard (K_x, A), SetPosting(K_x, A)
 /// UPDATE A SET email = "z" → guard (K_z, A), RemovePosting(K_x), SetPosting(K_z, A)
 /// INSERT B {email: "x"}   → guard (K_x, B), SetPosting(K_x, B)
@@ -667,7 +667,7 @@ async fn intra_tx_two_different_unique_indexes_no_collision() {
 #[tokio::test]
 async fn intra_tx_update_off_then_reclaim_same_key() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -723,7 +723,7 @@ async fn intra_tx_update_off_then_reclaim_same_key() {
 /// (from the two inserts) and false-rejected — the delete's RemovePosting was
 /// invisible to the claims-only check.
 ///
-/// ```
+/// ```text
 /// INSERT A {email: "x"} → guard (K_x, A), SetPosting(K_x, A)
 /// DELETE A              → RemovePosting(K_x)   [no guard pushed]
 /// INSERT B {email: "x"} → guard (K_x, B), SetPosting(K_x, B)
@@ -731,7 +731,7 @@ async fn intra_tx_update_off_then_reclaim_same_key() {
 #[tokio::test]
 async fn intra_tx_delete_then_reclaim_same_key() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await

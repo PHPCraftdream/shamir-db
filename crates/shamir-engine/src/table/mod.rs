@@ -50,7 +50,10 @@ pub use migration_freeze_guard::MigrationFreezeGuard;
 pub use persistable::{PersistRegistry, Persistable};
 pub use record_counter::RecordCounter;
 pub use table_config::TableConfig;
-pub use table_manager::{table_token_for, TableManager, WriteBarrierGuard};
+pub use table_manager::{
+    table_token_for, Index2ReadView, InternerReadView, TableDataStoreReadView,
+    TableInfoStoreReadView, TableManager, ValidatorRegistryReadView, WriteBarrierGuard,
+};
 
 #[cfg(test)]
 pub use table::Table;

@@ -52,7 +52,7 @@ async fn empty_tables_exact_keys_nested_bindings_and_tiny_chunks() {
     let manager = repo.repo_interner().await.unwrap();
     let interner = manager.get().await.unwrap();
     let payload = nested_payload(interner);
-    let mvcc = table.mvcc_store().unwrap();
+    let mvcc = table.mvcc_store_for_test().unwrap();
     let keys = [vec![0, 255, 1, 2], vec![1, 0, 128], vec![2, 255, 255]];
     for key in &keys {
         mvcc.set_versioned_no_wait(
@@ -200,7 +200,7 @@ async fn corrupt_missing_bindings_deleted_and_aborted_rows() {
     let source = fixture().await;
     let repo = source.get_db("app").unwrap().get_repo("main").unwrap();
     let table = repo.get_table("rows").await.unwrap();
-    let mvcc = table.mvcc_store().unwrap();
+    let mvcc = table.mvcc_store_for_test().unwrap();
     let manager = repo.repo_interner().await.unwrap();
     let payload = nested_payload(manager.get().await.unwrap());
     let key = [3, 4, 5];

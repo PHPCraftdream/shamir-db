@@ -7,10 +7,9 @@ use shamir_collections::TFxMap;
 use shamir_connect::common::push_envelope::{PushEnvelope, PushKind};
 use shamir_connect::server::conn_services::PushSink;
 use shamir_db::access::{Action, Actor, ResourcePath};
-use shamir_db::core::interner::Interner;
-use shamir_db::record_view::{RecordRef, RecordView};
+use shamir_db::engine::table::InternerReadView;
 use shamir_db::shamir_db::ChangelogDeliveryGate;
-use shamir_db::types::value::{InnerValue, QueryValue};
+use shamir_db::types::value::QueryValue;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::query::Query;
@@ -20,7 +19,6 @@ use shamir_query_types::subscribe::deliver_mode::DeliverMode;
 use shamir_query_types::subscribe::event_mask::EventMask;
 use shamir_query_types::subscribe::source::SubscriptionSource;
 use shamir_tx::ChangeOp;
-use tokio::sync::OnceCell;
 
 use super::db_journal_source::DbJournalSource;
 use super::decode_cache::{cache_evict_up_to, cache_get, cache_insert, CachedBytes};
@@ -62,19 +60,11 @@ impl Drop for SubscriptionSlotGuard {
 
 /// Convert cached raw bytes + interner to a `QueryValue` for delivery.
 ///
-/// Tries the zero-copy `RecordView` lens first; falls back to full
-/// `InnerValue` decode for bare-scalar / non-map records.
-fn bytes_to_query_value(bytes: &[u8], interner_cell: &OnceCell<Interner>) -> Option<QueryValue> {
-    let interner = interner_cell.get()?;
-    // Try RecordView (zero-copy lens) first.
-    if let Ok(view) = RecordView::new(bytes) {
-        // `to_query_value` returns QueryValue::Null on de-intern error;
-        // for a valid map that's the best we can do — return it.
-        return Some(view.to_query_value(interner));
-    }
-    // Fallback: full InnerValue decode for non-map records.
-    let inner = InnerValue::from_bytes(bytes).ok()?;
-    Some(inner.to_query_value(interner))
+/// Delegates to the read view's engine-side decoder (zero-copy `RecordView`
+/// lens first; full `InnerValue` decode fallback for bare-scalar / non-map
+/// records).
+fn bytes_to_query_value(bytes: &[u8], interner: &InternerReadView) -> Option<QueryValue> {
+    interner.record_bytes_to_query_value(bytes)
 }
 
 /// Bridge task: subscribes to the changefeed broadcast for the relevant
@@ -294,9 +284,9 @@ pub(crate) async fn bridge_task(
                                     cached
                                 } else {
                                     let entry = db
-                                        .get_table_interner_cell(db_name, repo, &change.table)
+                                        .get_table_interner_read_view(db_name, repo, &change.table)
                                         .await
-                                        .map(|interner_cell| (bytes_to_arc(bytes), interner_cell));
+                                        .map(|interner| (bytes_to_arc(bytes), interner));
                                     cache_insert(
                                         db_disc,
                                         repo,

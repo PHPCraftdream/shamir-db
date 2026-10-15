@@ -61,7 +61,7 @@ async fn reopen_disk_repo(name: &str, path: PathBuf, tables: Vec<TableConfig>) -
 #[tokio::test(flavor = "current_thread")]
 async fn durable_lags_visibility_but_overlay_serves_read() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let gate = repo.tx_gate().await.unwrap();
     let token = table_token_for("t");
@@ -132,7 +132,7 @@ async fn durable_lags_visibility_but_overlay_serves_read() {
 #[tokio::test(flavor = "current_thread")]
 async fn commit_then_drain_all_makes_value_durable_in_history() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let gate = repo.tx_gate().await.unwrap();
     let token = table_token_for("t");
@@ -267,7 +267,7 @@ async fn reopen_recovery_without_drain_reconstructs_history() {
 #[tokio::test(flavor = "current_thread")]
 async fn async_index_tail_must_not_truncate_drainer_converges() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let gate = repo.tx_gate().await.unwrap();
     let token = table_token_for("t");

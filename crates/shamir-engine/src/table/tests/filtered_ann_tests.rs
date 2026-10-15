@@ -127,7 +127,7 @@ fn embeddings_in_order(result: &crate::query::read::QueryResult) -> Vec<Vec<f32>
 #[serial_test::serial]
 async fn bare_vector_similarity_still_works() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     tbl.create_index_v2(&vector_index_op(2)).await.unwrap();
 
@@ -172,7 +172,7 @@ async fn bare_vector_similarity_still_works() {
 /// vectors degenerate the graph).
 async fn setup_two_cluster(n_per_cluster: usize) -> (RepoInstance, TableManager) {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     tbl.create_index_v2(&vector_index_op(8)).await.unwrap();
 
@@ -296,7 +296,7 @@ async fn filtered_ann_50pct_selectivity_correct() {
 #[serial_test::serial]
 async fn filtered_ann_low_selectivity_finds_rare() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     tbl.create_index_v2(&vector_index_op(8)).await.unwrap();
 
@@ -445,7 +445,7 @@ async fn filtered_ann_no_match_terminates_with_empty() {
 #[serial_test::serial]
 async fn oversample_higher_yields_at_least_as_many() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     tbl.create_index_v2(&vector_index_op(8)).await.unwrap();
 
@@ -537,7 +537,7 @@ async fn oversample_higher_yields_at_least_as_many() {
 #[serial_test::serial]
 async fn tx_staged_vector_visible_and_filtered() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     tbl.create_index_v2(&vector_index_op(2)).await.unwrap();
 
@@ -627,7 +627,7 @@ fn vec_record_with_price(
 #[serial_test::serial]
 async fn c1_partial_index_coverage_enforces_unindexed_predicate() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     tbl.create_index_v2(&vector_index_op(4)).await.unwrap();
     // base_index btree index on "tag" only — "price" is NOT indexed.
@@ -753,7 +753,7 @@ async fn commit_cluster(tbl: &TableManager, emb_id: u64, tag_id: u64, tag: &str,
 #[serial_test::serial]
 async fn vr5_prefilter_sees_staged_and_filters_residual() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     tbl.create_index_v2(&vector_index_op(2)).await.unwrap();
     // base_index btree on `tag` so `try_plan_index_scan` resolves `eq(tag, ...)`.
@@ -856,7 +856,7 @@ fn vr5_cofilter_production_thresholds_unchanged() {
 #[serial_test::serial]
 async fn vr5_cofilter_sees_staged_and_filters_residual() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let mut tbl = repo.get_table("vecs").await.unwrap();
     assert_eq!(tbl.filtered_ann_thresholds, None);
     tbl.filtered_ann_thresholds = Some((16, 0.15));
@@ -953,7 +953,7 @@ async fn vr5_cofilter_sees_staged_and_filters_residual() {
 #[serial_test::serial]
 async fn vr5_postfilter_sees_staged_and_filters_residual() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     // Vector index only — NO btree on `tag`, so no candidate_rids → post-filter.
     tbl.create_index_v2(&vector_index_op(2)).await.unwrap();
@@ -1033,7 +1033,7 @@ async fn vr5_postfilter_sees_staged_and_filters_residual() {
 #[tokio::test]
 async fn vr5_prefilter_update_in_tx_no_duplicate_rid() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     tbl.create_index_v2(&vector_index_op(2)).await.unwrap();
     tbl.create_index("tag_idx", &["tag"]).await.unwrap();

@@ -78,7 +78,7 @@ fn record_with_str(key: u64, val: &str) -> InnerValue {
 #[tokio::test]
 async fn insert_blocks_on_schema_activation_barrier_until_released() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let name_field = key_id(&tbl, "name").await;
 
@@ -161,7 +161,7 @@ async fn insert_blocks_on_schema_activation_barrier_until_released() {
 #[tokio::test]
 async fn without_barrier_flag_writer_takes_lock_free_path() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let name_field = key_id(&tbl, "name").await;
 
@@ -208,7 +208,7 @@ async fn without_barrier_flag_writer_takes_lock_free_path() {
 #[tokio::test]
 async fn f48_drain_catches_writer_that_read_false_before_flag_went_up() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let name_field = key_id(&tbl, "name").await;
 

@@ -59,7 +59,7 @@ fn record_with_two_str(key1: u64, val1: &str, key2: u64, val2: &str) -> InnerVal
 #[tokio::test]
 async fn stale_snapshot_delete_leaves_dangling_posting() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -175,7 +175,7 @@ async fn stale_snapshot_delete_leaves_dangling_posting() {
 #[tokio::test]
 async fn stale_snapshot_update_leaves_dangling_posting() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -292,7 +292,7 @@ async fn stale_snapshot_update_leaves_dangling_posting() {
 #[tokio::test]
 async fn delete_without_concurrent_change_works() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -347,7 +347,7 @@ async fn delete_without_concurrent_change_works() {
 #[tokio::test]
 async fn update_without_concurrent_change_works() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -405,7 +405,7 @@ async fn update_without_concurrent_change_works() {
 #[tokio::test]
 async fn unique_update_dedup_owner_blind() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_unique_index("by_email", &["email"])
         .await
@@ -568,7 +568,7 @@ async fn unique_update_dedup_owner_blind() {
 #[tokio::test]
 async fn regular_index_delete_from_stale_snapshot() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     tbl.create_index("by_email", &["email"]).await.unwrap();
     let email_index = key_id(&tbl, "by_email").await;

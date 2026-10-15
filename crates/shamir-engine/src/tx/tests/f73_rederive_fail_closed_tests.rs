@@ -206,7 +206,7 @@ async fn stage_update(
 #[tokio::test]
 async fn index2_storage_read_error_aborts_commit_no_partial_state() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let token = crate::table::table_manager::table_token_for("t");
     let name_key = key_id(&tbl, "name").await;
@@ -292,7 +292,7 @@ async fn index2_storage_read_error_aborts_commit_no_partial_state() {
 #[tokio::test]
 async fn index2_decode_error_aborts_commit_no_partial_state() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let name_key = key_id(&tbl, "name").await;
 
@@ -351,7 +351,7 @@ async fn index2_decode_error_aborts_commit_no_partial_state() {
 #[tokio::test]
 async fn sorted_storage_read_error_aborts_commit_no_partial_state() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let token = crate::table::table_manager::table_token_for("t");
     let name_key = key_id(&tbl, "name").await;
@@ -429,7 +429,7 @@ async fn sorted_storage_read_error_aborts_commit_no_partial_state() {
 #[tokio::test]
 async fn sorted_decode_error_aborts_commit_no_partial_state() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let name_key = key_id(&tbl, "name").await;
 
@@ -487,7 +487,7 @@ async fn sorted_decode_error_aborts_commit_no_partial_state() {
 #[tokio::test]
 async fn quiescent_update_with_hook_installed_but_unarmed_commits_normally() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let name_key = key_id(&tbl, "name").await;
 

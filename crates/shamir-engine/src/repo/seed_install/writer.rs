@@ -86,6 +86,11 @@ impl SeedImageWriter {
                 "seed destination contains existing stores".into(),
             ));
         }
+        let permit = repo
+            .write_domain()
+            .admit()
+            .await
+            .map_err(|error| DbError::Internal(error.to_string()))?;
         let info = repo.tx_info_store().await?;
         if repo.table_count() != 0
             || SeedInstallState::load(&info).await?.is_some()
@@ -130,10 +135,14 @@ impl SeedImageWriter {
         save_next_tx_id_snapshot(&info, 1).await?;
         save_last_committed_flushed(&info, 1).await?;
         // Destination identity is minted locally; the source stays in receipt.
-        repo.repo_identity().await?;
+        // Round-12 audit: the Round-11 pins here are reverted — the seed
+        // writer runs in the CLI seed-install child process, never on the
+        // main-thread server poll chain, and its admitted twins are already
+        // shallow (identity load / table lookup). No heap pinning needed.
+        repo.repo_identity_admitted(&permit).await?;
         for table in &tables {
-            repo.add_table(table.config());
-            let manager = repo.get_table(&table.name).await?;
+            repo.add_table_admitted(table.config(), &permit).await?;
+            let manager = repo.get_table_admitted(&table.name, &permit).await?;
             if manager.mvcc_store().is_none() || manager.has_any_index() {
                 return Err(DbError::Storage(
                     "seed destination must be index-free MVCC".into(),

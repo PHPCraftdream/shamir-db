@@ -1105,7 +1105,7 @@ impl Drainer {
                             tbl.begin_write_barrier(
                                 crate::index::write_barrier_flags::SCHEMA_ACTIVATION,
                             )
-                            .await,
+                            .await?,
                         )
                     } else {
                         None

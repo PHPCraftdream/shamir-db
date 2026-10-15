@@ -120,13 +120,14 @@ pub(crate) async fn publications(home: &ShamirDb) -> Result<Vec<CreatePublicatio
         .publications_table()
         .await
         .map_err(|e| ReplError::Transport(e.to_string()))?;
-    let interner = table
-        .interner()
-        .get()
+    let refs = shamir_collections::TMap::default();
+    // S5c-X F1 (Round 6): the FilterContext is built engine-side; no
+    // `&Interner` crosses the boundary.
+    let ctx = table
+        .info_store_read_view()
+        .filter_context(&refs)
         .await
         .map_err(|e| ReplError::Transport(e.to_string()))?;
-    let refs = shamir_collections::TMap::default();
-    let ctx = shamir_db::query::filter::FilterContext::new(interner, &refs);
     let result = table
         .read(
             &shamir_db::query::read::ReadQuery::new("publications"),

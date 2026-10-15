@@ -114,7 +114,7 @@ async fn f72_regular_index_planner_invisible_during_backfill() {
     use crate::table::index2_backfill_hook::BackfillPauseHook;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("people"));
+    repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let status_key = key_id(&tbl, "status").await;
     let id_key = key_id(&tbl, "id").await;
@@ -218,7 +218,7 @@ async fn f72_regular_index_planner_invisible_during_backfill() {
 #[tokio::test]
 async fn f72_sorted_index_planner_invisible_during_backfill() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("nums"));
+    repo.add_table_for_test(TableConfig::new("nums"));
     let tbl = repo.get_table("nums").await.unwrap();
     let score_key = key_id(&tbl, "score").await;
 

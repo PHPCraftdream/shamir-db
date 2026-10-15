@@ -23,7 +23,7 @@ use super::helpers::{make_repo, test_bound_key, test_posting_key};
 #[tokio::test]
 async fn phantom_via_update_into_range_aborts() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
     let table_token = table_token_for("users");
 

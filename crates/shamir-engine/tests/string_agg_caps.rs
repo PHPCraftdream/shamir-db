@@ -2,7 +2,6 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use shamir_engine::query::filter::FilterContext;
 use shamir_engine::table::TableManager;
 use shamir_query_builder::val::lit;
 use shamir_query_builder::{query::Query, select};
@@ -109,9 +108,13 @@ async fn string_agg_200_rows_stays_within_100_kib_allocation_cap() {
     for _ in 0..200 {
         table.insert(&InnerValue::Map(new_map())).await.unwrap();
     }
-    let interner = table.interner().get().await.unwrap();
     let refs = new_map();
-    let ctx = FilterContext::new(interner, &refs).with_max_accumulator_bytes(100 * 1024);
+    let ctx = table
+        .info_store_read_view()
+        .filter_context(&refs)
+        .await
+        .unwrap()
+        .with_max_accumulator_bytes(100 * 1024);
     let query = Query::from("t")
         .select([select::agg_fn_with_args_of(
             "string_agg",

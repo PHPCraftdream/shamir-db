@@ -58,8 +58,8 @@ async fn bounded(repo: &RepoInstance, handle: &ChangefeedHandle, from: u64) -> J
 
 async fn park_before_broadcast(visibility: CommitVisibility) {
     let repo = fixture();
-    repo.add_table(TableConfig::new("a"));
-    repo.add_table(TableConfig::new("b"));
+    repo.add_table_for_test(TableConfig::new("a"));
+    repo.add_table_for_test(TableConfig::new("b"));
     let a = repo.get_table("a").await.unwrap();
     let b = repo.get_table("b").await.unwrap();
     let handle = repo.changefeed().await.unwrap();
@@ -287,7 +287,7 @@ async fn journal_disjoint_tables_eight_by_fifty_bounded_pulls_lose_no_versions()
     let mut workers = Vec::with_capacity(8);
     for worker in 0..8 {
         let name = format!("t{worker}");
-        repo.add_table(TableConfig::new(name.clone()));
+        repo.add_table_for_test(TableConfig::new(name.clone()));
         let table = repo.get_table(&name).await.unwrap();
         let owned = repo.clone();
         let barrier = barrier.clone();

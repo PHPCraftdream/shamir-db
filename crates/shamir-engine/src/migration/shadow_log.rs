@@ -41,6 +41,14 @@ pub struct ShadowEntry {
 const SHADOW_LOG_VERSION: u8 = 0x01;
 
 /// Encode a `ShadowEntry` as `[VERSION_BYTE | bincode(entry)]`.
+///
+/// Round 8: `#[cfg(test)]` — the only writers of shadow entries are the
+/// engine tests that seed the log. Production never appends: commit
+/// `0c59f555` (#1220) froze source writes for the whole migration instead
+/// of building write interception, so the shadow log is currently
+/// test-seeded and drained (`read_from`) only. Restore to non-test code
+/// together with `append` when real write interception lands.
+#[cfg(test)]
 fn encode_entry(entry: &ShadowEntry) -> DbResult<Bytes> {
     let body =
         bincode::serialize(entry).map_err(|e| DbError::Codec(format!("shadow_log encode: {e}")))?;
@@ -123,7 +131,15 @@ impl MigrationShadowLog {
         self.next_lsn.load(Ordering::Relaxed)
     }
 
-    pub async fn append(&self, op: ShadowOp) -> DbResult<u64> {
+    /// Round 8: `#[cfg(test)]` — the only writers of shadow entries are the
+    /// engine tests that seed the log. Production never appends: commit
+    /// `0c59f555` (#1220) froze source writes for the whole migration
+    /// instead of building write interception (master's `append` was `pub`
+    /// and likewise had zero non-test callers — the Round 6 `pub(crate)`
+    /// demotion merely exposed that). Restore to non-test code when real
+    /// write interception lands.
+    #[cfg(test)]
+    pub(crate) async fn append(&self, op: ShadowOp) -> DbResult<u64> {
         let lsn = self.next_lsn.fetch_add(1, Ordering::Relaxed);
         let entry = ShadowEntry { lsn, op };
         let key = self.entry_key(lsn);
@@ -132,7 +148,9 @@ impl MigrationShadowLog {
         Ok(lsn)
     }
 
-    pub async fn append_batch(&self, ops: Vec<ShadowOp>) -> DbResult<Vec<u64>> {
+    /// Round 8: `#[cfg(test)]` — test seeding helper only (see `append`).
+    #[cfg(test)]
+    pub(crate) async fn append_batch(&self, ops: Vec<ShadowOp>) -> DbResult<Vec<u64>> {
         if ops.is_empty() {
             return Ok(vec![]);
         }
@@ -176,7 +194,8 @@ impl MigrationShadowLog {
         Ok(entries)
     }
 
-    pub async fn purge(&self) -> DbResult<u64> {
+    /// S5c-X F3 (Round 6): `pub(crate)` — mutating, engine-internal only.
+    pub(crate) async fn purge(&self) -> DbResult<u64> {
         let prefix = self.key_prefix();
         let mut keys = Vec::new();
         let mut stream = self.store.scan_prefix_stream(prefix, MAINT_SCAN_BATCH);
@@ -200,6 +219,9 @@ impl MigrationShadowLog {
         ShadowKey::scan_prefix(migration_id)
     }
 
+    /// Round 8: `#[cfg(test)]` — helper of the test-only `append`/
+    /// `append_batch` seeding path.
+    #[cfg(test)]
     fn entry_key(&self, lsn: u64) -> shamir_storage::types::RecordKey {
         ShadowKey::new(&self.migration_id, lsn).to_record_key()
     }

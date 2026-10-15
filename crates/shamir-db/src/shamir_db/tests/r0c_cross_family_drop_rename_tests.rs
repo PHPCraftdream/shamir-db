@@ -35,7 +35,7 @@ async fn setup_with_collision() -> ShamirDb {
     let db = shamir.get_db("testdb").unwrap();
     let table = db.get_table("main", "items").await.unwrap();
 
-    let interner = table.interner().get().await.unwrap();
+    let interner = table.interner_for_test().get().await.unwrap();
     let city_key = match interner.touch_ind("city").unwrap() {
         TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
     };
@@ -49,7 +49,11 @@ async fn setup_with_collision() -> ShamirDb {
         name_interned,
         vec![city_key],
     );
-    table.sorted_indexes().register(sorted_def).await.unwrap();
+    table
+        .sorted_indexes_for_test()
+        .register(sorted_def)
+        .await
+        .unwrap();
 
     shamir
 }

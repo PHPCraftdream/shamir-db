@@ -128,10 +128,11 @@ async fn p1060_crash_inside_phase_b() {
     tbl.set_phase_b_pause_hook(Some(Arc::clone(&pause_hook)));
 
     // Race phase_b_a_backfill against the pause hook.
+    let permit = tbl.write_domain.admit().await.unwrap();
     let tbl_c = tbl.clone();
     let index_def_c = index_def.clone();
     tokio::select! {
-        _ = tbl_c.phase_b_a_backfill("idx_name", index_def_c, 1000) => {
+        _ = tbl_c.phase_b_a_backfill("idx_name", index_def_c, 1000, &permit) => {
             panic!("phase_b_a_backfill completed before the pause hook fired");
         }
         _ = pause_hook.wait_until_parked() => {
@@ -216,10 +217,11 @@ async fn p1060_crash_inside_phase_a() {
         .store(Some(Arc::clone(&pause_hook)));
 
     // Race phase_b_a_backfill against the pause hook (batch_size = 1 to ensure ≥2 batches).
+    let permit = tbl.write_domain.admit().await.unwrap();
     let tbl_c = tbl.clone();
     let index_def_c = index_def.clone();
     tokio::select! {
-        _ = tbl_c.phase_b_a_backfill("idx_name", index_def_c, 1) => {
+        _ = tbl_c.phase_b_a_backfill("idx_name", index_def_c, 1, &permit) => {
             panic!("phase_b_a_backfill completed before the pause hook fired");
         }
         _ = pause_hook.wait_until_parked() => {
@@ -294,8 +296,9 @@ async fn p1060_crash_inside_phase_c() {
     let name_interned = index_def.name_interned;
 
     // Run Phase B+A to completion (uninterrupted).
+    let permit = tbl.write_domain.admit().await.unwrap();
     let phase_ba = tbl
-        .phase_b_a_backfill("idx_name", index_def, 1000)
+        .phase_b_a_backfill("idx_name", index_def, 1000, &permit)
         .await
         .expect("phase_b_a_backfill should succeed")
         .expect("online build should succeed");
@@ -307,7 +310,7 @@ async fn p1060_crash_inside_phase_c() {
     // Race phase_c_d_catchup_and_publish against the pause hook.
     let tbl_c = tbl.clone();
     tokio::select! {
-        _ = tbl_c.phase_c_d_catchup_and_publish(name_interned, phase_ba) => {
+        _ = tbl_c.phase_c_d_catchup_and_publish(name_interned, phase_ba, &permit) => {
             panic!("phase_c_d_catchup_and_publish completed before the pause hook fired");
         }
         _ = pause_hook.wait_until_parked() => {
@@ -386,8 +389,9 @@ async fn p1060_crash_inside_phase_d() {
     let name_interned = index_def.name_interned;
 
     // Run Phase B+A to completion (uninterrupted).
+    let permit = tbl.write_domain.admit().await.unwrap();
     let phase_ba = tbl
-        .phase_b_a_backfill("idx_name", index_def, 1000)
+        .phase_b_a_backfill("idx_name", index_def, 1000, &permit)
         .await
         .expect("phase_b_a_backfill should succeed")
         .expect("online build should succeed");
@@ -399,7 +403,7 @@ async fn p1060_crash_inside_phase_d() {
     // Race phase_c_d_catchup_and_publish against the pause hook.
     let tbl_c = tbl.clone();
     tokio::select! {
-        _ = tbl_c.phase_c_d_catchup_and_publish(name_interned, phase_ba) => {
+        _ = tbl_c.phase_c_d_catchup_and_publish(name_interned, phase_ba, &permit) => {
             panic!("phase_c_d_catchup_and_publish completed before the pause hook fired");
         }
         _ = pause_hook.wait_until_parked() => {
@@ -487,14 +491,15 @@ async fn p1060_after_ready_before_cleanup() {
     let name_interned = index_def.name_interned;
 
     // Run Phase B+A to completion (uninterrupted).
+    let permit = tbl.write_domain.admit().await.unwrap();
     let phase_ba = tbl
-        .phase_b_a_backfill("idx_name", index_def, 1000)
+        .phase_b_a_backfill("idx_name", index_def, 1000, &permit)
         .await
         .expect("phase_b_a_backfill should succeed")
         .expect("online build should succeed");
 
     // Run Phase C+D to completion (uninterrupted).
-    tbl.phase_c_d_catchup_and_publish(name_interned, phase_ba)
+    tbl.phase_c_d_catchup_and_publish(name_interned, phase_ba, &permit)
         .await
         .expect("phase_c_d_catchup_and_publish should succeed");
 

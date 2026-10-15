@@ -95,15 +95,16 @@ async fn explicit_pin_online_build_keeps_completed_row_above_published_marker() 
     };
     assert_eq!(mvcc.get_at(&rid.to_bytes(), 9).await.unwrap(), None);
     assert!(mvcc.get_at(&rid.to_bytes(), 11).await.unwrap().is_some());
+    let permit = tbl.write_domain.admit().await.unwrap();
     let phase = tbl
-        .phase_b_a_backfill("idx_name", def, 1)
+        .phase_b_a_backfill("idx_name", def, 1, &permit)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(phase.pin, 11, "DDL must not inherit the transaction pin");
     assert_eq!(phase.guard.version(), phase.pin);
     assert!(!gate.active_snapshots_empty());
-    tbl.phase_c_d_catchup_and_publish(name, phase)
+    tbl.phase_c_d_catchup_and_publish(name, phase, &permit)
         .await
         .unwrap();
     assert!(gate.active_snapshots_empty(), "C/D releases the build pin");
@@ -137,7 +138,8 @@ async fn explicit_pin_is_read_after_writer_drain() {
         state: IndexState::Building,
         instance_epoch: 0,
     };
-    let build = tbl.phase_b_a_backfill("idx_drain", def, 1);
+    let permit = tbl.write_domain.admit().await.unwrap();
+    let build = tbl.phase_b_a_backfill("idx_drain", def, 1, &permit);
     futures::pin_mut!(build);
     assert!(build.as_mut().now_or_never().is_none());
     let later = gate.assign_next_version_guarded();

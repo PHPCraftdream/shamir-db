@@ -206,9 +206,8 @@ async fn execute_batch(
 
 fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());
-    let instance = RepoInstance::new("bench".into(), BoxRepo::InMemory(repo), Vec::new());
-    instance.add_table(TableConfig::new("bench_table".to_string()));
-    instance
+    let tables = vec![TableConfig::new("bench_table".to_string())];
+    RepoInstance::new("bench".into(), BoxRepo::InMemory(repo), tables)
 }
 
 fn make_mvcc() -> Arc<MvccStore> {
@@ -285,13 +284,12 @@ fn main() {
             &format!("disjoint_tables/n_{n}"),
             move || async move {
                 let storage = Arc::new(InMemoryRepo::new());
-                let repo =
-                    RepoInstance::new("bench".into(), BoxRepo::InMemory(storage), Vec::new());
+                let names: Vec<String> = (0..n).map(|w| format!("writer_{w}")).collect();
+                let configs = names.iter().cloned().map(TableConfig::new).collect();
+                let repo = RepoInstance::new("bench".into(), BoxRepo::InMemory(storage), configs);
                 let mut tables = Vec::with_capacity(n);
-                for w in 0..n {
-                    let name = format!("writer_{w}");
-                    repo.add_table(TableConfig::new(name.clone()));
-                    tables.push(repo.get_table(&name).await.unwrap());
+                for name in &names {
+                    tables.push(repo.get_table(name).await.unwrap());
                 }
                 (repo, tables)
             },

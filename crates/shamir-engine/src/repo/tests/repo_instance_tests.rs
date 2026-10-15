@@ -245,7 +245,7 @@ async fn table_by_token_is_constant_time_and_correct() {
 
     // A batch added dynamically after construction.
     for i in 0..50 {
-        instance.add_table(TableConfig::new(format!("tbl_dyn_{i}")));
+        instance.add_table_for_test(TableConfig::new(format!("tbl_dyn_{i}")));
     }
 
     // Every registered name resolves by its deterministic token to itself.
@@ -285,7 +285,7 @@ async fn table_by_token_drops_with_remove_table() {
 
     // After removing the config, the token must no longer resolve — a
     // stale reverse-index entry must not resurrect a dropped table.
-    assert!(instance.remove_table("alpha"));
+    assert!(instance.remove_table_for_test("alpha"));
     assert!(instance
         .table_by_token(alpha_token)
         .await
@@ -303,8 +303,8 @@ async fn add_table_twice_is_idempotent_for_token_lookup() {
     let repo = Arc::new(InMemoryRepo::new());
     let instance = RepoInstance::new("tt".into(), BoxRepo::InMemory(repo), vec![]);
 
-    instance.add_table(TableConfig::new("dup"));
-    instance.add_table(TableConfig::new("dup"));
+    instance.add_table_for_test(TableConfig::new("dup"));
+    instance.add_table_for_test(TableConfig::new("dup"));
 
     let token = table_token_for("dup");
     let resolved = instance.table_by_token(token).await.unwrap().unwrap();
@@ -540,7 +540,7 @@ async fn a13_remove_table_clears_per_table_mvcc_entry() {
     );
 
     // Drop the table — the stale registry entry must NOT survive.
-    assert!(instance.remove_table("users"));
+    assert!(instance.remove_table_for_test("users"));
     assert!(
         instance.per_table_mvcc().get_sync(&token).is_none(),
         "remove_table must evict the per_table_mvcc entry; a stale \
@@ -573,7 +573,7 @@ async fn a13_drop_then_recreate_write_visible_through_new_table() {
     use shamir_tx::IsolationLevel;
 
     let instance = create_test_instance();
-    instance.add_table(TableConfig::new("t"));
+    instance.add_table_for_test(TableConfig::new("t"));
 
     // Materialize the FIRST incarnation so per_table_mvcc[token("t")]
     // holds the OLD MvccStore.
@@ -585,10 +585,10 @@ async fn a13_drop_then_recreate_write_visible_through_new_table() {
     let _ = t1.get(seed_rid).await.unwrap();
 
     // === DROP the table ===
-    assert!(instance.remove_table("t"));
+    assert!(instance.remove_table_for_test("t"));
 
     // === RECREATE under the SAME name ===
-    instance.add_table(TableConfig::new("t"));
+    instance.add_table_for_test(TableConfig::new("t"));
     let t2 = instance.get_table("t").await.unwrap();
 
     // The TableManager holds a fresh MvccStore; the commit pipeline must
@@ -626,7 +626,7 @@ async fn a13_plain_drop_no_recreate_still_clean() {
     let token = table_token_for("users");
     assert!(instance.per_table_mvcc().get_sync(&token).is_some());
 
-    assert!(instance.remove_table("users"));
+    assert!(instance.remove_table_for_test("users"));
     assert!(!instance.has_table("users"));
     assert!(instance.get_table("users").await.is_err());
     assert!(

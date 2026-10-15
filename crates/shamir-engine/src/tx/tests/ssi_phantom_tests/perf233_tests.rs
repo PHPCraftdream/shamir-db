@@ -17,7 +17,7 @@ use super::helpers::make_repo;
 #[tokio::test]
 async fn perf233_nontx_footprint_skipped_without_serializable_snapshot() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let gate = repo.tx_gate().await.unwrap();
 

@@ -19,7 +19,7 @@ async fn parked_insert(abort_lower: bool) {
         BoxRepo::InMemory(Arc::new(InMemoryRepo::new())),
         Vec::new(),
     );
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let table = repo.get_table("t").await.unwrap();
     let gate = repo.tx_gate().await.unwrap();
     let mvcc = table.mvcc_store().unwrap();
@@ -56,7 +56,8 @@ async fn parked_insert(abort_lower: bool) {
     // Acquiring it while ack is pending proves the writer drain was released.
     let (barrier, lock) = table
         .begin_write_barrier(crate::index::write_barrier_flags::SCHEMA_ACTIVATION)
-        .await;
+        .await
+        .unwrap();
     drop(lock);
     drop(barrier);
     if abort_lower {
@@ -93,7 +94,7 @@ async fn non_tx_insert_already_visible_does_not_suspend() {
         BoxRepo::InMemory(Arc::new(InMemoryRepo::new())),
         Vec::new(),
     );
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let table = repo.get_table("t").await.unwrap();
     let gate = repo.tx_gate().await.unwrap();
     let value = InnerValue::Str("ready".into());

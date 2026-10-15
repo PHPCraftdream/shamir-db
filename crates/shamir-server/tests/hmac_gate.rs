@@ -221,7 +221,7 @@ async fn drop_table_tag_bound_to_target_table() {
     // Also seed a second table inside the same repo.
     {
         let db = shamir.get_db("prod").unwrap();
-        db.create_table("main", "other").unwrap();
+        db.create_table("main", "other").await.unwrap();
     }
     let handler = ShamirDbHandler::new(shamir);
     let session = root_session();

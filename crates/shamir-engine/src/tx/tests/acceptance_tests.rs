@@ -16,7 +16,7 @@ fn make_repo() -> RepoInstance {
 #[tokio::test]
 async fn si_happy_path_insert_commit_observer_reads() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
 
     let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
@@ -52,7 +52,7 @@ async fn si_happy_path_insert_commit_observer_reads() {
 #[tokio::test]
 async fn abort_path_drop_tx_no_side_effects() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
 
     let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
@@ -79,7 +79,7 @@ async fn abort_path_drop_tx_no_side_effects() {
 #[tokio::test]
 async fn read_inside_tx_sees_committed_and_own_staged_writes() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
 
     // Pre-populate a record outside tx.
@@ -124,7 +124,7 @@ async fn read_inside_tx_sees_committed_and_own_staged_writes() {
 #[tokio::test]
 async fn two_concurrent_commits_monotonic_versions() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
 
     let (mut tx1, _g1) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
@@ -151,8 +151,8 @@ async fn two_concurrent_commits_monotonic_versions() {
 #[tokio::test]
 async fn cross_table_internal_atomicity() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("users"));
-    repo.add_table(TableConfig::new("orders"));
+    repo.add_table_for_test(TableConfig::new("users"));
+    repo.add_table_for_test(TableConfig::new("orders"));
     let users = repo.get_table("users").await.unwrap();
     let orders = repo.get_table("orders").await.unwrap();
 
@@ -207,7 +207,7 @@ async fn ssi_conflict_detected_on_concurrent_tx_writes() {
     use crate::tx::CommitError;
 
     let repo = make_repo();
-    repo.add_table(crate::table::TableConfig::new("t"));
+    repo.add_table_for_test(crate::table::TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     // Pre-populate a record outside any transaction.
@@ -261,7 +261,7 @@ async fn ssi_conflict_detected_on_concurrent_tx_writes() {
 #[tokio::test]
 async fn si_lost_update_last_writer_wins() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let rid = tbl
@@ -300,7 +300,7 @@ async fn snapshot_stable_during_concurrent_tx_commits() {
     use crate::table::table_manager::table_token_for;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     // Insert v1 via tx0 — establishes baseline.
@@ -368,7 +368,7 @@ async fn snapshot_stable_during_concurrent_tx_commits() {
 #[tokio::test]
 async fn si_counter_race_lost_updates() {
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     // Initial counter = 0
@@ -415,7 +415,7 @@ async fn snapshot_prevents_phantom_reads() {
     use crate::table::table_manager::table_token_for;
 
     let repo = make_repo();
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     // Insert initial record via tx0.
@@ -474,7 +474,7 @@ async fn ssi_write_skew_one_aborts() {
     use crate::tx::CommitError;
 
     let repo = make_repo();
-    repo.add_table(crate::table::TableConfig::new("doctors"));
+    repo.add_table_for_test(crate::table::TableConfig::new("doctors"));
     let tbl = repo.get_table("doctors").await.unwrap();
 
     // Insert two on-call doctors.
@@ -530,7 +530,7 @@ async fn ssi_write_skew_one_aborts() {
 #[tokio::test]
 async fn counter_advances_after_tx_commit() {
     let repo = make_repo();
-    repo.add_table(crate::table::TableConfig::new("t"));
+    repo.add_table_for_test(crate::table::TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
     let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
@@ -564,7 +564,7 @@ async fn version_monotonic_across_restart() {
         BoxRepo::InMemory(Arc::clone(&underlying)),
         Vec::new(),
     );
-    repo1.add_table(crate::table::TableConfig::new("t"));
+    repo1.add_table_for_test(crate::table::TableConfig::new("t"));
     let tbl = repo1.get_table("t").await.unwrap();
     let mut last_v_before = 0u64;
     for i in 0..5i64 {
@@ -583,7 +583,7 @@ async fn version_monotonic_across_restart() {
 
     // Phase 2: fresh repo over same underlying.
     let repo2 = RepoInstance::new("test".into(), BoxRepo::InMemory(underlying), Vec::new());
-    repo2.add_table(crate::table::TableConfig::new("t"));
+    repo2.add_table_for_test(crate::table::TableConfig::new("t"));
     let tbl = repo2.get_table("t").await.unwrap();
     let (mut tx, _g) = repo2.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     tbl.insert_tx(&InnerValue::Int(42), Some(&mut tx))
@@ -606,7 +606,7 @@ async fn concurrent_ssi_storm_exactly_one_wins() {
     use tokio::sync::Barrier;
 
     let repo = make_repo();
-    repo.add_table(crate::table::TableConfig::new("t"));
+    repo.add_table_for_test(crate::table::TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let rid = tbl.insert(&InnerValue::Int(0)).await.unwrap();
     let token = crate::table::table_manager::table_token_for("t");
@@ -684,7 +684,7 @@ async fn repro24_concurrent_ssi_storm_multithread() {
 
     for round in 0..ROUNDS {
         let repo = make_repo();
-        repo.add_table(crate::table::TableConfig::new("t"));
+        repo.add_table_for_test(crate::table::TableConfig::new("t"));
         let tbl = repo.get_table("t").await.unwrap();
         let rid = tbl.insert(&InnerValue::Int(0)).await.unwrap();
         let token = crate::table::table_manager::table_token_for("t");
@@ -778,7 +778,7 @@ async fn crit4_write_skew_lockfree_disjoint_writesets() {
 
     for round in 0..ROUNDS {
         let repo = make_repo();
-        repo.add_table(crate::table::TableConfig::new("kv"));
+        repo.add_table_for_test(crate::table::TableConfig::new("kv"));
         let tbl = repo.get_table("kv").await.unwrap();
 
         // Seed two records x and y at the same version.

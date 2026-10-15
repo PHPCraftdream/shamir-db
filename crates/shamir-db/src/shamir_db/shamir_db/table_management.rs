@@ -49,9 +49,8 @@ impl ShamirDb {
         if enable_indexes {
             config = config.with_indexes();
         }
-        db.get_repo(repo_name)
-            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?
-            .add_table(config);
+        db.create_table_checked_with_config(repo_name, config)
+            .await?;
 
         if let Err(e) = self
             .system_store
@@ -87,7 +86,7 @@ impl ShamirDb {
         let db = self
             .get_db(db_name)
             .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
-        let removed = db.drop_table(repo_name, table_name)?;
+        let removed = db.drop_table_checked(repo_name, table_name).await?;
 
         // Always clear the catalogue entry (idempotent), even if the
         // in-memory table was already gone, so a stale record can't
@@ -383,6 +382,25 @@ impl ShamirDb {
             .get_db(db_name)
             .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
         let mut table = db.get_table(repo_name, table_name).await?;
+        table.set_validator_registry(self.validators().clone());
+        Ok(table)
+    }
+
+    pub(crate) async fn get_table_admitted(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+        permit: &shamir_engine::repo::RepoWritePermit,
+    ) -> DbResult<TableManager> {
+        let db = self
+            .get_db(db_name)
+            .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
+        let mut table = db
+            .get_repo(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?
+            .get_table_admitted(table_name, permit)
+            .await?;
         table.set_validator_registry(self.validators().clone());
         Ok(table)
     }

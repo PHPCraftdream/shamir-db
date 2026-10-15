@@ -32,7 +32,7 @@ async fn fixture() -> (RepoInstance, TableManager, RecordId) {
         Vec::new(),
     )
     .with_commit_visibility_wait(STATUS);
-    repo.add_table(TableConfig::new("t"));
+    repo.add_table_for_test(TableConfig::new("t"));
     let table = repo.get_table("t").await.unwrap();
     let id = table.insert(&InnerValue::Int(1)).await.unwrap();
     (repo, table, id)
@@ -161,7 +161,8 @@ async fn bounded_crud_preserves_positions_values_and_pending_prefix() {
             let barrier = if slow {
                 let (barrier, lock) = table
                     .begin_write_barrier(crate::index::write_barrier_flags::SCHEMA_ACTIVATION)
-                    .await;
+                    .await
+                    .unwrap();
                 drop(lock);
                 Some(barrier)
             } else {
@@ -185,7 +186,8 @@ async fn bounded_crud_preserves_positions_values_and_pending_prefix() {
             drop(barrier);
             let (replay, lock) = table
                 .begin_write_barrier(crate::index::write_barrier_flags::SCHEMA_ACTIVATION)
-                .await;
+                .await
+                .unwrap();
             drop(lock);
             drop(replay);
             lower.commit();
@@ -215,7 +217,8 @@ async fn strict_observer_releases_all_crud_guards_and_preserves_recovery_on_canc
             let barrier = if slow {
                 let (barrier, lock) = table
                     .begin_write_barrier(crate::index::write_barrier_flags::SCHEMA_ACTIVATION)
-                    .await;
+                    .await
+                    .unwrap();
                 drop(lock);
                 Some(barrier)
             } else {
@@ -249,7 +252,8 @@ async fn strict_observer_releases_all_crud_guards_and_preserves_recovery_on_canc
             // Exact lower-replay protocol, while the Strict observer is parked.
             let (replay, lock) = table
                 .begin_write_barrier(crate::index::write_barrier_flags::SCHEMA_ACTIVATION)
-                .await;
+                .await
+                .unwrap();
             drop(lock);
             drop(replay);
             task.abort();
