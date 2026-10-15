@@ -36,7 +36,7 @@ tokio::task_local! {
 
 #[cfg(test)]
 async fn pause_before_retry_page() {
-    if let Some(hook) = PULL_RETRY_HOOK.try_with(Arc::clone).ok() {
+    if let Ok(hook) = PULL_RETRY_HOOK.try_with(Arc::clone) {
         hook.entered.notify_one();
         hook.release.notified().await;
     }
