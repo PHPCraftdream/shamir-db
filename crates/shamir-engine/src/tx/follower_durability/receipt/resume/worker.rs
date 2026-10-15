@@ -22,14 +22,14 @@
 //! `requires_reopen` and the guards dropped (after reopen the `Aborted`
 //! marks are acceptable — the repo is fail-stopped until then).
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::Store;
 use shamir_tx::VersionGuard;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use super::super::apply::run_receipt_pipeline;
 use crate::repo::RepoInstance;
@@ -59,6 +59,11 @@ pub(crate) struct ReceiptWorker {
     /// Fresh chunk guards parked across pipeline errors — see the module
     /// doc. NEVER dropped while the repo keeps serving.
     parked_guards: Mutex<Vec<VersionGuard>>,
+    /// Jobs currently running (0..1 in practice — the admission mutex
+    /// serializes). Drives the deterministic `wait_idle` test seam.
+    in_flight: AtomicUsize,
+    /// Notified on every 1→0 `in_flight` transition.
+    idle: Notify,
 }
 
 impl ReceiptWorker {
@@ -70,9 +75,25 @@ impl ReceiptWorker {
                 closed: AtomicBool::new(false),
                 handle: Mutex::new(None),
                 parked_guards: Mutex::new(Vec::new()),
+                in_flight: AtomicUsize::new(0),
+                idle: Notify::new(),
             }),
             receiver,
         )
+    }
+
+    /// A worker for a repo that never initialized one (or was already shut
+    /// down at install time): closed, sender-less, NO task spawned. Every
+    /// later `submit` fails with the typed closed error.
+    pub(crate) fn new_closed() -> Arc<Self> {
+        Arc::new(Self {
+            sender: Mutex::new(None),
+            closed: AtomicBool::new(true),
+            handle: Mutex::new(None),
+            parked_guards: Mutex::new(Vec::new()),
+            in_flight: AtomicUsize::new(0),
+            idle: Notify::new(),
+        })
     }
 
     /// Submit one job and await its reply. `try_send` keeps the queue
@@ -153,19 +174,44 @@ impl ReceiptWorker {
         self.parked_guards.lock().await.len()
     }
 
-    /// Close the queue and wait (bounded) for the in-flight job. The job
-    /// holds `commit_tail`, so `quiesce_commits` already waits for it too —
-    /// this bounded await covers the gap between quiescence and the loop's
-    /// exit. Quarantine of parked guards is the caller's decision.
-    async fn shutdown_core(&self, timeout: Duration) {
+    /// Deterministic test wait until no job is in flight. Cancel-safe
+    /// arm-then-check Notify pattern (mirrors `CommitTailBarrier::wait_zero`).
+    #[cfg(test)]
+    pub(crate) async fn wait_idle(&self) {
+        loop {
+            let notified = self.idle.notified();
+            tokio::pin!(notified);
+            // Arm before checking: the final decrement may race this waiter.
+            notified.as_mut().enable();
+            if self.in_flight.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Close the queue and wait (bounded) for the in-flight job WITHOUT ever
+    /// detaching it: the `JoinHandle` STAYS stored, so on timeout the task is
+    /// still owned and a later shutdown attempt can await it again. Returns
+    /// `Err` only on timeout (the caller decides the quarantine).
+    async fn shutdown_core(&self, timeout: Duration) -> DbResult<()> {
         self.closed.store(true, Ordering::Release);
         // Dropping the sender closes the channel; the loop drains queued
         // jobs (`recv` returns the rest) before it exits.
         drop(self.sender.lock().await.take());
-        let handle = self.handle.lock().await.take();
-        if let Some(handle) = handle {
-            let _ = tokio::time::timeout(timeout, handle).await;
+        let mut handle = self.handle.lock().await;
+        let timed_out = match handle.as_mut() {
+            // Await UNDER the handle mutex: on timeout the handle is left in
+            // place — never dropped, never detached.
+            Some(join) => tokio::time::timeout(timeout, &mut *join).await.is_err(),
+            None => false,
+        };
+        if timed_out {
+            return Err(DbError::Internal(
+                "receipt worker shutdown timed out; job still running".into(),
+            ));
         }
+        Ok(())
     }
 }
 
@@ -175,12 +221,16 @@ impl ReceiptWorker {
 /// panicked job ends the loop; later submitters observe the closed queue as
 /// a typed `Internal` error (same visibility as the old per-call
 /// `JoinHandle` join error, without an orphan spawn per call).
-async fn worker_loop(mut receiver: mpsc::Receiver<Job>) {
+async fn worker_loop(worker: Arc<ReceiptWorker>, mut receiver: mpsc::Receiver<Job>) {
     while let Some(job) = receiver.recv().await {
+        worker.in_flight.fetch_add(1, Ordering::AcqRel);
         let _tail = job.repo.commit_tail().enter();
         let result =
             run_receipt_pipeline(job.repo, job.info, job.events, job.bookmark, job.policy).await;
         let _ = job.reply.send(result);
+        if worker.in_flight.fetch_sub(1, Ordering::AcqRel) == 1 {
+            worker.idle.notify_waiters();
+        }
     }
 }
 
@@ -193,11 +243,14 @@ impl RepoInstance {
             .receipt_worker
             .get_or_try_init(|| async {
                 let (worker, receiver) = ReceiptWorker::new();
-                let handle = tokio::spawn(worker_loop(receiver));
+                let handle = tokio::spawn(worker_loop(Arc::clone(&worker), receiver));
                 *worker.handle.lock().await = Some(handle);
                 Ok(worker)
             })
             .await?;
+        // A closed worker (installed by `shutdown_receipt_worker` before any
+        // submission) is returned AS-IS: `submit` errors on the `closed`
+        // flag, and would also error on the absent sender.
         Ok(Arc::clone(worker))
     }
 
@@ -211,16 +264,37 @@ impl RepoInstance {
         }
     }
 
-    /// Shutdown the receipt worker if it was ever initialized: close the
-    /// queue, wait (bounded) for the in-flight job, then QUARANTINE any
-    /// parked guards — set `requires_reopen` and drop them (after reopen the
-    /// Aborted marks are acceptable; the repo is fail-stopped until then).
-    /// Idempotent; a no-op for repos that never used the receipt path.
+    /// Deterministic test wait: no receipt job is in flight on this repo's
+    /// worker.
+    #[cfg(test)]
+    pub(crate) async fn receipt_worker_wait_idle(&self) {
+        self.receipt_worker().await.unwrap().wait_idle().await;
+    }
+
+    /// Shutdown the receipt worker: close the queue, wait (bounded) for the
+    /// in-flight job — the JoinHandle is NEVER removed, so on timeout the
+    /// task stays owned (a later shutdown attempt can await it again; it is
+    /// never detached) — then QUARANTINE any parked guards: set
+    /// `requires_reopen` and drop them (after reopen the Aborted marks are
+    /// acceptable; the repo is fail-stopped until then). A repo that never
+    /// initialized a worker gets a CLOSED worker installed instead, so any
+    /// later `receipt_worker()`/submit observes the typed closed error.
+    /// Idempotent.
     pub(crate) async fn shutdown_receipt_worker(&self, timeout: Duration) {
-        let Some(worker) = self.receipt_worker.get() else {
-            return;
+        let worker = match self.receipt_worker.get() {
+            Some(worker) => Arc::clone(worker),
+            None => {
+                let _ = self.receipt_worker.set(ReceiptWorker::new_closed());
+                return;
+            }
         };
-        worker.shutdown_core(timeout).await;
+        if let Err(error) = worker.shutdown_core(timeout).await {
+            log::error!(
+                "receipt worker shutdown for repo {}: {error}; the task \
+                 remains owned and parked guards are quarantined",
+                self.name()
+            );
+        }
         let parked = worker.parked_guards.lock().await.len();
         if parked > 0 {
             log::warn!(

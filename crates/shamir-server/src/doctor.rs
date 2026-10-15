@@ -19,6 +19,17 @@ use shamir_db::ShamirDb;
 use crate::config::Config;
 use crate::tables_registry::TablesRegistry;
 
+/// Acquire the repo's `ddl_admission` guard before a boot-replay
+/// `create_table`, so replay cannot interleave with a follower receipt
+/// apply. `None` when the repo does not exist.
+pub(crate) async fn boot_table_guard(
+    db: &shamir_db::engine::db_instance::db_instance::DbInstance,
+    repo_name: &str,
+) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+    let repo = db.get_repo(repo_name)?;
+    Some(repo.ddl_admission_guard().await)
+}
+
 /// Wrapper for `IndexHealth` that includes the resolved index name
 /// for JSON serialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -252,15 +263,8 @@ pub async fn run(config: &Config, args: &DoctorArgs) -> anyhow::Result<DoctorRep
         for (db_name, repo_name, table_name) in snap.iter_entries() {
             if let Some(db) = shamir.get_db(db_name) {
                 if !db.has_table(repo_name, table_name) {
-                    // S5c round 3: `DbInstance::create_table` is the sync,
-                    // UNGUARDED `repo.add_table` path — acquire the
-                    // repo-level `ddl_admission` guard here so it cannot
-                    // interleave with a follower receipt apply.
-                    let repo = db.get_repo(repo_name);
-                    let _ddl = match &repo {
-                        Some(repo) => Some(repo.ddl_admission_guard().await),
-                        None => None,
-                    };
+                    // S5c round 3: guard DDL against follower receipt applies.
+                    let _ddl = boot_table_guard(db, repo_name).await;
                     if let Err(e) = db.create_table(repo_name, table_name) {
                         tracing::warn!(
                             db = db_name,

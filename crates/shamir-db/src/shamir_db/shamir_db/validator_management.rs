@@ -507,6 +507,20 @@ impl ShamirDb {
         priority: u16,
         _actor: Actor,
     ) -> DbResult<()> {
+        // DDL interlock (repo-level `ddl_admission`, S5c round 4): the table's
+        // info store is mutated below (`add_validator_binding`) and must not
+        // interleave with a follower receipt apply. Resolve db/repo exactly as
+        // `table_management.rs` does and hold the guard across validation, the
+        // table mutation, and the registry bookkeeping. Single acquisition per
+        // path — `add_validator_binding` itself takes no guard.
+        let db = self
+            .get_db(db_name)
+            .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
+        let repo = db
+            .get_repo(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
+        let _ddl = repo.ddl_admission_guard().await;
+
         // 1. Resolve name → id.
         let validator_id = self.validators.id_for_name(validator_name).ok_or_else(|| {
             DbError::Validation(format!("validator '{}' not found", validator_name))
@@ -578,6 +592,18 @@ impl ShamirDb {
         validator_name: &str,
         _actor: Actor,
     ) -> DbResult<bool> {
+        // DDL interlock (repo-level `ddl_admission`, S5c round 4): the table's
+        // info store is mutated below (`remove_validator_binding`) and must
+        // not interleave with a follower receipt apply. Same single-acquisition
+        // discipline as [`bind_validator_as`].
+        let db = self
+            .get_db(db_name)
+            .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
+        let repo = db
+            .get_repo(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
+        let _ddl = repo.ddl_admission_guard().await;
+
         let validator_id = self.validators.id_for_name(validator_name).ok_or_else(|| {
             DbError::Validation(format!("validator '{}' not found", validator_name))
         })?;

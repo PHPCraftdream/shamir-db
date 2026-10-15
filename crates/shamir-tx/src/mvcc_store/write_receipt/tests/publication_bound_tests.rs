@@ -329,3 +329,178 @@ async fn zero_floor_cold_path_does_not_seed_unpublished_cell() {
         Some(Bytes::from_static(b"v1"))
     );
 }
+
+/// S5c-X PR6b-2 round 4 — THE zero-floor visibility regression test (round-3
+/// review P1 #3): the round-3 fix post-filtered the GLOBAL max history version
+/// (`seek_latest_version(..).filter(|h| h <= floor)`), so when the newest
+/// version was materialized-but-UNPUBLISHED, `hist_v` collapsed to `None` and
+/// the cold path returned `None` WITHOUT consulting older PUBLISHED history —
+/// an older published row read as absent whenever a newer unpublished version
+/// existed. The fix bounds the SCAN RANGE at the floor
+/// (`seek_latest_published`), so the newest PUBLISHED version (v1 here) is
+/// found and served while the unpublished v2 stays invisible on every path.
+#[tokio::test]
+async fn older_published_history_visible_beside_unpublished_version() {
+    let (mvcc, gate) = make_mvcc();
+    assert_eq!(gate.last_committed(), 0, "fresh gate starts at floor 0");
+
+    // v1: materialize AND publish → floor 1, cell seeded.
+    let ops1 = [set_op(b"k", b"v1")];
+    mvcc.materialize_committed_to_history(&ops1, 1)
+        .await
+        .unwrap();
+    mvcc.publish_materialized(&ops1, 1);
+    assert_eq!(gate.last_committed(), 1);
+
+    // v2: materialize WITHOUT publishing (the follower receipt's
+    // materialize→publish window). The global max version is now 2 > floor 1.
+    let ops2 = [set_op(b"k", b"v2")];
+    mvcc.materialize_committed_to_history(&ops2, 2)
+        .await
+        .unwrap();
+
+    // REGRESSION: the point read must return the PUBLISHED v1 value, not
+    // None (round-3 post-filter made this None).
+    assert_eq!(
+        mvcc.get_current(RecordKey::from(Bytes::from_static(b"k")))
+            .await
+            .unwrap(),
+        Some(Bytes::from_static(b"v1"))
+    );
+    assert_eq!(
+        mvcc.get_current_bytes(b"k").await.unwrap(),
+        Some(Bytes::from_static(b"v1"))
+    );
+
+    // Snapshot reads at the floor agree.
+    assert_eq!(
+        mvcc.get_at(b"k", 1).await.unwrap(),
+        Some(Bytes::from_static(b"v1"))
+    );
+    assert_eq!(
+        mvcc.get_at_many(&[Bytes::from_static(b"k")], 1)
+            .await
+            .unwrap(),
+        vec![Some(Bytes::from_static(b"v1"))]
+    );
+
+    // The current stream emits the key with the v1 value (unpublished v2
+    // skipped by the `v > floor` group-by filter in version_entry.rs).
+    let current = collect_current(&mvcc).await;
+    assert!(
+        current
+            .iter()
+            .any(|(k, v)| k.as_slice() == b"k" && v.as_ref() == b"v1"),
+        "published v1 must appear in current_stream beside unpublished v2: {current:?}"
+    );
+    assert!(
+        !current
+            .iter()
+            .any(|(k, v)| k.as_slice() == b"k" && v.as_ref() == b"v2"),
+        "unpublished v2 must not appear in current_stream: {current:?}"
+    );
+
+    // The ts index is publication-unaware by design: it resolves the newest
+    // COMMIT-ts entry (including materialized v2) and the read paths apply
+    // the floor on top. It must still resolve.
+    assert_eq!(
+        mvcc.version_at_or_before_ts(u64::MAX).await,
+        Some(2),
+        "ts index sees the materialized commit ts; the read paths bound it"
+    );
+
+    // Publish v2 → every path returns v2.
+    mvcc.publish_materialized(&ops2, 2);
+    assert_eq!(
+        mvcc.get_current(RecordKey::from(Bytes::from_static(b"k")))
+            .await
+            .unwrap(),
+        Some(Bytes::from_static(b"v2"))
+    );
+    assert_eq!(
+        mvcc.get_current_bytes(b"k").await.unwrap(),
+        Some(Bytes::from_static(b"v2"))
+    );
+    assert_eq!(
+        mvcc.get_at(b"k", 2).await.unwrap(),
+        Some(Bytes::from_static(b"v2"))
+    );
+    let current = collect_current(&mvcc).await;
+    assert!(
+        current
+            .iter()
+            .any(|(k, v)| k.as_slice() == b"k" && v.as_ref() == b"v2"),
+        "published v2 must appear in current_stream: {current:?}"
+    );
+}
+
+/// S5c-X PR6b-2 round 4 — the round-3 zero-floor property must survive the
+/// bounded-scan fix: an UNPUBLISHED-ONLY key (v1 materialized, never
+/// published, floor still 0) stays invisible on every read path. The bounded
+/// scan returns `None` because the key has no version ≤ floor 0 — the same
+/// answer as before, but now obtained by the range bound instead of a
+/// post-filter that also broke older published rows.
+#[tokio::test]
+async fn zero_floor_hides_unpublished_only() {
+    let (mvcc, gate) = make_mvcc();
+    assert_eq!(gate.last_committed(), 0, "fresh gate starts at floor 0");
+
+    let ops = [set_op(b"k2", b"v1")];
+    mvcc.materialize_committed_to_history(&ops, 1)
+        .await
+        .unwrap();
+
+    // Negative control: the row IS durable while the floor is still 0.
+    assert_eq!(
+        mvcc.history_store()
+            .get(encode_version_key(b"k2", 1).into())
+            .await
+            .unwrap(),
+        Bytes::from_static(b"v1")
+    );
+
+    // Point reads (cell absent → cold bounded scan).
+    assert_eq!(
+        mvcc.get_current(RecordKey::from(Bytes::from_static(b"k2")))
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(mvcc.get_current_bytes(b"k2").await.unwrap(), None);
+
+    // Snapshot reads pinned at the floor.
+    assert_eq!(mvcc.get_at(b"k2", 0).await.unwrap(), None);
+    assert_eq!(
+        mvcc.get_at_many(&[Bytes::from_static(b"k2")], 0)
+            .await
+            .unwrap(),
+        vec![None]
+    );
+
+    // The current stream must not emit the key.
+    let current = collect_current(&mvcc).await;
+    assert!(
+        !current.iter().any(|(k, _)| k.as_slice() == b"k2"),
+        "unpublished-only key must not appear in current_stream at floor 0: {current:?}"
+    );
+
+    // Publish → visible on every path.
+    mvcc.publish_materialized(&ops, 1);
+    assert_eq!(
+        mvcc.get_current(RecordKey::from(Bytes::from_static(b"k2")))
+            .await
+            .unwrap(),
+        Some(Bytes::from_static(b"v1"))
+    );
+    assert_eq!(
+        mvcc.get_current_bytes(b"k2").await.unwrap(),
+        Some(Bytes::from_static(b"v1"))
+    );
+    let current = collect_current(&mvcc).await;
+    assert!(
+        current
+            .iter()
+            .any(|(k, v)| k.as_slice() == b"k2" && v.as_ref() == b"v1"),
+        "published version must appear in current_stream: {current:?}"
+    );
+}

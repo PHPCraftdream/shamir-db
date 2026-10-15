@@ -264,3 +264,36 @@ async fn negative_control_without_reconcile_state_is_not_reconciled() {
 
     close(repo).await;
 }
+
+// POSITIVE control for the unsettled-state injection (companion to the
+// negative control above): the checkpoint commit never lands
+// (`set_uncertain_without_commit`) but the read-back/retry reconcile is LEFT
+// ENABLED — so the retry actually repairs the unsettled durable state. The
+// pipeline still reports Applied AND `assert_settled` PASSES (bookmark
+// advanced, receipt retired, one history version per key, re-delivery
+// Skipped). Together with the disabled negative control this proves the
+// oracle discriminates real reconciliation: ENABLED + unsettled -> settled,
+// DISABLED + unsettled -> provably not settled.
+#[tokio::test]
+async fn uncertain_without_commit_is_reconciled_when_enabled() {
+    let _lock = checkpoint_test_lock();
+    set_simulate_checkpoint_uncertain(false);
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = repo_name(temp.path());
+    let repo = open_with_retry(temp.path(), &name).await;
+
+    let baseline = checkpoint_reconciles();
+    set_uncertain_without_commit(true);
+    // disable_uncertain_reconcile stays OFF: the reconcile is armed.
+    let outcome =
+        apply_replicated_batch(&repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted).await;
+    set_uncertain_without_commit(false);
+
+    assert_eq!(outcome.unwrap(), ApplyOutcome::Applied { local_version: 2 });
+    assert_eq!(checkpoint_reconciles(), baseline + 1);
+    // The retry repaired the unsettled state — the FULL settled oracle
+    // passes, unlike the disabled negative control where it provably fails.
+    assert_settled(&repo).await;
+
+    close(repo).await;
+}

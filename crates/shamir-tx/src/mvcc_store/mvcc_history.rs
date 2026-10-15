@@ -5,7 +5,9 @@ use shamir_storage::types::KvOp;
 use shamir_storage::types::RecordKey;
 use shamir_tunables::store_defaults::HISTORY_SCAN_BATCH;
 
-use super::version_entry::VersionEntry;
+use std::sync::Arc;
+
+use super::version_entry::{StreamingGroupByState, VersionEntry};
 use super::{ts_key, MvccStore};
 use crate::version_codec::{decode_version_key, encode_version_key};
 
@@ -42,15 +44,25 @@ impl MvccStore {
         Ok(latest)
     }
 
-    /// C2: cold-start helper for when the cell is absent after restart.
-    /// Reverse/scan the log for the largest version of `key`.
-    /// Range `[encode_version_key(key,0) .. encode_version_key(key,u64::MAX)]`,
-    /// decode each entry, filter `orig == key`, take the MAX version.
-    /// Returns `None` if the key was never written. Read-only.
-    pub(super) async fn seek_latest_version(&self, key: &[u8]) -> DbResult<Option<u64>> {
+    /// S5c-X PR6b-2 round 4 — publication-bounded cold-start seek: the newest
+    /// version of `key` that is PUBLISHED, i.e. `≤ floor`
+    /// (`gate.last_committed()`). Range
+    /// `[encode_version_key(key,0) .. encode_version_key(key,floor)]`, decode
+    /// each entry, filter `orig == key`, take the MAX version. Returns `None`
+    /// if the key has no version ≤ floor — either never written, or only
+    /// materialized-but-unpublished rows (invariant I3: those must never be
+    /// exposed, but they must NOT blind the scan to older published rows —
+    /// the bounded range already excludes them).
+    pub(super) async fn seek_latest_published(
+        &self,
+        key: &[u8],
+        floor: u64,
+    ) -> DbResult<Option<u64>> {
         let lo = encode_version_key(key, 0);
-        // Use u64::MAX to cover all possible versions.
-        let hi = encode_version_key(key, u64::MAX);
+        // Bounded hi: versions above the floor are simply outside the range,
+        // so an unpublished newest version can never shadow an older
+        // published one.
+        let hi = encode_version_key(key, floor);
         let stream = self
             .history
             .iter_range_stream(Some(lo), Some(hi), HISTORY_SCAN_BATCH);
@@ -670,5 +682,104 @@ impl MvccStore {
         // ack-driven flow the floor is already at/above this; on cold recovery
         // this lifts it.
         self.gate.raise_published(commit_version);
+    }
+}
+
+impl MvccStore {
+    /// Shared implementation behind [`current_stream`](Self::current_stream),
+    /// [`current_stream_with_tombstones`](Self::current_stream_with_tombstones), and
+    /// [`snapshot_stream`](Self::snapshot_stream). (Moved here in S5c-X PR6b-2
+    /// round 4 as part of the layout budget alongside the publication-bounded
+    /// `seek_latest_published` scan.)
+    ///
+    /// `at_version` is the explicit version floor (usually `gate.last_committed()` for
+    /// the current-stream variants).
+    /// `include_tombstones` selects which of the two semantics
+    /// `StreamingGroupByState`'s flush points apply — see
+    /// `version_entry.rs`'s `flush_group`/`drain_overlay`.
+    pub(super) fn snapshot_stream_impl(
+        &self,
+        batch: usize,
+        at_version: u64,
+        include_tombstones: bool,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(Bytes, Bytes)>>> + Send {
+        use futures::stream::unfold;
+
+        let history = Arc::clone(&self.history);
+        // R3: capture committed floor at stream-open time (explicit parameter).
+        let floor = at_version;
+        // P1b: materialise the overlay's per-key winner ≤ floor at open. The
+        // overlay is the SMALL side of the merge (bounded window), so loading
+        // it into a map and merging during the history group-by is cheap.
+        // `floor == 0` (bootstrap) → `snapshot_le` returns empty → overlay
+        // contributes nothing and the stream is byte-identical to history-only.
+        // Boundary: `snapshot_le` yields `RecordKey` keys; the group-by state
+        // machine (`OverlayWinners`) is `Bytes`-keyed and merges against the
+        // `Bytes` `orig` recovered from each history version-key. Convert the
+        // overlay side ONCE here at stream-open (byte-identical) — it is the
+        // small, bounded side of the merge, not a per-row hot-path cost.
+        let overlay: shamir_collections::TMap<Bytes, (u64, Bytes)> = self
+            .overlay
+            .snapshot_le(floor)
+            .into_iter()
+            .map(|(k, v, val)| (Bytes::from(k), (v, val)))
+            .collect();
+        // Box::pin so the returned stream is `Unpin` — callers (e.g.
+        // `TableManager::list_stream`) consume it via `.next()` without
+        // pinning, matching the P1 `Pin<Box<dyn Stream>>` contract. A raw
+        // `Unfold` over an async closure is NOT `Unpin`.
+        Box::pin(unfold(
+            StreamingGroupByState::Start {
+                history,
+                batch_size: batch,
+                floor,
+                overlay,
+                include_tombstones,
+            },
+            |state| async move {
+                match state {
+                    StreamingGroupByState::Start {
+                        history,
+                        batch_size,
+                        floor,
+                        overlay,
+                        include_tombstones,
+                    } => {
+                        // Boundary: the store now yields `RecordKey` keys; the
+                        // group-by state machine is `Bytes`-keyed throughout, so
+                        // convert each batch key back to `Bytes` (byte-identical)
+                        // at the stream boundary.
+                        let stream =
+                            futures::StreamExt::map(history.iter_stream(batch_size), |batch| {
+                                batch.map(|rows| {
+                                    rows.into_iter().map(|(k, v)| (Bytes::from(k), v)).collect()
+                                })
+                            });
+                        let pin = Box::pin(stream);
+                        let s = StreamingGroupByState::Streaming {
+                            stream: pin,
+                            batch_size,
+                            floor,
+                            overlay,
+                            cur_key: None,
+                            last_val: None,
+                            last_ver: 0,
+                            out_batch: Vec::new(),
+                            include_tombstones,
+                        };
+                        s.drain_and_emit().await
+                    }
+                    // C2 fix: a Streaming state returned by a prior
+                    // drain_and_emit (when out_batch filled to batch_size, or
+                    // on a stream error) must CONTINUE draining — not panic.
+                    // The previous `unreachable!()` paniced on the second pull
+                    // whenever the current-key set exceeded one batch.
+                    s @ StreamingGroupByState::Streaming { .. } => s.drain_and_emit().await,
+                    // P1b: overlay-only drain phase (after history exhausted).
+                    s @ StreamingGroupByState::DrainOverlay { .. } => s.drain_and_emit().await,
+                    StreamingGroupByState::Done => None,
+                }
+            },
+        ))
     }
 }

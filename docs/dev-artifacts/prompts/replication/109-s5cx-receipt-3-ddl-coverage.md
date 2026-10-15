@@ -1,8 +1,8 @@
-You are a Rust worker in worktree D:/dev/rust/shamir-db/worktrees/s5cx-follower-receipt-2 (branch feat/s5cx-follower-receipt-2, clean tree @ 0721b609). Task: S5c-X PR6b-2 round 3, review finding 5 (full DDL admission coverage) + layout shrink of admin_table_index.rs.
+You are a Rust worker in worktree worktrees/s5cx-follower-receipt-2 (branch feat/s5cx-follower-receipt-2, clean tree @ 0721b609). Task: S5c-X PR6b-2 round 3, review finding 5 (full DDL admission coverage) + layout shrink of admin_table_index.rs.
 
 ⛔ NEVER run git reset / checkout / clean / stash / restore / rm, or any git command that mutates the working tree or index. Only edit files; the orchestrator commits.
 Do NOT run cargo/rustc/nextest or any build or test. Only the orchestrator runs `cargo fmt` at the very end.
-Read and follow C:/Users/Computer/.agents/skills/rust-intel/SKILL.md if readable; CLAUDE.md conventions (imports at top, ≤7 folder entries / ≤1000 lines ratchet — already-over files/folders must not grow).
+Read and follow .agents/skills/rust-intel/SKILL.md if readable; CLAUDE.md conventions (imports at top, ≤7 folder entries / ≤1000 lines ratchet — already-over files/folders must not grow).
 FIRST: save this brief verbatim to docs/dev-artifacts/prompts/replication/109-s5cx-receipt-3-ddl-coverage.md.
 
 CONTEXT: the receipt apply pipeline (crates/shamir-engine/src/tx/follower_durability/receipt/apply.rs) holds `repo.ddl_admission_lock()` (repo-level `tokio::sync::Mutex`, guard type/factory in crates/shamir-engine/src/repo/changelog_store/follower_durability.rs; public cross-crate accessor `RepoInstance::ddl_admission_guard()`). Currently guarded: repo index/rename wrappers (repo_instance.rs ~790, 1797-1845), receipt pipeline, shamir-db facade add/drop (shamir_db/table_management.rs:58,102), wire executor CREATE/DROP/RENAME INDEX (execute/admin_table_index.rs:388,647,885). The tokio Mutex is NOT reentrant — every path must acquire EXACTLY ONCE.
