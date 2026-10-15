@@ -205,10 +205,19 @@ impl ShamirAdminExecutor {
             .read_changelog_from_journal(&self.db_name, &op.repo, from_version, limit)
             .await
         {
-            Some(jr) => jr,
-            None => {
+            // S5c-X PR8b: `read_changelog_from_journal` refuses a quarantined
+            // destination with `DbError::ResyncRequired`; surfaced as a batch
+            // error (admin op, not a replication serve path).
+            Ok(Some(jr)) => jr,
+            Ok(None) => {
                 return Err(err(format!(
                     "Repository '{}.{}' not found",
+                    self.db_name, op.repo
+                )))
+            }
+            Err(e) => {
+                return Err(err(format!(
+                    "changes_since read refused for '{}.{}': {e}",
                     self.db_name, op.repo
                 )))
             }

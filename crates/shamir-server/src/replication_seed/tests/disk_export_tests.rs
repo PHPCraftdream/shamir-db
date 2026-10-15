@@ -6,10 +6,14 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
+use shamir_db::engine::table::TableConfig;
 use shamir_db::engine::tx::IsolationLevel;
 use shamir_db::storage::types::RecordKey;
 use shamir_db::{ShamirDb, SystemStoreConfig};
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl::{repl_scope, replication_profile, subscription};
 use shamir_query_builder::doc;
+use shamir_query_types::admin::{ReplDirection, ReplMode};
 use shamir_tx::{event_from_wal_entry, ChangeOp, ChangelogEvent};
 use shamir_types::codecs::interned::query_value_to_inner;
 use tokio::runtime::{Builder, Runtime};
@@ -268,4 +272,70 @@ fn clean_disk_export_round_trip_twice_preserves_j_and_gap() {
 #[test]
 fn unclean_disk_export_certifies_and_twice_preserves_j_and_gap() {
     exercise(false);
+}
+
+/// PR8b: the seed exporter must refuse a replication destination whose
+/// subscription is quarantined (`resync_required`) — stale follower data
+/// must never be served as a seed, and no partial artifact may be left
+/// behind. Healthy repos pass the gate (the round-trip tests above cross
+/// the same check un-quarantined and succeed).
+#[test]
+fn disk_export_refuses_resync_quarantined_repo() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = runtime();
+    rt.block_on(async {
+        let (version, _, _) = fixture(dir.path(), true).await;
+        assert_eq!(version, 4);
+        let source = ShamirDb::init(SystemStoreConfig::Fjall(
+            dir.path().join("shamir_db_meta.redb"),
+        ))
+        .await
+        .unwrap();
+        // Healthy repo is not quarantined.
+        assert_eq!(source.read_quarantine_reason("app", "main"), None);
+        // Pull profile + ACTIVE subscription over app/main, then flip the
+        // subscription to `resync_required` through the REAL persisted path
+        // (mirrors quarantine_reads_tests::quarantine).
+        let mut b = Batch::new();
+        b.id(1);
+        b.op(
+            "profile",
+            replication_profile("prof_seed").stream(
+                repl_scope("app").repo("main").build(),
+                ReplDirection::Pull,
+                ReplMode::ReadOnly,
+            ),
+        );
+        b.op(
+            "sub",
+            subscription("sub_seed", "tcp://peer:9000", "pub", "prof_seed"),
+        );
+        source
+            .execute("app", &b.to_request_via_msgpack())
+            .await
+            .unwrap();
+        source
+            .mark_subscription_resync_required("sub_seed", 7, 3)
+            .await
+            .unwrap();
+        assert!(source.read_quarantine_reason("app", "main").is_some());
+    });
+    drop(rt);
+    // Re-open cold (like the exporter's MaintenanceOpen path) and refuse.
+    let rt = runtime();
+    rt.block_on(async {
+        let source = MaintenanceOpen::open(dir.path()).await.unwrap();
+        let out = dir.path().join("quarantined-seed");
+        let err = export_open(&source.db, "app", "main", &out, 1024)
+            .await
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("resync_required") && message.contains("app/main"),
+            "unexpected refusal message: {message}"
+        );
+        // Fail closed: no partial artifact on disk.
+        assert!(!out.try_exists().unwrap());
+    });
+    drop(rt);
 }

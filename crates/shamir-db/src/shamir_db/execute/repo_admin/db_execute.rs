@@ -135,8 +135,9 @@ impl ShamirDb {
 /// mirroring the authorization walk) and return the first READ op whose
 /// target repo is quarantined, as `(alias, repo, reason)`. Only data reads
 /// (`BatchOp::Read` — the `Action::Read`-classified variant) are checked;
-/// writes and admin/status/DESCRIBE ops pass through.
-fn quarantined_read_hit(
+/// writes and admin/status/DESCRIBE ops pass through. Shared by the batch
+/// (above) and the interactive-tx gate in `db_tx.rs`.
+pub(crate) fn quarantined_read_hit(
     db_name: &str,
     request: &BatchRequest,
     cache: &ResyncQuarantineCache,

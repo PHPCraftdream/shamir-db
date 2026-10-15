@@ -191,7 +191,7 @@ pub(crate) async fn bridge_task(
         let mut states = Vec::with_capacity(repos.len());
         for repo in &repos {
             match db.subscribe_changelog(&db_name, repo).await {
-                Some(rx) => {
+                Ok(Some(rx)) => {
                     receivers.push(rx);
                     // Attach before sampling W; never use a post-snapshot maximum.
                     let Some(w) = db.changelog_visible_floor(&db_name, repo).await else {
@@ -203,8 +203,16 @@ pub(crate) async fn bridge_task(
                     let cursor = from_version.map_or(w, |fv| fv.saturating_sub(1));
                     states.push(JournalDrain::new(cursor));
                 }
-                None => {
+                // S5c-X PR8b: a quarantined (`resync_required`) repo is
+                // refused (`DbError::ResyncRequired`) — the bridge must NOT
+                // attach a live event stream (nor run the initial snapshot)
+                // against a repo whose reads are quarantined.
+                Ok(None) => {
                     tracing::warn!(sub_id, repo = %repo, "changefeed not available");
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(sub_id, repo = %repo, %error, "changefeed refused");
                     return;
                 }
             }

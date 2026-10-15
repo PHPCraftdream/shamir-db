@@ -94,27 +94,53 @@ impl ShamirDb {
 
     /// Subscribe to a repo's live changefeed (Phase 3b).
     ///
-    /// Returns `None` when the database or repository does not exist. The
+    /// Returns `Ok(None)` when the database or repository does not exist. The
     /// returned `broadcast::Receiver` yields every `ChangelogEvent` emitted
     /// after the call; a subscriber that lags the bounded ring receives
     /// `RecvError::Lagged` and should re-sync the missed window via
     /// [`read_changelog_from`](Self::read_changelog_from).
+    ///
+    /// S5c-X PR8b: a quarantined (`resync_required`) replication destination
+    /// is refused with `DbError::ResyncRequired` BEFORE the broadcast is
+    /// resolved (fail closed) — no live event stream may attach to a repo
+    /// whose reads are quarantined. Same gate as
+    /// [`read_changelog_bounded`](Self::read_changelog_bounded).
     pub async fn subscribe_changelog(
         &self,
         db: &str,
         repo: &str,
-    ) -> Option<tokio::sync::broadcast::Receiver<std::sync::Arc<shamir_engine::ChangelogEvent>>>
-    {
-        let repo_instance = self.get_db(db)?.get_repo(repo)?;
-        repo_instance.subscribe_changelog().await.ok()
+    ) -> shamir_storage::error::DbResult<
+        Option<tokio::sync::broadcast::Receiver<std::sync::Arc<shamir_engine::ChangelogEvent>>>,
+    > {
+        // S5c-X PR8b: refuse a quarantined repo before resolving the
+        // broadcast (fail closed). Negative-control seam, test builds only —
+        // mirrors `read_changelog_bounded` above.
+        let skip_seam = cfg!(test) && SKIP_READ_QUARANTINE_FOR_TEST.load(Ordering::Relaxed);
+        if !skip_seam {
+            if let Some(reason) = self.quarantined_read_reason(db, repo) {
+                return Err(DbError::ResyncRequired {
+                    db: db.to_string(),
+                    repo: repo.to_string(),
+                    reason,
+                });
+            }
+        }
+        let Some(repo_instance) = self.get_db(db).and_then(|d| d.get_repo(repo)) else {
+            return Ok(None);
+        };
+        Ok(repo_instance.subscribe_changelog().await.ok())
     }
 
     /// Resumable pull from a repo's durable changelog journal (Phase 3b).
     ///
     /// Returns up to `limit` events with `commit_version >= from_version`,
-    /// ascending, or `None` when the database / repository does not exist.
+    /// ascending, or `Ok(None)` when the database / repository does not exist.
     /// A consumer that processed through version `V` continues with
     /// `read_changelog_from(db, repo, V + 1, n)`.
+    ///
+    /// S5c-X PR8b: a quarantined (`resync_required`) replication destination
+    /// refuses the read with `DbError::ResyncRequired` (fail closed) — the
+    /// consumer must reseed instead of consuming stale journal data.
     ///
     /// If the journal has a known gap at or after `from_version` (due to a
     /// prior channel-overflow drop) a `warn!` is emitted. Use
@@ -126,7 +152,7 @@ impl ShamirDb {
         repo: &str,
         from_version: u64,
         limit: usize,
-    ) -> Option<Vec<shamir_engine::ChangelogEvent>> {
+    ) -> shamir_storage::error::DbResult<Option<Vec<shamir_engine::ChangelogEvent>>> {
         let jr = self
             .read_changelog_from_journal(db, repo, from_version, limit)
             .await?;
@@ -137,7 +163,7 @@ impl ShamirDb {
                  consumer should perform a full snapshot resync"
             );
         }
-        Some(jr.events)
+        Ok(Some(jr.events))
     }
 
     /// Returns the eager latest-state publication floor for a repo.
@@ -158,6 +184,10 @@ impl ShamirDb {
     }
 
     /// Pull-only journal read with field-name bindings and unchanged gap metadata.
+    ///
+    /// Only called from the follower's own pull/serve machinery, which already
+    /// refuses at the serve entry when the destination is quarantined
+    /// (PR8 `downstream_resync_required`); left ungated for that reason.
     pub async fn read_changelog_for_replication(
         &self,
         db: &str,
@@ -234,18 +264,38 @@ impl ShamirDb {
 
     /// Like [`read_changelog_from`](Self::read_changelog_from) but returns the
     /// full [`shamir_engine::JournalRead`] so the caller can inspect `gap_at`
-    /// and decide whether a snapshot resync is needed.
+    /// and decide whether a snapshot resync is needed. `Ok(None)` means only
+    /// that the database or repo does not exist; a quarantined
+    /// (`resync_required`) destination is refused with
+    /// `DbError::ResyncRequired` (S5c-X PR8b, same gate as
+    /// [`read_changelog_bounded`](Self::read_changelog_bounded)).
     pub async fn read_changelog_from_journal(
         &self,
         db: &str,
         repo: &str,
         from_version: u64,
         limit: usize,
-    ) -> Option<shamir_engine::JournalRead> {
-        let repo_instance = self.get_db(db)?.get_repo(repo)?;
+    ) -> shamir_storage::error::DbResult<Option<shamir_engine::JournalRead>> {
+        // S5c-X PR8b: a quarantined (`resync_required`) destination refuses
+        // changelog reads (fail closed) — the follower must reseed instead.
+        // Negative-control seam is only compiled into test builds.
+        let skip_seam = cfg!(test) && SKIP_READ_QUARANTINE_FOR_TEST.load(Ordering::Relaxed);
+        if !skip_seam {
+            if let Some(reason) = self.quarantined_read_reason(db, repo) {
+                return Err(DbError::ResyncRequired {
+                    db: db.to_string(),
+                    repo: repo.to_string(),
+                    reason,
+                });
+            }
+        }
+        let Some(repo_instance) = self.get_db(db).and_then(|db| db.get_repo(repo)) else {
+            return Ok(None);
+        };
         repo_instance
             .read_changelog_from(from_version, limit)
             .await
             .ok()
+            .map(Some)
     }
 }

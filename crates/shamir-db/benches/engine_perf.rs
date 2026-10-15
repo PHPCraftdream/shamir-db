@@ -1193,7 +1193,9 @@ fn main() {
         //     duration; never polled (measures send-side cost only).
         {
             let shamir = block_on_setup(&rt, seeded(100, false));
-            let _subscriber = rt.block_on(shamir.subscribe_changelog("bench", "main"));
+            let _subscriber = rt
+                .block_on(shamir.subscribe_changelog("bench", "main"))
+                .expect("subscribe_changelog");
             let req = req_insert.clone();
             h.bench_async("changefeed_overhead/with_subscriber", move || {
                 let s = Arc::clone(&shamir);

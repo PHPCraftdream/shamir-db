@@ -105,7 +105,11 @@ async fn separate_table_index_occupies_ids_but_named_select_converges() {
     assert!(interner.get_ind("label").is_none());
     assert!(interner.get_ind("v").is_none());
 
-    let mut emitted = leader.subscribe_changelog("app", "main").await.unwrap();
+    let mut emitted = leader
+        .subscribe_changelog("app", "main")
+        .await
+        .unwrap()
+        .unwrap();
     let expected = doc().set("label", "leader").set("v", 20_i64).build();
     let mut write = Batch::new();
     write.transactional();
