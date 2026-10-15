@@ -603,3 +603,121 @@ async fn t8_temporal_as_of_read_refused_while_quarantined() {
     assert!(matches!(err, BatchError::ResyncRequired { .. }));
     assert_eq!(err.code(), Some("resync_required"));
 }
+
+/// S5c-X PR8b follow-up: the unbounded changelog read entries
+/// (`read_changelog_from`, `read_changelog_from_journal`) are refused with
+/// `DbError::ResyncRequired` while the repo is quarantined; healthy and
+/// non-replicated repos stay readable.
+#[tokio::test]
+async fn t9_changelog_read_entries_refused_while_quarantined() {
+    let shamir = setup().await;
+    seed_row(&shamir).await;
+    // Healthy repo reads succeed before quarantine.
+    assert!(shamir
+        .read_changelog_from("testdb", "main", 1, 10)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(shamir
+        .read_changelog_from_journal("testdb", "main", 1, 10)
+        .await
+        .unwrap()
+        .is_some());
+
+    quarantine(&shamir, "sub", "prof", "main").await;
+
+    let Err(err) = shamir.read_changelog_from("testdb", "main", 1, 10).await else {
+        panic!("read_changelog_from of a quarantined repo must be refused");
+    };
+    assert!(matches!(err, DbError::ResyncRequired { .. }));
+    assert_eq!(err.code(), Some("resync_required"));
+
+    let Err(err) = shamir
+        .read_changelog_from_journal("testdb", "main", 1, 10)
+        .await
+    else {
+        panic!("read_changelog_from_journal of a quarantined repo must be refused");
+    };
+    assert!(matches!(err, DbError::ResyncRequired { .. }));
+    assert_eq!(err.code(), Some("resync_required"));
+
+    // Non-replicated repo is unaffected.
+    assert!(shamir
+        .read_changelog_from("testdb", "side", 1, 10)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(shamir
+        .read_changelog_from_journal("testdb", "side", 1, 10)
+        .await
+        .unwrap()
+        .is_some());
+}
+
+/// S5c-X PR8b follow-up: the interactive-tx family fails closed. `tx_begin`
+/// refuses to pin a snapshot view of a quarantined repo, and a tx opened
+/// BEFORE the quarantine is refused on `tx_execute` (per-execute re-check);
+/// the healthy `side` repo begins and executes normally.
+#[tokio::test]
+async fn t10_tx_reads_refused_while_quarantined() {
+    let shamir = setup().await;
+    seed_row(&shamir).await;
+
+    // Open the tx while `main` is still healthy.
+    let (mut tx, _guard) = shamir.tx_begin("testdb", "main", "snapshot").await.unwrap();
+    quarantine(&shamir, "sub", "prof", "main").await;
+
+    // BEGIN on the quarantined repo is refused.
+    let err = shamir
+        .tx_begin("testdb", "main", "snapshot")
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("resync_required"));
+
+    // EXECUTE on the pre-quarantine tx is refused too (fail closed on use).
+    let mut b = Batch::new();
+    b.id(10);
+    b.query("r", Query::with_repo("main", "users"));
+    let Err(err) = shamir
+        .tx_execute("testdb", &b.to_request_via_msgpack(), &mut tx)
+        .await
+    else {
+        panic!("tx_execute on a quarantined repo must be refused");
+    };
+    assert_eq!(err.code(), Some("resync_required"));
+
+    // The healthy, non-replicated `side` repo is unaffected.
+    let (mut tx_side, _guard_side) = shamir.tx_begin("testdb", "side", "snapshot").await.unwrap();
+    let mut b_side = Batch::new();
+    b_side.id(11);
+    b_side.query("r", Query::with_repo("side", "users"));
+    shamir
+        .tx_execute("testdb", &b_side.to_request_via_msgpack(), &mut tx_side)
+        .await
+        .unwrap();
+}
+
+/// S5c-X PR8b follow-up: `subscribe_changelog` refuses a quarantined repo
+/// with the typed `DbError::ResyncRequired` BEFORE attaching a live event
+/// stream; a non-replicated repo subscribes fine.
+#[tokio::test]
+async fn t11_subscribe_changelog_refused_while_quarantined() {
+    let shamir = setup().await;
+    seed_row(&shamir).await;
+    quarantine(&shamir, "sub", "prof", "main").await;
+
+    let Err(err) = shamir.subscribe_changelog("testdb", "main").await else {
+        panic!("subscribe_changelog on a quarantined repo must be refused");
+    };
+    assert!(matches!(err, DbError::ResyncRequired { .. }));
+    assert_eq!(err.code(), Some("resync_required"));
+
+    // Non-replicated repo subscribes fine; drop the receiver immediately so
+    // no background subscriber leaks.
+    let rx = shamir
+        .subscribe_changelog("testdb", "side")
+        .await
+        .unwrap()
+        .expect("side repo exists");
+    drop(rx);
+}

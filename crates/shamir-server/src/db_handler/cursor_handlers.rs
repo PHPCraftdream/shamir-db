@@ -116,6 +116,7 @@ use crate::byte_budget::{stash_guard, stash_serialized_response, ByteBudgetGuard
 use crate::cursor_registry::{Cursor, CursorRegistryError, PaginationMode};
 
 use super::handler::{session_actor, DbResponse, ShamirDbHandler};
+use super::visibility_handlers::quarantine_cursor_error;
 
 /// Resolve `(db_name, query.from.repo)` down to a `RepoInstance`, mirroring
 /// `tx_begin_as`'s `db.get_db(...)`/`db.get_repo(...)` idiom exactly
@@ -1210,6 +1211,13 @@ impl ShamirDbHandler {
             return error_response(&e);
         }
 
+        // S5c-X PR8b: a cursor must not be created over a quarantined
+        // (`resync_required`) repo — gated right after authorization and
+        // BEFORE any repo/engine work (resolve_repo, snapshot pinning).
+        if let Some(e) = quarantine_cursor_error(&self.db, db_name, &repo_name) {
+            return error_response(&e);
+        }
+
         let repo = match resolve_repo(&self.db, db_name, &repo_name) {
             Ok(r) => r,
             Err(e) => return error_response(&e),
@@ -1762,6 +1770,17 @@ impl ShamirDbHandler {
         if let Err(e) =
             authorize_cursor_read(&self.db, &actor, cursor.db(), cursor.repo(), &table_name).await
         {
+            self.cursor_registry.remove(cursor_id.0);
+            drop(state);
+            return error_response(&e);
+        }
+
+        // S5c-X PR8b: a cursor created BEFORE its repo was quarantined must
+        // fail closed on the next fetch — the quarantine is re-probed on
+        // every page. This is a read-refusal, so the closest existing
+        // convention is the access-denied path above: the cursor is removed
+        // (closed) before returning the error.
+        if let Some(e) = quarantine_cursor_error(&self.db, cursor.db(), cursor.repo()) {
             self.cursor_registry.remove(cursor_id.0);
             drop(state);
             return error_response(&e);

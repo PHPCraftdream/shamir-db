@@ -868,6 +868,15 @@ impl ShamirDb {
         self.resync_quarantine.reason_for(db_name, repo_name)
     }
 
+    /// Public seam for wire-layer read gates (e.g. cursor-based journal reads
+    /// in the server crate): the read-quarantine (`resync_required`) reason
+    /// for `(db_name, repo_name)`, or `None` when the repo is readable.
+    /// Mirrors the internal gate of
+    /// [`read_changelog_bounded`](crate::ShamirDb::read_changelog_bounded).
+    pub fn read_quarantine_reason(&self, db_name: &str, repo_name: &str) -> Option<String> {
+        self.quarantined_read_reason(db_name, repo_name)
+    }
+
     /// Persist `state = "resync_required"` on subscription `name`'s row in
     /// `system/subscriptions`.
     ///

@@ -11,21 +11,76 @@
 //! engine re-export (`crate::engine::tx::*`) — the same concrete `shamir-tx`
 //! types the server names. See `docs/dev-artifacts/roadmap/PHASE_B_INTERACTIVE_TX.md` §5.
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use shamir_query_types::batch::{ExecPolicy, VisibilityWait};
+use shamir_query_types::batch::{ExecPolicy, ResyncRequiredDetail, VisibilityWait};
 
 use crate::access::{Action, Actor, ResourcePath};
 use crate::query::batch::{
     execute_in_open_tx, open_interactive_tx, Authorized, BatchError, BatchRequest, BatchResponse,
     TransactionInfo,
 };
+use crate::shamir_db::execute::SKIP_READ_QUARANTINE_FOR_TEST;
 
 use super::super::shamir_db::ShamirDb;
 use super::admin_dispatch::ShamirAdminExecutor;
+use super::db_execute::quarantined_read_hit;
 use super::function_invoker::ShamirFunctionInvoker;
 use super::table_resolver::DbTableResolver;
+
+/// S5c-X PR8b: ordinary READS of a quarantined (`resync_required`) repo fail
+/// closed for the interactive-tx family too. `tx_begin[_as]` refuses to pin a
+/// snapshot view of a quarantined repo (fail closed at open); the
+/// `tx_execute*` family re-checks per execute, so a tx opened BEFORE the
+/// quarantine also fails closed. The negative-control seam mirrors the batch
+/// gate in `repo_admin/db_execute.rs` exactly (test builds only).
+/// Writes/COMMIT are NOT gated — reads are gated at begin/execute instead.
+fn tx_read_quarantine_refusal(
+    shamir: &ShamirDb,
+    db_name: &str,
+    alias: &str,
+    repo_name: &str,
+) -> Option<BatchError> {
+    let skip_seam = cfg!(test) && SKIP_READ_QUARANTINE_FOR_TEST.load(Ordering::Relaxed);
+    if skip_seam {
+        return None;
+    }
+    let reason = shamir.quarantined_read_reason(db_name, repo_name)?;
+    Some(BatchError::ResyncRequired {
+        alias: alias.to_string(),
+        detail: Box::new(ResyncRequiredDetail {
+            db: db_name.to_string(),
+            repo: repo_name.to_string(),
+            reason,
+        }),
+    })
+}
+
+/// Request-shaped twin of [`tx_read_quarantine_refusal`] for the
+/// `tx_execute*` family: mirrors the batch gate's whole-query-tree walk so a
+/// read op targeting a quarantined repo is refused even inside a
+/// pre-quarantine tx.
+fn tx_read_quarantine_refusal_for_request(
+    shamir: &ShamirDb,
+    db_name: &str,
+    request: &BatchRequest,
+) -> Option<BatchError> {
+    if shamir.resync_quarantine.is_empty() {
+        return None;
+    }
+    quarantined_read_hit(db_name, request, &shamir.resync_quarantine).map(
+        |(alias, repo, reason)| BatchError::ResyncRequired {
+            alias,
+            detail: Box::new(ResyncRequiredDetail {
+                db: db_name.to_string(),
+                repo,
+                reason,
+            }),
+        },
+    )
+}
 
 impl ShamirDb {
     /// BEGIN: open an interactive tx against `db_name`/`repo_name`. Returns
@@ -70,6 +125,9 @@ impl ShamirDb {
         )
         .await
         .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
+        if let Some(err) = tx_read_quarantine_refusal(self, db_name, "", repo_name) {
+            return Err(err);
+        }
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),
             message: format!("Database '{}' not found", db_name),
@@ -129,6 +187,11 @@ impl ShamirDb {
     /// the [`crate::query::batch::AccessGate`], and `execute_in_open_tx`
     /// structurally cannot run without the resulting [`Authorized`] token.
     /// See `Authorized::authorize`'s doc.
+    ///
+    /// S5c-X PR8b: reads inside the tx are gated here (and at
+    /// `tx_begin[_as]`) — a quarantined repo is refused with
+    /// `BatchError::ResyncRequired` even when the tx was opened before the
+    /// quarantine; commit-time semantics stay ungated.
     pub async fn tx_execute_as(
         &self,
         actor: Actor,
@@ -188,6 +251,16 @@ impl ShamirDb {
         deadline_cap: Option<Duration>,
         repo_admin_observer: Option<Arc<dyn crate::RepoAdminObserver>>,
     ) -> Result<BatchResponse, BatchError> {
+        // S5c-X PR8b: ordinary READS of a quarantined repo fail closed, even
+        // for a tx opened BEFORE the quarantine. Same shape as the batch gate
+        // in `repo_admin/db_execute.rs` (incl. the test-only skip seam).
+        let skip_seam = cfg!(test) && SKIP_READ_QUARANTINE_FOR_TEST.load(Ordering::Relaxed);
+        if !skip_seam {
+            if let Some(err) = tx_read_quarantine_refusal_for_request(self, db_name, request) {
+                return Err(err);
+            }
+        }
+
         // Authorization must consume, not renew, the caller's remaining budget.
         let started = Instant::now();
         let mut auth = Authorized::authorize(request, actor, db_name, self)
@@ -223,6 +296,10 @@ impl ShamirDb {
     /// inherited `materialized` flag) on success, `aborted` with a reason on
     /// a commit-time conflict/violation. Mirrors the mapping the single-batch
     /// `execute_transactional` performs.
+    ///
+    /// Not gated by the read-quarantine (S5c-X PR8b): reads inside a tx are
+    /// gated at `tx_begin`/`tx_execute` instead; commit/write semantics are
+    /// out of read scope.
     pub async fn tx_commit(
         &self,
         db_name: &str,

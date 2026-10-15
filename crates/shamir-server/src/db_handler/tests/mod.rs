@@ -4,6 +4,7 @@ pub mod byte_budget_upfront_reserve_tests;
 pub mod commit_visibility_policy_tests;
 pub mod cursor_byte_budget_tests;
 pub mod cursor_handler_tests;
+pub mod cursor_quarantine_tests;
 pub mod invalid_request_tests;
 pub mod node_mode_tests;
 pub mod p1064_ddl_op_status_acl_tests;

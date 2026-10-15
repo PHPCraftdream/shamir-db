@@ -189,6 +189,7 @@ async fn temporal_lifecycle_e2e() {
     let mut rx = shamir
         .subscribe_changelog("testdb", "main")
         .await
+        .unwrap()
         .expect("repo exists");
 
     // ── 1. CREATE table with retention { max_count: 5 } ──────────────────
