@@ -10,7 +10,7 @@ use crate::repo::durability_policy::{DurabilityMetrics, DurabilityPolicy};
 use crate::table::interner_manager::InternerManager;
 #[cfg(test)]
 use crate::tx::clean_horizon::checkpoint::test_seam;
-use crate::tx::cold_reconcile::lifecycle::RepoUnitLifecycle;
+use crate::tx::cold_reconcile::lifecycle::ForegroundLifecycle;
 use crate::tx::CommitTailBarrier;
 use shamir_query_types::batch::VisibilityWait;
 use shamir_storage::error::{DbError, DbResult};
@@ -106,10 +106,8 @@ pub struct RepoInstance {
     /// returns the same `Arc<Drainer>`), so there is no "lost race" — every
     /// caller observes the one-and-only drainer.
     drainer: Arc<std::sync::OnceLock<Arc<crate::tx::drainer::Drainer>>>,
-    /// PR6b-2b (inactive): lifecycle owner of the repository background
-    /// worker; lazily created on first use; close-on-drop applies to the
-    /// created instance; PR6b-2c owns the lifetime of an ACTIVE worker.
-    worker_lifecycle: Arc<std::sync::OnceLock<Arc<RepoUnitLifecycle>>>,
+    /// Fixed-size foreground lifecycle token; background clones omit it.
+    worker_lifecycle: Option<Arc<ForegroundLifecycle>>,
     /// Per-repo string interner (Stage I — moved from per-table to per-repo).
     /// Backed by the dedicated `"__interner__"` store. Built once on first
     /// access (lazy) and shared via [`Arc::clone`] so every
@@ -196,7 +194,7 @@ impl Clone for RepoInstance {
             journal_publish_hook: Arc::clone(&self.journal_publish_hook),
             wal_dir: self.wal_dir.clone(),
             drainer: Arc::clone(&self.drainer),
-            worker_lifecycle: Arc::clone(&self.worker_lifecycle),
+            worker_lifecycle: self.worker_lifecycle.clone(),
             repo_interner: Arc::clone(&self.repo_interner),
             // Foreground clone: carries a strong liveness ref. If `self` is
             // itself the background clone (`None`) this stays `None` — a clone
@@ -266,7 +264,7 @@ impl RepoInstance {
             )),
             token_names: Arc::new(token_names),
             tx_metrics: Arc::new(shamir_tx::TxMetrics::new()),
-            worker_lifecycle: Arc::new(std::sync::OnceLock::new()),
+            worker_lifecycle: Some(Arc::new(ForegroundLifecycle::new())),
             commit_tail: Arc::new(CommitTailBarrier::default()),
             group_commit: Arc::new(GroupCommit::new()),
             changefeed: Arc::new(OnceCell::new()),
@@ -323,13 +321,16 @@ impl RepoInstance {
     }
 
     /// D2 P1d-2b: produce a BACKGROUND clone for the drain task to own.
-    /// Identical to a foreground [`Clone`] except `live = None`, so the task's
-    /// owned handle does NOT count toward repo liveness — the loop exits and
-    /// the inner `Arc`s are released once the last foreground clone drops.
+    /// Identical to a foreground [`Clone`] except `live = None` (the task
+    /// does not count toward repo liveness) and `worker_lifecycle = None`
+    /// (the task does not retain foreground lifecycle ownership).
     /// See [`Drainer::spawn`](crate::tx::drainer::Drainer::spawn).
     fn clone_for_background(&self) -> Self {
         let mut bg = self.clone();
         bg.live = None;
+        // Background handles own only drainer resources, never foreground
+        // lifecycle ownership.
+        bg.worker_lifecycle = None;
         bg
     }
 

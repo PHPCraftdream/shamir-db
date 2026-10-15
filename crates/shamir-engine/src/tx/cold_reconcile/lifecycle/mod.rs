@@ -1,23 +1,25 @@
-//! Repository-owned worker lifecycle foundation (S5c-X PR6b-2b).
-//!
-//! Three objects: the lifecycle owner, the worker execution state, and the
-//! job envelope. States are `Open -> Closing -> Joined`; quarantine is
-//! unconditional, and shutdown enforces ONE absolute deadline that covers
-//! worker shutdown + commit quiescence + flush + checkpoint (the worker
-//! performs all of those on its exit path). Full contract:
-//! `docs/guide-docs/follower-journal-durability.md`.
+//! Repository-owned worker lifecycle foundation.
 
+#[allow(dead_code)]
+// Inactive lifecycle interlock foundation; exercised by tests and reserved for receipt publication wiring.
 pub(crate) mod interlock;
+#[allow(dead_code)] // Inactive job envelope retained for the generic worker API and tests.
 pub(crate) mod job;
+#[allow(dead_code)] // Inactive lifecycle owner foundation; production wiring is handled separately.
 pub(crate) mod owner;
+#[allow(dead_code)]
+// Inactive worker foundation; retained for tests and future receipt-pipeline wiring.
 pub(crate) mod worker;
 
-pub use interlock::PubTermInterlock;
-pub use job::{JobSubmitError, LifecycleJob};
-pub use owner::{
-    InstallError, RepoUnitLifecycle, RepoWorkerLifecycle, ShutdownError, WorkerTerminal,
-};
-pub use worker::{spawn_worker, WorkerExecutionState, WorkerLease};
+#[cfg(test)]
+pub(crate) use interlock::PubTermInterlock;
+#[cfg(test)]
+pub(crate) use job::JobSubmitError;
+pub(crate) use owner::{ForegroundLifecycle, RepoUnitLifecycle, WorkerTerminal};
+#[cfg(test)]
+pub(crate) use owner::{InstallError, RepoWorkerLifecycle, ShutdownError};
+#[cfg(test)]
+pub(crate) use worker::{spawn_worker, LifecycleStatus, WorkerLease};
 
 #[cfg(test)]
 #[path = "tests/mod.rs"]

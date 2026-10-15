@@ -1,156 +1,172 @@
-//! Tests for the supervisor-owned-join-handle design: the lease is
-//! dropped strictly after the join and before the terminal is published,
-//! and the panic boundary quarantines before destroying the worker's
-//! guards.
-
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+//! Supervisor join, lease release, and fail-closed panic tests.
+use crate::tx::cold_reconcile::lifecycle::{
+    spawn_worker, ForegroundLifecycle, RepoUnitLifecycle, WorkerLease, WorkerTerminal,
+};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
-
 use tokio::sync::Notify;
 
-use crate::tx::cold_reconcile::lifecycle::{
-    spawn_worker, RepoUnitLifecycle, WorkerLease, WorkerTerminal,
-};
-
-/// No-op lease used by the tests.
 struct NoopLease;
-
 impl WorkerLease for NoopLease {}
-
-/// Lease whose physical resource is released by REAL destruction: the
-/// `Drop` impl (not any handler hook) decrements the held count and flags
-/// the release.
-struct LeaseGuard {
-    /// 1 while the lease struct is alive; the ONLY strong `Arc` is owned
-    /// by the lifecycle (supervisor + worker state).
-    held: Arc<AtomicUsize>,
-    released: Arc<AtomicBool>,
+struct DropSignal(Arc<Notify>);
+impl Drop for DropSignal {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
 }
-
+struct LeaseGuard {
+    released: Arc<AtomicBool>,
+    _signal: DropSignal,
+    _resource: Arc<()>,
+}
 impl Drop for LeaseGuard {
     fn drop(&mut self) {
-        self.held.fetch_sub(1, Ordering::SeqCst);
         self.released.store(true, Ordering::SeqCst);
     }
 }
-
 impl WorkerLease for LeaseGuard {}
 
-/// 19. The lease is destroyed ONLY after the supervisor joins the worker
-/// and strictly BEFORE the terminal wakes `shutdown`: the test holds a
-/// `Weak` to the lease's counter (no strong of its own), so
-/// `upgrade().is_none()` after `Completed` proves the lease struct was
-/// dropped by the supervisor — no detach.
 #[tokio::test(start_paused = true)]
-async fn lease_dropped_only_after_join_and_before_terminal() {
-    let held = Arc::new(AtomicUsize::new(1));
+async fn lease_is_dropped_after_join_before_terminal() {
+    let dropped = Arc::new(Notify::new());
+    let resource = Arc::new(());
+    let weak = Arc::downgrade(&resource);
     let released = Arc::new(AtomicBool::new(false));
-    // Weak is taken from the SAME Arc the lease owns; the test keeps NO
-    // strong clone, so upgrade() observes the lease's own destruction.
-    let weak = Arc::downgrade(&held);
-
-    let block = Arc::new(Notify::new());
-    let worker_block = Arc::clone(&block);
     let owner = Arc::new(RepoUnitLifecycle::new());
+    let gate = Arc::new(Notify::new());
+    let worker_gate = Arc::clone(&gate);
     spawn_worker(
         &owner,
         LeaseGuard {
-            held,
             released: Arc::clone(&released),
+            _signal: DropSignal(Arc::clone(&dropped)),
+            _resource: resource,
         },
         move |mut state| async move {
-            let _job = state.next_job().await.expect("one job submitted");
-            worker_block.notified().await;
+            let _job = state.next_job().await.expect("submitted job");
+            worker_gate.notified().await;
         },
     )
-    .expect("install");
-    let _rx = owner.submit(()).expect("admission open");
-
-    block.notify_one();
+    .unwrap();
+    let _rx = owner.submit(()).unwrap();
+    gate.notify_one();
     assert!(matches!(
         owner.shutdown(Duration::from_secs(3600)).await,
         Ok(WorkerTerminal::Completed)
     ));
-
-    // ORDERED observations, all deterministic because the supervisor drops
-    // the lease and sets `supervisor_joined` BEFORE publishing the
-    // terminal that wakes `shutdown`:
-    assert!(owner.supervisor_joined(), "supervisor joined first");
-    assert!(weak.upgrade().is_none(), "lease struct destroyed");
-    assert!(
-        released.load(Ordering::SeqCst),
-        "Drop released the resource"
-    );
+    assert!(owner.supervisor_joined());
+    assert!(weak.upgrade().is_none());
+    dropped.notified().await;
+    assert!(released.load(Ordering::SeqCst));
 }
 
-/// Lease recording quarantine order for the panic-boundary control.
 struct PanicLease {
-    order: Arc<Mutex<Vec<u8>>>,
+    _status: crate::tx::cold_reconcile::lifecycle::LifecycleStatus,
 }
-
-impl WorkerLease for PanicLease {
-    fn on_quarantine(&self) {
-        self.order.lock().unwrap().push(0);
+impl WorkerLease for PanicLease {}
+struct ProtectedResource {
+    status: crate::tx::cold_reconcile::lifecycle::LifecycleStatus,
+    observed: Arc<AtomicBool>,
+}
+impl Drop for ProtectedResource {
+    fn drop(&mut self) {
+        self.observed
+            .store(self.status.quarantined(), Ordering::SeqCst);
     }
 }
 
-/// 20. NEGATIVE CONTROL for the catch_unwind boundary: the handler's own
-/// guard lives INSIDE the worker future, so the boundary must quarantine
-/// (push 0) and run `lease.on_quarantine` BEFORE the future (and its
-/// guard, push 1) is dropped. Under the old spawn-directly design this
-/// ordering was unobservable.
 #[tokio::test(start_paused = true)]
-async fn panic_quarantines_before_guard_destruction() {
-    let order: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let lease_order = Arc::clone(&order);
-    let guard_order = Arc::clone(&order);
+async fn protected_resource_drop_observes_actual_quarantine_during_unwind() {
     let owner = Arc::new(RepoUnitLifecycle::new());
+    let owner_status = owner.status();
+    let observed = Arc::new(AtomicBool::new(false));
+    let drop_observed = Arc::clone(&observed);
     spawn_worker(
         &owner,
-        PanicLease { order: lease_order },
+        PanicLease {
+            _status: owner_status.clone(),
+        },
         move |state| async move {
-            struct Guard {
-                order: Arc<Mutex<Vec<u8>>>,
-            }
-            impl Drop for Guard {
-                fn drop(&mut self) {
-                    self.order.lock().unwrap().push(1);
-                }
-            }
-            let _state = state;
-            let _guard = Guard { order: guard_order };
-            panic!("boom");
+            let _guard = state.protect_guard(ProtectedResource {
+                status: state.status(),
+                observed: drop_observed,
+            });
+            panic!("intentional worker panic");
         },
     )
-    .expect("install");
-
+    .unwrap();
     assert!(matches!(
         owner.shutdown(Duration::from_secs(3600)).await,
         Ok(WorkerTerminal::Failed(_))
     ));
+    assert!(owner.supervisor_joined());
     assert!(owner.quarantined());
-    assert_eq!(
-        *order.lock().unwrap(),
-        vec![0, 1],
-        "quarantine STRICTLY before guard destruction"
+    assert!(
+        observed.load(Ordering::SeqCst),
+        "protected resource Drop observed quarantine"
     );
+    drop(owner_status);
 }
 
-/// 21. After a clean echo shutdown the supervisor has joined and set the
-/// sticky `supervisor_joined` flag.
 #[tokio::test(start_paused = true)]
-async fn supervisor_joined_after_terminal_observed() {
+async fn protected_local_resource_survives_timeout_until_worker_join() {
+    let owner = Arc::new(RepoUnitLifecycle::new());
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let (worker_entered, worker_release) = (Arc::clone(&entered), Arc::clone(&release));
+    let resource = Arc::new(());
+    let weak_resource = Arc::downgrade(&resource);
+    let worker_resource = Arc::clone(&resource);
+    spawn_worker(&owner, NoopLease, move |state| async move {
+        let _protected = state.protect_guard(worker_resource);
+        worker_entered.notify_one();
+        worker_release.notified().await;
+    })
+    .unwrap();
+    drop(resource);
+    entered.notified().await;
+    assert!(matches!(
+        owner.shutdown(Duration::ZERO).await,
+        Err(crate::tx::cold_reconcile::lifecycle::ShutdownError::TimedOut)
+    ));
+    assert!(owner.quarantined() && owner.reopen_required());
+    assert!(owner.interlock().publish(|| ()).is_err());
+    assert!(weak_resource.upgrade().is_some());
+    release.notify_one();
+    assert!(matches!(
+        owner.shutdown(Duration::from_secs(3600)).await,
+        Ok(WorkerTerminal::Completed)
+    ));
+    assert!(weak_resource.upgrade().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn final_foreground_token_closes_shared_lifecycle_without_raw_arc_cycle() {
+    let lifecycle = Arc::new(RepoUnitLifecycle::new());
+    let token = Arc::new(ForegroundLifecycle::from_lifecycle(Arc::clone(&lifecycle)));
+    let retained_token = Arc::clone(&token);
+    drop(token);
+    assert!(lifecycle.admission_open());
+    drop(retained_token);
+    assert!(!lifecycle.admission_open());
+    assert!(matches!(
+        lifecycle.shutdown(Duration::ZERO).await,
+        Ok(WorkerTerminal::Completed)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn supervisor_joined_after_clean_terminal() {
     let owner = Arc::new(RepoUnitLifecycle::new());
     spawn_worker(&owner, NoopLease, |mut state| async move {
         while let Some(job) = state.next_job().await {
             job.reply(());
         }
     })
-    .expect("install");
-    let rx = owner.submit(()).expect("admission open");
-    assert!(rx.await.is_ok());
-
+    .unwrap();
+    let rx = owner.submit(()).unwrap();
+    rx.await.unwrap();
     assert!(matches!(
         owner.shutdown(Duration::from_secs(3600)).await,
         Ok(WorkerTerminal::Completed)

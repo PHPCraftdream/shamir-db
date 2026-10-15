@@ -18,13 +18,11 @@
 //! `supervisor_joined`. Dropping the owner therefore cannot detach the
 //! worker task, and the physical lease lifetime ends strictly after join.
 //!
-//! Contention model: the `control` std-Mutex is a lifecycle control-plane
-//! critical section — low frequency (setup/teardown only, never a hot
-//! path), never held across an `.await`, and the mpsc `try_send` inside it
-//! is non-blocking. `CoreState` is lock-free (atomics + a `watch` sender)
-//! and `Arc`-shared with the worker and supervisor.
-//!
-//! Lock order: `control` only; no other lock interacts with it.
+//! Contention model: admission and quarantine serialize acceptance with
+//! `admission_gate` and take `control` second. Quarantine releases admission
+//! before acquiring the publication interlock. Publication callbacks must not
+//! re-enter lifecycle operations. No lifecycle lock is held across `.await`.
+//! The worker has no sender reference. Protected resources must not be dropped from publication callbacks.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -42,8 +40,6 @@ use super::worker::{WorkerExecutionState, WorkerLease};
 /// were removed in the supervisor redesign.)
 const DEFAULT_CHANNEL_BOUND: usize = 16;
 
-/// Terminal disposition of the worker task. `Failed` covers a panicked or
-/// aborted worker; the cause is stringified into it.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum WorkerTerminal {
     /// The worker task ran to completion.
@@ -54,16 +50,17 @@ pub enum WorkerTerminal {
     Failed(String),
 }
 
-/// Shared owner/supervisor/worker state — all `Arc`-shared; atomics plus a
-/// `watch` sender only (lock-free; `Send + Sync` by construction: atomics
-/// and `tokio::sync::watch::Sender<Option<WorkerTerminal>>` are both
-/// `Send + Sync` for `T: Send + Sync`).
+/// Shared owner/supervisor/worker state. Atomic observations coexist with
+/// synchronous mutexes for admission/quarantine and publication serialization.
 pub(crate) struct CoreState {
     interlock: PubTermInterlock,
+    /// Synchronous gate serializing submit's acceptance point with
+    /// quarantine. Lock order is admission_gate then owner control.
+    admission_gate: Mutex<()>,
     /// Sticky quarantine flag visible to repo reopen logic.
-    quarantined: AtomicBool,
+    pub(crate) quarantined: AtomicBool,
     /// Sticky flag: repository reopen is required before further use.
-    reopen_required: AtomicBool,
+    pub(crate) reopen_required: AtomicBool,
     /// Sticky flag set by the supervisor strictly AFTER joining the worker
     /// and dropping the lease, BEFORE the terminal becomes observable —
     /// tests use it to prove lease-release ordering.
@@ -82,18 +79,21 @@ impl CoreState {
     /// UNCONDITIONAL quarantine: sticky `quarantined` + `reopen_required`
     /// (both Release), then `interlock.terminate()`. The parked-guard count
     /// is NEVER consulted. Timeout and panic BOTH route here.
-    fn quarantine(&self, reason: &str) {
+    pub(crate) fn quarantine(&self, reason: &str) {
         log::warn!("worker lifecycle quarantine: {reason}");
+        // Admission closes under its gate first. Drop that gate before waiting
+        // on publication, whose callback is forbidden from re-entering lifecycle.
+        let gate = self
+            .admission_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         self.quarantined.store(true, Ordering::Release);
         self.reopen_required.store(true, Ordering::Release);
+        drop(gate);
         self.interlock.terminate();
     }
 
-    /// First-write-wins terminal publication (supervisor/worker race safe):
-    /// only the FIRST `set_terminal` writes; later calls are no-ops. This
-    /// is what keeps a caught worker panic (`Failed`, published inside the
-    /// worker boundary) from being overwritten by the supervisor's
-    /// `Completed`.
+    /// Supervisor-only terminal publication, after worker join and lease drop.
     fn set_terminal(&self, terminal: WorkerTerminal) {
         let _ = self.terminal_tx.send_if_modified(|slot| {
             if slot.is_none() {
@@ -107,23 +107,19 @@ impl CoreState {
 }
 
 /// Error returned by [`RepoWorkerLifecycle::install_worker`].
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, thiserror::Error)]
 pub enum InstallError {
-    /// The lifecycle is closing/closed/quarantined, or a previous
-    /// close-before-initialize permanently forbade spawning.
+    /// Lifecycle is closed or permanently forbidden.
     #[error("worker install rejected: lifecycle closed or spawn forbidden")]
     ClosedOrForbidden,
-    /// A worker was already installed for this lifecycle.
+    /// Worker is already installed.
     #[error("worker install rejected: worker already installed")]
     AlreadyInstalled,
-    /// Kept for install-API symmetry: the install was rejected WITHOUT
-    /// spawning, so nothing is untracked.
-    #[error("worker install rejected: install slot busy")]
-    #[allow(dead_code)] // kept per design contract; not constructible in the supervisor design
-    SlotBusy,
 }
 
 /// Error returned by [`RepoWorkerLifecycle::shutdown`].
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, thiserror::Error)]
 pub enum ShutdownError {
     /// The absolute shutdown deadline elapsed before the worker exited.
@@ -141,7 +137,7 @@ enum LifecycleState {
     /// Admission closed (sender dropped); buffered jobs still drain FIFO.
     Closing,
     /// The worker was joined and its terminal outcome is known.
-    Joined(WorkerTerminal),
+    Joined,
 }
 
 /// The ONE control critical section: state + sender + spawn bookkeeping +
@@ -195,6 +191,7 @@ impl<J: Send, R: Send> RepoWorkerLifecycle<J, R> {
             }),
             core: Arc::new(CoreState {
                 interlock: PubTermInterlock::new(),
+                admission_gate: Mutex::new(()),
                 quarantined: AtomicBool::new(false),
                 reopen_required: AtomicBool::new(false),
                 supervisor_joined: AtomicBool::new(false),
@@ -214,6 +211,11 @@ impl<J: Send, R: Send> RepoWorkerLifecycle<J, R> {
     /// Sticky: quarantine was applied to this lifecycle epoch.
     pub fn quarantined(&self) -> bool {
         self.core.quarantined.load(Ordering::Acquire)
+    }
+
+    /// Non-owner observation handle for protected resource destructors/tests.
+    pub fn status(&self) -> super::worker::LifecycleStatus {
+        super::worker::LifecycleStatus::new(Arc::clone(&self.core))
     }
 
     /// Sticky: the repository must reopen (recovering WAL-unsettled
@@ -236,10 +238,11 @@ impl<J: Send, R: Send> RepoWorkerLifecycle<J, R> {
 
     /// `true` while admission is open (state == `Open`).
     pub fn admission_open(&self) -> bool {
-        matches!(
-            self.control.lock().unwrap_or_else(|e| e.into_inner()).state,
-            LifecycleState::Open
-        )
+        !self.core.quarantined.load(Ordering::Acquire)
+            && matches!(
+                self.control.lock().unwrap_or_else(|e| e.into_inner()).state,
+                LifecycleState::Open
+            )
     }
 
     /// Installs the worker: synchronously checks admission, takes the
@@ -272,7 +275,10 @@ impl<J: Send, R: Send> RepoWorkerLifecycle<J, R> {
         if control.spawned {
             return Err(InstallError::AlreadyInstalled);
         }
-        if !matches!(control.state, LifecycleState::Open) || control.spawn_forbidden {
+        if !matches!(control.state, LifecycleState::Open)
+            || control.spawn_forbidden
+            || self.core.quarantined.load(Ordering::Acquire)
+        {
             if !matches!(control.state, LifecycleState::Open) {
                 control.spawn_forbidden = true;
             }
@@ -290,29 +296,20 @@ impl<J: Send, R: Send> RepoWorkerLifecycle<J, R> {
             generation,
             Arc::clone(&self.core),
         );
-        // Panic boundary: `Box::pin` so the future (and the guards captured
-        // inside it) can be dropped EXPLICITLY after quarantine, never by
-        // unwind. `catch_unwind` keeps the (already-pinned) future alive in
-        // `caught` when it panics, so its guards are NOT dropped by the
-        // unwind itself.
         let core_w = Arc::clone(&self.core);
-        let lease_w = Arc::clone(&lease);
         let inner = async move { handler(state).await };
+        let lease_w = Arc::clone(&lease);
         let worker_task = async move {
-            let mut caught = Box::pin(futures::FutureExt::catch_unwind(
-                std::panic::AssertUnwindSafe(inner),
-            ));
-            if caught.as_mut().await.is_err() {
-                // Panic caught INSIDE the worker execution: quarantine, run
-                // the FAIL-CLOSED lease cleanup, and publish the terminal —
-                // all BEFORE the future (and every guard it still owns) is
-                // dropped below. Guard destruction happens in
-                // `drop(caught)`, strictly after quarantine.
-                core_w.quarantine("worker panicked");
-                lease_w.on_quarantine();
-                core_w.set_terminal(WorkerTerminal::Failed("worker panicked".to_string()));
+            let result =
+                futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(inner)).await;
+            match result {
+                Ok(()) => WorkerTerminal::Completed,
+                Err(_) => {
+                    core_w.quarantine("worker panicked");
+                    lease_w.on_quarantine();
+                    WorkerTerminal::Failed("worker panicked".to_string())
+                }
             }
-            drop(caught); // guard destruction happens HERE, strictly after quarantine
         };
         let worker_handle = tokio::spawn(worker_task);
         // The supervisor OWNS the join handle and a lease Arc for the rest
@@ -335,8 +332,15 @@ impl<J: Send, R: Send> RepoWorkerLifecycle<J, R> {
     /// construction is impossible: the handler is supplied later, via
     /// `install_worker`.)
     pub fn submit(&self, payload: J) -> Result<tokio::sync::oneshot::Receiver<R>, JobSubmitError> {
+        let _gate = self
+            .core
+            .admission_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let control = self.control.lock().unwrap_or_else(|e| e.into_inner());
-        if !matches!(control.state, LifecycleState::Open) {
+        if self.core.quarantined.load(Ordering::Acquire)
+            || !matches!(control.state, LifecycleState::Open)
+        {
             return Err(JobSubmitError::Closing);
         }
         if !control.spawned {
@@ -358,12 +362,21 @@ impl<J: Send, R: Send> RepoWorkerLifecycle<J, R> {
     /// sender so the worker drains buffered jobs FIFO and then observes
     /// channel end. Idempotent; safe to call from `Drop`.
     pub fn close(&self) {
+        let _gate = self
+            .core
+            .admission_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut control = self.control.lock().unwrap_or_else(|e| e.into_inner());
         if matches!(control.state, LifecycleState::Open) {
             control.state = LifecycleState::Closing;
-            // Dropping the sender closes the channel; the mpsc Receiver
-            // keeps yielding buffered jobs after the sender drop.
             control.sender = None;
+            if !control.spawned {
+                control.spawn_forbidden = true;
+                control.state = LifecycleState::Joined;
+                self.core.supervisor_joined.store(true, Ordering::Release);
+                self.core.set_terminal(WorkerTerminal::Completed);
+            }
         }
     }
 
@@ -389,21 +402,30 @@ impl<J: Send, R: Send> RepoWorkerLifecycle<J, R> {
     /// additionally quarantines unconditionally (fail-closed) while the
     /// supervisor retains handle + lease.
     pub async fn shutdown(&self, deadline: Duration) -> Result<WorkerTerminal, ShutdownError> {
+        self.shutdown_until(tokio::time::Instant::now() + deadline)
+            .await
+    }
+
+    /// Waits until an absolute Tokio deadline without retaining control locks.
+    pub async fn shutdown_until(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<WorkerTerminal, ShutdownError> {
         self.close();
         let mut rx = self.terminal.clone();
         if let Some(t) = rx.borrow().clone() {
             // Cached terminal: the supervisor already joined and published;
             // never repoll the worker.
-            self.record_joined(t.clone());
+            self.record_joined();
             return Ok(t);
         }
-        match tokio::time::timeout(deadline, rx.wait_for(|t| t.is_some())).await {
+        match tokio::time::timeout_at(deadline, rx.wait_for(|t| t.is_some())).await {
             Ok(Ok(guard)) => {
                 let t = guard
                     .as_ref()
                     .cloned()
                     .expect("wait_for predicate guarantees Some");
-                self.record_joined(t.clone());
+                self.record_joined();
                 Ok(t)
             }
             Ok(Err(_recv_closed)) => {
@@ -424,46 +446,30 @@ impl<J: Send, R: Send> RepoWorkerLifecycle<J, R> {
     /// owner's control state. Called only from `shutdown` success paths
     /// (the supervisor performs the actual join). Poisoning-tolerant: a
     /// panicking holder must not wedge the lifecycle control plane.
-    fn record_joined(&self, terminal: WorkerTerminal) {
+    fn record_joined(&self) {
         let mut control = self.control.lock().unwrap_or_else(|e| e.into_inner());
-        control.state = LifecycleState::Joined(terminal);
+        control.state = LifecycleState::Joined;
     }
 }
 
-/// Spawns the supervisor task: it awaits the worker's join handle, drops
-/// the LAST lease `Arc` strictly AFTER the join and BEFORE the terminal
-/// becomes observable, sets `supervisor_joined`, then publishes the
-/// terminal outcome (first-write-wins).
+/// The supervisor task is intentionally background-owned: the runtime
+/// must remain alive until worker cleanup and supervisor publication finish.
 fn spawn_supervisor<L: WorkerLease>(
     core: Arc<CoreState>,
-    handle: JoinHandle<()>,
+    handle: JoinHandle<WorkerTerminal>,
     lease: Arc<L>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let join_result = handle.await;
-        let terminal = {
-            // `lease` (the LAST Arc<L>: the worker task already ended before
-            // `handle.await` returned) is dropped at the end of this block —
-            // strictly AFTER join, BEFORE the terminal becomes observable.
-            match join_result {
-                Ok(()) => {
-                    // A caught panic already published Failed (first-write-
-                    // wins keeps it); Completed only if the worker exited
-                    // cleanly.
-                    WorkerTerminal::Completed
-                }
-                Err(join_err) => {
-                    // Defensive: the worker boundary catches job panics;
-                    // reaching here means the wrapper task itself died
-                    // (abort or boundary unwind). Fail closed.
-                    core.quarantine("worker task aborted");
-                    lease.on_quarantine();
-                    WorkerTerminal::Failed(join_err.to_string())
-                }
+        let terminal = match handle.await {
+            Ok(terminal) => terminal,
+            Err(join_err) => {
+                core.quarantine("worker task failed outside its panic boundary");
+                lease.on_quarantine();
+                WorkerTerminal::Failed(join_err.to_string())
             }
         };
-        core.supervisor_joined
-            .store(true, std::sync::atomic::Ordering::Release);
+        drop(lease);
+        core.supervisor_joined.store(true, Ordering::Release);
         core.set_terminal(terminal);
     })
 }
@@ -474,6 +480,40 @@ impl<J: Send, R: Send> Drop for RepoWorkerLifecycle<J, R> {
     }
 }
 
-/// Unit-payload alias used by the production-inactive wiring: no job
-/// payload, no reply value.
+/// Repository-owned unit lifecycle. Foreground callers should retain a `ForegroundLifecycle` token; background users may retain the raw `Arc`.
 pub type RepoUnitLifecycle = RepoWorkerLifecycle<(), ()>;
+
+/// Foreground ownership token: dropping the final token closes its lifecycle.
+pub struct ForegroundLifecycle {
+    lifecycle: Arc<RepoUnitLifecycle>,
+}
+
+impl Default for ForegroundLifecycle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ForegroundLifecycle {
+    /// Starts a fresh foreground lifecycle owner.
+    pub fn new() -> Self {
+        Self {
+            lifecycle: Arc::new(RepoWorkerLifecycle::new()),
+        }
+    }
+    pub fn from_lifecycle(lifecycle: Arc<RepoUnitLifecycle>) -> Self {
+        Self { lifecycle }
+    }
+    pub fn lifecycle(&self) -> &Arc<RepoUnitLifecycle> {
+        &self.lifecycle
+    }
+    pub fn reopen_required(&self) -> bool {
+        self.lifecycle.reopen_required()
+    }
+}
+
+impl Drop for ForegroundLifecycle {
+    fn drop(&mut self) {
+        self.lifecycle.close();
+    }
+}
