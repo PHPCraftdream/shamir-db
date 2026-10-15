@@ -21,13 +21,14 @@ use crate::query::admin::{
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
 use crate::types::value::QueryValue;
-use crate::{DbError, DbResult, ShamirDb};
+use crate::{DbResult, ShamirDb};
 use shamir_query_types::admin::ReplDirection;
 use shamir_query_types::ReplicationServe;
 use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::helpers::{admin_result, to_qv};
+use super::quarantine_cache::{global_sentinel_key, unresolvable_profile_reason};
 
 impl ShamirAdminExecutor {
     // ------------------------------------------------------------------
@@ -738,9 +739,11 @@ impl ShamirDb {
         let entries = self.resync_quarantine_entries().await?;
         Ok(entries
             .iter()
-            .any(|((db, repo), _)| db == db_name && (repo == "*" || repo == repo_name)))
+            // db == "*" mirrors the read-side ("*", "*") global sentinel.
+            .any(|((db, repo), _)| {
+                (db == "*" || db == db_name) && (repo == "*" || repo == repo_name)
+            }))
     }
-
     /// Single source of truth for the quarantine set: walk the
     /// `system/subscriptions` table rows that are quarantined
     /// ([`row_is_quarantined`]) and resolve each row's profile `Pull` streams
@@ -749,6 +752,11 @@ impl ShamirDb {
     /// with the row's `status_message` (or a constant reason when absent).
     /// Consumed by both [`Self::has_resync_required_subscription_covering`]
     /// and [`Self::refresh_resync_quarantine_cache`].
+    ///
+    /// Fail-closed fallback: a row whose profile is missing/unresolvable
+    /// contributes the global ("*", "*") sentinel instead of an error (see
+    /// [`quarantine_row_entries`]); infra failures of the `subscriptions`
+    /// table read itself still propagate via `?`.
     pub(crate) async fn resync_quarantine_entries(
         &self,
     ) -> DbResult<Vec<((String, String), String)>> {
@@ -765,29 +773,19 @@ impl ShamirDb {
             if !row_is_quarantined(&row) {
                 continue;
             }
-            let profile = row
-                .get("profile")
-                .and_then(|value| value.as_str())
-                .ok_or_else(|| {
-                    DbError::Validation("quarantined subscription has no profile".into())
-                })?;
+            let profile = row.get("profile").and_then(|value| value.as_str());
             let reason = row
                 .get("status_message")
                 .and_then(|value| value.as_str())
-                .unwrap_or("subscription requires resync")
-                .to_string();
-            let streams = super::replication_seed::catalogue::streams(self, profile)
-                .await
-                .map_err(|error| {
-                    DbError::Validation(format!("quarantined profile resolution failed: {error}"))
-                })?;
-            for stream in streams {
-                if !matches!(stream.direction, ReplDirection::Pull) {
-                    continue;
-                }
-                let repo = stream.scope.repo.unwrap_or_else(|| "*".to_string());
-                entries.push(((stream.scope.db, repo), reason.clone()));
+                .unwrap_or("subscription requires resync");
+            let (mut row_entries, failure) = quarantine_row_entries(self, profile, reason).await;
+            if let Some(failure) = &failure {
+                log::warn!(
+                    "resync_quarantine_entries: quarantined row's profile \
+                     unresolvable ({failure}); global read quarantine installed"
+                );
             }
+            entries.append(&mut row_entries);
         }
         Ok(entries)
     }
@@ -857,6 +855,11 @@ impl ShamirDb {
     /// `quarantined` marker plus the `resync_from_receipt` baseline (see
     /// [`Self::mark_subscription_resync_required`]); other states never set
     /// the marker.
+    ///
+    /// Marking NEVER fails because the covered set cannot be computed:
+    /// a missing/unresolvable profile falls back to the global ("*", "*")
+    /// sentinel (see [`quarantine_row_entries`]), logged and appended to
+    /// `status_message`; the persisted write always happens.
     pub async fn mark_subscription_terminal(
         &self,
         name: &str,
@@ -885,26 +888,20 @@ impl ShamirDb {
             return Ok(());
         };
 
+        // Row-level profile resolution failure — surfaced below via
+        // `status_message`, never as a marking error (fail-closed fallback).
+        let mut resolution_failure = None;
         if state == "resync_required" {
-            let profile = row
-                .as_value()
-                .get("profile")
-                .and_then(|value| value.as_str())
-                .map(str::to_owned)
-                .ok_or_else(|| {
-                    DbError::Validation("quarantined subscription has no profile".into())
-                })?;
-            let reason = message.to_string();
-            let streams = super::replication_seed::catalogue::streams(self, &profile)
-                .await
-                .map_err(|error| {
-                    DbError::Validation(format!("quarantined profile resolution failed: {error}"))
-                })?;
-            for stream in streams {
-                if matches!(stream.direction, ReplDirection::Pull) {
-                    let repo = stream.scope.repo.unwrap_or_else(|| "*".to_string());
-                    next_entries.push(((stream.scope.db, repo), reason.clone()));
-                }
+            let owned_row = row.as_value().into_owned();
+            let profile = owned_row.get("profile").and_then(|value| value.as_str());
+            let (mut row_entries, failure) = quarantine_row_entries(self, profile, message).await;
+            next_entries.append(&mut row_entries);
+            if let Some(failure) = &failure {
+                log::warn!(
+                    "mark_subscription_terminal: {failure}; \
+                     global read quarantine installed"
+                );
+                resolution_failure = Some(failure.clone());
             }
             self.resync_quarantine.publish(next_entries);
             self.revoke_quarantined_receivers().await;
@@ -929,15 +926,18 @@ impl ShamirDb {
                 m.insert("quarantined".into(), QueryValue::Bool(true));
             }
         }
+        let mut status_message = message.to_string();
+        if let Some(failure) = &resolution_failure {
+            // Surface the resolution failure via status_message (echoed
+            // verbatim by status/list), not as a marking error.
+            status_message = format!("{message}; {failure}");
+        }
         if let QueryValue::Map(ref mut fields) = record {
             fields.insert(
                 "last_terminal_reason".into(),
                 QueryValue::Str(state.to_string()),
             );
-            fields.insert(
-                "status_message".into(),
-                QueryValue::Str(message.to_string()),
-            );
+            fields.insert("status_message".into(), QueryValue::Str(status_message));
         }
         let set_op = crate::query::write::SetOp {
             set: crate::query::TableRef::new("subscriptions"),
@@ -962,4 +962,39 @@ impl ShamirDb {
 fn row_is_quarantined(row: &QueryValue) -> bool {
     row.get("state").and_then(|value| value.as_str()) == Some("resync_required")
         || row.get("quarantined") == Some(&QueryValue::Bool(true))
+}
+
+/// Resolve one quarantined row's profile into quarantine cache entries;
+/// fail-closed fallback: rows record no db column, so a missing/unresolvable
+/// profile has no narrower safe `(db, repo)` scope — emit the global ("*", "*") sentinel instead of an error; 2nd element = row failure (warn/status).
+async fn quarantine_row_entries(
+    shamir: &ShamirDb,
+    profile: Option<&str>,
+    reason: &str,
+) -> (Vec<((String, String), String)>, Option<String>) {
+    let Some(profile) = profile else {
+        return (
+            vec![(
+                global_sentinel_key(),
+                unresolvable_profile_reason("<missing>"),
+            )],
+            Some("quarantined subscription has no profile".into()),
+        );
+    };
+    match super::replication_seed::catalogue::streams(shamir, profile).await {
+        Ok(streams) => {
+            let mut entries = Vec::new();
+            for stream in streams {
+                if matches!(stream.direction, ReplDirection::Pull) {
+                    let repo = stream.scope.repo.unwrap_or_else(|| "*".to_string());
+                    entries.push(((stream.scope.db, repo), reason.to_string()));
+                }
+            }
+            (entries, None)
+        }
+        Err(error) => (
+            vec![(global_sentinel_key(), unresolvable_profile_reason(profile))],
+            Some(format!("quarantined profile resolution failed: {error}")),
+        ),
+    }
 }
