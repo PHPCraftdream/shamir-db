@@ -113,11 +113,7 @@ impl ShamirDb {
         let skip_seam = skip_read_quarantine_for_test();
         if !skip_seam {
             if let Some(reason) = self.quarantined_read_reason(db, repo) {
-                return Err(DbError::ResyncRequired {
-                    db: db.to_string(),
-                    repo: repo.to_string(),
-                    reason,
-                });
+                return Err(DbError::resync_required(db, repo, reason));
             }
         }
         let Some(repo_instance) = self.get_db(db).and_then(|d| d.get_repo(repo)) else {
@@ -225,11 +221,7 @@ impl ShamirDb {
         let skip_seam = skip_read_quarantine_for_test();
         if !skip_seam {
             if let Some(reason) = self.quarantined_read_reason(db, repo) {
-                return Err(DbError::ResyncRequired {
-                    db: db.to_string(),
-                    repo: repo.to_string(),
-                    reason,
-                });
+                return Err(DbError::resync_required(db, repo, reason));
             }
         }
         let Some(repo_instance) = self.get_db(db).and_then(|db| db.get_repo(repo)) else {
@@ -262,11 +254,7 @@ impl ShamirDb {
         let skip_seam = skip_read_quarantine_for_test();
         if !skip_seam {
             if let Some(reason) = self.quarantined_read_reason(db, repo) {
-                return Err(DbError::ResyncRequired {
-                    db: db.to_string(),
-                    repo: repo.to_string(),
-                    reason,
-                });
+                return Err(DbError::resync_required(db, repo, reason));
             }
         }
         let Some(repo_instance) = self.get_db(db).and_then(|db| db.get_repo(repo)) else {
@@ -317,11 +305,7 @@ impl ShamirDb {
         let skip_seam = skip_read_quarantine_for_test();
         if !skip_seam {
             if let Some(reason) = self.quarantined_read_reason(db, repo) {
-                return Err(DbError::ResyncRequired {
-                    db: db.to_string(),
-                    repo: repo.to_string(),
-                    reason,
-                });
+                return Err(DbError::resync_required(db, repo, reason));
             }
         }
         let Some(repo_instance) = self.get_db(db).and_then(|db| db.get_repo(repo)) else {

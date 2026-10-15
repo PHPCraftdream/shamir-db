@@ -137,13 +137,28 @@ pub enum DbError {
     /// `resync_required` quarantine (identity/epoch fence tripped or terminal
     /// journal gap). The destination's local state is stale/diverged; reads are
     /// refused until a replacement seed is installed and the quarantine cleared.
-    #[error("repository {db}/{repo} is quarantined (resync_required): {reason}")]
-    ResyncRequired {
-        db: String,
-        repo: String,
-        reason: String,
-    },
+    ///
+    /// Boxed: three inline `String`s made this the largest variant and grew
+    /// every `DbResult` on every path (nested-batch stack overflow in CI).
+    #[error(
+        "repository {}/{} is quarantined (resync_required): {}",
+        .0.db,
+        .0.repo,
+        .0.reason
+    )]
+    ResyncRequired(Box<ResyncRequiredInfo>),
 }
+
+/// Heap payload of [`DbError::ResyncRequired`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResyncRequiredInfo {
+    pub db: String,
+    pub repo: String,
+    pub reason: String,
+}
+
+// Ratchet: a new inline-heavy variant must be boxed, not widen every `DbResult`.
+const _: () = assert!(std::mem::size_of::<DbError>() <= 64);
 
 impl From<CodecError> for DbError {
     fn from(err: CodecError) -> Self {
@@ -152,6 +167,15 @@ impl From<CodecError> for DbError {
 }
 
 impl DbError {
+    /// Build [`DbError::ResyncRequired`] for a quarantined `db`/`repo`.
+    pub fn resync_required(db: &str, repo: &str, reason: String) -> Self {
+        DbError::ResyncRequired(Box::new(ResyncRequiredInfo {
+            db: db.to_string(),
+            repo: repo.to_string(),
+            reason,
+        }))
+    }
+
     /// Return the machine-readable wire code for this error variant, if any.
     /// Used by the engine to populate `BatchError::QueryError.code` (and
     /// `DbResponse::Error.code` on the wire) so clients can branch on typed
