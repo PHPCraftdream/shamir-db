@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 use crate::engine::migration::MigrationCoordinator;
 use crate::engine::repo::{BoxRepoFactory, DurabilityPolicy, RepoConfig};
 use crate::engine::table::TableConfig;
+use crate::shamir_db::execute::ResyncQuarantineCache;
 
 use super::super::ports::{PrincipalResolver, UserAdminPort};
 use super::super::repo_durability::durability_from_record;
@@ -140,6 +141,12 @@ pub struct ShamirDb {
     pub(super) experimental_migration_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// Server-default policy, validated at initialization and each repository open.
     pub(super) durability_policy: DurabilityPolicy,
+    /// S5c-X PR8b — lock-free cache of `(db, repo)` targets covered by a
+    /// subscription in `state = "resync_required"`. Shared by clone; rebuilt
+    /// wholesale by `refresh_resync_quarantine_cache` (see
+    /// `execute::admin_replication`). Ordinary READS of a covered repo fail
+    /// closed; one atomic load on the healthy path.
+    pub(crate) resync_quarantine: ResyncQuarantineCache,
 }
 
 impl ShamirDb {
@@ -229,6 +236,7 @@ impl ShamirDb {
             principal_resolver: None,
             experimental_migration_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             durability_policy: durability,
+            resync_quarantine: ResyncQuarantineCache::new(),
         };
 
         if seed {
@@ -507,6 +515,10 @@ impl ShamirDb {
                 unresolved
             );
         }
+
+        // S5c-X PR8b: rebuild the read-quarantine cache from the persisted
+        // subscription rows — a `resync_required` quarantine survives restart.
+        shamir.refresh_resync_quarantine_cache().await;
 
         Ok(shamir)
     }

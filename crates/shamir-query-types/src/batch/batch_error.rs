@@ -257,6 +257,15 @@ pub enum BatchError {
         /// The configured `max_result_size_bytes` cap.
         max: usize,
     },
+
+    /// S5c-X PR8b: a read op targeted a replication destination in
+    /// `resync_required` quarantine; refused until a replacement seed is installed.
+    ResyncRequired {
+        alias: String,
+        db: String,
+        repo: String,
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for BatchError {
@@ -396,6 +405,18 @@ impl std::fmt::Display for BatchError {
                     size, max
                 )
             }
+            BatchError::ResyncRequired {
+                alias,
+                db,
+                repo,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "query '{alias}': repository {db}/{repo} is quarantined \
+                     (resync_required): {reason}"
+                )
+            }
         }
     }
 }
@@ -421,6 +442,7 @@ impl BatchError {
         match self {
             BatchError::QueryError { code, .. } => code.as_deref(),
             BatchError::AsOfVisibilityTimeout { .. } => Some("as_of_visibility_timeout"),
+            BatchError::ResyncRequired { .. } => Some("resync_required"),
             _ => None,
         }
     }

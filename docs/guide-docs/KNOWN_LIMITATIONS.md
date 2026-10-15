@@ -664,7 +664,22 @@ artifact).
   See `crates/shamir-server/src/replication/follower_loop.rs:311-325`,
   `crates/shamir-server/src/replication/supervisor.rs:309-334` and
   `crates/shamir-db/src/shamir_db/execute/admin_replication.rs:413-467`.
-  There is **no automatic snapshot/reseed**. Runtime clean-horizon checkpoints
+  There is **no automatic snapshot/reseed**. While the subscription is
+  quarantined (`resync_required`), the destination is also EXCLUDED FROM
+  ORDINARY READS (S5c-X PR8b): client reads (get/query/scan, including
+  temporal AsOf/History read ops) of any repo covered by that
+  subscription's Pull streams fail closed with the typed error
+  `BatchError::ResyncRequired` (stable wire code `resync_required`,
+  non-retryable), and local changefeed/journal pulls
+  (`read_changelog_bounded`, the local subscriber bridge) fail with
+  `DbError::ResyncRequired` — the consumer must reseed, not keep tailing
+  stale state; the downstream serve refusal (`downstream_resync_required`,
+  PR8) is unchanged. Status, `ReplicationStatus`/`ListSubscriptions`
+  (which already echo `state` and `status_message` verbatim), DESCRIBE and
+  other admin ops stay readable so the operator can see why; the
+  quarantine lifts only through the operator path that flips the
+  subscription state back (admin `Resume` / replacement-seed install per
+  the runbook, or dropping the subscription). Runtime clean-horizon checkpoints
   bound the retained local WAL; retention enforcement follows the configured
   refusal or conservative GAP policy. PR4 cold reconciliation means an
   unclean crash alone no longer implies reseeding: a seed is needed when the
@@ -704,7 +719,10 @@ artifact).
   a different one — including a restarted `in_memory`/`hybrid` leader,
   which mints a new lineage at every start because its `__tx__` is
   RAM-only. This stops silent history swaps; it does NOT repair the
-  follower's data — recovery stays the operator runbook above. Pre-PR7
+  follower's data — recovery stays the operator runbook above, and since
+  PR8b ordinary reads and local changefeed pulls of the quarantined
+  destination are refused (`resync_required`) until the state is flipped
+  back. Pre-PR7
   subscriptions adopt the first observed identity once (one WARN line).
   Identity lives in the actual advancing bookmark value and is preserved on
   every advance. Missing identity fails closed even on first contact; no
@@ -741,7 +759,9 @@ artifact).
   advertises speculative consistency, not linearizability. A refused
   bookmark marks the subscription `resync_required` (counter
   `shamir_repl_resync_required_total`) and it stays quarantined until a
-  replacement seed is installed; legacy peers omitting lineage/epoch
+  replacement seed is installed (and since PR8b ordinary reads and local
+  changefeed pulls of the destination fail with `resync_required` while it
+  lasts); legacy peers omitting lineage/epoch
   identity are refused (`MissingIdentity`) and never adopted. Sources:
   `crates/shamir-server/src/replication/identity_fence/mod.rs`,
   `crates/shamir-engine/src/meta/repo_identity.rs`,

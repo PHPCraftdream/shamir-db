@@ -1,6 +1,9 @@
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::ShamirDb;
+use crate::shamir_db::execute::SKIP_READ_QUARANTINE_FOR_TEST;
+use shamir_storage::error::DbError;
 use shamir_types::codecs::interned::inner_value_to_query_value;
 use shamir_types::core::interner::Interner;
 use shamir_types::types::value::{InnerValue, QueryValue};
@@ -188,6 +191,19 @@ impl ShamirDb {
         from_version: u64,
         limit: usize,
     ) -> shamir_storage::error::DbResult<Option<shamir_engine::BoundedJournalRead>> {
+        // S5c-X PR8b: a quarantined (`resync_required`) destination refuses
+        // changelog pulls (fail closed) — the follower must reseed instead.
+        // Negative-control seam is only compiled into test builds.
+        let skip_seam = cfg!(test) && SKIP_READ_QUARANTINE_FOR_TEST.load(Ordering::Relaxed);
+        if !skip_seam {
+            if let Some(reason) = self.quarantined_read_reason(db, repo) {
+                return Err(DbError::ResyncRequired {
+                    db: db.to_string(),
+                    repo: repo.to_string(),
+                    reason,
+                });
+            }
+        }
         let Some(repo_instance) = self.get_db(db).and_then(|db| db.get_repo(repo)) else {
             return Ok(None);
         };
