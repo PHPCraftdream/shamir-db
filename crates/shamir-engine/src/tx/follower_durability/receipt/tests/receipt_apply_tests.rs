@@ -470,14 +470,17 @@ async fn periodic_persist_cannot_overwrite_committed_counter() {
     close(repo).await;
 }
 
-// Finding 2/3 regression: a one-shot failure injected right after the
-// durable Materialized commit leaves the versions UNPUBLISHED — the receipt
-// stays Materialized-outstanding, the watermarks stay at 0, the snapshot
-// reads see nothing — and the repo keeps serving (no reopen, guards held by
-// the worker, not dropped). Re-applying the SAME batch replays the durable
-// Materialized receipt's RECORDED counters (no cache recompute) and
-// converges: watermark 2, exactly one history version per key, counter 2,
-// no parked guards left.
+// Finding 2/3 regression (round 4, DISCRIMINATING): a one-shot failure
+// injected right after the durable Materialized commit of a SECOND batch
+// leaves that batch's versions UNPUBLISHED — the receipt stays
+// Materialized-outstanding, nothing beyond the FIRST batch is published, the
+// repo keeps serving (no reopen, guards held by the worker, not dropped).
+// Re-applying the SAME batch replays the durable Materialized receipt's
+// RECORDED counters (no cache recompute): the absolute counter converges to
+// 3 (1 from the first batch + 2 from the failed batch). A defective
+// recompute-from-cache — which reads the paused batch's own hidden history
+// rows as absent and adopts the wrong absolute value — provably fails these
+// exact-value assertions.
 #[tokio::test]
 async fn error_pauses_receipt_versions_unpublished() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -485,6 +488,19 @@ async fn error_pauses_receipt_versions_unpublished() {
     let repo = open(temp.path(), &name).await;
     let key1 = key_bytes(1).await;
     let key2 = key_bytes(2).await;
+    let key3 = key_bytes(3).await;
+
+    // FIRST batch publishes cleanly: the counter cache becomes 1 (the
+    // floor the paused batch's counters must be built ON).
+    assert_eq!(
+        apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+            .await
+            .unwrap(),
+        ApplyOutcome::Applied { local_version: 1 }
+    );
+    let counter = repo.get_table("items").await.unwrap().counter().clone();
+    assert_eq!(counter.get().await.unwrap(), 1);
+    drop(counter);
 
     let hook = Arc::new(test_seam::Hook::default());
     *hook.fail_after.lock().unwrap() = Some(Phase::ReceiptMaterialized);
@@ -493,7 +509,7 @@ async fn error_pauses_receipt_versions_unpublished() {
     // succeed within the same call instead of pausing.
     hook.fail_after_sticky.store(true, Ordering::Release);
     test_seam::install(&name, Arc::clone(&hook));
-    let error = apply_replicated_batch(&repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted)
+    let error = apply_replicated_batch(&repo, &[event(2, 2), event(3, 3)], 1, ApplyPolicy::Trusted)
         .await
         .unwrap_err();
     test_seam::remove(&name);
@@ -504,34 +520,101 @@ async fn error_pauses_receipt_versions_unpublished() {
     );
 
     // Paused state: the Materialized receipt is outstanding and owns the
-    // versions; nothing is published; the repo still serves (no reopen).
+    // versions; nothing of the SECOND batch is published; the repo still
+    // serves (no reopen).
     let (outstanding, phase) = outstanding_state(&repo).await;
     assert!(outstanding.is_some());
     assert_eq!(phase, Some(ReceiptPhase::Materialized));
     let gate = repo.tx_gate().await.unwrap();
-    assert_eq!(gate.last_committed(), 0);
-    assert_eq!(gate.durable_watermark(), 0);
+    assert_eq!(gate.last_committed(), 1);
+    assert_eq!(gate.durable_watermark(), 1);
     assert!(!gate.requires_reopen());
     let table = repo.get_table("items").await.unwrap();
-    assert!(table.get_bytes(RecordId([1; 16])).await.unwrap().is_none());
+    assert!(table.get_bytes(RecordId([1; 16])).await.unwrap().is_some());
     assert!(table.get_bytes(RecordId([2; 16])).await.unwrap().is_none());
+    assert!(table.get_bytes(RecordId([3; 16])).await.unwrap().is_none());
     drop(table);
 
     // Re-apply the SAME batch: the retry replays the durable Materialized
-    // receipt (recorded counters) — no recompute, no duplicate rows.
+    // receipt (recorded counters) — no recompute, no duplicate rows. The
+    // EXACT expected values: absolute counter 3 (a recompute-from-cache
+    // defect adopts a different absolute value), persisted blob 3, and
+    // exactly one history version per key.
     assert_eq!(
-        apply_replicated_batch(&repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo, &[event(2, 2), event(3, 3)], 1, ApplyPolicy::Trusted)
             .await
             .unwrap(),
-        ApplyOutcome::Applied { local_version: 2 }
+        ApplyOutcome::Applied { local_version: 3 }
     );
-    assert_eq!(gate.last_committed(), 2);
-    assert_eq!(gate.durable_watermark(), 2);
+    assert_eq!(gate.last_committed(), 3);
+    assert_eq!(gate.durable_watermark(), 3);
     assert_eq!(history_versions(&repo, &key1).await, vec![1]);
     assert_eq!(history_versions(&repo, &key2).await, vec![2]);
+    assert_eq!(history_versions(&repo, &key3).await, vec![3]);
     let counter = repo.get_table("items").await.unwrap().counter().clone();
-    assert_eq!(counter.get().await.unwrap(), 2);
-    assert_eq!(persisted_count(&repo).await, 2);
+    assert_eq!(
+        counter.get().await.unwrap(),
+        3,
+        "absolute counter must be 3"
+    );
+    drop(counter);
+    assert_eq!(persisted_count(&repo).await, 3);
+    assert_eq!(repo.receipt_worker_parked_guards().await, Some(0));
+
+    close(repo).await;
+}
+
+// Reviewer P2 #8: a NON-retryable injected error (`RepoRequiresReopen` kind)
+// after the durable Prepared commit must NOT enter the 3-attempt Storage
+// retry loop — the first failure parks the chunk guards and returns
+// immediately. The durable Prepared receipt stays outstanding, the
+// watermarks stay at 0, the repo keeps serving (no crash, no reopen), and
+// the disarmed re-apply converges on the receipt's own version.
+#[tokio::test]
+async fn non_retryable_error_parks_guards() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = repo_name("receipt-nonretry", temp.path());
+    let repo = open(temp.path(), &name).await;
+    let key1 = key_bytes(1).await;
+
+    let hook = Arc::new(test_seam::Hook::default());
+    *hook.fail_after.lock().unwrap() = Some(Phase::ReceiptPrepared);
+    hook.fail_after_sticky.store(true, Ordering::Release);
+    // NON-retryable kind: the retry loop only retries `DbError::Storage`.
+    hook.fail_after_reopen.store(true, Ordering::Release);
+    test_seam::install(&name, Arc::clone(&hook));
+    let error = apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+        .await
+        .unwrap_err();
+    test_seam::remove(&name);
+    assert!(
+        matches!(&error, DbError::RepoRequiresReopen(message) if message == "injected"),
+        "expected the injected RepoRequiresReopen failure, got {error:?}"
+    );
+
+    // The FIRST attempt already parked: the durable Prepared receipt is
+    // outstanding, nothing published, watermarks 0, guard held — no crash,
+    // no reopen (the parks keep the repo serving).
+    let (outstanding, phase) = outstanding_state(&repo).await;
+    assert!(outstanding.is_some());
+    assert_eq!(phase, Some(ReceiptPhase::Prepared));
+    let gate = repo.tx_gate().await.unwrap();
+    assert_eq!(gate.last_committed(), 0);
+    assert_eq!(gate.durable_watermark(), 0);
+    assert!(!gate.requires_reopen());
+    assert_eq!(repo.receipt_worker_parked_guards().await, Some(1));
+    assert!(history_row(&repo, &key1, 1).await.is_none());
+
+    // Disarm: the resume re-owns the receipt's version and converges; the
+    // parked guard retires.
+    disarm(&hook);
+    assert_eq!(
+        apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+            .await
+            .unwrap(),
+        ApplyOutcome::Applied { local_version: 1 }
+    );
+    assert_eq!(history_versions(&repo, &key1).await, vec![1]);
     assert_eq!(repo.receipt_worker_parked_guards().await, Some(0));
 
     close(repo).await;

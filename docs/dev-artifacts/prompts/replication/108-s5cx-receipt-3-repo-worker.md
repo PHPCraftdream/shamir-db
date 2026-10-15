@@ -1,6 +1,6 @@
 # S5c-X PR6b-2 round 3, review findings 2/3/4 — repository-owned bounded receipt worker, guard ownership across errors, phase-aware counter-idempotent retry
 
-Worktree: D:/dev/rust/shamir-db/worktrees/s5cx-follower-receipt-2 (branch feat/s5cx-follower-receipt-2, clean tree @ 0721b609).
+Worktree: worktrees/s5cx-follower-receipt-2 (branch feat/s5cx-follower-receipt-2, clean tree @ 0721b609).
 
 ⛔ NEVER run git reset / checkout / clean / stash / restore / rm, or any git command that mutates the working tree or index. Only edit files; the orchestrator commits.
 Do NOT run cargo/rustc/nextest or any build or test. Only the orchestrator runs `cargo fmt` at the very end.

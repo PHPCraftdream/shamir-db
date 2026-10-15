@@ -1,11 +1,11 @@
 # S5c-X PR6b-2 round 3, review finding 6 — zero-floor unpublished-read hazard in MVCC read paths
 
-Worktree: D:/dev/rust/shamir-db/worktrees/s5cx-follower-receipt-2
+Worktree: worktrees/s5cx-follower-receipt-2
 Branch: feat/s5cx-follower-receipt-2, clean tree @ 0721b609
 
 ⛔ NEVER run git reset / checkout / clean / stash / restore / rm, or any git command that mutates the working tree or index. Only edit files; the orchestrator commits.
 Do NOT run cargo/rustc/nextest or any build or test. Only the orchestrator runs `cargo fmt` at the very end.
-Read and follow C:/Users/Computer/.agents/skills/rust-intel/SKILL.md if readable; CLAUDE.md conventions (imports at top, tests under tests/ dirs, TDD).
+Read and follow .agents/skills/rust-intel/SKILL.md if readable; CLAUDE.md conventions (imports at top, tests under tests/ dirs, TDD).
 
 FILE SCOPE: crates/shamir-tx/src/mvcc_store/** and its tests. Do NOT touch shamir-engine receipt/repo files (another worker owns them) — if the only sound fix lives in the engine's receipt activation path, STOP that part and report it instead of editing out of scope.
 

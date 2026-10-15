@@ -17,6 +17,7 @@ use crate::types::value::QueryValue;
 use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
+use super::ddl_admission::repo_ddl_guard;
 use super::helpers::admin_result;
 
 impl ShamirAdminExecutor {
@@ -62,6 +63,16 @@ impl ShamirAdminExecutor {
                  bypasses the freeze. To opt in for internal testing, call \
                  ShamirDb::enable_experimental_migration_api()."
                     .to_string(),
+            ));
+        }
+
+        // The destination must be a different repo: the commit path takes
+        // BOTH repo `ddl_admission` guards and the tokio Mutex is not
+        // reentrant, so a same-repo migration would self-deadlock there.
+        if op.dst_repo == op.repo {
+            return Err(err_code(
+                "migration_same_repo",
+                "migration destination repo must differ from the source repo".to_string(),
             ));
         }
 
@@ -367,6 +378,28 @@ impl ShamirAdminExecutor {
             })?;
         }
         let cutover_state = coord.state().await;
+        // Defensive (S5c round 4): a persisted/recovered state could name the
+        // same repo for src and dst; acquiring the same non-reentrant tokio
+        // Mutex twice below would self-deadlock, so reject before any guard.
+        if cutover_state.dst_repo == cutover_state.src_repo {
+            return Err(err_code(
+                "migration_same_repo",
+                "migration destination repo must differ from the source repo".to_string(),
+            ));
+        }
+        // DDL interlock (repo-level `ddl_admission`, S5c round 4): the
+        // finalisation section below mutates the src and dst tables directly
+        // (per-table `begin_write_barrier` blocks, index2 registry rebuild,
+        // mvcc log seeding) and must not interleave with a follower receipt
+        // apply. Acquire BOTH repo guards here, ONCE each, in a fixed
+        // src→dst order (different mutexes — the tokio Mutex is not
+        // reentrant, so the same repo must never be nested twice; every
+        // call below is guard-free coordinator/manager plumbing). Both are
+        // held through the end of the mutation section (end of function).
+        let _src_repo_ddl =
+            repo_ddl_guard(&self.shamir, &self.db_name, &cutover_state.src_repo).await?;
+        let _dst_repo_ddl =
+            repo_ddl_guard(&self.shamir, &self.db_name, &cutover_state.dst_repo).await?;
         let src_table = db
             .get_table(&cutover_state.src_repo, &cutover_state.table_name)
             .await

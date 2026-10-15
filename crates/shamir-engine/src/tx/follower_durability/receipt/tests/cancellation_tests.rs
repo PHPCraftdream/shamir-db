@@ -327,12 +327,15 @@ async fn watermark_never_passes_unpublished_receipt_versions() {
     close(repo).await;
 }
 
-/// Bounded deterministic condition wait (yield spin, no sleeps): poll until
-/// the detached worker has settled — durable bookmark AND receipt retired
-/// AND the RAM publication visible (`last_committed`/`durable_watermark` at
-/// 2; the bookmark/receipt can land before publication, so the publication
-/// fields are part of the settled condition, review finding 7b).
+/// Bounded deterministic condition wait: first a DETERMINISTIC job-completion
+/// wait — the repository-owned worker reports idle (`receipt_worker_wait_idle`,
+/// an arm-then-check Notify wait, no sleeps, no yields) — then a small
+/// bounded final-condition check for the DURABLE reads (bookmark AND receipt
+/// retired AND the RAM publication visible; the bookmark/receipt can land
+/// before publication, so the publication fields are part of the settled
+/// condition, review finding 7b).
 async fn spin_until_settled(repo: &RepoInstance) {
+    repo.receipt_worker_wait_idle().await;
     let gate = repo.tx_gate().await.unwrap();
     for _ in 0..2000u32 {
         let info = repo.tx_info_store().await.unwrap();

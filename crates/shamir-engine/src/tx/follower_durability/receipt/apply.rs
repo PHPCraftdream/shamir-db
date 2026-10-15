@@ -26,9 +26,7 @@ use super::super::super::{prepare_event, ApplyOutcome, ApplyPolicy, PreparedEven
 use super::super::test_seam::{self, Phase};
 use super::{checkpoint, publish, resume, stage};
 use crate::meta::repl::bookmark_v3::{load_bookmark_v3, BookmarkV3};
-use crate::meta::repl::{
-    receipt_id, ReceiptBinding, ReceiptPhase, ReplicationReceipt, MAX_RECEIPT_EVENTS,
-};
+use crate::meta::repl::{ReceiptBinding, ReceiptPhase, ReplicationReceipt, MAX_RECEIPT_EVENTS};
 use crate::meta::repl_bookmark::{load_fence_record, load_replication_bookmark};
 use crate::repo::RepoInstance;
 use crate::tx::ReplicatedEvent;
@@ -295,12 +293,15 @@ async fn try_chunk(
     // recorded absolute counters and force the retry to recompute them from
     // the live cache (where the batch's own history rows read back as
     // pre-existing) — skip the rewrite and let `run_chunk_tail` replay the
-    // recorded Materialized receipt.
+    // recorded Materialized receipt. Matching is by CONTENT (`same_batch`),
+    // not by `receipt_id`: the id is a hash of phase+counters, so a freshly
+    // rebuilt Prepared plan can never share it with the durable Materialized
+    // receipt even for the identical batch.
     let already_materialized = matches!(
         resume::lookup(repo, info).await?.as_ref(),
         Some(outstanding)
             if outstanding.receipt.phase == ReceiptPhase::Materialized
-                && receipt_id(&outstanding.receipt) == receipt_id(&plan.receipt),
+                && same_batch(&outstanding.receipt, &plan.receipt),
     );
     if !already_materialized {
         stage::commit_prepared(repo, info, &plan, old).await?;
@@ -322,23 +323,45 @@ async fn run_chunk_tail(
 ) -> DbResult<(u64, u64)> {
     // Phase-aware, counter-idempotent retry (finding 3): on EACH attempt,
     // load the durable outstanding receipt FIRST. If this chunk's
-    // Materialized receipt is already durable, build the work from its
-    // RECORDED absolute counters (`materialize_from_materialized_receipt`) —
-    // never recompute from the live cache/MVCC, where the batch's own
-    // history rows read back as pre-existing and the absolute count would be
-    // overwritten with a wrong value. Only when no Materialized receipt is
-    // durable yet is `materialize_from_plan` used (counters computed once
-    // against the true pre-state).
+    // Materialized receipt is already durable (content-matched via
+    // `same_batch`), the recorded absolute counters are replayed — never
+    // recomputed from the live cache/MVCC, where the batch's own history
+    // rows read back as pre-existing and the absolute count would be
+    // overwritten with a wrong value — and the durable batch is NOT
+    // re-staged: the pipeline goes straight to the checkpoint tail. Only
+    // when no Materialized receipt is durable yet is `materialize_from_plan`
+    // used (counters computed once against the true pre-state).
     let stored = resume::lookup(repo, info).await?;
-    let work = match stored {
+    if matches!(
+        stored.as_ref(),
         Some(outstanding)
             if outstanding.receipt.phase == ReceiptPhase::Materialized
-                && receipt_id(&outstanding.receipt) == receipt_id(&plan.receipt) =>
-        {
-            stage::materialize_from_materialized_receipt(&outstanding.receipt)?
-        }
-        _ => stage::materialize_from_plan(repo, plan).await?,
-    };
+                && same_batch(&outstanding.receipt, &plan.receipt)
+    ) {
+        // Materialized -> straight to the checkpoint (round 4): the durable
+        // matching receipt IS the Materialized bytes — re-staging/committing
+        // the batch would be a pure rewrite. Decode the STORED receipt (it
+        // carries the recorded absolute counters), build the publication
+        // from the plan + the STORED counters, and go directly to
+        // `durable_tail` (journal verify/repair + confirm + checkpoint all
+        // happen inside it, so every idempotency property is kept).
+        let stored = &stored.expect("matched above").receipt;
+        let counters: Vec<(String, u64)> = stored
+            .counters
+            .iter()
+            .map(|delta| (delta.table.clone(), delta.after))
+            .collect();
+        let publication = publish::publication_from_plan(repo, plan, &counters).await?;
+        let chunk_local_end = stored
+            .mapping
+            .iter()
+            .map(|mapping| mapping.local_version)
+            .max()
+            .unwrap_or(0);
+        let new_bookmark = durable_tail(repo, info, gate, stored, publication, old).await?;
+        return Ok((new_bookmark, chunk_local_end));
+    }
+    let work = stage::materialize_from_plan(repo, plan).await?;
     let (receipt, counters) = stage::commit_materialized_work(repo, info, &work, old).await?;
     #[cfg(test)]
     fail_after(repo.name(), Phase::ReceiptMaterialized)?;
@@ -402,12 +425,33 @@ async fn durable_tail(
     Ok(old.bookmark.max(receipt.upstream_end))
 }
 
+/// Phase-invariant CONTENT match between the durable receipt and the freshly
+/// rebuilt plan: the version mapping (exact local allocations), the upstream
+/// batch boundary, and the predecessor bookmark. `receipt_id` is NOT usable
+/// here — it hashes phase+counters (see `stage::set_counters`), and `plan` is
+/// rebuilt each attempt as Prepared with empty counters, so the ids can never
+/// match for the same batch across phases. These four fields are fixed at
+/// Prepared time and never change when the receipt is rewritten to
+/// Materialized, so the predicate matches the identical batch in either
+/// phase and rejects any different batch.
+fn same_batch(stored: &ReplicationReceipt, plan_receipt: &ReplicationReceipt) -> bool {
+    stored.mapping == plan_receipt.mapping
+        && stored.upstream_start == plan_receipt.upstream_start
+        && stored.upstream_end == plan_receipt.upstream_end
+        && stored.predecessor_bookmark == plan_receipt.predecessor_bookmark
+}
+
 /// Inject the test seam's one-shot (or sticky) post-phase failure: returns
-/// `DbError::Storage("injected")` exactly when the flag fires for `phase`.
+/// `DbError::Storage("injected")` — or `DbError::RepoRequiresReopen("injected")`
+/// when the reopen-kind flag is set — exactly when the flag fires for `phase`.
 #[cfg(test)]
 fn fail_after(repo_name: &str, phase: Phase) -> DbResult<()> {
     if test_seam::take_fail_after(repo_name, phase) {
-        Err(DbError::Storage("injected".into()))
+        if test_seam::fail_after_reopen(repo_name) {
+            Err(DbError::RepoRequiresReopen("injected".into()))
+        } else {
+            Err(DbError::Storage("injected".into()))
+        }
     } else {
         Ok(())
     }

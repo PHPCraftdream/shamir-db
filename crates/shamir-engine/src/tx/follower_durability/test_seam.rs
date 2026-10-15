@@ -31,6 +31,11 @@ pub(crate) struct Hook {
     /// stays armed (every retry fails too) until the test clears `fail_after`.
     pub fail_after: Mutex<Option<Phase>>,
     pub fail_after_sticky: AtomicBool,
+    /// When set (with `fail_after` armed for the same phase), the injected
+    /// error is `DbError::RepoRequiresReopen("injected")` instead of
+    /// `DbError::Storage("injected")` — a NON-retryable kind, so the
+    /// pipeline must park immediately instead of entering the 3-retry loop.
+    pub fail_after_reopen: AtomicBool,
     pub reached: Notify,
     pub resume: Notify,
 }
@@ -88,6 +93,16 @@ pub(crate) fn take_fail_after(repo_name: &str, phase: Phase) -> bool {
     true
 }
 
+/// Whether the armed `fail_after` for `repo_name` injects the NON-retryable
+/// `RepoRequiresReopen` kind instead of `Storage`.
+pub(crate) fn fail_after_reopen(repo_name: &str) -> bool {
+    hooks()
+        .lock()
+        .unwrap()
+        .get(repo_name)
+        .is_some_and(|hook| hook.fail_after_reopen.load(Ordering::Acquire))
+}
+
 #[cfg(test)]
 pub(crate) async fn history_written(repo: &crate::repo::RepoInstance) {
     phase(repo.name(), Phase::HistoryWritten).await;
@@ -108,6 +123,9 @@ pub(crate) async fn phase(repo_name: &str, phase: Phase) {
             // The notify lets an in-process observer proceed before the
             // abort (kill without graceful shutdown, for the crash harness).
             hook.reached.notify_waiters();
+            // Distinctive stderr marker so the crash harness can prove the
+            // abort hook fired (the child's death alone is ambiguous).
+            eprintln!("SHAMIR_RECEIPT_ABORT_FIRED {phase:?}");
             std::process::abort();
         }
     }

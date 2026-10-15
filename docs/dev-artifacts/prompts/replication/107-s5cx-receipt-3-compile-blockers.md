@@ -1,8 +1,8 @@
-You are a Rust fix worker in worktree D:/dev/rust/shamir-db/worktrees/s5cx-follower-receipt-2 (branch feat/s5cx-follower-receipt-2, clean tree @ 0721b609).
+You are a Rust fix worker in worktree worktrees/s5cx-follower-receipt-2 (branch feat/s5cx-follower-receipt-2, clean tree @ 0721b609).
 
 ⛔ NEVER run git reset / checkout / clean / stash / restore / rm, or any git command that mutates the working tree or index. Only edit files; the orchestrator commits.
 Do NOT run cargo/rustc/nextest or any build or test command. Only the orchestrator runs `cargo fmt` at the very end.
-Read and follow the hard rules in C:/Users/Computer/.agents/skills/rust-intel/SKILL.md if readable.
+Read and follow the hard rules in .agents/skills/rust-intel/SKILL.md if readable.
 FIRST: save this brief verbatim to docs/dev-artifacts/prompts/replication/107-s5cx-receipt-3-compile-blockers.md (create the file).
 
 TASK: fix six static compile blockers from the round-2 review. Fix ONLY these; surgical edits, no refactors, imports at file top, rustfmt-clean (4 spaces, trailing commas).

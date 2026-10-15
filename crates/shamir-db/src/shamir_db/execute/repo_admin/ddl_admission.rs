@@ -119,6 +119,43 @@ pub(in crate::shamir_db::execute) async fn begin_schema_activation_barrier(
 /// safely; but the cascade as a whole must be serialized against the
 /// receipt pipeline at the repo level.
 pub(in crate::shamir_db::execute) async fn drop_table_cascade_indexes(table: &TableManager) {
+    // F-3 (#1030): hold the per-table `ddl_admission` (via
+    // `begin_write_barrier`) for this WHOLE block of direct index-registry
+    // mutations. Pre-fix, these manager-level primitives
+    // (`index_manager_ref().drop_index`/`drop_unique_index`,
+    // `sorted_indexes().drop_index`, `index2_registry().remove_by_id`)
+    // bypassed the barrier `TableManager`'s own
+    // `drop_index`/`drop_unique_index`/`drop_sorted_index`/
+    // `drop_index2` wrappers take — violating the precondition
+    // `IndexRegistry::insert`'s doc comment states every
+    // registry-mutating DDL op must uphold (see
+    // `crates/shamir-index/src/registry.rs`, "# Precondition"):
+    // a concurrent `CREATE INDEX` could race this cascade's
+    // direct drops to the same next generation-counter value,
+    // un-serialized. One `begin_write_barrier` acquisition
+    // covering the entire block (not four separate ones, which
+    // would only serialize against itself) restores that
+    // guarantee. Bit choice: `REGULAR_INDEX_CREATE` — the same
+    // single per-table `ddl_admission` mutex backs every bit
+    // (`begin_write_barrier`'s Step 0), so any one existing bit
+    // is sufficient for the admission serialization this fix
+    // needs; no new bit is minted since the table is about to
+    // be removed entirely regardless of which writers see the
+    // slow path via this specific bit. The raw manager
+    // primitives called below do NOT themselves acquire
+    // `ddl_admission`/`unique_write_lock` (confirmed by reading
+    // `TableManager::drop_index`/`drop_unique_index`/
+    // `drop_sorted_index`/`drop_index2`, which call these exact
+    // primitives AFTER already taking the barrier) — so
+    // acquiring it here once cannot re-enter the non-reentrant
+    // `tokio::sync::Mutex`. (Round 4: this acquisition was lost
+    // in the round-3 extraction from the master
+    // `admin_table_index.rs` cascade block — restored verbatim.
+    // The repo-level guard is a DIFFERENT mutex held by the
+    // caller; the two nest safely.)
+    let (_barrier, _uwl_guard) = table
+        .begin_write_barrier(crate::engine::index::write_barrier_flags::REGULAR_INDEX_CREATE)
+        .await;
     // base_index regular indexes.
     let regular_ids: Vec<u64> = table
         .index_manager_ref()

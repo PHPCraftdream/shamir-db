@@ -239,6 +239,40 @@ async fn stage_checkpoint_batch(
     Ok(batch)
 }
 
+/// Stage and commit the checkpoint batch. Test builds may INJECT an
+/// `Uncertain` outcome WITHOUT committing anything
+/// (`UNCERTAIN_WITHOUT_COMMIT`) so the reconcile branch below runs against
+/// genuinely unsettled durable state; the production build runs the plain
+/// staging path — zero behavior change when the seam is unarmed.
+#[cfg(test)]
+async fn staged_checkpoint_outcome(
+    repo: &RepoInstance,
+    receipt: &ReplicationReceipt,
+    old: &BookmarkV3,
+) -> DbResult<AtomicCommitOutcome> {
+    if UNCERTAIN_WITHOUT_COMMIT.load(Ordering::Acquire) {
+        return Ok(AtomicCommitOutcome::Uncertain {
+            detail: "injected uncertain WITHOUT commit (negative control)".into(),
+        });
+    }
+    stage_checkpoint_batch(repo, receipt, old)
+        .await?
+        .commit()
+        .await
+}
+
+#[cfg(not(test))]
+async fn staged_checkpoint_outcome(
+    repo: &RepoInstance,
+    receipt: &ReplicationReceipt,
+    old: &BookmarkV3,
+) -> DbResult<AtomicCommitOutcome> {
+    stage_checkpoint_batch(repo, receipt, old)
+        .await?
+        .commit()
+        .await
+}
+
 async fn reconcile_uncertain(
     repo: &RepoInstance,
     info: &Arc<dyn Store>,
@@ -298,16 +332,7 @@ pub(crate) async fn checkpoint(
         COMMIT_PARK_REACHED.notify_waiters();
         COMMIT_PARK_RELEASE.notified().await;
     }
-    let outcome = if UNCERTAIN_WITHOUT_COMMIT.load(Ordering::Acquire) {
-        AtomicCommitOutcome::Uncertain {
-            detail: "injected uncertain WITHOUT commit (negative control)".into(),
-        }
-    } else {
-        stage_checkpoint_batch(repo, receipt, old)
-            .await?
-            .commit()
-            .await?
-    };
+    let outcome = staged_checkpoint_outcome(repo, receipt, old).await?;
     #[cfg(test)]
     let outcome = if outcome == AtomicCommitOutcome::Committed
         && SIMULATE_CHECKPOINT_UNCERTAIN.load(Ordering::Acquire)
@@ -328,6 +353,10 @@ pub(crate) async fn checkpoint(
             RECONCILE_PARK_REACHED.notify_waiters();
             RECONCILE_PARK_RELEASE.notified().await;
         }
+        // PRODUCTION always reconciles: only the negative-control
+        // short-circuit is test-only. The `#[cfg(test)]` attribute applies to
+        // the inner `if` STATEMENT alone; the non-test build runs
+        // `reconcile_uncertain` unconditionally.
         #[cfg(test)]
         if DISABLE_UNCERTAIN_RECONCILE.load(Ordering::Acquire) {
             // Negative control: protection removed. Treat the outcome as
@@ -335,13 +364,15 @@ pub(crate) async fn checkpoint(
             // entered (counter incremented above) but the durable state is
             // left unreconciled, which the tests assert provably.
             log::warn!(
-                "receipt checkpoint commit uncertain and reconcile DISABLED "
-                "(negative control) on repo {}: {detail}",
+                "receipt checkpoint commit uncertain and reconcile DISABLED \
+                 (negative control) on repo {}: {detail}",
                 repo.name()
             );
         } else {
             reconcile_uncertain(repo, info, receipt, old, detail).await?;
         }
+        #[cfg(not(test))]
+        reconcile_uncertain(repo, info, receipt, old, detail).await?;
     }
     // RAM publication: synchronous, in the same poll as the commit above.
     publish::apply_publication(gate, group.as_ref(), publication);
