@@ -105,6 +105,17 @@ impl ShamirDb {
     /// resolved (fail closed) — no live event stream may attach to a repo
     /// whose reads are quarantined. Same gate as
     /// [`read_changelog_bounded`](Self::read_changelog_bounded).
+    ///
+    /// Why a raw receiver is still returned (P1#4/#3 residual): tokio's
+    /// broadcast channel has no receiver-revocation API — a receiver minted
+    /// BEFORE the quarantine flip cannot be closed by the server. This
+    /// facade is process-local, however; the wire `Subscribe` path goes
+    /// through the server bridge, whose journal drain reads through the
+    /// gated [`read_changelog_bounded`](Self::read_changelog_bounded) and
+    /// therefore cannot deliver post-quarantine data. A pre-quarantine raw
+    /// receiver can thus only ever observe events already queued in the
+    /// bounded broadcast ring at flip time; any NEW commit after the
+    /// quarantine is visible only through gated paths.
     pub async fn subscribe_changelog(
         &self,
         db: &str,

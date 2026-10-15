@@ -1,7 +1,7 @@
 //! `impl ShamirDb { execute, execute_as }`.
 
 use dashmap::DashMap;
-use shamir_collections::THasher;
+use shamir_collections::{THasher, TSet};
 use shamir_query_types::batch::tree_visitor::BatchTreeVisitor;
 use shamir_query_types::batch::{BatchOp, ExecPolicy};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -203,17 +203,24 @@ impl ResyncQuarantineCache {
             .map(|reason| reason.value().clone())
     }
 
-    /// Atomically replace the whole set. No lock anywhere: the map is
-    /// cleared and repopulated lock-free; readers see either the old or the
-    /// new complete set (never a mix that matters — the refresh is idempotent
-    /// and derived from the same persisted rows).
+    /// Atomically replace the whole set — fail-closed. NEW entries are
+    /// inserted first (overwrites win), THEN keys that are no longer
+    /// quarantined are dropped via `retain`. A concurrent reader therefore
+    /// never observes an EMPTY map mid-refresh: at worst it sees the union
+    /// (old ∪ new) — a fail-closed superset — never the fail-open empty
+    /// window a clear-then-fill would expose. No lock anywhere; the refresh
+    /// is idempotent and derived from the same persisted rows.
     pub(crate) fn install(&self, entries: impl IntoIterator<Item = ((String, String), String)>) {
-        self.entries.clear();
-        let mut len = 0usize;
+        let mut fresh_keys: TSet<(String, String)> = TSet::default();
         for (key, reason) in entries {
-            self.entries.insert(key, reason);
-            len += 1;
+            self.entries.insert(key.clone(), reason);
+            fresh_keys.insert(key);
         }
+        // len must be the DEDUPED count — the set's size, not the iterator's.
+        let len = fresh_keys.len();
+        // DashMap 6.1.0 `retain(&self, impl FnMut(&K, &mut V) -> bool)`
+        // (verified against vendored sources).
+        self.entries.retain(|key, _| fresh_keys.contains(key));
         self.count.store(len, Ordering::Release);
     }
 }
