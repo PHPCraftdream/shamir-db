@@ -31,8 +31,13 @@ REFUSED with the same typed `resync_required` error, as is a plain
    repos are refused; Pause/SetProfile/Resume are refused too).
 2. `DROP` the quarantined subscription (deletes the row and its marker).
 3. Install the replacement seed with the real installer
-   (`replication-seed-export` / `-install`) — it creates a FRESH paused
-   subscription bound to the NEW `seed_receipt` (no marker).
+   (`replication-seed-export` / `-install`) — install it into a NEW follower
+   data directory: the installer refuses an existing ordinary destination
+   repository/database (`check_seed_target` in `seed/catalogue.rs` rejects an
+   "existing ordinary or conflicting repository" and an "existing ordinary
+   destination database"), so recovery means recreating/rebinding the follower
+   there. The installer creates a FRESH paused subscription bound to the NEW
+   `seed_receipt` (no marker) on that new directory.
 4. `Resume` the fresh subscription — it succeeds, and the first read
    succeeds.
 

@@ -261,12 +261,16 @@ pub enum BatchError {
     /// S5c-X PR8b: a read op targeted a replication destination in
     /// `resync_required` quarantine; refused until a replacement seed is installed.
     ///
-    /// The three payload strings are boxed behind [`ResyncRequiredDetail`]:
-    /// nested `Batch`/`ForEach` execution recurses through boxed futures that
-    /// each hold `Result<_, BatchError>`-sized locals, so every extra inline
-    /// byte in this enum multiplies across nesting depth (SIGABRT stack
-    /// overflow in debug builds on 2 MiB test stacks — see the audit tests
-    /// `nested_batch_alter_is_audited` / `foreach_execution_audits_each_alter_iteration`).
+    /// The payload is boxed behind [`ResyncRequiredDetail`] so the enum's
+    /// inline size stays minimal: nested `Batch`/`ForEach` execution recurses
+    /// through boxed futures that each hold `Result<_, BatchError>`-sized
+    /// locals, so enum growth multiplies across nesting depth. Inference,
+    /// not a measured fact: the CI stack overflows in the nested-batch audit
+    /// tests (`nested_batch_alter_is_audited` /
+    /// `foreach_execution_audits_each_alter_iteration`) are CONSISTENT with
+    /// the enum growth introduced with this variant, but no size measurement
+    /// or overflow-site trace was taken. Boxing is kept regardless — it is
+    /// also the right shape for a 3-string payload.
     ResyncRequired {
         alias: String,
         detail: std::boxed::Box<ResyncRequiredDetail>,
@@ -274,7 +278,8 @@ pub enum BatchError {
 }
 
 /// S5c-X PR8b: heap-boxed payload of [`BatchError::ResyncRequired`], keeping
-/// the enum's inline size minimal for deep nested-batch recursion.
+/// the enum's inline size minimal (see the variant's doc: boxing against deep
+/// nested-batch recursion is an inference, kept for payload shape as well).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResyncRequiredDetail {
     /// Database name of the quarantined destination.

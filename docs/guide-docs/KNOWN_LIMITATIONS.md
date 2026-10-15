@@ -681,9 +681,11 @@ artifact).
   `quarantined` marker (plus the `resync_from_receipt` baseline), so plain
   admin `Resume` — and even `Pause`/`SetProfile` — of a quarantined
   subscription are refused with the typed `resync_required` error; the
-  procedure is to DROP the quarantined subscription, install a replacement
-  seed with the real installer (which creates a FRESH paused subscription
-  bound to the new `seed_receipt`), then `Resume` that fresh row, per the
+  the procedure is to DROP the quarantined subscription, install a replacement
+  seed with the real installer — into a NEW follower data directory (the
+  installer refuses an existing ordinary destination repository/database) —
+  which creates a FRESH paused subscription bound to the new `seed_receipt`,
+  then `Resume` that fresh row, per the
   runbook, or drop the subscription. Runtime clean-horizon checkpoints
   bound the retained local WAL; retention enforcement follows the configured
   refusal or conservative GAP policy. PR4 cold reconciliation means an
