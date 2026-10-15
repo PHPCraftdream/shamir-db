@@ -22,7 +22,6 @@ use crate::completion_tracker::CompletionTracker;
 use crate::gate_diagnostics::{GateBlocker, GateBlockerClass, GateDiagnostics};
 use crate::pending_commit::PendingCommit;
 use crate::version_guard::VersionGuard;
-use crate::TxId;
 
 // ── Phase C: commit-write log structs ──────────────────────────────
 
