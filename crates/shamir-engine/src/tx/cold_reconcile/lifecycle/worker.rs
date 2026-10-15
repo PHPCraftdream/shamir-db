@@ -69,6 +69,14 @@ impl<T: FailClosedResource> FailClosedGuard<T> {
     }
 }
 
+impl FailClosedGuard<VersionGuard> {
+    /// Consume the guard and commit its version on the successful path.
+    /// Dropping without this call retains fail-closed cleanup behavior.
+    pub fn commit(mut self) {
+        self.value.take().expect("guard value is present").commit();
+    }
+}
+
 impl<T> Drop for FailClosedGuard<T> {
     fn drop(&mut self) {
         if std::thread::panicking() {

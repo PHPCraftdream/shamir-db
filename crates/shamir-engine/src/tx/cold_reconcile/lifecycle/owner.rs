@@ -2,21 +2,19 @@
 //! (S5c-X PR6b-2b, supervisor-owned-join-handle design).
 //!
 //! Three objects make up the foundation: this owner, the worker execution
-//! state ([`crate::tx::cold_reconcile::lifecycle::WorkerExecutionState`]),
+//! state ([`super::worker::WorkerExecutionState`]),
 //! and the job envelope. The lifecycle is `Open -> Closing -> Joined`;
-//! quarantine is unconditional (the parked-guard count is NEVER consulted),
-//! and `shutdown` enforces ONE absolute deadline that covers worker
-//! shutdown + commit quiescence + flush + checkpoint, because the worker
-//! performs all of those on its exit path. Full contract:
+//! quarantine is unconditional (the parked-guard count is NEVER consulted).
+//! Repository shutdown uses ONE absolute deadline for worker shutdown,
+//! commit quiescence, flush, and checkpoint. Lifecycle shutdown itself waits
+//! only for the worker terminal. Full contract:
 //! `docs/guide-docs/follower-journal-durability.md`.
 //!
-//! Ownership model: the owner does NOT hold the worker's join handle. The
-//! handle and a lease `Arc` are owned by a spawned SUPERVISOR task for the
-//! rest of the lifecycle: the supervisor joins the worker, releases the
-//! lease (the last `Arc<L>`), publishes the terminal outcome into a
-//! `watch` channel (first-write-wins), and only then sets
-//! `supervisor_joined`. Dropping the owner therefore cannot detach the
-//! worker task, and the physical lease lifetime ends strictly after join.
+//! The handle and lease `Arc` belong to a supervisor task. The supervisor
+//! joins the worker, drops the lease (the last `Arc<L>`), sets
+//! `supervisor_joined`, then publishes the terminal outcome into a `watch`
+//! channel (first-write-wins). Dropping the owner therefore cannot detach
+//! the worker, and the physical lease lifetime ends strictly after join.
 //!
 //! Contention model: admission and quarantine serialize acceptance with
 //! `admission_gate` and take `control` second. Quarantine releases admission
@@ -388,19 +386,9 @@ impl<J: Send, R: Send> RepoWorkerLifecycle<J, R> {
         self.close();
     }
 
-    /// THE one absolute shutdown deadline (covers worker drain + commit
-    /// quiescence + flush + checkpoint, because the worker performs all of
-    /// those on its exit path; enforced by callers).
-    ///
-    /// Contract: closes admission first (idempotent), then waits on the
-    /// terminal `watch` channel under the deadline. The join happens
-    /// EXACTLY ONCE, in the supervisor (which owns the handle and the
-    /// lease); repeated/concurrent callers each `wait_for` on cloned
-    /// receivers and all observe the single cached terminal. A timed-out
-    /// or cancelled waiter cancels nothing — the close is already applied
-    /// and the supervisor keeps ownership of the handle + lease; a timeout
-    /// additionally quarantines unconditionally (fail-closed) while the
-    /// supervisor retains handle + lease.
+    /// Waits for the worker terminal under a relative budget. Repository
+    /// `shutdown_clean` uses `shutdown_until` with its shared absolute deadline
+    /// before commit quiescence, flush, and checkpoint.
     pub async fn shutdown(&self, deadline: Duration) -> Result<WorkerTerminal, ShutdownError> {
         self.shutdown_until(tokio::time::Instant::now() + deadline)
             .await

@@ -154,6 +154,37 @@ impl FailClosedResource for Arc<()> {
 }
 
 #[tokio::test(start_paused = true)]
+async fn protected_version_guard_commits_on_successful_publication() {
+    let owner = Arc::new(RepoUnitLifecycle::new());
+    let gate = Arc::new(RepoTxGate::fresh());
+    let before_durable = gate.durable_watermark();
+    let worker_gate = Arc::clone(&gate);
+    let (published_tx, published_rx) = tokio::sync::oneshot::channel();
+    spawn_worker(&owner, NoopLease, move |state| async move {
+        let guard = worker_gate.assign_next_version_guarded();
+        let protected = state.protect_guard(guard);
+        let publication = state.interlock().publish(|| {
+            published_tx.send(protected.get().version()).unwrap();
+        });
+        assert!(publication.is_ok());
+        protected.commit();
+    })
+    .unwrap();
+    let version = published_rx.await.expect("publication completed");
+    assert_eq!(version, 1);
+    assert!(matches!(
+        owner.shutdown(Duration::from_secs(3600)).await,
+        Ok(WorkerTerminal::Completed)
+    ));
+    assert!(owner.supervisor_joined());
+    assert!(!owner.quarantined());
+    assert!(!owner.reopen_required());
+    assert!(!gate.requires_reopen());
+    assert_eq!(gate.completion().watermark(), version);
+    assert_eq!(gate.durable_watermark(), before_durable);
+}
+
+#[tokio::test(start_paused = true)]
 async fn protected_local_resource_survives_timeout_until_worker_join() {
     let owner = Arc::new(RepoUnitLifecycle::new());
     let entered = Arc::new(Notify::new());
