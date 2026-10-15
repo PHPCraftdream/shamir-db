@@ -127,20 +127,6 @@ pub struct RepoInstance {
     /// NOT keep the repo alive. The drain loop holds a `Weak<()>` of this and
     /// exits when the strong count reaches zero.
     live: Option<Arc<()>>,
-    /// S5c-X PR6b-2a release fix (round 11, item 3): synchronous drop signal
-    /// paired with [`live`](Self::live). `Some(Arc<RepoDropSignal>)` on every
-    /// FOREGROUND clone; `None` on the background clone (mirroring `live`).
-    /// Its `Drop` fires a `tokio::sync::Notify::notify_one` (a SYNC method,
-    /// legal inside `Drop`) so the parked drain loop wakes IMMEDIATELY when
-    /// the last foreground clone drops, instead of only at its next 50 ms
-    /// park-boundary liveness poll (`drainer.rs` `spawn`). Without this, the
-    /// drain task retains its background `RepoInstance` clone — and with it
-    /// every fjall store handle, each of whose write-worker threads holds an
-    /// `Arc<Database>` (`shamir-storage/src/storage_fjall.rs` `WriteWorker::spawn`)
-    /// — for up to one full park interval past `drop(repo)`, so an
-    /// immediately-following reopen of the same backing directory fails with
-    /// `FjallError: Locked`.
-    drop_signal: Option<Arc<RepoDropSignal>>,
     /// Audit §1.7: serializes `persist_markers`' disk write of the recovery
     /// marker. `gate.last_committed()` is already a monotonic in-memory
     /// max, but two concurrent Phase 6.5 committers writing to the
@@ -220,7 +206,6 @@ impl Clone for RepoInstance {
             // itself the background clone (`None`) this stays `None` — a clone
             // of the background handle must not resurrect liveness.
             live: self.live.clone(),
-            drop_signal: self.drop_signal.clone(),
             marker_write_mutex: Arc::clone(&self.marker_write_mutex),
             fk_reverse_cache: Arc::clone(&self.fk_reverse_cache),
             #[cfg(test)]
@@ -237,22 +222,6 @@ impl Clone for RepoInstance {
             wal_segment_bytes: self.wal_segment_bytes,
             write_domain: Arc::clone(&self.write_domain),
         }
-    }
-}
-
-/// S5c-X PR6b-2a release fix (round 11, item 3): synchronous liveness-drop
-/// signal. `Drop` fires the shared `Notify` so the background drainer loop
-/// wakes the moment the last foreground [`RepoInstance`] clone drops (see the
-/// `drop_signal` field doc). `notify_one` is a synchronous method, so this is
-/// legal from a plain (non-async) `Drop`; if the drain task is gone or the
-/// runtime is shutting down the notification is simply never observed.
-pub(crate) struct RepoDropSignal {
-    pub(crate) notify: tokio::sync::Notify,
-}
-
-impl Drop for RepoDropSignal {
-    fn drop(&mut self) {
-        self.notify.notify_one();
     }
 }
 
@@ -314,9 +283,6 @@ impl RepoInstance {
             drainer: Arc::new(std::sync::OnceLock::new()),
             repo_interner: Arc::new(OnceCell::new()),
             live: Some(Arc::new(())),
-            drop_signal: Some(Arc::new(RepoDropSignal {
-                notify: tokio::sync::Notify::new(),
-            })),
             marker_write_mutex: Arc::new(tokio::sync::Mutex::new(())),
             fk_reverse_cache: Arc::new(FkReverseCache::new()),
             #[cfg(test)]
@@ -371,9 +337,6 @@ impl RepoInstance {
     fn clone_for_background(&self) -> Self {
         let mut bg = self.clone();
         bg.live = None;
-        // The task must not be woken by (or hold) the foreground drop signal
-        // either — mirroring `live = None` above.
-        bg.drop_signal = None;
         // Background handles own only drainer resources, never foreground
         // lifecycle ownership.
         bg.worker_lifecycle = None;
@@ -426,20 +389,9 @@ impl RepoInstance {
                 // the commit path) — a dead weak makes the loop exit at once.
                 None => std::sync::Weak::new(),
             };
-            // Round 11 item 3: the drop signal fires (synchronously, from the
-            // last foreground clone's `Drop`) when the repo loses its last
-            // foreground handle, so the parked drain loop wakes at once and
-            // releases its background repo clone — deterministically closing
-            // the window in which the clone pins the fjall database handles
-            // and an immediate reopen fails with `FjallError: Locked`.
-            let drop_notify = match &self.drop_signal {
-                Some(signal) => Some(signal.notify.clone()),
-                None => None,
-            };
             drainer.spawn(
                 self.clone_for_background(),
                 live_weak,
-                drop_notify,
                 std::time::Duration::from_millis(DRAIN_INTERVAL_MS),
             );
             drainer
