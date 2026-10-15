@@ -519,8 +519,10 @@ prefix и собственно скорость apply follower; это разн�
    `ListSubscriptions` (state + status_message), DESCRIBE и статус остаются
    читаемыми. Порядок действий оператора: 1) увидеть карантин через
    status/list; 2) `DROP` карантинной подписки; 3) установить replacement
-   seed настоящим установщиком по runbook (`09-seed-recovery.md`) — он
-   создаёт СВЕЖУЮ paused-подписку с новым `seed_receipt` (без маркера);
+   seed настоящим установщиком по runbook (`09-seed-recovery.md`) — в НОВЫЙ
+   каталог данных follower'а (установщик отклоняет существующую обычную
+   репозиторий/БД назначения — `check_seed_target` в `seed/catalogue.rs`) —
+   он создаёт СВЕЖУЮ paused-подписку с новым `seed_receipt` (без маркера);
    4) `Resume` новой подписки; 5) первое чтение после этого успешно
    (автоматического reseed нет). На healthy path стоимость — один
    атомарный load на batch.
