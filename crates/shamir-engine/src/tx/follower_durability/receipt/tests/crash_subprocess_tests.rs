@@ -186,17 +186,24 @@ impl Scenario {
                     Some(value) => Bytes::copy_from_slice(value),
                     None => Bytes::new(),
                 };
-                (change.key.clone(), index as u64 + 1, value)
+                (change.key.to_vec(), index as u64 + 1, value)
             })
             .collect()
     }
 
-    /// Expected absolute row count after the batch.
+    /// Expected absolute counter after the batch: the counter semantics are
+    /// "absolute live-row count of DISTINCT keys present", i.e. the latest
+    /// op per key wins (a tombstoned key contributes 0, a repeated key 1) —
+    /// NOT the number of Put events (review finding 9a: repeated-key
+    /// expected 2 where the true count is 1; Put+Delete expected 1 where the
+    /// true count is 0).
     fn expected_counter(&self) -> u64 {
-        self.events()
-            .iter()
-            .filter(|event| event.event.changes[0].op == ChangeOp::Put)
-            .count() as u64
+        let mut live: std::collections::HashMap<Vec<u8>, bool> = std::collections::HashMap::new();
+        for event in self.events() {
+            let change = &event.event.changes[0];
+            live.insert(change.key.to_vec(), change.op == ChangeOp::Put);
+        }
+        live.into_values().filter(|exists| *exists).count() as u64
     }
 }
 
@@ -340,6 +347,16 @@ fn assert_child_died(status: std::process::ExitStatus, output: &str, point: &str
     assert!(
         !output.contains("test result: ok"),
         "child at crash point {point} must not report a passing run; output: {output}"
+    );
+    // Negative-control for the harness itself (review finding 9b): the child
+    // must have died via the seam's abort INSIDE the pipeline, not by
+    // falling off the end of `receipt_crash_child_scenario`'s fallback
+    // `unreachable!("abort must preempt the apply; ...")` — the latter would
+    // mean the apply RETURNED and the crash never exercised the pipeline.
+    assert!(
+        !output.contains("abort must preempt"),
+        "child at crash point {point} fell through to the fallback panic: the \
+         abort hook did not fire inside the pipeline; output: {output}"
     );
 }
 

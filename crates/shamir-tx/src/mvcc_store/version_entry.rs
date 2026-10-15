@@ -185,9 +185,13 @@ impl StreamingGroupByState {
                 Some(Ok(batch)) => {
                     for (phys_key, val) in batch {
                         if let Some((orig, v)) = decode_version_key(&phys_key) {
-                            // R3: skip versions above the committed floor.
-                            // Floor == 0 means bootstrap/recovery — no restriction.
-                            if floor > 0 && v > floor {
+                            // R3 + I3: skip versions above the committed floor.
+                            // No floor==0 exemption: versions start at 1, so a
+                            // floor of 0 means nothing is published yet —
+                            // materialized-but-unpublished rows (follower
+                            // receipt materialize→publish window) must stay
+                            // invisible to the stream.
+                            if v > floor {
                                 continue;
                             }
                             let orig_bytes = Bytes::copy_from_slice(orig);

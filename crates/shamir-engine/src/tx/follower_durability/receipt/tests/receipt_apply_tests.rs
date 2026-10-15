@@ -17,6 +17,7 @@ use shamir_types::codecs::basic::bincode as bincode_codec;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::meta::repl::bookmark_v3::load_bookmark_v3;
@@ -150,30 +151,35 @@ async fn outstanding_state(repo: &RepoInstance) -> (Option<[u8; 16]>, Option<Rec
     (Some(id), Some(decode_receipt(&id, &bytes).unwrap().phase))
 }
 
-/// Apply `events` and abort the task the moment the durable Prepared phase
-/// is reached (park on the seam, then drop the future at that await point).
-async fn crash_at_prepared(repo: &RepoInstance, name: &str, events: &[ReplicatedEvent]) {
+/// Drive `events` through the repository-owned receipt worker until the
+/// STICKY `fail_after = ReceiptPrepared` flag exhausts the 3 Storage retries
+/// of `commit_prepared`: the pipeline fails on EVERY attempt, so the worker
+/// parks the chunk guards (never drops them), returns `Err(Storage)`, goes
+/// IDLE, and leaves the durable Prepared receipt outstanding. Returns the
+/// hook so the test can disarm the flag before re-applying.
+async fn crashed_prepared(
+    repo: &RepoInstance,
+    name: &str,
+    events: &[ReplicatedEvent],
+) -> Arc<test_seam::Hook> {
     let hook = Arc::new(test_seam::Hook::default());
-    *hook.park_at.lock().unwrap() = Some(Phase::ReceiptPrepared);
-    test_seam::install(&name, Arc::clone(&hook));
-    let mut apply = Box::pin(apply_replicated_batch(
-        repo,
-        events,
-        0,
-        ApplyPolicy::Trusted,
-    ));
-    let reached = hook.reached.notified();
-    tokio::pin!(reached);
-    reached.as_mut().enable();
-    tokio::select! {
-        _ = &mut reached => {}
-        result = &mut apply => {
-            panic!("apply completed before ReceiptPrepared: {result:?}")
-        }
-    }
-    drop(apply);
-    hook.resume.notify_waiters();
+    *hook.fail_after.lock().unwrap() = Some(Phase::ReceiptPrepared);
+    hook.fail_after_sticky.store(true, Ordering::Release);
+    test_seam::install(name, Arc::clone(&hook));
+    let error = apply_replicated_batch(repo, events, 0, ApplyPolicy::Trusted)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, DbError::Storage(_)),
+        "expected the injected Storage failure, got {error:?}"
+    );
     test_seam::remove(name);
+    hook
+}
+
+/// Disarm the crashed_prepared flag so the re-apply converges.
+fn disarm(hook: &test_seam::Hook) {
+    *hook.fail_after.lock().unwrap() = None;
 }
 
 async fn key_bytes(id: u8) -> Vec<u8> {
@@ -224,7 +230,9 @@ async fn fresh_apply_writes_receipt_pipeline_atomically() {
     close(repo).await;
 }
 
-// A crash after the durable Prepared phase and before materialization
+// A failure after the durable Prepared phase (all 3 retries of the
+// idempotent commit_prepared injected-fail) parks the worker's guards and
+// leaves the durable Prepared receipt outstanding; the disarmed re-apply
 // resumes with the IDENTICAL local allocation: the replayed batch re-owns
 // version 1 from the receipt instead of allocating a replacement. The
 // history key therefore exists at exactly one version, 1.
@@ -235,13 +243,23 @@ async fn crash_prepared_resumes_with_identical_allocation() {
     let repo = open(temp.path(), &name).await;
     let key1 = key_bytes(1).await;
 
-    crash_at_prepared(&repo, &name, &[event(1, 1)]).await;
+    let hook = crashed_prepared(&repo, &name, &[event(1, 1)]).await;
     let (outstanding, phase) = outstanding_state(&repo).await;
     assert!(outstanding.is_some());
     assert_eq!(phase, Some(ReceiptPhase::Prepared));
     assert!(history_row(&repo, &key1, 1).await.is_none());
+    // The worker parked the chunk's guard — no Aborted mark advanced the
+    // watermarks past the unpublished version, and the repo did not
+    // fail-stop.
+    let gate = repo.tx_gate().await.unwrap();
+    assert_eq!(gate.last_committed(), 0);
+    assert_eq!(gate.durable_watermark(), 0);
+    assert!(!gate.requires_reopen());
+    assert_eq!(repo.receipt_worker_parked_guards().await, Some(1));
 
-    // Same open repo: the warm resume path re-owns the receipt's version.
+    // Same open repo, flag disarmed: the warm resume path re-owns the
+    // receipt's version; the parked guard retires (≤ watermark, no-op).
+    disarm(&hook);
     assert_eq!(
         apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
             .await
@@ -250,6 +268,7 @@ async fn crash_prepared_resumes_with_identical_allocation() {
     );
     assert_eq!(history_versions(&repo, &key1).await, vec![1]);
     assert!(history_row(&repo, &key1, 1).await.is_some());
+    assert_eq!(repo.receipt_worker_parked_guards().await, Some(0));
     let (outstanding, phase) = outstanding_state(&repo).await;
     assert_eq!(outstanding, None);
     assert_eq!(phase, None);
@@ -272,7 +291,9 @@ async fn changed_pull_boundary_converges() {
     let repo = open(temp.path(), &name).await;
     let keys = [key_bytes(1).await, key_bytes(2).await, key_bytes(3).await];
 
-    crash_at_prepared(&repo, &name, &[event(1, 1), event(2, 2)]).await;
+    // The sticky-fail worker pauses instead of a dropped caller.
+    let hook = crashed_prepared(&repo, &name, &[event(1, 1), event(2, 2)]).await;
+    disarm(&hook);
     assert_eq!(
         apply_replicated_batch(
             &repo,
@@ -282,8 +303,9 @@ async fn changed_pull_boundary_converges() {
         )
         .await
         .unwrap(),
-        // The resume outcome reports the receipt's highest re-owned version;
-        // the tail event is allocated as 3 on top.
+        // The resume outcome reports the receipt's highest re-owned version
+        // (run_receipt_pipeline returns `publication.floor` = 2 BEFORE the
+        // tail allocation runs); the tail event is still allocated as 3.
         ApplyOutcome::Applied { local_version: 2 }
     );
     for (id, key) in keys.iter().enumerate() {
@@ -299,6 +321,7 @@ async fn changed_pull_boundary_converges() {
     assert!(journal(&repo, 3).await.is_some());
     let counter = repo.get_table("items").await.unwrap().counter().clone();
     assert_eq!(counter.get().await.unwrap(), 3);
+    assert_eq!(repo.receipt_worker_parked_guards().await, Some(0));
 
     close(repo).await;
 }
@@ -311,7 +334,7 @@ async fn identity_rejection_is_fail_closed() {
     let name = repo_name("receipt-corrupt", temp.path());
     let repo = open(temp.path(), &name).await;
 
-    crash_at_prepared(&repo, &name, &[event(1, 1)]).await;
+    crashed_prepared(&repo, &name, &[event(1, 1)]).await;
     let info = repo.tx_info_store().await.unwrap();
     info.set(
         receipt_key(),
@@ -404,7 +427,7 @@ async fn disabled_receipt_lookup_replays_allocate_new_versions() {
     let repo = open(temp.path(), &name).await;
     let key1 = key_bytes(1).await;
 
-    crash_at_prepared(&repo, &name, &[event(1, 1)]).await;
+    crashed_prepared(&repo, &name, &[event(1, 1)]).await;
     disable_receipt_lookup(true);
     let error = apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted).await;
     disable_receipt_lookup(false);
@@ -443,6 +466,73 @@ async fn periodic_persist_cannot_overwrite_committed_counter() {
     counter.persist().await.unwrap();
     assert_eq!(counter.get().await.unwrap(), 2);
     assert_eq!(persisted_count(&repo).await, 2);
+
+    close(repo).await;
+}
+
+// Finding 2/3 regression: a one-shot failure injected right after the
+// durable Materialized commit leaves the versions UNPUBLISHED — the receipt
+// stays Materialized-outstanding, the watermarks stay at 0, the snapshot
+// reads see nothing — and the repo keeps serving (no reopen, guards held by
+// the worker, not dropped). Re-applying the SAME batch replays the durable
+// Materialized receipt's RECORDED counters (no cache recompute) and
+// converges: watermark 2, exactly one history version per key, counter 2,
+// no parked guards left.
+#[tokio::test]
+async fn error_pauses_receipt_versions_unpublished() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = repo_name("receipt-pause", temp.path());
+    let repo = open(temp.path(), &name).await;
+    let key1 = key_bytes(1).await;
+    let key2 = key_bytes(2).await;
+
+    let hook = Arc::new(test_seam::Hook::default());
+    *hook.fail_after.lock().unwrap() = Some(Phase::ReceiptMaterialized);
+    // STICKY: a one-shot flag would be consumed by the first retry, and the
+    // pipeline retries Storage failures INLINE — the first apply would then
+    // succeed within the same call instead of pausing.
+    hook.fail_after_sticky.store(true, Ordering::Release);
+    test_seam::install(&name, Arc::clone(&hook));
+    let error = apply_replicated_batch(&repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted)
+        .await
+        .unwrap_err();
+    test_seam::remove(&name);
+    disarm(&hook);
+    assert!(
+        matches!(&error, DbError::Storage(message) if message == "injected"),
+        "expected the injected Storage failure, got {error:?}"
+    );
+
+    // Paused state: the Materialized receipt is outstanding and owns the
+    // versions; nothing is published; the repo still serves (no reopen).
+    let (outstanding, phase) = outstanding_state(&repo).await;
+    assert!(outstanding.is_some());
+    assert_eq!(phase, Some(ReceiptPhase::Materialized));
+    let gate = repo.tx_gate().await.unwrap();
+    assert_eq!(gate.last_committed(), 0);
+    assert_eq!(gate.durable_watermark(), 0);
+    assert!(!gate.requires_reopen());
+    let table = repo.get_table("items").await.unwrap();
+    assert!(table.get_bytes(RecordId([1; 16])).await.unwrap().is_none());
+    assert!(table.get_bytes(RecordId([2; 16])).await.unwrap().is_none());
+    drop(table);
+
+    // Re-apply the SAME batch: the retry replays the durable Materialized
+    // receipt (recorded counters) — no recompute, no duplicate rows.
+    assert_eq!(
+        apply_replicated_batch(&repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted)
+            .await
+            .unwrap(),
+        ApplyOutcome::Applied { local_version: 2 }
+    );
+    assert_eq!(gate.last_committed(), 2);
+    assert_eq!(gate.durable_watermark(), 2);
+    assert_eq!(history_versions(&repo, &key1).await, vec![1]);
+    assert_eq!(history_versions(&repo, &key2).await, vec![2]);
+    let counter = repo.get_table("items").await.unwrap().counter().clone();
+    assert_eq!(counter.get().await.unwrap(), 2);
+    assert_eq!(persisted_count(&repo).await, 2);
+    assert_eq!(repo.receipt_worker_parked_guards().await, Some(0));
 
     close(repo).await;
 }

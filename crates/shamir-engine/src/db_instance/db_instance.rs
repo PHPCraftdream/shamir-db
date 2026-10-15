@@ -172,6 +172,13 @@ impl DbInstance {
     // ============================================================================
 
     /// Create a table in a repository.
+    ///
+    /// S5c round 3: this is a SYNC, UNGUARDED `repo.add_table` — any
+    /// wire/boot caller must hold the repo-level `ddl_admission` guard
+    /// (`RepoInstance::ddl_admission_guard`) across the call. The
+    /// production call sites (boot tables-registry replay in
+    /// `shamir-server`) do; `ShamirDb::add_table_as` goes through
+    /// `RepoInstance::add_table` under its own guard instead.
     pub fn create_table(&self, repo_name: &str, table_name: &str) -> DbResult<()> {
         let repo = self
             .repos
@@ -182,6 +189,11 @@ impl DbInstance {
     }
 
     /// Drop a table from a repository.
+    ///
+    /// S5c round 3: SYNC and UNGUARDED (calls `repo.remove_table`).
+    /// `ShamirDb::drop_table`/`drop_table_inner` call it only while already
+    /// holding the repo-level `ddl_admission` guard; any new caller must do
+    /// the same.
     pub fn drop_table(&self, repo_name: &str, table_name: &str) -> DbResult<bool> {
         let repo = self
             .repos

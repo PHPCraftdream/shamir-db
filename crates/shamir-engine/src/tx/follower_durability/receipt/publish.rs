@@ -135,15 +135,29 @@ pub(crate) async fn publication_from_receipt(
 /// versions the receipt recorded (allocation-free); its `commit()` marks
 /// visibility Materialized and advances the committed watermark.
 ///
-/// PROOF (cancellation, S5c-X PR6b-2 item 6): between the checkpoint batch's
+/// PROOF (cancellation + error ownership, S5c-X PR6b-2 round 3): between the
+/// checkpoint batch's
 /// atomic commit and the end of this function there is NO `.await`: an
 /// executor can only cancel a future at an await point, so once the commit's
 /// poll resolves, durability and RAM publication complete atomically with
-/// respect to caller cancellation. Earlier awaits are covered by the durable
-/// Prepared/Materialized receipt, which owns the versions; guards dropped
-/// mid-pipeline mark Aborted (transient — the resume path re-owns the exact
-/// versions via `resume_version_guard`, whose `commit()` rewrites the mark;
-/// the completion watermark never wedges because Aborted is terminal).
+/// respect to caller cancellation.
+///
+/// GUARD OWNERSHIP (review finding 2): Aborted is TERMINAL — the completion
+/// tracker skips marks at versions ≤ the watermark, and a `VersionGuard`'s
+/// `Drop` marks Aborted AND advances the watermarks — so the fresh path's
+/// chunk guards must NEVER drop on an error while the repo keeps serving
+/// (that would advance `last_committed`/`durable_watermark` past still-
+/// unpublished versions). On any pipeline failure the worker PARKS the
+/// remaining guards in `ReceiptWorker::parked_guards`. They are released
+/// only by (a) a later successful publication — this function's
+/// `mark_durable` step — after which the parked guards' Aborted marks land
+/// at versions ≤ the watermark and are no-ops (the worker drains them right
+/// after each successful chunk), or (b) worker shutdown under quarantine:
+/// the gate is set `requires_reopen` and the guards dropped, because after a
+/// reopen the Aborted marks are acceptable (the repo is fail-stopped until
+/// then). The resume path needs no parking: `resume_version_guard` re-owns
+/// the receipt's exact versions allocation-free and its `commit()` rewrites
+/// the mark.
 ///
 /// The wal group is resolved by the async caller and passed in — resolving
 /// it here would need a `.await`, which is exactly what this function must

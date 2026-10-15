@@ -101,6 +101,12 @@ impl ShamirAdminExecutor {
             )
             .await
             .map_err(err_access)?;
+
+        // S5c round 3: purge rewrites the history store (and drains the WAL
+        // overlay first); hold the repo-level `ddl_admission` guard so it
+        // cannot interleave with a follower receipt apply.
+        let _repo_ddl =
+            super::ddl_admission::repo_ddl_guard(&self.shamir, &self.db_name, &op.repo).await?;
         let mvcc =
             resolve_table_mvcc(&self.shamir, &self.db_name, &op.repo, &op.purge_history).await?;
 

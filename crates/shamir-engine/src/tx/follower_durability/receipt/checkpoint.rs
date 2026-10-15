@@ -34,6 +34,36 @@ pub(crate) fn set_simulate_checkpoint_uncertain(on: bool) {
     SIMULATE_CHECKPOINT_UNCERTAIN.store(on, Ordering::Release);
 }
 
+/// NEGATIVE-CONTROL hook (review finding 9d): when armed, the Uncertain
+/// branch treats the outcome as settled WITHOUT the read-back or the retry —
+/// the protection is removed while the branch is still entered, so
+/// `checkpoint_reconciles()` still increments. Combined with
+/// `set_uncertain_without_commit`, a test can prove the reconciliation
+/// tests discriminate real read-back protection and not merely branch entry:
+/// with this seam ON the settled-state assertions (bookmark advanced, clean
+/// horizon, receipt retired) provably FAIL.
+#[cfg(test)]
+static DISABLE_UNCERTAIN_RECONCILE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+#[allow(dead_code)] // driven by the PR6b-2 test chunk
+pub(crate) fn disable_uncertain_reconcile(on: bool) {
+    DISABLE_UNCERTAIN_RECONCILE.store(on, Ordering::Release);
+}
+
+/// Companion negative-control hook: when armed, `checkpoint()` reports
+/// `Uncertain` WITHOUT staging or committing anything, so the durable state
+/// is genuinely unsettled (bookmark not advanced, receipt outstanding) —
+/// exactly the situation the read-back/retry protection exists to repair.
+#[cfg(test)]
+static UNCERTAIN_WITHOUT_COMMIT: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+#[allow(dead_code)] // driven by the PR6b-2 test chunk
+pub(crate) fn set_uncertain_without_commit(on: bool) {
+    UNCERTAIN_WITHOUT_COMMIT.store(on, Ordering::Release);
+}
+
 /// Test-only observable seam: counts how many times the checkpoint's
 /// read-back/reconcile branch actually ran (one increment per Uncertain
 /// outcome). Lets tests prove the reconcile path executed instead of merely
@@ -209,6 +239,43 @@ async fn stage_checkpoint_batch(
     Ok(batch)
 }
 
+async fn reconcile_uncertain(
+    repo: &RepoInstance,
+    info: &Arc<dyn Store>,
+    receipt: &ReplicationReceipt,
+    old: &BookmarkV3,
+    detail: String,
+) -> DbResult<()> {
+    // Reconcile by reading back: advanced bookmark AND retired receipt.
+    let settled = match load_bookmark_v3(info).await {
+        Ok(Some(bookmark)) => {
+            bookmark.bookmark >= receipt.upstream_end && bookmark.outstanding_receipt.is_none()
+        }
+        _ => false,
+    };
+    if !settled {
+        match stage_checkpoint_batch(repo, receipt, old)
+            .await?
+            .commit()
+            .await?
+        {
+            AtomicCommitOutcome::Committed => {}
+            AtomicCommitOutcome::Uncertain { detail } => {
+                return Err(DbError::RepoRequiresReopen(format!(
+                    "receipt checkpoint commit uncertain twice: {detail}"
+                )));
+            }
+        }
+    } else {
+        log::warn!(
+            "receipt checkpoint commit was uncertain but the read-back shows \
+             the bookmark advanced (repo {}): {detail}",
+            repo.name()
+        );
+    }
+    Ok(())
+}
+
 /// Step 4b: advance the bookmark, J, and retire the receipt in ONE atomic
 /// batch, then publish to RAM in the SAME poll (the synchronous
 /// `publish::apply_publication` runs directly after the commit's poll
@@ -231,10 +298,16 @@ pub(crate) async fn checkpoint(
         COMMIT_PARK_REACHED.notify_waiters();
         COMMIT_PARK_RELEASE.notified().await;
     }
-    let outcome = stage_checkpoint_batch(repo, receipt, old)
-        .await?
-        .commit()
-        .await?;
+    let outcome = if UNCERTAIN_WITHOUT_COMMIT.load(Ordering::Acquire) {
+        AtomicCommitOutcome::Uncertain {
+            detail: "injected uncertain WITHOUT commit (negative control)".into(),
+        }
+    } else {
+        stage_checkpoint_batch(repo, receipt, old)
+            .await?
+            .commit()
+            .await?
+    };
     #[cfg(test)]
     let outcome = if outcome == AtomicCommitOutcome::Committed
         && SIMULATE_CHECKPOINT_UNCERTAIN.load(Ordering::Acquire)
@@ -255,32 +328,19 @@ pub(crate) async fn checkpoint(
             RECONCILE_PARK_REACHED.notify_waiters();
             RECONCILE_PARK_RELEASE.notified().await;
         }
-        // Reconcile by reading back: advanced bookmark AND retired receipt.
-        let settled = match load_bookmark_v3(info).await {
-            Ok(Some(bookmark)) => {
-                bookmark.bookmark >= receipt.upstream_end && bookmark.outstanding_receipt.is_none()
-            }
-            _ => false,
-        };
-        if !settled {
-            match stage_checkpoint_batch(repo, receipt, old)
-                .await?
-                .commit()
-                .await?
-            {
-                AtomicCommitOutcome::Committed => {}
-                AtomicCommitOutcome::Uncertain { detail } => {
-                    return Err(DbError::RepoRequiresReopen(format!(
-                        "receipt checkpoint commit uncertain twice: {detail}"
-                    )));
-                }
-            }
-        } else {
+        #[cfg(test)]
+        if DISABLE_UNCERTAIN_RECONCILE.load(Ordering::Acquire) {
+            // Negative control: protection removed. Treat the outcome as
+            // settled without the read-back or the retry — the branch was
+            // entered (counter incremented above) but the durable state is
+            // left unreconciled, which the tests assert provably.
             log::warn!(
-                "receipt checkpoint commit was uncertain but the read-back shows \
-                 the bookmark advanced (repo {}): {detail}",
+                "receipt checkpoint commit uncertain and reconcile DISABLED "
+                "(negative control) on repo {}: {detail}",
                 repo.name()
             );
+        } else {
+            reconcile_uncertain(repo, info, receipt, old, detail).await?;
         }
     }
     // RAM publication: synchronous, in the same poll as the commit above.

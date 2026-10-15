@@ -26,7 +26,8 @@ use crate::tx::apply_replicated::{apply_replicated_batch, ApplyOutcome, ApplyPol
 use crate::tx::ReplicatedEvent;
 
 use super::super::checkpoint::{
-    checkpoint_reconciles, checkpoint_test_lock, set_simulate_checkpoint_uncertain,
+    checkpoint_reconciles, checkpoint_test_lock, disable_uncertain_reconcile,
+    set_simulate_checkpoint_uncertain, set_uncertain_without_commit,
 };
 
 fn event(leader_version: u64, id: u8) -> ReplicatedEvent {
@@ -207,6 +208,59 @@ async fn no_reconcile_counter_without_uncertain() {
         ApplyOutcome::Applied { local_version: 2 }
     );
     assert_eq!(checkpoint_reconciles(), before);
+
+    close(repo).await;
+}
+
+// TRUE reconciliation negative control (review finding 9d): the checkpoint
+// commit never lands (`set_uncertain_without_commit`) so the durable state is
+// genuinely unsettled, and the read-back/retry protection is removed
+// (`disable_uncertain_reconcile`) while the branch is STILL entered — the
+// reconcile counter increments, but the settled-state invariants that
+// `assert_settled` checks (bookmark advanced, clean horizon, receipt retired)
+// provably FAIL. This proves the healthy-path test above discriminates real
+// read-back protection, not merely branch entry.
+#[tokio::test]
+async fn negative_control_without_reconcile_state_is_not_reconciled() {
+    let _lock = checkpoint_test_lock();
+    set_simulate_checkpoint_uncertain(false);
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = repo_name(temp.path());
+    let repo = open_with_retry(temp.path(), &name).await;
+
+    let baseline = checkpoint_reconciles();
+    set_uncertain_without_commit(true);
+    disable_uncertain_reconcile(true);
+    let outcome =
+        apply_replicated_batch(&repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted).await;
+    disable_uncertain_reconcile(false);
+    set_uncertain_without_commit(false);
+
+    // Branch entered (counter moved), protection removed: the pipeline still
+    // reports success and publishes to RAM, but NOTHING was reconciled
+    // durably.
+    assert_eq!(outcome.unwrap(), ApplyOutcome::Applied { local_version: 2 });
+    assert_eq!(checkpoint_reconciles(), baseline + 1);
+
+    // Provably NOT reconciled — the exact inverse of `assert_settled`'s
+    // durable invariants: the bookmark v3 record was never written, the
+    // receipt is still outstanding (Prepared), and the re-delivery is NOT a
+    // durable Skipped no-op (no durable bookmark classifies it as applied).
+    let info = repo.tx_info_store().await.unwrap();
+    let v3 = load_bookmark_v3(&info).await.unwrap();
+    assert!(
+        v3.as_ref().is_none_or(|v3| v3.bookmark < 2),
+        "bookmark must NOT have advanced without the reconcile: {v3:?}"
+    );
+    assert!(
+        v3.map_or(true, |v3| v3.outstanding_receipt.is_some()),
+        "receipt must still be outstanding without the reconcile"
+    );
+    assert!(
+        !matches!(info.get(receipt_key()).await, Err(DbError::NotFound(_))),
+        "receipt key must still be present without the reconcile"
+    );
+    drop(info);
 
     close(repo).await;
 }

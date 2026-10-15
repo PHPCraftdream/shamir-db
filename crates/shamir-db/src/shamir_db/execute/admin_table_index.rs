@@ -9,6 +9,7 @@ use shamir_engine::table::ddl_op_log;
 use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
+use super::ddl_admission::{drop_table_cascade_indexes, repo_ddl_guard};
 use super::helpers::{admin_result, admin_result_with_op_id, apply_table_retention};
 
 use log::error;
@@ -199,95 +200,22 @@ impl ShamirAdminExecutor {
             }
         }
 
-        // cascade: explicitly drop the table's own indexes (regular,
-        // unique, sorted, index2) before removing validators and the
-        // table itself.  Without cascade, indexes are orphaned in
-        // storage (harmless — the catalogue entry is gone so they
-        // will never be loaded again).
+        // S5c round 3: hold the repo-level `ddl_admission` guard for the WHOLE
+        // drop path — the F-3 cascade below AND the validator cleanup + inner
+        // table removal (guard-free inner variants; the public facade methods
+        // would take a second, non-reentrant acquisition). Exactly once.
+        let _ddl = repo_ddl_guard(&self.shamir, &self.db_name, &op.repo).await?;
         if op.cascade {
             if let Some(db) = self.shamir.get_db(&self.db_name) {
                 if let Ok(table) = db.get_table(&op.repo, &op.drop_table).await {
-                    // F-3 (#1030): hold `ddl_admission` (via `begin_write_barrier`)
-                    // for this WHOLE block of direct index-registry mutations.
-                    // Pre-fix, these manager-level primitives
-                    // (`index_manager_ref().drop_index`/`drop_unique_index`,
-                    // `sorted_indexes().drop_index`, `index2_registry().remove_by_id`)
-                    // bypassed the barrier `TableManager`'s own
-                    // `drop_index`/`drop_unique_index`/`drop_sorted_index`/
-                    // `drop_index2` wrappers take — violating the precondition
-                    // `IndexRegistry::insert`'s doc comment states every
-                    // registry-mutating DDL op must uphold (see
-                    // `crates/shamir-index/src/registry.rs`, "# Precondition"):
-                    // a concurrent `CREATE INDEX` could race this cascade's
-                    // direct drops to the same next generation-counter value,
-                    // un-serialized. One `begin_write_barrier` acquisition
-                    // covering the entire block (not four separate ones, which
-                    // would only serialize against itself) restores that
-                    // guarantee. Bit choice: `REGULAR_INDEX_CREATE` — the same
-                    // single `ddl_admission` mutex backs every bit
-                    // (`begin_write_barrier`'s Step 0), so any one existing bit
-                    // is sufficient for the admission serialization this fix
-                    // needs; no new bit is minted since the table is about to
-                    // be removed entirely regardless of which writers see the
-                    // slow path via this specific bit. The raw manager
-                    // primitives called below do NOT themselves acquire
-                    // `ddl_admission`/`unique_write_lock` (confirmed by reading
-                    // `TableManager::drop_index`/`drop_unique_index`/
-                    // `drop_sorted_index`/`drop_index2`, which call these exact
-                    // primitives AFTER already taking the barrier) — so
-                    // acquiring it here once cannot re-enter the non-reentrant
-                    // `tokio::sync::Mutex`.
-                    let (_barrier, _uwl_guard) = table
-                        .begin_write_barrier(
-                            shamir_engine::index::write_barrier_flags::REGULAR_INDEX_CREATE,
-                        )
-                        .await;
-                    // base_index regular indexes.
-                    let regular_ids: Vec<u64> = table
-                        .index_manager_ref()
-                        .iter_indexes()
-                        .map(|d| d.name_interned)
-                        .collect();
-                    for id in regular_ids {
-                        let _ = table.index_manager_ref().drop_index(id, None, None).await;
-                    }
-                    // base_index unique indexes.
-                    let unique_ids: Vec<u64> = table
-                        .index_manager_ref()
-                        .iter_unique_indexes()
-                        .map(|d| d.name_interned)
-                        .collect();
-                    for id in unique_ids {
-                        let _ = table
-                            .index_manager_ref()
-                            .drop_unique_index(id, None, None)
-                            .await;
-                    }
-                    // Sorted indexes.
-                    let sorted_ids: Vec<u64> = table
-                        .sorted_indexes()
-                        .iter_indexes()
-                        .iter()
-                        .map(|d| d.name_interned)
-                        .collect();
-                    for id in sorted_ids {
-                        let _ = table.sorted_indexes().drop_index(id, None, None).await;
-                    }
-                    // index2 registry — remove all backends.
-                    let backends = table.index2_registry().all_backends().await;
-                    for b in &backends {
-                        let _ = table
-                            .index2_registry()
-                            .remove_by_id(b.descriptor().id)
-                            .await;
-                    }
+                    drop_table_cascade_indexes(&table).await;
                 }
             }
         }
 
         let removed = self
             .shamir
-            .drop_table_cleaning_validators(&self.db_name, &op.repo, &op.drop_table)
+            .drop_table_cleaning_validators_inner(&self.db_name, &op.repo, &op.drop_table)
             .await
             .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
@@ -380,12 +308,9 @@ impl ShamirAdminExecutor {
             .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
         // DDL interlock (repo-level `ddl_admission`): the handler below calls
         // TableManager index DDL DIRECTLY (not the already-guarded
-        // RepoInstance wrappers), so it must take the repo guard itself —
+        // RepoInstance wrappers), so it takes the repo guard itself —
         // exactly once per path.
-        let repo = db
-            .get_repo(&op.repo)
-            .ok_or_else(|| err(format!("Repository '{}' not found", op.repo)))?;
-        let _ddl = repo.ddl_admission_guard().await;
+        let _ddl = repo_ddl_guard(&self.shamir, &self.db_name, &op.repo).await?;
         let table = db
             .get_table(&op.repo, &op.table)
             .await
@@ -639,12 +564,9 @@ impl ShamirAdminExecutor {
             .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
         // DDL interlock (repo-level `ddl_admission`): the handler below calls
         // TableManager index DDL DIRECTLY (not the already-guarded
-        // RepoInstance wrappers), so it must take the repo guard itself —
+        // RepoInstance wrappers), so it takes the repo guard itself —
         // exactly once per path.
-        let repo = db
-            .get_repo(&op.repo)
-            .ok_or_else(|| err(format!("Repository '{}' not found", op.repo)))?;
-        let _ddl = repo.ddl_admission_guard().await;
+        let _ddl = repo_ddl_guard(&self.shamir, &self.db_name, &op.repo).await?;
         let table = db
             .get_table(&op.repo, &op.table)
             .await
@@ -877,12 +799,9 @@ impl ShamirAdminExecutor {
             .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
         // DDL interlock (repo-level `ddl_admission`): the handler below calls
         // TableManager index DDL DIRECTLY (not the already-guarded
-        // RepoInstance wrappers), so it must take the repo guard itself —
+        // RepoInstance wrappers), so it takes the repo guard itself —
         // exactly once per path.
-        let repo = db
-            .get_repo(&op.repo)
-            .ok_or_else(|| err(format!("Repository '{}' not found", op.repo)))?;
-        let _ddl = repo.ddl_admission_guard().await;
+        let _ddl = repo_ddl_guard(&self.shamir, &self.db_name, &op.repo).await?;
         let table = db
             .get_table(&op.repo, &op.table)
             .await
