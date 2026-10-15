@@ -7,7 +7,6 @@ use crate::index2::kind::{
     FunctionalConfig, IndexKind, VectorBackendRef, VectorConfig, VectorMetric, VectorQuantization,
 };
 use crate::repo::RepoWritePermit;
-use crate::table::table_manager_index_mgmt::PhaseBAResult;
 use shamir_storage::error::DbResult;
 
 impl TableManager {
@@ -17,7 +16,6 @@ impl TableManager {
         op: &shamir_query_types::admin::CreateIndexOp,
         permit: &RepoWritePermit,
     ) -> DbResult<()> {
-        self.write_domain.debug_check_permit(permit);
         self.write_domain.debug_check_permit(permit);
         let index_type = op.index_type.as_deref().unwrap_or("btree");
         if index_type == "btree" {

@@ -1,11 +1,10 @@
 use std::collections::BTreeSet;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use futures::StreamExt;
 use shamir_query_types::read::{DdlOpKind, DdlOpState, DdlOpStatus};
 use shamir_storage::error::DbResult;
-use shamir_types::core::interner::{InternerKey, TouchInd};
+use shamir_types::core::interner::TouchInd;
 use shamir_types::time::unix_millis;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -14,13 +13,7 @@ use super::table_manager::TableManager;
 use crate::index::index_definition::IndexDefinition;
 use crate::index::index_info_item::IndexInfoItem;
 use crate::index2::backend::IndexBackend;
-use crate::index2::descriptor::IndexDescriptor;
-use crate::index2::kind::{
-    FunctionalConfig, IndexKind, VectorBackendRef, VectorConfig, VectorMetric, VectorQuantization,
-};
 use crate::repo::RepoWritePermit;
-use shamir_index::base_index::index_keys::{build_index_key_from_record, build_posting_key};
-use smallvec::SmallVec;
 
 /// Result structure for #1088 Phase C/D: the SnapshotGuard and pin version
 /// must be returned from Phase B+A and kept alive through Phase C/D.
@@ -896,7 +889,7 @@ impl TableManager {
     }
 
     /// Build IndexDefinition from string name and paths.
-    async fn build_index_definition(
+    pub(in crate::table) async fn build_index_definition(
         &self,
         name: &str,
         paths: &[&str],

@@ -111,14 +111,21 @@ async fn retired_initializer_cannot_disrupt_replacement() {
     hook.entered.notified().await;
     assert!(repo.remove_table("orders"));
     repo.add_table(TableConfig::new("orders"));
-    let replacement = repo.get_table("orders").await.unwrap();
-    assert_coherent(&repo, &replacement);
+    let replacement_worker_repo = repo.clone();
+    let mut replacement_worker = Box::pin(tokio::spawn(async move {
+        replacement_worker_repo.get_table("orders").await
+    }));
+    assert!(matches!(
+        futures::poll!(&mut replacement_worker),
+        std::task::Poll::Pending
+    ));
     hook.resume.notify_one();
     let result = worker.await.unwrap();
     assert!(matches!(
         result,
         Err(DbError::Internal(_)) | Err(DbError::NotFound(_))
     ));
+    let replacement = replacement_worker.await.unwrap().unwrap();
     assert_coherent(&repo, &replacement);
     let current = repo.get_table("orders").await.unwrap();
     assert!(Arc::ptr_eq(

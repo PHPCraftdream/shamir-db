@@ -50,10 +50,10 @@ async fn reservation_holder_can_admit_and_foreign_domain_is_rejected() {
     domain.debug_check_permit(&permit);
     drop(permit);
 
-    let err = foreign
-        .admit_with_reservation(&reservation)
-        .await
-        .unwrap_err();
+    let err = match foreign.admit_with_reservation(&reservation).await {
+        Err(err) => err,
+        Ok(_) => panic!("foreign domain unexpectedly admitted with reservation"),
+    };
     assert!(matches!(err, RepoWriteError::Reserved { repo } if repo == "foreign"));
     drop(reservation);
     assert!(domain.admit().await.is_ok());
@@ -82,9 +82,8 @@ async fn admit_serializes() {
     let holder = domain.admit().await.expect("holder admit must succeed");
     let task_domain = Arc::clone(&domain);
     let mut mutation = Box::pin(async move { task_domain.admit().await });
-    assert_eq!(
-        futures::poll!(mutation.as_mut()),
-        Poll::Pending,
+    assert!(
+        matches!(futures::poll!(mutation.as_mut()), Poll::Pending),
         "admission must wait while permit held"
     );
     drop(holder);

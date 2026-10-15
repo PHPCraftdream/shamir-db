@@ -15,7 +15,7 @@ use crate::tx::clean_horizon::checkpoint::test_seam;
 use crate::tx::CommitTailBarrier;
 use shamir_query_types::batch::VisibilityWait;
 use shamir_storage::error::{DbError, DbResult};
-use shamir_storage::types::{fully_unwrap_store, Repo, Store};
+use shamir_storage::types::{Repo, Store};
 use shamir_types::access::Actor;
 use shamir_types::types::common::{new_dash_map_wc, TDashMap, THasher};
 use shamir_types::types::value::InnerValue;
@@ -590,6 +590,22 @@ impl RepoInstance {
     /// the catalogue is the source of truth). If the caller also needs
     /// the old stores gone, follow up with `store_delete` per namespace.
     pub async fn rename_table_stores(&self, from: &str, to: &str) -> DbResult<bool> {
+        let permit = self
+            .write_domain
+            .admit()
+            .await
+            .map_err(|error| DbError::Internal(error.to_string()))?;
+        self.rename_table_stores_admitted(from, to, &permit).await
+    }
+
+    /// Rename while holding this repository's write-admission permit.
+    pub async fn rename_table_stores_admitted(
+        &self,
+        from: &str,
+        to: &str,
+        permit: &crate::repo::changelog_store::write_domain::RepoWritePermit,
+    ) -> DbResult<bool> {
+        self.write_domain.debug_check_permit(permit);
         // F-68 (#895) cluster D / task #124 diagnostic instrumentation:
         // timestamped entry/exit — NOT a behavior change, logging only.
         let rts_started = std::time::Instant::now();

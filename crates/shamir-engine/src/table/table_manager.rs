@@ -976,7 +976,7 @@ impl TableManager {
     /// the bit is claimed its owner exists before drain or lock can suspend.
     /// Cancelling either wait drops that owner and clears only the freeze bit.
     pub async fn begin_migration_freeze(&self) -> Result<MigrationFreezeGuard, CommitError> {
-        let permit = self.admit().await?;
+        let permit = self.admit().await.map_err(CommitError::Storage)?;
         self.begin_migration_freeze_admitted(&permit).await
     }
 

@@ -180,7 +180,11 @@ impl TableManager {
     /// would bypass `unique_write_lock` entirely — the exact race the review
     /// flagged. The bit + drain (done by the caller, BEFORE the lock — F-70)
     /// make the FIRST unique-index create as safe as the second-and-later.
-    async fn create_unique_index_body(&self, name: &str, paths: &[&str]) -> DbResult<()> {
+    pub(in crate::table) async fn create_unique_index_body(
+        &self,
+        name: &str,
+        paths: &[&str],
+    ) -> DbResult<()> {
         // R0-C (#1010): cross-family name-uniqueness preflight, done WHILE
         // holding `ddl_admission` — both callers (`create_unique_index` and
         // `rename_index`'s unique branch) already acquired the barrier

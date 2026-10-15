@@ -233,7 +233,9 @@ async fn repo_level_arm_and_unclean_bump() {
 
     // Negative control: the seam skips the bump entirely.
     SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST.store(true, Ordering::Release);
-    repo.note_unclean_open_bump().await.unwrap();
+    repo.note_unclean_open_bump(&repo.write_domain().admit().await.unwrap())
+        .await
+        .unwrap();
     assert_eq!(
         repo.repo_identity().await.unwrap().history_epoch,
         epoch_before
@@ -242,7 +244,9 @@ async fn repo_level_arm_and_unclean_bump() {
 
     // Real hook: exactly one bump, one metric increment, per open.
     SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST.store(false, Ordering::Release);
-    repo.note_unclean_open_bump().await.unwrap();
+    repo.note_unclean_open_bump(&repo.write_domain().admit().await.unwrap())
+        .await
+        .unwrap();
     assert_eq!(
         repo.repo_identity().await.unwrap().history_epoch,
         epoch_before + 1

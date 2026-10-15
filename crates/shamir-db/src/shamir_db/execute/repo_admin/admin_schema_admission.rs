@@ -1,3 +1,4 @@
+use crate::engine::table::TableManager;
 use crate::query::batch::BatchError;
 use crate::shamir_db::ShamirDb;
 use shamir_engine::repo::RepoWritePermit;

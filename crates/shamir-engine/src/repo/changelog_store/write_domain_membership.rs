@@ -6,8 +6,6 @@
 //! under the 1000-line ratchet; the sync bodies stay there untouched and
 //! are simply delegated to after the permit's identity is checked.
 
-use std::sync::Arc;
-
 use shamir_storage::error::DbResult;
 
 use super::super::repo_instance::RepoInstance;
