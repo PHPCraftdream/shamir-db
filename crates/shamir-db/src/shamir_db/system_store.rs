@@ -169,6 +169,28 @@ impl SystemStore {
         table.persist_interner_admitted(&permit).await
     }
 
+    /// S5c-X Round 7 (L3): single-admission write tail for system-catalogue
+    /// saves whose record must be interned first. Replaces the old
+    /// `to_inner` + `persist_table_interner` pair — the read-view `to_inner`
+    /// was a WRITE-prep interning step mutating through the read view.
+    /// Admits ONCE (the tokio write-domain mutex is non-reentrant), interns
+    /// the record via `intern_query_value_admitted`, then persists the
+    /// dictionary delta — all under the same permit.
+    pub(crate) async fn persist_table_interner_interning(
+        &self,
+        table: &TableManager,
+        record: &QueryValue,
+    ) -> DbResult<()> {
+        let repo = self.system_repo()?;
+        let permit = repo
+            .write_domain()
+            .admit()
+            .await
+            .map_err(|e| DbError::Internal(e.to_string()))?;
+        let _inner = table.intern_query_value_admitted(&permit, record).await?;
+        table.persist_interner_admitted(&permit).await
+    }
+
     /// Route a single non-tx DELETE through the implicit-tx file-WAL path
     /// (mirrors the `query_runner` non-tx Delete branch). Maps the
     /// [`BatchError`] surfaced by the implicit tx onto a [`DbError`].
@@ -233,14 +255,13 @@ impl SystemStore {
         let mut rec = record.clone();
         meta.inject_into(&mut rec);
         let table = self.table(TABLE_DATABASES).await?;
-        let _inner = table.info_store_read_view().to_inner(&rec).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_DATABASES),
             key: qv_map1("name", QueryValue::Str(name.to_string())),
-            value: rec,
+            value: rec.clone(),
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        self.persist_table_interner(&table).await?;
+        self.persist_table_interner_interning(&table, &rec).await?;
         Ok(())
     }
 
@@ -912,14 +933,14 @@ impl SystemStore {
     /// Persist a replacement database record (for `set_resource_meta`).
     pub async fn save_database_meta(&self, name: &str, record: &QueryValue) -> DbResult<()> {
         let table = self.table(TABLE_DATABASES).await?;
-        let _inner = table.info_store_read_view().to_inner(record).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_DATABASES),
             key: qv_map1("name", QueryValue::Str(name.to_string())),
             value: record.clone(),
         };
         self.set_via_implicit_tx(&table, &op).await?;
-        self.persist_table_interner(&table).await?;
+        self.persist_table_interner_interning(&table, record)
+            .await?;
         table.data_store_read_view().flush().await?;
         Ok(())
     }

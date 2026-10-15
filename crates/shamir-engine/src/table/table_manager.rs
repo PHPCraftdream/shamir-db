@@ -49,19 +49,42 @@ pub fn table_token_for(name: &str) -> u64 {
     h.finish()
 }
 
-/// S5c-X P2 (Round 6): this compile-fail doctest is the ENFORCED boundary
-/// gate. Doctests are enabled on this crate solely so it runs in CI (see
-/// `Cargo.toml` `[lib]` and the `cargo test --doc` workflow step — nextest
-/// cannot run doctests). It must KEEP failing to compile downstream: the raw
-/// component handles and the pre-F2 registry escape are unreachable.
+/// S5c-X P2 (Round 6, split Round 7): these compile-fail doctests are the
+/// ENFORCED boundary gate. Doctests are enabled on this crate solely so they
+/// run in CI (see `Cargo.toml` `[lib]` and the `cargo test --doc` workflow
+/// step — nextest cannot run doctests). They must KEEP failing to compile
+/// downstream: the raw component handles and the pre-F2 registry escape are
+/// unreachable. One block per accessor, so reopening any single accessor
+/// independently fails the gate.
 ///
 /// ```compile_fail
 /// use shamir_engine::table::TableManager;
 ///
 /// fn downstream(manager: &TableManager) {
 ///     let _ = manager.info_store();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use shamir_engine::table::TableManager;
+///
+/// fn downstream(manager: &TableManager) {
 ///     let _ = manager.data_store();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use shamir_engine::table::TableManager;
+///
+/// fn downstream(manager: &TableManager) {
 ///     let _ = manager.interner();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use shamir_engine::table::TableManager;
+///
+/// fn downstream(manager: &TableManager) {
 ///     let _ = manager.validator_registry();
 /// }
 /// ```
@@ -754,14 +777,6 @@ impl TableManager {
     pub fn verify_call_count(&self) -> usize {
         self.verify_call_count
             .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    /// Public read-only access to the inner `Table` — used by
-    /// `read_exec` for vectored `get_many` and by tests. Production
-    /// callers must not write to the table directly; go through
-    /// `TableManager::insert / set / delete` so index hooks fire.
-    pub(crate) fn table(&self) -> &Table {
-        &self.table
     }
 
     #[cfg(any(test, feature = "test-util"))]

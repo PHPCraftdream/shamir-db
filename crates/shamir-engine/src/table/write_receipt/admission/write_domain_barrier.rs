@@ -433,7 +433,7 @@ impl TableManager {
         // from nothing — essential for the unique path, which drops the OLD
         // definition FIRST. See `recover_hash_renames`'s doc for the full
         // crash-state matrix.
-        mgr.recover_hash_renames_admitted(&open_permit).await?;
+        mgr.recover_hash_renames_admitted(open_permit).await?;
 
         // Restore in-memory state from persisted data.
         //
@@ -509,7 +509,7 @@ impl TableManager {
                 // S5c-X: the open path already holds `open_permit` — use the
                 // admitted twin (public `repair()` would re-admit and
                 // self-deadlock on the non-reentrant domain mutex).
-                mgr.repair_admitted(&open_permit).await?;
+                mgr.repair_admitted(open_permit).await?;
             }
             crate::index2::persistence::save_legacy_index_version(&mgr.info_store).await?;
         }

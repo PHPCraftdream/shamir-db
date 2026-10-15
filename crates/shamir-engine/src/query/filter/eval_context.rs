@@ -44,7 +44,11 @@ pub struct FilterContext<'a> {
     pub(crate) read_visibility_scope: Option<&'a crate::query::batch::ExecScope>,
     pub(crate) row_byte_meter: Option<&'a RowByteMeter<'a>>,
     max_accumulator_bytes: Option<usize>,
-    pub interner: &'a Interner,
+    /// Interner for resolving field paths. `pub(crate)`, not `pub` (S5c-X
+    /// Round 7): the `Interner` is interior-mutable (`touch_ind`), so a
+    /// `pub` field would let read-view holders mutate through it. Engine
+    /// readers use the field directly; no cross-crate reader exists.
+    pub(crate) interner: &'a Interner,
     pub resolved_refs: &'a TMap<String, QueryResult>,
     /// Scalar function resolver for `FnCall` dispatch. Defaults to
     /// built-ins only ([`ScalarResolver::builtins_only`]); a per-DB

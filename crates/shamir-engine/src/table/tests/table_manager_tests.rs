@@ -48,7 +48,7 @@ async fn test_table_manager_clone() {
     let ctx2 = ctx1.clone();
 
     assert_eq!(ctx1.name(), ctx2.name());
-    assert!(std::ptr::eq(ctx1.table(), ctx2.table()));
+    assert!(std::ptr::eq(ctx1.table_for_test(), ctx2.table_for_test()));
 }
 
 #[tokio::test]

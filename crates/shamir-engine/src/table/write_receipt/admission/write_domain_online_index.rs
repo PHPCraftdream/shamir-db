@@ -36,7 +36,7 @@ impl TableManager {
     /// Returns `Ok(None)` when changefeed is not wired (online build unavailable).
     /// Returns `Ok(Some(PhaseBAResult { guard, pin }))` on success, where `guard`
     /// must be kept alive through Phase C/D (it pins the version for pin-time reads).
-    pub async fn phase_b_a_backfill(
+    pub(crate) async fn phase_b_a_backfill(
         &self,
         name: &str,
         index_def: crate::index::index_definition::IndexDefinition,
@@ -243,7 +243,7 @@ impl TableManager {
         Ok(Some(PhaseBAResult { guard, pin }))
     }
 
-    pub async fn phase_c_d_catchup_and_publish(
+    pub(crate) async fn phase_c_d_catchup_and_publish(
         &self,
         name_interned: u64,
         phase_ba: PhaseBAResult,

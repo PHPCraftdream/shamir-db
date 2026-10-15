@@ -38,7 +38,7 @@ use shamir_index::descriptor::IndexDescriptor;
 use shamir_query_types::filter::Filter;
 use shamir_query_types::read::DdlOpStatus;
 use shamir_storage::error::DbResult;
-use shamir_types::codecs::interned::{inner_value_to_query_value, query_value_to_inner};
+use shamir_types::codecs::interned::inner_value_to_query_value;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::{RecordRef, RecordView};
 use shamir_types::types::common::TMap;
@@ -61,8 +61,13 @@ use crate::query::filter::{compile_filter, FilterContext, FilterNode};
 /// * [`filter_context`](Self::filter_context) / [`interner_read_view`](Self::interner_read_view)
 ///   — query-planning reads over the interner dictionary WITHOUT handing
 ///   out `&Interner` (S5c-X F1, Round 6).
-/// * [`to_inner`](Self::to_inner) / [`inner_to_query_value`](Self::inner_to_query_value)
-///   — codec twins that keep the dictionary encapsulated.
+/// * [`inner_to_query_value`](Self::inner_to_query_value) — pure-read codec
+///   twin that keeps the dictionary encapsulated. (The old `to_inner` twin
+///   was removed in S5c-X Round 7: it was a WRITE-prep interning step that
+///   mutated through the read view; that interning now lives behind
+///   admission in `TableManager::intern_query_value_admitted`, chained with
+///   the dictionary-delta persist by
+///   `SystemStore::persist_table_interner_interning`.)
 /// * [`load_migration_state`](Self::load_migration_state) — read a persisted
 ///   migration state record for COMMIT MIGRATION retry.
 pub struct TableInfoStoreReadView<'a> {
@@ -140,19 +145,6 @@ impl<'a> TableInfoStoreReadView<'a> {
         Ok(interner
             .get_str(&InternerKey::new(id))
             .map(|arc| arc.to_string()))
-    }
-
-    /// Interned encoding of a `QueryValue` for a subsequent ADMITTED write
-    /// (the caller persists the dictionary delta via
-    /// `TableManager::persist_interner_admitted`). Faithful wrapper of
-    /// `shamir_types::codecs::interned::query_value_to_inner`. NOTE: this
-    /// MAY intern new field names — it is the preparation step of a write,
-    /// not a pure read, and is on this view only so the raw `&Interner`
-    /// never escapes (S5c-X F1, Round 6).
-    pub async fn to_inner(&self, value: &QueryValue) -> DbResult<InnerValue> {
-        let interner = self.manager.interner.get().await?;
-        query_value_to_inner(value, interner)
-            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))
     }
 
     /// Decode an `InnerValue` (changelog payload) back into a string-keyed

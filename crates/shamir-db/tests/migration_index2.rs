@@ -400,16 +400,28 @@ async fn assert_committed_crash_retry(seed_marker: bool) {
         .final_drain_and_commit_admitted(&src_permit, &dst_permit)
         .await
         .unwrap();
+    // S5c-X (Round 7): the tokio write-domain mutex is non-reentrant — drop the
+    // permits BEFORE the seed/populate/commit calls so each self-admits.
+    drop(src_permit);
+    drop(dst_permit);
     // Crash after seed but before its stage marker: retry must derive that
     // rows already have current versions instead of allocating new versions.
     dst.seed_log_from_data_store().await.unwrap();
     let mvcc = dst.mvcc_store_for_test().unwrap();
     mvcc.flush_history().await.unwrap();
     if seed_marker {
+        let (src_permit, dst_permit) = shamir_db::engine::repo::RepoWriteDomain::admit_pair(
+            src_repo.write_domain(),
+            dst_repo.write_domain(),
+        )
+        .await
+        .unwrap();
         coord
             .complete_finalisation_step_admitted(&src_permit, &dst_permit, 1)
             .await
             .unwrap();
+        drop(src_permit);
+        drop(dst_permit);
     }
     let mut records = dst.data_store_for_test().iter_stream(256);
     let key = records.next().await.unwrap().unwrap()[0].0.clone();
