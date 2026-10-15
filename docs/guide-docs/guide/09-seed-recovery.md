@@ -14,6 +14,33 @@ path for residual gaps. It is "R2-lite": an offline, whole-repository
 logical seed — NOT an online snapshot, NOT automatic reseeding,
 NOT promotion/failover, and NOT full-server disaster recovery.
 
+While a subscription is in `resync_required` quarantine, ordinary reads of
+the covered repository are also refused (PR8b): client reads
+(get/query/scan, incl. temporal AsOf/History) and local changefeed/journal
+pulls fail with the wire code `resync_required` (non-retryable), so stale
+state is never served. Status/`ReplicationStatus`/`ListSubscriptions`
+(state + `status_message`) and DESCRIBE stay readable. There is no
+automatic reseed. The quarantine is carried by a durable marker on the
+subscription row (`quarantined`, plus the `resync_from_receipt` baseline
+recording which `seed_receipt` the quarantine began from), so it survives
+Pause/SetProfile: Pause and SetProfile of a quarantined subscription are
+REFUSED with the same typed `resync_required` error, as is a plain
+`Resume`. The recovery procedure is:
+
+1. See the quarantine via status/list (reads and local pulls of the covered
+   repos are refused; Pause/SetProfile/Resume are refused too).
+2. `DROP` the quarantined subscription (deletes the row and its marker).
+3. Install the replacement seed with the real installer
+   (`replication-seed-export` / `-install`) — install it into a NEW follower
+   data directory: the installer refuses an existing ordinary destination
+   repository/database (`check_seed_target` in `seed/catalogue.rs` rejects an
+   "existing ordinary or conflicting repository" and an "existing ordinary
+   destination database"), so recovery means recreating/rebinding the follower
+   there. The installer creates a FRESH paused subscription bound to the NEW
+   `seed_receipt` (no marker) on that new directory.
+4. `Resume` the fresh subscription — it succeeds, and the first read
+   succeeds.
+
 Read this together with:
 
 * [`../architecture/SEED_FORMAT.md`](../architecture/SEED_FORMAT.md) — the

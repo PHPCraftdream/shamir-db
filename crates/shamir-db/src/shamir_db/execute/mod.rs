@@ -53,3 +53,9 @@ mod visibility_sample;
 
 #[cfg(test)]
 mod tests;
+
+#[path = "repo_admin/quarantine_cache.rs"]
+pub(crate) mod quarantine_cache;
+#[cfg(test)]
+pub(crate) use quarantine_cache::SKIP_READ_QUARANTINE_FOR_TEST;
+pub(crate) use quarantine_cache::{skip_read_quarantine_for_test, ResyncQuarantineCache};

@@ -25,6 +25,7 @@ use tokio::time::timeout;
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
 use shamir_db::engine::table::table_manager::table_token_for;
+use shamir_db::shamir_db::ChangelogReceiver;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
@@ -125,9 +126,7 @@ async fn update_record(shamir: &ShamirDb, db: &str, table: &str, name: &str, new
 /// `commit_version`. Mirrors `changefeed_e2e.rs::recv_event`. This is how we
 /// capture the monotonic write VERSION for each write — synchronously, no
 /// polling, fully deterministic.
-async fn recv_version(
-    rx: &mut tokio::sync::broadcast::Receiver<Arc<shamir_engine::ChangelogEvent>>,
-) -> u64 {
+async fn recv_version(rx: &mut ChangelogReceiver) -> u64 {
     let ev = timeout(Duration::from_secs(5), rx.recv())
         .await
         .expect("changefeed event within 5s")
@@ -189,6 +188,7 @@ async fn temporal_lifecycle_e2e() {
     let mut rx = shamir
         .subscribe_changelog("testdb", "main")
         .await
+        .unwrap()
         .expect("repo exists");
 
     // ── 1. CREATE table with retention { max_count: 5 } ──────────────────

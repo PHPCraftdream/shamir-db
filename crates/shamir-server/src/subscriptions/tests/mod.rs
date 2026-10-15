@@ -6,6 +6,6 @@ pub mod cache_eviction_tests;
 pub mod filter_eval_tests;
 pub mod filter_lens_parity_tests;
 pub mod push_backpressure_tests;
+pub mod quarantine;
 pub mod reactive_limits_tests;
-pub mod registry_tests;
 pub mod target_match_tests;

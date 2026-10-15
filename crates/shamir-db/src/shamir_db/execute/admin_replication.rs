@@ -28,6 +28,7 @@ use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::helpers::{admin_result, to_qv};
+use super::quarantine_cache::{global_sentinel_key, unresolvable_profile_reason};
 
 impl ShamirAdminExecutor {
     // ------------------------------------------------------------------
@@ -389,6 +390,13 @@ impl ShamirAdminExecutor {
             expected_version: None,
         };
         let result = self.delete_repl(&table, &del_op).await?;
+        if result {
+            // PR8b: dropping may remove a `resync_required` row and lift the
+            // quarantine. Boxed (Round-14): await state off the caller's frame.
+            Box::pin(self.shamir.refresh_resync_quarantine_cache())
+                .await
+                .map_err(|e| err(e.to_string()))?;
+        }
         Ok(admin_result(mpack!({
             "dropped_subscription": @(QueryValue::Str(name)),
             "existed": @(QueryValue::Bool(result)),
@@ -443,6 +451,37 @@ impl ShamirAdminExecutor {
         }
 
         let mut record = existing.records[0].as_value().into_owned();
+        // S5c-X PR8b: any action on a quarantined (`resync_required` or
+        // durably `quarantined`-marked) subscription is refused until a
+        // replacement seed has been bound since the quarantine began —
+        // compared via the durable `resync_from_receipt` baseline
+        // `mark_subscription_terminal` wrote against the row's current
+        // `seed_receipt`. Pause and SetProfile on a quarantined row are
+        // refused too: a state flip can never clear the quarantine (operators
+        // must reseed or DROP). This gate runs FIRST: no row mutation (and no
+        // `seed_resume_validated` flip) happens on refusal, and the typed
+        // error names the runbook.
+        if row_is_quarantined(&record) {
+            let reseeded = match &op.action {
+                SubAction::Resume => {
+                    let baseline = record.get("resync_from_receipt");
+                    let bound = record.get("seed_receipt");
+                    matches!((baseline, bound), (Some(from), Some(now)) if from != now)
+                }
+                // Pause / SetProfile: refused outright on a quarantined row.
+                _ => false,
+            };
+            if !reseeded {
+                return Err(BatchError::query_coded(
+                    "",
+                    "resync_required",
+                    format!(
+                        "subscription '{name}' is quarantined (resync_required): \
+                             install a replacement seed per guide/09-seed-recovery.md, then Resume"
+                    ),
+                ));
+            }
+        }
         self.shamir
             .validate_seed_resume_action(&record, &op.action)
             .await
@@ -511,7 +550,12 @@ impl ShamirAdminExecutor {
                             }
                         }
                     }
+                    // S5c-X PR8b: a successful (post-reseed) Resume lifts the
+                    // quarantine — remove the durable marker and its receipt
+                    // baseline alongside the state flip.
                     m.shift_remove("status_message");
+                    m.shift_remove("quarantined");
+                    m.shift_remove("resync_from_receipt");
                     m.insert("seed_resume_validated".into(), QueryValue::Bool(true));
                     m.insert("state".to_string(), QueryValue::Str("active".to_string()));
                 }
@@ -537,6 +581,12 @@ impl ShamirAdminExecutor {
             .map_err(|e| err(e.to_string()))?;
         self.shamir
             .flush_seed_catalogue()
+            .await
+            .map_err(|e| err(e.to_string()))?;
+        // PR8b: Pause/Resume/SetProfile can flip the persisted `state`; rebuild
+        // the read-quarantine cache post-commit. Boxed (Round-14): await state
+        // off the caller's frame.
+        Box::pin(self.shamir.refresh_resync_quarantine_cache())
             .await
             .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
@@ -684,44 +734,79 @@ impl ShamirDb {
         db_name: &str,
         repo_name: &str,
     ) -> DbResult<bool> {
+        let entries = self.resync_quarantine_entries().await?;
+        Ok(entries
+            .iter()
+            // db == "*" mirrors the read-side ("*", "*") global sentinel.
+            .any(|((db, repo), _)| {
+                (db == "*" || db == db_name) && (repo == "*" || repo == repo_name)
+            }))
+    }
+    /// Single source of truth for the quarantine set: walk the
+    /// `system/subscriptions` table rows that are quarantined
+    /// ([`row_is_quarantined`]) and resolve each row's profile `Pull` streams
+    /// into cache keys
+    /// `(db, repo)` (or `(db, "*")` when `scope.repo` is `None`), valued
+    /// with the row's `status_message` (or a constant reason when absent).
+    /// Consumed by both [`Self::has_resync_required_subscription_covering`]
+    /// and [`Self::refresh_resync_quarantine_cache`].
+    ///
+    /// Fail-closed fallback: a row whose profile is missing/unresolvable
+    /// contributes the global ("*", "*") sentinel instead of an error (see
+    /// [`quarantine_row_entries`]); infra failures of the `subscriptions`
+    /// table read itself still propagate via `?`.
+    pub(crate) async fn resync_quarantine_entries(
+        &self,
+    ) -> DbResult<Vec<((String, String), String)>> {
+        let mut entries = Vec::new();
         let table = self.system_store().subscriptions_table().await?;
         let refs = crate::types::common::new_map();
         let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let result = table
             .read(&crate::query::read::ReadQuery::new("subscriptions"), &ctx)
             .await?;
-        let rows: Vec<QueryValue> = result
-            .records
-            .into_iter()
-            .map(|row| row.as_value().into_owned())
-            .collect();
-        for row in &rows {
-            if row.get("state").and_then(|value| value.as_str()) != Some("resync_required") {
+        for record in result.records {
+            let row = record.as_value().into_owned();
+            if !row_is_quarantined(&row) {
                 continue;
             }
-            let Some(profile) = row.get("profile").and_then(|value| value.as_str()) else {
-                continue;
-            };
-            let Ok(streams) = super::replication_seed::catalogue::streams(self, profile).await
-            else {
-                // Missing/unreadable profile: not a covering stream.
-                continue;
-            };
-            for stream in streams {
-                if !matches!(stream.direction, ReplDirection::Pull) {
-                    continue;
-                }
-                if stream.scope.db != db_name {
-                    continue;
-                }
-                match &stream.scope.repo {
-                    None => return Ok(true),
-                    Some(repo) if repo == repo_name => return Ok(true),
-                    Some(_) => {}
-                }
+            let profile = row.get("profile").and_then(|value| value.as_str());
+            let reason = row
+                .get("status_message")
+                .and_then(|value| value.as_str())
+                .unwrap_or("subscription requires resync");
+            let (mut row_entries, failure) = quarantine_row_entries(self, profile, reason).await;
+            if let Some(failure) = &failure {
+                log::warn!(
+                    "resync_quarantine_entries: quarantined row's profile \
+                     unresolvable ({failure}); global read quarantine installed"
+                );
             }
+            entries.append(&mut row_entries);
         }
-        Ok(false)
+        Ok(entries)
+    }
+
+    /// Quarantine reason for an ordinary READ of `(db_name, repo_name)`, or
+    /// `None` when the repo is readable. Healthy path (empty cache): one
+    /// `Relaxed` `is_empty` load and no allocation / map lock — this is what
+    /// the wire-layer cursor gate in `shamir-server` rides on.
+    pub(crate) fn quarantined_read_reason(&self, db_name: &str, repo_name: &str) -> Option<String> {
+        // Healthy-path fast path: one Relaxed load, no allocation, no map
+        // lock when the cache is empty (no subscription is quarantined).
+        if self.resync_quarantine.is_empty() {
+            return None;
+        }
+        self.resync_quarantine.reason_for(db_name, repo_name)
+    }
+
+    /// Public seam for wire-layer read gates (e.g. cursor-based journal reads
+    /// in the server crate): the read-quarantine (`resync_required`) reason
+    /// for `(db_name, repo_name)`, or `None` when the repo is readable.
+    /// Mirrors the internal gate of
+    /// [`read_changelog_bounded`](crate::ShamirDb::read_changelog_bounded).
+    pub fn read_quarantine_reason(&self, db_name: &str, repo_name: &str) -> Option<String> {
+        self.quarantined_read_reason(db_name, repo_name)
     }
 
     /// Persist `state = "resync_required"` on subscription `name`'s row in
@@ -736,9 +821,14 @@ impl ShamirDb {
     /// echo `state` verbatim). Because `reconcile()` only (re)starts
     /// subscriptions whose row has `state == "active"`, a row left at
     /// `"resync_required"` naturally stays stopped across reconcile ticks,
-    /// exactly like `"paused"` does today. Recovery is the EXISTING
-    /// `Resume` admin action (flips `state` back to `"active"`); no new
-    /// admin action is introduced.
+    /// exactly like `"paused"` does today. Recovery requires a replacement seed
+    /// install (which binds a NEW `seed_receipt` on the row, differing from
+    /// the `resync_from_receipt` baseline captured here) followed by the
+    /// `Resume` admin action — a plain `Resume` of a still-quarantined row
+    /// is refused with a typed error. The quarantine is additionally marked
+    /// with a durable `quarantined` flag on the row, which — unlike `state`
+    /// — survives Pause/SetProfile: any admin action on a quarantined row
+    /// except a post-reseed `Resume` (or a `DROP`) is refused.
     ///
     /// `name` not found → treated as a no-op (logged, not errored): the
     /// subscription may have been dropped concurrently by an admin command
@@ -758,6 +848,15 @@ impl ShamirDb {
     }
 
     /// Persist an operational stop reason exposed verbatim by status/list.
+    /// A `"resync_required"` state additionally stamps the durable
+    /// `quarantined` marker plus the `resync_from_receipt` baseline (see
+    /// [`Self::mark_subscription_resync_required`]); other states never set
+    /// the marker.
+    ///
+    /// Marking NEVER fails because the covered set cannot be computed:
+    /// a missing/unresolvable profile falls back to the global ("*", "*")
+    /// sentinel (see [`quarantine_row_entries`]), logged and appended to
+    /// `status_message`; the persisted write always happens.
     pub async fn mark_subscription_terminal(
         &self,
         name: &str,
@@ -765,6 +864,7 @@ impl ShamirDb {
         message: &str,
     ) -> DbResult<()> {
         let _control = self.replication_control_lock.lock().await;
+        let mut next_entries = self.resync_quarantine_entries().await?;
         let table = self.system_store().subscriptions_table().await?;
         let refs = crate::types::common::new_map();
         let ctx = table.info_store_read_view().filter_context(&refs).await?;
@@ -784,19 +884,56 @@ impl ShamirDb {
             return Ok(());
         };
 
+        // Row-level profile resolution failure — surfaced below via
+        // `status_message`, never as a marking error (fail-closed fallback).
+        let mut resolution_failure = None;
+        if state == "resync_required" {
+            let owned_row = row.as_value().into_owned();
+            let profile = owned_row.get("profile").and_then(|value| value.as_str());
+            let (mut row_entries, failure) = quarantine_row_entries(self, profile, message).await;
+            next_entries.append(&mut row_entries);
+            if let Some(failure) = &failure {
+                log::warn!(
+                    "mark_subscription_terminal: {failure}; \
+                     global read quarantine installed"
+                );
+                resolution_failure = Some(failure.clone());
+            }
+            self.resync_quarantine.publish(next_entries);
+            Box::pin(self.revoke_quarantined_receivers()).await; // Round-14 boxed
+        }
         let mut record = row.as_value().into_owned();
+        // S5c-X PR8b: capture the row's CURRENT `seed_receipt` as the durable
+        // baseline the quarantine began from (absent ⇒ `Null`). `Resume`'s
+        // gate requires the bound receipt to differ from this value, so a
+        // plain `Resume` can never lift the quarantine without a replacement
+        // seed installed in between.
+        let resync_from_receipt = record
+            .get("seed_receipt")
+            .cloned()
+            .unwrap_or(QueryValue::Null);
         if let QueryValue::Map(ref mut m) = record {
             m.insert("state".to_string(), QueryValue::Str(state.to_string()));
+            m.insert("resync_from_receipt".into(), resync_from_receipt);
+            if state == "resync_required" {
+                // Durable quarantine marker: unlike `state`, it is not
+                // cleared by Pause/SetProfile — only a successful post-reseed
+                // `Resume` (or DROP) removes it.
+                m.insert("quarantined".into(), QueryValue::Bool(true));
+            }
+        }
+        let mut status_message = message.to_string();
+        if let Some(failure) = &resolution_failure {
+            // Surface the resolution failure via status_message (echoed
+            // verbatim by status/list), not as a marking error.
+            status_message = format!("{message}; {failure}");
         }
         if let QueryValue::Map(ref mut fields) = record {
             fields.insert(
                 "last_terminal_reason".into(),
                 QueryValue::Str(state.to_string()),
             );
-            fields.insert(
-                "status_message".into(),
-                QueryValue::Str(message.to_string()),
-            );
+            fields.insert("status_message".into(), QueryValue::Str(status_message));
         }
         let set_op = crate::query::write::SetOp {
             set: crate::query::TableRef::new("subscriptions"),
@@ -810,6 +947,52 @@ impl ShamirDb {
             .persist_table_interner(&table, None)
             .await?;
         self.flush_seed_catalogue().await?;
+        Box::pin(self.refresh_resync_quarantine_cache()).await?; // Round-14 boxed
         Ok(())
+    }
+}
+
+/// S5c-X PR8b: a subscription row is quarantined while `state ==
+/// "resync_required"` OR while the durable `quarantined` marker is set. The
+/// marker is written by [`ShamirDb::mark_subscription_terminal`] and survives
+/// state changes that do not reseed (Pause → `"paused"`, SetProfile), so a
+/// state flip alone can never lift the read gate.
+fn row_is_quarantined(row: &QueryValue) -> bool {
+    row.get("state").and_then(|value| value.as_str()) == Some("resync_required")
+        || row.get("quarantined") == Some(&QueryValue::Bool(true))
+}
+
+/// Resolve one quarantined row's profile into quarantine cache entries;
+/// fail-closed fallback: rows record no db column, so a missing/unresolvable
+/// profile has no narrower safe `(db, repo)` scope — emit the global ("*", "*") sentinel instead of an error; 2nd element = row failure (warn/status).
+async fn quarantine_row_entries(
+    shamir: &ShamirDb,
+    profile: Option<&str>,
+    reason: &str,
+) -> (Vec<((String, String), String)>, Option<String>) {
+    let Some(profile) = profile else {
+        return (
+            vec![(
+                global_sentinel_key(),
+                unresolvable_profile_reason("<missing>"),
+            )],
+            Some("quarantined subscription has no profile".into()),
+        );
+    };
+    match super::replication_seed::catalogue::streams(shamir, profile).await {
+        Ok(streams) => {
+            let mut entries = Vec::new();
+            for stream in streams {
+                if matches!(stream.direction, ReplDirection::Pull) {
+                    let repo = stream.scope.repo.unwrap_or_else(|| "*".to_string());
+                    entries.push(((stream.scope.db, repo), reason.to_string()));
+                }
+            }
+            (entries, None)
+        }
+        Err(error) => (
+            vec![(global_sentinel_key(), unresolvable_profile_reason(profile))],
+            Some(format!("profile resolution failed ({profile}): {error}")),
+        ),
     }
 }

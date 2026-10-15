@@ -14,6 +14,8 @@ pub mod system_store;
 
 pub use curl_gateway::CurlNetGateway;
 pub use ports::{PortError, PrincipalInfo, PrincipalResolver, RepoAdminObserver, UserAdminPort};
+pub use shamir_db::ChangelogDeliveryGate;
+pub use shamir_db::ChangelogReceiver;
 pub use shamir_db::FunctionSource;
 pub use shamir_db::ShamirDb;
 pub use system_store::{SystemStore, SystemStoreConfig};

@@ -110,18 +110,25 @@ impl AdminExecutor for ShamirAdminExecutor {
             op @ BatchOp::ChangesSince(_) => self.handle_changes_since(op).await,
 
             // ── Replication DDL (386-a) ────────────────────────────────
-            BatchOp::CreateReplicationProfile(op) => {
-                self.handle_create_replication_profile(op).await
+            // Round-14: routed through `dispatch_repl` so the replication
+            // arms' await state stays out of `execute_admin`'s own future
+            // (Round-12/14 Windows stack overflow).
+            op if matches!(
+                op,
+                BatchOp::CreateReplicationProfile(_)
+                    | BatchOp::DropReplicationProfile(_)
+                    | BatchOp::CreatePublication(_)
+                    | BatchOp::DropPublication(_)
+                    | BatchOp::CreateSubscription(_)
+                    | BatchOp::DropSubscription(_)
+                    | BatchOp::AlterSubscription(_)
+                    | BatchOp::ListPublications(_)
+                    | BatchOp::ListSubscriptions(_)
+                    | BatchOp::ReplicationStatus(_)
+            ) =>
+            {
+                Self::dispatch_repl(self, op).await
             }
-            BatchOp::DropReplicationProfile(op) => self.handle_drop_replication_profile(op).await,
-            BatchOp::CreatePublication(op) => self.handle_create_publication(op).await,
-            BatchOp::DropPublication(op) => self.handle_drop_publication(op).await,
-            BatchOp::CreateSubscription(op) => self.handle_create_subscription(op).await,
-            BatchOp::DropSubscription(op) => self.handle_drop_subscription(op).await,
-            BatchOp::AlterSubscription(op) => self.handle_alter_subscription(op).await,
-            BatchOp::ListPublications(_) => self.handle_list_publications().await,
-            BatchOp::ListSubscriptions(_) => self.handle_list_subscriptions().await,
-            BatchOp::ReplicationStatus(_) => self.handle_replication_status().await,
 
             // ── Interner (Stage 5d) ────────────────────────────────────
             op @ BatchOp::InternerDump(_) => self.handle_interner_dump(op).await,
@@ -132,13 +139,45 @@ impl AdminExecutor for ShamirAdminExecutor {
     }
 }
 
-/// Mirror of the Round-14 `ReplDispatchFuture` pattern (batch_execute.rs):
-/// keeps the boxed dispatcher future's type off `dispatch_alter_repo`'s
-/// signature so `clippy::type_complexity` stays quiet under `-D warnings`.
-type AlterRepoDispatchFuture<'a> =
+/// Mirror of `NestedTxBodyFuture` (batch_execute.rs): keeps the boxed
+/// dispatcher futures' type off `dispatch_repl` / `dispatch_alter_repo`
+/// signatures so `clippy::type_complexity` stays quiet under `-D warnings`.
+type AdminDispatchFuture<'a> =
     Pin<Box<dyn Future<Output = Result<QueryResult, BatchError>> + Send + 'a>>;
 
 impl ShamirAdminExecutor {
+    /// Round-14: replication DDL dispatcher, kept OUT of `execute_admin`'s
+    /// own future. `#[inline(never)]` + explicit boxing means the nine
+    /// replication arms' await state lives on the heap, not in every
+    /// `execute_admin` state machine along the nested-batch recursion
+    /// (Round-12/14 Windows stack overflow).
+    #[inline(never)]
+    fn dispatch_repl<'a>(&'a self, op: &'a BatchOp) -> AdminDispatchFuture<'a> {
+        Box::pin(async move {
+            match op {
+                BatchOp::CreateReplicationProfile(op) => {
+                    self.handle_create_replication_profile(op).await
+                }
+                BatchOp::DropReplicationProfile(op) => {
+                    self.handle_drop_replication_profile(op).await
+                }
+                BatchOp::CreatePublication(op) => self.handle_create_publication(op).await,
+                BatchOp::DropPublication(op) => self.handle_drop_publication(op).await,
+                BatchOp::CreateSubscription(op) => self.handle_create_subscription(op).await,
+                BatchOp::DropSubscription(op) => self.handle_drop_subscription(op).await,
+                BatchOp::AlterSubscription(op) => self.handle_alter_subscription(op).await,
+                BatchOp::ListPublications(_) => self.handle_list_publications().await,
+                BatchOp::ListSubscriptions(_) => self.handle_list_subscriptions().await,
+                BatchOp::ReplicationStatus(_) => self.handle_replication_status().await,
+                _ => Err(BatchError::QueryError {
+                    alias: String::new(),
+                    message: "Not a replication operation".to_string(),
+                    code: None,
+                }),
+            }
+        })
+    }
+
     /// S5c-X Round-11 (item 5): ALTER REPO dispatcher, kept OUT of
     /// `execute_admin`'s own future. `#[inline(never)]` + explicit boxing
     /// means the durability path's (admission, catalogue persist, live
@@ -146,7 +185,7 @@ impl ShamirAdminExecutor {
     /// `execute_admin` state machine along the nested-Batch/ForEach
     /// recursion (Windows stack overflow in the repo_audit tests).
     #[inline(never)]
-    fn dispatch_alter_repo<'a>(&'a self, op: &'a AlterRepoOp) -> AlterRepoDispatchFuture<'a> {
+    fn dispatch_alter_repo<'a>(&'a self, op: &'a AlterRepoOp) -> AdminDispatchFuture<'a> {
         Box::pin(async move { self.handle_alter_repo(op).await })
     }
 

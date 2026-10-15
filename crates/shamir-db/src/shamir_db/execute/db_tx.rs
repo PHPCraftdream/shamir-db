@@ -14,18 +14,86 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use shamir_query_types::batch::{ExecPolicy, VisibilityWait};
+use shamir_query_types::batch::{ExecPolicy, ResyncRequiredDetail, VisibilityWait};
 
 use crate::access::{Action, Actor, ResourcePath};
 use crate::query::batch::{
     execute_in_open_tx, open_interactive_tx, Authorized, BatchError, BatchRequest, BatchResponse,
     TransactionInfo,
 };
+use crate::shamir_db::execute::skip_read_quarantine_for_test;
 
 use super::super::shamir_db::ShamirDb;
 use super::admin_dispatch::ShamirAdminExecutor;
+use super::db_execute::quarantined_read_hit;
 use super::function_invoker::ShamirFunctionInvoker;
 use super::table_resolver::DbTableResolver;
+
+/// S5c-X PR8b: ordinary READS of a quarantined (`resync_required`) repo fail
+/// closed for the interactive-tx family too. `tx_begin[_as]` refuses to pin a
+/// snapshot view of a quarantined repo (fail closed at open); the
+/// `tx_execute*` family re-checks per execute, so a tx opened BEFORE the
+/// quarantine also fails closed. The negative-control seam mirrors the batch
+/// gate in `repo_admin/db_execute.rs` exactly (test builds only).
+/// Writes/COMMIT are NOT gated — reads are gated at begin/execute instead.
+fn tx_read_quarantine_refusal(
+    shamir: &ShamirDb,
+    db_name: &str,
+    alias: &str,
+    repo_name: &str,
+) -> Option<BatchError> {
+    let skip_seam = skip_read_quarantine_for_test();
+    if skip_seam {
+        return None;
+    }
+    let reason = shamir.quarantined_read_reason(db_name, repo_name)?;
+    Some(BatchError::ResyncRequired {
+        alias: alias.to_string(),
+        detail: Box::new(ResyncRequiredDetail {
+            db: db_name.to_string(),
+            repo: repo_name.to_string(),
+            reason,
+        }),
+    })
+}
+
+/// Request-shaped twin of [`tx_read_quarantine_refusal`] for the
+/// `tx_execute*` family — and the SINGLE shared implementation of the
+/// request-shaped quarantine gate, also called by the batch path in
+/// `repo_admin/db_execute.rs`. Mirrors the batch gate's whole-query-tree
+/// walk so a read op targeting a quarantined repo is refused even inside a
+/// pre-quarantine tx.
+///
+/// Deliberately SYNCHRONOUS (no `.await`) and fully self-contained (skip
+/// seam + `is_empty` fast path live here, not at the call sites): the async
+/// callers keep only a one-line `if let Some(err) = ...` in their bodies,
+/// so the tree-walk's locals (visitor, per-op bindings) never become fields
+/// of the callers' generated `Future` state machines. Inlining the walk
+/// into an async fn inflates that future, and under nested
+/// `Batch`/`ForEach` recursion the future is held on the stack once per
+/// recursion level — the Round-12 Windows stack overflow traced to exactly
+/// that. Keep this helper sync and out of line: once inlined, its locals
+/// still widen the caller's `poll` frame, which nests once per level.
+#[inline(never)]
+pub(crate) fn tx_read_quarantine_refusal_for_request(
+    shamir: &ShamirDb,
+    db_name: &str,
+    request: &BatchRequest,
+) -> Option<BatchError> {
+    if skip_read_quarantine_for_test() || shamir.resync_quarantine.is_empty() {
+        return None;
+    }
+    quarantined_read_hit(db_name, request, &shamir.resync_quarantine).map(
+        |(alias, repo, reason)| BatchError::ResyncRequired {
+            alias,
+            detail: Box::new(ResyncRequiredDetail {
+                db: db_name.to_string(),
+                repo,
+                reason,
+            }),
+        },
+    )
+}
 
 impl ShamirDb {
     /// BEGIN: open an interactive tx against `db_name`/`repo_name`. Returns
@@ -70,6 +138,9 @@ impl ShamirDb {
         )
         .await
         .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
+        if let Some(err) = tx_read_quarantine_refusal(self, db_name, "", repo_name) {
+            return Err(err);
+        }
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),
             message: format!("Database '{}' not found", db_name),
@@ -129,6 +200,11 @@ impl ShamirDb {
     /// the [`crate::query::batch::AccessGate`], and `execute_in_open_tx`
     /// structurally cannot run without the resulting [`Authorized`] token.
     /// See `Authorized::authorize`'s doc.
+    ///
+    /// S5c-X PR8b: reads inside the tx are gated here (and at
+    /// `tx_begin[_as]`) — a quarantined repo is refused with
+    /// `BatchError::ResyncRequired` even when the tx was opened before the
+    /// quarantine; commit-time semantics stay ungated.
     pub async fn tx_execute_as(
         &self,
         actor: Actor,
@@ -196,6 +272,17 @@ impl ShamirDb {
         if let Some(cap) = deadline_cap {
             auth = auth.with_deadline_cap(cap.saturating_sub(started.elapsed()));
         }
+
+        // S5c-X PR8b: ordinary READS of a quarantined repo fail closed, even
+        // for a tx opened BEFORE the quarantine. Same shape as the batch gate
+        // in `repo_admin/db_execute.rs`. The test-only skip seam and the
+        // `is_empty` fast path live INSIDE the shared sync helper, so only
+        // this one-line call sits in the async state machine.
+        // Authorization comes FIRST so unauthorized callers get
+        // `access_denied` and never learn the repo's quarantine state.
+        if let Some(err) = tx_read_quarantine_refusal_for_request(self, db_name, request) {
+            return Err(err);
+        }
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),
             message: format!("Database '{}' not found", db_name),
@@ -223,6 +310,10 @@ impl ShamirDb {
     /// inherited `materialized` flag) on success, `aborted` with a reason on
     /// a commit-time conflict/violation. Mirrors the mapping the single-batch
     /// `execute_transactional` performs.
+    ///
+    /// Not gated by the read-quarantine (S5c-X PR8b): reads inside a tx are
+    /// gated at `tx_begin`/`tx_execute` instead; commit/write semantics are
+    /// out of read scope.
     pub async fn tx_commit(
         &self,
         db_name: &str,

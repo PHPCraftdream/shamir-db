@@ -102,7 +102,8 @@ async fn journal_version(leader: &ShamirDb, events: usize) -> u64 {
         let journal = leader
             .read_changelog_from_journal("app", "main", 0, 1000)
             .await
-            .expect("leader journal");
+            .expect("leader journal")
+            .expect("journal present");
         assert_eq!(journal.gap_at, None);
         if journal.events.len() == events
             && journal.events.last().map(|event| event.commit_version) == Some(target)
@@ -356,7 +357,8 @@ async fn matrix(write: Write, read: Read) {
         let journal = leader
             .read_changelog_from_journal("app", "main", 0, 1000)
             .await
-            .expect("journal");
+            .expect("journal")
+            .expect("journal present");
         assert_eq!(journal.events.len(), 1);
         assert_eq!(journal.events[0].changes.len(), 2);
         let other_ids: Vec<_> = journal.events[0]
@@ -543,7 +545,8 @@ async fn matrix_unknown_table_bookmark() {
     let journal = follower
         .read_changelog_from_journal("app", "main", 0, 1000)
         .await
-        .expect("follower journal");
+        .expect("follower journal")
+        .expect("journal present");
     assert!(journal.events.is_empty());
 }
 
