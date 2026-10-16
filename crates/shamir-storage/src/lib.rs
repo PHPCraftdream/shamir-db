@@ -28,11 +28,13 @@ pub mod storage_fjall;
 /// atomic batch (driven from the shamir-engine test binary — always compiled,
 /// inert when not armed).
 #[doc(hidden)]
+#[path = "test_seams/commit_window_park_seam.rs"]
 pub mod commit_window_park_seam;
 
 /// Task #535/#539: test-only deterministic seam for `MemBufferStore::drain_once`
 /// (see `membuffer_clear_race_hook`'s module doc for the current shape).
 #[cfg(test)]
+#[path = "test_seams/membuffer_clear_race_hook.rs"]
 mod membuffer_clear_race_hook;
 
 #[cfg(test)]

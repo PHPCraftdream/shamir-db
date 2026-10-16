@@ -12,10 +12,12 @@ use crate::repo::version_provider::register_token;
 pub use crate::repo::version_provider::repo_token;
 use crate::table::interner_manager::InternerManager;
 use crate::table::table_manager::table_token_for;
+use crate::tx::apply_replicated::follower_durability::receipt::{
+    ApplyOutcome, ReceiptApplyJob, ReceiptLease,
+};
 #[cfg(test)]
 use crate::tx::clean_horizon::checkpoint::test_seam;
 use crate::tx::cold_reconcile::lifecycle::ForegroundLifecycle;
-use crate::tx::follower_durability::receipt::{ApplyOutcome, ReceiptApplyJob, ReceiptLease};
 use crate::tx::CommitTailBarrier;
 use shamir_query_types::batch::VisibilityWait;
 use shamir_storage::error::{DbError, DbResult};
