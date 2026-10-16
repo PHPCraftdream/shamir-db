@@ -40,7 +40,7 @@ impl LifecycleStatus {
         &self,
         callback: impl FnOnce() -> T,
     ) -> Result<T, super::interlock::PublicationClosed> {
-        self.0.interlock.publish(callback)
+        self.0.interlock().publish(callback)
     }
 }
 
