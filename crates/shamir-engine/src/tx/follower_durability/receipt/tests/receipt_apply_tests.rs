@@ -316,10 +316,9 @@ async fn changed_pull_boundary_converges() {
         )
         .await
         .unwrap(),
-        // The resume outcome reports the receipt's highest re-owned version
-        // (`run_receipt_pipeline` returns `publication.floor` = 2 BEFORE the
-        // tail allocation runs); the tail event is still allocated as 3.
-        ApplyOutcome::Applied { local_version: 2 }
+        // The resumed receipt (versions 1-2) and the fresh tail (3) both
+        // apply; the outcome reports the batch's final local version.
+        ApplyOutcome::Applied { local_version: 3 }
     );
     for (id, key) in keys.iter().enumerate() {
         let expected = id as u64 + 1;
