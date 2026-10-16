@@ -38,6 +38,10 @@ use super::worker::{WorkerExecutionState, WorkerLease};
 /// were removed in the supervisor redesign.)
 const DEFAULT_CHANNEL_BOUND: usize = 16;
 
+/// Test seam run between the quarantine check and lease-hook registration.
+#[cfg(test)]
+type InstallSeam = Box<dyn FnOnce(Arc<CoreState>) + Send>;
+
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum WorkerTerminal {
     /// The worker task ran to completion.
@@ -72,7 +76,7 @@ pub(crate) struct CoreState {
     /// re-entry never occurs while this registration lock is held.
     quarantine_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
-    before_quarantine_hook_install: Mutex<Option<Box<dyn FnOnce(Arc<CoreState>) + Send>>>,
+    before_quarantine_hook_install: Mutex<Option<InstallSeam>>,
 }
 
 impl CoreState {
@@ -250,10 +254,7 @@ impl<J: Send, R: Send> RepoWorkerLifecycle<J, R> {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_before_quarantine_hook_install(
-        &self,
-        seam: Box<dyn FnOnce(Arc<CoreState>) + Send>,
-    ) {
+    pub(crate) fn set_before_quarantine_hook_install(&self, seam: InstallSeam) {
         *self
             .core
             .before_quarantine_hook_install
