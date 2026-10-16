@@ -658,6 +658,16 @@ impl MvccStore {
         // Phase 3: maintain the in-memory ts-index (idempotent — duplicate
         // insert into TreeIndex is a no-op).
         self.ts_index_insert(ts_ms, commit_version);
+
+        // S5c-X PR6b-2 (cold-start restore): make the materialize→publish
+        // window DETECTABLE. The allocation high-water mark must dominate
+        // every durable history version, otherwise a reader cannot tell
+        // "rows exist above the floor because a receipt materialized them"
+        // (they must stay invisible) from "plain MVCC wrote them and the
+        // floor was simply never raised" (master's unbounded cold seek must
+        // find them). `fetch_max` is a no-op on the guarded ack path, where
+        // the version guard already advanced the counter.
+        self.gate.observe_materialized_version(commit_version);
         Ok(())
     }
 

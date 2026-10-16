@@ -23,18 +23,21 @@ use shamir_storage::types::Store;
 use crate::meta::repl::bookmark_v3::{load_bookmark_v3, BookmarkV3};
 use crate::meta::repl::receipt::load_outstanding_receipt;
 use crate::meta::repl::{ReceiptPhase, ReplicationReceipt};
+use crate::repo::changelog_store::write_domain::RepoWritePermit;
 use crate::repo::RepoInstance;
 use crate::tx::apply_replicated::follower_durability::receipt::{checkpoint, publish, stage};
 
 /// Complete the receipt referenced by the persisted bookmark v3 pointer, if
 /// any. Must run before the cold classification reads the clean horizon.
 ///
-/// Admission (PR6b-2c): the pipeline stages admit through the repository
-/// write-domain permit; a cold start is uncontended at open, so a plain
-/// `admit()` cannot fail in practice — any rejection is fatal to the open.
+/// Admission: the caller (recovery/open) already holds the repository
+/// write-domain permit for the whole recovery — it is threaded in and
+/// NEVER re-admitted here (`admit()` is non-reentrant; re-entering it
+/// under a held permit self-deadlocks the domain mutex).
 pub(crate) async fn complete_outstanding_receipt(
     repo: &RepoInstance,
     info: &Arc<dyn Store>,
+    permit: &RepoWritePermit,
 ) -> DbResult<()> {
     let Some(v3) = load_bookmark_v3(info).await? else {
         return Ok(());
@@ -52,12 +55,7 @@ pub(crate) async fn complete_outstanding_receipt(
             "bookmark references a Checkpointed receipt; unreachable state".into(),
         ));
     }
-    let permit = repo.write_domain().admit().await.map_err(|error| {
-        DbError::Internal(format!(
-            "cold receipt recovery admission rejected for repo {}: {error}",
-            repo.name()
-        ))
-    })?;
+    repo.write_domain().debug_check_permit(permit);
 
     let old = BookmarkV3 {
         fence: v3.fence,
@@ -66,7 +64,9 @@ pub(crate) async fn complete_outstanding_receipt(
         outstanding_receipt: None,
     };
     let work = match receipt.phase {
-        ReceiptPhase::Prepared => stage::materialize_from_prepared_receipt(repo, &receipt).await?,
+        ReceiptPhase::Prepared => {
+            stage::materialize_from_prepared_receipt(repo, permit, &receipt).await?
+        }
         ReceiptPhase::Materialized => stage::materialize_from_materialized_receipt(&receipt)?,
         ReceiptPhase::Checkpointed => unreachable!("checked above"),
     };
@@ -92,7 +92,7 @@ pub(crate) async fn complete_outstanding_receipt(
     }
     let local_end = local_end(&receipt);
     checkpoint::confirm_journal(repo, local_end).await?;
-    let publication = publish::publication_from_receipt(repo, &receipt).await?;
+    let publication = publish::publication_from_receipt(repo, permit, &receipt).await?;
     publish::adopt_counters(repo, &publication).await?;
     let gate = repo.tx_gate().await?;
     // One atomic batch: bookmark advance + receipt retirement, with the RAM

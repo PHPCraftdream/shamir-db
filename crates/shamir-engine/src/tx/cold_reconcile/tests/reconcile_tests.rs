@@ -244,7 +244,8 @@ fn reconcile_crash_child_entrypoint() {
         let repo = open_unrecovered(&path).await;
         let wal = repo.repo_wal().await.unwrap();
         let entries = wal.recover().await.unwrap();
-        let _ = reconcile_with_hook(&repo, &entries, &mut |at| {
+        let permit = repo.write_domain().admit().await.unwrap();
+        let _ = reconcile_with_hook(&repo, &entries, &permit, &mut |at| {
             if at == phase {
                 if let Ok(marker) = std::env::var("SHAMIR_COLD_RECONCILE_PHASE_MARKER") {
                     let mut file = std::fs::File::create(marker).expect("create reached marker");
@@ -518,11 +519,13 @@ async fn ephemeral_repositories_keep_legacy_cold_start_behavior() {
         .unwrap();
     let wal_group = repo.wal_group().await.unwrap();
     assert!(wal_group.is_mem_sink());
-    repo.certify_cold_start(&[entry]).await.unwrap();
+    let permit = repo.write_domain().admit().await.unwrap();
+    repo.certify_cold_start(&[entry], &permit).await.unwrap();
     let feed = repo.changefeed().await.unwrap().feed;
     assert_eq!(feed.clean_horizon(), 1);
     assert_eq!(feed.first_gap_version(), 1);
     assert_eq!(feed.certified_gap_interval(), Some((1, 1)));
+    drop(permit);
     stop(repo).await;
 }
 
@@ -546,10 +549,12 @@ async fn hybrid_factory_keeps_legacy_cold_start_behavior() {
         .unwrap();
     let wal_group = repo.wal_group().await.unwrap();
     assert!(wal_group.is_mem_sink());
-    repo.certify_cold_start(&[entry]).await.unwrap();
+    let permit = repo.write_domain().admit().await.unwrap();
+    repo.certify_cold_start(&[entry], &permit).await.unwrap();
     let feed = repo.changefeed().await.unwrap().feed;
     assert_eq!(feed.clean_horizon(), 1);
     assert_eq!(feed.first_gap_version(), 1);
     assert_eq!(feed.certified_gap_interval(), Some((1, 1)));
+    drop(permit);
     stop(repo).await;
 }

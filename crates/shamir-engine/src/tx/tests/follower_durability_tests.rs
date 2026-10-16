@@ -22,7 +22,9 @@ use crate::repo::{BoxRepo, RepoInstance};
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
 use crate::tx::apply_replicated::follower_durability::{durable_journal_barrier, in_flight_range};
-use crate::tx::apply_replicated::{apply_batch_with_info, apply_replicated_batch};
+use crate::tx::apply_replicated::{
+    apply_batch_with_info, apply_replicated_batch, apply_replicated_batch_legacy,
+};
 use crate::tx::{ApplyOutcome, ApplyPolicy, ReplicatedEvent};
 
 type TestStream = Pin<Box<dyn Stream<Item = DbResult<Vec<(RecordKey, Bytes)>>> + Send>>;
@@ -186,7 +188,7 @@ fn crash_phase_table_has_precise_certification_windows() {
 async fn batch_reserves_floor_then_flushes_history_once_before_bookmark() {
     let (repo, history, mvcc) = fixture(false).await;
     assert_eq!(
-        apply_replicated_batch(&repo, &events(), 0, ApplyPolicy::Trusted)
+        apply_replicated_batch_legacy(&repo, &events(), 0, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied { local_version: 2 },
@@ -215,7 +217,7 @@ async fn batch_reserves_floor_then_flushes_history_once_before_bookmark() {
 #[tokio::test]
 async fn published_batch_flush_failure_stops_and_keeps_old_bookmark() {
     let (repo, history, mvcc) = fixture(true).await;
-    let error = apply_replicated_batch(&repo, &events(), 0, ApplyPolicy::Trusted)
+    let error = apply_replicated_batch_legacy(&repo, &events(), 0, ApplyPolicy::Trusted)
         .await
         .unwrap_err();
     assert!(matches!(error, DbError::RepoRequiresReopen(_)), "{error:?}");
@@ -237,7 +239,7 @@ async fn published_batch_flush_failure_stops_and_keeps_old_bookmark() {
         .await
         .unwrap()
         .is_some());
-    let error = apply_replicated_batch(&repo, &events(), 0, ApplyPolicy::Trusted)
+    let error = apply_replicated_batch_legacy(&repo, &events(), 0, ApplyPolicy::Trusted)
         .await
         .unwrap_err();
     assert!(matches!(error, DbError::RepoRequiresReopen(_)), "{error:?}");

@@ -76,28 +76,10 @@ pub(crate) async fn run_receipt_pipeline(
     // is ever held across `.await` and the future stays `Send`.
     // Table managers self-admit through the SAME write domain on first
     // init (`TableManager::create_with_domain` → `admit()`); the pipeline
-    // holds the domain permit for its whole run, so every table the batch
-    // touches must be resolved BEFORE admission — a lazy init under the
-    // held permit would re-enter `admit()` and self-deadlock the
-    // non-reentrant domain mutex. Unconfigured tables keep the legacy
+    // holds the domain permit for its whole run, so every table below is
+    // resolved ADMITTED (`get_table_admitted`) — never re-entering
+    // `admit()` under the held permit. Unconfigured tables keep the legacy
     // `Rejected` handling inside `prepare_event`.
-    let mut batch_tables: Vec<&str> = events
-        .iter()
-        .flat_map(|event| {
-            event
-                .event
-                .changes
-                .iter()
-                .map(|change| change.table.as_str())
-        })
-        .collect();
-    batch_tables.sort_unstable();
-    batch_tables.dedup();
-    for table_name in batch_tables {
-        if repo.has_table(table_name) {
-            repo.get_table(table_name).await?;
-        }
-    }
     let permit = match lease.take_reservation() {
         Some(reservation) => {
             match repo
@@ -124,7 +106,8 @@ pub(crate) async fn run_receipt_pipeline(
         // Full identity check (finding 1c) BEFORE any resume work and
         // before loading bookmark v3: fence lineage/epoch, offered
         // coverage, bindings, and byte-identical re-translation.
-        resume::identity::verify_identity(repo, &info, &outstanding.receipt, &events).await?;
+        resume::identity::verify_identity(repo, &info, &outstanding.receipt, &events, &permit)
+            .await?;
         let tail = resume::tail_events(&outstanding.receipt, &events);
         let v3 = load_bookmark_v3(&info).await?.ok_or_else(|| {
             DbError::RepoRequiresReopen("replication bookmark vanished during resume".into())
@@ -151,15 +134,16 @@ pub(crate) async fn run_receipt_pipeline(
         let (receipt, publication) = match outstanding.receipt.phase {
             ReceiptPhase::Prepared => {
                 let work =
-                    stage::materialize_from_prepared_receipt(repo, &outstanding.receipt).await?;
+                    stage::materialize_from_prepared_receipt(repo, permit, &outstanding.receipt)
+                        .await?;
                 let (receipt, _counters) =
                     stage::commit_materialized_work(repo, &permit, &info, &work, &old).await?;
-                let publication = publish::publication_from_receipt(repo, &receipt).await?;
+                let publication = publish::publication_from_receipt(repo, permit, &receipt).await?;
                 (receipt, publication)
             }
             ReceiptPhase::Materialized => {
                 let publication =
-                    publish::publication_from_receipt(repo, &outstanding.receipt).await?;
+                    publish::publication_from_receipt(repo, permit, &outstanding.receipt).await?;
                 (outstanding.receipt.clone(), publication)
             }
             ReceiptPhase::Checkpointed => {
@@ -239,7 +223,16 @@ async fn apply_fresh(
     let mut prepared: Vec<PreparedEvent> = Vec::with_capacity(events.len());
     let mut origins: Vec<usize> = Vec::new();
     for (index, event) in events.iter().enumerate() {
-        match prepare_event(repo, &event.event, &event.field_bindings, watermark, policy).await? {
+        match prepare_event(
+            repo,
+            &event.event,
+            &event.field_bindings,
+            watermark,
+            policy,
+            Some(permit),
+        )
+        .await?
+        {
             Ok(event) => {
                 prepared.push(event);
                 origins.push(index);
@@ -471,7 +464,7 @@ async fn run_chunk_tail(
         //   attempt 3: fast path -> seam fires -> attempt >= 3 -> PARK.
         #[cfg(test)]
         fail_after(repo.name(), Phase::ReceiptMaterialized)?;
-        let publication = publish::publication_from_receipt(repo, stored).await?;
+        let publication = publish::publication_from_receipt(repo, permit, stored).await?;
         let chunk_local_end = stored
             .mapping
             .iter()
@@ -481,12 +474,12 @@ async fn run_chunk_tail(
         let new_bookmark = durable_tail(repo, permit, info, gate, stored, publication, old).await?;
         return Ok((new_bookmark, chunk_local_end));
     }
-    let work = stage::materialize_from_plan(repo, plan).await?;
+    let work = stage::materialize_from_plan(repo, permit, plan).await?;
     let (receipt, counters) =
         stage::commit_materialized_work(repo, permit, info, &work, old).await?;
     #[cfg(test)]
     fail_after(repo.name(), Phase::ReceiptMaterialized)?;
-    let publication = publish::publication_from_plan(repo, plan, &counters).await?;
+    let publication = publish::publication_from_plan(repo, permit, plan, &counters).await?;
     let chunk_local_end = receipt
         .mapping
         .iter()

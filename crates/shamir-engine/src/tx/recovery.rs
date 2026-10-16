@@ -496,7 +496,7 @@ pub async fn recover_inflight_v2(repo: &RepoInstance, permit: &RepoWritePermit) 
             floor
         );
     }
-    repo.certify_cold_start(&entries).await?;
+    repo.certify_cold_start(&entries, permit).await?;
     // PR8 completed_reseed chunk 2: cold-start history-epoch bump. An Armed
     // lifecycle record with no later Clean certificate means the previous
     // serve period ended uncleanly — the bump costs followers a re-seed,

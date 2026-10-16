@@ -42,6 +42,7 @@ async fn mvcc_for(repo: &RepoInstance, table: &str) -> DbResult<Arc<MvccStore>> 
 /// carries the downstream `Arc`s).
 pub(crate) async fn publication_from_plan(
     repo: &RepoInstance,
+    permit: &crate::repo::changelog_store::write_domain::RepoWritePermit,
     plan: &stage::BatchPlan,
     counters: &[(String, u64)],
 ) -> DbResult<Publication> {
@@ -64,7 +65,10 @@ pub(crate) async fn publication_from_plan(
     }
     let mut resolved = Vec::with_capacity(counters.len());
     for (table, after) in counters {
-        resolved.push((Arc::clone(repo.get_table(table).await?.counter()), *after));
+        resolved.push((
+            Arc::clone(repo.get_table_admitted(table, permit).await?.counter()),
+            *after,
+        ));
     }
     let floor = plan
         .per_event
@@ -84,6 +88,7 @@ pub(crate) async fn publication_from_plan(
 /// ops via the receipt's own segmentation.
 pub(crate) async fn publication_from_receipt(
     repo: &RepoInstance,
+    permit: &crate::repo::changelog_store::write_domain::RepoWritePermit,
     receipt: &ReplicationReceipt,
 ) -> DbResult<Publication> {
     let groups_per_event = stage::materialize_ops_from_receipt(receipt)?;
@@ -112,7 +117,11 @@ pub(crate) async fn publication_from_receipt(
     let mut counters = Vec::with_capacity(receipt.counters.len());
     for delta in &receipt.counters {
         counters.push((
-            Arc::clone(repo.get_table(&delta.table).await?.counter()),
+            Arc::clone(
+                repo.get_table_admitted(&delta.table, permit)
+                    .await?
+                    .counter(),
+            ),
             delta.after,
         ));
     }
