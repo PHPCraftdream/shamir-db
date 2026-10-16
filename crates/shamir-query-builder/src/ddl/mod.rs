@@ -22,44 +22,22 @@ pub use shamir_query_types::durability::DurabilityOverride;
 pub use shamir_query_types::WriteOp;
 
 // ============================================================================
-// Sub-modules
+// Sub-modules (grouped: db / schema / index / policy / repo)
 // ============================================================================
 
-/// Ergonomic helpers to build a [`ResourceRef`] without spelling out enum variants.
-pub mod res;
-
-mod access_control;
-mod alter_repo;
-mod auth;
-mod buffer_config;
-mod create_db;
-mod create_index;
-mod create_index_build_error;
-#[path = "alter_repo/create_repo.rs"]
-mod create_repo;
-mod create_table;
-mod describe_table;
-mod drop_db;
-mod drop_index;
-mod drop_repo;
-mod drop_table;
-mod function;
-mod index_spec;
-mod interner;
-mod interner_resolve;
-mod list;
-mod metric;
-mod migration;
-mod quantization;
-mod rename_db;
-mod rename_index;
-mod rename_repo;
-mod rename_table;
-mod replication;
-mod retention;
+mod db;
+mod index;
+mod policy;
+mod repo;
 mod schema;
-mod tokenizer;
-mod validator;
+
+pub use db::{create_db, create_table, drop_db, drop_table, rename_db, rename_table};
+pub use index::{
+    create_index, create_index_build_error, drop_index, index_spec, rename_index, tokenizer,
+};
+pub use policy::{access_control, auth, metric, migration, replication, retention};
+pub use repo::{alter_repo, create_repo, drop_repo, interner, interner_resolve, rename_repo, res};
+pub use schema::{buffer_config, describe_table, function, list, quantization, schema, validator};
 
 /// Internal typed index-kind IR (NOT a wire type) that `CreateIndex::try_build`
 /// and the typed `CreateIndex` constructors route through to make
