@@ -13,13 +13,19 @@ pub(crate) mod worker;
 
 #[cfg(test)]
 pub(crate) use interlock::PubTermInterlock;
-#[cfg(test)]
+// Receipt-pipeline production surface (PR6b-2c): these are re-exported
+// unconditionally; the ones without non-test callers yet carry their own
+// unused-import allowance.
 pub(crate) use job::JobSubmitError;
 pub(crate) use owner::{ForegroundLifecycle, RepoUnitLifecycle, WorkerTerminal};
-#[cfg(test)]
+#[cfg_attr(not(test), allow(unused_imports))]
+// prod-dead: receipt pipeline (W3+) installs the worker
 pub(crate) use owner::{InstallError, RepoWorkerLifecycle, ShutdownError};
+#[cfg_attr(not(test), allow(unused_imports))]
+// prod-dead: WorkerLease is a receipt-worker (W3+) bound
+pub(crate) use worker::WorkerLease;
 #[cfg(test)]
-pub(crate) use worker::{spawn_worker, FailClosedResource, LifecycleStatus, WorkerLease};
+pub(crate) use worker::{spawn_worker, FailClosedResource, LifecycleStatus};
 
 #[cfg(test)]
 #[path = "tests/mod.rs"]

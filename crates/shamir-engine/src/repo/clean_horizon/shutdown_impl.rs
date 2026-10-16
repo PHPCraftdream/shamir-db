@@ -5,7 +5,8 @@ use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::Repo;
 use std::sync::Arc;
 
-use crate::tx::cold_reconcile::lifecycle::{RepoUnitLifecycle, WorkerTerminal};
+use crate::tx::apply_replicated::follower_durability::receipt::{ApplyOutcome, ReceiptApplyJob};
+use crate::tx::cold_reconcile::lifecycle::{RepoWorkerLifecycle, WorkerTerminal};
 
 use super::RepoInstance;
 
@@ -43,7 +44,7 @@ impl RepoInstance {
                     return Err(DbError::Internal(format!(
                         "commit quiescence timed out after {remaining:?} for repo '{}'",
                         self.name
-                    )))
+                    )));
                 }
             }
             match tokio::time::timeout_at(deadline, self.flush_buffers()).await {
@@ -51,7 +52,7 @@ impl RepoInstance {
                 Err(_) => {
                     return Err(DbError::Storage(
                         "clean shutdown timed out during flush".into(),
-                    ))
+                    ));
                 }
             }
             match tokio::time::timeout_at(deadline, self.finish_clean_shutdown(deadline)).await {
@@ -87,7 +88,9 @@ impl RepoInstance {
 
     /// Shared lifecycle of foreground handles, if present. Background clones
     /// intentionally have no foreground lifecycle owner.
-    fn worker_lifecycle(&self) -> Option<&Arc<RepoUnitLifecycle>> {
+    fn worker_lifecycle(
+        &self,
+    ) -> Option<&Arc<RepoWorkerLifecycle<ReceiptApplyJob, DbResult<ApplyOutcome>>>> {
         self.worker_lifecycle
             .as_ref()
             .map(|foreground| foreground.lifecycle())

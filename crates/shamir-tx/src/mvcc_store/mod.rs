@@ -48,7 +48,6 @@ use crate::version_guard::VersionGuard;
 use crate::versioned_overlay::VersionedOverlay;
 
 use key_lock::KeyLock as KeyLockInner;
-use version_entry::StreamingGroupByState;
 
 // ============================================================================
 // T1c — per-version commit timestamp namespace.
@@ -346,7 +345,7 @@ impl MvccStore {
 
     /// Phase 3: insert a (ts_millis, version) entry into the in-memory ts-index.
     /// Lock-free (TreeIndex::insert is a CAS-based B+ tree operation).
-    pub(super) fn ts_index_insert(&self, ts_millis: u64, version: u64) {
+    pub fn ts_index_insert(&self, ts_millis: u64, version: u64) {
         let _ = self
             .ts_index
             .insert_sync((Reverse(ts_millis), Reverse(version)), ());
@@ -1301,7 +1300,7 @@ impl MvccStore {
     /// C2: flip get_current to the single version log. Returns `None` for
     /// tombstones (empty value) and absent keys. Cold-start: when the cell is
     /// absent (`current_version == 0`), scans the log for the latest version
-    /// via `seek_latest_version`.
+    /// via the publication-bounded `seek_latest_published`.
     ///
     /// R3 — MVCC pre-floor: reads are capped at the committed floor
     /// (`gate.last_committed()`). Versions above the floor are not yet
@@ -1326,14 +1325,27 @@ impl MvccStore {
         let v = if cur_v > 0 {
             cur_v
         } else {
-            // Cold-start: the cell is absent. `seek_latest_version` scans
-            // history; an overlay-only key (committed but not yet drained) is
-            // invisible to that scan. P1b: also consult the overlay so an
-            // overlay-only key is found. Cap the overlay probe at the floor
-            // (visibility gate); floor == 0 means bootstrap → use u64::MAX so
-            // nothing is hidden, matching the R3 "no restriction" semantics.
-            let ov_cap = if floor > 0 { floor } else { u64::MAX };
-            let hist_v = self.seek_latest_version(key).await?;
+            // Cold-start: the cell is absent. `seek_latest_published` scans
+            // history bounded at the floor; an overlay-only key (committed
+            // but not yet drained) is invisible to that scan. P1b: also
+            // consult the overlay so an overlay-only key is found.
+            //
+            // I3 (history readers must not expose materialized-but-unpublished
+            // versions): both probes are capped at the published floor. There
+            // is NO floor==0 bootstrap exemption: versions start at 1, so
+            // floor 0 means nothing is published yet, and every path that
+            // writes history rows above 0 either raises the floor in the same
+            // step (leader `write_committed_to_history`) or persists the
+            // recovery marker first (`reserve_floor`) so a restart re-seeds
+            // the floor before serving. A floor-0 gate with durable rows is
+            // therefore only the follower receipt's materialize→publish
+            // window, and those rows must stay invisible here.
+            // Round 4: the bound lives in the SCAN RANGE (≤ floor), not in a
+            // post-filter of the global max — post-filtering let the newest
+            // UNPUBLISHED version blind the scan to older PUBLISHED rows
+            // (hist_v → None → key read as absent).
+            let ov_cap = floor;
+            let hist_v = self.seek_latest_published(key, floor).await?;
             let ov_v = self.overlay.newest_visible(key, ov_cap).map(|(ver, _)| ver);
             // Cold path: `seed_version` takes an owned `RecordKey`. Build it
             // inline from the borrowed slice (alloc-free for the ≤23-byte
@@ -1357,12 +1369,12 @@ impl MvccStore {
                 (None, None) => return Ok(None),
             }
         };
-        // R3: if the committed floor is non-zero (gate initialized) and the
-        // resolved version exceeds it, fall back to snapshot read at the
-        // floor (range-scan for newest <= floor — overlay-aware via
-        // resolve_read). Floor == 0 means bootstrap / recovery — no
-        // visibility restriction applied.
-        if floor > 0 && v > floor {
+        // R3 + I3: if the resolved version exceeds the committed floor, fall
+        // back to a snapshot read at the floor (range-scan for newest <= floor
+        // — overlay-aware via resolve_read). There is no floor==0 exemption:
+        // versions start at 1, so a floor of 0 makes every version invisible
+        // (see the I3 comment in the cold path above).
+        if v > floor {
             return self.get_at(key, floor).await;
         }
         // P1b: overlay-probe BEFORE the durable log for the exact `(key, v)`.
@@ -1454,101 +1466,6 @@ impl MvccStore {
         self.snapshot_stream_impl(batch, self.gate.last_committed(), include_tombstones)
     }
 
-    /// Shared implementation behind [`current_stream`](Self::current_stream),
-    /// [`current_stream_with_tombstones`](Self::current_stream_with_tombstones), and
-    /// [`snapshot_stream`](Self::snapshot_stream).
-    ///
-    /// `at_version` is the explicit version floor (usually `gate.last_committed()` for
-    /// the current-stream variants).
-    /// `include_tombstones` selects which of the two semantics
-    /// `StreamingGroupByState`'s flush points apply — see
-    /// `version_entry.rs`'s `flush_group`/`drain_overlay`.
-    fn snapshot_stream_impl(
-        &self,
-        batch: usize,
-        at_version: u64,
-        include_tombstones: bool,
-    ) -> impl futures::Stream<Item = DbResult<Vec<(Bytes, Bytes)>>> + Send {
-        use futures::stream::unfold;
-
-        let history = Arc::clone(&self.history);
-        // R3: capture committed floor at stream-open time (explicit parameter).
-        let floor = at_version;
-        // P1b: materialise the overlay's per-key winner ≤ floor at open. The
-        // overlay is the SMALL side of the merge (bounded window), so loading
-        // it into a map and merging during the history group-by is cheap.
-        // `floor == 0` (bootstrap) → `snapshot_le` returns empty → overlay
-        // contributes nothing and the stream is byte-identical to history-only.
-        // Boundary: `snapshot_le` yields `RecordKey` keys; the group-by state
-        // machine (`OverlayWinners`) is `Bytes`-keyed and merges against the
-        // `Bytes` `orig` recovered from each history version-key. Convert the
-        // overlay side ONCE here at stream-open (byte-identical) — it is the
-        // small, bounded side of the merge, not a per-row hot-path cost.
-        let overlay: shamir_collections::TMap<Bytes, (u64, Bytes)> = self
-            .overlay
-            .snapshot_le(floor)
-            .into_iter()
-            .map(|(k, v, val)| (Bytes::from(k), (v, val)))
-            .collect();
-        // Box::pin so the returned stream is `Unpin` — callers (e.g.
-        // `TableManager::list_stream`) consume it via `.next()` without
-        // pinning, matching the P1 `Pin<Box<dyn Stream>>` contract. A raw
-        // `Unfold` over an async closure is NOT `Unpin`.
-        Box::pin(unfold(
-            StreamingGroupByState::Start {
-                history,
-                batch_size: batch,
-                floor,
-                overlay,
-                include_tombstones,
-            },
-            |state| async move {
-                match state {
-                    StreamingGroupByState::Start {
-                        history,
-                        batch_size,
-                        floor,
-                        overlay,
-                        include_tombstones,
-                    } => {
-                        // Boundary: the store now yields `RecordKey` keys; the
-                        // group-by state machine is `Bytes`-keyed throughout, so
-                        // convert each batch key back to `Bytes` (byte-identical)
-                        // at the stream boundary.
-                        let stream =
-                            futures::StreamExt::map(history.iter_stream(batch_size), |batch| {
-                                batch.map(|rows| {
-                                    rows.into_iter().map(|(k, v)| (Bytes::from(k), v)).collect()
-                                })
-                            });
-                        let pin = Box::pin(stream);
-                        let s = StreamingGroupByState::Streaming {
-                            stream: pin,
-                            batch_size,
-                            floor,
-                            overlay,
-                            cur_key: None,
-                            last_val: None,
-                            last_ver: 0,
-                            out_batch: Vec::new(),
-                            include_tombstones,
-                        };
-                        s.drain_and_emit().await
-                    }
-                    // C2 fix: a Streaming state returned by a prior
-                    // drain_and_emit (when out_batch filled to batch_size, or
-                    // on a stream error) must CONTINUE draining — not panic.
-                    // The previous `unreachable!()` paniced on the second pull
-                    // whenever the current-key set exceeded one batch.
-                    s @ StreamingGroupByState::Streaming { .. } => s.drain_and_emit().await,
-                    // P1b: overlay-only drain phase (after history exhausted).
-                    s @ StreamingGroupByState::DrainOverlay { .. } => s.drain_and_emit().await,
-                    StreamingGroupByState::Done => None,
-                }
-            },
-        ))
-    }
-
     /// Look up the latest committed version for `key` in the in-memory cache.
     /// Returns 0 if the key is not cached (meaning "initial / no version tracked").
     ///
@@ -1564,6 +1481,16 @@ impl MvccStore {
     /// (one per `get_at`, one per `version_of` read-set entry) is gone.
     pub(crate) fn current_version(&self, key: &[u8]) -> u64 {
         self.cells.read_sync(key, |_, c| c.version).unwrap_or(0)
+    }
+
+    /// TEST-ONLY: evict the key's in-memory cell so the next point read
+    /// takes the cold path (`seek_latest_published`). Used by the
+    /// cold-branch regression test to force the bounded scan even after a
+    /// publish (which seeds the cell). Synchronous `retain_sync` per the
+    /// #589 deadlock note in `prune_version_cache`; no production behavior.
+    #[cfg(test)]
+    pub(crate) fn evict_current_cell_for_test(&self, key: &[u8]) {
+        self.cells.retain_sync(|k, _| k.as_slice() != key);
     }
 
     /// Public accessor: current committed version for `key`, or `0` if
@@ -1648,8 +1575,11 @@ impl MvccStore {
                 continue;
             }
             // R3 floor-cap: version above the committed floor is not yet
-            // visible — fall back to snapshot read at floor.
-            if floor > 0 && cur_v > floor {
+            // visible — same rule as the point read. No `floor > 0`
+            // exemption: at floor 0 every version is above the floor and
+            // must route to the (publication-bounded) cold path instead of
+            // being served raw.
+            if cur_v > floor {
                 slots.push(Slot::FloorExceeded);
                 continue;
             }

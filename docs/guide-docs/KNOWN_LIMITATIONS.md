@@ -651,11 +651,44 @@ artifact).
   — and such existing gaps are not cleared by cold reconciliation. Followers have no WAL: since PR6c their cold start certifies through the
   journal horizon J in the bookmark record and marks only the in-flight batch
   (`in_flight_range`) as an uncertain GAP; an unknown J keeps the conservative
-  whole-window fallback. Retry-safe batch receipts (PR6b) remain unimplemented,
-  so the in-flight batch still requires a reseed. Live subscriptions deliver from this same journal
+  whole-window fallback. Since PR6b-2 the follower apply path is receipt-protected
+  (RESOLVED by PR6b-2c): an ordinary I/O failure pauses the batch and the next
+  pull resumes the SAME receipt with the identical local allocation — no extra
+  versions, no lost counters, no new gaps — so the in-flight batch no longer
+  requires a reseed; only corruption/ambiguity stays terminal
+  (reopen/quarantine), and v1/v2 bookmarks keep the legacy behaviour until
+  PR6b-3 migrates them (see the follower receipt bullet below). Live
+  subscriptions deliver from this same journal
   (broadcast is only a wake-up hint); a certified gap terminates a subscription
   (see the live-ordering bullet in section 4 and
   `crates/shamir-server/src/subscriptions/bridge.rs`).
+- **Follower applies are receipt-protected (PR6b-2c), with residual limits.**
+  Retry convergence: an ordinary I/O failure pauses the batch (keeping its
+  paused write reservation) and the NEXT PULL RESUMES THE SAME RECEIPT with the
+  identical local allocation — no extra versions, no lost counters, no new
+  gaps. Pipeline per chunk: Prepared receipt + allocation reservation +
+  bookmark-v3 pointer, ONE atomic batch (history rows/timestamps + absolute
+  counters + downstream journal records + receipt → Materialized), read-back +
+  checkpoint of bookmark+J with receipt retirement in the same batch, then
+  publish + broadcast. Corrupt identity/pointer, decode errors, and
+  double-Uncertain stay terminal (reopen/quarantine); ordinary failures no
+  longer set `requires-reopen`. Activation: WAL-less follower + backend
+  `supports_atomic_batch` + bookmark v3 or fresh install; v1/v2 bookmarks keep
+  the legacy behaviour until PR6b-3 migrates them (remaining step), and
+  persistent backends without the capability are rejected with
+  `AtomicBatchUnsupported` before allocation (wrapper/hybrid backends
+  excluded). The leader commit path and the non-follower apply path are
+  UNCHANGED; the follower apply path gains one receipt write + one atomic batch
+  + one checkpoint sync per batch, split at `MAX_RECEIPT_EVENTS` /
+  `MAX_RECEIPT_OPS` rather than weakening atomicity. Limits that REMAIN:
+  admission is the repository write-domain permit (DDL and local writes are
+  excluded for the pipeline's whole run, and a paused reservation rejects
+  ordinary admission with `RepoWriteError::Reserved` until the receipt
+  resolves); ts keys mirror `MvccStore` `TS_TAG` handling; the
+  `confirmed_through` race note is inherited from the barrier contract; the
+  index/vector rejection above (and no posting/vector exactly-once claim) is
+  unchanged. See `docs/guide-docs/follower-journal-durability.md` and
+  `crates/shamir-engine/src/tx/follower_durability/receipt/`.
 - **Detected gaps stop replication, but `Resume` does not repair data.**
   When the leader reports a `gap_at` at or after the requested `from_version`,
   the loop stops before applying the response's events with

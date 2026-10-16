@@ -111,6 +111,7 @@ use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::RecordView;
 use shamir_types::types::value::InnerValue;
 
+use self::follower_durability::receipt::{apply_batch_receipt, receipt_path_selected};
 use self::follower_durability::single_barrier;
 use crate::meta::recovery_marker::{
     load_last_committed, load_next_tx_id_snapshot, save_last_committed_flushed,
@@ -676,6 +677,10 @@ pub(crate) async fn apply_batch_with_info(
     let gate = repo.tx_gate().await?;
     if gate.requires_reopen() {
         return Err(DbError::RepoRequiresReopen(repo.name().to_string()));
+    }
+    // PR6b-2 activation: the legacy path below stays byte-identical.
+    if receipt_path_selected(repo, info).await? {
+        return apply_batch_receipt(repo, info.clone(), events.to_vec(), bookmark, policy).await;
     }
     // Retain the already-required preparation objects, not a second guard
     // vector, and translate each event exactly once.

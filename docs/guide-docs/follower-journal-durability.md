@@ -2,7 +2,7 @@
 
 A WAL-less follower publishes each translated batch into its local journal, confirms FIFO writer progress, verifies the expected event bytes and gap state, then explicitly flushes the journal store and history before advancing the upstream bookmark. A single versioned bookmark record stores both the upstream bookmark and follower-local clean horizon J; legacy u64 and v1 records have unknown J and retain conservative recovery behavior.
 
-The durable record deliberately does not contain a resumable apply receipt. If apply becomes visible and a later barrier or persistence step fails, the follower gate remains `requires-reopen`; retry-safe recovery of partial batches and exactly-once counter updates are deferred to PR6b. The PR6c cold-certification wiring loads J with `meta::repl_bookmark::load_clean_horizon` and certifies only `tx::apply_replicated::follower_durability::in_flight_range(max(changelog J, record J), recovered floor)` as an uncertain GAP; with an unknown J the original conservative cold clean-horizon fallback applies unchanged. The remaining limitation is PR6b: without retry-safe batch receipts a crashed in-flight batch cannot be resumed, so its GAP still costs a reseed of the affected range.
+The durable record did not originally contain a resumable apply receipt: under PR6, if apply became visible and a later barrier or persistence step failed, the follower gate remained `requires-reopen` and a crashed in-flight batch cost a reseed of the affected range. That behaviour is SUPERSEDED by the PR6b-2 receipt pipeline (below): an ordinary I/O failure now pauses the batch instead of failing the repository. The PR6c cold-certification wiring loads J with `meta::repl_bookmark::load_clean_horizon` and certifies only `tx::apply_replicated::follower_durability::in_flight_range(max(changelog J, record J), recovered floor)` as an uncertain GAP; with an unknown J the original conservative cold clean-horizon fallback applies unchanged.
 
 The bounded crash-image matrix and negative control are implemented in `tx/follower_durability/tests/crash_image_tests.rs`. They exercise the production verification/flush helper and public bookmark/horizon metadata APIs against a dropping-unflushed fake Store; they do not exercise full engine replay or establish exactly-once application. PR6c wires the record into cold-start certification (`tx/cold_reconcile/follower.rs`); the cold-start tests reopen each crash point twice and assert the GAP is exactly the in-flight batch.
 
@@ -51,3 +51,27 @@ The worker panic boundary uses `catch_unwind` to classify failure, but it does n
 Drop contract, stated exactly: dropping the last owner closes admission synchronously and cannot detach the task (no abort in `Drop`); physical lease lifetime ends strictly after the supervisor's join; explicit async `shutdown` guarantees the worker exited on success.
 
 The worker is INACTIVE in this PR: production receipt apply is not wired. CI exercises the contracts with synthetic jobs under `tx/cold_reconcile/lifecycle/tests/`.
+
+## PR6b-2c receipt apply (active)
+
+**Retry convergence.** An ordinary I/O failure pauses the batch — the paused write reservation is kept — and the NEXT PULL RESUMES THE SAME RECEIPT with the identical local allocation: no extra versions, no lost counters, no new gaps. Only corruption or ambiguity is terminal (reopen/quarantine); ordinary failures no longer set the gate `requires-reopen`.
+
+**Pipeline (per chunk).** Prepared receipt + allocation reservation + bookmark-v3 pointer, ONE atomic batch = history rows/timestamps + absolute counters + downstream journal records + receipt → Materialized; read-back + checkpoint of bookmark+J with receipt retirement in the same batch; then publish + broadcast. Batches are split at `MAX_RECEIPT_EVENTS`/`MAX_RECEIPT_OPS` rather than weakening atomicity. Publication only ever runs after durability: the Materialized batch must be committed before visibility is raised, and an `Uncertain` outcome is resolved by read-back reconcile, never by assuming absence.
+
+**Failure matrix (brief).** Prepared-write uncertain → reconcile read-back. Materialization uncertain → read-back, never assume absence. Journal I/O before publication → retry from the receipt through the serialized writer install. Cancellation before publication is safe (guards abort, the receipt owns the versions). Corrupt identity/pointer, decode errors, double-Uncertain → reopen/quarantine.
+
+**Hot path.** The LEADER commit path and the non-follower apply path are UNCHANGED. The follower apply path gains one receipt write + one atomic batch + one checkpoint sync per batch.
+
+**Activation rule.** WAL-less follower + backend `supports_atomic_batch` + stored bookmark v3 or absent (fresh install). A v1/v2 bookmark keeps the current (legacy) apply path until PR6b-3 migrates it. A persistent backend without the capability is rejected with `DbError::AtomicBatchUnsupported` before any allocation; wrapper/hybrid backends are excluded.
+
+**Admission.** Receipt apply admits through the repository write-domain permit in the established lock order (repo permit → marker persistence mutex): DDL and local writes are excluded for the pipeline's whole run. While a paused receipt holds a write reservation, ordinary admission is REJECTED with `RepoWriteError::Reserved` until the receipt resolves.
+
+**Worker lifecycle.** The receipt worker is the repository-owned lifecycle from `tx/cold_reconcile/lifecycle/`: the owner holds the job-channel sender, jobs carry payload plus a one-shot reply, states run `Open → Closing → Joined`, and a shutdown timeout or worker panic quarantines unconditionally. Shutdown reaches either publication or a safe durable pause and reports failures to the caller.
+
+**Cold recovery.** A crash between phases leaves an outstanding receipt behind the bookmark-v3 pointer; cold recovery COMPLETES both phases (a Prepared receipt is materialized and checkpointed exactly like the warm resume, a Materialized receipt skips straight to publication + checkpoint) BEFORE PR6c gap classification sees it.
+
+**Journal installs.** Downstream journal installs ride the sole journal writer (`install_durable_events`, never `try_send`).
+
+**Unchanged index/vector restriction.** Ordinary/unique/sorted/index2 indexes are still rejected before allocation; there is NO posting/vector maintenance exactly-once claim.
+
+**Remaining step.** PR6b-3: bookmark v1/v2 migration + rollback tooling.

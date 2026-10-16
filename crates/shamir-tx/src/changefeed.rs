@@ -53,8 +53,11 @@
 
 pub mod cold;
 
+mod install;
+mod journal_read;
 mod repair_pending;
 
+pub use journal_read::JournalRead;
 pub use repair_pending::RepairPending;
 use repair_pending::RepairPending as RepairPendingInner;
 
@@ -198,6 +201,13 @@ enum JournalMsg {
         interval: (u64, u64),
         ack: oneshot::Sender<Result<(), String>>,
     },
+    /// Serialized durable install (S5c-X PR6b-2): exact pre-encoded journal
+    /// records for the follower receipt path. Rides the SAME FIFO as normal
+    /// events (ordering kept); the sender awaits, so this path is never lossy.
+    InstallRecords {
+        records: Vec<(u64, Bytes)>,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 /// Per-repo changefeed: live broadcast + durable journal writer.
@@ -235,18 +245,6 @@ pub struct RepoChangefeed {
     confirm_timeouts: AtomicU64,
     /// Channel-full deferrals awaiting re-enqueue by the engine drainer.
     repair_pending: Arc<RepairPending>,
-}
-
-/// Result of a [`RepoChangefeed::read_from`] call.
-///
-/// `gap_at` is `Some(max(from_version, first_missing))` while the cursor is
-/// at or before the invalidation horizon. The consumer must snapshot resync
-/// rather than trusting the journal for an unbroken history.
-pub struct JournalRead {
-    /// Events read from the journal.
-    pub events: Vec<ChangelogEvent>,
-    /// `Some(v)` if a gap is known at version `v >= from_version`.
-    pub gap_at: Option<u64>,
 }
 
 impl std::fmt::Debug for RepoChangefeed {
@@ -539,25 +537,6 @@ impl RepoChangefeed {
             .await
             .map_err(|_| DbError::Storage("changefeed writer termination lost".into()))?;
         Ok(())
-    }
-
-    /// Read up to `limit` journal events with `commit_version >=
-    /// from_version`, ascending. Resumable pull: a consumer that processed
-    /// through version V calls `read_from(V + 1, n)` to continue.
-    ///
-    /// Returns a [`JournalRead`] that carries the events AND a `gap_at` field.
-    /// When `gap_at` is `Some(v)` a known-dropped version `v >= from_version`
-    /// exists — the journal is not contiguous from `from_version` and the
-    /// consumer must perform a full snapshot resync instead of trusting it for
-    /// an unbroken history.
-    pub async fn read_from(
-        &self,
-        store: &Arc<dyn ChangelogStore>,
-        from_version: u64,
-        limit: usize,
-    ) -> JournalRead {
-        self.read_from_bounded(store, from_version, limit, u64::MAX)
-            .await
     }
 
     /// Read the ascending prefix at or below `bound`, obtained by confirming
@@ -1050,6 +1029,9 @@ async fn process_journal_msg(
             let result = gap.persist_recovery(store, interval).await;
             // A cancelled caller no longer wants the ack; the repair still finishes.
             let _ = ack.send(result);
+        }
+        JournalMsg::InstallRecords { records, ack } => {
+            install::process_install(store, records, last_persisted_version, ack).await
         }
         JournalMsg::Barrier(w) => {
             let w = repair_pending.clamp_barrier(w);

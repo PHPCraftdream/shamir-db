@@ -1,5 +1,6 @@
 pub mod and_range_extraction_tests;
 pub mod apply_transforms_tests;
+pub mod as_of_unpublished_gate_tests;
 pub mod as_of_visibility_tests;
 pub mod asof_read_tests;
 pub mod batch_hoist_invariants_tests;
