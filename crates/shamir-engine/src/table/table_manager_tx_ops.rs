@@ -1103,7 +1103,12 @@ impl TableManager {
             return self.set(id, value).await;
         };
 
-        let old = self.read_one_tx(id, Some(&*tx)).await.ok();
+        // Only NotFound is absence; every other pre-read error fails closed.
+        let old = match self.read_one_tx(id, Some(&*tx)).await {
+            Ok(value) => Some(value),
+            Err(shamir_storage::error::DbError::NotFound(_)) => None,
+            Err(error) => return Err(error),
+        };
 
         // Level-3: acquire an Exclusive lock on the key before staging the
         // write. `read_one_tx` above already took a Shared lock for a
