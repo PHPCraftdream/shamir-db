@@ -20,7 +20,7 @@ use std::sync::Arc;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::Store;
 
-use crate::meta::repl::bookmark_v3::{load_bookmark_v3, BookmarkV3};
+use crate::meta::repl::bookmark_v3::{has_v3_record, load_bookmark_v3, BookmarkV3};
 use crate::meta::repl::receipt::load_outstanding_receipt;
 use crate::meta::repl::{ReceiptPhase, ReplicationReceipt};
 use crate::repo::changelog_store::write_domain::RepoWritePermit;
@@ -39,6 +39,13 @@ pub(crate) async fn complete_outstanding_receipt(
     info: &Arc<dyn Store>,
     permit: &RepoWritePermit,
 ) -> DbResult<()> {
+    // Inspect the raw persisted envelope: `load_bookmark_v3` also decodes
+    // legacy bookmarks, so it cannot establish native receipt provenance.
+    // Set the gate before cold classification exposes repository reads, even
+    // when the v3 record has no outstanding receipt.
+    if has_v3_record(info).await? {
+        repo.tx_gate().await?.enable_receipt_native_visibility();
+    }
     let Some(v3) = load_bookmark_v3(info).await? else {
         return Ok(());
     };

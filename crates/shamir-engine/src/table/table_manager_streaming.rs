@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
+use futures::future::Either;
 use futures::StreamExt;
 use shamir_query_types::batch::ResultEncoding;
-#[cfg(test)]
-use shamir_storage::error::DbError;
-use shamir_storage::error::DbResult;
+use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::RecordKey;
 use shamir_types::record_view::RecordView;
 use shamir_types::types::record_id::RecordId;
@@ -142,6 +141,10 @@ impl TableManager {
         type DynStream<'a> = std::pin::Pin<
             Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + Send + 'a>,
         >;
+        if let Err(error) = self.ensure_repo_readable() {
+            let failed: DynStream<'_> = Box::pin(futures::stream::once(async move { Err(error) }));
+            return failed;
+        }
         if let Some(mvcc) = self.mvcc_store_ref() {
             let mvcc = Arc::clone(mvcc);
             let s: DynStream<'_> = Box::pin(async_stream::stream! {
@@ -190,6 +193,10 @@ impl TableManager {
         type DynStream<'a> = std::pin::Pin<
             Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + Send + 'a>,
         >;
+        if let Err(error) = self.ensure_repo_readable() {
+            let failed: DynStream<'_> = Box::pin(futures::stream::once(async move { Err(error) }));
+            return failed;
+        }
         if let Some(mvcc) = self.mvcc_store_ref() {
             let mvcc = Arc::clone(mvcc);
             let s: DynStream<'_> = Box::pin(async_stream::stream! {
@@ -228,6 +235,10 @@ impl TableManager {
         type DynStream<'a> = std::pin::Pin<
             Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + Send + 'a>,
         >;
+        if let Err(error) = self.ensure_repo_readable() {
+            let failed: DynStream<'_> = Box::pin(futures::stream::once(async move { Err(error) }));
+            return failed;
+        }
         if let Some(mvcc) = self.mvcc_store_ref() {
             let mvcc = Arc::clone(mvcc);
             let s: DynStream<'_> = Box::pin(async_stream::stream! {
@@ -270,6 +281,7 @@ impl TableManager {
         filter: &Filter,
         ctx: &'a FilterContext<'a>,
     ) -> DbResult<impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a> {
+        self.ensure_repo_readable()?;
         let interner = self.interner.get().await?;
         let callback = compile_filter(filter, interner);
         let table_stream = self.list_stream(batch_size);
@@ -309,38 +321,21 @@ impl TableManager {
     /// committed state for Pessimistic or no transaction, then records each
     /// materialised Serializable read. Recording remains a lazy side-effect.
     ///
-    /// Streaming-scan SSI scope: this records the keys the scan *yields* (of
-    /// the RAW committed stream, before the overlay merge below). It does
-    /// NOT install predicate / range locks, so phantom inserts into the
-    /// scanned range by a concurrent tx are not detected — full SSI predicate
-    /// locking over a stream is a known harder problem and out of scope here.
-    /// Point reads ([`read_one_tx`]) and materialised scan reads are covered.
+    /// Streaming-scan SSI records yielded keys, not predicate/range locks;
+    /// concurrent phantom inserts are outside its guarantee.
     ///
-    /// FG-3: read-your-own-writes for scans. Streaming scans overlay the
-    /// tx's own `write_set` on top of the committed-store stream: a record
-    /// this tx staged (inserted/updated/deleted but not yet committed) IS
-    /// visible to an in-tx stream — a staged insert is injected in sorted
-    /// position, a staged delete is hidden, a staged update yields the
-    /// STAGED (new) bytes instead of the committed (old) ones. This mirrors
-    /// point reads ([`read_one_tx`]), which already did RYOW. The overlay
-    /// merge (`merge_stream_with_tx_overlay`, `tx_scan_overlay.rs`) runs
-    /// AFTER `record_scan_reads` below — SSI read-set recording is a
-    /// separate, unchanged concern over the raw committed stream; the
-    /// overlay merge is a downstream transform of what
-    /// `record_scan_reads` already yielded. A tx that never wrote this
-    /// table pays nothing (`overlay_rows_for_tx` returns empty, and the
-    /// merge is then a zero-cost pass-through). ONLY the tx that staged a
-    /// write sees it — a different, concurrent tx's stream is untouched
-    /// (isolation is preserved: `tx.write_set` is per-`TxContext`, never
-    /// shared).
+    /// FG-3 overlays this tx's staged writes on the committed stream; other
+    /// transactions' streams remain unaffected.
     pub fn list_stream_tx<'a>(
         &'a self,
         tx: Option<&'a shamir_tx::TxContext>,
         batch_size: usize,
     ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a {
-        // Phase C (Step 6): defensive coarse recording for streams
-        // reached directly (bypassing read_tx). Zero-overhead: gate on
-        // Serializable before any work.
+        if let Err(error) = self.ensure_repo_readable() {
+            return Either::Left(futures::stream::once(async move { Err(error) }));
+        }
+        // Direct callers need coarse predicate tracking; read_tx records a
+        // precise predicate and calls the helper below instead.
         if let Some(t) = tx {
             if t.isolation == shamir_tx::IsolationLevel::Serializable {
                 t.record_predicate_shared(shamir_tx::predicate_set::PredicateDep::TableScan {
@@ -348,12 +343,10 @@ impl TableManager {
                 });
             }
         }
-        self.list_stream_tx_after_predicate(tx, batch_size)
+        Either::Right(self.list_stream_tx_after_predicate(tx, batch_size))
     }
 
-    /// [`list_stream_tx`] without the defensive coarse `TableScan` record, for
-    /// scans reached through `read_tx`, which has already recorded the precise
-    /// predicate (a narrow index range must not widen to a table scan).
+    /// Variant for read_tx after its precise predicate has already been recorded.
     pub(super) fn list_stream_tx_after_predicate<'a>(
         &'a self,
         tx: Option<&'a shamir_tx::TxContext>,
@@ -363,8 +356,6 @@ impl TableManager {
         let token = self.table_token();
         let mvcc = self.mvcc_store.clone();
         let recorded = Self::record_scan_reads(inner, tx, token, mvcc);
-        // FG-3: overlay this tx's own staged writes on top of the recorded
-        // committed stream (unfiltered — no Filter/FilterContext here).
         let overlay = overlay_rows_for_tx(tx, token);
         merge_stream_with_tx_overlay(recorded, overlay, batch_size)
     }
@@ -375,6 +366,9 @@ impl TableManager {
         tx: Option<&'a shamir_tx::TxContext>,
         batch_size: usize,
     ) -> CommittedScan<'a> {
+        if let Err(error) = self.ensure_repo_readable() {
+            return Box::pin(futures::stream::once(async move { Err(error) }));
+        }
         match (self.mvcc_store_ref(), tx) {
             (Some(mvcc), Some(t))
                 if matches!(
@@ -407,15 +401,7 @@ impl TableManager {
 
     /// tx-aware streaming variant of [`filter_stream`].
     ///
-    /// Same materialised-read SSI recording as [`list_stream_tx`]: each
-    /// record that survives the filter and is yielded gets recorded into the
-    /// read-set (Serializable only). Same streaming-scan SSI scope note, and
-    /// the same FG-3 read-your-own-writes behaviour as [`list_stream_tx`] —
-    /// but here overlay-sourced rows (staged inserts / staged-overridden
-    /// updates) are re-evaluated against `filter` before being yielded (the
-    /// FILTERED overlay variant), so an injected/overridden staged row that
-    /// does not actually match `filter` is excluded rather than blindly
-    /// included.
+    /// Streaming filtered scan; it does not install predicate/range locks.
     pub async fn filter_stream_tx<'a>(
         &'a self,
         tx: Option<&'a shamir_tx::TxContext>,
@@ -423,6 +409,7 @@ impl TableManager {
         filter: &Filter,
         ctx: &'a FilterContext<'a>,
     ) -> DbResult<impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a> {
+        self.ensure_repo_readable()?;
         // Phase C (Step 6): predicate recording for filter streams
         // reached directly (bypassing read_tx). Zero-overhead: gate on
         // Serializable before any work.
@@ -487,7 +474,6 @@ impl TableManager {
         // committed value did; a staged INSERT was never filtered before).
         let overlay = overlay_rows_for_tx(tx, token);
         if overlay.is_empty() {
-            // No staged overlay to merge; the committed stream is already filtered.
             return Ok(Box::pin(recorded)
                 as std::pin::Pin<
                     Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a>,
@@ -634,6 +620,7 @@ impl TableManager {
         id: RecordId,
         tx: Option<&shamir_tx::TxContext>,
     ) -> DbResult<InnerValue> {
+        self.ensure_repo_readable()?;
         // Task-group-2 test-only fault injection: reuses the F-65 seam (see
         // [`TEST_READ_ONE_TX_BYTES_FAILURE`]'s doc) so a test can force
         // `update_tx`'s pre-read to fail with a genuine `Err` instead of
@@ -768,6 +755,7 @@ impl TableManager {
         id: RecordId,
         tx: Option<&shamir_tx::TxContext>,
     ) -> DbResult<Option<Bytes>> {
+        self.ensure_repo_readable()?;
         // F-65 (#891) test-only fault injection: if a test armed a failure for
         // this exact `(table_token, id)`, return the injected `Err` instead of
         // reading. One-shot (consumed on first match). See
@@ -848,6 +836,7 @@ impl TableManager {
         ctx: &FilterContext<'_>,
         tx: Option<&shamir_tx::TxContext>,
     ) -> DbResult<crate::query::read::QueryResult> {
+        self.ensure_repo_readable()?;
         // Only a Serializable tx records reads; for everything else the
         // recording pass is pure overhead, so dispatch straight to `read`.
         let recording = tx
@@ -911,6 +900,7 @@ impl TableManager {
         tx: Option<&shamir_tx::TxContext>,
         encoding: ResultEncoding,
     ) -> DbResult<crate::query::read::QueryResult> {
+        self.ensure_repo_readable()?;
         // Only a Serializable tx records reads; for everything else the
         // recording pass is pure overhead, so skip it.
         let recording = tx

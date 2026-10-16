@@ -16,11 +16,17 @@ use shamir_storage::error::DbError;
 use shamir_storage::types::RecordKey;
 use shamir_tx::{decode_version_key, ChangeOp, ChangelogEvent, RecordChange};
 use shamir_types::access::Actor;
+use shamir_types::codecs::basic::bincode as bincode_codec;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
+use super::super::stage::{
+    inject_materialization_batch_failures, set_materialization_readback_unavailable,
+    MaterializationBatchFailure,
+};
 use crate::meta::repl::bookmark_v3::load_bookmark_v3;
 use crate::meta::repl::receipt::receipt_key;
+use crate::meta::MetaKey;
 use crate::repo::{BoxRepoFactory, RepoInstance};
 use crate::table::TableConfig;
 use crate::tx::apply_replicated::{apply_replicated_batch, ApplyOutcome, ApplyPolicy};
@@ -31,6 +37,13 @@ use super::super::checkpoint::{
     set_simulate_checkpoint_uncertain, set_uncertain_without_commit,
 };
 
+struct MaterializationSeamReset(String);
+impl Drop for MaterializationSeamReset {
+    fn drop(&mut self) {
+        super::super::stage::clear_materialization_batch_failures(&self.0);
+        set_materialization_readback_unavailable(&self.0, false);
+    }
+}
 fn event(leader_version: u64, id: u8) -> ReplicatedEvent {
     ReplicatedEvent {
         event: ChangelogEvent {
@@ -49,12 +62,17 @@ fn event(leader_version: u64, id: u8) -> ReplicatedEvent {
         field_bindings: Vec::new(),
     }
 }
+fn event_with_table(leader_version: u64, id: u8, table: &str) -> ReplicatedEvent {
+    let mut value = event(leader_version, id);
+    value.event.changes[0].table = table.to_owned();
+    value
+}
 
 async fn open(path: &Path, name: &str) -> RepoInstance {
     RepoInstance::from_factory(
         name.into(),
         BoxRepoFactory::fjall_raw(path),
-        vec![TableConfig::new("items")],
+        vec![TableConfig::new("items"), TableConfig::new("other")],
     )
     .await
     .unwrap()
@@ -83,9 +101,15 @@ async fn journal(repo: &RepoInstance, version: u64) -> Option<Bytes> {
         .ok()
 }
 
-/// Every local version at which `key` has a history row.
-async fn history_versions(repo: &RepoInstance, key: &[u8]) -> Vec<u64> {
-    let store = repo.raw_store("__history__items").await.unwrap();
+async fn key_bytes(id: u8) -> Vec<u8> {
+    RecordId([id; 16]).to_bytes().to_vec()
+}
+
+async fn history_versions_for(repo: &RepoInstance, table: &str, key: &[u8]) -> Vec<u64> {
+    let store = repo
+        .raw_store(&format!("__history__{table}"))
+        .await
+        .unwrap();
     let mut versions = Vec::new();
     for batch in store.iter_stream(128).collect::<Vec<_>>().await {
         for (record_key, _) in batch.unwrap() {
@@ -100,15 +124,30 @@ async fn history_versions(repo: &RepoInstance, key: &[u8]) -> Vec<u64> {
     versions
 }
 
-async fn key_bytes(id: u8) -> Vec<u8> {
-    RecordId([id; 16]).to_bytes().to_vec()
+async fn persisted_count_for(repo: &RepoInstance, table: &str) -> u64 {
+    let store = repo.raw_store(&format!("__info__{table}")).await.unwrap();
+    match store
+        .get(RecordKey::from_slice(
+            MetaKey::Count.as_record_id().as_bytes(),
+        ))
+        .await
+    {
+        Ok(bytes) => bincode_codec::from_bytes::<u64>(&bytes).unwrap(),
+        Err(DbError::NotFound(_)) => 0,
+        Err(error) => panic!("count read failed for {table}: {error}"),
+    }
 }
-
 /// The settled post-checkpoint state, asserted identically on the live
 /// handle and after each reopen: bookmark v3 advanced with no outstanding
 /// receipt, the receipt key retired, one history version per key, both
 /// journal rows present, and the same batch re-delivered is a Skipped no-op.
 async fn assert_settled(repo: &RepoInstance) {
+    let key1 = key_bytes(1).await;
+    let key2 = key_bytes(2).await;
+    assert_eq!(history_versions_for(repo, "items", &key1).await, vec![1]);
+    assert_eq!(history_versions_for(repo, "other", &key2).await, vec![2]);
+    assert_eq!(persisted_count_for(repo, "items").await, 1);
+    assert_eq!(persisted_count_for(repo, "other").await, 1);
     let info = repo.tx_info_store().await.unwrap();
     let v3 = load_bookmark_v3(&info).await.unwrap().unwrap();
     assert_eq!(v3.bookmark, 2);
@@ -120,22 +159,210 @@ async fn assert_settled(repo: &RepoInstance) {
     ));
     drop(info);
 
-    let key1 = key_bytes(1).await;
-    let key2 = key_bytes(2).await;
-    assert_eq!(history_versions(repo, &key1).await, vec![1]);
-    assert_eq!(history_versions(repo, &key2).await, vec![2]);
+    assert_eq!(history_versions_for(repo, "items", &key1).await, vec![1]);
+    assert_eq!(history_versions_for(repo, "other", &key2).await, vec![2]);
+    assert_eq!(persisted_count_for(repo, "items").await, 1);
+    assert_eq!(persisted_count_for(repo, "other").await, 1);
     assert!(journal(repo, 1).await.is_some());
     assert!(journal(repo, 2).await.is_some());
-
     assert_eq!(
-        apply_replicated_batch(repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted)
-            .await
-            .unwrap(),
+        apply_replicated_batch(
+            repo,
+            &fresh_two_table_events().await,
+            0,
+            ApplyPolicy::Trusted
+        )
+        .await
+        .unwrap(),
         ApplyOutcome::Skipped
     );
 }
 
-// With the seam on, the checkpoint's Committed outcome is rewritten to
+async fn fresh_two_table_events() -> [ReplicatedEvent; 2] {
+    [
+        event_with_table(1, 1, "items"),
+        event_with_table(2, 2, "other"),
+    ]
+}
+
+#[tokio::test]
+async fn materialization_batch_failure_preserves_prepared_receipt_and_retry_allocation() {
+    let _guard = checkpoint_test_lock().await;
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = repo_name(temp.path());
+    let _reset = MaterializationSeamReset(name.clone());
+    let repo = open(temp.path(), &name).await;
+    let events = fresh_two_table_events().await;
+    inject_materialization_batch_failures(&name, &[MaterializationBatchFailure::BeforeCommit; 3]);
+    let error = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DbError::Storage(_)), "{error:?}");
+    let gate = repo.tx_gate().await.unwrap();
+    assert!(!gate.requires_reopen());
+    assert_eq!(gate.last_committed(), 0);
+    assert_eq!(gate.durable_watermark(), 0);
+    assert_eq!(gate.version_allocation_high_water_mark(), 2);
+    let key1 = key_bytes(1).await;
+    let key2 = key_bytes(2).await;
+    assert!(history_versions_for(&repo, "items", &key1).await.is_empty());
+    assert!(history_versions_for(&repo, "other", &key2).await.is_empty());
+    assert!(journal(&repo, 1).await.is_none());
+    assert!(journal(&repo, 2).await.is_none());
+    assert_eq!(persisted_count_for(&repo, "items").await, 0);
+    assert_eq!(persisted_count_for(&repo, "other").await, 0);
+    let info = repo.tx_info_store().await.unwrap();
+    let bookmark = load_bookmark_v3(&info).await.unwrap().unwrap();
+    let receipt_id = bookmark.outstanding_receipt.unwrap();
+    let receipt_bytes = info.get(receipt_key()).await.unwrap();
+    let prepared = crate::meta::repl::decode_receipt(&receipt_id, &receipt_bytes).unwrap();
+    assert_eq!(prepared.phase, crate::meta::repl::ReceiptPhase::Prepared);
+    let prepared_receipt_id = receipt_id;
+    let allocation = prepared.mapping.clone();
+    drop(info);
+
+    inject_materialization_batch_failures(&name, &[MaterializationBatchFailure::BeforeCommit; 3]);
+    let retry_error = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(retry_error, DbError::Storage(_)),
+        "{retry_error:?}"
+    );
+    let info = repo.tx_info_store().await.unwrap();
+    let bookmark = load_bookmark_v3(&info).await.unwrap().unwrap();
+    assert_eq!(bookmark.outstanding_receipt, Some(prepared_receipt_id));
+    let receipt_bytes = info.get(receipt_key()).await.unwrap();
+    let still_prepared =
+        crate::meta::repl::decode_receipt(&prepared_receipt_id, &receipt_bytes).unwrap();
+    assert_eq!(
+        still_prepared.phase,
+        crate::meta::repl::ReceiptPhase::Prepared
+    );
+    assert_eq!(still_prepared.mapping, allocation);
+    drop(info);
+    assert_eq!(gate.version_allocation_high_water_mark(), 2);
+    assert_eq!(gate.last_committed(), 0);
+    assert_eq!(gate.durable_watermark(), 0);
+
+    super::super::stage::clear_materialization_batch_failures(&name);
+    assert_eq!(
+        apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted)
+            .await
+            .unwrap(),
+        ApplyOutcome::Applied { local_version: 2 }
+    );
+    let info = repo.tx_info_store().await.unwrap();
+    let bookmark = load_bookmark_v3(&info).await.unwrap().unwrap();
+    assert_eq!(bookmark.outstanding_receipt, None);
+    assert!(matches!(
+        info.get(receipt_key()).await,
+        Err(DbError::NotFound(_))
+    ));
+    drop(info);
+    assert_eq!(history_versions_for(&repo, "items", &key1).await, vec![1]);
+    assert_eq!(history_versions_for(&repo, "other", &key2).await, vec![2]);
+    assert_eq!(persisted_count_for(&repo, "items").await, 1);
+    assert_eq!(persisted_count_for(&repo, "other").await, 1);
+    assert!(journal(&repo, 1).await.is_some());
+    assert!(journal(&repo, 2).await.is_some());
+    assert_eq!(gate.version_allocation_high_water_mark(), 2);
+    assert_eq!(gate.last_committed(), 2);
+    assert_eq!(gate.durable_watermark(), 2);
+    close(repo).await;
+}
+
+#[tokio::test]
+async fn repeated_uncertainty_also_fail_stops_without_advancing_floors() {
+    let _guard = checkpoint_test_lock().await;
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = repo_name(temp.path());
+    let _reset = MaterializationSeamReset(name.clone());
+    let repo = open(temp.path(), &name).await;
+    let events = fresh_two_table_events().await;
+    inject_materialization_batch_failures(
+        &name,
+        &[
+            MaterializationBatchFailure::AfterCommitUncertain,
+            MaterializationBatchFailure::AfterCommitUncertain,
+        ],
+    );
+    set_materialization_readback_unavailable(&name, true);
+
+    let error = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DbError::RepoRequiresReopen(_)), "{error:?}");
+    let gate = repo.tx_gate().await.unwrap();
+    assert!(gate.requires_reopen());
+    assert_eq!(gate.version_allocation_high_water_mark(), 2);
+    assert_eq!(gate.last_committed(), 0);
+    assert_eq!(gate.durable_watermark(), 0);
+    let key1 = key_bytes(1).await;
+    let key2 = key_bytes(2).await;
+    assert_eq!(history_versions_for(&repo, "items", &key1).await, vec![1]);
+    assert_eq!(history_versions_for(&repo, "other", &key2).await, vec![2]);
+    assert_eq!(persisted_count_for(&repo, "items").await, 1);
+    assert_eq!(persisted_count_for(&repo, "other").await, 1);
+    assert!(journal(&repo, 1).await.is_some());
+    assert!(journal(&repo, 2).await.is_some());
+    let retry = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted).await;
+    assert!(matches!(retry, Err(DbError::RepoRequiresReopen(_))));
+    let shutdown = repo.shutdown_clean(std::time::Duration::from_secs(5)).await;
+    assert!(
+        matches!(shutdown, Err(DbError::Storage(_))),
+        "quarantined worker shutdown should report failure"
+    );
+    close(repo).await;
+}
+
+#[tokio::test]
+async fn unresolved_uncertainty_retry_storage_failure_fail_stops_and_shutdown_fails() {
+    let _guard = checkpoint_test_lock().await;
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = repo_name(temp.path());
+    let _reset = MaterializationSeamReset(name.clone());
+    let repo = open(temp.path(), &name).await;
+    let events = fresh_two_table_events().await;
+    inject_materialization_batch_failures(
+        &name,
+        &[
+            MaterializationBatchFailure::AfterCommitUncertain,
+            MaterializationBatchFailure::BeforeCommit,
+        ],
+    );
+    set_materialization_readback_unavailable(&name, true);
+    let error = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DbError::RepoRequiresReopen(_)), "{error:?}");
+    let gate = repo.tx_gate().await.unwrap();
+    assert!(gate.requires_reopen());
+    assert_eq!(gate.version_allocation_high_water_mark(), 2);
+    assert_eq!(gate.last_committed(), 0);
+    assert_eq!(gate.durable_watermark(), 0);
+    let key1 = key_bytes(1).await;
+    let key2 = key_bytes(2).await;
+    assert_eq!(history_versions_for(&repo, "items", &key1).await, vec![1]);
+    assert_eq!(history_versions_for(&repo, "other", &key2).await, vec![2]);
+    assert_eq!(persisted_count_for(&repo, "items").await, 1);
+    assert_eq!(persisted_count_for(&repo, "other").await, 1);
+    assert!(journal(&repo, 1).await.is_some());
+    assert!(journal(&repo, 2).await.is_some());
+    let retry = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted).await;
+    assert!(
+        matches!(retry, Err(DbError::RepoRequiresReopen(_))),
+        "repo must remain fail-stopped: {retry:?}"
+    );
+    assert!(repo.worker_reopen_required());
+    let shutdown = repo.shutdown_clean(std::time::Duration::from_secs(5)).await;
+    assert!(
+        matches!(shutdown, Err(DbError::Storage(_))),
+        "quarantined worker shutdown should report failure"
+    );
+    close(repo).await;
+}
+
 // Uncertain so the read-back reconcile runs; the repo settles cleanly, and
 // the settled state survives two reopen cycles. The reconcile branch is
 // observably entered: `checkpoint_reconciles()` increases by exactly 1
@@ -152,12 +379,18 @@ async fn uncertain_checkpoint_reconciles_and_survives_reopens() {
 
     let baseline = checkpoint_reconciles();
     set_simulate_checkpoint_uncertain(true);
-    let outcome =
-        apply_replicated_batch(&repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted).await;
+    let events = fresh_two_table_events().await;
+    let outcome = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted).await;
     set_simulate_checkpoint_uncertain(false);
-    // The pipeline returns the allocation high-water mark: 2 for the
-    // two-event batch.
-    assert_eq!(outcome.unwrap(), ApplyOutcome::Applied { local_version: 2 });
+    let applied = outcome.unwrap();
+    assert_eq!(applied, ApplyOutcome::Applied { local_version: 2 });
+    assert_eq!(
+        repo.tx_gate()
+            .await
+            .unwrap()
+            .version_allocation_high_water_mark(),
+        2
+    );
     assert_eq!(checkpoint_reconciles(), baseline + 1);
     assert_settled(&repo).await;
 
@@ -220,8 +453,8 @@ async fn negative_control_without_reconcile_state_is_not_reconciled() {
     let baseline = checkpoint_reconciles();
     set_uncertain_without_commit(true);
     disable_uncertain_reconcile(true);
-    let outcome =
-        apply_replicated_batch(&repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted).await;
+    let events = fresh_two_table_events().await;
+    let outcome = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted).await;
     disable_uncertain_reconcile(false);
     set_uncertain_without_commit(false);
 
@@ -273,9 +506,8 @@ async fn uncertain_without_commit_is_reconciled_when_enabled() {
 
     let baseline = checkpoint_reconciles();
     set_uncertain_without_commit(true);
-    // disable_uncertain_reconcile stays OFF: the reconcile is armed.
-    let outcome =
-        apply_replicated_batch(&repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted).await;
+    let events = fresh_two_table_events().await;
+    let outcome = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted).await;
     set_uncertain_without_commit(false);
 
     assert_eq!(outcome.unwrap(), ApplyOutcome::Applied { local_version: 2 });

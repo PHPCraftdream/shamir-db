@@ -55,13 +55,23 @@ fn event(leader_version: u64, id: u8) -> ReplicatedEvent {
 }
 
 async fn open(path: &Path, name: &str) -> RepoInstance {
-    RepoInstance::from_factory(
-        name.into(),
-        BoxRepoFactory::fjall_raw(path),
-        vec![TableConfig::new("items")],
-    )
-    .await
-    .unwrap()
+    for attempt in 0..25u32 {
+        match RepoInstance::from_factory(
+            name.into(),
+            BoxRepoFactory::fjall_raw(path),
+            vec![TableConfig::new("items")],
+        )
+        .await
+        {
+            Ok(repo) => return repo,
+            Err(error) if attempt < 24 => {
+                let _ = error;
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("repo open failed after retries: {error}"),
+        }
+    }
+    unreachable!("retry loop always returns or panics")
 }
 
 async fn close(repo: RepoInstance) {
@@ -204,6 +214,75 @@ async fn assert_settled(repo: &RepoInstance) {
 }
 
 // One test per phase boundary; a fresh repo per phase.
+#[tokio::test]
+async fn panic_after_materialized_requires_reopen_without_advancing_floors() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = repo_name("panic-materialized", temp.path());
+    let repo = open(temp.path(), &name).await;
+    let hook = Arc::new(test_seam::Hook::default());
+    *hook.panic_after.lock().unwrap() = Some(Phase::ReceiptMaterialized);
+    test_seam::install(&name, Arc::clone(&hook));
+
+    let result =
+        apply_replicated_batch(&repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted).await;
+    assert!(
+        result.is_err(),
+        "panicking receipt worker must not report success"
+    );
+    test_seam::remove(&name);
+
+    let gate = repo.tx_gate().await.unwrap();
+    assert!(gate.requires_reopen());
+    assert_eq!(gate.last_committed(), 0);
+    assert_eq!(gate.durable_watermark(), 0);
+    assert_eq!(
+        outstanding_phase(&repo).await,
+        Some(ReceiptPhase::Materialized)
+    );
+    let table = repo.get_table("items").await.unwrap();
+    assert!(matches!(
+        table.get(RecordId([1; 16])).await,
+        Err(DbError::RepoRequiresReopen(_))
+    ));
+    assert!(matches!(
+        table.count().await,
+        Err(DbError::RepoRequiresReopen(_))
+    ));
+    drop(table);
+    let shutdown = repo.shutdown_clean(std::time::Duration::from_secs(5)).await;
+    assert!(
+        matches!(&shutdown, Err(DbError::Storage(message)) if message.contains("worker failed")),
+        "panicking lifecycle worker must terminate as Failed: {shutdown:?}"
+    );
+    let gate = repo.tx_gate().await.unwrap();
+    assert!(gate.requires_reopen());
+    assert_eq!(gate.last_committed(), 0);
+    assert_eq!(gate.durable_watermark(), 0);
+    close(repo).await;
+
+    // A cold open replays the durable Materialized receipt and must converge
+    // on the original versions rather than allocating replacement versions.
+    let reopened = open(temp.path(), &name).await;
+    let gate = reopened.tx_gate().await.unwrap();
+    assert!(!gate.requires_reopen());
+    assert_eq!(gate.last_committed(), 2);
+    assert_eq!(gate.durable_watermark(), 2);
+    assert_eq!(outstanding_phase(&reopened).await, None);
+    for id in 1u8..=2 {
+        let key = key_bytes(id).await;
+        let versions = history_versions(&reopened, &key).await;
+        assert_eq!(versions, vec![u64::from(id)]);
+    }
+    let table = reopened.get_table("items").await.unwrap();
+    assert_eq!(table.count().await.unwrap(), 2);
+    assert_eq!(
+        table.get(RecordId([1; 16])).await.unwrap(),
+        InnerValue::Str("row-1".into())
+    );
+    drop(table);
+    close(reopened).await;
+}
+
 #[tokio::test]
 async fn drop_at_receipt_prepared_converges_on_reapply() {
     let temp = tempfile::TempDir::new().unwrap();

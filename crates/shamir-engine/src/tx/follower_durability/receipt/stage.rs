@@ -42,6 +42,118 @@ const TX_STORE: &str = "__tx__";
 const CHANGELOG_STORE: &str = "__changelog__";
 
 #[cfg(test)]
+type MaterializationFailureQueues = TFxMap<String, Vec<MaterializationBatchFailure>>;
+
+#[cfg(test)]
+static MATERIALIZATION_BATCH_FAILURES: Mutex<Option<MaterializationFailureQueues>> =
+    Mutex::new(None);
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum MaterializationBatchFailure {
+    BeforeCommit,
+    AfterCommitUncertain,
+}
+
+#[cfg(test)]
+pub(crate) fn inject_materialization_batch_failures(
+    repo_name: &str,
+    failures: &[MaterializationBatchFailure],
+) {
+    let mut all = MATERIALIZATION_BATCH_FAILURES.lock().unwrap();
+    all.get_or_insert_with(TFxMap::default)
+        .insert(repo_name.to_owned(), failures.to_vec());
+}
+
+#[cfg(test)]
+pub(crate) fn clear_materialization_batch_failures(repo_name: &str) {
+    if let Some(queues) = MATERIALIZATION_BATCH_FAILURES.lock().unwrap().as_mut() {
+        queues.remove(repo_name);
+    }
+    MATERIALIZATION_READBACK_UNAVAILABLE
+        .lock()
+        .unwrap()
+        .as_mut()
+        .and_then(|map| map.remove(repo_name));
+}
+
+#[cfg(test)]
+fn wrap_materialization_batch(
+    batch: Box<dyn AtomicBatch>,
+    repo_name: &str,
+) -> Box<dyn AtomicBatch> {
+    Box::new(InjectedMaterializationBatch {
+        inner: batch,
+        repo_name: repo_name.to_owned(),
+    })
+}
+
+#[cfg(test)]
+struct InjectedMaterializationBatch {
+    inner: Box<dyn AtomicBatch>,
+    repo_name: String,
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl AtomicBatch for InjectedMaterializationBatch {
+    fn set(&mut self, store: &str, key: RecordKey, value: Bytes) -> DbResult<()> {
+        self.inner.set(store, key, value)
+    }
+    fn delete(&mut self, store: &str, key: RecordKey) -> DbResult<()> {
+        self.inner.delete(store, key)
+    }
+    async fn commit(self: Box<Self>) -> DbResult<AtomicCommitOutcome> {
+        let failure = {
+            let mut all = MATERIALIZATION_BATCH_FAILURES.lock().unwrap();
+            all.as_mut()
+                .and_then(|map| map.get_mut(&self.repo_name))
+                .and_then(|q| {
+                    if q.is_empty() {
+                        None
+                    } else {
+                        Some(q.remove(0))
+                    }
+                })
+        };
+        match failure {
+            Some(MaterializationBatchFailure::BeforeCommit) => {
+                Err(DbError::Storage("injected pre-commit failure".into()))
+            }
+            Some(MaterializationBatchFailure::AfterCommitUncertain) => {
+                self.inner.commit().await?;
+                Ok(AtomicCommitOutcome::Uncertain {
+                    detail: "injected post-commit uncertainty".into(),
+                })
+            }
+            None => self.inner.commit().await,
+        }
+    }
+}
+
+#[cfg(test)]
+static MATERIALIZATION_READBACK_UNAVAILABLE: Mutex<Option<TFxMap<String, bool>>> = Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_materialization_readback_unavailable(repo_name: &str, on: bool) {
+    MATERIALIZATION_READBACK_UNAVAILABLE
+        .lock()
+        .unwrap()
+        .get_or_insert_with(TFxMap::default)
+        .insert(repo_name.to_owned(), on);
+}
+
+#[cfg(test)]
+fn take_materialization_readback_failure(repo_name: &str) -> bool {
+    MATERIALIZATION_READBACK_UNAVAILABLE
+        .lock()
+        .unwrap()
+        .as_mut()
+        .and_then(|map| map.remove(repo_name))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
 static MATERIALIZATION_COMMITS: Mutex<Option<TFxMap<String, usize>>> = Mutex::new(None);
 
 #[cfg(test)]
@@ -603,7 +715,10 @@ async fn stage_materialized_batch(
     work: &MaterializedWork,
     old: &BookmarkV3,
 ) -> DbResult<Box<dyn AtomicBatch>> {
-    let mut batch = repo.begin_repo_atomic_batch(permit).await?;
+    let batch = repo.begin_repo_atomic_batch(permit).await?;
+    #[cfg(test)]
+    let batch = wrap_materialization_batch(batch, repo.name());
+    let mut batch = batch;
     for (table, history, info_store, count_after) in table_rows(work)? {
         for (index, event) in work.events.iter().enumerate() {
             let Some((_, ops)) = event.tables.iter().find(|group| group.0 == table) else {
@@ -726,23 +841,43 @@ pub(crate) async fn commit_materialized_work(
         outcome
     };
     if let AtomicCommitOutcome::Uncertain { detail } = outcome {
+        #[cfg(test)]
+        let force_unresolved_readback = take_materialization_readback_failure(repo.name());
+        #[cfg(test)]
+        let settled = if force_unresolved_readback {
+            false
+        } else {
+            matches!(
+                load_outstanding_receipt(info, &work.receipt_id).await,
+                Ok(Some(receipt)) if receipt.phase == ReceiptPhase::Materialized,
+            )
+        };
+        #[cfg(not(test))]
         let settled = matches!(
             load_outstanding_receipt(info, &work.receipt_id).await,
             Ok(Some(receipt)) if receipt.phase == ReceiptPhase::Materialized,
         );
         if !settled {
-            match stage_materialized_batch(repo, permit, work, old)
-                .await?
-                .commit()
-                .await?
-            {
-                AtomicCommitOutcome::Committed => {
+            let retry = stage_materialized_batch(repo, permit, work, old).await;
+            let retry_outcome = match retry {
+                Ok(batch) => batch.commit().await,
+                Err(error) => Err(error),
+            };
+            match retry_outcome {
+                Ok(AtomicCommitOutcome::Committed) => {
                     #[cfg(test)]
                     record_materialization_commit(repo.name());
                 }
-                AtomicCommitOutcome::Uncertain { detail } => {
+                Ok(AtomicCommitOutcome::Uncertain { detail }) => {
+                    repo.tx_gate().await?.set_requires_reopen();
                     return Err(DbError::RepoRequiresReopen(format!(
                         "receipt Materialized commit uncertain twice: {detail}"
+                    )));
+                }
+                Err(error) => {
+                    repo.tx_gate().await?.set_requires_reopen();
+                    return Err(DbError::RepoRequiresReopen(format!(
+                        "receipt Materialized retry failed after unresolved uncertainty: {error}"
                     )));
                 }
             }

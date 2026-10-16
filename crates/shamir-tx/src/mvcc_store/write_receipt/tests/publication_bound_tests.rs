@@ -19,6 +19,7 @@ use crate::version_codec::encode_version_key;
 
 fn make_mvcc() -> (MvccStore, Arc<RepoTxGate>) {
     let gate = Arc::new(RepoTxGate::fresh());
+    gate.enable_receipt_native_visibility();
     let mvcc = MvccStore::new(Arc::new(InMemoryStore::new()), Arc::clone(&gate));
     (mvcc, gate)
 }
@@ -230,6 +231,7 @@ async fn publish_is_idempotent() {
 #[tokio::test]
 async fn materialized_unpublished_invisible_at_zero_floor() {
     let (mvcc, gate) = make_mvcc();
+    gate.enable_receipt_native_visibility();
     assert_eq!(gate.last_committed(), 0, "fresh gate starts at floor 0");
 
     let ops = [set_op(b"k", b"v1")];
@@ -307,6 +309,7 @@ async fn materialized_unpublished_invisible_at_zero_floor() {
 #[tokio::test]
 async fn zero_floor_cold_path_does_not_seed_unpublished_cell() {
     let (mvcc, gate) = make_mvcc();
+    gate.enable_receipt_native_visibility();
     assert_eq!(gate.last_committed(), 0);
 
     let ops = [set_op(b"k", b"v1")];
