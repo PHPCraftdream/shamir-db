@@ -122,7 +122,7 @@ async fn as_of_real_read_bounds_materialized_unpublished_version() {
     // v1: materialize AND publish (visible) → floor 1.
     let guard1 = gate.assign_next_version_guarded();
     assert_eq!(guard1.version(), 1);
-    mvcc.apply_committed_visible(&[op1.clone()], 1);
+    mvcc.apply_committed_visible(std::slice::from_ref(&op1), 1);
     guard1.commit();
     assert_eq!(gate.visible_floor(), 1);
 
@@ -132,7 +132,7 @@ async fn as_of_real_read_bounds_materialized_unpublished_version() {
     // the allocation high-water mark is 2.
     let guard2 = gate.assign_next_version_guarded();
     assert_eq!(guard2.version(), 2);
-    mvcc.materialize_committed_to_history(&[op2.clone()], 2)
+    mvcc.materialize_committed_to_history(std::slice::from_ref(&op2), 2)
         .await
         .unwrap();
     assert_eq!(gate.visible_floor(), 1, "publish must not have happened");

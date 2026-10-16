@@ -144,7 +144,7 @@ async fn assert_settled(repo: &RepoInstance) {
 async fn uncertain_checkpoint_reconciles_and_survives_reopens() {
     // The checkpoint seams and the reconcile counter are process-global:
     // serialize against the other tests that touch them.
-    let _lock = checkpoint_test_lock();
+    let _lock = checkpoint_test_lock().await;
     set_simulate_checkpoint_uncertain(false);
     let temp = tempfile::TempDir::new().unwrap();
     let name = repo_name(temp.path());
@@ -183,7 +183,7 @@ async fn uncertain_checkpoint_reconciles_and_survives_reopens() {
 // so both halves are needed.)
 #[tokio::test]
 async fn no_reconcile_counter_without_uncertain() {
-    let _lock = checkpoint_test_lock();
+    let _lock = checkpoint_test_lock().await;
     set_simulate_checkpoint_uncertain(false);
     let temp = tempfile::TempDir::new().unwrap();
     let name = repo_name(temp.path());
@@ -211,7 +211,7 @@ async fn no_reconcile_counter_without_uncertain() {
 // read-back protection, not merely branch entry.
 #[tokio::test]
 async fn negative_control_without_reconcile_state_is_not_reconciled() {
-    let _lock = checkpoint_test_lock();
+    let _lock = checkpoint_test_lock().await;
     set_simulate_checkpoint_uncertain(false);
     let temp = tempfile::TempDir::new().unwrap();
     let name = repo_name(temp.path());
@@ -242,7 +242,7 @@ async fn negative_control_without_reconcile_state_is_not_reconciled() {
         "bookmark must NOT have advanced without the reconcile: {v3:?}"
     );
     assert!(
-        v3.map_or(true, |v3| v3.outstanding_receipt.is_some()),
+        v3.is_none_or(|v3| v3.outstanding_receipt.is_some()),
         "receipt must still be outstanding without the reconcile"
     );
     assert!(
@@ -265,7 +265,7 @@ async fn negative_control_without_reconcile_state_is_not_reconciled() {
 // DISABLED + unsettled -> provably not settled.
 #[tokio::test]
 async fn uncertain_without_commit_is_reconciled_when_enabled() {
-    let _lock = checkpoint_test_lock();
+    let _lock = checkpoint_test_lock().await;
     set_simulate_checkpoint_uncertain(false);
     let temp = tempfile::TempDir::new().unwrap();
     let name = repo_name(temp.path());
