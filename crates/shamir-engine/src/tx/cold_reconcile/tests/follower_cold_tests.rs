@@ -16,7 +16,7 @@ use crate::meta::repl_bookmark::load_clean_horizon;
 use crate::repo::{BoxRepoFactory, RepoInstance};
 use crate::table::TableConfig;
 use crate::tx::apply_replicated::follower_durability::test_seam::{self, Phase};
-use crate::tx::apply_replicated::{apply_replicated_batch, ApplyOutcome, ApplyPolicy};
+use crate::tx::apply_replicated::{apply_replicated_batch_legacy, ApplyOutcome, ApplyPolicy};
 use crate::tx::ReplicatedEvent;
 
 fn event(version: u64) -> ChangelogEvent {
@@ -115,7 +115,7 @@ async fn follower_batch_crash_points_certify_only_the_in_flight_batch() {
         );
         let repo = open(temp.path(), &name).await;
         assert_eq!(
-            apply_replicated_batch(&repo, &[replicated(1, 1)], 0, ApplyPolicy::Trusted)
+            apply_replicated_batch_legacy(&repo, &[replicated(1, 1)], 0, ApplyPolicy::Trusted)
                 .await
                 .expect("first batch applies"),
             ApplyOutcome::Applied { local_version: 1 }
@@ -124,7 +124,7 @@ async fn follower_batch_crash_points_certify_only_the_in_flight_batch() {
         *hook.park_at.lock().unwrap() = Some(phase);
         test_seam::install(&name, Arc::clone(&hook));
         let second_batch = [replicated(2, 2)];
-        let mut apply = Box::pin(apply_replicated_batch(
+        let mut apply = Box::pin(apply_replicated_batch_legacy(
             &repo,
             &second_batch,
             1,

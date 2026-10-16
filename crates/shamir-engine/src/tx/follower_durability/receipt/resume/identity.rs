@@ -22,6 +22,7 @@ use super::super::super::super::{prepare_event, reproject_for_downstream};
 use super::match_offered;
 use crate::meta::repl::bookmark::load_fence_record;
 use crate::meta::repl::{ReceiptBinding, ReplicationReceipt};
+use crate::repo::changelog_store::write_domain::RepoWritePermit;
 use crate::repo::RepoInstance;
 use crate::tx::ApplyPolicy;
 use crate::tx::ReplicatedEvent;
@@ -53,6 +54,7 @@ pub(crate) async fn verify_identity(
     info: &Arc<dyn Store>,
     receipt: &ReplicationReceipt,
     offered: &[ReplicatedEvent],
+    permit: &RepoWritePermit,
 ) -> DbResult<()> {
     // (i) fence identity.
     let fence = load_fence_record(info).await?;
@@ -115,6 +117,7 @@ pub(crate) async fn verify_identity(
             &event.field_bindings,
             receipt.predecessor_bookmark,
             ApplyPolicy::default(),
+            Some(permit),
         )
         .await?
         {

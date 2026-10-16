@@ -771,6 +771,24 @@ impl RepoTxGate {
         }
     }
 
+    /// S5c-X PR6b-2 (cold-start restore): record that `version` was
+    /// materialized into history WITHOUT going through
+    /// [`assign_next_version`](Self::assign_next_version) (the follower
+    /// receipt's direct `materialize_committed_to_history` call). Advances
+    /// [`version_allocation_high_water_mark`](Self::version_allocation_high_water_mark)
+    /// to at least `version` (monotonic `fetch_max` — never regresses a
+    /// counter advanced by a concurrent allocator). Read paths use
+    /// `watermark > floor` to detect the materialize→publish window and
+    /// bound their cold history seeks at the floor; without this bump the
+    /// window is undetectable when a store drains receipts directly on a
+    /// gate whose allocator never armed a version guard.
+    pub fn observe_materialized_version(&self, version: u64) {
+        // AcqRel matches the allocator pair in `assign_next_version`: a
+        // reader whose Acquire load observes the bumped watermark must also
+        // observe the durable history writes sequenced before the bump.
+        self.version_counter.fetch_max(version, Ordering::AcqRel);
+    }
+
     /// Sync `last_committed_version` from the completion tracker's watermark.
     ///
     /// Called after `completion.mark(version, Materialized)` on the tx commit

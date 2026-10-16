@@ -419,6 +419,7 @@ pub(crate) fn journal_records(receipt: &ReplicationReceipt) -> DbResult<Vec<(u64
 /// pending map; the rest is pure RAM.
 async fn compute_counters(
     repo: &RepoInstance,
+    permit: &RepoWritePermit,
     events: &[EventOps],
 ) -> DbResult<Vec<ReceiptCounterDelta>> {
     // First-seen table order.
@@ -434,7 +435,7 @@ async fn compute_counters(
 
     let mut counters = Vec::with_capacity(order.len());
     for table in order {
-        let counter = Arc::clone(repo.get_table(&table).await?.counter());
+        let counter = Arc::clone(repo.get_table_admitted(&table, permit).await?.counter());
         let before = counter.get().await?;
         let token = crate::table::table_manager::table_token_for(&table);
         let mvcc: Arc<MvccStore> = repo
@@ -506,6 +507,7 @@ async fn compute_counters(
 /// pre-state, attach them, and encode the Materialized receipt.
 pub(crate) async fn materialize_from_plan(
     repo: &RepoInstance,
+    permit: &RepoWritePermit,
     plan: &mut BatchPlan,
 ) -> DbResult<MaterializedWork> {
     let events: Vec<EventOps> = plan
@@ -520,7 +522,7 @@ pub(crate) async fn materialize_from_plan(
                 .collect(),
         })
         .collect();
-    let counters = compute_counters(repo, &events).await?;
+    let counters = compute_counters(repo, permit, &events).await?;
     set_counters(plan, counters.clone());
     let mut receipt = plan.receipt.clone();
     receipt.phase = ReceiptPhase::Materialized;
@@ -545,10 +547,11 @@ pub(crate) async fn materialize_from_plan(
 /// counters the same way the fresh path would have (nothing was published).
 pub(crate) async fn materialize_from_prepared_receipt(
     repo: &RepoInstance,
+    permit: &RepoWritePermit,
     receipt: &ReplicationReceipt,
 ) -> DbResult<MaterializedWork> {
     let events = materialize_ops_from_receipt(receipt)?;
-    let counters = compute_counters(repo, &events).await?;
+    let counters = compute_counters(repo, permit, &events).await?;
     let mut rewritten = receipt.clone();
     rewritten.counters = counters.clone();
     rewritten.phase = ReceiptPhase::Materialized;

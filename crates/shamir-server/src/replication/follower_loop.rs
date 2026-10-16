@@ -520,7 +520,10 @@ async fn run_follower_loop_internal(
             continue;
         }
 
-        match shamir_db::engine::tx::apply_replicated::apply_replicated_batch(
+        // Legacy v1/v2 follower path (no receipt routing). The receipt
+        // activation is PR6b-3's switch; until then the server's legacy
+        // loop must stay on the legacy entry.
+        match shamir_db::engine::tx::apply_replicated::apply_replicated_batch_legacy(
             &repo_instance,
             &events,
             bookmark,

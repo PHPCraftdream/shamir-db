@@ -1300,7 +1300,9 @@ impl MvccStore {
     /// C2: flip get_current to the single version log. Returns `None` for
     /// tombstones (empty value) and absent keys. Cold-start: when the cell is
     /// absent (`current_version == 0`), scans the log for the latest version
-    /// via the publication-bounded `seek_latest_published`.
+    /// via `seek_latest_published`, bounded at the published floor ONLY while
+    /// the receipt's materialize→publish window is open (see the cold-path
+    /// comment in [`get_current_bytes`](Self::get_current_bytes)).
     ///
     /// R3 — MVCC pre-floor: reads are capped at the committed floor
     /// (`gate.last_committed()`). Versions above the floor are not yet
@@ -1325,27 +1327,39 @@ impl MvccStore {
         let v = if cur_v > 0 {
             cur_v
         } else {
-            // Cold-start: the cell is absent. `seek_latest_published` scans
-            // history bounded at the floor; an overlay-only key (committed
-            // but not yet drained) is invisible to that scan. P1b: also
-            // consult the overlay so an overlay-only key is found.
+            // Cold-start: the cell is absent. The history scan resolves the
+            // key's latest version; an overlay-only key (committed but not
+            // yet drained) is invisible to that scan. P1b: also consult the
+            // overlay so an overlay-only key is found.
             //
-            // I3 (history readers must not expose materialized-but-unpublished
-            // versions): both probes are capped at the published floor. There
-            // is NO floor==0 bootstrap exemption: versions start at 1, so
-            // floor 0 means nothing is published yet, and every path that
-            // writes history rows above 0 either raises the floor in the same
-            // step (leader `write_committed_to_history`) or persists the
-            // recovery marker first (`reserve_floor`) so a restart re-seeds
-            // the floor before serving. A floor-0 gate with durable rows is
-            // therefore only the follower receipt's materialize→publish
-            // window, and those rows must stay invisible here.
-            // Round 4: the bound lives in the SCAN RANGE (≤ floor), not in a
-            // post-filter of the global max — post-filtering let the newest
-            // UNPUBLISHED version blind the scan to older PUBLISHED rows
-            // (hist_v → None → key read as absent).
-            let ov_cap = floor;
-            let hist_v = self.seek_latest_published(key, floor).await?;
+            // S5c-X PR6b-2 (cold-start restore) — the publication bound
+            // applies ONLY to receipt-unpublished versions. The receipt
+            // window is detectable as `version_allocation_high_water_mark()
+            // > floor`: a version was ALLOCATED (and, per
+            // `materialize_committed_to_history`'s
+            // `observe_materialized_version` bump, durably written to
+            // history) but the floor was not raised to it yet. In that
+            // window the scan is bounded at the floor so materialized-but-
+            // unpublished rows stay invisible (I3) while older published
+            // rows still surface (the bound is in the scan RANGE, so an
+            // unpublished newest version cannot blind the scan).
+            //
+            // When `watermark == floor` no materialized-but-unpublished
+            // version CAN exist, and master's cold-start semantics are
+            // restored verbatim: an UNBOUNDED scan (`u64::MAX` cap) and the
+            // bootstrap overlay cap. This is the branch every plain-MVCC
+            // user takes — including floor 0, where the old unconditional
+            // bound made all committed history invisible
+            // (`c2_cold_start_seek` / `get_current_many_cold_start`).
+            let watermark = self.gate.version_allocation_high_water_mark();
+            let bounded = watermark > floor;
+            let hist_cap = if bounded { floor } else { u64::MAX };
+            let ov_cap = if bounded || floor > 0 {
+                floor
+            } else {
+                u64::MAX
+            };
+            let hist_v = self.seek_latest_published(key, hist_cap).await?;
             let ov_v = self.overlay.newest_visible(key, ov_cap).map(|(ver, _)| ver);
             // Cold path: `seed_version` takes an owned `RecordKey`. Build it
             // inline from the borrowed slice (alloc-free for the ≤23-byte
@@ -1369,12 +1383,14 @@ impl MvccStore {
                 (None, None) => return Ok(None),
             }
         };
-        // R3 + I3: if the resolved version exceeds the committed floor, fall
-        // back to a snapshot read at the floor (range-scan for newest <= floor
-        // — overlay-aware via resolve_read). There is no floor==0 exemption:
-        // versions start at 1, so a floor of 0 makes every version invisible
-        // (see the I3 comment in the cold path above).
-        if v > floor {
+        // R3: if the committed floor is non-zero (gate initialized) and the
+        // resolved version exceeds it, fall back to snapshot read at the
+        // floor (range-scan for newest <= floor — overlay-aware via
+        // resolve_read). Floor == 0 means bootstrap / recovery — no
+        // visibility restriction applied (master semantics; in the bounded
+        // receipt window the scan caps below the floor anyway, so the extra
+        // conjunct never changes the outcome there).
+        if floor > 0 && v > floor {
             return self.get_at(key, floor).await;
         }
         // P1b: overlay-probe BEFORE the durable log for the exact `(key, v)`.
@@ -1575,11 +1591,14 @@ impl MvccStore {
                 continue;
             }
             // R3 floor-cap: version above the committed floor is not yet
-            // visible — same rule as the point read. No `floor > 0`
-            // exemption: at floor 0 every version is above the floor and
-            // must route to the (publication-bounded) cold path instead of
-            // being served raw.
-            if cur_v > floor {
+            // visible — same rule as the point read. S5c-X PR6b-2 (cold-
+            // start restore): master's `floor > 0` bootstrap exemption is
+            // restored UNLESS the receipt window is open (watermark > floor
+            // — a materialized-but-unpublished version may exist), in which
+            // case the cap applies even at floor 0.
+            if cur_v > floor
+                && (floor > 0 || self.gate.version_allocation_high_water_mark() > floor)
+            {
                 slots.push(Slot::FloorExceeded);
                 continue;
             }
