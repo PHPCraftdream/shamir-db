@@ -7,4 +7,3 @@ pub(crate) mod lookup;
 pub(crate) mod worker;
 
 pub(crate) use lookup::{lookup, match_offered, tail_events};
-pub(crate) use worker::{ReceiptApplyJob, ReceiptLease};

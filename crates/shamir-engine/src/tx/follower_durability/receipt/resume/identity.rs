@@ -18,11 +18,12 @@ use shamir_collections::TFxMap;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::Store;
 
-use super::super::super::{prepare_event, reproject_for_downstream, ApplyPolicy};
+use super::super::super::super::{prepare_event, reproject_for_downstream};
 use super::match_offered;
 use crate::meta::repl::bookmark::load_fence_record;
 use crate::meta::repl::{ReceiptBinding, ReplicationReceipt};
 use crate::repo::RepoInstance;
+use crate::tx::ApplyPolicy;
 use crate::tx::ReplicatedEvent;
 
 /// Full four-part identity check between an outstanding receipt and the
