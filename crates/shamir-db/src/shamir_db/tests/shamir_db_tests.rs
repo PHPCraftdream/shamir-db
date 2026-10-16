@@ -70,12 +70,12 @@ async fn test_remove_db() {
     assert_eq!(shamir.db_count(), 1);
 
     // Remove existing
-    let removed = shamir.remove_db("production").await;
+    let removed = shamir.remove_db("production").await.unwrap();
     assert!(removed);
     assert_eq!(shamir.db_count(), 0);
 
     // Remove non-existent
-    let removed = shamir.remove_db("production").await;
+    let removed = shamir.remove_db("production").await.unwrap();
     assert!(!removed);
 }
 
@@ -84,7 +84,7 @@ async fn test_remove_system_db_forbidden() {
     let shamir = ShamirDb::init_memory().await.unwrap();
 
     // Cannot remove system DB
-    let removed = shamir.remove_db("__system__").await;
+    let removed = shamir.remove_db("__system__").await.unwrap();
     assert!(!removed);
 }
 
@@ -202,16 +202,16 @@ async fn test_remove_repo_from_shamir_db() {
     assert!(db.has_repo("users_db"));
 
     // Remove repo
-    let removed = shamir.remove_repo("production", "users_db").await;
+    let removed = shamir.remove_repo("production", "users_db").await.unwrap();
     assert!(removed);
     assert!(!db.has_repo("users_db"));
 
     // Remove non-existent repo
-    let removed = shamir.remove_repo("production", "users_db").await;
+    let removed = shamir.remove_repo("production", "users_db").await.unwrap();
     assert!(!removed);
 
     // Remove from non-existent db
-    let removed = shamir.remove_repo("nonexistent", "users_db").await;
+    let removed = shamir.remove_repo("nonexistent", "users_db").await.unwrap();
     assert!(!removed);
 }
 

@@ -4,8 +4,8 @@
 
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl::{
-    alter_subscription, drop_subscription, list_subscriptions, repl_scope, replication_profile,
-    subscription,
+    alter_subscription, drop_replication_profile, drop_subscription, list_subscriptions,
+    repl_scope, replication_profile, subscription,
 };
 use shamir_query_builder::doc;
 use shamir_query_builder::write::insert;
@@ -166,198 +166,13 @@ async fn t3_describe_and_status_stay_readable() {
     assert_eq!(row.get("name").and_then(|v| v.as_str()), Some("sub"));
 }
 
-/// Unix-only recovery helpers: `SeedImageWriter::begin` (and the whole
-/// seed-install path) refuses non-Unix targets, so every helper touching the
-/// real installer is compiled out on Windows/macOS — the refusal-only test
-/// legs below still run everywhere.
-#[cfg(unix)]
-mod recovery {
-    use std::sync::Arc;
-
-    use async_trait::async_trait;
-    use shamir_engine::meta::repo_identity::RepoIdentity;
-    use shamir_engine::repo::{SeedImageWriter, SeedReceipt, SeedTable};
-    use shamir_query_builder::batch::Batch;
-    use shamir_query_builder::doc;
-    use shamir_query_types::admin::{
-        CreatePublicationOp, CreateSubscriptionOp, ReplDirection, ReplMode, ReplScope, ReplStream,
-    };
-    use shamir_query_types::wire::repl::{ReplRepoInfo, ReplResponse};
-    use shamir_types::codecs::interned::query_value_to_inner_with;
-    use shamir_types::codecs::CodecError;
-    use shamir_types::core::interner::InternerKey;
-    use shamir_types::types::record_id::RecordId;
-
-    use crate::{ResumeProbe, SeedRefusal, ShamirDb};
-
-    struct HelloProbe(ReplResponse);
-
-    #[async_trait]
-    impl ResumeProbe for HelloProbe {
-        async fn hello(&self, _: &str) -> Result<ReplResponse, SeedRefusal> {
-            Ok(self.0.clone())
-        }
-    }
-
-    /// The receipt the real installer binds on the replacement seed: fresh
-    /// staging for `testdb/main`, lineage `[1; 16]`, epoch 2, version 1.
-    fn replacement_receipt() -> SeedReceipt {
-        SeedReceipt {
-            artifact_digest: "a".repeat(64),
-            source_db: "testdb".into(),
-            source_repo: "main".into(),
-            source_identity: RepoIdentity {
-                lineage_id: [1; 16],
-                history_epoch: 2,
-            },
-            schema_digest: "b".repeat(64),
-            source_version: 1,
-            local_baseline: 1,
-        }
-    }
-
-    /// An upstream Hello consistent with [`replacement_receipt`] and the
-    /// fresh (bookmark 0) destination: no gap horizon, settled at the
-    /// receipt's `source_version`.
-    pub(super) fn matching_hello() -> ReplResponse {
-        ReplResponse::Hello {
-            leader_epoch: 1,
-            repos: vec![ReplRepoInfo {
-                db: "testdb".into(),
-                repo: "main".into(),
-                current_version: 1,
-                journal_floor: 0,
-                repo_lineage_id: Some([1; 16]),
-                history_epoch: Some(2),
-                gap_first: None,
-                gap_through: None,
-                schema_digest: Some("b".repeat(64)),
-                settled_version: Some(1),
-                publications: vec![CreatePublicationOp {
-                    create_publication: "pub".into(),
-                    scopes: vec![ReplScope {
-                        db: "testdb".into(),
-                        repo: Some("main".into()),
-                        table: None,
-                    }],
-                }],
-            }],
-        }
-    }
-
-    pub(super) fn probe() -> Arc<dyn ResumeProbe> {
-        Arc::new(HelloProbe(matching_hello()))
-    }
-
-    /// Source-interner field ids for the single replacement `users` row (the
-    /// ids are arbitrary — `SeedImageWriter::binding` remaps them to the
-    /// destination repo's local interner).
-    const NAME_SOURCE_ID: u64 = 100;
-    const AGE_SOURCE_ID: u64 = 101;
-
-    /// The REAL recovery procedure, installer steps only (the caller DROPs
-    /// every quarantined subscription covering the destination first): build
-    /// a fresh destination image with `SeedImageWriter` (fresh staging,
-    /// `users` inventory carrying ONE replacement row), then run
-    /// `install_seed_profile` + `install_seed_subscription` — which create a
-    /// FRESH paused subscription row bound to the NEW receipt, no marker.
-    ///
-    /// The row key MUST be a real 16-byte `RecordId`: ordinary table reads
-    /// decode every stored key as a 16-byte `RecordId` and silently skip
-    /// keys that do not fit (`shamir-engine/src/table/table.rs
-    /// `decode_raw_batch`), so an opaque key would make the row invisible to
-    /// every scan. `RecordId::system` is deterministic, so the key is
-    /// identical across the fjall reopen in the restart test.
-    pub(super) async fn install_replacement_seed(shamir: &ShamirDb, sub: &str) {
-        let repo = shamir.get_db("testdb").unwrap().get_repo("main").unwrap();
-        let receipt = replacement_receipt();
-        let mut writer = SeedImageWriter::begin(
-            repo.clone(),
-            receipt.clone(),
-            vec![SeedTable {
-                name: "users".into(),
-                live_records: 1,
-            }],
-        )
-        .await
-        .unwrap();
-        writer.binding(NAME_SOURCE_ID, "name").await.unwrap();
-        writer.binding(AGE_SOURCE_ID, "age").await.unwrap();
-        let row = query_value_to_inner_with(
-            &doc! { "name" => "replacement", "age" => 1 }.into(),
-            &|key| match key {
-                "name" => Ok(InternerKey::new(NAME_SOURCE_ID)),
-                "age" => Ok(InternerKey::new(AGE_SOURCE_ID)),
-                other => Err(CodecError::Decode(format!(
-                    "unexpected replacement row field: {other}"
-                ))),
-            },
-        )
-        .unwrap();
-        writer
-            .row(
-                0,
-                RecordId::system("replacement").to_bytes(),
-                row.to_bytes().unwrap(),
-            )
-            .await
-            .unwrap();
-        writer.finish(&[]).await.unwrap();
-        // Persist the `users` table to the table catalogue: the writer only
-        // registers it on the RUNNING repo instance, so without this the
-        // table would not exist after a restart (I.2 boot reload reads the
-        // catalogue, not the seed inventory).
-        shamir
-            .add_table("testdb", "main", "users", false)
-            .await
-            .unwrap();
-        let streams = vec![ReplStream {
-            scope: ReplScope {
-                db: "testdb".into(),
-                repo: Some("main".into()),
-                table: None,
-            },
-            direction: ReplDirection::Pull,
-            mode: ReplMode::ReadOnly,
-        }];
-        shamir.install_seed_profile("prof", &streams).await.unwrap();
-        shamir
-            .install_seed_subscription(
-                &repo,
-                &receipt,
-                &CreateSubscriptionOp {
-                    create_subscription: sub.to_string(),
-                    upstream: "tcp://peer:9000".into(),
-                    publication: "pub".into(),
-                    profile: "prof".into(),
-                    paused: true,
-                },
-            )
-            .await
-            .unwrap();
-    }
-
-    /// Admin `DROP SUBSCRIPTION` through the batch path.
-    pub(super) async fn drop_subscription(shamir: &ShamirDb, id: u64, sub: &str) {
-        let mut b = Batch::new();
-        b.id(id);
-        b.op("drop", shamir_query_builder::ddl::drop_subscription(sub));
-        shamir
-            .execute("testdb", &b.to_request_via_msgpack())
-            .await
-            .unwrap();
-    }
-}
-
 /// Plain `Resume` of a quarantined subscription is refused with code
 /// "resync_required", so is PAUSE (the durable `quarantined` marker survives
-/// state changes), and reads stay refused; the REAL recovery procedure —
-/// DROP the quarantined subscription, install a replacement seed through the
-/// REAL installer (fresh paused receipt-bound row, no marker), then Resume —
-/// succeeds and reads return again. The recovery half is Unix-only
-/// (`SeedImageWriter` refuses non-Unix); the refusal half runs everywhere.
+/// state changes), and reads stay refused. S5c-X PR8b-2: DROP is refused too
+/// — dropping is not evidence that the destination's data became consistent
+/// (follow the reseed runbook instead).
 #[tokio::test]
-async fn t4_resume_requires_replacement_seed_then_succeeds() {
+async fn t4_every_admin_action_including_drop_is_refused_while_quarantined() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     let db = shamir.create_db("testdb").await;
     // No tables here: the installed seed image carries the `users` table
@@ -379,25 +194,17 @@ async fn t4_resume_requires_replacement_seed_then_succeeds() {
     // Reads stay refused.
     assert!(read_users(&shamir, "main").await.is_err());
 
-    #[cfg(unix)]
-    {
-        // Real recovery: DROP the quarantined subscription, then install the
-        // replacement seed through the REAL installer.
-        recovery::drop_subscription(&shamir, 6, "sub").await;
-        recovery::install_replacement_seed(&shamir, "sub").await;
-        shamir.set_replication_resume_probe(recovery::probe());
-        // Resume of the fresh paused receipt-bound row SUCCEEDS, and the
-        // replacement seed's single `users` row is served.
-        resume_subscription(&shamir, 7, "sub").await.unwrap();
-        let resp = read_users(&shamir, "main").await.unwrap();
-        assert_eq!(resp.results["r"].records.len(), 1);
-        let row = resp.results["r"].records[0].as_value().into_owned();
-        assert_eq!(
-            row.get("name").and_then(|v| v.as_str()),
-            Some("replacement")
-        );
-        assert_eq!(row.get("age").and_then(|v| v.as_i64()), Some(1));
-    }
+    // S5c-X PR8b-2: DROP of the quarantined subscription is refused with the
+    // typed code and does not mutate the row.
+    let mut b = Batch::new();
+    b.id(6);
+    b.try_op("drop", drop_subscription("sub")).unwrap();
+    let err = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("resync_required"), "{err}");
+    assert!(read_users(&shamir, "main").await.is_err());
 }
 
 /// A non-replicated repo in the same db stays readable while `main` is
@@ -433,16 +240,14 @@ async fn t5_healthy_and_non_replicated_repos_unaffected() {
     assert!(read_users(&shamir, "main").await.is_err());
 }
 
-/// The quarantine survives a full drop-and-reopen cycle on the same durable
-/// backing store (cache rebuilt from the persisted rows at init). The repo is
+/// The quarantine survives a full reopen cycle on the same durable backing
+/// store (cache rebuilt from the persisted rows at init). The repo is
 /// registered through the PERSISTING facade (`ShamirDb::add_repo`), so after
 /// the restart it is reloaded from the catalogue (regression: `DbInstance::
 /// add_repo` alone does not persist the repo row, and the post-restart
-/// `get_repo` panicked on CI). Two subscriptions cover the repo: on Unix both
-/// are DROPped pre-restart and the replacement seed (receipt + one data row,
-/// all inside the durable fjall repo) is installed BEFORE the restart; after
-/// the restart the receipt-bound Resume succeeds and the replacement row is
-/// served. On non-Unix (no installer) both rows stay quarantined across the
+/// `get_repo` panicked on CI). S5c-X PR8b-2: the DROP of a quarantined
+/// subscription is refused before the restart AND after it — dropping is not
+/// evidence of consistency — so both rows stay quarantined across the
 /// restart: reads stay refused and the second row's Resume is refused too.
 #[tokio::test]
 async fn t6_quarantine_survives_restart() {
@@ -456,8 +261,7 @@ async fn t6_quarantine_survives_restart() {
             .unwrap();
         shamir.create_db("testdb").await;
         // Durable repo, persisted via the facade so the boot reload finds the
-        // catalogue row. No inline tables: the installed seed image carries
-        // the `users` table (writer registration + catalogue write).
+        // catalogue row.
         shamir
             .add_repo(
                 "testdb",
@@ -466,41 +270,21 @@ async fn t6_quarantine_survives_restart() {
             .await
             .unwrap();
         quarantine(&shamir, "sub", "prof", "main").await;
-        // A SECOND subscription covering the same repo, quarantined too —
-        // it carries the read refusal while the first is dropped, and on
-        // non-Unix it is the one that survives the restart.
+        // A SECOND subscription covering the same repo, quarantined too.
         quarantine(&shamir, "sub2", "prof2", "main").await;
         assert!(read_users(&shamir, "main").await.is_err());
 
-        // DROP the first subscription (real recovery step 1); the second
-        // still quarantines the repo, so reads stay refused.
+        // S5c-X PR8b-2: DROP of a quarantined subscription is refused —
+        // there is no drop-and-reinstall recovery anymore.
         let mut b = Batch::new();
         b.id(3);
-        b.op("drop", drop_subscription("sub"));
-        shamir
+        b.try_op("drop", drop_subscription("sub")).unwrap();
+        let err = shamir
             .execute("testdb", &b.to_request_via_msgpack())
             .await
-            .unwrap();
+            .unwrap_err();
+        assert_eq!(err.code(), Some("resync_required"), "{err}");
         assert!(read_users(&shamir, "main").await.is_err());
-
-        #[cfg(unix)]
-        {
-            // The second owner must go pre-restart: it would be a
-            // CompetingOwner for the replacement receipt. After this DROP the
-            // repo is NOT quarantined anymore — no refusal assertion here.
-            let mut b = Batch::new();
-            b.id(4);
-            b.op("drop2", drop_subscription("sub2"));
-            shamir
-                .execute("testdb", &b.to_request_via_msgpack())
-                .await
-                .unwrap();
-            // Install BEFORE the restart: `SeedImageWriter::begin` needs
-            // fresh staging (true on the just-created fjall repo) and the
-            // Complete receipt + data live in the fjall directory, which
-            // survives the drop-and-reopen.
-            recovery::install_replacement_seed(&shamir, "sub").await;
-        }
     }
 
     // Reopen with a bounded retry (fjall releases its lock a few ms after
@@ -524,32 +308,12 @@ async fn t6_quarantine_survives_restart() {
         "testdb/main must be re-registered from the catalogue after restart"
     );
 
-    #[cfg(unix)]
-    {
-        // The receipt AND the replacement data survived the restart: Resume
-        // validates the bound receipt against the repo's installed receipt,
-        // and the read serves the seeded row.
-        shamir.set_replication_resume_probe(recovery::probe());
-        resume_subscription(&shamir, 8, "sub").await.unwrap();
-        let resp = read_users(&shamir, "main").await.unwrap();
-        assert_eq!(resp.results["r"].records.len(), 1);
-        let row = resp.results["r"].records[0].as_value().into_owned();
-        assert_eq!(
-            row.get("name").and_then(|v| v.as_str()),
-            Some("replacement")
-        );
-        assert_eq!(row.get("age").and_then(|v| v.as_i64()), Some(1));
-    }
-    #[cfg(not(unix))]
-    {
-        // No installer on non-Unix: both subscriptions are still quarantined
-        // across the restart — reads stay refused (sub2's durable marker).
-        let err = read_users(&shamir, "main").await.unwrap_err();
-        assert_eq!(err.code(), Some("resync_required"));
-        // And the still-quarantined row's Resume stays refused after restart.
-        let err = resume_subscription(&shamir, 6, "sub2").await.unwrap_err();
-        assert_eq!(err.code(), Some("resync_required"));
-    }
+    // Both subscriptions are still quarantined across the restart — reads
+    // stay refused and the row's Resume stays refused too.
+    let err = read_users(&shamir, "main").await.unwrap_err();
+    assert_eq!(err.code(), Some("resync_required"));
+    let err = resume_subscription(&shamir, 6, "sub2").await.unwrap_err();
+    assert_eq!(err.code(), Some("resync_required"));
 }
 
 /// Negative control: with the test seam set, the quarantined read is SERVED
@@ -738,4 +502,311 @@ async fn t12_gated_journal_source_refuses_once_quarantined() {
         .await
         .unwrap()
         .is_some());
+}
+
+/// Unix-only recovery helpers: `SeedImageWriter::begin` (and the whole
+/// seed-install path) refuses non-Unix targets, so every helper touching the
+/// real installer is compiled out on Windows/macOS.
+#[cfg(unix)]
+mod recovery {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use shamir_engine::meta::repo_identity::RepoIdentity;
+    use shamir_engine::repo::{SeedImageWriter, SeedReceipt, SeedTable};
+    use shamir_query_types::admin::{
+        CreatePublicationOp, CreateSubscriptionOp, ReplDirection, ReplMode, ReplScope, ReplStream,
+    };
+    use shamir_query_types::wire::repl::{ReplRepoInfo, ReplResponse};
+    use shamir_types::codecs::interned::query_value_to_inner_with;
+    use shamir_types::codecs::CodecError;
+    use shamir_types::core::interner::InternerKey;
+    use shamir_types::types::record_id::RecordId;
+
+    use crate::{ResumeProbe, SeedRefusal, ShamirDb};
+
+    struct HelloProbe(ReplResponse);
+
+    #[async_trait]
+    impl ResumeProbe for HelloProbe {
+        async fn hello(&self, _: &str) -> Result<ReplResponse, SeedRefusal> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// The receipt the real installer binds on the replacement seed: fresh
+    /// staging for `testdb/main`, lineage `[1; 16]`, epoch 2, version 1.
+    fn replacement_receipt() -> SeedReceipt {
+        SeedReceipt {
+            artifact_digest: "a".repeat(64),
+            source_db: "testdb".into(),
+            source_repo: "main".into(),
+            source_identity: RepoIdentity {
+                lineage_id: [1; 16],
+                history_epoch: 2,
+            },
+            schema_digest: "b".repeat(64),
+            source_version: 1,
+            local_baseline: 1,
+        }
+    }
+
+    /// An upstream Hello consistent with [`replacement_receipt`] and the
+    /// fresh (bookmark 0) destination: no gap horizon, settled at the
+    /// receipt's `source_version`.
+    pub(super) fn matching_hello() -> ReplResponse {
+        ReplResponse::Hello {
+            leader_epoch: 1,
+            repos: vec![ReplRepoInfo {
+                db: "testdb".into(),
+                repo: "main".into(),
+                current_version: 1,
+                journal_floor: 0,
+                repo_lineage_id: Some([1; 16]),
+                history_epoch: Some(2),
+                gap_first: None,
+                gap_through: None,
+                schema_digest: Some("b".repeat(64)),
+                settled_version: Some(1),
+                publications: vec![CreatePublicationOp {
+                    create_publication: "pub".into(),
+                    scopes: vec![ReplScope {
+                        db: "testdb".into(),
+                        repo: Some("main".into()),
+                        table: None,
+                    }],
+                }],
+            }],
+        }
+    }
+
+    pub(super) fn probe() -> Arc<dyn ResumeProbe> {
+        Arc::new(HelloProbe(matching_hello()))
+    }
+
+    /// Source-interner field ids for the single replacement `users` row (the
+    /// ids are arbitrary — `SeedImageWriter::binding` remaps them to the
+    /// destination repo's local interner).
+    const NAME_SOURCE_ID: u64 = 100;
+    const AGE_SOURCE_ID: u64 = 101;
+
+    /// The REAL recovery procedure (S5c-X verdict evidence row 9): build a
+    /// replacement seed image with `SeedImageWriter` (bumped
+    /// `history_epoch`, fresh staging, `users` inventory carrying ONE
+    /// replacement row), then run `install_seed_profile` +
+    /// `install_seed_subscription` over the EXISTING (quarantined) row —
+    /// same name/upstream/publication/profile, `paused: true`. The installer
+    /// rebinding writes the NEW receipt onto the row WITHOUT clearing the
+    /// quarantine; only a post-reseed `Resume` lifts it.
+    pub(super) async fn install_replacement_seed(shamir: &ShamirDb, sub: &str) {
+        let repo = shamir.get_db("testdb").unwrap().get_repo("main").unwrap();
+        let receipt = replacement_receipt();
+        let mut writer = SeedImageWriter::begin(
+            repo.clone(),
+            receipt.clone(),
+            vec![SeedTable {
+                name: "users".into(),
+                live_records: 1,
+            }],
+        )
+        .await
+        .unwrap();
+        writer.binding(NAME_SOURCE_ID, "name").await.unwrap();
+        writer.binding(AGE_SOURCE_ID, "age").await.unwrap();
+        let row = query_value_to_inner_with(
+            &doc! { "name" => "replacement", "age" => 1 }.into(),
+            &|key| match key {
+                "name" => Ok(InternerKey::new(NAME_SOURCE_ID)),
+                "age" => Ok(InternerKey::new(AGE_SOURCE_ID)),
+                other => Err(CodecError::Decode(format!(
+                    "unexpected replacement row field: {other}"
+                ))),
+            },
+        )
+        .unwrap();
+        writer
+            .row(
+                0,
+                RecordId::system("replacement").to_bytes(),
+                row.to_bytes().unwrap(),
+            )
+            .await
+            .unwrap();
+        writer.finish(&[]).await.unwrap();
+        // Persist the `users` table to the table catalogue: the writer only
+        // registers it on the RUNNING repo instance.
+        shamir
+            .add_table("testdb", "main", "users", false)
+            .await
+            .unwrap();
+        let streams = vec![ReplStream {
+            scope: ReplScope {
+                db: "testdb".into(),
+                repo: Some("main".into()),
+                table: None,
+            },
+            direction: ReplDirection::Pull,
+            mode: ReplMode::ReadOnly,
+        }];
+        shamir.install_seed_profile("prof", &streams).await.unwrap();
+        shamir
+            .install_seed_subscription(
+                &repo,
+                &receipt,
+                &CreateSubscriptionOp {
+                    create_subscription: sub.to_string(),
+                    upstream: "tcp://peer:9000".into(),
+                    publication: "pub".into(),
+                    profile: "prof".into(),
+                    paused: true,
+                },
+            )
+            .await
+            .unwrap();
+    }
+}
+
+/// The sanctioned recovery path (S5c-X verdict evidence row 9, Unix-only):
+/// quarantine via the real supervisor entry point; the typed read refusal and
+/// a plain `Resume` refusal while no replacement seed exists; then the REAL
+/// `install_seed_subscription` rebinds a NEW receipt on the EXISTING
+/// quarantined row (the row is STILL quarantined — reads stay refused);
+/// finally `Resume` through the admin batch activates the row, clears the
+/// durable marker, and the bound destination serves the replacement seed's
+/// row while the unrelated `side` repo stays readable throughout.
+#[cfg(unix)]
+#[tokio::test]
+async fn t13_replacement_seed_rebinds_quarantined_row_then_resume() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let db = shamir.create_db("testdb").await;
+    // No tables on `main` here: the installed seed image carries the `users`
+    // table inventory. `side` is an unrelated, always-readable repo.
+    db.add_repo(RepoConfig::new("main", BoxRepoFactory::in_memory()))
+        .await
+        .unwrap();
+    db.add_repo(
+        RepoConfig::new("side", BoxRepoFactory::in_memory())
+            .add_table(crate::engine::table::TableConfig::new("users")),
+    )
+    .await
+    .unwrap();
+    assert!(read_users(&shamir, "side").await.is_ok());
+    quarantine(&shamir, "sub", "prof", "main").await;
+
+    // Bound destination refuses reads with the typed code, and a plain
+    // `Resume` is refused (no replacement seed yet). `side` stays readable.
+    let err = read_users(&shamir, "main").await.unwrap_err();
+    assert_eq!(err.code(), Some("resync_required"));
+    let err = resume_subscription(&shamir, 4, "sub").await.unwrap_err();
+    assert_eq!(err.code(), Some("resync_required"));
+    assert!(read_users(&shamir, "side").await.is_ok());
+
+    // Real recovery: the OFFLINE installer rebinds the NEW receipt on the
+    // EXISTING quarantined row (same name/upstream/publication/profile).
+    recovery::install_replacement_seed(&shamir, "sub").await;
+
+    // The row now carries the NEW receipt but is STILL quarantined: marker
+    // intact, state still `resync_required`, baseline receipt still the
+    // original (absent) one, and reads stay refused. Read the RAW catalogue
+    // row (`rows` is the same helper the installer itself uses — status/list
+    // only project a subset of fields).
+    let records = super::super::catalogue::rows(&shamir, "subscriptions")
+        .await
+        .unwrap();
+    let row = records
+        .iter()
+        .find(|r| r.get("name").and_then(|v| v.as_str()) == Some("sub"))
+        .unwrap();
+    assert_eq!(
+        row.get("state").and_then(|v| v.as_str()),
+        Some("resync_required")
+    );
+    assert_eq!(row.get("quarantined").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        row["seed_receipt"]["source_identity"]["history_epoch"].as_u64(),
+        Some(2),
+        "row must carry the REPLACEMENT receipt (history_epoch 2)"
+    );
+    assert!(row
+        .get("resync_from_receipt")
+        .map(|v| v.is_null())
+        .unwrap_or(false));
+    let err = read_users(&shamir, "main").await.unwrap_err();
+    assert_eq!(err.code(), Some("resync_required"));
+    assert!(read_users(&shamir, "side").await.is_ok());
+
+    // Post-reseed `Resume` through the admin batch now SUCCEEDS: the row is
+    // active, the durable marker is cleared, and the bound destination
+    // serves the replacement seed's single `users` row.
+    shamir.set_replication_resume_probe(recovery::probe());
+    resume_subscription(&shamir, 6, "sub").await.unwrap();
+    let resp = read_users(&shamir, "main").await.unwrap();
+    assert_eq!(resp.results["r"].records.len(), 1);
+    let served = resp.results["r"].records[0].as_value().into_owned();
+    assert_eq!(
+        served.get("name").and_then(|v| v.as_str()),
+        Some("replacement")
+    );
+    assert_eq!(served.get("age").and_then(|v| v.as_i64()), Some(1));
+    assert!(read_users(&shamir, "side").await.is_ok());
+}
+
+/// S5c-X PR8b-2 evidence row 3 (REOPEN leg): after quarantine, DROP the
+/// replication profile and REOPEN the persisted system store — the bound
+/// destination must STILL refuse with the typed code, because the durable
+/// binding on the row (not the profile) is the quarantine authority. Not
+/// Unix-gated: only the persisted store is exercised, no seed installer.
+#[tokio::test]
+async fn t14_bound_destination_stays_refused_after_profile_drop_and_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let sys_path = dir.path().join("meta");
+    let repo_path = dir.path().join("main");
+
+    {
+        let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
+            .await
+            .unwrap();
+        shamir.create_db("testdb").await;
+        shamir
+            .add_repo(
+                "testdb",
+                RepoConfig::new("main", BoxRepoFactory::fjall(repo_path.clone())),
+            )
+            .await
+            .unwrap();
+        quarantine(&shamir, "sub", "prof", "main").await;
+        assert!(read_users(&shamir, "main").await.is_err());
+
+        // Delete/corrupt the profile: DROP the replication profile the
+        // subscription was created against.
+        let mut b = Batch::new();
+        b.id(7);
+        b.op("drp", drop_replication_profile("prof"));
+        shamir
+            .execute("testdb", &b.to_request_via_msgpack())
+            .await
+            .unwrap();
+
+        // Still refused in-process — the binding outlived the profile.
+        let err = read_users(&shamir, "main").await.unwrap_err();
+        assert_eq!(err.code(), Some("resync_required"), "{err}");
+    }
+
+    // Reopen with the bounded fjall-lock retry (mirrors `durable_repo_tests`).
+    let mut shamir = None;
+    for _ in 0..100 {
+        match ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone())).await {
+            Ok(opened) => {
+                shamir = Some(opened);
+                break;
+            }
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+        }
+    }
+    let shamir = shamir.expect("system store still locked after retries");
+
+    // After reopen the cache is rebuilt from the persisted rows' durable
+    // bindings — the profile is gone, the refusal is not.
+    let err = read_users(&shamir, "main").await.unwrap_err();
+    assert_eq!(err.code(), Some("resync_required"), "{err}");
 }

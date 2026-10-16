@@ -79,6 +79,18 @@ pub(super) fn to_qv<T: serde::Serialize>(v: &T) -> QueryValue {
         .unwrap_or(QueryValue::Null)
 }
 
+/// Map a typed [`crate::DbError`] onto a coded [`BatchError`] so the admin
+/// dispatch surface keeps its machine-readable `code` (S5c-X PR8b-2: the
+/// subscription-binding guards surface typed catalogue/validation errors).
+pub(super) fn db_error_to_batch(error: crate::DbError) -> BatchError {
+    let code = error.code().map(str::to_string);
+    BatchError::QueryError {
+        alias: String::new(),
+        message: error.to_string(),
+        code,
+    }
+}
+
 /// Rejects path-traversal characters in database and repository names.
 ///
 /// Only `[A-Za-z0-9_-]` is allowed — no `/`, `\`, `:`, `.`, or any
