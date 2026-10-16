@@ -32,6 +32,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::stream::Stream;
 use shamir_db::access::{principal64_from_username, Actor};
+use shamir_db::engine::meta::repl::bookmark::save_bookmark_and_clean_horizon;
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::table_manager::table_token_for;
 use shamir_db::engine::table::TableConfig;
@@ -505,6 +506,10 @@ async fn partial_history_failure_stops_supervisor_and_refuses_paused_resume() {
     let follower = build_db().await;
     create_profile_and_subscription(&follower).await;
     let destination = follower.get_db("app").unwrap().get_repo("main").unwrap();
+    // This failure is in legacy per-table writes: receipt-native atomic history
+    // batches bypass the registered MVCC Store::set hook entirely.
+    let info = destination.tx_info_store().await.unwrap();
+    save_bookmark_and_clean_horizon(&info, 0, 0).await.unwrap();
     let permit = destination.write_domain().admit().await.unwrap();
     destination
         .add_table_admitted(TableConfig::new("other"), &permit)

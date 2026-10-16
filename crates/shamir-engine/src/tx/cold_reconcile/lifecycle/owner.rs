@@ -68,9 +68,11 @@ pub(crate) struct CoreState {
     terminal_tx: tokio::sync::watch::Sender<Option<WorkerTerminal>>,
     /// First quarantine reason, surfaced as the supervisor's terminal failure.
     quarantine_reason: Mutex<Option<String>>,
-    /// Installed lease cleanup hook; cloned out before invocation so callback
+    /// Installed lease cleanup hook; taken before invocation so callback
     /// re-entry never occurs while this registration lock is held.
     quarantine_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    before_quarantine_hook_install: Mutex<Option<Box<dyn FnOnce(Arc<CoreState>) + Send>>>,
 }
 
 impl CoreState {
@@ -101,15 +103,8 @@ impl CoreState {
         self.quarantined.store(true, Ordering::Release);
         self.reopen_required.store(true, Ordering::Release);
         drop(gate);
-        self.interlock.terminate();
-        let hook = self
-            .quarantine_hook
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        if let Some(hook) = hook {
-            hook();
-        }
+        self.interlock().terminate();
+        self.fire_quarantine_hook();
     }
 
     fn install_quarantine_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
@@ -117,6 +112,17 @@ impl CoreState {
             .quarantine_hook
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    }
+
+    fn fire_quarantine_hook(&self) {
+        let hook = self
+            .quarantine_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     /// Supervisor-only terminal publication, after worker join and lease drop.
@@ -223,6 +229,8 @@ impl<J: Send, R: Send> RepoWorkerLifecycle<J, R> {
                 supervisor_joined: AtomicBool::new(false),
                 quarantine_reason: Mutex::new(None),
                 quarantine_hook: Mutex::new(None),
+                #[cfg(test)]
+                before_quarantine_hook_install: Mutex::new(None),
                 terminal_tx,
             }),
             terminal: terminal_rx,
@@ -239,6 +247,18 @@ impl<J: Send, R: Send> RepoWorkerLifecycle<J, R> {
     /// Sticky: quarantine was applied to this lifecycle epoch.
     pub fn quarantined(&self) -> bool {
         self.core.quarantined.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_before_quarantine_hook_install(
+        &self,
+        seam: Box<dyn FnOnce(Arc<CoreState>) + Send>,
+    ) {
+        *self
+            .core
+            .before_quarantine_hook_install
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(seam);
     }
 
     /// Non-owner observation handle for protected resource destructors/tests.
@@ -327,11 +347,26 @@ impl<J: Send, R: Send> RepoWorkerLifecycle<J, R> {
         let core_w = Arc::clone(&self.core);
         let inner = async move { handler(state).await };
         let quarantine_lease = Arc::downgrade(&lease);
+        #[cfg(test)]
+        if let Some(seam) = self
+            .core
+            .before_quarantine_hook_install
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            seam(Arc::clone(&self.core));
+        }
         self.core.install_quarantine_hook(Arc::new(move || {
             if let Some(lease) = quarantine_lease.upgrade() {
                 lease.on_quarantine();
             }
         }));
+        if self.core.quarantined.load(Ordering::Acquire) {
+            self.core.fire_quarantine_hook();
+            lease.on_quarantine();
+            return Err(InstallError::ClosedOrForbidden);
+        }
         let worker_task = async move {
             let result =
                 futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(inner)).await;

@@ -212,10 +212,13 @@ async fn protected_local_resource_survives_timeout_until_worker_join() {
     assert!(owner.interlock().publish(|| ()).is_err());
     assert!(weak_resource.upgrade().is_some());
     release.notify_one();
+    let terminal = owner.shutdown(Duration::from_secs(3600)).await;
     assert!(matches!(
-        owner.shutdown(Duration::from_secs(3600)).await,
-        Ok(WorkerTerminal::Completed)
+        terminal,
+        Ok(WorkerTerminal::Failed(ref reason))
+            if reason == "worker quarantined: worker shutdown deadline elapsed"
     ));
+    assert!(owner.supervisor_joined());
     assert!(weak_resource.upgrade().is_none());
 }
 

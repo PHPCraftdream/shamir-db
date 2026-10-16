@@ -48,6 +48,8 @@ async fn marker_without_bookmark_selects_legacy_path() {
     let repo = repo();
     let info = info();
     save_last_committed_flushed(&info, 2).await.unwrap();
+    // The subprocess crash regression leaves this legacy durable-floor,
+    // absent-bookmark state; it must never be mistaken for a fresh install.
     assert!(!receipt_path_selected(&repo, &info).await.unwrap());
 }
 
@@ -105,7 +107,8 @@ async fn open_with_retry(path: &Path, name: &str) -> RepoInstance {
 #[cfg(feature = "fjall")]
 #[tokio::test]
 async fn durable_marker_without_bookmark_selects_legacy_after_reopen() {
-    // No existing legacy seam aborts between floor reservation and the first bookmark; seed that durable state directly.
+    // The history-written subprocess regression exercises the real legacy
+    // reservation crash; this seeded marker case covers routing after reopen.
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().to_path_buf();
     let name = "activation-restart";

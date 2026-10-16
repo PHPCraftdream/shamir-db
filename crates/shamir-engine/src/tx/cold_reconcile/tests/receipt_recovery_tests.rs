@@ -16,11 +16,11 @@ use shamir_types::types::value::InnerValue;
 
 use crate::meta::repl::bookmark_v3::load_bookmark_v3;
 use crate::meta::repl::receipt::receipt_key;
-use crate::repo::{BoxRepoFactory, RepoInstance};
-use crate::table::TableConfig;
+use crate::repo::RepoInstance;
 use crate::tx::apply_replicated::follower_durability::receipt::stage;
 use crate::tx::apply_replicated::follower_durability::test_seam::{self, Phase};
 
+use super::helpers::open_with_retry;
 use crate::tx::apply_replicated::{apply_replicated_batch, ApplyPolicy};
 use crate::tx::ReplicatedEvent;
 
@@ -41,16 +41,6 @@ fn event(leader_version: u64, id: u8) -> ReplicatedEvent {
         },
         field_bindings: Vec::new(),
     }
-}
-
-async fn open(path: &Path, name: &str) -> RepoInstance {
-    RepoInstance::from_factory(
-        name.into(),
-        BoxRepoFactory::fjall_raw(path),
-        vec![TableConfig::new("items")],
-    )
-    .await
-    .unwrap()
 }
 
 async fn close(repo: RepoInstance) {
@@ -116,7 +106,7 @@ async fn assert_completed_state(repo: &RepoInstance) {
 async fn cold_reopen_completes_outstanding_receipt() {
     let temp = tempfile::TempDir::new().unwrap();
     let name = repo_name("receipt-cold", temp.path());
-    let repo = open(temp.path(), &name).await;
+    let repo = open_with_retry(temp.path(), &name).await;
 
     // Drive the batch through the repository-owned worker until the sticky
     // `fail_after = ReceiptPrepared` flag exhausts the 3 retries: the worker
@@ -151,7 +141,7 @@ async fn cold_reopen_completes_outstanding_receipt() {
     close(repo).await;
 
     for _ in 0..2 {
-        let reopened = open(temp.path(), &name).await;
+        let reopened = open_with_retry(temp.path(), &name).await;
         assert_completed_state(&reopened).await;
         close(reopened).await;
     }
@@ -163,7 +153,7 @@ async fn cold_reopen_completes_outstanding_receipt() {
 async fn cold_reopen_materialized_receipt_does_not_recommit() {
     let temp = tempfile::TempDir::new().unwrap();
     let name = repo_name("receipt-cold-materialized", temp.path());
-    let repo = open(temp.path(), &name).await;
+    let repo = open_with_retry(temp.path(), &name).await;
 
     let hook = Arc::new(test_seam::Hook::default());
     *hook.fail_after.lock().unwrap() = Some(Phase::ReceiptMaterialized);
@@ -191,7 +181,7 @@ async fn cold_reopen_materialized_receipt_does_not_recommit() {
         commits_before_reopen >= 1,
         "setup must have observed the initial materialization commit"
     );
-    let reopened = open(temp.path(), &name).await;
+    let reopened = open_with_retry(temp.path(), &name).await;
     assert_eq!(
         stage::materialization_commit_count(&name),
         commits_before_reopen,

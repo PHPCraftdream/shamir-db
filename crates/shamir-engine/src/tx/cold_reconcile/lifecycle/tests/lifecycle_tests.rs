@@ -15,6 +15,31 @@ struct NoopLease;
 impl WorkerLease for NoopLease {}
 
 #[tokio::test(start_paused = true)]
+async fn quarantine_between_install_check_and_hook_registration_fails_closed() {
+    let owner = RepoUnitLifecycle::new();
+    let gate = Arc::new(RepoTxGate::fresh());
+    let lease = ReceiptLease::new(Arc::clone(&gate), owner.status());
+    let reached = Arc::new(Notify::new());
+    let reached_wait = reached.notified();
+    tokio::pin!(reached_wait);
+    reached_wait.as_mut().enable();
+    let reached_hook = Arc::clone(&reached);
+    owner.set_before_quarantine_hook_install(Box::new(move |core| {
+        reached_hook.notify_one();
+        core.quarantine("install race quarantine");
+    }));
+
+    assert!(matches!(
+        owner.install_worker(lease, |_state| async {}),
+        Err(InstallError::ClosedOrForbidden)
+    ));
+    reached_wait.await;
+    assert!(owner.quarantined());
+    assert!(owner.reopen_required());
+    assert!(gate.requires_reopen());
+}
+
+#[tokio::test(start_paused = true)]
 async fn clean_receipt_lease_drop_does_not_require_reopen() {
     let owner = RepoUnitLifecycle::new();
     let gate = Arc::new(RepoTxGate::fresh());

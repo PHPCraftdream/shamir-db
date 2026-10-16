@@ -13,6 +13,26 @@ use shamir_wal::{WalDurability, WalEntryV2};
 
 pub(super) const REPO_NAME: &str = "cold_reconcile_test";
 
+pub(super) async fn open_with_retry(path: &Path, name: &str) -> RepoInstance {
+    for attempt in 0..25u32 {
+        match RepoInstance::from_factory(
+            name.to_owned(),
+            BoxRepoFactory::fjall_raw(path),
+            vec![TableConfig::new("items")],
+        )
+        .await
+        {
+            Ok(repo) => return repo,
+            Err(error) if attempt < 24 => {
+                let _ = error;
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("reopen failed after retries: {error}"),
+        }
+    }
+    unreachable!("retry loop always returns or panics")
+}
+
 pub(super) async fn open_unrecovered(path: &Path) -> RepoInstance {
     let repo = RepoInstance::from_factory_for_recovery_test(
         REPO_NAME.into(),
