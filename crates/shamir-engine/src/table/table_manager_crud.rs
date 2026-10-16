@@ -10,11 +10,9 @@ use crate::index::index_definition::IndexDefinition;
 
 impl TableManager {
     pub(super) fn ensure_repo_readable(&self) -> DbResult<()> {
-        if self
-            .changefeed
-            .as_ref()
-            .is_some_and(|changefeed| changefeed.gate.requires_reopen())
-        {
+        if self.changefeed.as_ref().is_some_and(|changefeed| {
+            changefeed.gate.receipt_native_visibility_enabled() && changefeed.gate.requires_reopen()
+        }) {
             return Err(DbError::RepoRequiresReopen(self.name().to_string()));
         }
         Ok(())

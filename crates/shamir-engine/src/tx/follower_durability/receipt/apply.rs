@@ -213,7 +213,7 @@ pub(crate) async fn run_receipt_pipeline(
         // before checkpoint's fallible final flush.
         if !tail.is_empty() {
             let tail: Vec<ReplicatedEvent> = tail.into_iter().cloned().collect();
-            apply_fresh(
+            let tail_outcome = apply_fresh(
                 repo,
                 &permit,
                 &info,
@@ -224,6 +224,9 @@ pub(crate) async fn run_receipt_pipeline(
                 lease,
             )
             .await?;
+            if let ApplyOutcome::Applied { .. } = tail_outcome {
+                return Ok(tail_outcome);
+            }
         }
         return Ok(ApplyOutcome::Applied {
             local_version: floor,
@@ -297,17 +300,6 @@ async fn apply_fresh(
     if gate.requires_reopen() {
         return Err(DbError::RepoRequiresReopen(repo.name().to_string()));
     }
-    let mut guards = Vec::with_capacity(prepared.len());
-    for event in &mut prepared {
-        let mut guard = gate.assign_next_version_guarded();
-        // Receipt materialization writes follower-visible rows before local
-        // publication. A panic in that window must reopen, never Aborted-mark
-        // the allocated version and advance the floors beneath those rows.
-        guard.visibility_started_without_wal();
-        event.version = Some(guard.version());
-        guards.push(guard);
-    }
-    let floor = gate.version_allocation_high_water_mark();
     let mut old = match load_bookmark_v3(info).await? {
         Some(bookmark) => BookmarkV3 {
             outstanding_receipt: None,
@@ -344,6 +336,16 @@ async fn apply_fresh(
             }
             combined += cost;
             end += 1;
+        }
+        let mut guards = Vec::with_capacity(end - start);
+        for event in &mut prepared[start..end] {
+            let mut guard = gate.assign_next_version_guarded();
+            // Receipt materialization writes follower-visible rows before local
+            // publication. A panic in that window must reopen, never Aborted-mark
+            // the allocated version and advance the floors beneath those rows.
+            guard.visibility_started_without_wal();
+            event.version = Some(guard.version());
+            guards.push(guard);
         }
         // Guard ownership across errors (finding 2): from allocation until
         // publication the worker OWNS these guards — on ANY failure they are
@@ -418,7 +420,7 @@ async fn apply_fresh(
         start = end;
     }
     Ok(ApplyOutcome::Applied {
-        local_version: floor,
+        local_version: gate.version_allocation_high_water_mark(),
     })
 }
 
