@@ -189,7 +189,7 @@ pub(crate) fn release_reconcile_park() {
     RECONCILE_PARK_RELEASE.notify_waiters();
 }
 
-/// Matches `barrier::CONFIRM_BUDGET` (private to the barrier module).
+/// The journal confirmation budget for the durable tail.
 const RECEIPT_CONFIRM_BUDGET: Duration = Duration::from_secs(1);
 
 /// Every receipt event must already be in the follower journal, byte-exact.

@@ -6,12 +6,6 @@ use tokio::sync::Notify;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Phase {
-    HistoryWritten,
-    AfterPerEventHistoryWrites,
-    JournalConfirmed,
-    AfterJournalFlush,
-    BeforeCombinedHistoryFlush,
-    BookmarkPersisted,
     ReceiptPrepared,
     ReceiptMaterialized,
     ReceiptCheckpointed,
@@ -19,9 +13,6 @@ pub(crate) enum Phase {
 
 #[derive(Default)]
 pub(crate) struct Hook {
-    pub fail_journal_barrier: AtomicBool,
-    pub bypass_journal_barrier: AtomicBool,
-    pub fail_history_flush: AtomicBool,
     pub park_at: Mutex<Option<Phase>>,
     pub abort_at: Mutex<Option<Phase>>,
     /// One-shot post-phase failure (S5c-X round 3): when the pipeline passes
@@ -58,24 +49,6 @@ pub(crate) fn remove(repo_name: &str) {
     hooks().lock().unwrap().remove(repo_name);
 }
 
-pub(crate) fn barrier_action(repo_name: &str) -> (bool, bool) {
-    let hooks = hooks().lock().unwrap();
-    hooks.get(repo_name).map_or((false, false), |hook| {
-        (
-            hook.fail_journal_barrier.load(Ordering::Acquire),
-            hook.bypass_journal_barrier.load(Ordering::Acquire),
-        )
-    })
-}
-
-pub(crate) fn fail_history_flush(repo_name: &str) -> bool {
-    hooks()
-        .lock()
-        .unwrap()
-        .get(repo_name)
-        .is_some_and(|hook| hook.fail_history_flush.load(Ordering::Acquire))
-}
-
 /// Consume the one-shot post-`phase` failure flag for `repo_name` (armed
 /// only when it holds exactly this phase). Returns `true` exactly when the
 /// caller must return the injected `DbError::Storage("injected")`. Sticky
@@ -104,11 +77,6 @@ pub(crate) fn fail_after_reopen(repo_name: &str) -> bool {
         .unwrap()
         .get(repo_name)
         .is_some_and(|hook| hook.fail_after_reopen.load(Ordering::Acquire))
-}
-
-#[cfg(test)]
-pub(crate) async fn history_written(repo: &crate::repo::RepoInstance) {
-    phase(repo.name(), Phase::HistoryWritten).await;
 }
 
 pub(crate) async fn phase(repo_name: &str, phase: Phase) {

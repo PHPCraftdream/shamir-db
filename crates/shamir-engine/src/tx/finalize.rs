@@ -10,7 +10,7 @@
 //! The sole in-tree caller today is `commit_tx_lockfree` (`commit.rs`).
 //! (F-54, #865 removed the dead `tx/group_commit.rs` batch path —
 //! `run_single_tx` / `run_leader` — that previously shared this tail; it
-//! had zero production call sites.) `apply_replicated` (R1) does NOT call
+//! had zero production call sites.) `apply_replicated_batch` (R1) does NOT call
 //! this either: a replicated raw-apply has neither a `TxContext` (for
 //! `promote_vectors`) nor a `PostPublishState` (from `materialize`), so it
 //! reimplements the equivalent steps inline — see `apply_replicated.rs`'s

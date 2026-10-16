@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::meta::recovery_marker::save_last_committed_flushed;
-use crate::meta::repl_bookmark::{save_bookmark_and_clean_horizon, save_replication_bookmark};
+use crate::meta::repl::bookmark_v3::{save_bookmark_v3, BookmarkV3};
 use crate::repo::{BoxRepoFactory, RepoFactory, RepoInstance};
 use crate::table::TableConfig;
 use shamir_storage::error::DbResult;
@@ -96,14 +96,19 @@ async fn persist_image(
     save_last_committed_flushed(&info, top)
         .await
         .expect("persist allocation floor");
-    match (bookmark, record_clean_through) {
-        (Some(bookmark), Some(known)) => save_bookmark_and_clean_horizon(&info, bookmark, known)
-            .await
-            .expect("persist follower batch record"),
-        (Some(bookmark), None) => save_replication_bookmark(&info, bookmark)
-            .await
-            .expect("persist follower bookmark"),
-        (None, _) => {}
+    if let Some(bookmark) = bookmark {
+        // v3-only fixture: tests own the record shape; no legacy writer exists.
+        save_bookmark_v3(
+            &info,
+            &BookmarkV3 {
+                fence: None,
+                bookmark,
+                clean_through: record_clean_through,
+                outstanding_receipt: None,
+            },
+        )
+        .await
+        .expect("persist follower v3 record");
     }
     let wal = repo.repo_wal().await.expect("repo WAL");
     for entry in entries {

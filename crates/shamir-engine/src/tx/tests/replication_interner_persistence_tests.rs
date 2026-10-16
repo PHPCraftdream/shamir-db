@@ -4,6 +4,10 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use crate::repo::{BoxRepoFactory, RepoFactory, RepoInstance};
+use crate::table::interner_manager::InternerManager;
+use crate::table::TableConfig;
+use crate::tx::{apply_replicated_batch, ApplyOutcome, ApplyPolicy, ReplicatedEvent};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::Stream;
@@ -17,10 +21,25 @@ use shamir_types::core::interner::InternerKey;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
-use crate::repo::{BoxRepoFactory, RepoFactory, RepoInstance};
-use crate::table::interner_manager::InternerManager;
-use crate::table::TableConfig;
-use crate::tx::{ApplyOutcome, ApplyPolicy};
+/// Apply ONE event through the public batch entry (the receipt pipeline).
+async fn apply_batch(
+    repo: &RepoInstance,
+    event: &ChangelogEvent,
+    field_bindings: &[(u64, String)],
+    bookmark: u64,
+    policy: ApplyPolicy,
+) -> shamir_storage::error::DbResult<ApplyOutcome> {
+    apply_replicated_batch(
+        repo,
+        &[ReplicatedEvent {
+            event: event.clone(),
+            field_bindings: field_bindings.to_vec(),
+        }],
+        bookmark,
+        policy,
+    )
+    .await
+}
 
 type TestStream = Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>;
 
@@ -181,8 +200,7 @@ fn failed_interner_set_retry_persists_all_rows_before_version_and_survives_reope
 
             // Arm only after all lazy setup and the initial durable seed.
             fault.fail_next.store(true, Ordering::SeqCst);
-            let error = follower
-                .apply_replicated(&source, &bindings, 0, ApplyPolicy::Trusted)
+            let error = apply_batch(&follower, &source, &bindings, 0, ApplyPolicy::Trusted)
                 .await
                 .expect_err("first apply must surface interner set failure");
             assert!(matches!(&error, DbError::Storage(_)));
@@ -224,8 +242,7 @@ fn failed_interner_set_retry_persists_all_rows_before_version_and_survives_reope
 
             // Same event, same bindings, no new first-touch and no manual persist.
             assert_eq!(
-                follower
-                    .apply_replicated(&source, &bindings, 0, ApplyPolicy::Trusted)
+                apply_batch(&follower, &source, &bindings, 0, ApplyPolicy::Trusted)
                     .await
                     .unwrap(),
                 ApplyOutcome::Applied { local_version: 1 },

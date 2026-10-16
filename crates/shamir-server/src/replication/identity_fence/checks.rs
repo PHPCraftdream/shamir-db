@@ -12,6 +12,11 @@ use shamir_query_types::wire::repl::ReplResponse;
 use super::recorded::{self, FenceRecord};
 use crate::replication::error::ReplError;
 
+/// Map a storage error to a replication error WITHOUT flattening a typed
+/// follower-state refusal into a retryable string (PR6b-3): the refusal
+/// stays machine-readable and terminal; everything else keeps the
+/// `Bookmark` string form.
+
 /// Negative-control seam for tests: when set, the supervisor skips the
 /// `resync_required` quarantine after an identity/epoch fence trip (mirrors
 /// `SKIP_S_CLAMP_FOR_TEST` in the engine's `replication_bound.rs`). Always
@@ -20,20 +25,23 @@ use crate::replication::error::ReplError;
 pub(crate) static SKIP_FENCE_QUARANTINE_FOR_TEST: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+pub(crate) fn storage_error(error: shamir_db::storage::error::DbError) -> ReplError {
+    match error {
+        shamir_db::storage::error::DbError::FollowerStateRefused { reason } => {
+            ReplError::FollowerStateRefused { reason }
+        }
+        other => ReplError::Bookmark(other.to_string()),
+    }
+}
+
 /// Re-establish durability once per loop start, before any leader contact.
 /// A failed/cancelled set+flush may be readable without having reached disk.
 /// Checks return on persistence errors, so no later response in that loop can
 /// trust such a write; a restarted loop must pass this barrier again.
 /// Cancellation may leave the flush incomplete; repeating this is idempotent.
 pub(crate) async fn prepare_existing(info: &Arc<dyn Store>) -> Result<(), ReplError> {
-    if recorded::load(info)
-        .await
-        .map_err(|e| ReplError::Bookmark(e.to_string()))?
-        .is_some()
-    {
-        info.flush()
-            .await
-            .map_err(|e| ReplError::Bookmark(e.to_string()))?;
+    if recorded::load(info).await.map_err(storage_error)?.is_some() {
+        info.flush().await.map_err(storage_error)?;
     }
     Ok(())
 }
@@ -55,10 +63,7 @@ pub(crate) async fn prepare_subscription(
             db: db_name.into(),
             repo: repo_name.into(),
         })?;
-    let info = repo
-        .tx_info_store()
-        .await
-        .map_err(|e| ReplError::Bookmark(e.to_string()))?;
+    let info = repo.tx_info_store().await.map_err(storage_error)?;
     prepare_existing(&info).await
 }
 
@@ -82,10 +87,7 @@ pub(crate) async fn fence_hello_recorded(
             db: db_name.into(),
             repo: repo_name.into(),
         })?;
-    let info = repo
-        .tx_info_store()
-        .await
-        .map_err(|e| ReplError::Bookmark(e.to_string()))?;
+    let info = repo.tx_info_store().await.map_err(storage_error)?;
     fence_hello_identity(&info, db_name, repo_name, response, receipt).await
 }
 
@@ -149,15 +151,11 @@ async fn decide(
     schema: Option<&str>,
     receipt: Option<&SeedReceipt>,
 ) -> Result<(), ReplError> {
-    let existing = recorded::load(info)
-        .await
-        .map_err(|e| ReplError::Bookmark(e.to_string()))?;
+    let existing = recorded::load(info).await.map_err(storage_error)?;
     let (Some(lineage_id), Some(history_epoch)) = (lineage, epoch) else {
         if let Some(mut record) = existing {
             record.observed_identity = None;
-            recorded::save(info, record)
-                .await
-                .map_err(|e| ReplError::Bookmark(e.to_string()))?;
+            recorded::save(info, record).await.map_err(storage_error)?;
         }
         return Err(SeedRefusal::MissingIdentity.into());
     };
@@ -167,7 +165,7 @@ async fn decide(
     };
     let bookmark = load_replication_bookmark(info)
         .await
-        .map_err(|e| ReplError::Bookmark(e.to_string()))?;
+        .map_err(storage_error)?;
     let expected = existing
         .map(|r| RepoIdentity {
             lineage_id: r.lineage_id,
@@ -192,9 +190,7 @@ async fn decide(
     // Repeated matching responses need no extra write/flush.
     if existing.is_none() || record.observed_identity != Some(observed) {
         record.observed_identity = Some(observed);
-        recorded::save(info, record)
-            .await
-            .map_err(|e| ReplError::Bookmark(e.to_string()))?;
+        recorded::save(info, record).await.map_err(storage_error)?;
     }
     if let Some(code) = reason {
         if matches!(

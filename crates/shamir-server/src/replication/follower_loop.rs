@@ -355,6 +355,11 @@ async fn run_follower_loop_internal(
         let bookmark = match repo_instance.replication_bookmark().await {
             Ok(v) => v,
             Err(e) => {
+                // PR6b-3: a refused durable follower state is TERMINAL — no
+                // migration exists, the operator reseeds. Never retry it.
+                if let shamir_db::storage::error::DbError::FollowerStateRefused { reason } = &e {
+                    return Err(ReplError::FollowerStateRefused { reason: *reason });
+                }
                 let re = ReplError::Bookmark(e.to_string());
                 warn!(node_id = %node_id, error = %re, "follower_loop: bookmark read failed");
                 sleep_backoff(&cancel, &mut backoff_ms).await;
@@ -520,9 +525,8 @@ async fn run_follower_loop_internal(
             continue;
         }
 
-        // PR6b-2 activation: fresh repositories take the receipt path;
-        // repositories with a stored legacy v1/v2 bookmark keep the legacy
-        // path (activation.rs decides from the DURABLE bookmark record).
+        // PR6b-3: the receipt pipeline is the ONLY apply path; admission
+        // refuses unsupported durable follower states with a typed error.
         match shamir_db::engine::tx::apply_replicated::apply_replicated_batch(
             &repo_instance,
             &events,
@@ -539,6 +543,27 @@ async fn run_follower_loop_internal(
                 });
             }
             Err(e) => {
+                // PR6b-3: a refused durable follower state is TERMINAL —
+                // check BEFORE the requires_reopen probe and never back off.
+                if let shamir_db::storage::error::DbError::FollowerStateRefused { reason } = &e {
+                    return Err(ReplError::FollowerStateRefused { reason: *reason });
+                }
+                // PR6b-3 (W5): the receipt pipeline's `RepoRequiresReopen`
+                // error kind IS the producer's explicit terminal
+                // classification (corrupt receipt pointer, vanished
+                // bookmark, double-Uncertain). The engine deliberately keeps
+                // the RAM gate flag clean on these failures — the parked
+                // guards keep the repo serving — so the loop must trust the
+                // error KIND, not only the flag: retrying it in-process
+                // would contradict its meaning and the design's
+                // machine-readable-terminal requirement.
+                if let shamir_db::storage::error::DbError::RepoRequiresReopen(detail) = &e {
+                    return Err(ReplError::ReopenRequired {
+                        db: db_name.clone(),
+                        repo: repo.clone(),
+                        detail: detail.clone(),
+                    });
+                }
                 let gate = repo_instance
                     .tx_gate()
                     .await

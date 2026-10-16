@@ -5,10 +5,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use shamir_db::engine::meta::repl::bookmark_v3::{save_bookmark_v3, BookmarkV3};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig, RepoInstance};
 use shamir_db::engine::table::TableConfig;
-use shamir_db::engine::tx::apply_replicated::{ApplyOutcome, ApplyPolicy};
-use shamir_db::engine::tx::ReplicatedEvent;
+use shamir_db::engine::tx::apply_replicated::apply_replicated_batch;
+use shamir_db::engine::tx::{ApplyOutcome, ApplyPolicy, ReplicatedEvent};
 use shamir_db::storage::storage_fjall::FjallRepo;
 use shamir_db::storage::types::{RecordKey, Repo};
 use shamir_db::types::value::QueryValue;
@@ -312,20 +313,26 @@ fn explicit_persisted_gap_stops_consumer_and_supervisor_but_not_beyond_h() {
         assert!(matches!(read_error, BatchError::ResyncRequired { .. }));
         assert_eq!(read_error.code(), Some("resync_required"));
         supervisor.stop_all().await;
-        // Apply the actual payload delivered alongside the explicit GAP, then
-        // persist its leader bookmark to model a follower caught up through H.
+        // Apply the actual payload delivered alongside the explicit GAP via
+        // the receipt-only batch entry, then persist its leader bookmark as a
+        // v3 record to model a follower caught up through H.
         let seeded = open(None).await;
-        let outcome = repo(&seeded)
-            .apply_replicated(
-                &events[0].event,
-                &events[0].field_bindings,
-                0,
-                ApplyPolicy::default(),
-            )
+        let outcome = apply_replicated_batch(&repo(&seeded), &events, 0, ApplyPolicy::default())
             .await
             .unwrap();
         assert!(matches!(outcome, ApplyOutcome::Applied { .. }));
-        repo(&seeded).advance_replication_bookmark(h).await.unwrap();
+        let info = repo(&seeded).tx_info_store().await.unwrap();
+        save_bookmark_v3(
+            &info,
+            &BookmarkV3 {
+                fence: None,
+                bookmark: h,
+                clean_through: None,
+                outstanding_receipt: None,
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(repo(&seeded).replication_bookmark().await.unwrap(), h);
         assert_eq!(rows(&seeded).await, rows(&leader).await);
 

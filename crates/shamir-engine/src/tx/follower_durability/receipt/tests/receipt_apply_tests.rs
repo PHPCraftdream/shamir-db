@@ -1,9 +1,8 @@
 //! In-process tests for the receipt apply pipeline (S5c-X PR6b-2): the
 //! atomic Prepared/Materialized/checkpoint writes, the identical-allocation
 //! resume, the changed-pull-boundary convergence, fail-closed identity
-//! rejection, the Uncertain read-back reconcile, absolute counters, the
-//! paused-reservation write-domain state, and the negative-control contrast
-//! with the legacy (unprotected) apply path.
+//! rejection, the Uncertain read-back reconcile, absolute counters, and the
+//! paused-reservation write-domain state.
 //!
 //! Deterministic: the crash points park on the `test_seam::Hook`
 //! notify/notify_waiters handshake — no sleeps, no yield budgets.
@@ -33,7 +32,6 @@ use crate::tx::apply_replicated::follower_durability::test_seam::{self, Phase};
 use crate::tx::apply_replicated::{apply_replicated_batch, ApplyOutcome, ApplyPolicy};
 use crate::tx::ReplicatedEvent;
 
-use super::super::resume::activation::disable_receipt_lookup;
 use super::super::stage::set_simulate_uncertain;
 
 struct FailFlushReset(String);
@@ -423,42 +421,6 @@ async fn receipt_path_writes_absolute_counters() {
     let table = repo.get_table("items").await.unwrap();
     assert!(table.get_bytes(RecordId([7; 16])).await.unwrap().is_none());
     drop(table);
-
-    close(repo).await;
-}
-
-// NEGATIVE CONTROL: with the receipt lookup seam disabled the legacy path
-// replays the crashed batch as a NEW allocation on top of the abandoned
-// receipt's reserved version — the exactly-one-version invariant of the
-// receipt path provably fails here.
-#[tokio::test]
-async fn disabled_receipt_lookup_replays_allocate_new_versions() {
-    disable_receipt_lookup(false);
-    let temp = tempfile::TempDir::new().unwrap();
-    let name = repo_name("receipt-legacy-ctrl", temp.path());
-    let repo = open(temp.path(), &name).await;
-    let key1 = key_bytes(1).await;
-
-    crashed_prepared(&repo, &name, &[event(1, 1)]).await;
-    disable_receipt_lookup(true);
-    let error = apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted).await;
-    disable_receipt_lookup(false);
-
-    // The legacy path allocates a REPLACEMENT version (2), writes it, and
-    // only then fails on the v3 bookmark it cannot downgrade — the replay
-    // never converges on the receipt's version 1.
-    assert!(
-        matches!(&error, Err(DbError::RepoRequiresReopen(_))),
-        "legacy replay must fail-stop on the outstanding v3 bookmark, got {error:?}"
-    );
-    assert!(history_row(&repo, &key1, 1).await.is_none());
-    assert!(
-        history_row(&repo, &key1, 2).await.is_some(),
-        "legacy replay allocated a replacement version on top of the receipt"
-    );
-    assert!(journal(&repo, 2).await.is_some());
-
-    close(repo).await;
 }
 
 // After a successful apply the counter's periodic persist cannot overwrite
