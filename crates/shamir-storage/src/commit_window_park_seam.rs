@@ -30,7 +30,7 @@ static WAIT_MUTEX: Mutex<()> = Mutex::new(());
 /// Async test-side arrival signal (round 5): the parking thread fires
 /// `notify_waiters()` right after setting `REACHED`, so engine tests can
 /// await `wait_reached()` instead of spinning on yield budgets.
-static NOTIFY: tokio::sync::Notify = tokio::sync::Notify::new();
+static NOTIFY: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 fn lock() -> MutexGuard<'static, ()> {
     WAIT_MUTEX
@@ -60,14 +60,16 @@ pub fn reached() -> bool {
 /// thread stores `REACHED` (Release) BEFORE `notify_waiters()`, so waking
 /// implies `reached() == true`. No sleeps, no yield budgets.
 pub async fn wait_reached() {
-    if reached() {
-        return;
-    }
-    let notified = NOTIFY.notified();
-    tokio::pin!(notified);
-    notified.as_mut().enable();
-    while !reached() {
-        notified.as_mut().await;
+    // A fresh `Notified` per round: re-awaiting a completed one is Ready at
+    // once and would spin if `REACHED` was already reset by a release.
+    loop {
+        let notified = NOTIFY.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if reached() {
+            return;
+        }
+        notified.await;
     }
 }
 
