@@ -465,7 +465,7 @@ async fn run_chunk_tail(
         //   attempt 3: fast path -> seam fires -> attempt >= 3 -> PARK.
         #[cfg(test)]
         fail_after(repo.name(), Phase::ReceiptMaterialized)?;
-        let publication = publish::publication_from_receipt(repo, &permit, stored).await?;
+        let publication = publish::publication_from_receipt(repo, permit, stored).await?;
         let chunk_local_end = stored
             .mapping
             .iter()
