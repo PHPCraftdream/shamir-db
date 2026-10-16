@@ -74,6 +74,30 @@ pub(crate) async fn run_receipt_pipeline(
     // `admit_with_reservation`; the reservation is taken OUT of the lease's
     // mutex BEFORE the await and restored on failure, so no std-sync guard
     // is ever held across `.await` and the future stays `Send`.
+    // Table managers self-admit through the SAME write domain on first
+    // init (`TableManager::create_with_domain` → `admit()`); the pipeline
+    // holds the domain permit for its whole run, so every table the batch
+    // touches must be resolved BEFORE admission — a lazy init under the
+    // held permit would re-enter `admit()` and self-deadlock the
+    // non-reentrant domain mutex. Unconfigured tables keep the legacy
+    // `Rejected` handling inside `prepare_event`.
+    let mut batch_tables: Vec<&str> = events
+        .iter()
+        .flat_map(|event| {
+            event
+                .event
+                .changes
+                .iter()
+                .map(|change| change.table.as_str())
+        })
+        .collect();
+    batch_tables.sort_unstable();
+    batch_tables.dedup();
+    for table_name in batch_tables {
+        if repo.has_table(table_name) {
+            repo.get_table(table_name).await?;
+        }
+    }
     let permit = match lease.take_reservation() {
         Some(reservation) => {
             match repo
