@@ -71,7 +71,7 @@ pub(crate) async fn complete_outstanding_receipt(
         ReceiptPhase::Checkpointed => unreachable!("checked above"),
     };
     let (receipt, _counters) =
-        stage::commit_materialized_work(repo, &permit, info, &work, &old).await?;
+        stage::commit_materialized_work(repo, permit, info, &work, &old).await?;
 
     // Durability boundary: verify journal coverage (the Materialized batch
     // wrote the rows; only an Uncertain commit that silently failed can leave
@@ -97,7 +97,7 @@ pub(crate) async fn complete_outstanding_receipt(
     let gate = repo.tx_gate().await?;
     // One atomic batch: bookmark advance + receipt retirement, with the RAM
     // publication in the same poll (+ info flush).
-    checkpoint::checkpoint(repo, &permit, info, &receipt, &old, &gate, &publication).await?;
+    checkpoint::checkpoint(repo, permit, info, &receipt, &old, &gate, &publication).await?;
     log::info!(
         "cold receipt recovery: completed receipt upstream {}..={} through \
          local version {} on repo {}",
