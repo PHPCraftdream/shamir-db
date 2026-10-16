@@ -34,6 +34,15 @@ fn codec_error(e: crate::meta::MetaError) -> DbError {
 /// Encode a bookmark v3 record under tuple version 3. No production path
 /// calls this in PR6b-1 (tests only).
 pub fn encode_bookmark_v3(record: &BookmarkV3) -> DbResult<Vec<u8>> {
+    if record
+        .fence
+        .as_ref()
+        .is_some_and(|fence| fence.bookmark != record.bookmark)
+    {
+        return Err(DbError::Storage(
+            "bookmark v3: fence.bookmark disagrees with the flat bookmark".into(),
+        ));
+    }
     MetaEnvelope::new((3u16, record.clone()))
         .encode()
         .map_err(codec_error)

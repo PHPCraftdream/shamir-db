@@ -6,7 +6,8 @@ use shamir_storage::types::{RecordKey, Store};
 
 use crate::meta::repl_bookmark::{
     load_clean_horizon, load_fence_record, load_replication_bookmark,
-    save_bookmark_and_clean_horizon, save_fence_record, save_replication_bookmark, FenceRecord,
+    save_bookmark_and_clean_horizon, save_fence_record, save_fence_record_v3_aware,
+    save_replication_bookmark, FenceRecord,
 };
 use crate::meta::{MetaEnvelope, MetaKey};
 
@@ -16,6 +17,46 @@ fn store() -> Arc<dyn Store> {
 
 fn bookmark_key() -> RecordKey {
     RecordKey::from_slice(MetaKey::ReplicationBookmark.as_record_id().as_bytes())
+}
+
+#[tokio::test]
+async fn fresh_v3_aware_identity_fence_uses_absent_bookmark_cursor() {
+    let info = store();
+    let mut adopted = FenceRecord {
+        bookmark: 0,
+        lineage_id: [8; 16],
+        history_epoch: 9,
+        observed_identity: None,
+    };
+    // No bookmark means cursor zero is authoritative even if a caller passes
+    // a stale/nonzero cursor; v3 requires fence.bookmark == flat bookmark.
+    adopted.bookmark = 17;
+    save_fence_record_v3_aware(&info, adopted).await.unwrap();
+    let v3 = crate::meta::repl::load_bookmark_v3(&info)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(v3.bookmark, 0);
+    assert_eq!(v3.fence.unwrap().bookmark, 0);
+}
+
+#[tokio::test]
+async fn legacy_marker_without_bookmark_keeps_identity_adoption_legacy() {
+    let info = store();
+    crate::meta::recovery_marker::save_last_committed(&info, 7)
+        .await
+        .unwrap();
+    let fence = FenceRecord {
+        bookmark: 0,
+        lineage_id: [8; 16],
+        history_epoch: 9,
+        observed_identity: None,
+    };
+    save_fence_record_v3_aware(&info, fence).await.unwrap();
+    let bytes = info.get(bookmark_key()).await.unwrap();
+    let (version, decoded): (u16, FenceRecord) = MetaEnvelope::open(&bytes).unwrap();
+    assert_eq!(version, 1);
+    assert_eq!(decoded, fence);
 }
 
 #[tokio::test]

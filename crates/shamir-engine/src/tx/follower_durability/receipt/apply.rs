@@ -28,10 +28,11 @@ use super::super::super::{prepare_event, ApplyOutcome, ApplyPolicy, PreparedEven
 use super::super::test_seam::{self, Phase};
 use super::resume::worker::ReceiptLease;
 use super::{checkpoint, publish, resume, stage};
+use crate::meta::repl::bookmark::FenceRecord;
 use crate::meta::repl::bookmark_v3::{load_bookmark_v3, BookmarkV3};
 use crate::meta::repl::{ReceiptBinding, ReceiptPhase, ReplicationReceipt, MAX_RECEIPT_EVENTS};
 use crate::meta::repl_bookmark::{load_fence_record, load_replication_bookmark};
-use crate::repo::changelog_store::write_domain::RepoWritePermit;
+use crate::repo::changelog_store::write_domain::{RepoWritePermit, RepoWriteReservation};
 use crate::repo::RepoInstance;
 use crate::tx::ReplicatedEvent;
 
@@ -51,6 +52,31 @@ pub(crate) async fn apply_batch_receipt(
     // `install_worker`.
     repo.submit_receipt_job(info, events, bookmark, policy)
         .await
+}
+
+/// Scope-owned paused-reservation guard: a reservation taken from the lease
+/// must survive the WHOLE resume. Dropping it early clears the write-domain
+/// slot and lets ordinary writes/DDL interleave before the receipt retires.
+/// Restored on every durable-pause exit (Drop); disarmed by [`Self::release`]
+/// once the receipt has retired and published.
+struct PausedReservation<'a> {
+    lease: &'a ReceiptLease,
+    reservation: Option<RepoWriteReservation>,
+}
+
+impl PausedReservation<'_> {
+    /// The receipt retired and published: the pause is over — do not restore.
+    fn release(&mut self) {
+        self.reservation = None;
+    }
+}
+
+impl Drop for PausedReservation<'_> {
+    fn drop(&mut self) {
+        if let Some(reservation) = self.reservation.take() {
+            self.lease.place_pause_reservation(reservation);
+        }
+    }
 }
 
 pub(crate) async fn run_receipt_pipeline(
@@ -80,26 +106,41 @@ pub(crate) async fn run_receipt_pipeline(
     // resolved ADMITTED (`get_table_admitted`) — never re-entering
     // `admit()` under the held permit. Unconfigured tables keep the legacy
     // `Rejected` handling inside `prepare_event`.
-    let permit = match lease.take_reservation() {
+    let (permit, mut pause) = match lease.take_reservation() {
         Some(reservation) => {
             match repo
                 .write_domain()
                 .admit_with_reservation(&reservation)
                 .await
             {
-                Ok(permit) => permit,
+                Ok(permit) => (
+                    permit,
+                    PausedReservation {
+                        lease,
+                        reservation: Some(reservation),
+                    },
+                ),
                 Err(error) => {
-                    // Restore the pause so the NEXT pull can still resume
-                    // through the reservation path.
-                    lease.restore_reservation(reservation);
+                    // Admission refused: the pause stays exactly as it was.
+                    lease.place_pause_reservation(reservation);
                     return Err(admission_error(repo, error));
                 }
             }
         }
-        None => match repo.write_domain().admit().await {
-            Ok(permit) => permit,
-            Err(error) => return Err(admission_error(repo, error)),
-        },
+        None => {
+            let permit = repo
+                .write_domain()
+                .admit()
+                .await
+                .map_err(|error| admission_error(repo, error))?;
+            (
+                permit,
+                PausedReservation {
+                    lease,
+                    reservation: None,
+                },
+            )
+        }
     };
     let _marker = repo.marker_write_mutex().lock().await;
     if let Some(outstanding) = resume::lookup(repo, &info).await? {
@@ -154,15 +195,19 @@ pub(crate) async fn run_receipt_pipeline(
             }
         };
         let floor = publication.floor;
-        let new_bookmark =
-            durable_tail(repo, &permit, &info, &gate, &receipt, publication, &old).await?;
-        // The receipt retired cleanly: clear the paused reservation (its
-        // RAII drop releases the domain slot, so ordinary `admit()` works
-        // again).
-        lease.clear_reservation();
-        // Publication succeeded: parked guards' versions are ≤ the watermark
-        // now — retire (drop) them, their Aborted marks are no-ops.
+        let new_bookmark = durable_tail(
+            repo,
+            &permit,
+            &info,
+            (&gate, lease),
+            (&receipt, &old),
+            publication,
+            Some(&mut pause),
+        )
+        .await?;
         lease.retire_parked();
+        // `durable_tail` disarms the scope guard synchronously at publication,
+        // before checkpoint's fallible final flush.
         if !tail.is_empty() {
             let tail: Vec<ReplicatedEvent> = tail.into_iter().cloned().collect();
             apply_fresh(
@@ -313,6 +358,7 @@ async fn apply_fresh(
                 &origins[start..end],
                 &prepared[start..end],
                 &old,
+                lease,
             )
             .await
             {
@@ -348,7 +394,10 @@ async fn apply_fresh(
         lease.retire_parked();
         guards.drain(0..end - start);
         old = BookmarkV3 {
-            fence: old.fence,
+            fence: old.fence.map(|fence| FenceRecord {
+                bookmark: new_bookmark,
+                ..fence
+            }),
             bookmark: new_bookmark,
             clean_through: Some(
                 old.clean_through
@@ -377,6 +426,7 @@ async fn try_chunk(
     origins: &[usize],
     prepared: &[PreparedEvent],
     old: &BookmarkV3,
+    lease: &ReceiptLease,
 ) -> DbResult<(u64, u64)> {
     let bindings = collect_bindings(events, origins);
     let leader_start = prepared[0].event.commit_version;
@@ -400,18 +450,44 @@ async fn try_chunk(
     // `stage::set_counters`), so a freshly rebuilt Prepared plan can never
     // share it with the durable Materialized receipt even for the identical
     // batch.
+    // Hoisted so the phase check and the post-checkpoint reconciliation
+    // below share ONE durable-receipt read.
+    let stored = resume::lookup(repo, info).await?;
     let already_materialized = matches!(
-        resume::lookup(repo, info).await?.as_ref(),
+        stored.as_ref(),
         Some(outstanding)
             if outstanding.receipt.phase == ReceiptPhase::Materialized
                 && same_batch(&outstanding.receipt, &plan.receipt),
     );
     if !already_materialized {
+        if stored.is_none() {
+            // A failure AFTER checkpoint/publication (e.g. the fallible info
+            // flush at the end of `checkpoint`) lands here: the receipt is
+            // retired and the durable bookmark already covers this chunk.
+            // Re-staging Prepared would REWIND the durable bookmark —
+            // reconcile from the advanced bookmark and treat the chunk as
+            // done instead.
+            let chunk_local_end = prepared[prepared.len() - 1]
+                .version
+                .ok_or_else(|| DbError::Storage("prepared event lost its local version".into()))?;
+            if let Some(v3) = load_bookmark_v3(info).await? {
+                if v3.outstanding_receipt.is_none()
+                    && v3.bookmark >= leader_end
+                    && v3
+                        .clean_through
+                        .is_some_and(|clean| clean >= chunk_local_end)
+                    && gate.last_committed() >= chunk_local_end
+                    && gate.durable_watermark() >= chunk_local_end
+                {
+                    return Ok((v3.bookmark, chunk_local_end));
+                }
+            }
+        }
         stage::commit_prepared(repo, permit, info, &plan, old).await?;
         #[cfg(test)]
         fail_after(repo.name(), Phase::ReceiptPrepared)?;
     }
-    run_chunk_tail(repo, permit, info, gate, &mut plan, old).await
+    run_chunk_tail(repo, permit, info, gate, &mut plan, old, lease).await
 }
 
 /// Post-Prepared tail of one fresh chunk: the idempotent materialization,
@@ -424,6 +500,7 @@ async fn run_chunk_tail(
     gate: &Arc<RepoTxGate>,
     plan: &mut stage::BatchPlan,
     old: &BookmarkV3,
+    lease: &ReceiptLease,
 ) -> DbResult<(u64, u64)> {
     // Phase-aware, counter-idempotent retry (finding 3): on EACH attempt,
     // load the durable outstanding receipt FIRST. If this chunk's
@@ -472,7 +549,16 @@ async fn run_chunk_tail(
             .map(|mapping| mapping.local_version)
             .max()
             .unwrap_or(0);
-        let new_bookmark = durable_tail(repo, permit, info, gate, stored, publication, old).await?;
+        let new_bookmark = durable_tail(
+            repo,
+            permit,
+            info,
+            (&gate, lease),
+            (stored, old),
+            publication,
+            None,
+        )
+        .await?;
         return Ok((new_bookmark, chunk_local_end));
     }
     let work = stage::materialize_from_plan(repo, permit, plan).await?;
@@ -487,7 +573,16 @@ async fn run_chunk_tail(
         .map(|mapping| mapping.local_version)
         .max()
         .unwrap_or(0);
-    let new_bookmark = durable_tail(repo, permit, info, gate, &receipt, publication, old).await?;
+    let new_bookmark = durable_tail(
+        repo,
+        permit,
+        info,
+        (&gate, lease),
+        (&receipt, old),
+        publication,
+        None,
+    )
+    .await?;
     Ok((new_bookmark, chunk_local_end))
 }
 
@@ -500,11 +595,13 @@ async fn durable_tail(
     repo: &RepoInstance,
     permit: &RepoWritePermit,
     info: &Arc<dyn Store>,
-    gate: &Arc<RepoTxGate>,
-    receipt: &ReplicationReceipt,
+    gate_and_lease: (&Arc<RepoTxGate>, &ReceiptLease),
+    receipt_and_old: (&ReplicationReceipt, &BookmarkV3),
     publication: publish::Publication,
-    old: &BookmarkV3,
+    pause: Option<&mut PausedReservation<'_>>,
 ) -> DbResult<u64> {
+    let (receipt, old) = receipt_and_old;
+    let (gate, lease) = gate_and_lease;
     if let Err(first) = checkpoint::verify_journal(repo, receipt).await {
         log::warn!(
             "follower receipt journal coverage incomplete ({first}); repairing \
@@ -527,7 +624,25 @@ async fn durable_tail(
         .unwrap_or(0);
     checkpoint::confirm_journal(repo, local_end).await?;
     publish::adopt_counters(repo, &publication).await?;
-    checkpoint::checkpoint(repo, permit, info, receipt, old, gate, &publication).await?;
+    checkpoint::checkpoint(
+        repo,
+        permit,
+        info,
+        receipt,
+        old,
+        (&gate, &publication),
+        checkpoint::PublicationCompletion {
+            lease: Some(lease),
+            on_published: || {
+                if let Some(pause) = pause {
+                    lease.clear_reservation();
+                    pause.release();
+                    lease.retire_parked();
+                }
+            },
+        },
+    )
+    .await?;
     let floor = publication.floor;
     for event in &publication.events {
         repo.broadcast_changefeed_event(Some(Arc::clone(&event.downstream)));

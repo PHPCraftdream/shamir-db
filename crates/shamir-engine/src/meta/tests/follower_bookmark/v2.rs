@@ -229,7 +229,6 @@ pub async fn save_bookmark_and_clean_horizon(
 /// (receipt-native) record is updated IN PLACE — its bookmark, clean horizon
 /// and outstanding-receipt pointer are preserved, and the v3 decode invariant
 /// `fence.bookmark == bookmark` is kept by syncing the fence's own bookmark —
-/// while a v1/v2 record (or a fresh install) takes the legacy
 /// `save_fence_record` path unchanged. The other legacy writers keep their
 /// refuse-v3 downgrade guard.
 pub async fn save_fence_record_v3_aware(
@@ -238,7 +237,30 @@ pub async fn save_fence_record_v3_aware(
 ) -> DbResult<()> {
     let bytes = match info.get(key()).await {
         Ok(bytes) => bytes,
-        Err(DbError::NotFound(_)) => return save_fence_record(info, record).await,
+        Err(DbError::NotFound(_)) => {
+            // No bookmark is not proof of a fresh repo: legacy apply writes its
+            // recovery-floor marker before its first bookmark. Preserve that
+            // lineage; only an actually fresh store may activate v3 here.
+            if crate::meta::recovery_marker::load_last_committed(info)
+                .await?
+                .unwrap_or(0)
+                > 0
+            {
+                return save_fence_record(info, record).await;
+            }
+            // The bookmark is absent, so the fence's cursor must reflect that
+            // authoritative starting point (adoption passes the stored cursor).
+            let v3 = crate::meta::repl::bookmark_v3::BookmarkV3 {
+                fence: Some(FenceRecord {
+                    bookmark: 0,
+                    ..record
+                }),
+                bookmark: 0,
+                clean_through: None,
+                outstanding_receipt: None,
+            };
+            return save_bookmark_v3(info, &v3).await;
+        }
         Err(error) => return Err(error),
     };
     if !is_v3(&bytes) {

@@ -15,6 +15,8 @@
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 
 use bytes::Bytes;
 use shamir_collections::TFxMap;
@@ -38,6 +40,26 @@ use crate::repo::RepoInstance;
 
 const TX_STORE: &str = "__tx__";
 const CHANGELOG_STORE: &str = "__changelog__";
+
+#[cfg(test)]
+static MATERIALIZATION_COMMITS: Mutex<Option<TFxMap<String, usize>>> = Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn materialization_commit_count(repo_name: &str) -> usize {
+    MATERIALIZATION_COMMITS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|counts| counts.get(repo_name).copied())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+fn record_materialization_commit(repo_name: &str) {
+    let mut counts = MATERIALIZATION_COMMITS.lock().unwrap();
+    let counts = counts.get_or_insert_with(TFxMap::default);
+    *counts.entry(repo_name.to_owned()).or_default() += 1;
+}
 
 /// Test-only seam: after a `Committed` outcome, pretend it was `Uncertain`
 /// so the read-back reconcile path runs in tests.
@@ -571,32 +593,6 @@ pub(crate) async fn materialize_from_prepared_receipt(
     })
 }
 
-/// Materialize work from a durable MATERIALIZED receipt (resume): the rows
-/// and counters are replayed exactly as recorded.
-#[cfg_attr(not(test), allow(dead_code))] // driven by the PR6b-2 test chunk (W5)
-pub(crate) fn materialize_from_materialized_receipt(
-    receipt: &ReplicationReceipt,
-) -> DbResult<MaterializedWork> {
-    let events = materialize_ops_from_receipt(receipt)?;
-    if receipt.downstream_events.len() != events.len() {
-        return Err(DbError::RepoRequiresReopen(
-            "receipt downstream events are shorter than its mapping".into(),
-        ));
-    }
-    Ok(MaterializedWork {
-        downstream: receipt
-            .downstream_events
-            .iter()
-            .map(|bytes| Bytes::from(bytes.clone()))
-            .collect(),
-        events,
-        timestamps: receipt.timestamps.clone(),
-        counters: receipt.counters.clone(),
-        receipt_bytes: Bytes::from(encode_receipt(receipt)?),
-        receipt_id: receipt_id(receipt),
-    })
-}
-
 /// The Materialized atomic batch: per-table history rows + ts rows, per-table
 /// absolute counter rows, the exact downstream journal bytes, the rewritten
 /// Materialized receipt, and the bookmark pointer moved to the Materialized
@@ -716,6 +712,10 @@ pub(crate) async fn commit_materialized_work(
         .commit()
         .await?;
     #[cfg(test)]
+    if outcome == AtomicCommitOutcome::Committed {
+        record_materialization_commit(repo.name());
+    }
+    #[cfg(test)]
     let outcome = if outcome == AtomicCommitOutcome::Committed
         && SIMULATE_UNCERTAIN.load(Ordering::Acquire)
     {
@@ -736,7 +736,10 @@ pub(crate) async fn commit_materialized_work(
                 .commit()
                 .await?
             {
-                AtomicCommitOutcome::Committed => {}
+                AtomicCommitOutcome::Committed => {
+                    #[cfg(test)]
+                    record_materialization_commit(repo.name());
+                }
                 AtomicCommitOutcome::Uncertain { detail } => {
                     return Err(DbError::RepoRequiresReopen(format!(
                         "receipt Materialized commit uncertain twice: {detail}"

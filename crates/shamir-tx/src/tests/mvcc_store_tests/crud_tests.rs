@@ -2,9 +2,12 @@
 #![allow(clippy::disallowed_methods)]
 
 use super::helpers::{make_gate, make_mvcc, make_mvcc_with_gate};
+use crate::mvcc_store::MvccStore;
 use bytes::Bytes;
 use futures::StreamExt;
-use shamir_storage::types::RecordKey;
+use shamir_storage::storage_in_memory::InMemoryStore;
+use shamir_storage::types::{KvOp, RecordKey, Store};
+use std::sync::Arc;
 
 #[tokio::test]
 async fn set_without_snapshots_skips_history() {
@@ -685,5 +688,76 @@ async fn c2_cold_start_seek() {
         got,
         Some(val),
         "C2: cold-start get_current must seek the log"
+    );
+}
+
+#[tokio::test]
+async fn plain_materialized_pending_cold_seek_hides_until_published() {
+    let mvcc = make_mvcc();
+    let key = Bytes::from_static(b"plain-pending");
+    let older = [KvOp::Set(key.clone().into(), Bytes::from_static(b"older"))];
+    mvcc.materialize_committed_to_history(&older, 1)
+        .await
+        .unwrap();
+    mvcc.publish_materialized(&older, 1);
+
+    let newer = [KvOp::Set(key.clone().into(), Bytes::from_static(b"newer"))];
+    mvcc.materialize_committed_to_history(&newer, 2)
+        .await
+        .unwrap();
+    assert_eq!(mvcc.gate.last_committed(), 1);
+    assert_eq!(mvcc.gate.version_allocation_high_water_mark(), 2);
+
+    mvcc.evict_current_cell_for_test(b"plain-pending");
+    assert_eq!(mvcc.current_version(b"plain-pending"), 0);
+    assert_eq!(
+        mvcc.get_current(RecordKey::from(key.clone()))
+            .await
+            .unwrap(),
+        Some(Bytes::from_static(b"older")),
+        "cold seek must skip materialized-but-unpublished newer history"
+    );
+
+    mvcc.publish_materialized(&newer, 2);
+    mvcc.evict_current_cell_for_test(b"plain-pending");
+    assert_eq!(
+        mvcc.get_current(RecordKey::from(key)).await.unwrap(),
+        Some(Bytes::from_static(b"newer")),
+        "publishing the pending version makes it the cold-seek result"
+    );
+}
+
+/// Q3 legacy-isolation: PLAIN (non-receipt) writes keep master's unbounded
+/// cold seek after commit — the allocation watermark equals the floor, so
+/// the publication bound must not engage even with the cell evicted.
+#[tokio::test]
+async fn plain_committed_writes_cold_seek_unbounded_after_commit() {
+    let history: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let mvcc = MvccStore::new(Arc::clone(&history), make_gate());
+
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k1")), Bytes::from("v1"))
+        .await
+        .unwrap();
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k2")), Bytes::from("v2"))
+        .await
+        .unwrap();
+    // Both writes committed: watermark == floor == 2.
+    assert_eq!(mvcc.gate.version_allocation_high_water_mark(), 2);
+    assert_eq!(mvcc.gate.last_committed(), 2);
+
+    // Force the cold path for both keys despite the warm cell cache.
+    mvcc.evict_current_cell_for_test(b"k1");
+    mvcc.evict_current_cell_for_test(b"k2");
+
+    assert_eq!(
+        mvcc.get_current(RecordKey::from(Bytes::from("k1")))
+            .await
+            .unwrap(),
+        Some(Bytes::from("v1")),
+        "plain committed history must stay cold-readable (master semantics)"
+    );
+    assert_eq!(
+        mvcc.get_current_bytes(b"k2").await.unwrap(),
+        Some(Bytes::from("v2"))
     );
 }

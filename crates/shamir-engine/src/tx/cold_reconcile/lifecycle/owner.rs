@@ -66,6 +66,11 @@ pub(crate) struct CoreState {
     /// Terminal publication channel (first-write-wins; `None` until the
     /// supervisor publishes the outcome).
     terminal_tx: tokio::sync::watch::Sender<Option<WorkerTerminal>>,
+    /// First quarantine reason, surfaced as the supervisor's terminal failure.
+    quarantine_reason: Mutex<Option<String>>,
+    /// Installed lease cleanup hook; cloned out before invocation so callback
+    /// re-entry never occurs while this registration lock is held.
+    quarantine_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl CoreState {
@@ -79,8 +84,16 @@ impl CoreState {
     /// is NEVER consulted. Timeout and panic BOTH route here.
     pub(crate) fn quarantine(&self, reason: &str) {
         log::warn!("worker lifecycle quarantine: {reason}");
-        // Admission closes under its gate first. Drop that gate before waiting
-        // on publication, whose callback is forbidden from re-entering lifecycle.
+        let mut recorded = self
+            .quarantine_reason
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if recorded.is_none() {
+            *recorded = Some(reason.to_owned());
+        }
+        drop(recorded);
+        // Close publication first, then fail-stop the installed lease before
+        // any worker-owned guards can be released. Callback runs lock-free.
         let gate = self
             .admission_gate
             .lock()
@@ -89,6 +102,21 @@ impl CoreState {
         self.reopen_required.store(true, Ordering::Release);
         drop(gate);
         self.interlock.terminate();
+        let hook = self
+            .quarantine_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    fn install_quarantine_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .quarantine_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(hook);
     }
 
     /// Supervisor-only terminal publication, after worker join and lease drop.
@@ -193,6 +221,8 @@ impl<J: Send, R: Send> RepoWorkerLifecycle<J, R> {
                 quarantined: AtomicBool::new(false),
                 reopen_required: AtomicBool::new(false),
                 supervisor_joined: AtomicBool::new(false),
+                quarantine_reason: Mutex::new(None),
+                quarantine_hook: Mutex::new(None),
                 terminal_tx,
             }),
             terminal: terminal_rx,
@@ -296,7 +326,12 @@ impl<J: Send, R: Send> RepoWorkerLifecycle<J, R> {
         );
         let core_w = Arc::clone(&self.core);
         let inner = async move { handler(state).await };
-        let lease_w = Arc::clone(&lease);
+        let quarantine_lease = Arc::downgrade(&lease);
+        self.core.install_quarantine_hook(Arc::new(move || {
+            if let Some(lease) = quarantine_lease.upgrade() {
+                lease.on_quarantine();
+            }
+        }));
         let worker_task = async move {
             let result =
                 futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(inner)).await;
@@ -304,7 +339,6 @@ impl<J: Send, R: Send> RepoWorkerLifecycle<J, R> {
                 Ok(()) => WorkerTerminal::Completed,
                 Err(_) => {
                     core_w.quarantine("worker panicked");
-                    lease_w.on_quarantine();
                     WorkerTerminal::Failed("worker panicked".to_string())
                 }
             }
@@ -466,11 +500,22 @@ fn spawn_supervisor<L: WorkerLease>(
             Ok(terminal) => terminal,
             Err(join_err) => {
                 core.quarantine("worker task failed outside its panic boundary");
-                lease.on_quarantine();
                 WorkerTerminal::Failed(join_err.to_string())
             }
         };
         drop(lease);
+        let terminal = match terminal {
+            WorkerTerminal::Completed if core.quarantined.load(Ordering::Acquire) => {
+                let reason = core
+                    .quarantine_reason
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+                    .unwrap_or_else(|| "worker quarantined".to_owned());
+                WorkerTerminal::Failed(format!("worker quarantined: {reason}"))
+            }
+            other => other,
+        };
         core.supervisor_joined.store(true, Ordering::Release);
         core.set_terminal(terminal);
     })

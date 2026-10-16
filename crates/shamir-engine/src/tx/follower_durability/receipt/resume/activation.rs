@@ -44,6 +44,19 @@ pub(crate) async fn receipt_path_selected(
         // A v1/v2 record is present: legacy path until PR6b-3 migrates it.
         return Ok(false);
     }
+    // Absence of a bookmark record is NOT proof of freshness: the LEGACY
+    // writer persists its recovery floor marker BEFORE its first bookmark
+    // (`reserve_floor_in`), while the receipt writer stages floor markers in
+    // the same atomic batch as its first v3 bookmark. A durable floor marker
+    // without a bookmark record is therefore legacy evidence — stay legacy.
+    if !v3
+        && crate::meta::recovery_marker::load_last_committed(info)
+            .await?
+            .unwrap_or(0)
+            > 0
+    {
+        return Ok(false);
+    }
     // Fresh install: both checks above found nothing.
     if !repo.storage_supports_atomic_batch() {
         return Err(DbError::AtomicBatchUnsupported(format!(

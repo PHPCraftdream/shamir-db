@@ -18,7 +18,9 @@ use crate::meta::repl::bookmark_v3::load_bookmark_v3;
 use crate::meta::repl::receipt::receipt_key;
 use crate::repo::{BoxRepoFactory, RepoInstance};
 use crate::table::TableConfig;
+use crate::tx::apply_replicated::follower_durability::receipt::stage;
 use crate::tx::apply_replicated::follower_durability::test_seam::{self, Phase};
+
 use crate::tx::apply_replicated::{apply_replicated_batch, ApplyPolicy};
 use crate::tx::ReplicatedEvent;
 
@@ -138,9 +140,13 @@ async fn cold_reopen_completes_outstanding_receipt() {
     // (sets requires_reopen on the in-RAM gate and drops them — after a
     // reopen the Aborted marks are acceptable), so the cold reopen starts
     // from a fresh, clean gate and completes the receipt during reconcile.
-    repo.shutdown_clean(std::time::Duration::from_secs(5))
-        .await
-        .unwrap();
+    // The parked receipt is a DURABLE PAUSE: shutdown must report it (not
+    // `Completed`) and fail the gate for the next open.
+    let shutdown = repo.shutdown_clean(std::time::Duration::from_secs(5)).await;
+    assert!(
+        matches!(&shutdown, Err(shamir_storage::error::DbError::Storage(message)) if message.contains("durable pause")),
+        "shutdown must report the durable pause, got {shutdown:?}"
+    );
     assert!(repo.tx_gate().await.unwrap().requires_reopen());
     close(repo).await;
 
@@ -149,4 +155,48 @@ async fn cold_reopen_completes_outstanding_receipt() {
         assert_completed_state(&reopened).await;
         close(reopened).await;
     }
+}
+
+// A durable Materialized receipt is the pre-checkpoint crash state: open must
+// finish only the checkpoint tail and must not repeat the materialization batch.
+#[tokio::test(flavor = "current_thread")]
+async fn cold_reopen_materialized_receipt_does_not_recommit() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = repo_name("receipt-cold-materialized", temp.path());
+    let repo = open(temp.path(), &name).await;
+
+    let hook = Arc::new(test_seam::Hook::default());
+    *hook.fail_after.lock().unwrap() = Some(Phase::ReceiptMaterialized);
+    hook.fail_after_sticky
+        .store(true, std::sync::atomic::Ordering::Release);
+    test_seam::install(&name, Arc::clone(&hook));
+    let events = [event(1, 1)];
+    let error = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, shamir_storage::error::DbError::Storage(_)),
+        "expected injected Storage failure, got {error:?}"
+    );
+    test_seam::remove(&name);
+    let shutdown = repo.shutdown_clean(std::time::Duration::from_secs(5)).await;
+    assert!(
+        matches!(&shutdown, Err(shamir_storage::error::DbError::Storage(message)) if message.contains("durable pause")),
+        "shutdown must report the durable pause, got {shutdown:?}"
+    );
+    close(repo).await;
+
+    let commits_before_reopen = stage::materialization_commit_count(&name);
+    assert!(
+        commits_before_reopen >= 1,
+        "setup must have observed the initial materialization commit"
+    );
+    let reopened = open(temp.path(), &name).await;
+    assert_eq!(
+        stage::materialization_commit_count(&name),
+        commits_before_reopen,
+        "cold recovery of a Materialized receipt must not commit materialization"
+    );
+    assert_completed_state(&reopened).await;
+    close(reopened).await;
 }

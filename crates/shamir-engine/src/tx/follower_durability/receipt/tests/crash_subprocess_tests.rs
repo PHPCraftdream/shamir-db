@@ -47,7 +47,7 @@ fn event(leader_version: u64, id: u8) -> ReplicatedEvent {
             commit_version: leader_version,
             tx_id: leader_version,
             actor: Actor::System,
-            timestamp_ns: 0,
+            timestamp_ns: leader_version * 1_000_000,
             changes: vec![RecordChange {
                 table: "items".into(),
                 key: RecordId([id; 16]).to_bytes(),
@@ -66,7 +66,7 @@ fn delete_event(leader_version: u64, id: u8) -> ReplicatedEvent {
             commit_version: leader_version,
             tx_id: leader_version,
             actor: Actor::System,
-            timestamp_ns: 0,
+            timestamp_ns: leader_version * 1_000_000,
             changes: vec![RecordChange {
                 table: "items".into(),
                 key: RecordId([id; 16]).to_bytes(),
@@ -140,6 +140,23 @@ async fn history_rows(repo: &RepoInstance, keys: &[Vec<u8>]) -> Vec<(Vec<u8>, u6
     rows
 }
 
+/// Per-version timestamp row of the history store: keyed `0x00 ||
+/// version_be8`, holding the 8-byte LE millis (the TS_TAG mirror written by
+/// `receipt/stage.rs::stage_materialized_batch`).
+async fn ts_row(repo: &RepoInstance, version: u64) -> Option<u64> {
+    let mut key = Vec::with_capacity(9);
+    key.push(0x00);
+    key.extend_from_slice(&version.to_be_bytes());
+    let value = repo
+        .raw_store("__history__items")
+        .await
+        .unwrap()
+        .get(RecordKey::from_slice(&key))
+        .await
+        .ok()?;
+    Some(u64::from_le_bytes(value.as_ref().try_into().unwrap()))
+}
+
 // ---------------------------------------------------------------- scenario
 
 #[derive(Clone, Copy)]
@@ -172,7 +189,7 @@ impl Scenario {
         }
     }
 
-    fn leader_watermark(&self) -> u64 {
+    fn local_version_watermark(&self) -> u64 {
         self.events().len() as u64
     }
 
@@ -229,12 +246,58 @@ async fn assert_converged(repo: &RepoInstance, scenario: &Scenario) {
     );
 
     // Journal bytes at every applied version, non-empty.
-    for version in 1..=scenario.leader_watermark() {
+    for version in 1..=scenario.local_version_watermark() {
         let bytes = journal_bytes(repo, version)
             .await
             .unwrap_or_else(|| panic!("journal row for version {version} missing"));
         assert!(!bytes.is_empty(), "journal row {version} empty");
     }
+
+    // Exact downstream journal bytes: the follower journal row at local
+    // version v is the reprojected event (same actor/timestamp/key/op/value,
+    // `repo` = this repo's name, `commit_version` = v), rmp-serialized.
+    for (index, event) in scenario.events().iter().enumerate() {
+        let version = index as u64 + 1;
+        let expected = ChangelogEvent {
+            repo: repo.name().to_owned(),
+            commit_version: version,
+            tx_id: event.event.tx_id,
+            actor: event.event.actor.clone(),
+            timestamp_ns: event.event.timestamp_ns,
+            changes: event.event.changes.clone(),
+        };
+        let expected_bytes = rmp_serde::to_vec(&expected)
+            .unwrap_or_else(|error| panic!("expected journal encode v{version}: {error}"));
+        let bytes = journal_bytes(repo, version)
+            .await
+            .unwrap_or_else(|| panic!("journal row for version {version} missing"));
+        assert_eq!(
+            bytes.as_ref(),
+            expected_bytes.as_slice(),
+            "journal row {version} must be the exact reprojected event"
+        );
+    }
+
+    // Exact timestamp rows: the history store carries one `[0x00 || v_be8]`
+    // ts row per version with the 8-byte LE millis of the event.
+    for (index, event) in scenario.events().iter().enumerate() {
+        let version = index as u64 + 1;
+        assert_eq!(
+            ts_row(repo, version).await,
+            Some(event.event.timestamp_ns / 1_000_000),
+            "history ts row millis for version {version}"
+        );
+    }
+
+    // Allocation watermark: no extra versions beyond the receipt's batch.
+    assert_eq!(
+        repo.tx_gate()
+            .await
+            .unwrap()
+            .version_allocation_high_water_mark(),
+        scenario.local_version_watermark(),
+        "no versions may be allocated beyond the receipt's batch"
+    );
 
     // Absolute counter.
     let counter = repo.get_table("items").await.unwrap().counter().clone();
@@ -256,13 +319,41 @@ async fn assert_converged(repo: &RepoInstance, scenario: &Scenario) {
     let info = repo.tx_info_store().await.unwrap();
     let v3 = load_bookmark_v3(&info).await.unwrap().unwrap();
     assert_eq!(v3.outstanding_receipt, None, "receipt must be retired");
-    assert_eq!(v3.bookmark, scenario.leader_watermark());
+    assert_eq!(v3.bookmark, scenario.local_version_watermark());
     assert_eq!(v3.clean_through, Some(scenario.events().len() as u64));
     assert!(matches!(
         info.get(receipt_key()).await,
         Err(shamir_storage::error::DbError::NotFound(_))
     ));
     drop(info);
+}
+
+/// Historical snapshot / AS OF reads, checked against the latest journal
+/// change for each key visible at each local version.
+async fn assert_as_of_reads(repo: &RepoInstance, scenario: &Scenario) {
+    let mvcc = repo
+        .get_table("items")
+        .await
+        .unwrap()
+        .mvcc_store()
+        .expect("items table must have an MVCC store");
+    let watermark = scenario.local_version_watermark();
+    let events = scenario.events();
+    for at in 1..=watermark {
+        for key in scenario.keys() {
+            let expected = events[..at as usize]
+                .iter()
+                .rev()
+                .flat_map(|event| event.event.changes.iter())
+                .find(|change| change.key.as_ref() == key.as_slice())
+                .and_then(|change| change.value.as_ref().cloned());
+            assert_eq!(
+                mvcc.get_at(&key, at).await.unwrap(),
+                expected,
+                "as-of read mismatch for key {key:?} at version {at}"
+            );
+        }
+    }
 }
 
 // ------------------------------------------------------------------ child
@@ -417,7 +508,8 @@ async fn run_point(scenario: Scenario) {
         let outcome = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted).await;
         assert!(outcome.is_ok(), "first replay failed: {outcome:?}");
         assert_converged(&repo, &scenario).await;
-        journal_snapshot = collect_journals(&repo, scenario.leader_watermark()).await;
+        assert_as_of_reads(&repo, &scenario).await;
+        journal_snapshot = collect_journals(&repo, scenario.local_version_watermark()).await;
         history_snapshot = history_rows(&repo, &scenario.keys()).await;
         close(repo).await;
     }
@@ -429,8 +521,9 @@ async fn run_point(scenario: Scenario) {
         let outcome = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted).await;
         assert!(outcome.is_ok(), "second replay failed: {outcome:?}");
         assert_converged(&repo, &scenario).await;
+        assert_as_of_reads(&repo, &scenario).await;
         assert_eq!(
-            collect_journals(&repo, scenario.leader_watermark()).await,
+            collect_journals(&repo, scenario.local_version_watermark()).await,
             journal_snapshot,
             "journal bytes must be identical across the two replays"
         );
