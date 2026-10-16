@@ -27,9 +27,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use shamir_db::access::{principal64_from_username, Actor};
+use shamir_db::engine::meta::recovery_marker::load_last_committed;
+use shamir_db::engine::meta::repl::bookmark_v3::decode_bookmark_v3;
 use shamir_db::engine::meta::repo_identity::RepoIdentity;
+use shamir_db::engine::meta::MetaKey;
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
+use shamir_db::storage::types::RecordKey;
 use shamir_db::types::value::QueryValue;
 use shamir_db::SeedRefusal;
 use shamir_db::ShamirDb;
@@ -51,10 +55,42 @@ use crate::replication::in_process::InProcessReplSource;
 use crate::replication::source::ReplSource;
 use crate::replication::supervisor::{ReplSourceFactory, SubscriptionSupervisor};
 
+#[tokio::test]
+async fn first_contact_on_fresh_atomic_repo_adopts_v3_before_apply() {
+    let leader = build_memory().await;
+    write_rows(&leader, 0, 1).await;
+    let follower = build_memory().await;
+    let source = Arc::new(InProcessReplSource::new(leader));
+    run_follower_loop(
+        Arc::new(follower.clone()),
+        source,
+        FollowerLoopConfig::new("fresh-v3", "app", "main")
+            .with_poll_wait_ms(0)
+            .with_max_iterations(1),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let info = repo(&follower).tx_info_store().await.unwrap();
+    let raw = info
+        .get(RecordKey::from_slice(
+            MetaKey::ReplicationBookmark.as_record_id().as_bytes(),
+        ))
+        .await
+        .unwrap();
+    let v3 = decode_bookmark_v3(&raw).unwrap();
+    assert!(v3.fence.is_some(), "identity adoption must be in v3");
+    assert!(
+        v3.bookmark > 0,
+        "the subsequent apply must advance bookmark"
+    );
+    assert_eq!(v3.clean_through, Some(v3.bookmark));
+    assert_eq!(load_last_committed(&info).await.unwrap(), Some(v3.bookmark));
+}
+
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
-
 /// In-memory `ShamirDb` with db `app`, repo `main`, table `items`.
 pub(super) async fn build_memory() -> ShamirDb {
     build_factory(BoxRepoFactory::in_memory()).await

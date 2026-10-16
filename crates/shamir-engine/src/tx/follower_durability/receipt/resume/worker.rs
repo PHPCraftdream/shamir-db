@@ -71,6 +71,8 @@ struct LeaseInner {
     /// Resolved at install time; owned here so quarantine can fail closed
     /// without re-resolving the repo.
     gate: Arc<RepoTxGate>,
+    /// Publication capability from the installed lifecycle epoch.
+    status: crate::tx::cold_reconcile::lifecycle::LifecycleStatus,
     /// Fresh chunk guards parked across pipeline errors — see the module
     /// doc. NEVER dropped while the repo keeps serving. Synchronous mutex:
     /// every hold is a short park/retire/quarantine section with NO `.await`
@@ -94,10 +96,14 @@ struct LeaseInner {
 }
 
 impl ReceiptLease {
-    pub(crate) fn new(gate: Arc<RepoTxGate>) -> Self {
+    pub(crate) fn new(
+        gate: Arc<RepoTxGate>,
+        status: crate::tx::cold_reconcile::lifecycle::LifecycleStatus,
+    ) -> Self {
         Self {
             inner: Arc::new(LeaseInner {
                 gate,
+                status,
                 parked: Mutex::new(Vec::new()),
                 paused_reservation: Mutex::new(None),
                 in_flight: AtomicUsize::new(0),
@@ -170,16 +176,6 @@ impl ReceiptLease {
             .take()
     }
 
-    /// Put a taken reservation BACK (admission failed): the durable pause
-    /// stays armed for the next pull.
-    pub(crate) fn restore_reservation(&self, reservation: RepoWriteReservation) {
-        *self
-            .inner
-            .paused_reservation
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reservation);
-    }
-
     /// Drop the paused reservation (successful pipeline: the receipt
     /// retired). The reservation's RAII clears the domain slot, so ordinary
     /// `admit()` works again.
@@ -191,7 +187,6 @@ impl ReceiptLease {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 
-    /// Handler-side bookkeeping: one job started.
     fn enter_job(&self) {
         self.inner.in_flight.fetch_add(1, Ordering::AcqRel);
     }
@@ -220,43 +215,90 @@ impl ReceiptLease {
         }
     }
 
-    /// Quarantine path (b): if any guards are parked, set the gate
-    /// `requires_reopen` and drop them. After a reopen the Aborted marks are
-    /// acceptable — the repo is fail-stopped until then (same semantics as
-    /// the old branch's shutdown quarantine). Contention note: this runs on
-    /// the failure/shutdown path only, never a hot path.
-    pub(crate) fn quarantine_parked_if_any(&self) {
+    /// The publication callback is synchronous and must not re-enter lifecycle operations.
+    pub(crate) fn publish<T>(
+        &self,
+        callback: impl FnOnce() -> T,
+    ) -> Result<T, crate::tx::cold_reconcile::lifecycle::PublicationClosed> {
+        self.inner.status.publish(callback)
+    }
+
+    /// Unconditionally fail closed for an explicit worker quarantine, even
+    /// when no guards or reservation happen to be parked. The gate must close
+    /// before releasing either durable-pause resource.
+    fn force_quarantine(&self) {
+        self.inner.gate.set_requires_reopen();
+        self.release_durable_pause();
+    }
+
+    /// Normal worker exit/lease cleanup only requires reopen when it would
+    /// otherwise release a durable pause. Check and close the gate before
+    /// dropping guards or the reservation.
+    fn quarantine_durable_pause_if_any(&self) -> bool {
         let mut parked = self
             .inner
             .parked
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if parked.is_empty() {
-            return;
+        let has_parked = !parked.is_empty();
+        let mut reservation = self
+            .inner
+            .paused_reservation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let has_reservation = reservation.is_some();
+        if has_parked || has_reservation {
+            self.inner.gate.set_requires_reopen();
         }
         let count = parked.len();
         parked.clear();
+        reservation.take();
+        drop(reservation);
         drop(parked);
-        log::warn!(
-            "receipt worker: quarantining {count} parked version guards \
-             (requires_reopen)"
-        );
-        self.inner.gate.set_requires_reopen();
+        if count > 0 {
+            log::warn!(
+                "receipt worker: quarantining {count} parked version guards \
+                 (requires_reopen)"
+            );
+        }
+        has_parked || has_reservation
+    }
+
+    fn release_durable_pause(&self) {
+        self.inner
+            .paused_reservation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        self.inner
+            .parked
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
     }
 }
 
 impl WorkerLease for ReceiptLease {
     fn on_quarantine(&self) {
-        self.quarantine_parked_if_any();
+        self.force_quarantine();
     }
 }
 
-impl Drop for ReceiptLease {
+impl Drop for LeaseInner {
     fn drop(&mut self) {
-        // The supervisor drops the last lease Arc strictly AFTER joining the
-        // worker, so this quarantine (if any guards remain) is the single,
-        // owner-ordered durable pause.
-        self.quarantine_parked_if_any();
+        let parked = self
+            .parked
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let reservation = self
+            .paused_reservation
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !parked.is_empty() || reservation.is_some() {
+            self.gate.set_requires_reopen();
+        }
+        parked.clear();
+        reservation.take();
     }
 }
 
@@ -288,7 +330,11 @@ async fn receipt_handler(mut state: ReceiptJobState) {
             state.lease().inner.idle.notify_waiters();
         }
     }
-    state.lease().quarantine_parked_if_any();
+    if state.lease().quarantine_durable_pause_if_any() {
+        // A durable pause survived the queue: shutdown must NOT report
+        // ordinary completion — the repository requires reopen.
+        state.quarantine_worker("receipt worker shut down with a durable pause");
+    }
 }
 
 impl RepoInstance {
@@ -301,13 +347,13 @@ impl RepoInstance {
             .receipt_worker
             .get_or_try_init(|| async {
                 let gate = self.tx_gate().await?;
-                let lease = ReceiptLease::new(gate);
                 let lifecycle = self.worker_lifecycle.as_ref().ok_or_else(|| {
                     DbError::Internal(format!(
                         "receipt worker for repo {} has no foreground lifecycle",
                         self.name()
                     ))
                 })?;
+                let lease = ReceiptLease::new(gate, lifecycle.lifecycle().status());
                 lifecycle
                     .lifecycle()
                     .install_worker(lease.clone(), receipt_handler)

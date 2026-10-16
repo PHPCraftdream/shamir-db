@@ -13,6 +13,7 @@ pub(crate) mod worker;
 
 #[cfg(test)]
 pub(crate) use interlock::PubTermInterlock;
+pub(crate) use interlock::PublicationClosed;
 // Receipt-pipeline production surface (PR6b-2c): re-exported unconditionally;
 // ShutdownError is only named in tests, the rest are production-wired.
 pub(crate) use job::JobSubmitError;
@@ -22,10 +23,11 @@ pub(crate) use owner::{ForegroundLifecycle, WorkerTerminal};
 #[cfg_attr(not(test), allow(unused_imports))]
 // ShutdownError is only named in tests; InstallError/RepoWorkerLifecycle are production-wired (receipt worker, shutdown_impl).
 pub(crate) use owner::{InstallError, RepoWorkerLifecycle, ShutdownError};
+pub(crate) use worker::LifecycleStatus;
 pub(crate) use worker::WorkerExecutionState;
 pub(crate) use worker::WorkerLease;
 #[cfg(test)]
-pub(crate) use worker::{spawn_worker, FailClosedResource, LifecycleStatus};
+pub(crate) use worker::{spawn_worker, FailClosedResource};
 
 #[cfg(test)]
 #[path = "tests/mod.rs"]

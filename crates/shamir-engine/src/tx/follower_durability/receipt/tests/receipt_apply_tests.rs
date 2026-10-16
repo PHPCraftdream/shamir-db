@@ -23,7 +23,8 @@ use std::sync::Arc;
 
 use crate::meta::repl::bookmark_v3::load_bookmark_v3;
 use crate::meta::repl::receipt::receipt_key;
-use crate::meta::repl::{decode_receipt, ReceiptPhase};
+use crate::meta::repl::{decode_receipt, ReceiptPhase, MAX_RECEIPT_EVENTS};
+use crate::meta::repl_bookmark::{save_fence_record_v3_aware, FenceRecord};
 use crate::meta::MetaKey;
 use crate::repo::RepoWriteError;
 use crate::repo::{BoxRepoFactory, RepoInstance};
@@ -34,6 +35,13 @@ use crate::tx::ReplicatedEvent;
 
 use super::super::resume::activation::disable_receipt_lookup;
 use super::super::stage::set_simulate_uncertain;
+
+struct FailFlushReset(String);
+impl Drop for FailFlushReset {
+    fn drop(&mut self) {
+        super::super::checkpoint::set_fail_final_flush(&self.0, false);
+    }
+}
 
 fn event(leader_version: u64, id: u8) -> ReplicatedEvent {
     ReplicatedEvent {
@@ -718,6 +726,270 @@ async fn non_retryable_error_parks_guards() {
     );
     assert_eq!(history_versions(&repo, &key1).await, vec![1]);
     assert_eq!(repo.receipt_worker_parked_guards().await, Some(0));
+
+    close(repo).await;
+}
+
+#[tokio::test]
+async fn upstream_bookmark_does_not_skip_unpublished_local_chunk() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = repo_name("receipt-upstream-offset", temp.path());
+    let repo = open(temp.path(), &name).await;
+    let key1 = key_bytes(1).await;
+    let key2 = key_bytes(2).await;
+    let key3 = key_bytes(3).await;
+    let _reset = FailFlushReset(name.clone());
+    super::super::checkpoint::set_fail_final_flush(&name, true);
+    let outcome = apply_replicated_batch(
+        &repo,
+        &[event(100, 1), event(101, 2)],
+        0,
+        ApplyPolicy::Trusted,
+    )
+    .await;
+    super::super::checkpoint::set_fail_final_flush(&name, false);
+    assert_eq!(outcome.unwrap(), ApplyOutcome::Applied { local_version: 2 });
+    let info = repo.tx_info_store().await.unwrap();
+    let v3 = load_bookmark_v3(&info).await.unwrap().unwrap();
+    assert_eq!(v3.bookmark, 101);
+    assert_eq!(v3.clean_through, Some(2));
+    assert_eq!(v3.outstanding_receipt, None);
+    assert!(matches!(
+        info.get(receipt_key()).await,
+        Err(DbError::NotFound(_))
+    ));
+    drop(info);
+    assert_eq!(history_versions(&repo, &key1).await, vec![1]);
+    assert_eq!(history_versions(&repo, &key2).await, vec![2]);
+    let table = repo.get_table("items").await.unwrap();
+    assert!(table.get_bytes(RecordId([1; 16])).await.unwrap().is_some());
+    assert!(table.get_bytes(RecordId([2; 16])).await.unwrap().is_some());
+    drop(table);
+    assert_eq!(
+        repo.get_table("items")
+            .await
+            .unwrap()
+            .counter()
+            .get()
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        apply_replicated_batch(&repo, &[event(102, 3)], 101, ApplyPolicy::Trusted)
+            .await
+            .unwrap(),
+        ApplyOutcome::Applied { local_version: 3 }
+    );
+    assert_eq!(history_versions(&repo, &key3).await, vec![3]);
+    assert!(journal(&repo, 3).await.is_some());
+    assert_eq!(
+        repo.get_table("items")
+            .await
+            .unwrap()
+            .counter()
+            .get()
+            .await
+            .unwrap(),
+        3
+    );
+    close(repo).await;
+}
+
+#[tokio::test]
+async fn paused_reservation_survives_a_failed_resume() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = repo_name("receipt-pause", temp.path());
+    let repo = open(temp.path(), &name).await;
+
+    // Sticky Prepared failure parks the worker and write-domain reservation.
+    let hook = crashed_prepared(&repo, &name, &[event(1, 1)]).await;
+    assert!(repo.write_domain().has_outstanding_reservation());
+    disarm(&hook);
+    let error = apply_replicated_batch(&repo, &[event(9, 9)], 0, ApplyPolicy::Trusted)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, DbError::Storage(_)),
+        "expected the identity mismatch refusal, got {error:?}"
+    );
+    assert!(repo.write_domain().has_outstanding_reservation());
+    assert_eq!(
+        apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+            .await
+            .unwrap(),
+        ApplyOutcome::Applied { local_version: 1 }
+    );
+    assert!(!repo.write_domain().has_outstanding_reservation());
+    assert_eq!(repo.receipt_worker_parked_guards().await, Some(0));
+
+    close(repo).await;
+}
+
+#[tokio::test]
+async fn fenced_multi_chunk_apply_keeps_v3_invariant_across_reopen() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = repo_name("receipt-fence", temp.path());
+    let repo = open(temp.path(), &name).await;
+
+    // Receipt-native v3 record with a fence at bookmark 1.
+    assert_eq!(
+        apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+            .await
+            .unwrap(),
+        ApplyOutcome::Applied { local_version: 1 }
+    );
+    let info = repo.tx_info_store().await.unwrap();
+    save_fence_record_v3_aware(
+        &info,
+        FenceRecord {
+            bookmark: 1,
+            lineage_id: [7u8; 16],
+            history_epoch: 0,
+            observed_identity: None,
+        },
+    )
+    .await
+    .unwrap();
+    drop(info);
+
+    // A one-op event costs 3 + 2*1 = 5 combined units, so a chunk holds
+    // MAX_RECEIPT_EVENTS/5 events; N above that + 2 forces >= 2 chunks.
+    let n = MAX_RECEIPT_EVENTS / 5 + 3;
+    let batch: Vec<ReplicatedEvent> = (2..(2 + n as u64))
+        .map(|leader_version| event(leader_version, (leader_version % 251) as u8))
+        .collect();
+    assert_eq!(batch.len(), n);
+    assert_eq!(
+        apply_replicated_batch(&repo, &batch, 0, ApplyPolicy::Trusted)
+            .await
+            .unwrap(),
+        ApplyOutcome::Applied {
+            local_version: 1 + n as u64
+        }
+    );
+
+    let expected_bookmark = 1 + n as u64;
+    let info = repo.tx_info_store().await.unwrap();
+    let v3 = load_bookmark_v3(&info).await.unwrap().unwrap();
+    assert_eq!(v3.bookmark, expected_bookmark);
+    let fence = v3.fence.clone().expect("fence must survive the chunks");
+    assert_eq!(fence.bookmark, v3.bookmark);
+    assert_eq!(fence.lineage_id, [7u8; 16]);
+    assert_eq!(v3.outstanding_receipt, None);
+    drop(info);
+
+    close(repo).await;
+    let repo = open(temp.path(), &name).await;
+    let info = repo.tx_info_store().await.unwrap();
+    let v3 = load_bookmark_v3(&info).await.unwrap().unwrap();
+    assert_eq!(v3.bookmark, expected_bookmark);
+    assert_eq!(v3.fence.map(|fence| fence.bookmark), Some(v3.bookmark));
+    assert_eq!(v3.outstanding_receipt, None);
+    drop(info);
+
+    assert_eq!(
+        apply_replicated_batch(
+            &repo,
+            &[event(1 + n as u64, ((1 + n as u64) % 251) as u8)],
+            0,
+            ApplyPolicy::Trusted
+        )
+        .await
+        .unwrap(),
+        ApplyOutcome::Skipped
+    );
+
+    close(repo).await;
+}
+
+#[tokio::test]
+async fn post_checkpoint_flush_failure_fresh_chunk_is_done() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = repo_name("receipt-fresh-final-flush", temp.path());
+    let repo = open(temp.path(), &name).await;
+    let keys = [key_bytes(1).await, key_bytes(2).await];
+    let events = [event(1, 1), event(2, 2)];
+    let _reset = FailFlushReset(name.clone());
+    super::super::checkpoint::set_fail_final_flush(&name, true);
+    assert_eq!(
+        apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted)
+            .await
+            .unwrap(),
+        ApplyOutcome::Applied { local_version: 2 }
+    );
+    super::super::checkpoint::set_fail_final_flush(&name, false);
+    for (key, version) in keys.iter().zip([1, 2]) {
+        assert_eq!(history_versions(&repo, key).await, vec![version]);
+    }
+    assert_eq!(
+        repo.get_table("items")
+            .await
+            .unwrap()
+            .counter()
+            .get()
+            .await
+            .unwrap(),
+        2
+    );
+    let info = repo.tx_info_store().await.unwrap();
+    let v3 = load_bookmark_v3(&info).await.unwrap().unwrap();
+    assert_eq!(v3.bookmark, 2);
+    assert_eq!(v3.outstanding_receipt, None);
+    assert!(matches!(
+        info.get(receipt_key()).await,
+        Err(DbError::NotFound(_))
+    ));
+    drop(info);
+    assert!(!repo.write_domain().has_outstanding_reservation());
+    assert_eq!(
+        apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted)
+            .await
+            .unwrap(),
+        ApplyOutcome::Skipped
+    );
+    close(repo).await;
+    let repo = open(temp.path(), &name).await;
+    let info = repo.tx_info_store().await.unwrap();
+    let v3 = load_bookmark_v3(&info).await.unwrap().unwrap();
+    assert_eq!(v3.bookmark, 2);
+    assert_eq!(v3.outstanding_receipt, None);
+    drop(info);
+    close(repo).await;
+}
+
+#[tokio::test]
+async fn post_checkpoint_flush_failure_resumed_chunk_is_done() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = repo_name("receipt-final-flush", temp.path());
+    let repo = open(temp.path(), &name).await;
+    let key1 = key_bytes(1).await;
+    let hook = crashed_prepared(&repo, &name, &[event(1, 1)]).await;
+    disarm(&hook);
+    let _reset = FailFlushReset(name.clone());
+    super::super::checkpoint::set_fail_final_flush(&name, true);
+    let error = apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+        .await
+        .unwrap_err();
+    super::super::checkpoint::set_fail_final_flush(&name, false);
+    assert!(matches!(error, DbError::Storage(_)));
+    assert!(!repo.write_domain().has_outstanding_reservation());
+    let permit = repo.write_domain().admit().await.unwrap();
+    drop(permit);
+    assert_eq!(
+        apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+            .await
+            .unwrap(),
+        ApplyOutcome::Skipped
+    );
+    assert_eq!(history_versions(&repo, &key1).await, vec![1]);
+    let info = repo.tx_info_store().await.unwrap();
+    assert_eq!(load_bookmark_v3(&info).await.unwrap().unwrap().bookmark, 1);
+    assert!(matches!(
+        info.get(receipt_key()).await,
+        Err(DbError::NotFound(_))
+    ));
+    drop(info);
 
     close(repo).await;
 }

@@ -5,7 +5,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(test)]
+use shamir_collections::TFxMap;
+#[cfg(test)]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 #[cfg(test)]
 use tokio::sync::Notify;
 
@@ -30,6 +34,32 @@ const TX_STORE: &str = "__tx__";
 /// stage.rs's `SIMULATE_UNCERTAIN`).
 #[cfg(test)]
 static SIMULATE_CHECKPOINT_UNCERTAIN: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+fn fail_final_flushes() -> &'static Mutex<TFxMap<String, bool>> {
+    static FAIL_FINAL_FLUSH: OnceLock<Mutex<TFxMap<String, bool>>> = OnceLock::new();
+    FAIL_FINAL_FLUSH.get_or_init(|| Mutex::new(TFxMap::default()))
+}
+
+#[cfg(test)]
+pub(crate) fn set_fail_final_flush(repo_name: &str, fail: bool) {
+    let mut failures = fail_final_flushes().lock().unwrap();
+    if fail {
+        failures.insert(repo_name.to_owned(), true);
+    } else {
+        failures.remove(repo_name);
+    }
+}
+
+#[cfg(test)]
+fn fail_final_flush(repo_name: &str) -> bool {
+    fail_final_flushes()
+        .lock()
+        .unwrap()
+        .get(repo_name)
+        .copied()
+        .unwrap_or(false)
+}
 
 #[cfg(test)]
 #[allow(dead_code)] // driven by the PR6b-2 test chunk
@@ -324,6 +354,11 @@ async fn reconcile_uncertain(
     Ok(())
 }
 
+pub(crate) struct PublicationCompletion<'a, F> {
+    pub(crate) lease: Option<&'a super::resume::worker::ReceiptLease>,
+    pub(crate) on_published: F,
+}
+
 /// Step 4b: advance the bookmark, J, and retire the receipt in ONE atomic
 /// batch, then publish to RAM in the SAME poll (the synchronous
 /// `publish::apply_publication` runs directly after the commit's poll
@@ -335,9 +370,10 @@ pub(crate) async fn checkpoint(
     info: &Arc<dyn Store>,
     receipt: &ReplicationReceipt,
     old: &BookmarkV3,
-    gate: &Arc<RepoTxGate>,
-    publication: &publish::Publication,
+    gate_publication: (&Arc<RepoTxGate>, &publish::Publication),
+    completion: PublicationCompletion<'_, impl FnOnce()>,
 ) -> DbResult<()> {
+    let (gate, publication) = gate_publication;
     // Resolve the WAL group BEFORE the commit so nothing awaits between the
     // commit's poll resolving and the RAM publication (see the cancellation
     // proof on `publish::apply_publication`).
@@ -389,8 +425,20 @@ pub(crate) async fn checkpoint(
         #[cfg(not(test))]
         reconcile_uncertain(repo, permit, info, receipt, old, detail).await?;
     }
-    // RAM publication: synchronous, in the same poll as the commit above.
-    publish::apply_publication(gate, group.as_ref(), publication);
+    if let Some(lease) = completion.lease {
+        lease
+            .publish(|| publish::apply_publication(gate, group.as_ref(), publication))
+            .map_err(|_| {
+                DbError::RepoRequiresReopen(
+                    "receipt publication rejected after lifecycle termination".into(),
+                )
+            })?;
+    } else {
+        // Cold open owns the repository's write-domain permit and runs before
+        // exposure; no concurrent lifecycle worker can publish against this gate.
+        publish::apply_publication(gate, group.as_ref(), publication);
+    }
+    (completion.on_published)();
     // ReceiptCheckpointed fires only AFTER the publication has completed —
     // a test that drops the apply future at this phase can never observe
     // the commit-without-publication window.
@@ -406,5 +454,9 @@ pub(crate) async fn checkpoint(
         receipt.upstream_end,
         repo.name()
     );
+    #[cfg(test)]
+    if fail_final_flush(repo.name()) {
+        return Err(DbError::Storage("injected final flush failure".into()));
+    }
     info.flush().await
 }

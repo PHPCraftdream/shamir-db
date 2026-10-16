@@ -73,15 +73,21 @@ pub(crate) async fn complete_outstanding_receipt(
         clean_through: v3.clean_through,
         outstanding_receipt: None,
     };
-    let work = match receipt.phase {
+    // A stored Materialized receipt is already durable: NEVER re-commit the
+    // materialization (that would re-write the Materialized phase); jump
+    // straight to the verify/confirm/publish/checkpoint tail, mirroring the
+    // warm fast path (`apply.rs::run_chunk_tail`). Only a Prepared receipt
+    // still needs the materialize → commit leg.
+    let receipt = match receipt.phase {
         ReceiptPhase::Prepared => {
-            stage::materialize_from_prepared_receipt(repo, permit, &receipt).await?
+            let work = stage::materialize_from_prepared_receipt(repo, permit, &receipt).await?;
+            stage::commit_materialized_work(repo, permit, info, &work, &old)
+                .await?
+                .0
         }
-        ReceiptPhase::Materialized => stage::materialize_from_materialized_receipt(&receipt)?,
+        ReceiptPhase::Materialized => receipt,
         ReceiptPhase::Checkpointed => unreachable!("checked above"),
     };
-    let (receipt, _counters) =
-        stage::commit_materialized_work(repo, permit, info, &work, &old).await?;
 
     // Durability boundary: verify journal coverage (the Materialized batch
     // wrote the rows; only an Uncertain commit that silently failed can leave
@@ -107,7 +113,19 @@ pub(crate) async fn complete_outstanding_receipt(
     let gate = repo.tx_gate().await?;
     // One atomic batch: bookmark advance + receipt retirement, with the RAM
     // publication in the same poll (+ info flush).
-    checkpoint::checkpoint(repo, permit, info, &receipt, &old, &gate, &publication).await?;
+    checkpoint::checkpoint(
+        repo,
+        permit,
+        info,
+        &receipt,
+        &old,
+        (&gate, &publication),
+        checkpoint::PublicationCompletion {
+            lease: None,
+            on_published: || {},
+        },
+    )
+    .await?;
     log::info!(
         "cold receipt recovery: completed receipt upstream {}..={} through \
          local version {} on repo {}",
