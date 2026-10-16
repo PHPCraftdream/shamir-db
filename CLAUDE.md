@@ -353,13 +353,24 @@ CI is segmented into two tiers to keep the shared runner pool responsive
 Scope: source trees only — not lockfiles, generated code, vendored code,
 fixtures or docs.
 
-Existing violations are grandfathered; there is **no repo-wide sweep**.
-The limits are a ratchet: a change must not push a new file or folder over
+Existing violations are grandfathered in the baseline and are being swept
+into subfolders / split files incrementally (owner decision 2026-10-16:
+the goal is an empty baseline). The limits are a ratchet: a change must not push a new file or folder over
 a limit, and must not grow a file or folder that is already over it. New
 logic goes into a new file or subfolder instead; when a task substantially
 rewrites an over-limit file, split it in that task. Delegated briefs
 carry this rule, and the orchestrator checks it on the diff of every
 delegated change (changed paths only, so the check is instant).
+
+**Enforcement.** Both limits are enforced on every PR by
+`scripts/ci/check_layout.py` (FAST + FULL CI tiers; instant, Python
+stdlib only). Current violations are grandfathered in
+`scripts/ci/layout_baseline.txt` as a ratchet: a baselined folder/file
+must not grow above its recorded size, any new violation fails the
+check, and `--update-baseline` only lowers or removes entries (never
+adds). The repo root and `crates/` are exempt from the entry rule
+(workspace container roots); the checker's scope/exclusion list lives
+at the top of the script.
 
 ---
 
