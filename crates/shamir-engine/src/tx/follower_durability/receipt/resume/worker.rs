@@ -268,14 +268,16 @@ impl Drop for ReceiptLease {
 /// parked guards: the safe durable pause.
 type ReceiptJobState = WorkerExecutionState<ReceiptApplyJob, DbResult<ApplyOutcome>, ReceiptLease>;
 
-async fn receipt_handler(state: ReceiptJobState) {
-    while let Some(job) = state.next_job().await {
+async fn receipt_handler(mut state: ReceiptJobState) {
+    while let Some(mut job) = state.next_job().await {
         state.lease().enter_job();
         let _tail = job.payload.repo.commit_tail().enter();
+        // Take the events so `job` stays whole for `reply`.
+        let events = std::mem::take(&mut job.payload.events);
         let result = run_receipt_pipeline(
             &job.payload.repo,
             job.payload.info,
-            job.payload.events,
+            events,
             job.payload.bookmark,
             job.payload.policy,
             state.lease(),
