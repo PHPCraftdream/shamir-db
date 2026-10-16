@@ -8,7 +8,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use shamir_storage::types::{RecordKey, Store};
+use shamir_storage::types::RecordKey;
 use shamir_tx::{decode_version_key, encode_version_key, ChangeOp, ChangelogEvent, RecordChange};
 use shamir_types::access::Actor;
 use shamir_types::types::record_id::RecordId;

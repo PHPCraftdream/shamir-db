@@ -90,9 +90,10 @@ async fn parked_apply_blocks_ddl_via_the_write_domain() {
     let hook = Arc::new(test_seam::Hook::default());
     *hook.park_at.lock().unwrap() = Some(Phase::ReceiptPrepared);
     test_seam::install(&name, Arc::clone(&hook));
+    let events = [event(1, 1)];
     let mut apply = Box::pin(apply_replicated_batch(
         &repo,
-        &[event(1, 1)],
+        &events,
         0,
         ApplyPolicy::Trusted,
     ));

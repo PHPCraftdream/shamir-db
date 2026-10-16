@@ -10,7 +10,7 @@
 use bytes::Bytes;
 use futures::StreamExt;
 use shamir_storage::storage_in_memory::InMemoryStore;
-use shamir_storage::types::{KvOp, RecordKey, Store as _};
+use shamir_storage::types::{KvOp, RecordKey};
 use std::sync::Arc;
 
 use crate::mvcc_store::MvccStore;

@@ -11,7 +11,7 @@
 use bytes::Bytes;
 use futures::StreamExt;
 use shamir_storage::error::DbError;
-use shamir_storage::types::{RecordKey, Store};
+use shamir_storage::types::RecordKey;
 use shamir_tx::{decode_version_key, encode_version_key, ChangeOp, ChangelogEvent, RecordChange};
 use shamir_types::access::Actor;
 use shamir_types::codecs::basic::bincode as bincode_codec;

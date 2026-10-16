@@ -19,7 +19,6 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use shamir_storage::error::DbError;
-use shamir_storage::types::Store as _;
 use shamir_tx::{decode_version_key, ChangeOp, ChangelogEvent, RecordChange};
 use shamir_types::access::Actor;
 use shamir_types::types::record_id::RecordId;
@@ -137,13 +136,15 @@ async fn crash_at_phase(
         0,
         ApplyPolicy::Trusted,
     ));
-    let reached = hook.reached.notified();
-    tokio::pin!(reached);
-    reached.as_mut().enable();
-    tokio::select! {
-        _ = &mut reached => {}
-        result = &mut apply => {
-            panic!("apply completed before {phase:?}: {result:?}")
+    {
+        let reached = hook.reached.notified();
+        tokio::pin!(reached);
+        reached.as_mut().enable();
+        tokio::select! {
+            _ = &mut reached => {}
+            result = &mut apply => {
+                panic!("apply completed before {phase:?}: {result:?}")
+            }
         }
     }
     // Dropping the caller future drops only the JoinHandle await; the
@@ -189,7 +190,8 @@ async fn assert_settled(repo: &RepoInstance) {
     let info = repo.tx_info_store().await.unwrap();
     let v3 = load_bookmark_v3(&info).await.unwrap();
     assert!(
-        v3.is_some_and(|v3| v3.bookmark >= 2 && v3.outstanding_receipt.is_none()),
+        v3.as_ref()
+            .is_some_and(|v3| v3.bookmark >= 2 && v3.outstanding_receipt.is_none()),
         "bookmark must be advanced with the receipt retired: {v3:?}"
     );
     drop(info);
@@ -456,7 +458,7 @@ async fn drop_during_uncertain_readback_still_completes_and_publishes() {
     assert_eq!(gate.durable_watermark(), 2);
     assert_eq!(outstanding_phase(&repo).await, None);
     assert!(
-        checkpoint::checkpoint_reconciles() >= baseline + 1,
+        checkpoint::checkpoint_reconciles() > baseline,
         "the reconcile branch must have run"
     );
 
