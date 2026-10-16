@@ -79,10 +79,14 @@ impl ShamirDb {
         db
     }
 
-    pub async fn remove_db(&self, name: &str) -> bool {
+    pub async fn remove_db(&self, name: &str) -> DbResult<bool> {
         if name == SYSTEM_DB_NAME {
-            return false;
+            return Ok(false);
         }
+
+        // S5c-X PR8b-2: refuse DROP of a destination referenced by a durable
+        // subscription binding BEFORE any live or durable mutation.
+        self.ensure_destinations_unbound(name, None).await?;
 
         let removed = self.dbs.remove(name).is_some();
 
@@ -96,7 +100,7 @@ impl ShamirDb {
             }
         }
 
-        removed
+        Ok(removed)
     }
 
     /// Thin System-actor wrapper around [`rename_db_as`].
@@ -138,6 +142,10 @@ impl ShamirDb {
     /// - The destination must NOT exist (in-memory AND persisted).
     pub async fn rename_db_as(&self, from: &str, to: &str, _actor: Actor) -> DbResult<()> {
         // ── Guards ────────────────────────────────────────────────────
+        // S5c-X PR8b-2: refuse RENAME of a destination referenced by a
+        // durable subscription binding BEFORE any live or durable mutation
+        // (repo: None — the whole database is the destination set).
+        self.ensure_destinations_unbound(from, None).await?;
         if from == SYSTEM_DB_NAME {
             return Err(DbError::Validation(format!(
                 "cannot rename the system database '{}'",
@@ -516,7 +524,11 @@ impl ShamirDb {
         Ok(())
     }
 
-    pub async fn remove_repo(&self, db_name: &str, repo_name: &str) -> bool {
+    pub async fn remove_repo(&self, db_name: &str, repo_name: &str) -> DbResult<bool> {
+        // S5c-X PR8b-2: refuse DROP of a referenced destination BEFORE any
+        // live or durable mutation.
+        self.ensure_destinations_unbound(db_name, Some(repo_name))
+            .await?;
         if let Some(db) = self.get_db(db_name) {
             let removed = db.remove_repo(repo_name).await;
             if removed {
@@ -533,9 +545,9 @@ impl ShamirDb {
                     );
                 }
             }
-            removed
+            Ok(removed)
         } else {
-            false
+            Ok(false)
         }
     }
 
@@ -565,6 +577,10 @@ impl ShamirDb {
         to: &str,
         _actor: Actor,
     ) -> DbResult<()> {
+        // S5c-X PR8b-2: refuse RENAME of a destination referenced by a
+        // durable subscription binding BEFORE any live or durable mutation.
+        self.ensure_destinations_unbound(db_name, Some(from))
+            .await?;
         let db = self
             .get_db(db_name)
             .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;

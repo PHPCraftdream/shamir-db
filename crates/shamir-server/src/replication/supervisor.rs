@@ -5,7 +5,9 @@
 //! `admin_replication.rs`) must translate into a running
 //! [`run_follower_loop`](super::follower_loop::run_follower_loop) pulling from
 //! the subscription's `upstream` and applying onto the local `(db, repo)`
-//! resolved from the bound profile's `pull` streams. `pause` / `resume` /
+//! destinations recorded in the row's DURABLE binding (S5c-X PR8b-2) — the
+//! bound profile's `pull` streams are only checked for coverage, never used
+//! as the target source. `pause` / `resume` /
 //! `drop` (via `alter_subscription` / `drop_subscription`, 386-a) flip the
 //! row's `state`; the supervisor's [`reconcile`](Self::reconcile) converges
 //! the running loops to that declarative state.
@@ -22,8 +24,9 @@
 //! Active loops live in a [`scc::HashMap`] keyed by subscription name, hashed
 //! with the workspace [`THasher`]. Each entry owns a
 //! [`CancellationToken`] (stop signal) + the spawned [`JoinHandle`]s (one per
-//! `pull` stream) + the profile name it was started against (so a profile
-//! rebind can be detected and the loop restarted).
+//! bound destination) + the profile name and binding generation it was
+//! started against (so a profile rebind or a replaced binding can be
+//! detected and the loop restarted).
 //!
 //! # Reactivity — reconcile + `notify_changed`, NOT changefeed-watch (yet)
 //!
@@ -51,8 +54,8 @@ use shamir_collections::{THasher, TMap};
 use shamir_db::query::admin::ReplStream;
 use shamir_db::query::read::{QueryResult, ReadQuery};
 use shamir_db::types::value::QueryValue;
-use shamir_db::{SeedRefusal, ShamirDb};
-use shamir_query_types::admin::{ReplDirection, ReplScope};
+use shamir_db::{SeedRefusal, ShamirDb, SubscriptionBinding};
+use shamir_query_types::admin::ReplDirection;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -79,6 +82,15 @@ pub struct Subscription {
     pub profile: String,
     /// `active` → loop should run; `paused` (or anything else) → stopped.
     pub state: String,
+    /// S5c-X PR8b-2: the row's durable binding generation. The DURABLE
+    /// authority for loop identity on reconcile — a loop started under an
+    /// older generation must never survive to mark or clear a replacement
+    /// binding.
+    pub binding_generation: u64,
+    /// S5c-X PR8b-2: the row's durable destination set — the ENFORCED write
+    /// boundary for follower targets and the coverage authority for
+    /// quarantine. The replication profile is NOT the authority.
+    pub binding_destinations: Vec<(String, String)>,
 }
 
 impl Subscription {
@@ -104,11 +116,13 @@ pub type ReplSourceFactory =
     Arc<dyn Fn(&Subscription) -> Arc<dyn ReplSource> + Send + Sync + 'static>;
 
 /// A running subscription: its stop signal, spawned loop tasks, and the
-/// profile it was started against (to detect a rebind on reconcile).
+/// profile + binding generation it was started against (to detect a rebind
+/// or a replaced binding on reconcile).
 struct SubHandle {
     cancel: CancellationToken,
     joins: Vec<JoinHandle<()>>,
     profile: String,
+    generation: u64,
     targets: Vec<(String, String)>,
 }
 
@@ -215,10 +229,14 @@ impl SubscriptionSupervisor {
     /// Converge running loops to the declarative catalogue state. Idempotent.
     ///
     /// - For each `active` subscription with a resolvable profile and NOT
-    ///   already running under the same profile → start its loop(s).
-    /// - For each running loop whose subscription is gone, `paused`, or
-    ///   rebound to a different profile → stop it (and, on rebind, the next
-    ///   pass restarts it under the new profile).
+    ///   already running under the same profile AND the same binding
+    ///   generation → start its loop(s).
+    /// - For each running loop whose subscription is gone, `paused`, rebound
+    ///   to a different profile, or replaced under a new binding generation
+    ///   → stop it (and, on rebind, the next pass restarts it under the new
+    ///   profile / binding). A generation change means the binding was
+    ///   replaced — an old task must never survive to mark or clear the
+    ///   replacement.
     pub async fn reconcile(&self) {
         let _lifecycle = self.reconcile_lock.lock().await;
         let subs = match self.read_subscriptions().await {
@@ -229,12 +247,16 @@ impl SubscriptionSupervisor {
             }
         };
 
-        // 1. Stop loops that should no longer run (removed / paused / rebound).
+        // 1. Stop loops that should no longer run (removed / paused /
+        // rebound / replaced binding).
         let mut to_stop: Vec<String> = Vec::new();
         self.registry.iter_sync(|name, handle| {
-            let keep = subs
-                .iter()
-                .any(|s| &s.name == name && s.is_active() && s.profile == handle.profile);
+            let keep = subs.iter().any(|s| {
+                &s.name == name
+                    && s.is_active()
+                    && s.profile == handle.profile
+                    && s.binding_generation == handle.generation
+            });
             if !keep {
                 to_stop.push(name.clone());
             }
@@ -290,26 +312,39 @@ impl SubscriptionSupervisor {
         }
     }
 
-    /// Resolve `sub`'s profile → `pull` streams, then spawn one follower loop
-    /// per `pull` stream targeting `(scope.db, scope.repo)`.
+    /// Start the follower loops for `sub`: one per destination recorded in
+    /// the row's DURABLE binding (the enforced write boundary), after
+    /// requiring the resolved profile's `pull` streams to cover every bound
+    /// destination (keeps the admission/hello machinery honest).
     async fn start_subscription(&self, sub: &Subscription) -> Result<(), ReplError> {
         let streams = self
             .resolve_profile_streams(&sub.profile)
             .await
             .map_err(ReplError::Start)?;
-        let pull_targets: Vec<(String, String)> = streams
+        // The binding is the enforced boundary — targets come from the row,
+        // NEVER from the profile. The profile is only checked for coverage.
+        let profile_pulls: Vec<(String, String)> = streams
             .iter()
             .filter(|st| matches!(st.direction, ReplDirection::Pull))
-            .filter_map(|st| pull_target(&st.scope))
+            .filter_map(|st| {
+                st.scope
+                    .repo
+                    .as_ref()
+                    .map(|repo| (st.scope.db.clone(), repo.clone()))
+            })
             .collect();
-
-        if pull_targets.is_empty() {
-            return Err(ReplError::Start(format!(
-                "profile '{}' has no pull streams with a (db, repo) scope",
-                sub.profile
-            )));
+        for (db, repo) in &sub.binding_destinations {
+            if !profile_pulls
+                .iter()
+                .any(|(p_db, p_repo)| p_db == db && p_repo == repo)
+            {
+                return Err(ReplError::Start(format!(
+                    "profile '{}' does not cover bound destination '{}/{}'",
+                    sub.profile, db, repo
+                )));
+            }
         }
-
+        let pull_targets = sub.binding_destinations.clone();
         for (index, (db, repo)) in pull_targets.iter().enumerate() {
             super::source::seed::admission::admit(&self.local, &sub.name, &streams, db, repo)
                 .await?;
@@ -378,6 +413,10 @@ impl SubscriptionSupervisor {
             let src = source.clone();
             let tok = cancel.clone();
             let sub_name = sub.name.clone();
+            // S5c-X PR8b-2: the generation this loop runs under — a stale
+            // task's terminal callback on a REPLACED binding is a no-op
+            // inside `ShamirDb` (generation mismatch ⇒ logged no-op).
+            let generation = sub.binding_generation;
             // §5.6 — each loop is its own task; never blocks the server.
             let join = tokio::spawn(async move {
                 match run_follower_loop(local.clone(), src, cfg, tok).await {
@@ -395,7 +434,12 @@ impl SubscriptionSupervisor {
                             gap_at
                         };
                         if let Err(mark_err) = local
-                            .mark_subscription_resync_required(&sub_name, gap_at, from_version)
+                            .mark_subscription_resync_required_generation(
+                                &sub_name,
+                                gap_at,
+                                from_version,
+                                generation,
+                            )
                             .await
                         {
                             warn!(
@@ -443,16 +487,17 @@ impl SubscriptionSupervisor {
                                 .await;
                         } else {
                             // Same catalogue state the gap path persists via
-                            // `mark_subscription_resync_required`
+                            // `mark_subscription_resync_required_generation`
                             // (state = "resync_required"), but the message
                             // keeps the TYPED fence reason plus the recorded
                             // and observed identities instead of gap text —
                             // there is no gap; nothing was applied.
                             if let Err(mark_err) = local
-                                .mark_subscription_terminal(
+                                .mark_subscription_terminal_generation(
                                     &sub_name,
                                     "resync_required",
                                     &e.to_string(),
+                                    Some(generation),
                                 )
                                 .await
                             {
@@ -500,6 +545,7 @@ impl SubscriptionSupervisor {
             cancel,
             joins,
             profile: sub.profile.clone(),
+            generation: sub.binding_generation,
             targets: pull_targets,
         };
         // A racing reconcile may have inserted already; if so, stop the loops
@@ -550,9 +596,20 @@ impl SubscriptionSupervisor {
             .map_err(|e| e.to_string())?;
         Ok(records
             .into_iter()
-            .filter_map(|r| {
-                Some(Subscription {
-                    name: r.get("name")?.as_str()?.to_string(),
+            .map(|r| {
+                // S5c-X PR8b-2: the binding is strictly validated; a row
+                // that fails is a typed catalogue error naming the
+                // subscription. Reconcile logs a warning and leaves running
+                // loops alone — fail-safe, never fail-open.
+                let binding = SubscriptionBinding::from_row(&r).map_err(|e| e.to_string())?;
+                let (binding_generation, binding_destinations) =
+                    (binding.generation(), binding.destinations().to_vec());
+                Ok(Subscription {
+                    name: r
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| "subscription row is missing its 'name' string".to_string())?
+                        .to_string(),
                     upstream: r
                         .get("upstream")
                         .and_then(|v| v.as_str())
@@ -573,21 +630,12 @@ impl SubscriptionSupervisor {
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string(),
+                    binding_generation,
+                    binding_destinations,
                 })
             })
             .collect())
     }
-}
-
-/// Extract a `(db, repo)` pull target from a scope. A pull loop needs a
-/// concrete repo (the follower applies onto `(db, repo)`), so a bare-database
-/// scope (`repo == None`) is skipped for R1 — expanding it to every repo in
-/// the db is future work.
-fn pull_target(scope: &ReplScope) -> Option<(String, String)> {
-    scope
-        .repo
-        .as_ref()
-        .map(|repo| (scope.db.clone(), repo.clone()))
 }
 
 /// Reverse `to_qv(&Vec<ReplStream>)`: re-encode the `QueryValue` to msgpack

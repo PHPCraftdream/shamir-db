@@ -1,79 +1,110 @@
-//! Cache published before persistent resync transitions.
-use dashmap::DashMap;
+//! Lock-free snapshot cache of `resync_required` quarantine coverage
+//! (S5c-X PR8b-2). An immutable [`QuarantineSnapshot`] is published through
+//! an [`arc_swap::ArcSwap`]: reads are two borrow-only hash lookups keyed by
+//! exact `(db, repo)` — no global sentinel, no wildcard arms, no map locks,
+//! and zero allocation unless a quarantine hit clones the reason.
+//!
+//! Reliability contract: there is NO global sentinel anymore. A catalogue
+//! validation failure fails initialization (typed error at open) or, at
+//! runtime, retains the last safe snapshot — `install` is simply not called
+//! on error, so protection is never cleared.
+
+use arc_swap::ArcSwap;
 use shamir_collections::{THasher, TSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+type QuarantineEntries = HashMap<String, HashMap<String, Arc<str>>, THasher>;
+
+/// Immutable snapshot: two levels keyed by db then repo, plus the set of
+/// prepublished (not yet durably confirmed) keys.
+#[derive(Default)]
+struct QuarantineSnapshot {
+    entries: QuarantineEntries,
+    pending: TSet<(String, String)>,
+}
 
 pub(crate) struct ResyncQuarantineCache {
-    entries: DashMap<(String, String), String, THasher>,
-    pending: DashMap<(String, String), (), THasher>,
-    count: AtomicUsize,
-}
-/// Global fallback cache key. Subscription rows carry no db column, so when a
-/// quarantined row's replication profile cannot be resolved there is no
-/// recorded `(db, repo)` to quarantine narrowly: the widest key that is
-/// guaranteed safe is the global sentinel, which fails every read closed.
-pub(crate) fn global_sentinel_key() -> (String, String) {
-    ("*".to_string(), "*".to_string())
-}
-
-/// Reason string stored under the global sentinel when a quarantined row's
-/// profile cannot be resolved — it must name the unresolvable profile.
-pub(crate) fn unresolvable_profile_reason(profile: &str) -> String {
-    format!(
-        "global read quarantine: unresolvable replication profile '{profile}' — \
-         reads fail closed until the profile is restored"
-    )
+    snapshot: ArcSwap<QuarantineSnapshot>,
 }
 
 impl ResyncQuarantineCache {
     pub(crate) fn new() -> Self {
         Self {
-            entries: DashMap::with_hasher(THasher::default()),
-            pending: DashMap::with_hasher(THasher::default()),
-            count: AtomicUsize::new(0),
+            snapshot: ArcSwap::from_pointee(QuarantineSnapshot::default()),
         }
     }
     pub(crate) fn is_empty(&self) -> bool {
-        self.count.load(Ordering::Acquire) == 0
+        self.snapshot.load().entries.is_empty()
     }
+    /// Exact `(db, repo)` lookup only — no wildcard or global fallback.
     pub(crate) fn reason_for(&self, db: &str, repo: &str) -> Option<String> {
-        if let Some(reason) = self.entries.get(&(db.to_string(), repo.to_string())) {
-            return Some(reason.value().clone());
-        }
-        self.entries
-            .get(&(db.to_string(), "*".to_string()))
-            .map(|reason| reason.value().clone())
-            .or_else(|| {
-                // Global sentinel ("*", "*"): a quarantined row with an
-                // unresolvable profile quarantines reads fail-closed
-                // everywhere, since no db is recorded for it.
-                self.entries
-                    .get(&("*".to_string(), "*".to_string()))
-                    .map(|reason| reason.value().clone())
-            })
+        let snapshot = self.snapshot.load();
+        snapshot
+            .entries
+            .get(db)?
+            .get(repo)
+            .map(|reason| reason.to_string())
     }
-    /// Add pre-persistence quarantine keys, retaining them if persistence fails.
+    /// Add pre-persistence quarantine keys, retaining them if persistence
+    /// fails. Existing keys keep their current reason (old vacant-only
+    /// semantics); newly added keys are recorded as pending. Called under
+    /// `replication_control_lock`, before persistence.
     pub(crate) fn publish(&self, entries: impl IntoIterator<Item = ((String, String), String)>) {
-        for (key, reason) in entries {
-            if let dashmap::mapref::entry::Entry::Vacant(entry) = self.entries.entry(key.clone()) {
-                entry.insert(reason);
-                self.pending.insert(key, ());
-                self.count.fetch_add(1, Ordering::Release);
+        let current = self.snapshot.load_full();
+        let mut next = QuarantineSnapshot {
+            entries: current.entries.clone(),
+            pending: current.pending.clone(),
+        };
+        for ((db, repo), reason) in entries {
+            let repos = next.entries.entry(db.clone()).or_default();
+            if !repos.contains_key(repo.as_str()) {
+                repos.insert(repo.clone(), Arc::from(reason));
+                next.pending.insert((db, repo));
             }
         }
+        self.snapshot.store(Arc::new(next));
     }
-    /// Replace cache contents from a successful persistence snapshot, keeping
-    /// prepublished keys until that snapshot confirms their durable state.
+    /// Replace cache contents from a successful persistence snapshot,
+    /// keeping prepublished keys (with their current reasons) until that
+    /// snapshot confirms their durable state. Callers never call this on
+    /// failure, so a failed persistence never publishes an empty
+    /// replacement — the last safe snapshot stays.
     pub(crate) fn install(&self, entries: impl IntoIterator<Item = ((String, String), String)>) {
+        let current = self.snapshot.load_full();
         let mut fresh: TSet<(String, String)> = TSet::default();
-        for (key, reason) in entries {
-            self.entries.insert(key.clone(), reason);
-            fresh.insert(key);
+        let mut next_entries: QuarantineEntries = HashMap::with_hasher(THasher::default());
+        for ((db, repo), reason) in entries {
+            fresh.insert((db.clone(), repo.clone()));
+            next_entries
+                .entry(db)
+                .or_default()
+                .insert(repo, Arc::from(reason));
         }
-        self.pending.retain(|key, _| !fresh.contains(key));
-        self.entries
-            .retain(|key, _| fresh.contains(key) || self.pending.contains_key(key));
-        self.count.store(self.entries.len(), Ordering::Release);
+        let mut pending = current.pending.clone();
+        for key in fresh.iter() {
+            pending.remove(key);
+        }
+        // Surviving prepublished keys (with their current reasons) are
+        // merged back so protection never regresses below the prepublished
+        // set.
+        for (db, repo) in pending.iter() {
+            if let Some(reason) = current
+                .entries
+                .get(db)
+                .and_then(|repos| repos.get(repo.as_str()))
+                .cloned()
+            {
+                next_entries
+                    .entry(db.clone())
+                    .or_default()
+                    .insert(repo.clone(), reason);
+            }
+        }
+        self.snapshot.store(Arc::new(QuarantineSnapshot {
+            entries: next_entries,
+            pending,
+        }));
     }
 }
 impl Default for ResyncQuarantineCache {

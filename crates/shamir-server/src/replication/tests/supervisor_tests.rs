@@ -800,3 +800,67 @@ async fn resync_required_destination_is_excluded_from_downstream_serving() {
         "an uncovered db must stay servable"
     );
 }
+
+/// S5c-X PR8b-2 evidence row 5 (stale terminal callback): a callback carrying
+/// a binding generation that no longer matches the row's durable binding is a
+/// logged no-op — the row's `state` does NOT change and the quarantine cache
+/// does not grow. The CORRECT generation flips the row. In-process, no
+/// timing races: both calls go through the same
+/// `mark_subscription_resync_required_generation` seam the supervisor uses.
+/// (Subscriptions bind `binding_generation = 1` at creation.)
+#[tokio::test]
+async fn stale_generation_callback_does_not_mark_replacement() {
+    let follower = build_db().await;
+    create_profile_and_subscription(&follower).await;
+
+    // Nothing quarantined yet.
+    assert!(!follower
+        .has_resync_required_subscription_covering("app", "main")
+        .await
+        .unwrap());
+
+    // STALE generation (99 != the row's 1): a no-op — no state flip, no
+    // cache growth.
+    follower
+        .mark_subscription_resync_required_generation("sub_a", 100, 42, 99)
+        .await
+        .unwrap();
+    assert_eq!(
+        sub_state(&follower, "sub_a").await.as_deref(),
+        Some("active"),
+        "a stale-generation callback must not mark the row"
+    );
+    assert!(
+        !follower
+            .has_resync_required_subscription_covering("app", "main")
+            .await
+            .unwrap(),
+        "a stale-generation callback must not grow the quarantine cache"
+    );
+
+    // The CORRECT generation (the row's durable 1) marks the row and covers
+    // exactly its bound destination.
+    follower
+        .mark_subscription_resync_required_generation("sub_a", 100, 42, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        sub_state(&follower, "sub_a").await.as_deref(),
+        Some("resync_required"),
+        "the current-generation callback must mark the row"
+    );
+    assert!(
+        follower
+            .has_resync_required_subscription_covering("app", "main")
+            .await
+            .unwrap(),
+        "the bound destination must be excluded from serving"
+    );
+    assert!(
+        !follower
+            .has_resync_required_subscription_covering("app", "other")
+            .await
+            .unwrap(),
+        "an uncovered repo must stay servable"
+    );
+}

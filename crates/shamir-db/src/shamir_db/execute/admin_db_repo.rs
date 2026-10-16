@@ -12,7 +12,7 @@ use crate::types::value::QueryValue;
 use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
-use super::helpers::{admin_result, validate_name_component};
+use super::helpers::{admin_result, db_error_to_batch, validate_name_component};
 
 impl ShamirAdminExecutor {
     pub(super) async fn handle_create_db(
@@ -139,11 +139,21 @@ impl ShamirAdminExecutor {
                                 .await;
                         }
                     }
-                    self.shamir.remove_repo(&op.drop_db, repo_name).await;
+                    // S5c-X PR8b-2: the binding guard's typed refusal must
+                    // propagate before the database row is removed.
+                    let _ = self
+                        .shamir
+                        .remove_repo(&op.drop_db, repo_name)
+                        .await
+                        .map_err(db_error_to_batch)?;
                 }
             }
         }
-        let removed = self.shamir.remove_db(&op.drop_db).await;
+        let removed = self
+            .shamir
+            .remove_db(&op.drop_db)
+            .await
+            .map_err(db_error_to_batch)?;
         Ok(admin_result(mpack!({
             "dropped": @(QueryValue::Str(op.drop_db.clone())),
             "existed": @(QueryValue::Bool(removed)),
@@ -408,7 +418,11 @@ impl ShamirAdminExecutor {
         // Route through ShamirDb so the repo's catalogue record is
         // removed from the system store and the repo does not
         // resurrect on the next open (symmetry with CreateRepo).
-        let removed = self.shamir.remove_repo(&self.db_name, &op.drop_repo).await;
+        let removed = self
+            .shamir
+            .remove_repo(&self.db_name, &op.drop_repo)
+            .await
+            .map_err(db_error_to_batch)?;
         Ok(admin_result(mpack!({
             "dropped_repo": @(QueryValue::Str(op.drop_repo.clone())),
             "existed": @(QueryValue::Bool(removed)),

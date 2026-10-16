@@ -1,0 +1,411 @@
+//! S5c-X PR8b-2 evidence rows 3 (in-process leg), 5, 6, 8 — the binding is
+//! the durable authority through profile drops, SetProfile, profile
+//! replacement, same-name recreation, terminal flush failures, and
+//! DROP/RENAME of bound destinations (facade-level guards).
+
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl::{
+    alter_subscription, drop_replication_profile, drop_subscription, list_subscriptions,
+    repl_scope, replication_profile, subscription,
+};
+use shamir_query_builder::doc;
+use shamir_query_builder::write::insert;
+use shamir_query_builder::Query;
+use shamir_query_types::admin::{ReplDirection, ReplMode};
+use shamir_query_types::batch::{BatchError, BatchResponse};
+
+use crate::access::Actor;
+use crate::engine::repo::repo_types::BoxRepoFactory;
+use crate::engine::repo::RepoConfig;
+use crate::types::value::QueryValue;
+use crate::{DbError, ShamirDb};
+
+/// In-memory ShamirDb with `testdb/{main,side}` and `otherdb/main`, each with
+/// a `users` table.
+async fn setup() -> ShamirDb {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let db = shamir.create_db("testdb").await;
+    for repo in ["main", "side"] {
+        db.add_repo(
+            RepoConfig::new(repo, BoxRepoFactory::in_memory())
+                .add_table(crate::engine::table::TableConfig::new("users")),
+        )
+        .await
+        .unwrap();
+    }
+    let otherdb = shamir.create_db("otherdb").await;
+    otherdb
+        .add_repo(
+            RepoConfig::new("main", BoxRepoFactory::in_memory())
+                .add_table(crate::engine::table::TableConfig::new("users")),
+        )
+        .await
+        .unwrap();
+    shamir
+}
+
+/// Insert one row into `testdb/{repo}.users`.
+async fn seed_row(shamir: &ShamirDb, repo: &str) {
+    let mut b = Batch::new();
+    b.id(1);
+    b.insert(
+        "ins",
+        insert("users").row(doc! { "name" => "Alice", "age" => 30 }),
+    );
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+}
+
+/// Plain SELECT against `{db}/{repo}.users`.
+async fn read_users(shamir: &ShamirDb, db: &str, repo: &str) -> Result<BatchResponse, BatchError> {
+    let mut b = Batch::new();
+    b.id(9);
+    b.query("r", Query::with_repo(repo, "users"));
+    shamir.execute(db, &b.to_request_via_msgpack()).await
+}
+
+/// Create ONE Pull profile over a single `(db, repo)` scope (builder-only).
+async fn create_profile(shamir: &ShamirDb, profile: &str, repo: &str) {
+    let mut b = Batch::new();
+    b.id(2);
+    b.op(
+        "profile",
+        replication_profile(profile).stream(
+            repl_scope("testdb").repo(repo).build(),
+            ReplDirection::Pull,
+            ReplMode::ReadOnly,
+        ),
+    );
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+}
+
+/// Create a profile over `testdb/{repo}` plus an ACTIVE subscription bound to
+/// it, then quarantine the row through the real supervisor entry point.
+async fn quarantine(shamir: &ShamirDb, sub: &str, profile: &str, repo: &str) {
+    create_profile(shamir, profile, repo).await;
+    let mut b = Batch::new();
+    b.id(2);
+    b.op("sub", subscription(sub, "tcp://peer:9000", "pub", profile));
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    shamir
+        .mark_subscription_resync_required(sub, 7, 3)
+        .await
+        .unwrap();
+}
+
+/// Read the raw subscription row for `name` (status/list only project a
+/// subset of fields — same pattern as `replication_ddl_tests`).
+async fn subscription_row(shamir: &ShamirDb, name: &str) -> QueryValue {
+    let table = shamir.system_store().subscriptions_table().await.unwrap();
+    let interner = table.interner_for_test().get().await.unwrap();
+    let refs = crate::types::common::new_map();
+    let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+    table
+        .read(
+            &crate::query::read::ReadQuery::new("subscriptions").filter(
+                crate::query::filter::Filter::Eq {
+                    field: vec!["name".to_string()],
+                    value: crate::query::filter::FilterValue::String(name.to_string()),
+                },
+            ),
+            &ctx,
+        )
+        .await
+        .unwrap()
+        .records
+        .remove(0)
+        .as_value()
+        .into_owned()
+}
+
+/// `ALTER SUBSCRIPTION ... SET PROFILE` through the batch path.
+async fn set_profile(
+    shamir: &ShamirDb,
+    id: u64,
+    sub: &str,
+    profile: &str,
+) -> Result<BatchResponse, BatchError> {
+    let mut b = Batch::new();
+    b.id(id);
+    b.try_op("alt", alter_subscription(sub).set_profile(profile))
+        .unwrap();
+    shamir.execute("testdb", &b.to_request_via_msgpack()).await
+}
+
+/// Evidence row 3 (in-process leg): `DROP REPLICATION PROFILE` after binding
+/// leaves the bound destination refused — the refresh rebuilds coverage from
+/// the row's durable binding, never from profile resolution.
+#[tokio::test]
+async fn binding_profile_drop_keeps_bound_destination_blocked() {
+    let shamir = setup().await;
+    seed_row(&shamir, "main").await;
+    quarantine(&shamir, "sub", "prof", "main").await;
+    assert!(read_users(&shamir, "testdb", "main").await.is_err());
+
+    let mut b = Batch::new();
+    b.id(3);
+    b.op("drp", drop_replication_profile("prof"));
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    let err = read_users(&shamir, "testdb", "main").await.unwrap_err();
+    assert_eq!(err.code(), Some("resync_required"), "{err}");
+    assert!(read_users(&shamir, "testdb", "side").await.is_ok());
+}
+
+/// Evidence row 5: SetProfile to an equal-destination profile SUCCEEDS and
+/// keeps the durable binding untouched; SetProfile to a different-destination
+/// profile is refused with `binding_destination_mismatch` and mutates
+/// nothing; same-name subscription creation is refused with `already_exists`.
+#[tokio::test]
+async fn binding_set_profile_and_same_name_guards() {
+    let shamir = setup().await;
+    seed_row(&shamir, "main").await;
+    create_profile(&shamir, "prof", "main").await;
+    let mut b = Batch::new();
+    b.id(2);
+    b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    // Equal-destination profile: SetProfile succeeds, binding unchanged.
+    create_profile(&shamir, "prof_equal", "main").await;
+    set_profile(&shamir, 4, "sub", "prof_equal").await.unwrap();
+    let row = subscription_row(&shamir, "sub").await;
+    assert_eq!(
+        row.get("profile").and_then(|v| v.as_str()),
+        Some("prof_equal")
+    );
+    assert_eq!(row.get("binding_version").and_then(|v| v.as_u64()), Some(1));
+    let destinations = row
+        .get("binding_destinations")
+        .and_then(|v| v.as_array())
+        .unwrap();
+    assert_eq!(destinations.len(), 1);
+    assert_eq!(
+        destinations[0].get("repo").and_then(|v| v.as_str()),
+        Some("main")
+    );
+    assert!(read_users(&shamir, "testdb", "main").await.is_ok());
+
+    // Different-destination profile: refused with the typed code; nothing
+    // about the row changes.
+    create_profile(&shamir, "prof_other", "side").await;
+    let err = set_profile(&shamir, 6, "sub", "prof_other")
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("binding_destination_mismatch"), "{err}");
+    let row = subscription_row(&shamir, "sub").await;
+    assert_eq!(
+        row.get("profile").and_then(|v| v.as_str()),
+        Some("prof_equal"),
+        "the refused SetProfile must not mutate the row"
+    );
+
+    // Same-name creation is refused with `already_exists` — a replacement
+    // binding must never silently overwrite the row data was written under.
+    let mut b = Batch::new();
+    b.id(7);
+    b.op(
+        "dup",
+        subscription("sub", "tcp://other:9000", "pub", "prof_equal"),
+    );
+    let err = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("already_exists"), "{err}");
+}
+
+/// Evidence row 5 (profile-replacement arm): recreating the REFERENCED
+/// profile with a different destination set is refused with
+/// `binding_destination_mismatch`; recreating it with the SAME destination
+/// set succeeds; the new destination set never becomes quarantined.
+#[tokio::test]
+async fn binding_profile_replacement_to_different_destinations_refused_while_referenced() {
+    let shamir = setup().await;
+    seed_row(&shamir, "main").await;
+    quarantine(&shamir, "sub", "prof", "main").await;
+    assert!(read_users(&shamir, "testdb", "main").await.is_err());
+
+    // Upsert with a DIFFERENT destination set → typed refusal.
+    let mut b = Batch::new();
+    b.id(3);
+    b.op(
+        "swap",
+        replication_profile("prof").stream(
+            repl_scope("testdb").repo("side").build(),
+            ReplDirection::Pull,
+            ReplMode::ReadOnly,
+        ),
+    );
+    let err = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("binding_destination_mismatch"), "{err}");
+
+    // The bound destination is untouched, and `side` never became special.
+    let row = subscription_row(&shamir, "sub").await;
+    let destinations = row
+        .get("binding_destinations")
+        .and_then(|v| v.as_array())
+        .unwrap();
+    assert_eq!(
+        destinations[0].get("repo").and_then(|v| v.as_str()),
+        Some("main")
+    );
+    assert!(read_users(&shamir, "testdb", "side").await.is_ok());
+
+    // Upsert with the SAME destination set → allowed (destination-preserving
+    // profile change is the one permitted mutation), and the gate holds.
+    let mut b = Batch::new();
+    b.id(4);
+    b.op(
+        "same",
+        replication_profile("prof").stream(
+            repl_scope("testdb").repo("main").build(),
+            ReplDirection::Pull,
+            ReplMode::ReadOnly,
+        ),
+    );
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    assert!(read_users(&shamir, "testdb", "main").await.is_err());
+}
+
+/// Evidence row 6: a terminal flush failure must not lose the prepublished
+/// quarantine keys — the affected live reads stay blocked (prepublished
+/// protection survived the failed persistence), unrelated destinations stay
+/// readable, and after disarming the seam a successful re-mark leaves the
+/// gate reflecting the persisted row.
+#[tokio::test]
+async fn binding_terminal_flush_failure_keeps_prepublished_protection() {
+    let shamir = setup().await;
+    seed_row(&shamir, "main").await;
+    quarantine(&shamir, "sub", "prof", "main").await;
+    assert!(read_users(&shamir, "testdb", "main").await.is_err());
+    assert!(read_users(&shamir, "testdb", "side").await.is_ok());
+
+    // A second subscription covering the previously-healthy `side`.
+    create_profile(&shamir, "prof_side", "side").await;
+    let mut b = Batch::new();
+    b.id(2);
+    b.op(
+        "sub_side",
+        subscription("sub_side", "tcp://peer:9000", "pub", "prof_side"),
+    );
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    shamir.arm_seed_catalogue_flush_fault_for_test();
+    let err = shamir
+        .mark_subscription_resync_required("sub_side", 5, 2)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DbError::Storage(_)),
+        "the flush seam must inject a Storage failure"
+    );
+
+    // Prepublished keys survived the failed persistence: `side` is blocked
+    // even though the flush failed, and the first quarantine still holds.
+    let err = read_users(&shamir, "testdb", "side").await.unwrap_err();
+    assert_eq!(err.code(), Some("resync_required"), "{err}");
+    assert!(read_users(&shamir, "testdb", "main").await.is_err());
+
+    // Disarm and re-mark: persistence now completes and the refreshed cache
+    // STILL reflects the persisted row (the gate never regressed below the
+    // prepublished set).
+    shamir.disarm_seed_catalogue_flush_fault_for_test();
+    shamir
+        .mark_subscription_resync_required("sub_side", 5, 2)
+        .await
+        .unwrap();
+    assert!(read_users(&shamir, "testdb", "side").await.is_err());
+    assert!(read_users(&shamir, "testdb", "main").await.is_err());
+
+    // An unrelated destination stays readable throughout: `otherdb/main` is
+    // in NO binding, so the exact-key cache never touches it.
+    assert!(read_users(&shamir, "otherdb", "main").await.is_ok());
+}
+
+/// Evidence row 8: quarantined-destination DROP/RENAME and quarantined
+/// subscription DROP are refused BEFORE any live or durable mutation —
+/// asserted through the FACADE APIs (`remove_db`/`rename_db_as`/
+/// `remove_repo`/`rename_repo_as`), not only the admin batch path.
+#[tokio::test]
+async fn binding_quarantined_destination_drop_rename_and_subscription_drop_refused() {
+    let shamir = setup().await;
+    seed_row(&shamir, "main").await;
+    quarantine(&shamir, "sub", "prof", "main").await;
+    assert!(read_users(&shamir, "testdb", "main").await.is_err());
+
+    // DROP of the quarantined subscription refused with the typed code; the
+    // row is still present afterwards.
+    let mut b = Batch::new();
+    b.id(3);
+    b.try_op("drop", drop_subscription("sub")).unwrap();
+    let err = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("resync_required"), "{err}");
+    let mut b = Batch::new();
+    b.id(4);
+    b.op("ls", list_subscriptions());
+    let resp = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    let subs = resp.results["ls"].records[0]
+        .as_value()
+        .into_owned()
+        .get("subscriptions")
+        .and_then(|v| v.as_array())
+        .unwrap()
+        .clone();
+    assert_eq!(subs.len(), 1, "the refused DROP must not delete the row");
+
+    // Facade destination guards: every refusal names the referencing
+    // subscription, and the repo survives.
+    let err = shamir.remove_repo("testdb", "main").await.unwrap_err();
+    assert!(err.to_string().contains("'sub'"), "{err}");
+    let err = shamir
+        .rename_repo_as("testdb", "main", "main2", Actor::System)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("'sub'"), "{err}");
+    let err = shamir.remove_db("testdb").await.unwrap_err();
+    assert!(err.to_string().contains("'sub'"), "{err}");
+    let err = shamir
+        .rename_db_as("testdb", "testdb2", Actor::System)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("'sub'"), "{err}");
+    assert!(
+        shamir.get_db("testdb").unwrap().get_repo("main").is_some(),
+        "no live mutation may precede the guard refusals"
+    );
+    assert!(read_users(&shamir, "testdb", "main").await.is_err());
+
+    // Negative control: an UNBOUND destination in the same db is removable —
+    // the guard is exact-key, not database-wide.
+    assert!(shamir.remove_repo("testdb", "side").await.unwrap());
+}

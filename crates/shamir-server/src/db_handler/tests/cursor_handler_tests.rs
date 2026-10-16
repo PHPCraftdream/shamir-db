@@ -1026,7 +1026,7 @@ async fn fetch_next_after_db_dropped_mid_scroll_surfaces_access_denied_not_unkno
         .await
         .expect("owner chmod back to 0o700 must succeed");
 
-    let removed = handler.db().remove_db("app").await;
+    let removed = handler.db().remove_db("app").await.unwrap();
     assert!(removed, "sanity: the db must have actually been removed");
 
     let resp = send(&handler, &bob, fetch_next_req(cursor_id, 2)).await;

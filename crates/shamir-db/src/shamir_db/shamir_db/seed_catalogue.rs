@@ -1,6 +1,28 @@
 use futures::StreamExt;
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::{DbError, DbResult, ShamirDb};
+
+/// S5c-X PR8b-2 (evidence row 6): test-only fault seam — when set,
+/// `flush_seed_catalogue` fails so terminal quarantine persistence cannot
+/// reach its final durability barrier.
+#[cfg(test)]
+static SEED_CATALOGUE_FLUSH_FAULT: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+impl ShamirDb {
+    /// Arm the injected `flush_seed_catalogue` failure (evidence row 6).
+    pub(crate) fn arm_seed_catalogue_flush_fault_for_test(&self) {
+        SEED_CATALOGUE_FLUSH_FAULT.store(true, Ordering::SeqCst);
+    }
+
+    /// Disarm the injected `flush_seed_catalogue` failure.
+    pub(crate) fn disarm_seed_catalogue_flush_fault_for_test(&self) {
+        SEED_CATALOGUE_FLUSH_FAULT.store(false, Ordering::SeqCst);
+    }
+}
 
 impl ShamirDb {
     /// Offline-only live-record cap across all system tables.
@@ -61,6 +83,12 @@ impl ShamirDb {
     /// Strict metadata durability for an offline seed; no clean checkpoint is
     /// required merely to flush the authoritative table/repository catalogue.
     pub async fn flush_seed_catalogue(&self) -> DbResult<()> {
+        #[cfg(test)]
+        if SEED_CATALOGUE_FLUSH_FAULT.load(Ordering::SeqCst) {
+            return Err(DbError::Storage(
+                "injected seed-catalogue flush failure (test)".into(),
+            ));
+        }
         let repo = self.system_store.system_repo()?;
         for name in repo.list_table_names() {
             repo.get_table(&name).await?;

@@ -157,7 +157,7 @@ async fn quarantine_cache_replace_clears_persisted_removal_but_keeps_pending_fai
 }
 
 #[tokio::test]
-async fn unresolvable_profile_marking_installs_global_sentinel_read_quarantine() {
+async fn marking_after_profile_removal_quarantines_exactly_bound_destination() {
     let db = ShamirDb::init(SystemStoreConfig::InMemory).await.unwrap();
     let instance = db.create_db("testdb").await;
     instance
@@ -186,8 +186,9 @@ async fn unresolvable_profile_marking_installs_global_sentinel_read_quarantine()
     db.execute("testdb", &batch.to_request_via_msgpack())
         .await
         .unwrap();
-    // Remove the profile: the subscription row records no db column, so
-    // profile resolution can no longer produce a per-row (db, repo) key.
+    // Remove the profile: S5c-X PR8b-2 — coverage comes from the row's
+    // durable binding, so profile resolution is never consulted and marking
+    // must still succeed.
     let mut drop_batch = shamir_query_builder::batch::Batch::new();
     drop_batch.id(2);
     drop_batch.op(
@@ -198,21 +199,19 @@ async fn unresolvable_profile_marking_installs_global_sentinel_read_quarantine()
         .await
         .unwrap();
 
-    // Marking must NOT error — it falls back to the global ("*", "*")
-    // sentinel instead (widest safe scope with no recorded db).
     db.mark_subscription_resync_required("sub", 7, 3)
         .await
         .unwrap();
 
-    // Reads on testdb/main are refused fail-closed, resolved via the
-    // sentinel in `reason_for` (after the (db, repo) and (db, "*") checks).
+    // The bound destination is quarantined with the row's status reason.
     let reason = db
         .read_quarantine_reason("testdb", "main")
-        .expect("reads must be quarantined via the global sentinel");
+        .expect("bound destination must be quarantined");
     assert!(
-        reason.contains("unresolvable replication profile 'prof'"),
-        "reason must name the unresolvable profile, got: {reason}"
+        reason.contains("journal gap at 7"),
+        "reason must come from the marking message, got: {reason}"
     );
-    // And the quarantine covers every other (db, repo) too — global scope.
-    assert!(db.read_quarantine_reason("otherdb", "other").is_some());
+    // And nothing outside the bound destination set is quarantined — no
+    // global sentinel exists anymore.
+    assert!(db.read_quarantine_reason("otherdb", "other").is_none());
 }

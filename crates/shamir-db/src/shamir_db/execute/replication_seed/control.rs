@@ -184,11 +184,13 @@ impl ShamirDb {
         op: &CreateSubscriptionOp,
         record: &mut QueryValue,
     ) -> Result<(), SeedRefusal> {
-        // Unresolved legacy profiles retain their ordinary behaviour. Seed targets,
-        // however, are always derived from repository metadata, never row evidence.
-        let Ok(scope) = streams(self, &op.profile).await else {
-            return Ok(());
-        };
+        // S5c-X PR8b-2: an unresolvable profile is a REFUSAL, and the
+        // executable destination set must bind (a wildcard/db-wide Pull
+        // scope is refused) — the binding is the durable quarantine
+        // authority, so it must be knowable at creation.
+        let scope = streams(self, &op.profile).await?;
+        crate::repl_binding::SubscriptionBinding::from_streams(&op.create_subscription, &scope)
+            .map_err(|_| SeedRefusal::WrongScope)?;
         for stream in &scope {
             let Some(database) = self.get_db(&stream.scope.db) else {
                 continue;
@@ -220,12 +222,10 @@ impl ShamirDb {
         record: &QueryValue,
     ) -> Result<(), SeedRefusal> {
         let profile = record["profile"].as_str().ok_or(SeedRefusal::WrongScope)?;
-        let scope = match streams(self, profile).await {
-            Ok(scope) => scope,
-            // An unresolved profile of an unbound legacy row keeps its ordinary behaviour.
-            Err(_) if record.get("seed_receipt").is_none() => return Ok(()),
-            Err(reason) => return Err(reason),
-        };
+        // S5c-X PR8b-2: every row carries a valid binding now, so an
+        // unresolvable profile is a refusal — no "unbound legacy row"
+        // branch remains.
+        let scope = streams(self, profile).await?;
         if let Some(bound) = record.get("seed_receipt") {
             let bytes =
                 rmp_serde::to_vec_named(bound).map_err(|_| SeedRefusal::ConflictingBinding)?;
