@@ -53,7 +53,7 @@ jobs:
       # Pinned to the cargo-nextest baseline documented in
       # .config/nextest.toml (0.9.137 — the version whose `--stress-count`
       # support this job relies on). Same pin as ci.yml's two test jobs.
-      - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af  # v2.87.11
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375  # v2.87.12
         with:
           tool: nextest@0.9.137
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
