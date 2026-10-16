@@ -81,16 +81,17 @@ pub(crate) fn checkpoint_reconciles() -> usize {
 
 /// Test-only serialization: the seams below are process-global, so the
 /// tests that touch them (or the reconcile counter) take this lock to stay
-/// deterministic under cargo's parallel test threads.
+/// deterministic under cargo's parallel test threads. Async on purpose:
+/// tests hold the guard across `.await` points for their whole body, so a
+/// poisoning-`Mutex` guard would trip `clippy::await_holding_lock` — this
+/// is the workspace-sanctioned `tokio::sync::Mutex` case.
 #[cfg(test)]
-static CHECKPOINT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static CHECKPOINT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(test)]
 #[allow(dead_code)] // driven by the PR6b-2 test chunk
-pub(crate) fn checkpoint_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    CHECKPOINT_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+pub(crate) async fn checkpoint_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    CHECKPOINT_TEST_LOCK.lock().await
 }
 
 /// Commit-park gate for cancellation tests: parks `checkpoint()` AFTER the

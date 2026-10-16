@@ -16,6 +16,7 @@
 
 use bytes::Bytes;
 use futures::StreamExt;
+use shamir_collections::TMap;
 use shamir_storage::types::RecordKey;
 use shamir_tx::{decode_version_key, ChangeOp, ChangelogEvent, RecordChange};
 use shamir_types::access::Actor;
@@ -199,7 +200,7 @@ impl Scenario {
     /// expected 2 where the true count is 1; Put+Delete expected 1 where the
     /// true count is 0).
     fn expected_counter(&self) -> u64 {
-        let mut live: std::collections::HashMap<Vec<u8>, bool> = std::collections::HashMap::new();
+        let mut live: TMap<Vec<u8>, bool> = TMap::default();
         for event in self.events() {
             let change = &event.event.changes[0];
             live.insert(change.key.to_vec(), change.op == ChangeOp::Put);
@@ -426,10 +427,7 @@ async fn run_point(scenario: Scenario) {
     {
         let repo = open_with_retry(temp.path(), &name).await;
         let outcome = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted).await;
-        assert!(
-            matches!(outcome, Ok(_)),
-            "second replay failed: {outcome:?}"
-        );
+        assert!(outcome.is_ok(), "second replay failed: {outcome:?}");
         assert_converged(&repo, &scenario).await;
         assert_eq!(
             collect_journals(&repo, scenario.leader_watermark()).await,

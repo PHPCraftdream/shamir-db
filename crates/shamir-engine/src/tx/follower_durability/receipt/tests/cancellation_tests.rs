@@ -102,9 +102,7 @@ async fn history_versions(repo: &RepoInstance, key: &[u8]) -> Vec<u64> {
 async fn outstanding_phase(repo: &RepoInstance) -> Option<ReceiptPhase> {
     let info = repo.tx_info_store().await.unwrap();
     let v3 = load_bookmark_v3(&info).await.unwrap();
-    let Some(id) = v3.as_ref().and_then(|v3| v3.outstanding_receipt) else {
-        return None;
-    };
+    let id = v3.as_ref().and_then(|v3| v3.outstanding_receipt)?;
     match info.get(receipt_key()).await {
         Ok(bytes) => Some(
             crate::meta::repl::decode_receipt(&id, &bytes)
@@ -196,7 +194,7 @@ async fn assert_settled(repo: &RepoInstance) {
     );
     drop(info);
     assert_eq!(
-        apply_replicated_batch(&repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted)
+        apply_replicated_batch(repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Skipped
@@ -355,7 +353,7 @@ async fn drop_during_checkpoint_commit_still_completes_and_publishes() {
 
     // The checkpoint/commit seams are process-global: serialize against the
     // other tests that arm them or read the reconcile counter.
-    let _lock = checkpoint::checkpoint_test_lock();
+    let _lock = checkpoint::checkpoint_test_lock().await;
     checkpoint::arm_commit_park(false); // ensure the PRE-stage park is inert
                                         // Park the worker at ReceiptMaterialized (AFTER the Materialized batch
                                         // is durable), then arm the commit-window seam and release: the worker's
@@ -430,7 +428,7 @@ async fn drop_during_uncertain_readback_still_completes_and_publishes() {
 
     // The checkpoint seams are process-global: serialize against the other
     // tests that read the reconcile counter.
-    let _lock = checkpoint::checkpoint_test_lock();
+    let _lock = checkpoint::checkpoint_test_lock().await;
     let baseline = checkpoint::checkpoint_reconciles();
     checkpoint::set_simulate_checkpoint_uncertain(true);
     checkpoint::arm_reconcile_park(true);
