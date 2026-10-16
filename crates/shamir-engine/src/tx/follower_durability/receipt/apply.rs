@@ -330,7 +330,7 @@ async fn apply_fresh(
         lease.retire_parked();
         guards.drain(0..end - start);
         old = BookmarkV3 {
-            fence: old.fence.clone(),
+            fence: old.fence,
             bookmark: new_bookmark,
             clean_through: Some(
                 old.clean_through

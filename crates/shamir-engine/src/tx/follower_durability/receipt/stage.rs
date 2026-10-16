@@ -253,7 +253,7 @@ async fn stage_prepared_batch(
         Bytes::from(encode_receipt(&plan.receipt)?),
     )?;
     let bookmark = BookmarkV3 {
-        fence: old.fence.clone(),
+        fence: old.fence,
         bookmark: old.bookmark,
         clean_through: old.clean_through,
         outstanding_receipt: Some(id),
@@ -445,7 +445,7 @@ async fn compute_counters(
         let mut pending: TFxMap<RecordKey, bool> = TFxMap::default();
         let mut delta = 0i64;
         for event in events {
-            let Some((_, ops)) = event.tables.iter().find(|group| &group.0 == &table) else {
+            let Some((_, ops)) = event.tables.iter().find(|group| group.0 == table) else {
                 continue;
             };
             // One batched pre-state read per group for keys not yet pending.
@@ -607,7 +607,7 @@ async fn stage_materialized_batch(
     let mut batch = repo.begin_repo_atomic_batch(permit).await?;
     for (table, history, info_store, count_after) in table_rows(work)? {
         for (index, event) in work.events.iter().enumerate() {
-            let Some((_, ops)) = event.tables.iter().find(|group| &group.0 == &table) else {
+            let Some((_, ops)) = event.tables.iter().find(|group| group.0 == table) else {
                 continue;
             };
             for op in ops {
@@ -653,7 +653,7 @@ async fn stage_materialized_batch(
     }
     batch.set(TX_STORE, receipt_key(), work.receipt_bytes.clone())?;
     let bookmark = BookmarkV3 {
-        fence: old.fence.clone(),
+        fence: old.fence,
         bookmark: old.bookmark,
         clean_through: old.clean_through,
         outstanding_receipt: Some(work.receipt_id),
