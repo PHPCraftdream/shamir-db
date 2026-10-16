@@ -23,8 +23,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use futures::Future;
 use shamir_query_builder::Query;
-use shamir_storage::error::DbError;
+use shamir_query_types::read::ReadQuery;
+use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::{KvOp, RecordKey, Store};
 use shamir_tx::{MvccStore, RepoTxGate};
@@ -81,7 +83,8 @@ async fn read_version(table: &TableManager, version: u64) -> DbResult<QueryResul
         .as_of_version(version)
         .build();
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(interner, &new_map());
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
     table.read(&query, &ctx).await
 }
 
@@ -91,7 +94,8 @@ async fn read_timestamp(table: &TableManager, ts: u64) -> DbResult<QueryResult> 
         .as_of_timestamp(ts)
         .build();
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(interner, &new_map());
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
     table.read(&query, &ctx).await
 }
 
@@ -99,7 +103,7 @@ async fn read_timestamp(table: &TableManager, ts: u64) -> DbResult<QueryResult> 
 /// `start_paused`).
 fn budget_read(
     table: &TableManager,
-    query: shamir_query_builder::Query,
+    query: ReadQuery,
 ) -> std::pin::Pin<Box<impl std::future::Future<Output = DbResult<QueryResult>> + '_>> {
     let interner = table.interner();
     Box::pin(async move {
