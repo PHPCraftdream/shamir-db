@@ -47,17 +47,18 @@
 extern crate self as shamir_query_builder;
 
 pub mod batch;
-pub mod cursor;
 pub mod ddl;
-pub mod filter;
 #[macro_use]
 pub mod macros;
-pub mod query;
-pub mod response;
-pub mod select;
-pub mod val;
 pub mod wire;
 pub mod write;
+
+// Read-side builders are grouped under `read`; every module keeps its
+// original public path via the re-exports below.
+mod read;
+pub use batch::visibility;
+pub use read::{cursor, filter, query, select, val};
+pub use wire::response;
 
 // Re-export the headline type for convenience.
 pub use query::{Conds, IntoSelectItem, Query};
@@ -77,5 +78,3 @@ pub use shamir_query_types::subscribe::{DeliverMode, EventMask};
 
 // Re-export proc-macros so users get `shamir_query_builder::{filter, q}`.
 pub use shamir_query_builder_macros::{filter, q};
-
-pub mod visibility;
