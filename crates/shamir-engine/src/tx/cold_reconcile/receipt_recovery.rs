@@ -57,6 +57,16 @@ pub(crate) async fn complete_outstanding_receipt(
     }
     repo.write_domain().debug_check_permit(permit);
 
+    // The reopened repository has LAZY tables: `per_table_mvcc` is populated
+    // only by table initialization. The Materialized resume path publishes
+    // through each table's MVCC store, so every table the receipt touches
+    // must be resolved (admitted — never re-admitting under the held permit)
+    // before publication. `receipt.counters` holds exactly one entry per
+    // distinct touched table.
+    for delta in &receipt.counters {
+        repo.get_table_admitted(&delta.table, permit).await?;
+    }
+
     let old = BookmarkV3 {
         fence: v3.fence,
         bookmark: receipt.predecessor_bookmark,

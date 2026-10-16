@@ -22,9 +22,7 @@ use crate::repo::{BoxRepo, RepoInstance};
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
 use crate::tx::apply_replicated::follower_durability::{durable_journal_barrier, in_flight_range};
-use crate::tx::apply_replicated::{
-    apply_batch_with_info, apply_replicated_batch, apply_replicated_batch_legacy,
-};
+use crate::tx::apply_replicated::{apply_batch_with_info, apply_replicated_batch_legacy};
 use crate::tx::{ApplyOutcome, ApplyPolicy, ReplicatedEvent};
 
 type TestStream = Pin<Box<dyn Stream<Item = DbResult<Vec<(RecordKey, Bytes)>>> + Send>>;
@@ -473,7 +471,7 @@ async fn crash_and_converge(park_set: bool) {
         .per_table_mvcc()
         .insert_sync(token, mvcc.clone())
         .is_ok());
-    let outcome = apply_replicated_batch(&reopened, &events, 0, ApplyPolicy::Trusted)
+    let outcome = apply_replicated_batch_legacy(&reopened, &events, 0, ApplyPolicy::Trusted)
         .await
         .unwrap();
     assert_eq!(outcome, ApplyOutcome::Applied { local_version: 4 });

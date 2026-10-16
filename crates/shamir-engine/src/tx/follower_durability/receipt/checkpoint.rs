@@ -14,6 +14,7 @@ use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{AtomicBatch, AtomicCommitOutcome, RecordKey, Store};
 use shamir_tx::{version_key, RepoTxGate};
 
+use crate::meta::repl::bookmark::FenceRecord;
 use crate::meta::repl::bookmark_v3::{encode_bookmark_v3, load_bookmark_v3, BookmarkV3};
 use crate::meta::repl::receipt::receipt_key;
 use crate::meta::repl::ReplicationReceipt;
@@ -224,9 +225,14 @@ async fn stage_checkpoint_batch(
     old: &BookmarkV3,
 ) -> DbResult<Box<dyn AtomicBatch>> {
     let end = local_end(receipt);
+    let bookmark = old.bookmark.max(receipt.upstream_end);
+    // Keep the v3 decode invariant `fence.bookmark == bookmark`: the legacy
+    // writers sync the embedded fence's bookmark on every advance, and the
+    // fence decoder rejects the record otherwise.
+    let fence = old.fence.map(|fence| FenceRecord { bookmark, ..fence });
     let bookmark = BookmarkV3 {
-        fence: old.fence,
-        bookmark: old.bookmark.max(receipt.upstream_end),
+        fence,
+        bookmark,
         clean_through: Some(old.clean_through.map_or(end, |j| j.max(end))),
         outstanding_receipt: None,
     };
