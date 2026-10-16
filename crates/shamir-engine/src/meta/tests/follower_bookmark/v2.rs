@@ -1,4 +1,4 @@
-use crate::meta::repl::bookmark_v3::decode_bookmark_v3;
+use crate::meta::repl::bookmark_v3::{decode_bookmark_v3, save_bookmark_v3};
 use crate::meta::{MetaEnvelope, MetaKey};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -222,4 +222,37 @@ pub async fn save_bookmark_and_clean_horizon(
         record.fence = Some(fence);
     }
     save_record(info, record).await
+}
+
+/// Representation-aware fence write (PR6b-2): identity adoption persists the
+/// fence through the representation the repository actually uses. A v3
+/// (receipt-native) record is updated IN PLACE — its bookmark, clean horizon
+/// and outstanding-receipt pointer are preserved, and the v3 decode invariant
+/// `fence.bookmark == bookmark` is kept by syncing the fence's own bookmark —
+/// while a v1/v2 record (or a fresh install) takes the legacy
+/// `save_fence_record` path unchanged. The other legacy writers keep their
+/// refuse-v3 downgrade guard.
+pub async fn save_fence_record_v3_aware(
+    info: &Arc<dyn Store>,
+    record: FenceRecord,
+) -> DbResult<()> {
+    let bytes = match info.get(key()).await {
+        Ok(bytes) => bytes,
+        Err(DbError::NotFound(_)) => return save_fence_record(info, record).await,
+        Err(error) => return Err(error),
+    };
+    if !is_v3(&bytes) {
+        return save_fence_record(info, record).await;
+    }
+    let mut v3 = decode_bookmark_v3(&bytes)?;
+    let fence = if record.bookmark == v3.bookmark {
+        record
+    } else {
+        FenceRecord {
+            bookmark: v3.bookmark,
+            ..record
+        }
+    };
+    v3.fence = Some(fence);
+    save_bookmark_v3(info, &v3).await
 }

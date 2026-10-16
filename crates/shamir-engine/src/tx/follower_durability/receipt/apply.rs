@@ -134,16 +134,17 @@ pub(crate) async fn run_receipt_pipeline(
         let (receipt, publication) = match outstanding.receipt.phase {
             ReceiptPhase::Prepared => {
                 let work =
-                    stage::materialize_from_prepared_receipt(repo, permit, &outstanding.receipt)
+                    stage::materialize_from_prepared_receipt(repo, &permit, &outstanding.receipt)
                         .await?;
                 let (receipt, _counters) =
                     stage::commit_materialized_work(repo, &permit, &info, &work, &old).await?;
-                let publication = publish::publication_from_receipt(repo, permit, &receipt).await?;
+                let publication =
+                    publish::publication_from_receipt(repo, &permit, &receipt).await?;
                 (receipt, publication)
             }
             ReceiptPhase::Materialized => {
                 let publication =
-                    publish::publication_from_receipt(repo, permit, &outstanding.receipt).await?;
+                    publish::publication_from_receipt(repo, &permit, &outstanding.receipt).await?;
                 (outstanding.receipt.clone(), publication)
             }
             ReceiptPhase::Checkpointed => {
@@ -464,7 +465,7 @@ async fn run_chunk_tail(
         //   attempt 3: fast path -> seam fires -> attempt >= 3 -> PARK.
         #[cfg(test)]
         fail_after(repo.name(), Phase::ReceiptMaterialized)?;
-        let publication = publish::publication_from_receipt(repo, permit, stored).await?;
+        let publication = publish::publication_from_receipt(repo, &permit, stored).await?;
         let chunk_local_end = stored
             .mapping
             .iter()
