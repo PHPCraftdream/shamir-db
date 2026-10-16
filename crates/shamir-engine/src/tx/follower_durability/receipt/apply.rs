@@ -553,7 +553,7 @@ async fn run_chunk_tail(
             repo,
             permit,
             info,
-            (&gate, lease),
+            (gate, lease),
             (stored, old),
             publication,
             None,
@@ -577,7 +577,7 @@ async fn run_chunk_tail(
         repo,
         permit,
         info,
-        (&gate, lease),
+        (gate, lease),
         (&receipt, old),
         publication,
         None,
@@ -630,7 +630,7 @@ async fn durable_tail(
         info,
         receipt,
         old,
-        (&gate, &publication),
+        (gate, &publication),
         checkpoint::PublicationCompletion {
             lease: Some(lease),
             on_published: || {

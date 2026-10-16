@@ -873,7 +873,7 @@ async fn fenced_multi_chunk_apply_keeps_v3_invariant_across_reopen() {
     let info = repo.tx_info_store().await.unwrap();
     let v3 = load_bookmark_v3(&info).await.unwrap().unwrap();
     assert_eq!(v3.bookmark, expected_bookmark);
-    let fence = v3.fence.clone().expect("fence must survive the chunks");
+    let fence = v3.fence.expect("fence must survive the chunks");
     assert_eq!(fence.bookmark, v3.bookmark);
     assert_eq!(fence.lineage_id, [7u8; 16]);
     assert_eq!(v3.outstanding_receipt, None);
