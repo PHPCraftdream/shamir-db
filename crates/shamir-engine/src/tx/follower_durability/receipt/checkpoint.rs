@@ -224,7 +224,7 @@ async fn stage_checkpoint_batch(
 ) -> DbResult<Box<dyn AtomicBatch>> {
     let end = local_end(receipt);
     let bookmark = BookmarkV3 {
-        fence: old.fence.clone(),
+        fence: old.fence,
         bookmark: old.bookmark.max(receipt.upstream_end),
         clean_through: Some(old.clean_through.map_or(end, |j| j.max(end))),
         outstanding_receipt: None,

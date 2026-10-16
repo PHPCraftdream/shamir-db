@@ -227,7 +227,7 @@ pub async fn apply_replicated(
     apply_prepared(repo, &mut prepared, None, false).await
 }
 
-struct PreparedEvent {
+pub(crate) struct PreparedEvent {
     event: ChangelogEvent,
     tables: Vec<PreparedTable>,
     guard: Option<shamir_tx::VersionGuard>,
