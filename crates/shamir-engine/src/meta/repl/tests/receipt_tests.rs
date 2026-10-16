@@ -33,6 +33,7 @@ fn full_receipt() -> ReplicationReceipt {
                 value: None,
             },
         ],
+        ops_per_event: vec![1, 1],
         bindings: vec![ReceiptBinding {
             interned_id: 12,
             name: "name".into(),
@@ -71,6 +72,7 @@ fn receipt_round_trips_all_fields() {
         let id = receipt_id(&receipt);
         let bytes = encode_receipt(&receipt).unwrap();
         assert_eq!(decode_receipt(&id, &bytes).unwrap(), receipt);
+        assert_eq!(receipt.ops_per_event, vec![1, 1]);
     }
 }
 
@@ -140,6 +142,18 @@ fn decode_rejects_trailing_bytes() {
 }
 
 #[test]
+fn decode_rejects_v1_tagged_receipt() {
+    // Tuple version 1 never shipped a writer; the codec bumped to 2 so the
+    // same binary that writes a receipt can always recover it. A v1-tagged
+    // envelope must fail closed.
+    let receipt = full_receipt();
+    let bytes = crate::meta::MetaEnvelope::new((1u16, receipt.clone()))
+        .encode()
+        .unwrap();
+    assert!(decode_receipt(&receipt_id(&receipt), &bytes).is_err());
+}
+
+#[test]
 fn decode_rejects_unknown_version() {
     let receipt = full_receipt();
     let bytes = crate::meta::MetaEnvelope::new((7u16, receipt.clone()))
@@ -157,6 +171,17 @@ fn decode_rejects_oversized_receipt() {
             local_version: i as u64,
         })
         .collect();
+    assert!(encode_receipt(&receipt).is_err());
+}
+
+#[test]
+fn receipt_with_mismatched_ops_per_event_rejected() {
+    let mut receipt = full_receipt();
+    receipt.ops_per_event = vec![2, 1];
+    assert!(encode_receipt(&receipt).is_err());
+
+    let mut receipt = full_receipt();
+    receipt.ops_per_event = vec![1, 2];
     assert!(encode_receipt(&receipt).is_err());
 }
 

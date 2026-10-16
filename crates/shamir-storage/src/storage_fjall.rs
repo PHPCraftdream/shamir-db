@@ -1,4 +1,5 @@
 use super::types::{AtomicBatch, AtomicCommitOutcome, KvOp, RecordKey, Repo, Store};
+pub use crate::commit_window_park_seam;
 use crate::error::{DbError, DbResult};
 use async_stream::stream;
 use async_trait::async_trait;
@@ -261,6 +262,13 @@ fn exec_atomic_commit(
     // fjall's API cannot distinguish a pre-apply from a post-apply failure
     // here, so an error AFTER staging is reported UNCERTAIN — never assumed
     // absent.
+    // Test-only commit-window park: parks this `spawn_blocking` thread
+    // INSIDE the physical commit window (after staging, before the batch is
+    // applied) so a test can abort the caller mid-commit. See the module
+    // docs on `commit_window_park_seam` for the contention model.
+    if commit_window_park_seam::ARMED.load(std::sync::atomic::Ordering::Relaxed) {
+        commit_window_park_seam::park();
+    }
     if let Err(e) = batch.commit() {
         return Ok(AtomicCommitOutcome::Uncertain {
             detail: format!("fjall batch commit: {e}"),

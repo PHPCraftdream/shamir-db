@@ -486,27 +486,27 @@ impl<J: Send, R: Send> Drop for RepoWorkerLifecycle<J, R> {
 pub type RepoUnitLifecycle = RepoWorkerLifecycle<(), ()>;
 
 /// Foreground ownership token: dropping the final token closes its lifecycle.
-pub struct ForegroundLifecycle {
-    lifecycle: Arc<RepoUnitLifecycle>,
+pub struct ForegroundLifecycle<J: Send, R: Send> {
+    lifecycle: Arc<RepoWorkerLifecycle<J, R>>,
 }
 
-impl Default for ForegroundLifecycle {
+impl<J: Send, R: Send> Default for ForegroundLifecycle<J, R> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ForegroundLifecycle {
+impl<J: Send, R: Send> ForegroundLifecycle<J, R> {
     /// Starts a fresh foreground lifecycle owner.
     pub fn new() -> Self {
         Self {
             lifecycle: Arc::new(RepoWorkerLifecycle::new()),
         }
     }
-    pub fn from_lifecycle(lifecycle: Arc<RepoUnitLifecycle>) -> Self {
+    pub fn from_lifecycle(lifecycle: Arc<RepoWorkerLifecycle<J, R>>) -> Self {
         Self { lifecycle }
     }
-    pub fn lifecycle(&self) -> &Arc<RepoUnitLifecycle> {
+    pub fn lifecycle(&self) -> &Arc<RepoWorkerLifecycle<J, R>> {
         &self.lifecycle
     }
     pub fn reopen_required(&self) -> bool {
@@ -514,7 +514,7 @@ impl ForegroundLifecycle {
     }
 }
 
-impl Drop for ForegroundLifecycle {
+impl<J: Send, R: Send> Drop for ForegroundLifecycle<J, R> {
     fn drop(&mut self) {
         self.lifecycle.close();
     }

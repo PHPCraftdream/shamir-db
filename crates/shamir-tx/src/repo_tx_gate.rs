@@ -22,9 +22,11 @@ use crate::completion_tracker::CompletionTracker;
 use crate::gate_diagnostics::{GateBlocker, GateBlockerClass, GateDiagnostics};
 use crate::pending_commit::PendingCommit;
 use crate::version_guard::VersionGuard;
-use crate::TxId;
 
 // ── Phase C: commit-write log structs ──────────────────────────────
+
+#[path = "visibility_metrics/resume_access.rs"]
+mod resume_impl;
 
 /// PROPOSED (Phase C). One captured commit's index-posting footprint for
 /// the predicate-conflict check. Built engine-side from `TxContext` state
@@ -355,11 +357,6 @@ impl RepoTxGate {
     /// Fresh gate for a new repo (no history).
     pub fn fresh() -> Self {
         Self::new(0, 1)
-    }
-
-    /// Allocate a unique tx-id. Lock-free.
-    pub fn fresh_tx_id(&self) -> TxId {
-        TxId::new(self.next_tx_id.fetch_add(1, Ordering::Relaxed))
     }
 
     /// Current committed version visible to readers.

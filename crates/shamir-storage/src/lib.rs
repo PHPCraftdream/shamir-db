@@ -24,6 +24,12 @@ pub mod types;
 #[cfg(feature = "fjall")]
 pub mod storage_fjall;
 
+/// Task #535/#539-style test seam: commit-window park for the repository-wide
+/// atomic batch (driven from the shamir-engine test binary — always compiled,
+/// inert when not armed).
+#[doc(hidden)]
+pub mod commit_window_park_seam;
+
 /// Task #535/#539: test-only deterministic seam for `MemBufferStore::drain_once`
 /// (see `membuffer_clear_race_hook`'s module doc for the current shape).
 #[cfg(test)]
