@@ -4,7 +4,9 @@ use bytes::Bytes;
 use futures::future::Either;
 use futures::StreamExt;
 use shamir_query_types::batch::ResultEncoding;
-use shamir_storage::error::{DbError, DbResult};
+#[cfg(test)]
+use shamir_storage::error::DbError;
+use shamir_storage::error::DbResult;
 use shamir_storage::types::RecordKey;
 use shamir_types::record_view::RecordView;
 use shamir_types::types::record_id::RecordId;
