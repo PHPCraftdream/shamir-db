@@ -4,6 +4,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use shamir_db::engine::meta::repl::bookmark_v3::{
+    decode_bookmark_v3, save_bookmark_v3, BookmarkV3,
+};
 use shamir_db::engine::meta::repo_identity::RepoIdentity;
 use shamir_db::engine::meta::{MetaEnvelope, MetaKey};
 use shamir_db::engine::repo::BoxRepoFactory;
@@ -22,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 async fn hello_records_actual_bookmark_value_before_any_pull() {
     let leader = build_memory().await;
     let follower = build_memory().await;
+    let info = repo(&follower).tx_info_store().await.unwrap();
     let hello = InProcessReplSource::new(leader.clone())
         .hello("probe")
         .await
@@ -29,29 +33,52 @@ async fn hello_records_actual_bookmark_value_before_any_pull() {
     checks::fence_hello_recorded(&follower, "app", "main", &hello, None)
         .await
         .unwrap();
-    let info = repo(&follower).tx_info_store().await.unwrap();
     let bytes = info
         .get(RecordKey::from_slice(
             MetaKey::ReplicationBookmark.as_record_id().as_bytes(),
         ))
         .await
         .unwrap();
-    let (version, record): (u16, recorded::FenceRecord) = MetaEnvelope::open(&bytes).unwrap();
-    assert_eq!(version, 1);
+    let (version, _): (u16, BookmarkV3) = MetaEnvelope::open(&bytes).unwrap();
+    assert_eq!(version, 3);
+    let record = decode_bookmark_v3(&bytes).unwrap();
     assert_eq!(record.bookmark, 0);
+    let fence = record.fence.expect("first Hello records a fence");
+    assert_eq!(fence.bookmark, 0);
     assert_eq!(
-        record.lineage_id,
+        fence.lineage_id,
         repo(&leader).repo_identity().await.unwrap().lineage_id
     );
-    repo(&follower)
-        .advance_replication_bookmark(17)
+    assert_eq!(record.clean_through, None);
+    assert_eq!(record.outstanding_receipt, None);
+
+    let seeded = BookmarkV3 {
+        fence: None,
+        bookmark: 17,
+        clean_through: None,
+        outstanding_receipt: None,
+    };
+    save_bookmark_v3(&info, &seeded).await.unwrap();
+    checks::fence_hello_recorded(&follower, "app", "main", &hello, None)
         .await
         .unwrap();
-    let advanced = recorded::load(&info).await.unwrap().unwrap();
-    assert_eq!(advanced.bookmark, 17);
-    assert_eq!(advanced.lineage_id, record.lineage_id);
+    let preserved_bytes = info
+        .get(RecordKey::from_slice(
+            MetaKey::ReplicationBookmark.as_record_id().as_bytes(),
+        ))
+        .await
+        .unwrap();
+    let preserved = decode_bookmark_v3(&preserved_bytes).unwrap();
+    assert_eq!(preserved.bookmark, 17);
+    let fence = preserved.fence.expect("Hello records the identity fence");
+    assert_eq!(fence.bookmark, 17);
+    assert_eq!(
+        fence.lineage_id,
+        repo(&leader).repo_identity().await.unwrap().lineage_id
+    );
+    assert_eq!(preserved.clean_through, None);
+    assert_eq!(preserved.outstanding_receipt, None);
 }
-
 #[tokio::test]
 async fn changed_first_pull_cannot_replace_first_hello_identity() {
     let first = build_memory().await;
