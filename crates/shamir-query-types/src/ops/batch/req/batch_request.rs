@@ -114,7 +114,7 @@ pub struct BatchRequest {
 
     /// Commit-only override; VIS-1 carries it without enabling bounded waits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub visibility_wait: Option<super::VisibilityWait>,
+    pub visibility_wait: Option<super::super::VisibilityWait>,
 
     /// Queries map: alias -> query entry.
     ///
