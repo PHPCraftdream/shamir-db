@@ -667,7 +667,11 @@ impl MvccStore {
         // floor was simply never raised" (master's unbounded cold seek must
         // find them). `fetch_max` is a no-op on the guarded ack path, where
         // the version guard already advanced the counter.
-        self.gate.observe_materialized_version(commit_version);
+        // The receipt path enables this gate flag before materialization;
+        // legacy materialization leaves its allocator watermark untouched.
+        if self.gate.receipt_native_visibility_enabled() {
+            self.gate.observe_materialized_version(commit_version);
+        }
         Ok(())
     }
 

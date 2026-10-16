@@ -1332,27 +1332,11 @@ impl MvccStore {
             // yet drained) is invisible to that scan. P1b: also consult the
             // overlay so an overlay-only key is found.
             //
-            // S5c-X PR6b-2 (cold-start restore) — the publication bound
-            // applies ONLY to receipt-unpublished versions. The receipt
-            // window is detectable as `version_allocation_high_water_mark()
-            // > floor`: a version was ALLOCATED (and, per
-            // `materialize_committed_to_history`'s
-            // `observe_materialized_version` bump, durably written to
-            // history) but the floor was not raised to it yet. In that
-            // window the scan is bounded at the floor so materialized-but-
-            // unpublished rows stay invisible (I3) while older published
-            // rows still surface (the bound is in the scan RANGE, so an
-            // unpublished newest version cannot blind the scan).
-            //
-            // When `watermark == floor` no materialized-but-unpublished
-            // version CAN exist, and master's cold-start semantics are
-            // restored verbatim: an UNBOUNDED scan (`u64::MAX` cap) and the
-            // bootstrap overlay cap. This is the branch every plain-MVCC
-            // user takes — including floor 0, where the old unconditional
-            // bound made all committed history invisible
-            // (`c2_cold_start_seek` / `get_current_many_cold_start`).
+            // Receipt-native mode caps history only while allocated versions
+            // are ahead of the published floor; legacy mode keeps the
+            // unbounded cold seek.
             let watermark = self.gate.version_allocation_high_water_mark();
-            let bounded = watermark > floor;
+            let bounded = self.gate.receipt_native_visibility_enabled() && watermark > floor;
             let hist_cap = if bounded { floor } else { u64::MAX };
             let ov_cap = if bounded || floor > 0 {
                 floor
@@ -1597,7 +1581,9 @@ impl MvccStore {
             // — a materialized-but-unpublished version may exist), in which
             // case the cap applies even at floor 0.
             if cur_v > floor
-                && (floor > 0 || self.gate.version_allocation_high_water_mark() > floor)
+                && (floor > 0
+                    || (self.gate.receipt_native_visibility_enabled()
+                        && self.gate.version_allocation_high_water_mark() > floor))
             {
                 slots.push(Slot::FloorExceeded);
                 continue;

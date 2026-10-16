@@ -131,16 +131,25 @@ impl ReceiptLease {
             .extend(guards);
     }
 
-    /// Release path (a): a chunk just PUBLISHED (apply_publication ran
-    /// `mark_durable`), so every parked version is ≤ the watermark and the
-    /// parked guards' Aborted marks are no-ops. Drain after every successful
-    /// publication.
+    /// Commit parked obligations only after both visibility and durability
+    /// floors cover them; retain any version not yet safely published.
     pub(crate) fn retire_parked(&self) {
-        self.inner
+        let visible = self.inner.gate.last_committed();
+        let durable = self.inner.gate.durable_watermark();
+        let mut parked = self
+            .inner
             .parked
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut pending = Vec::with_capacity(parked.len());
+        for guard in std::mem::take(&mut *parked) {
+            if guard.version() <= visible && guard.version() <= durable {
+                guard.commit();
+            } else {
+                pending.push(guard);
+            }
+        }
+        *parked = pending;
     }
 
     /// Idle count of parked guards, for tests and diagnostics.
@@ -250,6 +259,12 @@ impl ReceiptLease {
         if has_parked || has_reservation {
             self.inner.gate.set_requires_reopen();
         }
+        // Quarantine can follow a panic while some guards were already
+        // parked. Arm fail-closed Drop before releasing them so their
+        // completion floors remain unchanged until reopen recovery.
+        for guard in parked.iter_mut() {
+            guard.visibility_started_without_wal();
+        }
         let count = parked.len();
         parked.clear();
         reservation.take();
@@ -270,11 +285,15 @@ impl ReceiptLease {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
-        self.inner
+        let mut parked = self
+            .inner
             .parked
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for guard in parked.iter_mut() {
+            guard.visibility_started_without_wal();
+        }
+        parked.clear();
     }
 }
 
@@ -296,6 +315,9 @@ impl Drop for LeaseInner {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !parked.is_empty() || reservation.is_some() {
             self.gate.set_requires_reopen();
+            for guard in parked.iter_mut() {
+                guard.visibility_started_without_wal();
+            }
         }
         parked.clear();
         reservation.take();

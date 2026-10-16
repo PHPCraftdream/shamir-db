@@ -692,8 +692,9 @@ async fn c2_cold_start_seek() {
 }
 
 #[tokio::test]
-async fn plain_materialized_pending_cold_seek_hides_until_published() {
+async fn receipt_native_materialized_pending_cold_seek_hides_until_published() {
     let mvcc = make_mvcc();
+    mvcc.gate.enable_receipt_native_visibility();
     let key = Bytes::from_static(b"plain-pending");
     let older = [KvOp::Set(key.clone().into(), Bytes::from_static(b"older"))];
     mvcc.materialize_committed_to_history(&older, 1)
@@ -727,13 +728,56 @@ async fn plain_materialized_pending_cold_seek_hides_until_published() {
     );
 }
 
+#[tokio::test]
+async fn plain_materialized_history_ignores_unrelated_pending_allocation() {
+    let history: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let gate = make_gate();
+    let mvcc = MvccStore::new(Arc::clone(&history), Arc::clone(&gate));
+    let key = Bytes::from_static(b"legacy-origin");
+    let origin = [KvOp::Set(key.clone().into(), Bytes::from_static(b"origin"))];
+    mvcc.materialize_committed_to_history(&origin, 1)
+        .await
+        .unwrap();
+
+    assert_eq!(gate.version_allocation_high_water_mark(), 0);
+    assert_eq!(gate.last_committed(), 0);
+
+    // An unrelated allocator can advance above the floor without changing
+    // legacy cold-seek behavior.
+    assert_eq!(gate.assign_next_version(), 1);
+    assert_eq!(gate.assign_next_version(), 2);
+    assert_eq!(gate.version_allocation_high_water_mark(), 2);
+
+    mvcc.evict_current_cell_for_test(b"legacy-origin");
+    assert_eq!(
+        mvcc.get_current_bytes(b"legacy-origin").await.unwrap(),
+        Some(Bytes::from_static(b"origin")),
+        "legacy cold seek remains unbounded despite an unrelated pending allocation"
+    );
+}
+
+#[tokio::test]
+async fn plain_materialized_history_preserves_legacy_allocation_watermark() {
+    let mvcc = make_mvcc();
+    assert_eq!(mvcc.gate.version_allocation_high_water_mark(), 0);
+    let ops = [KvOp::Set(
+        Bytes::from_static(b"legacy-watermark").into(),
+        Bytes::from_static(b"value"),
+    )];
+    mvcc.materialize_committed_to_history(&ops, 1)
+        .await
+        .unwrap();
+    assert_eq!(mvcc.gate.version_allocation_high_water_mark(), 0);
+}
+
 /// Q3 legacy-isolation: PLAIN (non-receipt) writes keep master's unbounded
 /// cold seek after commit — the allocation watermark equals the floor, so
 /// the publication bound must not engage even with the cell evicted.
 #[tokio::test]
 async fn plain_committed_writes_cold_seek_unbounded_after_commit() {
     let history: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-    let mvcc = MvccStore::new(Arc::clone(&history), make_gate());
+    let gate = make_gate();
+    let mvcc = MvccStore::new(Arc::clone(&history), Arc::clone(&gate));
 
     mvcc.set_versioned(RecordKey::from(Bytes::from("k1")), Bytes::from("v1"))
         .await
@@ -742,8 +786,8 @@ async fn plain_committed_writes_cold_seek_unbounded_after_commit() {
         .await
         .unwrap();
     // Both writes committed: watermark == floor == 2.
-    assert_eq!(mvcc.gate.version_allocation_high_water_mark(), 2);
-    assert_eq!(mvcc.gate.last_committed(), 2);
+    assert_eq!(gate.version_allocation_high_water_mark(), 2);
+    assert_eq!(gate.last_committed(), 2);
 
     // Force the cold path for both keys despite the warm cell cache.
     mvcc.evict_current_cell_for_test(b"k1");

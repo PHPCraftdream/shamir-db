@@ -88,6 +88,9 @@ pub(crate) async fn run_receipt_pipeline(
     lease: &ReceiptLease,
 ) -> DbResult<ApplyOutcome> {
     let gate = repo.tx_gate().await?;
+    // Receipt activation is the provenance boundary for native visibility.
+    // Enable before any receipt materialization can allocate versions.
+    gate.enable_receipt_native_visibility();
     if gate.requires_reopen() {
         return Err(DbError::RepoRequiresReopen(repo.name().to_string()));
     }
@@ -296,7 +299,11 @@ async fn apply_fresh(
     }
     let mut guards = Vec::with_capacity(prepared.len());
     for event in &mut prepared {
-        let guard = gate.assign_next_version_guarded();
+        let mut guard = gate.assign_next_version_guarded();
+        // Receipt materialization writes follower-visible rows before local
+        // publication. A panic in that window must reopen, never Aborted-mark
+        // the allocated version and advance the floors beneath those rows.
+        guard.visibility_started_without_wal();
         event.version = Some(guard.version());
         guards.push(guard);
     }
@@ -387,12 +394,15 @@ async fn apply_fresh(
                 }
             }
         };
-        // The chunk published (apply_publication ran `mark_durable` inside
-        // the checkpoint): any guards parked by EARLIER failed chunks are now
-        // ≤ the watermark — retire them; then retire this chunk's own guards
-        // (their Aborted marks are no-ops at versions already durable).
+        // The chunk published and is durable. Retire parked prior guards,
+        // then commit this chunk's original allocation guards (not drop them
+        // armed after publication's separate reowned guards committed).
         lease.retire_parked();
-        guards.drain(0..end - start);
+        // Publication owns the reowned guards; explicitly discharge the
+        // original allocation guards rather than dropping them armed.
+        for guard in guards.drain(0..end - start) {
+            guard.commit();
+        }
         old = BookmarkV3 {
             fence: old.fence.map(|fence| FenceRecord {
                 bookmark: new_bookmark,

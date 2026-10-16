@@ -36,6 +36,9 @@ pub(crate) struct Hook {
     /// `DbError::Storage("injected")` — a NON-retryable kind, so the
     /// pipeline must park immediately instead of entering the 3-retry loop.
     pub fail_after_reopen: AtomicBool,
+    /// Panic synchronously immediately after the selected phase boundary.
+    #[cfg(test)]
+    pub panic_after: Mutex<Option<Phase>>,
     pub reached: Notify,
     pub resume: Notify,
 }
@@ -118,6 +121,11 @@ pub(crate) async fn phase(repo_name: &str, phase: Phase) {
             resumed.as_mut().enable();
             hook.reached.notify_waiters();
             resumed.await;
+        }
+        #[cfg(test)]
+        if *hook.panic_after.lock().unwrap() == Some(phase) {
+            hook.reached.notify_waiters();
+            panic!("injected receipt panic after {phase:?}");
         }
         if *hook.abort_at.lock().unwrap() == Some(phase) {
             // The notify lets an in-process observer proceed before the

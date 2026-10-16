@@ -156,17 +156,11 @@ pub(crate) async fn publication_from_receipt(
 /// `Drop` marks Aborted AND advances the watermarks — so the fresh path's
 /// chunk guards must NEVER drop on an error while the repo keeps serving
 /// (that would advance `last_committed`/`durable_watermark` past still-
-/// unpublished versions). On any pipeline failure the worker PARKS the
-/// remaining guards in `ReceiptWorker::parked_guards`. They are released
-/// only by (a) a later successful publication — this function's
-/// `mark_durable` step — after which the parked guards' Aborted marks land
-/// at versions ≤ the watermark and are no-ops (the worker drains them right
-/// after each successful chunk), or (b) worker shutdown under quarantine:
-/// the gate is set `requires_reopen` and the guards dropped, because after a
-/// reopen the Aborted marks are acceptable (the repo is fail-stopped until
-/// then). The resume path needs no parking: `resume_version_guard` re-owns
-/// the receipt's exact versions allocation-free and its `commit()` rewrites
-/// the mark.
+/// unpublished versions). On failure, fresh guards stay parked; quarantine
+/// fail-stops the gate before fail-closed Drop, preserving both floors until
+/// reopen. Successful retirement commits guards only when both visibility and
+/// durability floors cover their version. Resume re-owns receipt versions and
+/// commits each after publication.
 ///
 /// The wal group is resolved by the async caller and passed in — resolving
 /// it here would need a `.await`, which is exactly what this function must
@@ -177,7 +171,10 @@ pub(crate) fn apply_publication(
     publication: &Publication,
 ) {
     for event in &publication.events {
-        let guard = gate.resume_version_guard(event.local_version);
+        let mut guard = gate.resume_version_guard(event.local_version);
+        // Publication may panic after some rows are installed. Preserve the
+        // unsettled version and fail-stop the repo instead of aborting it.
+        guard.visibility_started_without_wal();
         for (mvcc, ops) in &event.groups {
             mvcc.publish_materialized(ops, event.local_version);
             mvcc.ts_index_insert(event.ts_ms, event.local_version);
