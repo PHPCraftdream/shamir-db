@@ -11,6 +11,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 #[test]
+fn receipt_native_visibility_defaults_off() {
+    let gate = RepoTxGate::fresh();
+    assert!(!gate.receipt_native_visibility_enabled());
+    gate.enable_receipt_native_visibility();
+    assert!(gate.receipt_native_visibility_enabled());
+}
+
+#[test]
 fn fresh_tx_id_monotonic() {
     let gate = RepoTxGate::fresh();
     let a = gate.fresh_tx_id();

@@ -4,8 +4,23 @@ use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::Store;
 
 use super::super::{reproject_for_downstream, PreparedEvent};
-use super::{durable_journal_barrier, persist_batch_record};
+use super::durable_journal_barrier;
+use crate::meta::repl_bookmark::{save_bookmark_and_clean_horizon, save_replication_bookmark};
 use crate::repo::RepoInstance;
+
+/// Store a follower-local horizon together with its upstream bookmark.
+pub(super) async fn persist_batch_record(
+    info: &Arc<dyn Store>,
+    bookmark: u64,
+    local_end: u64,
+    journal_clean: bool,
+) -> DbResult<()> {
+    if journal_clean {
+        save_bookmark_and_clean_horizon(info, bookmark, local_end).await
+    } else {
+        save_replication_bookmark(info, bookmark).await
+    }
+}
 
 /// Finish one follower batch after its events have been applied and queued.
 pub(in crate::tx::apply_replicated) async fn finish_batch(

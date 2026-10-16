@@ -2,6 +2,7 @@ mod algorithm;
 mod classification;
 mod follower;
 pub(crate) mod lifecycle;
+mod receipt_recovery;
 
 #[cfg(test)]
 #[path = "tests/mod.rs"]

@@ -43,13 +43,15 @@ fn missing_intervals(known: &BTreeSet<u64>, after: u64, through: u64) -> Vec<(u6
 pub(crate) async fn reconcile_cold_start(
     repo: &RepoInstance,
     entries: &[WalEntryV2],
+    permit: &crate::repo::RepoWritePermit,
 ) -> DbResult<()> {
-    reconcile_with_hook(repo, entries, &mut |_| Ok(())).await
+    reconcile_with_hook(repo, entries, permit, &mut |_| Ok(())).await
 }
 
 pub(super) async fn reconcile_with_hook(
     repo: &RepoInstance,
     entries: &[WalEntryV2],
+    permit: &crate::repo::RepoWritePermit,
     hook: &mut (dyn FnMut(&'static str) -> DbResult<()> + Send),
 ) -> DbResult<()> {
     if !repo.has_persistent_wal() {
@@ -73,6 +75,12 @@ pub(super) async fn reconcile_with_hook(
     if let Some((first, through)) = previous_gap {
         feed.record_recovery_gap(first, through).await?;
     }
+    // PR6b-2: complete an outstanding replication receipt BEFORE the `h <= j`
+    // early return and the PR6c classification, so the receipt's versions are
+    // certified through the bookmark's clean horizon instead of becoming a
+    // recovery GAP.
+    let info = repo.tx_info_store().await?;
+    super::receipt_recovery::complete_outstanding_receipt(repo, &info, permit).await?;
     if h <= j {
         if let Some(coverage) = repo.wal_group().await?.coverage_observer() {
             coverage.certify_exclusive_open(h);
@@ -80,7 +88,6 @@ pub(super) async fn reconcile_with_hook(
         return Ok(());
     }
 
-    let info = repo.tx_info_store().await?;
     let bookmark = load_replication_bookmark(&info).await?;
     let follower_fence = load_fence_record(&info).await?;
     let follower_provenance = bookmark > 0 || follower_fence.is_some();

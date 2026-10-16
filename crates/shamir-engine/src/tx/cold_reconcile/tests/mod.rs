@@ -6,5 +6,7 @@ mod classification_tests;
 mod follower_cold_tests;
 #[path = "helpers.rs"]
 mod helpers;
+#[path = "receipt_recovery_tests.rs"]
+mod receipt_recovery_tests;
 #[path = "reconcile_tests.rs"]
 mod reconcile_tests;

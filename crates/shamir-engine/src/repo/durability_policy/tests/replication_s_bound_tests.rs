@@ -7,8 +7,11 @@
 //! post-condition is asserted on the condition itself.
 
 use shamir_wal::{WalDurability, WalGroupCommit, WalSink};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+
+use crate::repo::durability_policy::replication_bound::BOUND_WAIT_MS_FOR_TEST;
 
 use super::super::replication_bound;
 use super::super::RetentionOverflow;
@@ -91,7 +94,11 @@ async fn concurrent_held_back_pulls_coalesce_into_one_sync() {
     let demands0 = group.instance_sync_calls();
 
     // Park the (single) coalesced round mid-fsync so all 8 pulls are
-    // guaranteed to register inside the SAME window (no wall clock).
+    // guaranteed to register inside the SAME window (no wall clock). The
+    // 200 ms pull budget would otherwise expire early waiters before the
+    // last one registers on a slow runner, so `wait_sync_waiters(8)` could
+    // never observe 8 at once; the budget is lifted for this test only.
+    BOUND_WAIT_MS_FOR_TEST.store(3_600_000, Ordering::Release);
     shamir_wal::WalSink::arm_pause_next_file_sync();
     let mut pulls = Vec::new();
     for _ in 0..8 {

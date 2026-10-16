@@ -8,7 +8,8 @@
 mod v2;
 pub use v2::{
     load_clean_horizon, load_fence_record, load_replication_bookmark,
-    save_bookmark_and_clean_horizon, save_fence_record, save_replication_bookmark, FenceRecord,
+    save_bookmark_and_clean_horizon, save_fence_record, save_fence_record_v3_aware,
+    save_replication_bookmark, FenceRecord,
 };
 
 #[cfg(test)]

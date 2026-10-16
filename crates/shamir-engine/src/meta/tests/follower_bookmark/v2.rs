@@ -1,3 +1,4 @@
+use crate::meta::repl::bookmark_v3::{decode_bookmark_v3, save_bookmark_v3};
 use crate::meta::{MetaEnvelope, MetaKey};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -20,7 +21,21 @@ fn key() -> RecordKey {
     RecordKey::from_slice(MetaKey::ReplicationBookmark.as_record_id().as_bytes())
 }
 
+fn is_v3(bytes: &[u8]) -> bool {
+    bytes.len() >= 16 && u16::from_le_bytes([bytes[14], bytes[15]]) == 3
+}
+
 fn decode(bytes: &[u8]) -> DbResult<Version2Record> {
+    if is_v3(bytes) {
+        // PR6b-2: a v3 record (receipt protocol) decodes through the v3
+        // codec; the legacy view simply drops `outstanding_receipt`.
+        let v3 = decode_bookmark_v3(bytes)?;
+        return Ok(Version2Record {
+            fence: v3.fence,
+            bookmark: v3.bookmark,
+            clean_through: v3.clean_through,
+        });
+    }
     if bytes.len() == 22 {
         let bookmark: u64 = MetaEnvelope::open(bytes)
             .map_err(|e| DbError::Storage(format!("replication bookmark codec: {e}")))?;
@@ -124,7 +139,27 @@ async fn get_previous(info: &Arc<dyn Store>) -> DbResult<Option<Version2Record>>
     }
 }
 
+/// Legacy `save_*` writers must never downgrade a v3 record to v2 (the
+/// receipt pointer would be lost); PR6b-2 repos advance the bookmark through
+/// `bookmark_v3::save_bookmark_v3` (or an atomic batch) only.
+async fn refuse_v3(info: &Arc<dyn Store>) -> DbResult<()> {
+    let bytes = match info.get(key()).await {
+        Ok(bytes) => bytes,
+        Err(DbError::NotFound(_)) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if is_v3(&bytes) {
+        return Err(DbError::Storage(
+            "replication bookmark: a v3 record is present; legacy save_* must \
+             not downgrade it — use bookmark_v3::save_bookmark_v3 (PR6b-2)"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn save_fence_record(info: &Arc<dyn Store>, record: FenceRecord) -> DbResult<()> {
+    refuse_v3(info).await?;
     let old = get_previous(info).await?;
     if old.is_some_and(|old| old.clean_through.is_some()) {
         return save_record(
@@ -145,6 +180,7 @@ pub async fn save_fence_record(info: &Arc<dyn Store>, record: FenceRecord) -> Db
 }
 
 pub async fn save_replication_bookmark(info: &Arc<dyn Store>, bookmark: u64) -> DbResult<()> {
+    refuse_v3(info).await?;
     let mut record = load(info).await?;
     record.bookmark = bookmark;
     if let Some(mut fence) = record.fence {
@@ -173,6 +209,7 @@ pub async fn save_bookmark_and_clean_horizon(
     bookmark: u64,
     clean_horizon: u64,
 ) -> DbResult<()> {
+    refuse_v3(info).await?;
     let mut record = load(info).await?;
     record.bookmark = bookmark;
     record.clean_through = Some(
@@ -185,4 +222,59 @@ pub async fn save_bookmark_and_clean_horizon(
         record.fence = Some(fence);
     }
     save_record(info, record).await
+}
+
+/// Representation-aware fence write (PR6b-2): identity adoption persists the
+/// fence through the representation the repository actually uses. A v3
+/// (receipt-native) record is updated IN PLACE — its bookmark, clean horizon
+/// and outstanding-receipt pointer are preserved, and the v3 decode invariant
+/// `fence.bookmark == bookmark` is kept by syncing the fence's own bookmark —
+/// `save_fence_record` path unchanged. The other legacy writers keep their
+/// refuse-v3 downgrade guard.
+pub async fn save_fence_record_v3_aware(
+    info: &Arc<dyn Store>,
+    record: FenceRecord,
+) -> DbResult<()> {
+    let bytes = match info.get(key()).await {
+        Ok(bytes) => bytes,
+        Err(DbError::NotFound(_)) => {
+            // No bookmark is not proof of a fresh repo: legacy apply writes its
+            // recovery-floor marker before its first bookmark. Preserve that
+            // lineage; only an actually fresh store may activate v3 here.
+            if crate::meta::recovery_marker::load_last_committed(info)
+                .await?
+                .unwrap_or(0)
+                > 0
+            {
+                return save_fence_record(info, record).await;
+            }
+            // The bookmark is absent, so the fence's cursor must reflect that
+            // authoritative starting point (adoption passes the stored cursor).
+            let v3 = crate::meta::repl::bookmark_v3::BookmarkV3 {
+                fence: Some(FenceRecord {
+                    bookmark: 0,
+                    ..record
+                }),
+                bookmark: 0,
+                clean_through: None,
+                outstanding_receipt: None,
+            };
+            return save_bookmark_v3(info, &v3).await;
+        }
+        Err(error) => return Err(error),
+    };
+    if !is_v3(&bytes) {
+        return save_fence_record(info, record).await;
+    }
+    let mut v3 = decode_bookmark_v3(&bytes)?;
+    let fence = if record.bookmark == v3.bookmark {
+        record
+    } else {
+        FenceRecord {
+            bookmark: v3.bookmark,
+            ..record
+        }
+    };
+    v3.fence = Some(fence);
+    save_bookmark_v3(info, &v3).await
 }

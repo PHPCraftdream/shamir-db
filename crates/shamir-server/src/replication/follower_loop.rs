@@ -520,6 +520,9 @@ async fn run_follower_loop_internal(
             continue;
         }
 
+        // PR6b-2 activation: fresh repositories take the receipt path;
+        // repositories with a stored legacy v1/v2 bookmark keep the legacy
+        // path (activation.rs decides from the DURABLE bookmark record).
         match shamir_db::engine::tx::apply_replicated::apply_replicated_batch(
             &repo_instance,
             &events,

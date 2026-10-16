@@ -111,6 +111,7 @@ use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::RecordView;
 use shamir_types::types::value::InnerValue;
 
+use self::follower_durability::receipt::{apply_batch_receipt, receipt_path_selected};
 use self::follower_durability::single_barrier;
 use crate::meta::recovery_marker::{
     load_last_committed, load_next_tx_id_snapshot, save_last_committed_flushed,
@@ -219,14 +220,14 @@ pub async fn apply_replicated(
     policy: ApplyPolicy,
 ) -> DbResult<ApplyOutcome> {
     let mut prepared =
-        match prepare_event(repo, event, field_bindings, applied_watermark, policy).await? {
+        match prepare_event(repo, event, field_bindings, applied_watermark, policy, None).await? {
             Ok(prepared) => prepared,
             Err(outcome) => return Ok(outcome),
         };
     apply_prepared(repo, &mut prepared, None, false).await
 }
 
-struct PreparedEvent {
+pub(crate) struct PreparedEvent {
     event: ChangelogEvent,
     tables: Vec<PreparedTable>,
     guard: Option<shamir_tx::VersionGuard>,
@@ -239,6 +240,7 @@ async fn prepare_event(
     field_bindings: &[(u64, String)],
     applied_watermark: u64,
     policy: ApplyPolicy,
+    permit: Option<&crate::repo::RepoWritePermit>,
 ) -> DbResult<Result<PreparedEvent, ApplyOutcome>> {
     // V4 §4 idempotency: O(1) watermark check, no per-record scan. A
     // re-delivered event (at-most-once transport with redelivery) is a
@@ -312,7 +314,12 @@ async fn prepare_event(
 
     let mut prepared: Vec<PreparedTable> = Vec::with_capacity(by_table.len());
     for (table_name, ops) in by_table {
-        let table = match repo.get_table(&table_name).await {
+        let table = match match permit {
+            // Receipt path: the pipeline holds the write-domain permit, so
+            // table resolution MUST NOT re-admit (non-reentrant domain).
+            Some(permit) => repo.get_table_admitted(&table_name, permit).await,
+            None => repo.get_table(&table_name).await,
+        } {
             Ok(table) => table,
             Err(DbError::NotFound(_)) => {
                 return Ok(Err(ApplyOutcome::Rejected {
@@ -663,6 +670,25 @@ pub async fn apply_replicated_batch(
     policy: ApplyPolicy,
 ) -> DbResult<ApplyOutcome> {
     let info = repo.tx_info_store().await?;
+    // PR6b-2 activation: route to the receipt pipeline when the stored
+    // bookmark records select it (fresh installs qualify); otherwise take
+    // the legacy v1/v2 follower path below, byte-identical.
+    if receipt_path_selected(repo, &info).await? {
+        return apply_batch_receipt(repo, info, events.to_vec(), bookmark, policy).await;
+    }
+    apply_batch_with_info(repo, events, bookmark, policy, &info).await
+}
+
+/// Legacy v1/v2 follower apply path (no receipt routing). Kept public for
+/// the engine's legacy follower tests; PR6b-3 will convert the server's
+/// legacy loop off this entry.
+pub async fn apply_replicated_batch_legacy(
+    repo: &RepoInstance,
+    events: &[crate::tx::ReplicatedEvent],
+    bookmark: u64,
+    policy: ApplyPolicy,
+) -> DbResult<ApplyOutcome> {
+    let info = repo.tx_info_store().await?;
     apply_batch_with_info(repo, events, bookmark, policy, &info).await
 }
 
@@ -681,7 +707,16 @@ pub(crate) async fn apply_batch_with_info(
     // vector, and translate each event exactly once.
     let mut prepared = Vec::with_capacity(events.len());
     for event in events {
-        match prepare_event(repo, &event.event, &event.field_bindings, bookmark, policy).await? {
+        match prepare_event(
+            repo,
+            &event.event,
+            &event.field_bindings,
+            bookmark,
+            policy,
+            None,
+        )
+        .await?
+        {
             Ok(event) => prepared.push(event),
             Err(ApplyOutcome::Skipped) => {}
             Err(rejected) => return Ok(rejected),

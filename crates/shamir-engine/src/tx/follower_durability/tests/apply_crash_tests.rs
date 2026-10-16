@@ -24,7 +24,9 @@ use crate::repo::{BoxRepoFactory, RepoInstance};
 #[cfg(feature = "fjall")]
 use crate::table::TableConfig;
 #[cfg(feature = "fjall")]
-use crate::tx::apply_replicated::{apply_replicated_batch, follower_durability::in_flight_range};
+use crate::tx::apply_replicated::{
+    apply_replicated_batch_legacy, follower_durability::in_flight_range,
+};
 #[cfg(feature = "fjall")]
 use crate::tx::{ApplyOutcome, ApplyPolicy, ReplicatedEvent};
 
@@ -109,7 +111,7 @@ async fn real_fjall_crash_phase_matrix() {
         let name = repo_name(tag, temp.path());
         let repo = open(temp.path(), &name).await;
         assert_eq!(
-            apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+            apply_replicated_batch_legacy(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
                 .await
                 .unwrap(),
             ApplyOutcome::Applied { local_version: 1 }
@@ -118,7 +120,7 @@ async fn real_fjall_crash_phase_matrix() {
         *hook.park_at.lock().unwrap() = Some(phase);
         test_seam::install(&name, Arc::clone(&hook));
         let events = [event(2, 2)];
-        let mut apply = Box::pin(apply_replicated_batch(
+        let mut apply = Box::pin(apply_replicated_batch_legacy(
             &repo,
             &events,
             1,
@@ -210,9 +212,14 @@ async fn real_fjall_crash_phase_matrix() {
                 let before_two = journal(&reopened, 2).await;
                 let floor_before = reopened_gate.version_allocation_high_water_mark();
                 assert_eq!(
-                    apply_replicated_batch(&reopened, &[event(2, 2)], 2, ApplyPolicy::Trusted)
-                        .await
-                        .unwrap(),
+                    apply_replicated_batch_legacy(
+                        &reopened,
+                        &[event(2, 2)],
+                        2,
+                        ApplyPolicy::Trusted
+                    )
+                    .await
+                    .unwrap(),
                     ApplyOutcome::Skipped
                 );
                 assert_eq!(

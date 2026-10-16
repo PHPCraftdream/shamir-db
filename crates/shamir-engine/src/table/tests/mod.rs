@@ -105,5 +105,6 @@ pub mod validator_binding_serialization_tests;
 pub mod version_cas_tests;
 pub mod with_version_order_by_tests;
 pub mod write_exec_tests;
+pub mod write_path_preread_fail_closed_tests;
 pub mod write_receipt;
 pub mod writer_drain_barrier_tests;
