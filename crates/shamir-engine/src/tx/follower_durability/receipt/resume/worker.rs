@@ -272,11 +272,11 @@ async fn receipt_handler(mut state: ReceiptJobState) {
     while let Some(mut job) = state.next_job().await {
         state.lease().enter_job();
         let _tail = job.payload.repo.commit_tail().enter();
-        // Take the events so `job` stays whole for `reply`.
+        // Take/clone payload fields so `job` stays whole for `reply`.
         let events = std::mem::take(&mut job.payload.events);
         let result = run_receipt_pipeline(
             &job.payload.repo,
-            job.payload.info,
+            Arc::clone(&job.payload.info),
             events,
             job.payload.bookmark,
             job.payload.policy,
