@@ -1147,46 +1147,13 @@ impl RepoInstance {
         self.tx_gate.get().map(|gate| gate.as_ref())
     }
 
-    /// cancel-safe: NO — multi-step state mutation (local version
-    /// allocation + per-table raw writes + changefeed emit). The raw-apply
-    /// primitive itself (`MvccStore::apply_committed_ops`) is last-write-
-    /// wins idempotent, so a re-delivery of the same event after a crash
-    /// converges as long as the caller does NOT advance its
-    /// `applied_watermark` past an event that did not return
-    /// [`ApplyOutcome::Applied`].
-    ///
-    /// R1-a — apply a single leader-emitted [`ChangelogEvent`] to this
-    /// follower repo as a trusted raw write. Wrapper around
-    /// [`crate::tx::apply_replicated`]. See its docs for the version-
-    /// allocation model, idempotency contract, and finalize-tail reuse
-    /// rationale.
-    ///
-    /// `applied_watermark` is the highest leader `commit_version` the
-    /// caller has durably recorded as applied (R1-b owns the durable
-    /// bookmark). The method performs an O(1) comparison and short-
-    /// circuits to [`ApplyOutcome::Skipped`] without touching the store
-    /// when `event.commit_version <= applied_watermark`.
-    ///
-    /// `policy` selects the trust model (#1199) — see
-    /// [`crate::tx::ApplyPolicy`]'s doc.
-    pub async fn apply_replicated(
-        &self,
-        event: &shamir_tx::ChangelogEvent,
-        field_bindings: &[(u64, String)],
-        applied_watermark: u64,
-        policy: crate::tx::ApplyPolicy,
-    ) -> DbResult<crate::tx::ApplyOutcome> {
-        crate::tx::apply_replicated(self, event, field_bindings, applied_watermark, policy).await
-    }
-
     /// R1-b — read the durable per-(db,repo) follower replication bookmark.
     ///
     /// Returns the highest LEADER `commit_version` this follower has
     /// durably recorded as applied on this repo. Returns `0` on a fresh
-    /// repo (the marker has never been written). The value is what the
-    /// follower feeds back into
-    /// [`apply_replicated`](Self::apply_replicated) as
-    /// `applied_watermark` for O(1) idempotent re-delivery gating.
+    /// repo (the marker has never been written). Receipt checkpointing
+    /// advances the durable bookmark; the value is used for O(1)
+    /// idempotent re-delivery gating.
     ///
     /// Stored in the repo's `__tx__` info-store under
     /// [`MetaKey::ReplicationBookmark`](crate::meta::MetaKey::ReplicationBookmark)
@@ -1197,28 +1164,6 @@ impl RepoInstance {
     pub async fn replication_bookmark(&self) -> DbResult<u64> {
         let info_store = self.tx_info_store().await?;
         crate::meta::repl_bookmark::load_replication_bookmark(&info_store).await
-    }
-
-    /// R1-b — monotonically advance the durable replication bookmark.
-    ///
-    /// Persists `version` as the new high-water mark ONLY if `version` is
-    /// strictly greater than the currently-persisted bookmark; otherwise
-    /// this is a no-op (returns `Ok(())`). The compare-then-swap guards
-    /// against an out-of-order delivery rewinding the bookmark: e.g. after
-    /// advancing to 5, a late-arriving event at leader-version 3 is rejected
-    /// and the bookmark stays at 5.
-    ///
-    /// Callers should typically advance to the leader `commit_version` of
-    /// the event returned as [`crate::tx::ApplyOutcome::Applied`] by
-    /// [`apply_replicated`](Self::apply_replicated). On error the bookmark
-    /// is unchanged (the persist is atomic at the store level).
-    pub async fn advance_replication_bookmark(&self, version: u64) -> DbResult<()> {
-        let info_store = self.tx_info_store().await?;
-        let current = crate::meta::repl_bookmark::load_replication_bookmark(&info_store).await?;
-        if version > current {
-            crate::meta::repl_bookmark::save_replication_bookmark(&info_store, version).await?;
-        }
-        Ok(())
     }
 
     /// Run a single non-tx write as an implicit single-op BATCH transaction.

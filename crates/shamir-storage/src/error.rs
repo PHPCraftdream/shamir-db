@@ -147,6 +147,13 @@ pub enum DbError {
         .0.reason
     )]
     ResyncRequired(Box<ResyncRequiredInfo>),
+
+    /// Durable follower state this version refuses (S5c-X PR6b-3). No in-place
+    /// migration exists; the operator reseeds the affected subscription.
+    #[error(
+        "follower repository state refused ({reason:?}); no migration exists — reseed required"
+    )]
+    FollowerStateRefused { reason: FollowerRefusalReason },
 }
 
 /// Heap payload of [`DbError::ResyncRequired`].
@@ -155,6 +162,19 @@ pub struct ResyncRequiredInfo {
     pub db: String,
     pub repo: String,
     pub reason: String,
+}
+
+/// Why durable follower state was refused. The receipt protocol is the only
+/// follower apply protocol; unsupported states are refused, never migrated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FollowerRefusalReason {
+    /// A legacy fixed-width/u64, v1 or v2 bookmark record is present.
+    LegacyBookmarkFormat,
+    /// The bookmark record is malformed, truncated, or of an unknown version.
+    MalformedBookmark,
+    /// A nonzero allocation floor (or other pre-receipt installation state)
+    /// exists without a v3 bookmark record; reseeding is required.
+    LegacyFollowerState,
 }
 
 // Ratchet: a new inline-heavy variant must be boxed, not widen every `DbResult`.

@@ -1,69 +1,65 @@
-//! Activation rule (PR6b-2): the receipt protocol applies to a WAL-less
-//! follower batch when the backend supports repository-wide atomic batches
-//! AND the stored bookmark is v3 or ABSENT (freshly installed by this
-//! version). A v1/v2 bookmark keeps the legacy apply path until PR6b-3
-//! migrates it. A backend without the capability is rejected with
-//! `DbError::AtomicBatchUnsupported` where the new protocol is required.
+//! Follower admission (S5c-X PR6b-3): the receipt protocol is the ONLY
+//! follower apply protocol. `admit_follower` validates the durable follower
+//! state at first follower admission and returns the admission verdict;
+//! unsupported durable states (legacy bookmark formats, malformed records,
+//! floor-without-bookmark evidence, conflicting seed-install state) are
+//! REFUSED with typed errors — there is no "choose legacy" result anymore
+//! and no migration: the operator reseeds the affected subscription.
+//! `Fresh` means the caller must ADOPT (write the v3 baseline) before any
+//! apply work.
 
 use std::sync::Arc;
 
-#[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
-
-use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::error::{DbError, DbResult, FollowerRefusalReason};
 use shamir_storage::types::Store;
 
+use crate::meta::repl::bookmark_v3::{classify_follower_bookmark, FollowerBookmarkState};
 use crate::repo::RepoInstance;
 
-/// Negative-control seam: forces the legacy (unprotected) apply path so the
-/// crash-harness tests can contrast it with the receipt path.
-#[cfg(test)]
-static RECEIPT_LOOKUP_DISABLED: AtomicBool = AtomicBool::new(false);
-
-#[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
-pub(crate) fn disable_receipt_lookup(disabled: bool) {
-    RECEIPT_LOOKUP_DISABLED.store(disabled, Ordering::Release);
+/// Admission verdict for the first follower apply.
+pub(crate) enum FollowerAdmission {
+    /// A valid v3 bookmark record exists: durably identified follower.
+    Native,
+    /// No bookmark record and no floor/installation conflict: eligible —
+    /// the caller must adopt (write the v3 baseline) before any apply work.
+    Fresh,
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // wired by the activation chunk (next stage)
-pub(crate) async fn receipt_path_selected(
+/// Validate durable follower state at first follower admission. Typed
+/// refusals propagate; `Fresh` means the caller must adopt (write the v3
+/// baseline) before any apply work.
+pub(crate) async fn admit_follower(
     repo: &RepoInstance,
     info: &Arc<dyn Store>,
-) -> DbResult<bool> {
-    #[cfg(test)]
-    if RECEIPT_LOOKUP_DISABLED.load(Ordering::Acquire) {
-        return Ok(false);
+) -> DbResult<FollowerAdmission> {
+    match classify_follower_bookmark(info).await? {
+        FollowerBookmarkState::Native(_) => Ok(FollowerAdmission::Native),
+        FollowerBookmarkState::Fresh => {
+            if crate::repo::seed_install::SeedInstallState::load(info)
+                .await?
+                .is_some()
+            {
+                // Conflicting installation state: a seed install is in
+                // flight or incomplete — refusing is safer than adopting.
+                return Err(DbError::FollowerStateRefused {
+                    reason: FollowerRefusalReason::LegacyFollowerState,
+                });
+            }
+            if !repo.storage_supports_atomic_batch() {
+                return Err(DbError::AtomicBatchUnsupported(format!(
+                    "follower repo {} requires the receipt apply protocol but its \
+                     backend does not support repository-wide atomic batches",
+                    repo.name()
+                )));
+            }
+            Ok(FollowerAdmission::Fresh)
+        }
+        FollowerBookmarkState::FloorWithoutBookmark { .. } => {
+            // A nonzero durable allocation floor without a v3 record is
+            // unowned pre-receipt follower evidence: reseed required.
+            Err(DbError::FollowerStateRefused {
+                reason: FollowerRefusalReason::LegacyFollowerState,
+            })
+        }
     }
-    let v3 = crate::meta::repl::bookmark_v3::has_v3_record(info).await?;
-    if !v3
-        && crate::meta::repl::bookmark_v3::load_bookmark_v3(info)
-            .await?
-            .is_some()
-    {
-        // A v1/v2 record is present: legacy path until PR6b-3 migrates it.
-        return Ok(false);
-    }
-    // Absence of a bookmark record is NOT proof of freshness: the LEGACY
-    // writer persists its recovery floor marker BEFORE its first bookmark
-    // (`reserve_floor_in`), while the receipt writer stages floor markers in
-    // the same atomic batch as its first v3 bookmark. A durable floor marker
-    // without a bookmark record is therefore legacy evidence — stay legacy.
-    if !v3
-        && crate::meta::recovery_marker::load_last_committed(info)
-            .await?
-            .unwrap_or(0)
-            > 0
-    {
-        return Ok(false);
-    }
-    // Fresh install: both checks above found nothing.
-    if !repo.storage_supports_atomic_batch() {
-        return Err(DbError::AtomicBatchUnsupported(format!(
-            "follower repo {} requires the receipt apply protocol but its \
-             backend does not support repository-wide atomic batches",
-            repo.name()
-        )));
-    }
-    Ok(true)
 }

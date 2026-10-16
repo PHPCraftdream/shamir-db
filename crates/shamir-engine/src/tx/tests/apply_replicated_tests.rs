@@ -1,4 +1,5 @@
-//! R1-a — tests for [`apply_replicated`] (single-hop follower raw-apply).
+//! Tests for the follower apply entry [`crate::tx::apply_replicated_batch`]
+//! (receipt-only protocol, PR6b-3), exercised one event per batch.
 //!
 //! Each test constructs an in-memory follower repo with an `items` table,
 //! builds a [`ChangelogEvent`] via the REAL `shamir_tx::project_event` path
@@ -6,16 +7,13 @@
 //! apply contract: Put/Delete convergence, idempotency by leader-watermark,
 //! watermark ordering, and downstream changefeed re-emission.
 
-use std::pin::Pin;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::Bytes;
-use futures::Stream;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_in_memory::{InMemoryRepo, InMemoryStore};
-use shamir_storage::types::{RecordKey, Repo, Store};
-use shamir_tx::{IsolationLevel, MvccStore, TxContext, TxId};
+use shamir_storage::types::Store;
+use shamir_tx::{IsolationLevel, TxContext, TxId};
 use shamir_types::access::Actor;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -23,7 +21,27 @@ use shamir_types::types::value::InnerValue;
 use crate::repo::{BoxRepo, RepoInstance};
 use crate::table::TableConfig;
 use crate::tx::apply_replicated::ApplyRejectReason;
-use crate::tx::{apply_replicated, ApplyOutcome, ApplyPolicy};
+use crate::tx::{apply_replicated_batch, ApplyOutcome, ApplyPolicy, ReplicatedEvent};
+
+/// Apply ONE event through the public batch entry (the receipt pipeline).
+async fn apply_one(
+    repo: &RepoInstance,
+    event: &shamir_tx::ChangelogEvent,
+    field_bindings: &[(u64, String)],
+    bookmark: u64,
+    policy: ApplyPolicy,
+) -> DbResult<ApplyOutcome> {
+    apply_replicated_batch(
+        repo,
+        &[ReplicatedEvent {
+            event: event.clone(),
+            field_bindings: field_bindings.to_vec(),
+        }],
+        bookmark,
+        policy,
+    )
+    .await
+}
 
 /// Build an in-memory follower repo with one configured table `items`.
 fn follower_repo() -> RepoInstance {
@@ -51,7 +69,7 @@ fn items_token() -> u64 {
 /// what a leader emits. The staging `TxContext` is built via
 /// `ensure_table_staging` so the human-readable table name is recorded in
 /// `table_tokens` (otherwise `project_event` falls back to `token:{n}` and
-/// `apply_replicated`'s `table_token_for` would resolve the wrong token).
+/// `apply_replicated_batch`'s `table_token_for` would resolve the wrong token).
 fn put_event(value: &str, record: RecordId, leader_version: u64) -> shamir_tx::ChangelogEvent {
     let mut tx = TxContext::new(TxId::new(1), 0, 0, IsolationLevel::Snapshot);
     tx.set_actor(Actor::User(42));
@@ -87,7 +105,7 @@ async fn put_convergence() {
 
     let event = put_event("hello", rid(1), 1);
 
-    let outcome = apply_replicated(&follower, &event, &[], 0, ApplyPolicy::Trusted)
+    let outcome = apply_one(&follower, &event, &[], 0, ApplyPolicy::Trusted)
         .await
         .unwrap();
     let local_v = match outcome {
@@ -115,7 +133,7 @@ async fn delete_convergence() {
     let put_ev = put_event("tmp", rid(7), 1);
     let del_ev = delete_event(rid(7), 2);
 
-    let _ = apply_replicated(&follower, &put_ev, &[], 0, ApplyPolicy::Trusted)
+    let _ = apply_one(&follower, &put_ev, &[], 0, ApplyPolicy::Trusted)
         .await
         .unwrap();
     // Confirm Put landed first.
@@ -123,7 +141,7 @@ async fn delete_convergence() {
     assert!(matches!(got, InnerValue::Str(ref s) if s == "tmp"));
 
     // Apply Delete — watermark is 1 (Put's leader version).
-    let outcome = apply_replicated(&follower, &del_ev, &[], 1, ApplyPolicy::Trusted)
+    let outcome = apply_one(&follower, &del_ev, &[], 1, ApplyPolicy::Trusted)
         .await
         .unwrap();
     assert!(matches!(outcome, ApplyOutcome::Applied { .. }));
@@ -148,7 +166,7 @@ async fn idempotent_reapply_is_skip() {
     let event = put_event("v3", rid(3), 5);
 
     // First apply at watermark 0 → Applied.
-    let first = apply_replicated(&follower, &event, &[], 0, ApplyPolicy::Trusted)
+    let first = apply_one(&follower, &event, &[], 0, ApplyPolicy::Trusted)
         .await
         .unwrap();
     assert!(matches!(first, ApplyOutcome::Applied { .. }));
@@ -159,7 +177,7 @@ async fn idempotent_reapply_is_skip() {
 
     // Second apply with watermark = event.commit_version (5) → Skipped, no
     // version consumed, no state change.
-    let second = apply_replicated(&follower, &event, &[], 5, ApplyPolicy::Trusted)
+    let second = apply_one(&follower, &event, &[], 5, ApplyPolicy::Trusted)
         .await
         .unwrap();
     assert_eq!(second, ApplyOutcome::Skipped);
@@ -187,7 +205,7 @@ async fn watermark_ordering() {
     {
         let follower = follower_repo();
         let follower_tbl = follower.get_table("items").await.unwrap();
-        let outcome = apply_replicated(&follower, &event, &[], 3, ApplyPolicy::Trusted)
+        let outcome = apply_one(&follower, &event, &[], 3, ApplyPolicy::Trusted)
             .await
             .unwrap();
         assert!(matches!(outcome, ApplyOutcome::Applied { .. }));
@@ -199,7 +217,7 @@ async fn watermark_ordering() {
     {
         let follower = follower_repo();
         let _ = follower.get_table("items").await.unwrap();
-        let outcome = apply_replicated(&follower, &event, &[], 5, ApplyPolicy::Trusted)
+        let outcome = apply_one(&follower, &event, &[], 5, ApplyPolicy::Trusted)
             .await
             .unwrap();
         assert_eq!(outcome, ApplyOutcome::Skipped);
@@ -209,7 +227,7 @@ async fn watermark_ordering() {
     {
         let follower = follower_repo();
         let follower_tbl = follower.get_table("items").await.unwrap();
-        let outcome = apply_replicated(&follower, &event, &[], 4, ApplyPolicy::Trusted)
+        let outcome = apply_one(&follower, &event, &[], 4, ApplyPolicy::Trusted)
             .await
             .unwrap();
         assert!(matches!(outcome, ApplyOutcome::Applied { .. }));
@@ -220,7 +238,7 @@ async fn watermark_ordering() {
 
 // ── Test 5: finalize-tail — downstream changefeed re-emit ───────────
 
-/// After apply_replicated, the follower's OWN changefeed carries a
+/// After apply_replicated_batch, the follower's OWN changefeed carries a
 /// re-emitted event at the follower-local version (downstream chain
 /// replication works).
 #[tokio::test]
@@ -235,7 +253,7 @@ async fn downstream_changefeed_reemit() {
 
     let event = put_event("chain", rid(11), 7);
 
-    let outcome = apply_replicated(&follower, &event, &[], 0, ApplyPolicy::Trusted)
+    let outcome = apply_one(&follower, &event, &[], 0, ApplyPolicy::Trusted)
         .await
         .unwrap();
     let local_v = match outcome {
@@ -270,9 +288,9 @@ async fn downstream_changefeed_reemit() {
 
 /// Regression for the MVCC-attach ordering risk surfaced by R1-d: a
 /// follower that applies a replicated event BEFORE ever serving a read had
-/// no per-table `MvccStore` attached, so `apply_replicated` took the
+/// no per-table `MvccStore` attached, so `apply_replicated_batch` took the
 /// base-store fallback and the write was invisible to a later MVCC read.
-/// `apply_replicated` now forces the attach (via `get_table`) before
+/// `apply_replicated_batch` now forces the attach (via `get_table`) before
 /// writing, so the record is visible even when apply is the very first
 /// touch of the table — NO prior `get_table` here on purpose.
 #[tokio::test]
@@ -280,9 +298,9 @@ async fn apply_before_any_read_is_mvcc_visible() {
     let follower = follower_repo();
 
     // Apply FIRST — the follower has never read `items`, so its MvccStore
-    // is not yet attached at the top of apply_replicated.
+    // is not yet attached at the top of the apply entry.
     let event = put_event("fresh", rid(3), 1);
-    let outcome = apply_replicated(&follower, &event, &[], 0, ApplyPolicy::Trusted)
+    let outcome = apply_one(&follower, &event, &[], 0, ApplyPolicy::Trusted)
         .await
         .unwrap();
     assert!(
@@ -303,7 +321,7 @@ async fn apply_before_any_read_is_mvcc_visible() {
 
 // ── A12 regression — completion-tracker terminal marking ───────────
 //
-// apply_replicated used to allocate its local version via the BARE
+// The legacy per-event executor used to allocate its local version via the BARE
 // `assign_next_version()` (which only bumps the version_counter atomic) and
 // never marked that version in the gate's `completion` tracker on the success
 // path — only `mark_durable_aborted` ran on the failure path, and that touches
@@ -315,7 +333,7 @@ async fn apply_before_any_read_is_mvcc_visible() {
 // pure failures abort, and SNAP-6 partial visibility requires reopen without
 // settling either tracker. RAII also protects cancellation at awaited history.
 
-/// Reproduce the stuck-watermark scenario: apply_replicated succeeds (version
+/// Reproduce the stuck-watermark scenario: apply_replicated_batch succeeds (version
 /// N allocated), then a LOCAL tx commits at M > N. The completion tracker's
 /// contiguous watermark MUST advance through both N and M — before the fix it
 /// wedged at N-1 forever because N was never terminally marked in
@@ -331,10 +349,10 @@ async fn a12_success_path_completion_watermark_advances_past_replicated_version(
     let completion_before = gate.completion().watermark();
     assert_eq!(completion_before, 0, "fresh gate: watermark at 0");
 
-    // Step 1 — apply_replicated allocates local_version = 1 (N) and (post-fix)
+    // Step 1 — apply_replicated_batch allocates local_version = 1 (N) and (post-fix)
     // marks it `Materialized` in `completion` via the VersionGuard's `commit()`.
     let event = put_event("a12-ok", rid(21), 1);
-    let outcome = apply_replicated(&follower, &event, &[], 0, ApplyPolicy::Trusted)
+    let outcome = apply_one(&follower, &event, &[], 0, ApplyPolicy::Trusted)
         .await
         .unwrap();
     let n = match outcome {
@@ -350,7 +368,7 @@ async fn a12_success_path_completion_watermark_advances_past_replicated_version(
     assert_eq!(
         gate.completion().watermark(),
         n,
-        "completion watermark must advance to N after a successful apply_replicated"
+        "completion watermark must advance to N after a successful apply_replicated_batch"
     );
 
     // Step 2 — a LOCAL tx commit at M = N + 1 through the normal commit path.
@@ -391,47 +409,7 @@ async fn a12_success_path_completion_watermark_advances_past_replicated_version(
     assert_eq!(gate.last_committed(), m);
 }
 
-/// Failure path: history errors follow overlay publication, so SNAP-6 must
-/// leave visibility and durability unsettled and require reopen. Only a pure
-/// pre-image failure before the first apply can preserve A12's normal abort.
-#[tokio::test]
-async fn a12_history_failure_keeps_visible_version_unsettled_until_reopen() {
-    let follower = follower_repo();
-    let _ = follower.get_table("items").await.unwrap();
-    let gate = follower.tx_gate().await.unwrap();
-    assert_eq!(gate.completion().watermark(), 0);
-
-    let history: Arc<dyn Store> = Arc::new(FailingHistoryStore {
-        inner: Arc::new(InMemoryStore::new()),
-    });
-    let mvcc = Arc::new(MvccStore::new(history, Arc::clone(&gate)));
-    assert!(follower
-        .per_table_mvcc()
-        .remove_sync(&items_token())
-        .is_some());
-    assert!(follower
-        .per_table_mvcc()
-        .insert_sync(items_token(), mvcc)
-        .is_ok());
-    let bad_event = put_event("history-fails", rid(31), 1);
-    let err = apply_replicated(&follower, &bad_event, &[], 0, ApplyPolicy::Trusted)
-        .await
-        .expect_err("history persistence must fail");
-    assert!(
-        matches!(err, DbError::RepoRequiresReopen(_)),
-        "unexpected error: {err:?}"
-    );
-    assert_eq!(gate.version_allocation_high_water_mark(), 1);
-
-    // apply_committed_ops publishes the overlay before history can fail.
-    // There is no follower WAL replay owner: neither tracker may abort it.
-    assert!(gate.requires_reopen());
-    assert_eq!(gate.completion().watermark(), 0);
-    assert_eq!(gate.durable_watermark(), 0);
-    assert!(!gate.is_orphaned_post_wal(1));
-}
-
-/// Regression: the A12 fix MUST NOT change apply_replicated's externally
+/// Regression: the A12 fix MUST NOT change the apply path's externally
 /// observable success-path contract — the record still lands, the downstream
 /// changefeed still re-emits at the follower-local version, and the durable
 /// watermark still tracks the visibility watermark (inline-materialize
@@ -444,7 +422,7 @@ async fn a12_regression_success_path_preserves_data_changefeed_and_durable() {
     let mut rx = follower.subscribe_changelog().await.unwrap();
 
     let event = put_event("regress", rid(41), 3);
-    let outcome = apply_replicated(&follower, &event, &[], 0, ApplyPolicy::Trusted)
+    let outcome = apply_one(&follower, &event, &[], 0, ApplyPolicy::Trusted)
         .await
         .unwrap();
     let n = match outcome {
@@ -513,7 +491,7 @@ async fn follower_repo_with_corrupt_items_info() -> (RepoInstance, Arc<InMemoryR
     (follower, mem)
 }
 
-/// Regression: `apply_replicated` forces the per-table MVCC attach via
+/// Regression: `apply_replicated_batch` forces the per-table MVCC attach via
 /// `repo.get_table(&table_name)` and, before the fix, discarded EVERY error
 /// from that call (`let _ = repo.get_table(&table_name).await;`) — not just
 /// the expected "table not configured yet" `NotFound` case.
@@ -552,7 +530,7 @@ async fn get_table_attach_failure_is_not_swallowed() {
 
     let event = put_event("should-not-land", rid(50), 1);
 
-    let err = apply_replicated(&follower, &event, &[], 0, ApplyPolicy::Trusted)
+    let err = apply_one(&follower, &event, &[], 0, ApplyPolicy::Trusted)
         .await
         .expect_err("a genuine non-NotFound attach failure must propagate, not be swallowed");
     assert!(
@@ -563,7 +541,7 @@ async fn get_table_attach_failure_is_not_swallowed() {
     assert_eq!(gate.version_allocation_high_water_mark(), allocated);
     // The finalize tail must NOT have run: no downstream changefeed
     // re-emit. `try_recv` is deterministic here (no other task can have
-    // produced on this broadcast channel by the time `apply_replicated`
+    // produced on this broadcast channel by the time `apply_replicated_batch`
     // has already returned).
     assert!(
         matches!(
@@ -614,7 +592,7 @@ async fn validate_payload_rejects_undecodable_put_and_consumes_no_version() {
         }],
     };
 
-    let err = apply_replicated(
+    let err = apply_one(
         &follower,
         &garbage_event,
         &[],
@@ -636,7 +614,7 @@ async fn validate_payload_rejects_undecodable_put_and_consumes_no_version() {
     );
 
     // Trusted skips optional validation, not decoding required for translation.
-    let outcome = apply_replicated(&follower, &garbage_event, &[], 0, ApplyPolicy::Trusted)
+    let outcome = apply_one(&follower, &garbage_event, &[], 0, ApplyPolicy::Trusted)
         .await
         .unwrap();
     assert_eq!(
@@ -645,55 +623,4 @@ async fn validate_payload_rejects_undecodable_put_and_consumes_no_version() {
             reason: ApplyRejectReason::UndecodablePayload,
         }
     );
-}
-
-type HistoryStream = Pin<Box<dyn Stream<Item = DbResult<Vec<(RecordKey, Bytes)>>> + Send>>;
-
-struct FailingHistoryStore {
-    inner: Arc<dyn Store>,
-}
-
-#[async_trait]
-impl Store for FailingHistoryStore {
-    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
-        self.inner.insert(value).await
-    }
-
-    async fn set(&self, _key: RecordKey, _value: Bytes) -> DbResult<bool> {
-        Err(DbError::Storage("injected history failure".into()))
-    }
-
-    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
-        self.inner.get(key).await
-    }
-
-    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
-        self.inner.remove(key).await
-    }
-
-    fn iter_stream(&self, batch_size: usize) -> HistoryStream {
-        self.inner.iter_stream(batch_size)
-    }
-
-    fn scan_prefix_stream(&self, prefix: Bytes, batch_size: usize) -> HistoryStream {
-        self.inner.scan_prefix_stream(prefix, batch_size)
-    }
-
-    fn iter_range_stream(
-        &self,
-        start: Option<Bytes>,
-        end: Option<Bytes>,
-        batch_size: usize,
-    ) -> HistoryStream {
-        self.inner.iter_range_stream(start, end, batch_size)
-    }
-
-    fn iter_range_stream_reverse(
-        &self,
-        start: Option<Bytes>,
-        end: Option<Bytes>,
-        batch_size: usize,
-    ) -> HistoryStream {
-        self.inner.iter_range_stream_reverse(start, end, batch_size)
-    }
 }

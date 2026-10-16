@@ -1,46 +1,50 @@
+//! Crash-image tests (acceptance test 10, PR6b-3): a legacy crash image —
+//! floor marker plus v2/u64 bookmark bytes written directly into the store —
+//! is REFUSED with the typed error on the cold open/apply path, and the
+//! refusal REPEATS: nothing is rewritten, no v3 is minted, counters and
+//! floor are unchanged. There is no runnable legacy executor to replay it.
+
 use std::collections::BTreeMap;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::Stream;
-use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::error::{DbError, FollowerRefusalReason};
 use shamir_storage::types::{RecordKey, Store};
-use shamir_tx::{ChangeOp, ChangelogEvent, RecordChange};
-use shamir_types::access::Actor;
-use shamir_types::types::record_id::RecordId;
 
-use super::super::barrier::{verify_events_and_flush, verify_events_without_flush};
-use super::super::in_flight_range;
+use crate::meta::recovery_marker::{load_last_committed, save_last_committed_flushed};
+use crate::meta::repl::bookmark_v3::{classify_follower_bookmark, load_bookmark_v3};
 use crate::meta::repl_bookmark::{
-    load_clean_horizon, load_replication_bookmark, save_bookmark_and_clean_horizon,
+    load_clean_horizon, load_replication_bookmark, save_fence_record_v3_aware, FenceRecord,
 };
+use crate::meta::{MetaEnvelope, MetaKey};
 
-type TestStream = Pin<Box<dyn Stream<Item = DbResult<Vec<(RecordKey, Bytes)>>> + Send>>;
-
+/// A durable crash image: an immutable byte snapshot of a metadata store.
 #[derive(Default)]
-struct DiskImage {
-    pending: Mutex<BTreeMap<RecordKey, Bytes>>,
-    durable: Mutex<BTreeMap<RecordKey, Bytes>>,
-    fail_flush: AtomicBool,
+struct CrashImage {
+    records: Mutex<BTreeMap<RecordKey, Bytes>>,
 }
 
-impl DiskImage {
-    fn crash_image(&self) -> Arc<dyn Store> {
-        Arc::new(SnapshotStore {
-            records: Mutex::new(self.durable.lock().unwrap().clone()),
+impl CrashImage {
+    fn set(&self, key: RecordKey, value: Bytes) {
+        self.records.lock().unwrap().insert(key, value);
+    }
+
+    fn image(&self) -> Arc<dyn Store> {
+        Arc::new(ImageStore {
+            records: Mutex::new(self.records.lock().unwrap().clone()),
         })
     }
 }
 
-struct SnapshotStore {
+/// Read/write view of a crash image. Writes that MUTATE the image fail (the
+/// refusal path must never rewrite refused state); only count them.
+struct ImageStore {
     records: Mutex<BTreeMap<RecordKey, Bytes>>,
 }
 
 #[async_trait]
-impl Store for SnapshotStore {
+impl Store for ImageStore {
     async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
         let key = RecordKey::from_slice(&(self.records.lock().unwrap().len() as u64).to_be_bytes());
         self.set(key.clone(), value).await?;
@@ -55,262 +59,147 @@ impl Store for SnapshotStore {
             .unwrap()
             .get(&key)
             .cloned()
-            .ok_or_else(|| DbError::NotFound("fake store key".into()))
+            .ok_or_else(|| DbError::NotFound("crash image key".into()))
     }
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
         Ok(self.records.lock().unwrap().remove(&key).is_some())
     }
-    fn iter_stream(&self, _size: usize) -> TestStream {
-        Box::pin(futures::stream::empty())
-    }
-    fn scan_prefix_stream(&self, _prefix: Bytes, _size: usize) -> TestStream {
-        Box::pin(futures::stream::empty())
-    }
-    fn iter_range_stream(
-        &self,
-        _start: Option<Bytes>,
-        _end: Option<Bytes>,
-        _size: usize,
-    ) -> TestStream {
-        Box::pin(futures::stream::empty())
-    }
-    fn iter_range_stream_reverse(
-        &self,
-        _start: Option<Bytes>,
-        _end: Option<Bytes>,
-        _size: usize,
-    ) -> TestStream {
-        Box::pin(futures::stream::empty())
+}
+
+fn bookmark_key() -> RecordKey {
+    RecordKey::from_slice(MetaKey::ReplicationBookmark.as_record_id().as_bytes())
+}
+
+fn fence(bookmark: u64) -> FenceRecord {
+    FenceRecord {
+        bookmark,
+        lineage_id: [5; 16],
+        history_epoch: 3,
+        observed_identity: None,
     }
 }
 
-#[async_trait]
-impl Store for DiskImage {
-    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
-        let key = RecordKey::from_slice(&(self.pending.lock().unwrap().len() as u64).to_be_bytes());
-        self.set(key.clone(), value).await?;
-        Ok(key)
-    }
-    async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
-        Ok(self.pending.lock().unwrap().insert(key, value).is_none())
-    }
-    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
-        self.pending
-            .lock()
-            .unwrap()
-            .get(&key)
-            .cloned()
-            .ok_or_else(|| DbError::NotFound("fake store key".into()))
-    }
-    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
-        Ok(self.pending.lock().unwrap().remove(&key).is_some())
-    }
-    async fn flush(&self) -> DbResult<()> {
-        if self.fail_flush.load(Ordering::Acquire) {
-            return Err(DbError::Storage("injected flush failure".into()));
-        }
-        *self.durable.lock().unwrap() = self.pending.lock().unwrap().clone();
-        Ok(())
-    }
-    fn iter_stream(&self, _size: usize) -> TestStream {
-        Box::pin(futures::stream::empty())
-    }
-    fn scan_prefix_stream(&self, _prefix: Bytes, _size: usize) -> TestStream {
-        Box::pin(futures::stream::empty())
-    }
-    fn iter_range_stream(
-        &self,
-        _start: Option<Bytes>,
-        _end: Option<Bytes>,
-        _size: usize,
-    ) -> TestStream {
-        Box::pin(futures::stream::empty())
-    }
-    fn iter_range_stream_reverse(
-        &self,
-        _start: Option<Bytes>,
-        _end: Option<Bytes>,
-        _size: usize,
-    ) -> TestStream {
-        Box::pin(futures::stream::empty())
-    }
+/// Hand-built legacy bookmark bytes: fixed-width u64 and v2 (fence +
+/// independent clean horizon), including bookmark zero.
+fn legacy_bookmark_fixtures() -> Vec<(Vec<u8>, &'static str)> {
+    vec![
+        (
+            MetaEnvelope::new(10u64).encode().unwrap(),
+            "fixed-width u64",
+        ),
+        (MetaEnvelope::new(0u64).encode().unwrap(), "u64 zero"),
+        (
+            MetaEnvelope::new((2u16, (Some(fence(10)), 10u64, Some(8u64))))
+                .encode()
+                .unwrap(),
+            "v2",
+        ),
+    ]
 }
 
-fn event(version: u64) -> Arc<ChangelogEvent> {
-    Arc::new(ChangelogEvent {
-        repo: "follower".into(),
-        commit_version: version,
-        tx_id: version,
-        actor: Actor::System,
-        timestamp_ns: 0,
-        changes: vec![RecordChange {
-            table: "items".into(),
-            key: RecordId([version as u8; 16]).to_bytes(),
-            op: ChangeOp::Put,
-            value: None,
-        }],
-    })
+/// One legacy crash image: floor marker + the legacy bookmark bytes.
+fn legacy_crash_image(bookmark_bytes: &[u8]) -> Arc<dyn Store> {
+    let image = CrashImage::default();
+    image.set(bookmark_key(), Bytes::from(bookmark_bytes.to_vec()));
+    image.image()
 }
 
-#[tokio::test]
-async fn verification_and_flush_make_events_and_certificate_survive_two_reopens() {
-    let journal = DiskImage::default();
-    let item = event(7);
-    journal
-        .set(
-            RecordKey::from_slice(&7u64.to_be_bytes()),
-            Bytes::from(rmp_serde::to_vec(item.as_ref()).unwrap()),
-        )
-        .await
-        .unwrap();
-    verify_events_and_flush(&journal, &[item], 7, 7, None)
-        .await
-        .unwrap();
-    let metadata = Arc::new(DiskImage::default());
-    let metadata_store: Arc<dyn Store> = metadata.clone();
-    save_bookmark_and_clean_horizon(&metadata_store, 700, 7)
-        .await
-        .unwrap();
-    let journal_reopen = journal.crash_image();
-    let journal_key = RecordKey::from_slice(&7u64.to_be_bytes());
-    let expected = Bytes::from(rmp_serde::to_vec(event(7).as_ref()).unwrap());
-    assert_eq!(
-        journal_reopen.get(journal_key.clone()).await.unwrap(),
-        expected
-    );
-    for _ in 0..2 {
-        let reopened_journal = journal_reopen.get(journal_key.clone()).await.unwrap();
-        assert_eq!(reopened_journal, expected);
-        let reopened_metadata = metadata.crash_image();
-        assert_eq!(
-            load_replication_bookmark(&reopened_metadata).await.unwrap(),
-            700
-        );
-        assert_eq!(
-            load_clean_horizon(&reopened_metadata).await.unwrap(),
-            Some(7)
-        );
-    }
-}
-
-#[tokio::test]
-async fn omitting_flush_is_a_negative_control_and_loses_unflushed_journal() {
-    let journal = DiskImage::default();
-    let event = event(3);
-    journal
-        .set(
-            RecordKey::from_slice(&3u64.to_be_bytes()),
-            Bytes::from(rmp_serde::to_vec(event.as_ref()).unwrap()),
-        )
-        .await
-        .unwrap();
-    verify_events_without_flush(&journal, &[event], 3, 3, None)
-        .await
-        .unwrap();
-    assert!(matches!(
-        journal
-            .crash_image()
-            .get(RecordKey::from_slice(&3u64.to_be_bytes()))
-            .await,
-        Err(DbError::NotFound(_))
-    ));
-}
-
-#[tokio::test]
-async fn missing_mismatched_and_failed_flush_refuse_certification() {
-    let journal = DiskImage::default();
-    assert!(verify_events_and_flush(&journal, &[event(1)], 1, 1, None)
-        .await
-        .is_err());
-    journal
-        .set(
-            RecordKey::from_slice(&1u64.to_be_bytes()),
-            Bytes::from_static(b"wrong"),
-        )
-        .await
-        .unwrap();
-    assert!(verify_events_and_flush(&journal, &[event(1)], 1, 1, None)
-        .await
-        .is_err());
-    journal
-        .set(
-            RecordKey::from_slice(&1u64.to_be_bytes()),
-            Bytes::from(rmp_serde::to_vec(event(1).as_ref()).unwrap()),
-        )
-        .await
-        .unwrap();
-    journal.fail_flush.store(true, Ordering::Release);
-    assert!(verify_events_and_flush(&journal, &[event(1)], 1, 1, None)
-        .await
-        .is_err());
-}
-
-#[tokio::test]
-async fn five_phase_crash_images_keep_old_or_certified_horizon() {
-    for phase in 0..5 {
-        let history = DiskImage::default();
-        let journal = DiskImage::default();
-        let metadata = Arc::new(DiskImage::default());
-        let metadata_store: Arc<dyn Store> = metadata.clone();
-        save_bookmark_and_clean_horizon(&metadata_store, 200, 2)
-            .await
-            .unwrap();
-        let marker_key = RecordKey::from_slice(&99u64.to_be_bytes());
-        history
-            .set(marker_key.clone(), Bytes::from_static(b"history"))
-            .await
-            .unwrap();
-        history.flush().await.unwrap();
-        if phase >= 1 {
-            let item = event(5);
-            journal
-                .set(
-                    RecordKey::from_slice(&5u64.to_be_bytes()),
-                    Bytes::from(rmp_serde::to_vec(item.as_ref()).unwrap()),
-                )
-                .await
-                .unwrap();
-        }
-        if phase >= 2 {
-            verify_events_and_flush(&journal, &[event(5)], 5, 5, None)
-                .await
-                .unwrap();
-        }
-        if phase >= 3 {
-            save_bookmark_and_clean_horizon(&metadata_store, 500, 5)
-                .await
-                .unwrap();
-        }
-
-        let mut horizon = None;
-        let mut bookmark = 0;
-        let mut in_flight = None;
-        for _ in 0..2 {
-            let reopened_metadata = metadata.crash_image();
-            horizon = load_clean_horizon(&reopened_metadata).await.unwrap();
-            bookmark = load_replication_bookmark(&reopened_metadata).await.unwrap();
-            in_flight = in_flight_range(horizon, 5);
-            let reopened_journal = journal.crash_image();
-            assert_eq!(
-                reopened_journal
-                    .get(RecordKey::from_slice(&5u64.to_be_bytes()))
-                    .await
-                    .is_ok(),
-                phase >= 2,
-                "phase {phase}"
+async fn assert_refused_repeatedly(
+    image: &Arc<dyn Store>,
+    expected_bytes: &[u8],
+    reason: FollowerRefusalReason,
+    label: &str,
+) {
+    for attempt in 0..2 {
+        let check = |result: DbError| {
+            assert!(
+                matches!(result, DbError::FollowerStateRefused { reason: r } if r == reason),
+                "attempt {attempt} for {label}: expected FollowerStateRefused({reason:?}), \
+                 got {result:?}"
             );
-        }
-        let reopened_history = history.crash_image();
-        assert!(
-            reopened_history.get(marker_key).await.is_ok(),
-            "phase {phase}"
+        };
+        check(load_bookmark_v3(image).await.unwrap_err());
+        check(classify_follower_bookmark(image).await.unwrap_err());
+        check(load_replication_bookmark(image).await.unwrap_err());
+        check(load_clean_horizon(image).await.unwrap_err());
+        // The refusal path must NEVER mint a v3 record over refused bytes.
+        check(
+            save_fence_record_v3_aware(image, fence(99))
+                .await
+                .unwrap_err(),
         );
-        if phase >= 3 {
-            assert_eq!((bookmark, horizon), (500, Some(5)));
-            assert_eq!(in_flight, None);
-        } else {
-            assert_eq!((bookmark, horizon), (200, Some(2)));
-            assert_eq!(in_flight, Some(3..=5));
-        }
+        // The stored bytes are untouched — no rewrite, no adoption.
+        assert_eq!(
+            image.get(bookmark_key()).await.unwrap().as_ref(),
+            expected_bytes,
+            "attempt {attempt} for {label}"
+        );
     }
+}
+
+/// A legacy bookmark record in a crash image refuses every loader and the
+/// v3 writer, repeatedly, with `LegacyBookmarkFormat`; nothing is rewritten.
+#[tokio::test]
+async fn legacy_bookmark_crash_images_refuse_repeatedly_without_rewrite() {
+    for (bytes, label) in legacy_bookmark_fixtures() {
+        let image = legacy_crash_image(&bytes);
+        assert_refused_repeatedly(
+            &image,
+            &bytes,
+            FollowerRefusalReason::LegacyBookmarkFormat,
+            label,
+        )
+        .await;
+    }
+}
+
+/// A floor-without-bookmark crash image (aborted follower before any
+/// bookmark) refuses with `LegacyFollowerState`, repeatedly, and the floor
+/// is preserved verbatim.
+#[tokio::test]
+async fn floor_only_crash_image_refuses_repeatedly_and_keeps_the_floor() {
+    let image = CrashImage::default();
+    let store = image.image();
+    // Floor marker WITHOUT any bookmark: unowned pre-receipt follower state.
+    save_last_committed_flushed(&store, 7).await.unwrap();
+    for attempt in 0..2 {
+        let error = classify_follower_bookmark(&store).await.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                DbError::FollowerStateRefused {
+                    reason: FollowerRefusalReason::LegacyFollowerState
+                }
+            ),
+            "attempt {attempt}: {error:?}"
+        );
+        assert_eq!(load_last_committed(&store).await.unwrap(), Some(7));
+        assert!(load_bookmark_v3(&store).await.unwrap().is_none());
+    }
+}
+
+/// A crash image containing BOTH a valid v3 record and its floor keeps
+/// opening as a native follower — the only supported durable state.
+#[tokio::test]
+async fn v3_crash_image_still_classifies_native() {
+    let image = CrashImage::default();
+    let store = image.image();
+    save_last_committed_flushed(&store, 2).await.unwrap();
+    crate::meta::repl::bookmark_v3::save_bookmark_v3(
+        &store,
+        &crate::meta::repl::bookmark_v3::BookmarkV3 {
+            fence: Some(fence(2)),
+            bookmark: 2,
+            clean_through: Some(2),
+            outstanding_receipt: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        classify_follower_bookmark(&store).await.unwrap(),
+        crate::meta::repl::bookmark_v3::FollowerBookmarkState::Native(_)
+    ));
+    assert_eq!(load_replication_bookmark(&store).await.unwrap(), 2);
+    assert_eq!(load_clean_horizon(&store).await.unwrap(), Some(2));
 }

@@ -23,6 +23,18 @@ files before editing. `has_v3_record` and the legacy writers no longer exist.
 
 ## Deliverables
 
+### 0. Close a W1 gap first (small, same crate)
+In `crates/shamir-engine/src/meta/repl/bookmark_v3.rs`, `read_strict_record` returns
+`decode_bookmark_v3`'s raw `DbError::Storage` when the bytes SNIFF as v3 but fail the strict
+decode (truncated at >=16 bytes, trailing bytes, fence/bookmark mismatch). The design's
+state table requires a typed format/corruption error there: map a failed decode of
+v3-sniffed bytes to `DbError::FollowerStateRefused { reason: MalformedBookmark }`. Keep
+`decode_bookmark_v3` itself unchanged (its Storage errors are internal invariants); only
+`read_strict_record` (and thus the projections, the classifier, `load_bookmark_v3` and
+`save_fence_record_v3_aware`) must surface the typed refusal. Update
+`meta/repl/tests/bookmark_refusal_tests.rs` with one truncated-v3 fixture asserting the
+typed reason.
+
 ### 1. Cold open: classification BEFORE every early-return branch
 `crates/shamir-engine/src/tx/cold_reconcile/algorithm.rs` (`reconcile_with_hook`):
 - Move `let info = repo.tx_info_store().await?;` to the TOP, before the

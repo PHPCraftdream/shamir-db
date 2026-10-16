@@ -21,7 +21,7 @@ pub use replicated_event::ReplicatedEvent;
 pub mod recovery;
 pub mod tx_outcome;
 
-pub use apply_replicated::{apply_replicated, ApplyOutcome, ApplyPolicy};
+pub use apply_replicated::{apply_replicated_batch, ApplyOutcome, ApplyPolicy};
 pub(crate) use commit::release_pessimistic_locks;
 pub use commit::{commit_tx, wal_ops_from_tx, TxError as CommitError};
 pub(crate) use commit_driver::CommitDriver;

@@ -7,9 +7,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::stream::Stream;
+use shamir_db::engine::meta::repl::bookmark_v3::{
+    decode_bookmark_v3, load_bookmark_v3, save_bookmark_v3, BookmarkV3,
+};
+use shamir_db::engine::meta::{MetaEnvelope, MetaKey};
 use shamir_db::engine::tx::apply_replicated::apply_replicated_batch;
 use shamir_db::engine::tx::{ApplyOutcome, ApplyPolicy, ReplicatedEvent};
-use shamir_db::storage::error::{DbError, DbResult};
+use shamir_db::storage::error::{DbError, DbResult, FollowerRefusalReason};
 use shamir_db::storage::storage_in_memory::InMemoryStore;
 use shamir_db::storage::types::{RecordKey, Store};
 use shamir_query_types::wire::repl::ReplResponse;
@@ -348,4 +352,87 @@ async fn adoption_retry(park: bool, reflush: bool) {
         probe.flushes.load(Ordering::Acquire),
         if reflush { 2 } else { 1 }
     );
+}
+
+// S5c-X PR6b-3: identity adoption lands on a V3 record and preserves the
+// seeded bookmark, the local clean horizon J and the outstanding receipt
+// reference across `save_fence_record_v3_aware` adoption.
+#[tokio::test]
+async fn adoption_lands_v3_record_preserving_bookmark_j_and_receipt() {
+    let leader = build_memory().await;
+    write_rows(&leader, 0, 2).await;
+    let follower = build_memory().await;
+    let info = repo(&follower).tx_info_store().await.unwrap();
+    save_bookmark_v3(
+        &info,
+        &BookmarkV3 {
+            fence: None,
+            bookmark: 7,
+            clean_through: Some(3),
+            outstanding_receipt: Some([0xAB; 16]),
+        },
+    )
+    .await
+    .unwrap();
+
+    let hello = InProcessReplSource::new(leader)
+        .hello("probe")
+        .await
+        .unwrap();
+    checks::fence_hello_recorded(&follower, "app", "main", &hello, None)
+        .await
+        .unwrap();
+
+    let bytes = info
+        .get(RecordKey::from_slice(
+            MetaKey::ReplicationBookmark.as_record_id().as_bytes(),
+        ))
+        .await
+        .unwrap();
+    let (version, _): (u16, BookmarkV3) = MetaEnvelope::open(&bytes).unwrap();
+    assert_eq!(version, 3, "adoption must land a v3 record");
+    let record = decode_bookmark_v3(&bytes).unwrap();
+    let fence = record.fence.expect("adoption records the fence");
+    assert_eq!(record.bookmark, 7, "bookmark preserved across adoption");
+    assert_eq!(fence.bookmark, 7, "fence agrees with the v3 bookmark");
+    assert_eq!(
+        record.clean_through,
+        Some(3),
+        "local clean horizon J preserved across adoption"
+    );
+    assert_eq!(
+        record.outstanding_receipt,
+        Some([0xAB; 16]),
+        "outstanding receipt reference preserved across adoption"
+    );
+}
+
+// S5c-X PR6b-3: a durable allocation floor WITHOUT a v3 bookmark refuses
+// identity adoption with the typed `LegacyFollowerState` refusal — and the
+// refusal holds on repeated attempts: no v3 is minted over the floor.
+#[tokio::test]
+async fn floor_without_v3_refuses_adoption_with_legacy_follower_state() {
+    let leader = build_memory().await;
+    let follower = build_memory().await;
+    write_rows(&follower, 0, 1).await; // durable floor, no v3 bookmark
+    let hello = InProcessReplSource::new(leader)
+        .hello("probe")
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let error = checks::fence_hello_recorded(&follower, "app", "main", &hello, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                crate::replication::ReplError::FollowerStateRefused {
+                    reason: FollowerRefusalReason::LegacyFollowerState,
+                }
+            ),
+            "expected LegacyFollowerState refusal, got {error:?}"
+        );
+    }
+    let info = repo(&follower).tx_info_store().await.unwrap();
+    assert!(load_bookmark_v3(&info).await.unwrap().is_none());
 }

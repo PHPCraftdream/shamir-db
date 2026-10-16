@@ -361,6 +361,32 @@ impl SubscriptionSupervisor {
                         .map_err(|error| ReplError::Start(error.to_string()))?;
                     return Err(error);
                 }
+                // PR6b-3: refuse resume of a repo whose durable follower
+                // state this version does not support (legacy bookmark,
+                // malformed record, floor-without-bookmark evidence). A
+                // refused repo can never be resumed — the operator reseeds.
+                let info = destination
+                    .tx_info_store()
+                    .await
+                    .map_err(|error| ReplError::Start(error.to_string()))?;
+                if let Err(e) =
+                    shamir_db::engine::meta::repl::bookmark_v3::classify_follower_bookmark(&info)
+                        .await
+                {
+                    if let shamir_db::storage::error::DbError::FollowerStateRefused { reason } = e {
+                        let error = ReplError::FollowerStateRefused { reason };
+                        self.local
+                            .mark_subscription_terminal(
+                                &sub.name,
+                                "resync_required",
+                                &error.to_string(),
+                            )
+                            .await
+                            .map_err(|error| ReplError::Start(error.to_string()))?;
+                        return Err(error);
+                    }
+                    return Err(ReplError::Start(e.to_string()));
+                }
             }
         }
         let source = (self.factory)(sub);
@@ -469,6 +495,32 @@ impl SubscriptionSupervisor {
                                 "identity fence tripped; subscription marked resync_required"
                             );
                         }
+                    }
+                    Err(e @ ReplError::FollowerStateRefused { .. }) => {
+                        // S5c-X PR6b-3 — TERMINAL: the follower repo's durable
+                        // state is unsupported (no migration exists). Same
+                        // quarantine family as the identity fence, WITHOUT
+                        // the identity-fence test seam: always quarantined.
+                        if let Err(mark_err) = local
+                            .mark_subscription_terminal(
+                                &sub_name,
+                                "resync_required",
+                                &e.to_string(),
+                            )
+                            .await
+                        {
+                            warn!(
+                                subscription = %sub_name,
+                                error = %mark_err,
+                                "supervisor: failed to persist resync_required after follower-state refusal"
+                            );
+                        }
+                        metrics::counter!("shamir_repl_resync_required_total").increment(1);
+                        warn!(
+                            subscription = %sub_name,
+                            error = %e,
+                            "follower state refused; subscription marked resync_required (reseed required)"
+                        );
                     }
                     Err(e @ ReplError::ReopenRequired { .. }) => {
                         if let Err(error) = local
