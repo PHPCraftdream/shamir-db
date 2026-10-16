@@ -1,5 +1,10 @@
-use crate::meta::repl::{decode_bookmark_v3, encode_bookmark_v3, load_bookmark_v3, BookmarkV3};
-use crate::meta::repl_bookmark::{save_bookmark_and_clean_horizon, save_fence_record, FenceRecord};
+use crate::meta::repl::{
+    decode_bookmark_v3, encode_bookmark_v3, load_bookmark_v3, save_bookmark_v3, BookmarkV3,
+};
+use crate::meta::repl_bookmark::{
+    load_clean_horizon, load_fence_record, load_replication_bookmark,
+    save_bookmark_and_clean_horizon, save_fence_record, save_replication_bookmark, FenceRecord,
+};
 use crate::meta::{MetaEnvelope, MetaKey};
 use bytes::Bytes;
 use shamir_storage::error::DbError;
@@ -145,4 +150,43 @@ async fn v3_rejects_trailing_bytes() {
     let mut bytes = encode_bookmark_v3(&record).unwrap();
     bytes.push(0);
     assert!(decode_bookmark_v3(&bytes).is_err());
+}
+
+// PR6b-2 scope extension: the LEGACY v2 loaders decode a v3 record through
+// the v3 codec (dropping `outstanding_receipt`), and the legacy save_*
+// writers refuse to downgrade a v3 record instead of silently corrupting it.
+#[tokio::test]
+async fn legacy_v2_loaders_read_v3_records_and_saves_refuse_downgrade() {
+    let info = store();
+    save_bookmark_v3(
+        &info,
+        &BookmarkV3 {
+            fence: Some(fence(30)),
+            bookmark: 30,
+            clean_through: Some(28),
+            outstanding_receipt: Some([7; 16]),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(load_replication_bookmark(&info).await.unwrap(), 30);
+    assert_eq!(load_fence_record(&info).await.unwrap(), Some(fence(30)));
+    assert_eq!(load_clean_horizon(&info).await.unwrap(), Some(28));
+
+    let downgrade = save_replication_bookmark(&info, 31).await.unwrap_err();
+    assert!(matches!(downgrade, DbError::Storage(_)), "{downgrade:?}");
+    let downgrade = save_bookmark_and_clean_horizon(&info, 31, 30)
+        .await
+        .unwrap_err();
+    assert!(matches!(downgrade, DbError::Storage(_)), "{downgrade:?}");
+    // Refused downgrade: the record (and its receipt pointer) is untouched.
+    assert_eq!(load_replication_bookmark(&info).await.unwrap(), 30);
+    assert_eq!(
+        load_bookmark_v3(&info)
+            .await
+            .unwrap()
+            .unwrap()
+            .outstanding_receipt,
+        Some([7; 16])
+    );
 }

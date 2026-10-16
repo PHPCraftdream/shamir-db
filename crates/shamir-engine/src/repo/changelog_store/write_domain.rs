@@ -178,10 +178,6 @@ impl RepoWriteDomain {
 
     /// Rejects reservations from another domain, stale references and empty
     /// slots after acquiring the domain mutex.
-    // S5c-X PR6b-2c: paused-receipt holder admission. Consumed by tests
-    // (db_instance membership tests) in this PR; shamir-db schema/boot paths
-    // take it in the cross-crate chunk.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn admit_with_reservation(
         self: &Arc<Self>,
         reservation: &RepoWriteReservation,
@@ -205,8 +201,6 @@ impl RepoWriteDomain {
     ///
     /// Returns Some only if no reservation is outstanding; token zero is
     /// reserved for the empty slot and can never authorize admission.
-    // S5c-X PR6b-2b/2c: paused-receipt reservation.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn try_place_reservation(self: &Arc<Self>) -> Option<RepoWriteReservation> {
         let token = NEXT_REPO_WRITE_RESERVATION_TOKEN.fetch_add(1, Ordering::Relaxed);
         if token == 0 {

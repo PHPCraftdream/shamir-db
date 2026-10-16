@@ -1,4 +1,5 @@
 //! Deterministic tests for lifecycle admission, worker completion, and shutdown waiters.
+use crate::tx::apply_replicated::follower_durability::receipt::resume::worker::ReceiptLease;
 use crate::tx::cold_reconcile::lifecycle::{
     spawn_worker, InstallError, JobSubmitError, RepoUnitLifecycle, RepoWorkerLifecycle,
     ShutdownError, WorkerLease, WorkerTerminal,
@@ -13,6 +14,77 @@ use tokio::sync::Notify;
 struct NoopLease;
 impl WorkerLease for NoopLease {}
 
+#[tokio::test(start_paused = true)]
+async fn quarantine_between_install_check_and_hook_registration_fails_closed() {
+    let owner = RepoUnitLifecycle::new();
+    let gate = Arc::new(RepoTxGate::fresh());
+    let lease = ReceiptLease::new(Arc::clone(&gate), owner.status());
+    let reached = Arc::new(Notify::new());
+    let reached_wait = reached.notified();
+    tokio::pin!(reached_wait);
+    reached_wait.as_mut().enable();
+    let reached_hook = Arc::clone(&reached);
+    owner.set_before_quarantine_hook_install(Box::new(move |core| {
+        reached_hook.notify_one();
+        core.quarantine("install race quarantine");
+    }));
+
+    assert!(matches!(
+        owner.install_worker(lease, |_state| async {}),
+        Err(InstallError::ClosedOrForbidden)
+    ));
+    reached_wait.await;
+    assert!(owner.quarantined());
+    assert!(owner.reopen_required());
+    assert!(gate.requires_reopen());
+}
+
+#[tokio::test(start_paused = true)]
+async fn clean_receipt_lease_drop_does_not_require_reopen() {
+    let owner = RepoUnitLifecycle::new();
+    let gate = Arc::new(RepoTxGate::fresh());
+    let lease = ReceiptLease::new(Arc::clone(&gate), owner.status());
+    let clone = lease.clone();
+    drop(lease);
+    assert!(!gate.requires_reopen());
+    drop(clone);
+    assert!(!gate.requires_reopen());
+}
+
+#[tokio::test(start_paused = true)]
+async fn explicit_receipt_quarantine_fails_closed_without_parked_guards() {
+    let owner = RepoUnitLifecycle::new();
+    let gate = Arc::new(RepoTxGate::fresh());
+    let lease = ReceiptLease::new(Arc::clone(&gate), owner.status());
+    WorkerLease::on_quarantine(&lease);
+    assert!(gate.requires_reopen());
+    assert!(lease.publish(|| 42).is_ok());
+    owner.quarantine("receipt lease quarantined".to_owned());
+    assert!(lease.publish(|| 7).is_err());
+}
+#[tokio::test(start_paused = true)]
+async fn generic_quarantine_preserves_its_failure_reason() {
+    let owner = Arc::new(RepoUnitLifecycle::new());
+    let worker = Arc::clone(&owner);
+    spawn_worker(&owner, NoopLease, move |_state| async move {
+        worker.quarantine("unrelated timeout".to_owned());
+    })
+    .unwrap();
+    assert!(matches!(
+        owner.shutdown(Duration::from_secs(3600)).await,
+        Ok(WorkerTerminal::Failed(message)) if message == "worker quarantined: unrelated timeout"
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn lifecycle_status_publication_is_interlocked_with_quarantine() {
+    let owner = Arc::new(RepoUnitLifecycle::new());
+    let status = owner.status();
+    assert_eq!(status.publish(|| 42), Ok(42));
+    owner.quarantine("test quarantine".to_owned());
+    assert!(status.publish(|| 7).is_err());
+    assert!(owner.reopen_required());
+}
 #[tokio::test(start_paused = true)]
 async fn submit_without_worker_is_not_initialized() {
     let owner = RepoUnitLifecycle::new();
@@ -98,7 +170,9 @@ async fn deadline_expiry_quarantines_and_retains_supervisor_until_join() {
     let release = Arc::new(Notify::new());
     let (worker_entered, worker_release) = (Arc::clone(&entered), Arc::clone(&release));
     let owner = Arc::new(RepoUnitLifecycle::new());
-    spawn_worker(&owner, NoopLease, move |mut s| async move {
+    let gate = Arc::new(RepoTxGate::fresh());
+    let lease = ReceiptLease::new(Arc::clone(&gate), owner.status());
+    spawn_worker(&owner, lease, move |mut s| async move {
         let _job = s.next_job().await.unwrap();
         worker_entered.notify_one();
         worker_release.notified().await;
@@ -111,11 +185,13 @@ async fn deadline_expiry_quarantines_and_retains_supervisor_until_join() {
         Err(ShutdownError::TimedOut)
     ));
     assert!(owner.quarantined() && owner.reopen_required());
+    assert!(gate.requires_reopen());
     assert!(owner.interlock().publish(|| ()).is_err());
     release.notify_one();
     assert!(matches!(
         owner.shutdown(Duration::from_secs(3600)).await,
-        Ok(WorkerTerminal::Completed)
+        Ok(WorkerTerminal::Failed(message))
+            if message.contains("worker shutdown deadline elapsed")
     ));
     assert!(owner.supervisor_joined());
 }

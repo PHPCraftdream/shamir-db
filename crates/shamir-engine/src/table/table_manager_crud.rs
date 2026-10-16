@@ -6,7 +6,20 @@ use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
 use super::table_manager::TableManager;
+#[cfg(test)]
+use super::TEST_READ_ONE_TX_BYTES_FAILURE;
 use crate::index::index_definition::IndexDefinition;
+
+impl TableManager {
+    pub(super) fn ensure_repo_readable(&self) -> DbResult<()> {
+        if self.changefeed.as_ref().is_some_and(|changefeed| {
+            changefeed.gate.receipt_native_visibility_enabled() && changefeed.gate.requires_reopen()
+        }) {
+            return Err(DbError::RepoRequiresReopen(self.name().to_string()));
+        }
+        Ok(())
+    }
+}
 
 // ── F-48 (#859) test-only pause seam ────────────────────────────────────────
 //
@@ -487,8 +500,13 @@ impl TableManager {
         // F-48 test seam: parks strictly AFTER the flag read, BEFORE the
         // write. No-op in every non-test build.
         fire_post_barrier_pre_write_test_hook().await;
-        // Get old value before deletion for index cleanup
-        let old_value = self.get(id).await.ok();
+        // Get old value before deletion for index cleanup; only NotFound is
+        // absence, every other pre-read error fails closed.
+        let old_value = match self.get(id).await {
+            Ok(value) => Some(value),
+            Err(DbError::NotFound(_)) => None,
+            Err(error) => return Err(error),
+        };
         // Route through MvccStore when attached so the old bytes are
         // archived to history under active snapshots and `version_cache`
         // is bumped.
@@ -578,8 +596,13 @@ impl TableManager {
         // write. No-op in every non-test build.
         fire_post_barrier_pre_write_test_hook().await;
 
-        // Get old value before update for index maintenance
-        let old_value = self.get(id).await.ok();
+        // Get old value before update for index maintenance; only NotFound is
+        // absence, every other pre-read error fails closed.
+        let old_value = match self.get(id).await {
+            Ok(value) => Some(value),
+            Err(DbError::NotFound(_)) => None,
+            Err(error) => return Err(error),
+        };
 
         // 1. Validate unique indexes BEFORE write
         if let Some(ref old) = old_value {
@@ -657,11 +680,21 @@ impl TableManager {
 
     /// Count records (uses stored counter for O(1) performance)
     pub async fn count(&self) -> DbResult<usize> {
+        self.ensure_repo_readable()?;
         Ok(self.counter.get().await? as usize)
     }
 
     /// Get a record by RecordId
     pub async fn get(&self, id: RecordId) -> DbResult<InnerValue> {
+        self.ensure_repo_readable()?;
+        // Test-only fault injection (F-65 seam): forces the set/delete
+        // pre-read to fail with a genuine error.
+        #[cfg(test)]
+        if let Some(hook) = TEST_READ_ONE_TX_BYTES_FAILURE.get() {
+            if let Some(err) = hook.take_injected(self.table_token(), id) {
+                return Err(err);
+            }
+        }
         if let Some(mvcc) = self.mvcc_store_ref() {
             match mvcc.get_current_bytes(id.as_bytes()).await? {
                 Some(bytes) => InnerValue::from_bytes(bytes)
@@ -678,6 +711,7 @@ impl TableManager {
     /// otherwise falls through to the raw `table.get_many` (data_store).
     /// Returns `None` for a slot when the key is absent or tombstoned.
     pub async fn get_many(&self, ids: &[RecordId]) -> DbResult<Vec<Option<InnerValue>>> {
+        self.ensure_repo_readable()?;
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -708,6 +742,7 @@ impl TableManager {
     /// zero-copy field access. The `InnerValue`-decoding [`get`] is kept for
     /// the aggregate pipeline and other callers that need the full tree.
     pub async fn get_bytes(&self, id: RecordId) -> DbResult<Option<Bytes>> {
+        self.ensure_repo_readable()?;
         if let Some(mvcc) = self.mvcc_store_ref() {
             mvcc.get_current_bytes(id.as_bytes()).await
         } else {
@@ -730,6 +765,7 @@ impl TableManager {
     /// zero-copy field access. The `InnerValue`-decoding [`get_many`] is kept
     /// for the aggregate pipeline.
     pub async fn get_many_bytes(&self, ids: &[RecordId]) -> DbResult<Vec<Option<Bytes>>> {
+        self.ensure_repo_readable()?;
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -760,6 +796,7 @@ impl TableManager {
         ids: &[RecordId],
         tx: Option<&shamir_tx::TxContext>,
     ) -> DbResult<Vec<Option<Bytes>>> {
+        self.ensure_repo_readable()?;
         // Fast path: no tx → plain vectored read.
         let tx = match tx {
             None => return self.get_many_bytes(ids).await,

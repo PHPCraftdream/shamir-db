@@ -6,6 +6,7 @@ use crate::meta::repl::bookmark::{
     load_clean_horizon, load_fence_record, load_replication_bookmark, FenceRecord,
 };
 use crate::meta::{MetaEnvelope, MetaError, MetaKey, ENVELOPE_MAGIC, ENVELOPE_VERSION};
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{RecordKey, Store};
@@ -33,6 +34,15 @@ fn codec_error(e: crate::meta::MetaError) -> DbError {
 /// Encode a bookmark v3 record under tuple version 3. No production path
 /// calls this in PR6b-1 (tests only).
 pub fn encode_bookmark_v3(record: &BookmarkV3) -> DbResult<Vec<u8>> {
+    if record
+        .fence
+        .as_ref()
+        .is_some_and(|fence| fence.bookmark != record.bookmark)
+    {
+        return Err(DbError::Storage(
+            "bookmark v3: fence.bookmark disagrees with the flat bookmark".into(),
+        ));
+    }
     MetaEnvelope::new((3u16, record.clone()))
         .encode()
         .map_err(codec_error)
@@ -101,4 +111,23 @@ pub async fn load_bookmark_v3(info: &Arc<dyn Store>) -> DbResult<Option<Bookmark
         clean_through,
         outstanding_receipt: None,
     }))
+}
+
+/// Persist a bookmark v3 record (set + flush). The flush makes the bookmark
+/// advance itself a durability boundary; the receipt pipeline's atomic batches
+/// stage the encoded record directly and flush separately.
+pub async fn save_bookmark_v3(info: &Arc<dyn Store>, record: &BookmarkV3) -> DbResult<()> {
+    let bytes = encode_bookmark_v3(record)?;
+    info.set(key(), Bytes::from(bytes)).await?;
+    info.flush().await
+}
+
+/// Cheap sniff mirroring `load_bookmark_v3`'s dispatch: is the record at the
+/// bookmark key a v3 envelope?
+pub(crate) async fn has_v3_record(info: &Arc<dyn Store>) -> DbResult<bool> {
+    match info.get(key()).await {
+        Ok(bytes) => Ok(bytes.len() >= 16 && u16::from_le_bytes([bytes[14], bytes[15]]) == 3),
+        Err(DbError::NotFound(_)) => Ok(false),
+        Err(error) => Err(error),
+    }
 }

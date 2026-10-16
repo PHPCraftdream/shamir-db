@@ -13,6 +13,26 @@ use shamir_wal::{WalDurability, WalEntryV2};
 
 pub(super) const REPO_NAME: &str = "cold_reconcile_test";
 
+pub(super) async fn open_with_retry(path: &Path, name: &str) -> RepoInstance {
+    for attempt in 0..25u32 {
+        match RepoInstance::from_factory(
+            name.to_owned(),
+            BoxRepoFactory::fjall_raw(path),
+            vec![TableConfig::new("items")],
+        )
+        .await
+        {
+            Ok(repo) => return repo,
+            Err(error) if attempt < 24 => {
+                let _ = error;
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("reopen failed after retries: {error}"),
+        }
+    }
+    unreachable!("retry loop always returns or panics")
+}
+
 pub(super) async fn open_unrecovered(path: &Path) -> RepoInstance {
     let repo = RepoInstance::from_factory_for_recovery_test(
         REPO_NAME.into(),
@@ -133,7 +153,15 @@ pub(super) async fn open_and_reconcile(path: &Path) -> DbResult<RepoInstance> {
             return Err(error);
         }
     };
-    if let Err(error) = repo.certify_cold_start(&entries).await {
+    // Admit through the write domain FIRST (uncontended at open) and drop
+    // the permit after — cold recovery threads the permit, it never
+    // re-admits itself.
+    let permit = repo.write_domain().admit().await.map_err(|error| {
+        shamir_storage::error::DbError::Internal(format!("test admission rejected: {error}"))
+    })?;
+    let result = repo.certify_cold_start(&entries, &permit).await;
+    drop(permit);
+    if let Err(error) = result {
         repo.stop_journal_writer_for_test().await?;
         return Err(error);
     }

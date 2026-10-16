@@ -33,6 +33,15 @@ impl LifecycleStatus {
     pub fn reopen_required(&self) -> bool {
         self.0.reopen_required.load(Ordering::Acquire)
     }
+
+    /// Runs a synchronous publication callback under the lifecycle interlock.
+    /// The callback must not re-enter lifecycle operations.
+    pub(crate) fn publish<T>(
+        &self,
+        callback: impl FnOnce() -> T,
+    ) -> Result<T, super::interlock::PublicationClosed> {
+        self.0.interlock().publish(callback)
+    }
 }
 
 /// Capability required for resources whose destructor must fail closed.
@@ -123,6 +132,12 @@ impl<J, R, L> WorkerExecutionState<J, R, L> {
         L: WorkerLease,
     {
         self.lease.on_quarantine();
+    }
+    /// Worker-side quarantine: sticky fail-closed flags plus publication
+    /// termination. The supervisor publishes the terminal (Failed while
+    /// quarantined) after joining.
+    pub fn quarantine_worker(&self, reason: &str) {
+        self.core.quarantine(reason);
     }
     pub fn interlock(&self) -> &PubTermInterlock {
         self.core.interlock()

@@ -15,11 +15,14 @@ impl RepoInstance {
     }
 
     /// Reconcile the persistent journal from surviving WAL entries before service.
+    /// The caller's write-domain permit is threaded through: cold recovery must
+    /// never re-admit under a held permit (non-reentrant domain).
     pub(crate) async fn certify_cold_start(
         &self,
         entries: &[shamir_wal::WalEntryV2],
+        permit: &crate::repo::RepoWritePermit,
     ) -> DbResult<()> {
-        crate::tx::cold_reconcile::reconcile_cold_start(self, entries).await
+        crate::tx::cold_reconcile::reconcile_cold_start(self, entries, permit).await
     }
 
     pub(crate) async fn certify_legacy_cold_start(&self) -> DbResult<()> {

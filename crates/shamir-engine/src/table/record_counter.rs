@@ -259,6 +259,20 @@ impl RecordCounter {
         Ok(())
     }
 
+    /// S5c-X PR6b-2: adopt an ABSOLUTE durable count written by the follower
+    /// receipt atomic batch. Cache and `last_persisted` are set to `after`
+    /// under `persist_lock`, so the periodic `persist()` sees
+    /// cache == last_persisted and never overwrites the committed count with
+    /// a stale value.
+    #[allow(dead_code)] // wired by the PR6b-2 receipt-apply chunk (W3+)
+    pub(crate) async fn adopt_absolute(&self, after: u64) -> DbResult<()> {
+        let cache = self.ensure_cache().await?;
+        let _guard = self.persist_lock.lock().await;
+        cache.store(after, Ordering::Release);
+        self.last_persisted.store(after, Ordering::Release);
+        Ok(())
+    }
+
     /// Cheap, lock-free dirty check — NO admission, NO `ensure_cache`
     /// (an uninitialized `OnceCell` cache means nothing has been written
     /// since construction: every write path (`set`/`set_to`/`increment`)

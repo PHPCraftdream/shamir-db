@@ -13,7 +13,7 @@ use crate::meta::repl_bookmark::{load_clean_horizon, load_replication_bookmark};
 use crate::repo::{BoxRepoFactory, RepoInstance};
 use crate::table::TableConfig;
 use crate::tx::apply_replicated::{
-    apply_replicated_batch,
+    apply_replicated_batch, apply_replicated_batch_legacy,
     follower_durability::{in_flight_range, test_seam},
 };
 use crate::tx::{ApplyOutcome, ApplyPolicy, ReplicatedEvent};
@@ -91,7 +91,7 @@ async fn failed_barrier_preserves_persisted_certificate_and_fail_stops() {
     hook.fail_journal_barrier.store(true, Ordering::Release);
     test_seam::install(&name, hook);
     assert!(matches!(
-        apply_replicated_batch(&repo, &[event(2, 2)], 1, ApplyPolicy::Trusted).await,
+        apply_replicated_batch_legacy(&repo, &[event(2, 2)], 1, ApplyPolicy::Trusted).await,
         Err(DbError::RepoRequiresReopen(_))
     ));
     let gate = repo.tx_gate().await.unwrap();
@@ -104,7 +104,7 @@ async fn failed_barrier_preserves_persisted_certificate_and_fail_stops() {
     }
     let high_water = gate.version_allocation_high_water_mark();
     assert!(matches!(
-        apply_replicated_batch(&repo, &[event(2, 2)], 1, ApplyPolicy::Trusted).await,
+        apply_replicated_batch_legacy(&repo, &[event(2, 2)], 1, ApplyPolicy::Trusted).await,
         Err(DbError::RepoRequiresReopen(_))
     ));
     assert_eq!(gate.version_allocation_high_water_mark(), high_water);

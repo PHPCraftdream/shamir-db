@@ -33,6 +33,13 @@ pub const REPLICATION_BOUND_WAIT: Duration = Duration::from_millis(200);
 pub(crate) static SKIP_S_CLAMP_FOR_TEST: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Test-only seam: when non-zero, replaces every pull's wait budget (ms).
+/// Lets a real-time test park the shared fsync until all pulls register
+/// without racing the 200 ms budget (deadline expiry has its own test).
+#[cfg(test)]
+pub(crate) static BOUND_WAIT_MS_FOR_TEST: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// Final replication bound: `min(bound, R)`.
 ///
 /// When `bound > R`, first trigger the coalesced `sync_now` and wait
@@ -66,6 +73,11 @@ async fn replication_bound_impl(
     if SKIP_S_CLAMP_FOR_TEST.load(std::sync::atomic::Ordering::Acquire) {
         return bound;
     }
+    #[cfg(test)]
+    let max_wait = match BOUND_WAIT_MS_FOR_TEST.load(std::sync::atomic::Ordering::Acquire) {
+        0 => max_wait,
+        ms => Duration::from_millis(ms),
+    };
     if bound == 0 {
         if let Some(metrics) = metrics {
             metrics.observe_bound(0, 0);

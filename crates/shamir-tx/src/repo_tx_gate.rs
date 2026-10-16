@@ -22,9 +22,11 @@ use crate::completion_tracker::CompletionTracker;
 use crate::gate_diagnostics::{GateBlocker, GateBlockerClass, GateDiagnostics};
 use crate::pending_commit::PendingCommit;
 use crate::version_guard::VersionGuard;
-use crate::TxId;
 
 // ── Phase C: commit-write log structs ──────────────────────────────
+
+#[path = "visibility_metrics/resume_access.rs"]
+mod resume_impl;
 
 /// PROPOSED (Phase C). One captured commit's index-posting footprint for
 /// the predicate-conflict check. Built engine-side from `TxContext` state
@@ -89,13 +91,10 @@ pub struct RepoTxGate {
     /// Monotonic MVCC version counter. Incremented on every commit.
     version_counter: AtomicU64,
 
-    /// The highest version that has been fully published. Readers
-    /// see only versions ≤ this value.
-    ///
-    /// `Arc` so a [`VersionGuard`] can hold a clone and advance it on
-    /// `commit()` / `Drop` without a back-reference to the gate.
+    /// Highest fully published version; readers see only versions ≤ this.
+    /// `Arc` lets `VersionGuard` advance it without a gate back-reference.
     last_committed_version: Arc<AtomicU64>,
-
+    pub(crate) receipt_native: AtomicBool,
     /// Monotonic tx-id allocator.
     next_tx_id: AtomicU64,
 
@@ -324,6 +323,7 @@ impl RepoTxGate {
             commit_mutex: tokio::sync::Mutex::new(()),
             version_counter: AtomicU64::new(last_committed),
             last_committed_version: Arc::new(AtomicU64::new(last_committed)),
+            receipt_native: AtomicBool::new(false),
             next_tx_id: AtomicU64::new(next_tx_id_seed),
             active_snapshots: Arc::new(scc::HashMap::with_hasher(THasher::default())),
             active_serializable_count: Arc::new(AtomicU64::new(0)),
@@ -355,11 +355,6 @@ impl RepoTxGate {
     /// Fresh gate for a new repo (no history).
     pub fn fresh() -> Self {
         Self::new(0, 1)
-    }
-
-    /// Allocate a unique tx-id. Lock-free.
-    pub fn fresh_tx_id(&self) -> TxId {
-        TxId::new(self.next_tx_id.fetch_add(1, Ordering::Relaxed))
     }
 
     /// Current committed version visible to readers.

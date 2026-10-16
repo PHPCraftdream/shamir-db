@@ -9,11 +9,14 @@
 //! This module is a codec only — no production path writes or reads
 //! receipts in this PR; PR6b-2 activates the writer/reader.
 
-use crate::meta::{MetaEnvelope, ENVELOPE_MAGIC, ENVELOPE_VERSION};
+use crate::meta::{MetaEnvelope, MetaKey, ENVELOPE_MAGIC, ENVELOPE_VERSION};
+use bytes::Bytes;
 use rustc_hash::FxHasher;
 use serde::{Deserialize, Serialize};
 use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::types::{RecordKey, Store};
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 /// Structural cap on `mapping`, `downstream_events` and `timestamps`:
 /// at most this many events per receipt batch.
@@ -101,6 +104,9 @@ pub struct ReplicationReceipt {
     pub mapping: Vec<ReceiptVersionMapping>,
     /// Immutable translated operations (see [`ReceiptOp`]).
     pub ops: Vec<ReceiptOp>,
+    /// Number of entries of `ops` belonging to each event, in order
+    /// (parallel to `mapping`; the entries sum to `ops.len()`).
+    pub ops_per_event: Vec<u32>,
     /// Field-name bindings referenced by the translated records.
     pub bindings: Vec<ReceiptBinding>,
     /// The exact downstream journal event bytes produced for this batch;
@@ -160,13 +166,33 @@ fn validate(receipt: &ReplicationReceipt) -> DbResult<()> {
     if receipt.upstream_end < receipt.upstream_start {
         return Err(DbError::Storage("invalid upstream range".into()));
     }
+    if receipt.ops_per_event.len() != receipt.mapping.len() {
+        return Err(DbError::Storage(
+            "replication receipt ops_per_event must parallel mapping".into(),
+        ));
+    }
+    if receipt
+        .ops_per_event
+        .iter()
+        .map(|&count| count as usize)
+        .sum::<usize>()
+        != receipt.ops.len()
+    {
+        return Err(DbError::Storage(
+            "replication receipt ops_per_event must sum to ops.len()".into(),
+        ));
+    }
     Ok(())
 }
 
-/// Encode a receipt under tuple version 1 after validation.
+/// Encode a receipt under tuple version 2 after validation. Version 1 never
+/// shipped (no production writer existed before the format stabilized), so
+/// the tuple version jumps straight to 2: bincode is not self-describing,
+/// and a strict bump guarantees the same binary that writes a receipt can
+/// always recover it.
 pub fn encode_receipt(receipt: &ReplicationReceipt) -> DbResult<Vec<u8>> {
     validate(receipt)?;
-    MetaEnvelope::new((1u16, receipt.clone()))
+    MetaEnvelope::new((2u16, receipt.clone()))
         .encode()
         .map_err(|e| DbError::Storage(format!("replication receipt codec: {e}")))
 }
@@ -211,7 +237,7 @@ pub fn decode_receipt(id: &[u8; 16], bytes: &[u8]) -> DbResult<ReplicationReceip
         ));
     }
     let (version, receipt) = envelope.payload;
-    if version != 1 {
+    if version != 2 {
         return Err(DbError::Storage(format!(
             "replication receipt codec: unsupported version {version}"
         )));
@@ -223,4 +249,49 @@ pub fn decode_receipt(id: &[u8; 16], bytes: &[u8]) -> DbResult<ReplicationReceip
         ));
     }
     Ok(receipt)
+}
+
+// ── Writer helpers (S5c-X PR6b-2) ─────────────────────────────────────
+//
+// Production, follower-path-only accessors around the codec above. None of
+// them flushes: callers either flush explicitly or stage the write inside a
+// repository-wide atomic batch.
+
+/// The `__tx__` info-store key the outstanding receipt lives under.
+pub(crate) fn receipt_key() -> RecordKey {
+    RecordKey::from_slice(MetaKey::ReplicationReceipt.as_record_id().as_bytes())
+}
+
+/// Encode and write the receipt WITHOUT flushing — callers flush or ride an
+/// atomic batch.
+#[allow(dead_code)] // wired by the PR6b-2 receipt-apply chunk (W3+)
+pub(crate) async fn put_receipt(
+    info: &Arc<dyn Store>,
+    receipt: &ReplicationReceipt,
+) -> DbResult<()> {
+    let bytes = encode_receipt(receipt)?;
+    info.set(receipt_key(), Bytes::from(bytes))
+        .await
+        .map(|_| ())
+}
+
+/// Strictly decode the receipt stored under `receipt_key()` and bound to
+/// `id`. `Ok(None)` when no receipt is stored.
+#[allow(dead_code)] // wired by the PR6b-2 resume pipeline (W3+)
+pub(crate) async fn load_outstanding_receipt(
+    info: &Arc<dyn Store>,
+    id: &[u8; 16],
+) -> DbResult<Option<ReplicationReceipt>> {
+    let bytes = match info.get(receipt_key()).await {
+        Ok(bytes) => bytes,
+        Err(DbError::NotFound(_)) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    decode_receipt(id, &bytes).map(Some)
+}
+
+/// Remove the stored receipt (callers flush or ride an atomic batch).
+#[allow(dead_code)] // direct-retire variant; the atomic path deletes in-batch
+pub(crate) async fn delete_receipt(info: &Arc<dyn Store>) -> DbResult<()> {
+    info.remove(receipt_key()).await.map(|_| ())
 }
