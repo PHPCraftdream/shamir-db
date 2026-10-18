@@ -58,7 +58,7 @@ use shamir_db::{SeedRefusal, ShamirDb, SubscriptionBinding};
 use shamir_query_types::admin::ReplDirection;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::error::ReplError;
 use super::follower_loop::{run_follower_loop, FollowerLoopConfig};
@@ -291,8 +291,36 @@ impl SubscriptionSupervisor {
             if !sub.is_active() || self.registry.contains_sync(&sub.name) {
                 continue;
             }
-            if let Err(e) = self.start_subscription(sub).await {
-                warn!(subscription = %sub.name, error = %e, "supervisor: start failed");
+            // P1-C start predicate: never start a follower unless the row's
+            // active state is flush-confirmed. This is the
+            // pending-creation barrier's invariant — a row whose active
+            // state was not confirmed by a successful flush can never pass,
+            // so flush errors and cancellation can never start a follower.
+            if !self
+                .local
+                .may_start_follower(&sub.name, sub.binding_generation)
+            {
+                debug!(
+                    subscription = %sub.name,
+                    "supervisor: active state not yet flush-confirmed; start deferred"
+                );
+                continue;
+            }
+            match self.start_subscription(sub).await {
+                // Stale snapshot: expected under races — a concurrent admin
+                // write changed the row between the catalogue read and the
+                // start. The pass that observes the new row owns any
+                // restart; no terminal marking.
+                Ok(false) => {
+                    debug!(
+                        subscription = %sub.name,
+                        "supervisor: stale snapshot; start dropped"
+                    );
+                }
+                Ok(true) => {}
+                Err(e) => {
+                    warn!(subscription = %sub.name, error = %e, "supervisor: start failed");
+                }
             }
         }
     }
@@ -330,7 +358,41 @@ impl SubscriptionSupervisor {
     /// the row's DURABLE binding (the enforced write boundary), after
     /// requiring the resolved profile's `pull` streams to cover every bound
     /// destination (keeps the admission/hello machinery honest).
-    async fn start_subscription(&self, sub: &Subscription) -> Result<(), ReplError> {
+    ///
+    /// Returns `Ok(true)` when the loops were started and `Ok(false)` when
+    /// the caller's snapshot turned out stale: nothing is marked and nothing
+    /// is spawned. The reconcile pass that observes the new row owns any
+    /// restart.
+    pub(crate) async fn start_subscription(&self, sub: &Subscription) -> Result<bool, ReplError> {
+        // Stale-snapshot re-validation (round 3): the reconcile snapshot may
+        // be outdated by the time we start. Re-read the CURRENT row under
+        // the control lock and require it to still match the snapshot
+        // exactly — name (by lookup), `active` state, binding generation,
+        // and binding destinations. Any mismatch drops the start WITHOUT
+        // terminal marking: the reconcile pass that observes the new row
+        // owns any restart. This mirrors `read_subscriptions`' public read
+        // path (same table, same `SubscriptionBinding::from_row` parse).
+        {
+            let _control = self.local.replication_control_lock().lock().await;
+            let stale = match self.read_subscription_row(&sub.name).await {
+                Ok(Some(row)) => {
+                    let binding = SubscriptionBinding::from_row(&row)
+                        .map_err(|e| ReplError::Start(e.to_string()))?;
+                    row.get("state").and_then(|v| v.as_str()) != Some("active")
+                        || binding.generation() != sub.binding_generation
+                        || binding.destinations().to_vec() != sub.binding_destinations
+                }
+                Ok(None) => true,
+                Err(e) => return Err(ReplError::Start(e)),
+            };
+            if stale {
+                warn!(
+                    subscription = %sub.name,
+                    "supervisor: subscription row changed since the reconcile snapshot; start dropped"
+                );
+                return Ok(false);
+            }
+        }
         let streams = self
             .resolve_profile_streams(&sub.profile)
             .await
@@ -383,12 +445,17 @@ impl SubscriptionSupervisor {
                     repo: repo.clone(),
                     owner,
                 };
-                // They run synchronously under the reconcile lock against
-                // the current row — never from a stale task — so the
-                // generation-less `mark_subscription_terminal(..., None)`
-                // is correct here.
+                // Generation-aware: this runs synchronously inside a start
+                // whose snapshot was just re-validated against the current
+                // row under the control lock, so the generation passed here
+                // is the row's CURRENT generation.
                 self.local
-                    .mark_subscription_terminal(&sub.name, "duplicate_owner", &error.to_string())
+                    .mark_subscription_terminal_generation(
+                        &sub.name,
+                        "duplicate_owner",
+                        &error.to_string(),
+                        Some(sub.binding_generation),
+                    )
                     .await
                     .map_err(|error| ReplError::Start(error.to_string()))?;
                 return Err(error);
@@ -404,11 +471,16 @@ impl SubscriptionSupervisor {
                         repo: repo.clone(),
                         detail: "Resume refused until destination is reopened".into(),
                     };
+                    // Generation-aware: this runs synchronously inside a
+                    // start whose snapshot was just re-validated against the
+                    // current row under the control lock, so the generation
+                    // passed here is the row's CURRENT generation.
                     self.local
-                        .mark_subscription_terminal(
+                        .mark_subscription_terminal_generation(
                             &sub.name,
                             "reopen_required",
                             &error.to_string(),
+                            Some(sub.binding_generation),
                         )
                         .await
                         .map_err(|error| ReplError::Start(error.to_string()))?;
@@ -427,6 +499,11 @@ impl SubscriptionSupervisor {
             if let Some(n) = self.max_iterations {
                 cfg = cfg.with_max_iterations(n);
             }
+            // S5c-X round 3: the loop re-validates its startup snapshot
+            // against the CURRENT row via `may_start_follower` before every
+            // apply.
+            cfg.subscription = sub.name.clone();
+            cfg.binding_generation = sub.binding_generation;
             let local = self.local.clone();
             let src = source.clone();
             let tok = cancel.clone();
@@ -580,7 +657,24 @@ impl SubscriptionSupervisor {
         } else {
             info!(subscription = %sub.name, profile = %sub.profile, "supervisor: started follower loop");
         }
-        Ok(())
+        Ok(true)
+    }
+
+    /// Read the CURRENT catalogue row for one subscription by name,
+    /// mirroring [`Self::read_subscriptions`]' public read path.
+    async fn read_subscription_row(&self, name: &str) -> Result<Option<QueryValue>, String> {
+        let table = self
+            .local
+            .system_store()
+            .subscriptions_table()
+            .await
+            .map_err(|e| e.to_string())?;
+        let records = read_all(&table, "subscriptions")
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(records
+            .into_iter()
+            .find(|r| r.get("name").and_then(|v| v.as_str()) == Some(name)))
     }
 
     /// Resolve a profile name → its `streams` by reading

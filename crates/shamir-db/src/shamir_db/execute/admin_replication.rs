@@ -20,6 +20,7 @@ use crate::query::admin::{
 };
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
+use crate::repl_binding::pending::PENDING_STATE;
 use crate::repl_binding::{
     quarantined_row_keys, row_is_quarantined, SubscriptionBinding, SUBSCRIPTION_BINDING_VERSION,
 };
@@ -488,6 +489,20 @@ impl ShamirAdminExecutor {
         }
 
         let mut record = existing.records[0].as_value().into_owned();
+        // S5c-X PR8b-2 round 3 (P1-C): a row still at `pending_durable` is an
+        // unfinished creation barrier — its active state was never flushed, so
+        // it has NO durable active state any action could respect. Refuse
+        // EVERY action: re-run CREATE to complete the barrier or DROP it.
+        if record.get("state").and_then(|value| value.as_str()) == Some(PENDING_STATE) {
+            return Err(BatchError::query_coded(
+                "",
+                "pending_creation_barrier",
+                format!(
+                    "subscription '{name}' is an unfinished creation barrier (pending_durable): \
+                     it has no durable active state — re-run CREATE to complete or DROP it"
+                ),
+            ));
+        }
         // S5c-X PR8b: any action on a quarantined (`resync_required` or
         // durably `quarantined`-marked) subscription is refused until a
         // replacement seed has been bound since the quarantine began —

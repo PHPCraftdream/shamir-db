@@ -33,6 +33,11 @@ impl ShamirDb {
         crate::repl_binding::validate::validate_subscription_catalogue(self).await?;
         let entries = self.resync_quarantine_entries().await?;
         self.resync_quarantine.install(entries);
+        // S5c-X PR8b-2 round 3 (P1-C): rebuild the confirmed-start gate right
+        // after the quarantine install — every subscription mutation and
+        // open already calls this refresh, so the gate reflects exactly the
+        // rows whose active state is durable.
+        self.confirmed_active.rebuild(self).await?;
         self.revoke_quarantined_receivers().await;
         Ok(())
     }

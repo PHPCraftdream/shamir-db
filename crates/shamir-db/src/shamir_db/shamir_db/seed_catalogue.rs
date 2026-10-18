@@ -1,38 +1,42 @@
 use futures::StreamExt;
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 
 use crate::{DbError, DbResult, ShamirDb};
 
-/// S5c-X PR8b-2 (evidence row 6): test-only fault seam — when set,
-/// `flush_seed_catalogue` fails so terminal quarantine persistence cannot
-/// reach its final durability barrier.
+/// S5c-X PR8b-2 (evidence row 6; round 3 P2): test-only PER-INSTANCE fault
+/// seam — while armed on an instance, `flush_seed_catalogue` fails so
+/// terminal quarantine persistence cannot reach its final durability
+/// barrier. The round-2 GLOBAL atomic let concurrent tests on different
+/// instances interfere; arming is now an instance field.
+/// `SeedCatalogueFlushFaultForTest` is the RAII guard.
 #[cfg(test)]
-static SEED_CATALOGUE_FLUSH_FAULT: AtomicBool = AtomicBool::new(false);
-
-/// S5c-X PR8b-2 (evidence row 6, round 2 C9): test-only fault seam guard —
-/// while an instance is alive, `flush_seed_catalogue` fails so terminal
-/// quarantine persistence cannot reach its final durability barrier. Arming
-/// is RAII: dropping the guard (including on panic/unwind) disarms the
-/// fault, so a test can never leak the fault into later tests.
-#[cfg(test)]
-pub(crate) struct SeedCatalogueFlushFaultForTest;
+pub(crate) struct SeedCatalogueFlushFaultForTest(ShamirDb);
 
 #[cfg(test)]
 impl SeedCatalogueFlushFaultForTest {
     /// Arm the injected `flush_seed_catalogue` failure for this guard's
-    /// lifetime (evidence row 6).
-    pub(crate) fn arm() -> Self {
-        SEED_CATALOGUE_FLUSH_FAULT.store(true, Ordering::SeqCst);
-        Self
+    /// lifetime (evidence row 6): it fires immediately.
+    pub(crate) fn arm(shamir: &ShamirDb) -> Self {
+        Self::arm_after_passing(shamir, 0)
+    }
+
+    /// Arm the fault so the first `n` `flush_seed_catalogue` calls succeed
+    /// and every later one fails — for tests that must observe a success
+    /// before the injected failure.
+    pub(crate) fn arm_after_passing(shamir: &ShamirDb, n: usize) -> Self {
+        shamir.flush_fault_armed.store(true, Ordering::SeqCst);
+        shamir.flush_fault_pass_first.store(n, Ordering::SeqCst);
+        Self(shamir.clone())
     }
 }
 
 #[cfg(test)]
 impl Drop for SeedCatalogueFlushFaultForTest {
     fn drop(&mut self) {
-        SEED_CATALOGUE_FLUSH_FAULT.store(false, Ordering::SeqCst);
+        self.0.flush_fault_armed.store(false, Ordering::SeqCst);
+        self.0.flush_fault_pass_first.store(0, Ordering::SeqCst);
     }
 }
 
@@ -95,11 +99,16 @@ impl ShamirDb {
     /// Strict metadata durability for an offline seed; no clean checkpoint is
     /// required merely to flush the authoritative table/repository catalogue.
     pub async fn flush_seed_catalogue(&self) -> DbResult<()> {
+        // Test-only per-instance fault seam (production untouched).
         #[cfg(test)]
-        if SEED_CATALOGUE_FLUSH_FAULT.load(Ordering::SeqCst) {
-            return Err(DbError::Storage(
-                "injected seed-catalogue flush failure (test)".into(),
-            ));
+        if self.flush_fault_armed.load(Ordering::SeqCst) {
+            if self.flush_fault_pass_first.load(Ordering::SeqCst) > 0 {
+                self.flush_fault_pass_first.fetch_sub(1, Ordering::SeqCst);
+            } else {
+                return Err(DbError::Storage(
+                    "injected seed-catalogue flush failure (test)".into(),
+                ));
+            }
         }
         let repo = self.system_store.system_repo()?;
         for name in repo.list_table_names() {

@@ -317,7 +317,7 @@ async fn binding_terminal_flush_failure_keeps_prepublished_protection() {
         .unwrap();
 
     // Arm the flush fault through the RAII guard (panic-safe, self-scoping).
-    let fault = crate::shamir_db::shamir_db::SeedCatalogueFlushFaultForTest::arm();
+    let fault = crate::shamir_db::shamir_db::SeedCatalogueFlushFaultForTest::arm(&shamir);
     let err = shamir
         .mark_subscription_resync_required("sub_side", 5, 2)
         .await
@@ -526,7 +526,7 @@ async fn binding_pending_durable_barrier_survives_failed_flush_until_retry() {
     seed_row(&shamir, "main").await;
     create_profile(&shamir, "prof", "main").await;
 
-    let fault = crate::shamir_db::shamir_db::SeedCatalogueFlushFaultForTest::arm();
+    let fault = crate::shamir_db::shamir_db::SeedCatalogueFlushFaultForTest::arm(&shamir);
     let mut b = Batch::new();
     b.id(2);
     b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
@@ -679,4 +679,262 @@ async fn binding_corrupted_profile_stream_refuses_creation_and_never_unblocks() 
         Some("resync_required"),
         "the corrupted profile must NOT unblock the bound destination: {err}"
     );
+}
+
+/// Read the raw subscription row for `name` if it exists (None while the
+/// pending-creation barrier write has not landed yet).
+async fn subscription_row_opt(shamir: &ShamirDb, name: &str) -> Option<QueryValue> {
+    let table = shamir.system_store().subscriptions_table().await.ok()?;
+    let interner = table.interner_for_test().get().await.ok()?;
+    let refs = crate::types::common::new_map();
+    let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+    let mut records = table
+        .read(
+            &crate::query::read::ReadQuery::new("subscriptions").filter(
+                crate::query::filter::Filter::Eq {
+                    field: vec!["name".to_string()],
+                    value: crate::query::filter::FilterValue::String(name.to_string()),
+                },
+            ),
+            &ctx,
+        )
+        .await
+        .ok()?
+        .records;
+    Some(records.remove(0).as_value().into_owned())
+}
+
+/// S5c-X round 3 (P1-A, deterministic — no sleeps): the cascade drop shares
+/// the replication-control interlock. While the lock is held, the
+/// `DROP REPO main CASCADE` batch has not even STARTED its first poll step
+/// (Pending) and the destination is fully intact; once the guard drops, the
+/// cascade completes — and the now-missing destination refuses any NEW
+/// subscription creation that would bind it. (Order 2 — the refusal before
+/// any mutation — is covered by the C6 tests above.)
+#[tokio::test]
+async fn binding_cascade_drop_holds_interlock_creation_waits_then_sees_destination_gone() {
+    let shamir = setup().await;
+    seed_row(&shamir, "main").await;
+    let guard = shamir.replication_control_lock().lock().await;
+
+    let mut b = Batch::new();
+    b.id(3);
+    b.op("drop", drop_repo("main").cascade());
+    let request = b.to_request_via_msgpack();
+    let mut cascade = Box::pin(shamir.execute("testdb", &request));
+    assert!(
+        matches!(futures::poll!(cascade.as_mut()), std::task::Poll::Pending),
+        "the cascade drop must wait on the replication-control interlock"
+    );
+
+    // While held: nothing was dropped — repo, table, and the seeded row are
+    // all intact and serving.
+    assert!(
+        shamir.get_db("testdb").unwrap().get_repo("main").is_some(),
+        "the held interlock must prevent any cascade mutation"
+    );
+    let resp = read_users(&shamir, "testdb", "main").await.unwrap();
+    let served = resp.results["r"].records[0].as_value().into_owned();
+    assert_eq!(served.get("name").and_then(|v| v.as_str()), Some("Alice"));
+
+    drop(guard);
+    cascade.await.unwrap();
+
+    // The destination is gone: a batch that would CREATE a profile plus an
+    // ACTIVE subscription binding `testdb/main` is REFUSED — a subscription
+    // can never bind a destination that no longer exists.
+    let mut b = Batch::new();
+    b.id(4);
+    b.op(
+        "profile",
+        replication_profile("prof").stream(
+            repl_scope("testdb").repo("main").build(),
+            ReplDirection::Pull,
+            ReplMode::ReadOnly,
+        ),
+    );
+    b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
+    let err = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap_err();
+    assert!(
+        !matches!(err, BatchError::ResyncRequired { .. }),
+        "the refusal must be a destination-missing class, not quarantine: {err}"
+    );
+}
+
+/// S5c-X round 3 (P1-C, pending barrier): with the flush fault failing the
+/// FIRST flush, creation fails at the pending barrier; the row is left
+/// `pending_durable`, and `ALTER SUBSCRIPTION ... RESUME` on that unfinished
+/// barrier is refused with the typed `pending_creation_barrier` code while
+/// the raw row stays `pending_durable`.
+#[tokio::test]
+async fn binding_pending_row_refuses_resume_with_typed_error() {
+    let shamir = setup().await;
+    seed_row(&shamir, "main").await;
+    create_profile(&shamir, "prof", "main").await;
+
+    let fault = crate::shamir_db::shamir_db::SeedCatalogueFlushFaultForTest::arm(&shamir);
+    let mut b = Batch::new();
+    b.id(2);
+    b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
+    assert!(
+        shamir
+            .execute("testdb", &b.to_request_via_msgpack())
+            .await
+            .is_err(),
+        "the injected flush fault must fail the creation at the pending barrier"
+    );
+
+    // The unfinished barrier refuses EVERY admin action with the typed code.
+    let mut b = Batch::new();
+    b.id(3);
+    b.try_op("alt", alter_subscription("sub").resume()).unwrap();
+    let err = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("pending_creation_barrier"), "{err}");
+
+    // The raw row is still the pending barrier.
+    let row = subscription_row(&shamir, "sub").await;
+    assert_eq!(
+        row.get("state").and_then(|v| v.as_str()),
+        Some(crate::repl_binding::pending::PENDING_STATE)
+    );
+    drop(fault);
+}
+
+/// S5c-X round 3 (P1-C, final-flip flush failure): the first flush (pending
+/// barrier) succeeds, the flip flush fails, and the compensation runs — the
+/// row ends `pending_durable` (durable), and THE supervisor start predicate
+/// (`may_start_follower`) is FALSE for its generation. After dropping the
+/// fault, the retried creation succeeds with a strictly bumped generation
+/// that IS startable. Quarantine coverage stays absent throughout.
+#[tokio::test]
+async fn binding_final_flip_flush_failure_never_makes_row_startable() {
+    let shamir = setup().await;
+    seed_row(&shamir, "main").await;
+    create_profile(&shamir, "prof", "main").await;
+
+    let fault =
+        crate::shamir_db::shamir_db::SeedCatalogueFlushFaultForTest::arm_after_passing(&shamir, 1);
+    let mut b = Batch::new();
+    b.id(2);
+    b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
+    assert!(
+        shamir
+            .execute("testdb", &b.to_request_via_msgpack())
+            .await
+            .is_err(),
+        "the injected flip-flush fault must fail the creation batch"
+    );
+
+    // The compensated row is a durable pending barrier — never startable.
+    let row = subscription_row(&shamir, "sub").await;
+    assert_eq!(
+        row.get("state").and_then(|v| v.as_str()),
+        Some(crate::repl_binding::pending::PENDING_STATE)
+    );
+    let gen = row
+        .get("binding_generation")
+        .and_then(|v| v.as_u64())
+        .expect("binding_generation must be present");
+    assert!(
+        !shamir.may_start_follower("sub", gen),
+        "a row whose active state was never flush-confirmed must never be startable"
+    );
+    assert!(
+        !shamir
+            .has_resync_required_subscription_covering("testdb", "main")
+            .await
+            .unwrap(),
+        "a pending row must not gate anything"
+    );
+
+    // Disarm and retry: the creation completes, and the new generation IS
+    // flush-confirmed (the supervisor may start a follower for it).
+    drop(fault);
+    let mut b = Batch::new();
+    b.id(3);
+    b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    let row = subscription_row(&shamir, "sub").await;
+    assert_eq!(row.get("state").and_then(|v| v.as_str()), Some("active"));
+    let gen2 = row
+        .get("binding_generation")
+        .and_then(|v| v.as_u64())
+        .expect("binding_generation must be present");
+    assert!(gen2 > gen, "the retried creation must bump the generation");
+    assert!(
+        shamir.may_start_follower("sub", gen2),
+        "a successfully flushed active row must be startable"
+    );
+    assert!(
+        !shamir
+            .has_resync_required_subscription_covering("testdb", "main")
+            .await
+            .unwrap(),
+        "creation must not quarantine anything"
+    );
+}
+
+/// S5c-X round 3 (P1-C, cancellation during the final write): the creation
+/// task is aborted while (or after) the final flip write is in flight.
+/// WHEREVER the abort lands, the row's generation must fail THE start
+/// predicate (`may_start_follower`) — a cancelled write can never leave a
+/// startable row behind.
+#[tokio::test]
+async fn binding_cancellation_during_final_write_leaves_row_unstartable() {
+    let shamir = setup().await;
+    seed_row(&shamir, "main").await;
+    create_profile(&shamir, "prof", "main").await;
+
+    let fault =
+        crate::shamir_db::shamir_db::SeedCatalogueFlushFaultForTest::arm_after_passing(&shamir, 1);
+    let mut b = Batch::new();
+    b.id(2);
+    b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
+    let s = shamir.clone();
+    let task = tokio::spawn(async move { s.execute("testdb", &b.to_request_via_msgpack()).await });
+
+    // Bounded wait (no sleeps) until the live row flips to `active` — or the
+    // poll budget runs out; the abort lands wherever it lands.
+    for _ in 0..500 {
+        tokio::task::yield_now().await;
+        if let Some(row) = subscription_row_opt(&shamir, "sub").await {
+            if row.get("state").and_then(|v| v.as_str()) == Some("active") {
+                break;
+            }
+        }
+    }
+    task.abort();
+    let _ = task.await;
+
+    let row = subscription_row(&shamir, "sub").await;
+    let state = row.get("state").and_then(|v| v.as_str()).unwrap_or("");
+    let gen = row
+        .get("binding_generation")
+        .and_then(|v| v.as_u64())
+        .expect("binding_generation must be present");
+    // The invariant, regardless of where the abort landed: if the live row
+    // reads `active`, its flush is the armed (failing) one, so it is not
+    // confirmed; if it reads pending, it never had an active state at all.
+    // BOTH branches must fail the supervisor start predicate.
+    assert!(
+        !shamir.may_start_follower("sub", gen),
+        "a cancelled creation (row state '{state}') must never leave a startable row"
+    );
+    assert!(
+        !shamir
+            .has_resync_required_subscription_covering("testdb", "main")
+            .await
+            .unwrap(),
+        "a pending or unconfirmed row must not gate anything"
+    );
+    drop(fault);
 }

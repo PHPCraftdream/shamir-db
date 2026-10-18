@@ -111,6 +111,12 @@ impl ShamirAdminExecutor {
             })));
         }
 
+        // P1-A cascade interlock: hold the replication control lock ONCE
+        // across the binding check AND every destructive step below, so a
+        // concurrent CREATE SUBSCRIPTION can never bind the destination
+        // mid-cascade.
+        let _control = self.shamir.replication_control_lock().lock().await;
+
         // Round 2 (A6): hoist the binding guard BEFORE any cascade mutation —
         // a `DROP DATABASE … CASCADE` over a bound destination is refused
         // with the typed error before any repo/table is dropped.
@@ -148,10 +154,12 @@ impl ShamirAdminExecutor {
                         }
                     }
                     // S5c-X PR8b-2: the binding guard's typed refusal must
-                    // propagate before the database row is removed.
+                    // propagate before the database row is removed. The
+                    // control lock is already held, so use the _locked
+                    // variants.
                     let _ = self
                         .shamir
-                        .remove_repo(&op.drop_db, repo_name)
+                        .remove_repo_locked(&op.drop_db, repo_name)
                         .await
                         .map_err(db_error_to_batch)?;
                 }
@@ -159,7 +167,7 @@ impl ShamirAdminExecutor {
         }
         let removed = self
             .shamir
-            .remove_db(&op.drop_db)
+            .remove_db_locked(&op.drop_db)
             .await
             .map_err(db_error_to_batch)?;
         Ok(admin_result(mpack!({
@@ -396,6 +404,12 @@ impl ShamirAdminExecutor {
             }
         }
 
+        // P1-A cascade interlock: hold the replication control lock ONCE
+        // across the binding check AND every destructive step below, so a
+        // concurrent CREATE SUBSCRIPTION can never bind the destination
+        // mid-cascade.
+        let _control = self.shamir.replication_control_lock().lock().await;
+
         // Round 2 (A6): hoist the binding guard BEFORE the child-table
         // cascade loop — a `DROP REPO … CASCADE` over a bound destination is
         // refused with the typed error before any table is dropped.
@@ -433,10 +447,11 @@ impl ShamirAdminExecutor {
         }
         // Route through ShamirDb so the repo's catalogue record is
         // removed from the system store and the repo does not
-        // resurrect on the next open (symmetry with CreateRepo).
+        // resurrect on the next open (symmetry with CreateRepo). The
+        // control lock is already held, so use the _locked variant.
         let removed = self
             .shamir
-            .remove_repo(&self.db_name, &op.drop_repo)
+            .remove_repo_locked(&self.db_name, &op.drop_repo)
             .await
             .map_err(db_error_to_batch)?;
         Ok(admin_result(mpack!({

@@ -80,16 +80,21 @@ impl ShamirDb {
     }
 
     pub async fn remove_db(&self, name: &str) -> DbResult<bool> {
+        // Round 2 (A6) lifecycle interlock: ONE lock shared with the
+        // subscription catalogue writers, taken here so every existing
+        // caller keeps the interlock without changes.
+        let _control = self.replication_control_lock.lock().await;
+        self.remove_db_locked(name).await
+    }
+
+    /// Lock-free variant of [`Self::remove_db`].
+    ///
+    /// Caller MUST hold `replication_control_lock` (non-reentrant — never
+    /// acquired here).
+    pub async fn remove_db_locked(&self, name: &str) -> DbResult<bool> {
         if name == SYSTEM_DB_NAME {
             return Ok(false);
         }
-
-        // Round 2 (A6) lifecycle interlock: ONE lock shared with the
-        // subscription catalogue writers — the binding guard below is a
-        // check-then-act, so it must run under the same interlock the
-        // catalogue writers hold, otherwise a concurrent CREATE SUBSCRIPTION
-        // could bind this destination between the check and the drop.
-        let _control = self.replication_control_lock.lock().await;
 
         // S5c-X PR8b-2: refuse DROP of a destination referenced by a durable
         // subscription binding BEFORE any live or durable mutation.
@@ -537,9 +542,17 @@ impl ShamirDb {
 
     pub async fn remove_repo(&self, db_name: &str, repo_name: &str) -> DbResult<bool> {
         // Round 2 (A6) lifecycle interlock: ONE lock shared with the
-        // subscription catalogue writers — the check-then-act binding guard
-        // below cannot race a concurrent CREATE SUBSCRIPTION.
+        // subscription catalogue writers, taken here so every existing
+        // caller keeps the interlock without changes.
         let _control = self.replication_control_lock.lock().await;
+        self.remove_repo_locked(db_name, repo_name).await
+    }
+
+    /// Lock-free variant of [`Self::remove_repo`].
+    ///
+    /// Caller MUST hold `replication_control_lock` (non-reentrant — never
+    /// acquired here).
+    pub async fn remove_repo_locked(&self, db_name: &str, repo_name: &str) -> DbResult<bool> {
         // S5c-X PR8b-2: refuse DROP of a referenced destination BEFORE any
         // live or durable mutation.
         self.ensure_destinations_unbound(db_name, Some(repo_name))

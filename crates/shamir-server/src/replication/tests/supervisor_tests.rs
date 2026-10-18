@@ -807,7 +807,8 @@ async fn resync_required_destination_is_excluded_from_downstream_serving() {
 /// does not grow. The CORRECT generation flips the row. In-process, no
 /// timing races: both calls go through the same
 /// `mark_subscription_resync_required_generation` seam the supervisor uses.
-/// (Subscriptions bind `binding_generation = 1` at creation.)
+/// The row's REAL binding generation is read from the catalogue; the stale
+/// call uses a far-future generation.
 #[tokio::test]
 async fn stale_generation_callback_does_not_mark_replacement() {
     let follower = build_db().await;
@@ -819,10 +820,17 @@ async fn stale_generation_callback_does_not_mark_replacement() {
         .await
         .unwrap());
 
-    // STALE generation (99 != the row's 1): a no-op — no state flip, no
+    // The row's REAL durable generation (durable-sequence values are
+    // monotonic but not small predictable integers).
+    let gen = sub_binding_generation(&follower, "sub_a")
+        .await
+        .expect("row exists");
+    assert!(gen >= 1);
+
+    // STALE generation (far past the row's): a no-op — no state flip, no
     // cache growth.
     follower
-        .mark_subscription_resync_required_generation("sub_a", 100, 42, 99)
+        .mark_subscription_resync_required_generation("sub_a", 100, 42, gen + 100)
         .await
         .unwrap();
     assert_eq!(
@@ -838,10 +846,10 @@ async fn stale_generation_callback_does_not_mark_replacement() {
         "a stale-generation callback must not grow the quarantine cache"
     );
 
-    // The CORRECT generation (the row's durable 1) marks the row and covers
-    // exactly its bound destination.
+    // The CORRECT generation (the row's durable one) marks the row and
+    // covers exactly its bound destination.
     follower
-        .mark_subscription_resync_required_generation("sub_a", 100, 42, 1)
+        .mark_subscription_resync_required_generation("sub_a", 100, 42, gen)
         .await
         .unwrap();
     assert_eq!(

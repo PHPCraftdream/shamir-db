@@ -2,6 +2,7 @@ use base64::Engine;
 
 use crate::access::Actor;
 use crate::engine::db_instance::db_instance::DbInstance;
+use crate::repl_binding::ConfirmedActive;
 use crate::{DbError, DbResult};
 use dashmap::DashMap;
 use shamir_collections::THasher;
@@ -150,6 +151,21 @@ pub struct ShamirDb {
     /// closed; one atomic load on the healthy path.
     pub(crate) resync_quarantine: Arc<ResyncQuarantineCache>,
     pub(crate) changelog_receivers: Arc<super::revocation::registry::ChangelogReceiverRegistry>,
+    /// S5c-X PR8b-2 round 3 (P1-C): confirmed-start gate — the set of
+    /// `(subscription, binding_generation)` pairs whose durable row is
+    /// `active` with a valid binding, rebuilt wholesale after each
+    /// successful flush. Shared by clone via the inner `Arc`.
+    pub(crate) confirmed_active: ConfirmedActive,
+    /// S5c-X PR8b-2 (evidence row 6): per-instance test fault seam for
+    /// `flush_seed_catalogue` — the round-2 GLOBAL atomic made concurrent
+    /// tests interfere; arming is now per-instance. Production is untouched
+    /// (every read is `#[cfg(test)]`-gated).
+    #[cfg(test)]
+    pub(crate) flush_fault_armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Number of `flush_seed_catalogue` passes that still succeed before the
+    /// armed fault fires (0 = fail immediately). Test-only.
+    #[cfg(test)]
+    pub(crate) flush_fault_pass_first: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl ShamirDb {
@@ -243,6 +259,11 @@ impl ShamirDb {
             changelog_receivers: Arc::new(
                 super::revocation::registry::ChangelogReceiverRegistry::new(),
             ),
+            confirmed_active: ConfirmedActive::new(),
+            #[cfg(test)]
+            flush_fault_armed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(test)]
+            flush_fault_pass_first: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
         if seed {

@@ -591,16 +591,12 @@ pub(crate) mod recovery {
     const NAME_SOURCE_ID: u64 = 100;
     const AGE_SOURCE_ID: u64 = 101;
 
-    /// The REAL recovery procedure (S5c-X verdict evidence row 9): build a
-    /// replacement seed image with `SeedImageWriter` (bumped
+    /// The REAL recovery procedure, image half (S5c-X verdict evidence row
+    /// 9): build a replacement seed image with `SeedImageWriter` (bumped
     /// `history_epoch`, fresh staging, `users` inventory carrying ONE
-    /// replacement row), then run `install_seed_profile` +
-    /// `install_seed_subscription` over the EXISTING (quarantined) row —
-    /// same name/upstream/publication, `profile_name` the installed profile
-    /// (also the profile the subscription op references). The installer
-    /// rebinding writes the NEW receipt onto the row WITHOUT clearing the
-    /// quarantine; only a post-reseed `Resume` lifts it.
-    pub(crate) async fn install_replacement_seed(shamir: &ShamirDb, sub: &str, profile_name: &str) {
+    /// replacement row) and persist the `users` table to the table catalogue.
+    /// NOTHING else — rebinds are [`rebind_to_replacement`].
+    pub(crate) async fn install_replacement_image(shamir: &ShamirDb) {
         let repo = shamir.get_db("testdb").unwrap().get_repo("main").unwrap();
         let receipt = replacement_receipt();
         let mut writer = SeedImageWriter::begin(
@@ -641,6 +637,18 @@ pub(crate) mod recovery {
             .add_table("testdb", "main", "users", false)
             .await
             .unwrap();
+    }
+
+    /// The REAL recovery procedure, rebind half: run `install_seed_profile` +
+    /// `install_seed_subscription` over the EXISTING (quarantined) row — same
+    /// name/upstream/publication, `profile_name` the installed profile (also
+    /// the profile the subscription op references), receipt identical to the
+    /// installed image's. The installer rebinding writes the NEW receipt onto
+    /// the row WITHOUT clearing the quarantine; only a post-reseed `Resume`
+    /// lifts it.
+    pub(crate) async fn rebind_to_replacement(shamir: &ShamirDb, sub: &str, profile_name: &str) {
+        let repo = shamir.get_db("testdb").unwrap().get_repo("main").unwrap();
+        let receipt = replacement_receipt();
         let streams = vec![ReplStream {
             scope: ReplScope {
                 db: "testdb".into(),
@@ -706,9 +714,11 @@ async fn t13_replacement_seed_rebinds_quarantined_row_then_resume() {
     assert_eq!(err.code(), Some("resync_required"));
     assert!(read_users(&shamir, "side").await.is_ok());
 
-    // Real recovery: the OFFLINE installer rebinds the NEW receipt on the
-    // EXISTING quarantined row (same name/upstream/publication/profile).
-    recovery::install_replacement_seed(&shamir, "sub", "prof").await;
+    // Real recovery: the OFFLINE installer installs the replacement image
+    // once, then rebinds the NEW receipt on the EXISTING quarantined row
+    // (same name/upstream/publication/profile).
+    recovery::install_replacement_image(&shamir).await;
+    recovery::rebind_to_replacement(&shamir, "sub", "prof").await;
 
     // The row now carries the NEW receipt but is STILL quarantined: marker
     // intact, state still `resync_required`, baseline receipt still the
@@ -867,9 +877,11 @@ async fn t15_replacement_rebind_survives_reopen_and_resume_requires_full_recover
         let sub1_gen_before = gen_before("sub1");
         let sub2_gen_before = gen_before("sub2");
 
-        // Real rebind of BOTH rows through the offline installer.
-        recovery::install_replacement_seed(&shamir, "sub1", "prof").await;
-        recovery::install_replacement_seed(&shamir, "sub2", "prof2").await;
+        // Real recovery: install the replacement image ONCE, then rebind
+        // BOTH rows through the offline installer (same replacement receipt).
+        recovery::install_replacement_image(&shamir).await;
+        recovery::rebind_to_replacement(&shamir, "sub1", "prof").await;
+        recovery::rebind_to_replacement(&shamir, "sub2", "prof2").await;
 
         // Raw-row assertions: both still quarantined, generations strictly
         // bumped past their pre-rebind values and ordered by creation +

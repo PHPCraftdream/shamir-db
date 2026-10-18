@@ -247,12 +247,14 @@ async fn binding_scope_overlapping_quarantines_clear_independently() {
     assert_serves_named_row(&shamir, "testdb", "side", "SideRow").await;
 }
 
-/// S5c-X round 2 (C10, Unix-only): overlap clearing through the REAL
-/// recovery path — the offline installer's replacement rebind plus the real
-/// admin `Resume` (probe-backed), not the hand-persisted row rewrite. Two
-/// subscriptions are quarantined over `testdb/main`; rebind + Resume of
-/// sub1 must NOT unblock the destination (sub2 still covers it); only after
-/// sub2 is rebound and Resumed does the destination serve again.
+/// S5c-X round 2 (C10, Unix-only; round-3 same-receipt sibling rule):
+/// overlap clearing through the REAL recovery path — the offline installer's
+/// replacement rebind plus the real admin `Resume` (probe-backed), not the
+/// hand-persisted row rewrite. The image is installed ONCE and both
+/// quarantined subscriptions over `testdb/main` are rebound to the SAME
+/// replacement receipt; Resume of sub1 must NOT unblock the destination
+/// (sub2 still covers it); only after sub2 is Resumed does the destination
+/// serve again.
 #[cfg(unix)]
 #[tokio::test]
 async fn binding_scope_overlap_clearing_through_real_reseed_resume() {
@@ -275,11 +277,14 @@ async fn binding_scope_overlap_clearing_through_real_reseed_resume() {
     assert_refused(&shamir, "testdb", "main").await;
     assert!(read_users(&shamir, "testdb", "side").await.is_ok());
 
-    // Real rebind of sub1 through the offline installer, then the real
-    // admin `Resume`. Both rows share the SAME replacement receipt (epoch
-    // 2), so one probe serves both Resumes.
-    super::quarantine_reads_tests::recovery::install_replacement_seed(&shamir, "sub1", "prof1")
-        .await;
+    // Real recovery: install the replacement image ONCE, then rebind BOTH
+    // rows through the offline installer — they share the SAME replacement
+    // receipt (epoch 2), so one probe serves both Resumes, and the round-3
+    // same-receipt `check_owners` rule keeps the siblings from competing
+    // during each Resume.
+    super::quarantine_reads_tests::recovery::install_replacement_image(&shamir).await;
+    super::quarantine_reads_tests::recovery::rebind_to_replacement(&shamir, "sub1", "prof1").await;
+    super::quarantine_reads_tests::recovery::rebind_to_replacement(&shamir, "sub2", "prof2").await;
     shamir.set_replication_resume_probe(super::quarantine_reads_tests::recovery::probe());
     let mut b = Batch::new();
     b.id(3);
@@ -294,10 +299,8 @@ async fn binding_scope_overlap_clearing_through_real_reseed_resume() {
     assert_refused(&shamir, "testdb", "main").await;
     assert!(read_users(&shamir, "testdb", "side").await.is_ok());
 
-    // Rebind + Resume sub2: the LAST lifted quarantine unblocks `main`,
+    // Resume sub2: the LAST lifted quarantine unblocks `main`,
     // which now serves the replacement seed's row.
-    super::quarantine_reads_tests::recovery::install_replacement_seed(&shamir, "sub2", "prof2")
-        .await;
     let mut b = Batch::new();
     b.id(4);
     b.try_op("alt", alter_subscription("sub2").resume())

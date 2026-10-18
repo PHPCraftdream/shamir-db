@@ -90,6 +90,15 @@ pub struct FollowerLoopConfig {
     /// callers pass `None`; tests pass a small cap to avoid relying on
     /// cancellation timing.
     pub max_iterations: Option<usize>,
+    /// S5c-X round 3: the subscription this loop serves. Set by the
+    /// supervisor; the loop refuses to apply when the row's CURRENT binding
+    /// generation no longer matches [`Self::binding_generation`]. Empty
+    /// means "unsupervised loop" (direct/test callers) — the generation
+    /// check is skipped.
+    pub subscription: String,
+    /// S5c-X round 3: the binding generation the loop's startup snapshot was
+    /// taken under. See [`Self::subscription`].
+    pub binding_generation: u64,
 }
 
 impl FollowerLoopConfig {
@@ -105,6 +114,8 @@ impl FollowerLoopConfig {
             #[cfg(test)]
             identity_fence: true,
             max_iterations: None,
+            subscription: String::new(),
+            binding_generation: 0,
         }
     }
 
@@ -218,6 +229,8 @@ async fn run_follower_loop_internal(
         #[cfg(test)]
         identity_fence,
         max_iterations,
+        subscription,
+        binding_generation,
     } = cfg;
     #[cfg(not(test))]
     let identity_fence = true;
@@ -243,6 +256,22 @@ async fn run_follower_loop_internal(
             identity_store.as_ref().map(|store| &store.info),
         )
         .await?;
+    }
+    // S5c-X round 3: generation-aware start gate. The loop never applies to
+    // a destination whose row generation no longer matches its startup
+    // snapshot — this closes the stale-startup apply window between
+    // reconciles (a replaced binding or paused row stops the loop cleanly;
+    // reconcile owns any restart). Unsupervised loops (empty `subscription`)
+    // skip the check.
+    if !subscription.is_empty() && !db.may_start_follower(&subscription, binding_generation) {
+        info!(
+            node_id = %node_id,
+            db = %db_name,
+            repo = %repo,
+            subscription = %subscription,
+            "follower_loop: binding generation no longer current; exiting"
+        );
+        return Ok(());
     }
     let mut max_seen_epoch = match source.hello(&node_id).await {
         Ok(resp) => {
@@ -325,6 +354,20 @@ async fn run_follower_loop_internal(
             }
         }
         iter += 1;
+
+        // S5c-X round 3: re-check the generation gate at the TOP of every
+        // iteration, BEFORE the bookmark read / apply. The loop never
+        // applies to a destination whose row generation no longer matches
+        // its startup snapshot; a stale loop exits cleanly and reconcile
+        // owns any restart.
+        if !subscription.is_empty() && !db.may_start_follower(&subscription, binding_generation) {
+            info!(
+                node_id = %node_id,
+                subscription = %subscription,
+                "follower_loop: binding generation no longer current; exiting"
+            );
+            return Ok(());
+        }
 
         // 2. read the durable bookmark on the follower (R1-b).
         let repo_instance = match db.get_db(&db_name).and_then(|d| d.get_repo(&repo)) {

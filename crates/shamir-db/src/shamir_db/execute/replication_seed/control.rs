@@ -122,6 +122,13 @@ pub(super) async fn check_owners(
                 && (stream.scope.repo.is_none()
                     || stream.scope.repo.as_deref() == Some(receipt.source_repo.as_str()))
             {
+                // P1-D.1 (round-3 verdict): shared destination AND identical
+                // replacement receipt = two views of one recovery, not two
+                // competing owners. This applies uniformly to Resume
+                // (`validate_seed_resume`) and installer rebind.
+                if row.get("seed_receipt") == Some(&super::super::helpers::to_qv(receipt)) {
+                    continue;
+                }
                 return Err(SeedRefusal::CompetingOwner);
             }
         }

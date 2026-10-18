@@ -6,12 +6,15 @@ use shamir_db::engine::table::TableConfig;
 use shamir_db::engine::tx::apply_replicated::ApplyRejectReason;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
-use shamir_query_builder::ddl::create_index;
+use shamir_query_builder::ddl::{
+    create_index, drop_subscription, repl_scope, replication_profile, subscription,
+};
 use shamir_query_builder::filter::eq;
 use shamir_query_builder::query::Query;
 use shamir_query_builder::response::BatchResponseExt;
 use shamir_query_builder::select::count_all;
 use shamir_query_builder::write::{delete, doc, insert, update};
+use shamir_query_types::admin::{ReplDirection, ReplMode};
 use shamir_query_types::batch::BatchResponse;
 use shamir_query_types::read::{QueryRecord, QueryResult};
 use shamir_types::codecs::interned::inner_value_to_query_value;
@@ -22,6 +25,8 @@ use tokio_util::sync::CancellationToken;
 use crate::replication::error::ReplError;
 use crate::replication::follower_loop::{run_follower_loop, FollowerLoopConfig};
 use crate::replication::in_process::InProcessReplSource;
+use crate::replication::source::ReplSource;
+use crate::replication::supervisor::{ReplSourceFactory, Subscription, SubscriptionSupervisor};
 
 #[derive(Clone, Copy)]
 enum Write {
@@ -673,4 +678,160 @@ async fn matrix_preinterned_field_leader_names() {
     let result = read_query(&follower, Query::with_repo("main", "items")).await;
     assert_rows(&result, &[expected]);
     assert_eq!(result.records[0].as_value().get("follower_only"), None);
+}
+
+// ---------------------------------------------------------------------------
+// S5c-X round 3 (P1-B) — stale startup snapshot is refused
+// ---------------------------------------------------------------------------
+
+/// Raw catalogue read of one subscription row via the PUBLIC system-store
+/// path (mirrors `supervisor.rs::read_subscriptions`).
+async fn subscription_row(follower: &ShamirDb, name: &str) -> Option<QueryValue> {
+    let table = follower.system_store().subscriptions_table().await.ok()?;
+    let refs = shamir_db::types::common::new_map();
+    let ctx = table
+        .info_store_read_view()
+        .filter_context(&refs)
+        .await
+        .ok()?;
+    let query = shamir_db::query::read::ReadQuery::new("subscriptions");
+    let result = table.read(&query, &ctx).await.ok()?;
+    result.records.iter().find_map(|r| {
+        let value = r.as_value();
+        if value.get("name").and_then(|v| v.as_str()) == Some(name) {
+            Some(value.into_owned())
+        } else {
+            None
+        }
+    })
+}
+
+/// Create a Pull profile over `app/{repo}` plus an ACTIVE subscription
+/// `sub_a` bound to it, on the follower catalogue.
+async fn create_profile_and_subscription(follower: &ShamirDb, profile: &str, repo: &str) {
+    let mut b = Batch::new();
+    b.id(1);
+    b.op(
+        "profile",
+        replication_profile(profile).stream(
+            repl_scope("app").repo(repo).build(),
+            ReplDirection::Pull,
+            ReplMode::ReadOnly,
+        ),
+    );
+    b.op(
+        "sub",
+        subscription("sub_a", "tcp://leader:9000", "pub_a", profile),
+    );
+    follower
+        .execute("app", &b.to_request_via_msgpack())
+        .await
+        .expect("create profile+subscription");
+}
+
+/// Drop `sub_a` through the admin batch path.
+async fn drop_sub_a(follower: &ShamirDb) {
+    let mut b = Batch::new();
+    b.id(2);
+    b.op("drop", drop_subscription("sub_a"));
+    follower
+        .execute("app", &b.to_request_via_msgpack())
+        .await
+        .expect("drop subscription");
+}
+
+/// S5c-X round 3 (P1-B): `start_subscription` re-validates its startup
+/// snapshot against the CURRENT row under the control lock. A stale snapshot
+/// (the row was dropped and re-created over a DIFFERENT profile/destination,
+/// with a strictly bumped binding generation) is refused with `Ok(false)` —
+/// nothing is marked, nothing is spawned — while the CURRENT snapshot starts
+/// normally.
+#[tokio::test]
+async fn stale_startup_snapshot_is_refused_and_marks_nothing() {
+    let leader = Arc::new(build_db(&["items"], false).await);
+    let follower = Arc::new(build_db(&["items"], false).await);
+    follower
+        .add_repo_as(
+            "app",
+            RepoConfig::new("other", BoxRepoFactory::in_memory())
+                .add_table(TableConfig::new("items")),
+            owner(),
+        )
+        .await
+        .expect("add second repo");
+    let factory: ReplSourceFactory = {
+        let leader = leader.clone();
+        Arc::new(move |_sub: &Subscription| {
+            Arc::new(InProcessReplSource::new((*leader).clone())) as Arc<dyn ReplSource>
+        })
+    };
+    let sup =
+        SubscriptionSupervisor::new(follower.clone(), factory, "follower-1").with_max_iterations(1);
+
+    // G1: sub_a over prof_a / app/main.
+    create_profile_and_subscription(&follower, "prof_a", "main").await;
+    let g1_row = subscription_row(&follower, "sub_a").await.expect("row G1");
+    let gen1 = g1_row
+        .get("binding_generation")
+        .and_then(|v| v.as_u64())
+        .expect("binding_generation");
+    let stale_sub = Subscription {
+        name: "sub_a".into(),
+        upstream: "tcp://leader:9000".into(),
+        publication: "pub_a".into(),
+        profile: "prof_a".into(),
+        state: "active".into(),
+        binding_generation: gen1,
+        binding_destinations: vec![("app".into(), "main".into())],
+    };
+
+    // DROP + re-create sub_a over prof_b / app/other → generation G2.
+    drop_sub_a(&follower).await;
+    create_profile_and_subscription(&follower, "prof_b", "other").await;
+    let g2_row = subscription_row(&follower, "sub_a").await.expect("row G2");
+    let gen2 = g2_row
+        .get("binding_generation")
+        .and_then(|v| v.as_u64())
+        .expect("binding_generation");
+    assert!(gen2 > gen1, "re-creation must strictly bump the generation");
+
+    // The STALE snapshot is refused: nothing started, nothing marked.
+    assert!(
+        matches!(sup.start_subscription(&stale_sub).await, Ok(false)),
+        "a stale startup snapshot must be refused without starting anything"
+    );
+    assert!(!sup.is_running("sub_a"));
+    assert_eq!(sup.active_count(), 0);
+    let row = subscription_row(&follower, "sub_a").await.expect("row");
+    assert_eq!(row.get("state").and_then(|v| v.as_str()), Some("active"));
+    assert_eq!(
+        row.get("binding_generation").and_then(|v| v.as_u64()),
+        Some(gen2),
+        "the refused start must not mark the replacement row"
+    );
+    for repo in ["main", "other"] {
+        let destination = follower
+            .get_db("app")
+            .and_then(|d| d.get_repo(repo))
+            .expect("follower repo");
+        assert_eq!(
+            destination.replication_bookmark().await.expect("bookmark"),
+            0,
+            "app/{repo} must be untouched by the refused start"
+        );
+    }
+
+    // Control leg: the CURRENT snapshot starts normally.
+    let current_sub = Subscription {
+        binding_generation: gen2,
+        profile: "prof_b".into(),
+        binding_destinations: vec![("app".into(), "other".into())],
+        ..stale_sub
+    };
+    assert!(
+        matches!(sup.start_subscription(&current_sub).await, Ok(true)),
+        "the current snapshot must start"
+    );
+    assert!(sup.is_running("sub_a"));
+    sup.stop_all().await;
 }
