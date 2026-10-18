@@ -8,15 +8,12 @@
 
 #[allow(clippy::module_inception)]
 mod batch;
-mod build_error;
-mod durability;
-mod handle;
-mod index_visibility;
-#[path = "into_batch_op/into_batch_op.rs"]
-mod into_batch_op;
-mod isolation;
-pub mod subscribe;
-mod try_into_batch_op;
+mod op;
+pub use op::{build_error, into_batch_op, try_into_batch_op};
+mod runtime;
+pub use runtime::{durability, handle, isolation, subscribe};
+pub use vis::{index_visibility, visibility};
+mod vis;
 
 pub use batch::*;
 pub use build_error::*;

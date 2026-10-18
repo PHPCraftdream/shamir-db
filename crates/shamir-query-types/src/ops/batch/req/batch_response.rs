@@ -1,0 +1,65 @@
+//! [`BatchResponse`] — the wire DTO returned after executing a batch.
+
+use serde::{Deserialize, Serialize};
+use shamir_collections::TMap;
+use shamir_types::types::value::QueryValue;
+
+use crate::read::QueryResult;
+
+use crate::batch::edge_kind::EdgeKind;
+use crate::batch::interner_delta::InternerDelta;
+use crate::batch::transaction_info::TransactionInfo;
+
+/// Batch response with results.
+///
+/// # Wire Format
+///
+/// ```text
+/// {
+///   "results": {
+///     "users": [...],
+///     "orders": [...]
+///   },
+///   "execution_plan": [["users", "products"], ["orders"], ["stats"]],
+///   "edge_provenance": { "orders": { "users": "data_flow", "products": "data_flow" } },
+///   "execution_time_us": 1234,
+///   "transaction": { "id": 1, "committed": true }
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BatchResponse {
+    /// Echoed request ID from BatchRequest.
+    pub id: QueryValue,
+
+    /// Results by alias.
+    #[serde(default)]
+    pub results: TMap<String, QueryResult>,
+
+    /// Execution plan (for debugging).
+    ///
+    /// Each inner array contains queries that run in parallel.
+    pub execution_plan: Vec<Vec<String>>,
+
+    /// Dependency-edge provenance (for debugging): alias -> dep_alias ->
+    /// whether the edge came from an explicit `after`, an auto-extracted
+    /// `$query` reference, or both. Lets the client tell ordering-only
+    /// edges apart from real data-flow edges in `execution_plan`.
+    #[serde(default, skip_serializing_if = "TMap::is_empty")]
+    pub edge_provenance: TMap<String, TMap<String, EdgeKind>>,
+
+    /// Total execution time in microseconds.
+    pub execution_time_us: u64,
+
+    /// Transaction info (if transactional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transaction: Option<TransactionInfo>,
+
+    /// Per-repo interner deltas for ambient cache sync (Stage 5-wire Part A).
+    ///
+    /// Keyed by repo name; present only for repos the client advertised an
+    /// epoch for in [`BatchRequest::interner_epochs`](super::BatchRequest::interner_epochs).
+    /// Backward-compatible: `#[serde(default, skip_serializing_if = "is_empty")]`
+    /// → old peers never see the field.
+    #[serde(default, skip_serializing_if = "TMap::is_empty")]
+    pub interner_delta: TMap<String, InternerDelta>,
+}

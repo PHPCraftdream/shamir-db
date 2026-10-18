@@ -1,20 +1,25 @@
 //! Admin (DDL) operation types.
 
-pub mod buffer_config;
 pub mod changes_since_response;
-pub mod db_ops;
-pub mod fk_action;
-pub mod function_ops;
-pub mod index_ops;
-pub mod interner_ops;
-pub mod list_ops;
-pub mod migration_ops;
-pub mod repl_ops;
 pub mod repo_ops;
-pub mod retention;
-pub mod schema_ops;
-pub mod table_ops;
-pub mod validator_ops;
+
+mod db;
+mod ddl;
+mod repl;
+
+pub use db::buffer_config;
+pub use db::db_ops;
+pub use db::fk_action;
+pub use db::retention;
+pub use db::schema_ops;
+pub use db::table_ops;
+pub use ddl::function_ops;
+pub use ddl::index_ops;
+pub use ddl::interner_ops;
+pub use ddl::list_ops;
+pub use ddl::migration_ops;
+pub use ddl::validator_ops;
+pub use repl::repl_ops;
 
 pub use buffer_config::{
     AlterBufferConfigOp, BufferConfigDto, BufferConfigPatch, GetBufferConfigOp, SetBufferConfigOp,

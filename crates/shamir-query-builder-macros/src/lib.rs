@@ -8,6 +8,7 @@ use proc_macro::TokenStream;
 
 mod filter_lower;
 mod query_parse;
+mod query_parse_lower;
 
 /// Build a [`Filter`] from a natural boolean expression.
 ///

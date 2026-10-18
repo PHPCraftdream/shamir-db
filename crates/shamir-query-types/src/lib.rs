@@ -33,22 +33,18 @@
 //!   `TableManager`.
 
 pub mod admin;
-pub mod auth;
-pub mod batch;
-pub mod call;
 pub mod durability;
-pub mod filter;
-#[cfg(feature = "crypto")]
-pub mod hmac;
 pub mod read;
-pub mod subscribe;
-pub mod table_ref;
-pub mod validator;
 pub mod wire;
-pub mod write;
 
-#[cfg(test)]
-mod tests;
+mod ops;
+mod security;
+
+pub use ops::{batch, call, subscribe, table_ref, write};
+pub use read::filter;
+#[cfg(feature = "crypto")]
+pub use security::hmac;
+pub use security::{auth, validator};
 
 pub use batch::ResultEncoding;
 pub use call::CallOp;

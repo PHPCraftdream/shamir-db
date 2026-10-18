@@ -52,11 +52,9 @@
 //! ```
 
 mod builder_error;
-mod delete;
-mod doc;
-mod insert;
-mod update;
-mod upsert;
+mod ops;
+
+pub use ops::{delete, doc, insert, update, upsert};
 
 pub use builder_error::*;
 pub use delete::*;
