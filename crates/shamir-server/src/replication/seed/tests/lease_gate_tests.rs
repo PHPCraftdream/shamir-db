@@ -1,5 +1,4 @@
 //! S5c-X round 5 — supervisor lease/barrier tests (W3).
-//!
 //! Fixtures replicate `supervisor_tests.rs` locally (leader/follower
 //! `build_db`, builder-batch catalogue writes, a supervisor factory) —
 //! nothing is imported from that module. All synchronisation is Notify-,
@@ -8,11 +7,7 @@
 //! catalogue seams (`SeedCatalogueFlushFaultForTest`, the lease
 //! `apply_gate`, the final-write seam) block real mutators, and
 //! `tokio::time::pause` advances the B3 retry sleeps. NO sleeps and NO
-//! yield budgets anywhere in this file.
-//!
-//! Scenarios:
-//!   * T1 — create → reconcile starts a FRESH subscription: the follower
-//!     bookmark reaches the leader's version.
+//! yield budgets anywhere in this file. Scenarios:
 //!   * T2 — a REAL catalogue-flush fault at the start barrier defers the
 //!     start (nothing spawned, nothing marked, lease invalidated); the
 //!     retrying reconcile starts it.
@@ -37,6 +32,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures_util::poll; // poll! re-export
 use shamir_db::access::{principal64_from_username, Actor};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
@@ -50,13 +46,11 @@ use shamir_query_builder::write::insert;
 use shamir_query_types::admin::{ReplDirection, ReplMode};
 use shamir_query_types::batch::{BatchError, BatchOp, BatchResponse};
 use shamir_query_types::wire::repl::ReplResponse;
-use futures_util::poll; // poll! re-export
 use tokio::sync::Notify;
 
 /// A boxed follower-catalogue batch future (`poll!`-able / droppable mid-flight).
-type BoxedBatch = std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<BatchResponse, BatchError>> + Send>,
->;
+type BoxedBatch =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<BatchResponse, BatchError>> + Send>>;
 
 use crate::replication::error::ReplError;
 use crate::replication::in_process::InProcessReplSource;
@@ -448,7 +442,10 @@ async fn pause_resume_back_to_back_restarts_and_applies_new_event() {
     )
     .await
     .expect("resume");
-    assert_eq!(sub_state(&follower, "sub_a").await.as_deref(), Some("active"));
+    assert_eq!(
+        sub_state(&follower, "sub_a").await.as_deref(),
+        Some("active")
+    );
     assert_eq!(
         sub_generation(&follower, "sub_a").await,
         gen,
@@ -534,7 +531,10 @@ async fn cancelled_quiesce_leaves_active_row_recoverable() {
     )
     .await
     .expect("resume");
-    assert_eq!(sub_state(&follower, "sub_a").await.as_deref(), Some("active"));
+    assert_eq!(
+        sub_state(&follower, "sub_a").await.as_deref(),
+        Some("active")
+    );
     assert_eq!(
         sub_generation(&follower, "sub_a").await,
         gen,
@@ -580,8 +580,8 @@ async fn second_supervisor_defers_then_takes_over_after_invalidation() {
     };
     let sup_a = SubscriptionSupervisor::new(follower.clone(), factory.clone(), "follower-a")
         .with_poll_wait_ms(2000);
-    let sup_b = SubscriptionSupervisor::new(follower.clone(), factory, "follower-b")
-        .with_max_iterations(1);
+    let sup_b =
+        SubscriptionSupervisor::new(follower.clone(), factory, "follower-b").with_max_iterations(1);
 
     // sup_a runs the LIVE follower L1.
     sup_a.reconcile().await;
@@ -696,10 +696,7 @@ async fn obsolete_follower_parked_in_pull_applies_nothing_after_replacement() {
     let g = lease.apply_gate.read().await;
     let mut drop_future = op_future(follower.clone(), drop_subscription("sub_a"));
     assert!(
-        matches!(
-            poll!(drop_future.as_mut()),
-            std::task::Poll::Pending
-        ),
+        matches!(poll!(drop_future.as_mut()), std::task::Poll::Pending),
         "the REAL DROP's quiesce must be blocked by the held read guard"
     );
     // Destination still intact while the DROP is parked mid-quiesce.
@@ -936,8 +933,11 @@ async fn terminal_marking_retries_until_success() {
         .repo_identity()
         .await
         .unwrap();
-    if let ReplResponse::Pull { repo_lineage_id, .. } = &mut bad_pull {
-        let mut observed = expected.clone();
+    if let ReplResponse::Pull {
+        repo_lineage_id, ..
+    } = &mut bad_pull
+    {
+        let mut observed = expected;
         observed.lineage_id[0] ^= 1;
         *repo_lineage_id = Some(observed.lineage_id);
     }
@@ -963,8 +963,8 @@ async fn terminal_marking_retries_until_success() {
 
     let follower = build_db().await;
     create_profile_and_subscription(&follower).await;
-    let sup = SubscriptionSupervisor::new(follower.clone(), factory, "follower-1")
-        .with_max_iterations(1);
+    let sup =
+        SubscriptionSupervisor::new(follower.clone(), factory, "follower-1").with_max_iterations(1);
 
     // loop#1: applies v1, exits, self-deregisters, lease invalidated.
     sup.reconcile().await;

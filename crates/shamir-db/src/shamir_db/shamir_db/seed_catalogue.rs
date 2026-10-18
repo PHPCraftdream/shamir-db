@@ -45,7 +45,9 @@ impl SeedCatalogueFlushFaultForTest {
     pub fn arm_fail_first(shamir: &ShamirDb, n: usize) -> Self {
         shamir.flush_fault_armed.store(true, Ordering::SeqCst);
         shamir.flush_fault_fail_first.store(n, Ordering::SeqCst);
-        shamir.flush_fault_pass_first.store(usize::MAX, Ordering::SeqCst);
+        shamir
+            .flush_fault_pass_first
+            .store(usize::MAX, Ordering::SeqCst);
         Self(shamir.clone())
     }
 }

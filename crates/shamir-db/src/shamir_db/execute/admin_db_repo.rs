@@ -129,7 +129,11 @@ impl ShamirAdminExecutor {
         // binding check — a moved lock acquisition turns the T6 assertions
         // red.
         #[cfg(test)]
-        if self.shamir.cascade_pause.load(std::sync::atomic::Ordering::Acquire) {
+        if self
+            .shamir
+            .cascade_pause
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             self.shamir.cascade_arrived.notify_one();
             self.shamir.cascade_release.notified().await;
         }
@@ -431,7 +435,11 @@ impl ShamirAdminExecutor {
         // binding check — a moved lock acquisition turns the T6 assertions
         // red.
         #[cfg(test)]
-        if self.shamir.cascade_pause.load(std::sync::atomic::Ordering::Acquire) {
+        if self
+            .shamir
+            .cascade_pause
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             self.shamir.cascade_arrived.notify_one();
             self.shamir.cascade_release.notified().await;
         }

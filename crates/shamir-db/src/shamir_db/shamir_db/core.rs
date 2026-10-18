@@ -134,7 +134,8 @@ pub struct ShamirDb {
     /// in-memory (tests). Wire-created repos default to a durable redb
     /// engine under this root; in-memory homes fall back to in-memory repos
     /// — coherent with the home's durability class.
-    pub(super) data_root: Option<std::path::PathBuf>,    /// Injected write-side user-administration port (task #559). `None` for
+    pub(super) data_root: Option<std::path::PathBuf>,
+    /// Injected write-side user-administration port (task #559). `None` for
     /// embedded/no-directory deployments and tests; `Some` when `shamir-server`
     /// wires its directory-backed impl (then the four re-targeted handlers
     /// stop returning `not_supported`).
@@ -165,8 +166,7 @@ pub struct ShamirDb {
     pub(crate) resync_quarantine: Arc<ResyncQuarantineCache>,
     pub(crate) changelog_receivers: Arc<super::revocation::registry::ChangelogReceiverRegistry>,
     /// Round-4 mechanism 2 — per-subscription generation lease registry
-    /// (`name -> Arc<SubscriptionLease>`); shared by clone via the inner
-    /// `Arc`.
+    /// (`name -> Arc<SubscriptionLease>`); shared by clone via the inner `Arc`.
     pub(crate) leases: Arc<DashMap<String, Arc<SubscriptionLease>, THasher>>,
     /// S5c-X PR8b-2 (evidence row 6): per-instance test fault seam for
     /// `flush_seed_catalogue` — the round-2 GLOBAL atomic made concurrent
@@ -184,19 +184,17 @@ pub struct ShamirDb {
     /// (round-5 B3 fail-first mode). Test-only.
     #[cfg(any(test, feature = "test-util"))]
     pub(crate) flush_fault_fail_first: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    /// Round-4 T7 seam: when armed, `write_new_subscription` signals the
-    /// Notify immediately before the final-state row write, so the test can
-    /// drop the CREATE future exactly on the final-write boundary. Gated
-    /// `any(test, "test-util")` (round 5): shamir-server's tests drive it
-    /// cross-crate via the opt-in feature.
+    /// Round-4 T7 seam: when armed, `write_new_subscription` signals the Notify
+    /// immediately before the final-state row write, so the test can drop the
+    /// CREATE future exactly on the final-write boundary. Gated
+    /// `any(test, "test-util")`: shamir-server's tests drive it cross-crate.
     #[cfg(any(test, feature = "test-util"))]
     pub(crate) final_write_pause: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Round-4 T7 seam: one-shot arrival signal for `final_write_pause`.
     #[cfg(any(test, feature = "test-util"))]
     pub(crate) final_write_arrived: std::sync::Arc<tokio::sync::Notify>,
     /// Round-4 T7 seam: while `final_write_pause` is armed, the CREATE
-    /// future parks on this Notify at the final-write boundary until the
-    /// test releases it (or DROPS the future).
+    /// future parks on this Notify at the final-write boundary until released.
     #[cfg(any(test, feature = "test-util"))]
     pub(crate) final_write_release: std::sync::Arc<tokio::sync::Notify>,
     /// Round-5 T6 seam: when armed, `DROP … CASCADE` parks INSIDE the
@@ -301,7 +299,9 @@ impl ShamirDb {
             experimental_migration_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             durability_policy: durability,
             resync_quarantine: Arc::new(ResyncQuarantineCache::new()),
-            changelog_receivers: Arc::new(super::revocation::registry::ChangelogReceiverRegistry::new()),
+            changelog_receivers: Arc::new(
+                super::revocation::registry::ChangelogReceiverRegistry::new(),
+            ),
             leases: Arc::new(DashMap::with_hasher(THasher::default())),
             #[cfg(any(test, feature = "test-util"))]
             flush_fault_armed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
