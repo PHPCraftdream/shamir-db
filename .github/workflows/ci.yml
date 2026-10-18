@@ -408,3 +408,131 @@ jobs:
       # incompatible loom code paths. The `-E 'test(loom_model)'` filter
       # runs just the model-checker test (excluded from test.sh by design).
       - run: cargo nextest run -p shamir-engine --features loom --lib -E 'test(loom_model)' --nocapture
+
+  # rust-guard source-integrity gates (CI-03a). Runs the workspace-excluded
+  # `tools/rust-guard` binary against the whole repo: `modules` (every
+  # tracked `.rs` reachable from a target root or excepted), `structure`
+  # (AST rules over the PR's changed files only — the VIS_WIDENING /
+  # ALLOW_ADDED rules are diff-shaped by nature, and a full-repo run would
+  # just re-flag the grandfathered baseline repo, so on master pushes only
+  # the whole-repo `modules` scan runs), and `conservation` (source
+  # inventory diff per active campaign in `.rust-guard/stages.toml` — a
+  # no-op while that list is empty). Also re-runs the baseline-monotonic
+  # and layout checks next to the tool whose findings they ratchet.
+  #
+  # Runs on draft AND ready PRs and master pushes (no draft-only `if:`):
+  # the gates are cheap (seconds) and the whole point is catching structural
+  # drift the moment it is written, not when the draft is promoted. The tool
+  # is workspace-excluded, so the main fmt/clippy jobs never cover it — its
+  # own fmt/clippy run here too. ubuntu-only: the tool parses git objects
+  # and Rust sources; nothing OS-specific.
+  source-integrity:
+    name: rust-guard source integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # full history: merge-base computation, `git show <rev>:<path>`
+          # reads and the baseline check all need real git objects.
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
+        with:
+          components: rustfmt, clippy
+      # Distinct cache scope so this job's build of the standalone tool does
+      # not fight the workspace cache the other jobs share.
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          workspaces: tools/rust-guard
+      # PRs only: on master pushes there is no merge base (HEAD *is*
+      # master); the diff-shaped `structure`/`conservation` gates are
+      # skipped there, the whole-repo `modules` scan still runs below.
+      - name: compute merge base
+        if: github.event_name == 'pull_request'
+        run: echo "MERGE_BASE=$(git merge-base origin/master HEAD)" >> "$GITHUB_ENV"
+      - name: build rust-guard
+        run: cargo build --manifest-path tools/rust-guard/Cargo.toml --locked
+      - name: rust-guard modules (whole repo)
+        run: tools/rust-guard/target/debug/rust-guard modules --repo .
+      - name: rust-guard structure (changed files)
+        if: github.event_name == 'pull_request'
+        run: tools/rust-guard/target/debug/rust-guard structure --repo . --changed-since "$MERGE_BASE"
+      # Conservation runs only when the PR touches Rust files of a package
+      # named in an active campaign (`.rust-guard/stages.toml`). With
+      # `campaigns = []` (the normal state) this is a documented no-op.
+      - name: rust-guard conservation (per active campaign)
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, subprocess, sys, tomllib
+
+          campaigns = tomllib.load(open(".rust-guard/stages.toml", "rb")).get("campaigns", [])
+          if not campaigns:
+              print("::notice::.rust-guard/stages.toml has no active campaigns; conservation is a no-op")
+              sys.exit(0)
+
+          meta = json.loads(subprocess.run(
+              ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+              check=True, capture_output=True, text=True).stdout)
+          pkg_dirs = {}
+          for p in meta["packages"]:
+              pkg_dirs.setdefault(p["name"], os.path.dirname(p["manifest_path"]))
+
+          changed = subprocess.run(
+              ["git", "diff", "--name-only", os.environ["MERGE_BASE"] + "...HEAD"],
+              check=True, capture_output=True, text=True).stdout.splitlines()
+
+          guard = "tools/rust-guard/target/debug/rust-guard"
+          ran = False
+          for c in campaigns:
+              dirs = [pkg_dirs[name] for name in c["packages"] if name in pkg_dirs]
+              touched = [f for f in changed if any(f.startswith(d + "/") for d in dirs)]
+              if not touched:
+                  continue
+              subprocess.run([guard, "conservation", "--repo", ".",
+                              "--base", os.environ["MERGE_BASE"], "--head", "HEAD",
+                              "--delta", c["delta"]], check=True)
+              ran = True
+          if not ran:
+              print("::notice::no campaign package touched by this diff; conservation skipped")
+          PY
+      # Same ratchet the fmt job runs; repeated here so the source-integrity
+      # job is self-contained (cheap, stdlib-only).
+      - name: baseline monotonic check
+        run: python3 -I scripts/ci/check_baseline_monotonic.py --base "origin/master" --head HEAD
+      - name: layout check
+        run: python3 -I scripts/ci/check_layout.py
+      # The tool is workspace-excluded: the main fmt/clippy jobs never see
+      # it, so it lints itself here.
+      - run: cargo fmt --manifest-path tools/rust-guard/Cargo.toml -- --check
+      - run: cargo clippy --manifest-path tools/rust-guard/Cargo.toml --all-targets --locked -- -D warnings
+
+  # The tool's own test suite (`tools/rust-guard/tests/`). Runs in CI ONLY —
+  # CLAUDE.md bans local builds/tests. The crate is workspace-excluded, so
+  # the `test` job above never runs these. Same perimeter-guard constraint
+  # as the loom job: raw `cargo test` is blocked by the committed
+  # .cargo/config.toml runner even in CI, so tests go through cargo-nextest
+  # (the wrapper the guard sanctions). ubuntu-only: pure std + syn parsing,
+  # nothing OS-specific.
+  rust-guard-selftest:
+    name: rust-guard self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
+        with:
+          components: rustfmt, clippy
+      - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af  # v2.87.11
+        with:
+          tool: nextest@0.9.137
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          workspaces: tools/rust-guard
+      - working-directory: tools/rust-guard
+        run: cargo nextest run --locked
+      - run: cargo fmt --manifest-path tools/rust-guard/Cargo.toml -- --check
+      - run: cargo clippy --manifest-path tools/rust-guard/Cargo.toml --all-targets --locked -- -D warnings

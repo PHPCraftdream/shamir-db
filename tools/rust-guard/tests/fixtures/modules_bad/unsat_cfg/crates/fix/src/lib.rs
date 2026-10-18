@@ -1,0 +1,2 @@
+#[cfg(any())]
+mod ghost;

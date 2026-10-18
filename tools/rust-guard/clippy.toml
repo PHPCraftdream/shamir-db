@@ -1,0 +1,6 @@
+# rust-guard is a workspace-excluded standalone tool: it cannot depend on
+# `shamir_collections` (Fx), so the workspace-wide std-hashmap bans do not
+# apply here. Single-threaded, correctness-first CLI; std collections are
+# fine. `absolute-paths-max-segments` inherits from the root config.
+disallowed-types = []
+disallowed-methods = []

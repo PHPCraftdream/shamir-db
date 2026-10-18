@@ -1,0 +1,10 @@
+# Owned-impl assertions for `rust-guard structure` (rule 5, `OWNED_IMPL`).
+#
+# Every inherent `impl <type>` must live in the type's defining module
+# (`module`) or a descendant of it. Trait impls are not governed.
+# The file's logical module path is derived from its physical path under
+# the package's `src/` directory (`crate::a::b`).
+
+[[owned_impl]]
+type = "RepoInstance"
+module = "crate::repo::instance::repo_instance"
