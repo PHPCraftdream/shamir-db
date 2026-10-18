@@ -16,7 +16,7 @@ export type {
   CondValue,
   Filter,
   ComputedFilter,
-} from './filter.js';
+} from './read/filter.js';
 
 export type {
   TableRefWire,
@@ -35,7 +35,7 @@ export type {
   ReadQuery,
   PlanType,
   ExplainPlan,
-} from './query.js';
+} from './read/query.js';
 
 export type { ConnectOptions, ConnectLocalOptions, ResumeOptions } from './connection.js';
 
@@ -49,7 +49,7 @@ export type {
   SetOp,
   DeleteOp,
   WriteOp,
-} from './write.js';
+} from './write/write.js';
 
 export type {
   HmacSigner,
@@ -106,7 +106,7 @@ export type {
   ChangesSinceOp,
   ListOp,
   DdlOp,
-} from './ddl.js';
+} from './schema/ddl.js';
 
 export type {
   ResourceRef,  GroupRef,
@@ -130,7 +130,7 @@ export type {
   SetSuperuserOp,
   SetReplicatorOp,
   AdminOp,
-} from './admin.js';
+} from './access/admin.js';
 
 export type {
   ReplScope,
@@ -149,11 +149,11 @@ export type {
   ListSubscriptionsOp,
   ReplicationStatusOp,
   ReplicationOp,
-} from './replication.js';
+} from './stream/replication.js';
 
 export type {
   CallOp,
-} from './call.js';
+} from './write/call.js';
 
 export type {
   EventMask,
@@ -163,7 +163,7 @@ export type {
   UnsubscribeOp,
   PushKind,
   PushEnvelope,
-} from './subscribe.js';
+} from './stream/subscribe.js';
 
 export type {
   SubBatchOp,
@@ -183,7 +183,7 @@ export type {
   TransactionInfo,
   BatchResponse,
   EdgeKind,
-} from './batch.js';
+} from './write/batch.js';
 
 export type {
   CursorId,
@@ -192,5 +192,5 @@ export type {
   CancelCursorRequest,
   CursorPageResponse,
   CursorClosedResponse,
-} from './cursor.js';
+} from './read/cursor.js';
 

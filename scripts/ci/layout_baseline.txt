@@ -1,13 +1,7 @@
 # layout baseline: current violations of the layout limits
 # format: dir <path> <n> | file <path> <n>; maintained by check_layout.py
 dir crates/shamir-client-node 10
-dir crates/shamir-client-ts 10
-dir crates/shamir-client-ts/src/__tests__ 34
-dir crates/shamir-client-ts/src/core 19
-dir crates/shamir-client-ts/src/core/__tests__ 13
-dir crates/shamir-client-ts/src/core/builders 14
-dir crates/shamir-client-ts/src/core/builders/__tests__ 15
-dir crates/shamir-client-ts/src/core/types 12
+dir crates/shamir-client-ts 8
 dir crates/shamir-client/src 11
 dir crates/shamir-client/src/tests 12
 dir crates/shamir-client/tests 8
@@ -45,19 +39,6 @@ dir crates/shamir-engine/src/validator/schema 11
 dir crates/shamir-engine/src/validator/tests 13
 dir crates/shamir-funclib/src 32
 dir crates/shamir-numa/src 12
-dir crates/shamir-query-builder/src 14
-dir crates/shamir-query-builder/src/batch 11
-dir crates/shamir-query-builder/src/batch/tests 13
-dir crates/shamir-query-builder/src/ddl 33
-dir crates/shamir-query-builder/src/ddl/tests 10
-dir crates/shamir-query-builder/src/write 8
-dir crates/shamir-query-types/src 15
-dir crates/shamir-query-types/src/admin/types 18
-dir crates/shamir-query-types/src/admin/types/tests 8
-dir crates/shamir-query-types/src/batch 25
-dir crates/shamir-query-types/src/batch/tests 13
-dir crates/shamir-query-types/src/read 14
-dir crates/shamir-query-types/src/read/tests 10
 dir crates/shamir-sdk/src 12
 dir crates/shamir-server/benches 9
 dir crates/shamir-server/src 39
@@ -86,10 +67,6 @@ dir crates/shamir-wasm-host/src 16
 dir crates/shamir-wasm-host/src/tests 11
 dir crates/shamir-wasm-host/src/wasm 9
 dir scripts 15
-file crates/shamir-client-ts/src/__tests__/e2e-data.test.ts 1285
-file crates/shamir-client-ts/src/__tests__/e2e.test.ts 1049
-file crates/shamir-client-ts/src/core/builders/ddl.ts 1407
-file crates/shamir-client-ts/src/core/client.ts 1402
 file crates/shamir-client/src/client.rs 1318
 file crates/shamir-connect/tests/integration_resume.rs 1216
 file crates/shamir-db/benches/engine_perf.rs 1365
@@ -127,10 +104,6 @@ file crates/shamir-engine/src/tx/tests/drainer_tests.rs 1344
 file crates/shamir-engine/src/tx/tests/p1096_tx_aware_unique_check_tests.rs 1305
 file crates/shamir-engine/src/tx/tests/recovery_tests.rs 1726
 file crates/shamir-engine/tests/crash_recovery.rs 1651
-file crates/shamir-query-builder-macros/src/query_parse.rs 1019
-file crates/shamir-query-builder/src/batch/batch.rs 1405
-file crates/shamir-query-builder/src/query/tests/query_tests.rs 1115
-file crates/shamir-query-types/src/batch/tests/planner_tests.rs 1196
 file crates/shamir-server/src/config.rs 1002
 file crates/shamir-server/src/db_handler/cursor_handlers.rs 2090
 file crates/shamir-server/src/db_handler/tests/cursor_handler_tests.rs 5380

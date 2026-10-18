@@ -1,18 +1,23 @@
 //! Read-query DTO module — query shape, ordering, pagination, results.
 //! Execution (`exec`) and query parsing (`parser`) live in shamir-engine.
 
-pub mod agg;
-pub mod ddl;
-pub mod group_by;
-pub mod limit;
-pub mod order_by;
-pub mod query_record;
-pub mod query_result;
-pub mod read_query;
+pub mod filter;
 pub mod receipts;
-pub mod select;
-pub mod select_expr;
-pub mod temporal;
+
+mod clause;
+mod core;
+
+pub use clause::agg;
+pub use clause::ddl;
+pub use clause::group_by;
+pub use clause::limit;
+pub use clause::order_by;
+pub use clause::temporal;
+pub use core::query_record;
+pub use core::query_result;
+pub use core::read_query;
+pub use core::select;
+pub use core::select_expr;
 
 pub use agg::{AggFunc, AggregateField};
 pub use ddl::{DdlOpKind, DdlOpState, DdlOpStatus};
