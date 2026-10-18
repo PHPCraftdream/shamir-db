@@ -2,8 +2,10 @@
 #
 # ShamirDB pre-push gate.
 #
-# Mirrors the CLAUDE.md pre-commit gate so a push can never land formatting
-# drift, lint regressions, or failing library tests on a shared branch.
+# Mirrors the CLAUDE.md pre-push gate so a push can never land formatting
+# drift, lint regressions or layout violations on a shared branch. Tests are
+# not run here: the PR's GitHub CI runs them (CLAUDE.md "Compile / build /
+# test policy").
 #
 # Activate once per clone:
 #     git config core.hooksPath .githooks
@@ -30,8 +32,8 @@ cargo fmt --all -- --check
 echo "pre-push [2/3]: cargo clippy --workspace --all-targets -- -D warnings"
 cargo clippy --workspace --all-targets -- -D warnings
 
-echo "pre-push [3/3]: cargo test --workspace --lib"
-cargo test --workspace --lib
+echo "pre-push [3/3]: layout check"
+python3 -I scripts/ci/check_layout.py
 
 echo "pre-push: all checks passed — pushing."
 
