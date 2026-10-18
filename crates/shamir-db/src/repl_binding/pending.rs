@@ -96,6 +96,17 @@ pub(crate) async fn write_new_subscription(
     if let QueryValue::Map(fields) = &mut pending {
         fields.insert("state".into(), QueryValue::Str(final_state.to_string()));
     }
+    // Round-4 T7 seam: the armed CREATE future PARKS exactly on the
+    // final-write boundary — the test drops the future here, so the final
+    // write never starts.
+    #[cfg(test)]
+    if shamir
+        .final_write_pause
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        shamir.final_write_arrived.notify_one();
+        shamir.final_write_release.notified().await;
+    }
     if let Err(flip_err) = write_row(shamir, &name, pending.clone()).await {
         // Compensate: rewrite the pending barrier so no startable row
         // survives a failed flip. If even the compensation fails, the row

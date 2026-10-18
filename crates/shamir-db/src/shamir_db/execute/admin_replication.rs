@@ -416,7 +416,10 @@ impl ShamirAdminExecutor {
         self.shamir
             .ensure_drop_allowed(&name)
             .await
-            .map_err(db_error_to_batch)?;
+            .map_err(db_error_to_batch)?; // quiesce (below) before ANY mutation
+        self.shamir
+            .quiesce_subscription_lease_locked(&name, &_control)
+            .await;
 
         let del_op = crate::query::write::DeleteOp {
             delete_from: crate::query::TableRef::new("subscriptions"),
@@ -556,6 +559,10 @@ impl ShamirAdminExecutor {
         if let QueryValue::Map(ref mut m) = record {
             match &op.action {
                 SubAction::Pause => {
+                    // quiesce first: drain an in-flight apply, block new ones
+                    self.shamir
+                        .quiesce_subscription_lease_locked(&name, &_control)
+                        .await;
                     m.insert("state".to_string(), QueryValue::Str("paused".to_string()));
                 }
                 SubAction::Resume => {
@@ -935,6 +942,8 @@ impl ShamirDb {
                 return Ok(());
             }
         }
+        self.quiesce_subscription_lease_locked(name, &_control) // quiesce BEFORE the row mutation
+            .await;
         if state == "resync_required" {
             // S5c-X PR8b-2: coverage is the row's durable binding — an
             // unparseable row fails loudly (typed error), never marks

@@ -84,14 +84,18 @@ impl ShamirDb {
         // subscription catalogue writers, taken here so every existing
         // caller keeps the interlock without changes.
         let _control = self.replication_control_lock.lock().await;
-        self.remove_db_locked(name).await
+        self.remove_db_locked(name, &_control).await
     }
 
     /// Lock-free variant of [`Self::remove_db`].
     ///
-    /// Caller MUST hold `replication_control_lock` (non-reentrant — never
-    /// acquired here).
-    pub async fn remove_db_locked(&self, name: &str) -> DbResult<bool> {
+    /// The `_control` guard parameter ENFORCES that the caller holds
+    /// `replication_control_lock` (non-reentrant — never acquired here).
+    pub async fn remove_db_locked(
+        &self,
+        name: &str,
+        _control: &tokio::sync::MutexGuard<'_, ()>,
+    ) -> DbResult<bool> {
         if name == SYSTEM_DB_NAME {
             return Ok(false);
         }
@@ -545,14 +549,19 @@ impl ShamirDb {
         // subscription catalogue writers, taken here so every existing
         // caller keeps the interlock without changes.
         let _control = self.replication_control_lock.lock().await;
-        self.remove_repo_locked(db_name, repo_name).await
+        self.remove_repo_locked(db_name, repo_name, &_control).await
     }
 
     /// Lock-free variant of [`Self::remove_repo`].
     ///
-    /// Caller MUST hold `replication_control_lock` (non-reentrant — never
-    /// acquired here).
-    pub async fn remove_repo_locked(&self, db_name: &str, repo_name: &str) -> DbResult<bool> {
+    /// The `_control` guard parameter ENFORCES that the caller holds
+    /// `replication_control_lock` (non-reentrant — never acquired here).
+    pub async fn remove_repo_locked(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        _control: &tokio::sync::MutexGuard<'_, ()>,
+    ) -> DbResult<bool> {
         // S5c-X PR8b-2: refuse DROP of a referenced destination BEFORE any
         // live or durable mutation.
         self.ensure_destinations_unbound(db_name, Some(repo_name))

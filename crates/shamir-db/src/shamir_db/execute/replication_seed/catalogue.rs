@@ -235,6 +235,10 @@ impl ShamirDb {
                 .map_err(|_| SeedRefusal::ConflictingBinding)?;
                 let mut record = existing.clone();
                 binding(&mut record, expected);
+                // Replacement-seed rebind: invalidate the old generation's
+                // lease (quiesce) before the row changes.
+                self.quiesce_subscription_lease_locked(&op.create_subscription, &_control)
+                    .await;
                 replacement_binding.write_to_row(&mut record);
                 return persist(self, record)
                     .await

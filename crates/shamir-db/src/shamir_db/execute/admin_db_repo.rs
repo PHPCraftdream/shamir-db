@@ -159,7 +159,7 @@ impl ShamirAdminExecutor {
                     // variants.
                     let _ = self
                         .shamir
-                        .remove_repo_locked(&op.drop_db, repo_name)
+                        .remove_repo_locked(&op.drop_db, repo_name, &_control)
                         .await
                         .map_err(db_error_to_batch)?;
                 }
@@ -167,7 +167,7 @@ impl ShamirAdminExecutor {
         }
         let removed = self
             .shamir
-            .remove_db_locked(&op.drop_db)
+            .remove_db_locked(&op.drop_db, &_control)
             .await
             .map_err(db_error_to_batch)?;
         Ok(admin_result(mpack!({
@@ -451,7 +451,7 @@ impl ShamirAdminExecutor {
         // control lock is already held, so use the _locked variant.
         let removed = self
             .shamir
-            .remove_repo_locked(&self.db_name, &op.drop_repo)
+            .remove_repo_locked(&self.db_name, &op.drop_repo, &_control)
             .await
             .map_err(db_error_to_batch)?;
         Ok(admin_result(mpack!({

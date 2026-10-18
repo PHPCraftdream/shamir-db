@@ -7,11 +7,14 @@
 //! a typed catalogue error.
 
 pub mod binding;
-pub(crate) mod confirmed;
 pub mod coverage;
+pub mod lease;
 pub(crate) mod pending;
 pub mod validate;
 
+#[cfg(test)]
+mod tests;
+
 pub use binding::{SubscriptionBinding, SUBSCRIPTION_BINDING_VERSION};
-pub(crate) use confirmed::ConfirmedActive;
 pub(crate) use coverage::{quarantined_row_keys, row_is_quarantined};
+pub use lease::SubscriptionLease;

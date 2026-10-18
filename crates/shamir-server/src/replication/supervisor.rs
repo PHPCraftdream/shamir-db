@@ -64,6 +64,13 @@ use super::error::ReplError;
 use super::follower_loop::{run_follower_loop, FollowerLoopConfig};
 use super::source::ReplSource;
 
+/// Test seam (round 4, T5): a hook awaited after admission and before
+/// spawn — the seam that replaces the row between lease-take and spawn.
+#[cfg(test)]
+type StartRaceHook = std::sync::Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
+>;
+
 /// A subscription resolved from `system/subscriptions` (386-a schema).
 ///
 /// Passed to the [`ReplSourceFactory`] so it can build the transport
@@ -158,6 +165,16 @@ pub struct SubscriptionSupervisor {
     validate_replicated_payload: bool,
     // Cold catalogue lifecycle serialization; no follower write lock.
     reconcile_lock: tokio::sync::Mutex<()>,
+    /// Test seam (round 4, T2): the first n start-barrier attempts fail
+    /// without touching the real flush — deterministic, instance-scoped,
+    /// no globals. See [`Self::with_start_barrier_faults`].
+    #[cfg(test)]
+    start_barrier_faults: std::sync::atomic::AtomicUsize,
+    /// Test seam (round 4, T5): awaited after admission and before spawn —
+    /// the seam that replaces the row between lease-take and spawn. See
+    /// [`Self::with_start_race_hook`].
+    #[cfg(test)]
+    start_race_hook: Option<StartRaceHook>,
 }
 
 impl SubscriptionSupervisor {
@@ -179,7 +196,30 @@ impl SubscriptionSupervisor {
             poll_wait_ms: 5000,
             validate_replicated_payload: false,
             reconcile_lock: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            start_barrier_faults: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            start_race_hook: None,
         }
+    }
+
+    /// Arm `n` deterministic start-barrier failures (tests only): the first
+    /// `n` start-barrier attempts fail without touching the real flush.
+    /// Instance-scoped — no globals.
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_start_barrier_faults(mut self, n: usize) -> Self {
+        self.start_barrier_faults = std::sync::atomic::AtomicUsize::new(n);
+        self
+    }
+
+    /// Install a hook awaited after admission and before spawn (tests
+    /// only): the T5 seam that replaces the row between lease-take and
+    /// spawn, exposing the startup interior window.
+    #[cfg(test)]
+    pub fn with_start_race_hook(mut self, hook: StartRaceHook) -> Self {
+        self.start_race_hook = Some(hook);
+        self
     }
 
     /// Cap each loop at `n` iterations (tests only — avoids relying on
@@ -291,21 +331,6 @@ impl SubscriptionSupervisor {
             if !sub.is_active() || self.registry.contains_sync(&sub.name) {
                 continue;
             }
-            // P1-C start predicate: never start a follower unless the row's
-            // active state is flush-confirmed. This is the
-            // pending-creation barrier's invariant — a row whose active
-            // state was not confirmed by a successful flush can never pass,
-            // so flush errors and cancellation can never start a follower.
-            if !self
-                .local
-                .may_start_follower(&sub.name, sub.binding_generation)
-            {
-                debug!(
-                    subscription = %sub.name,
-                    "supervisor: active state not yet flush-confirmed; start deferred"
-                );
-                continue;
-            }
             match self.start_subscription(sub).await {
                 // Stale snapshot: expected under races — a concurrent admin
                 // write changed the row between the catalogue read and the
@@ -372,7 +397,11 @@ impl SubscriptionSupervisor {
         // terminal marking: the reconcile pass that observes the new row
         // owns any restart. This mirrors `read_subscriptions`' public read
         // path (same table, same `SubscriptionBinding::from_row` parse).
-        {
+        // Round-4 MECHANISM 2: take the lease for (name, generation) while
+        // the control lock is still held, then run the start-time durability
+        // barrier (round-4 MECHANISM 1). The whole block evaluates to the
+        // lease so the control-lock guard is dropped right after.
+        let lease = {
             let _control = self.local.replication_control_lock().lock().await;
             let stale = match self.read_subscription_row(&sub.name).await {
                 Ok(Some(row)) => {
@@ -392,6 +421,51 @@ impl SubscriptionSupervisor {
                 );
                 return Ok(false);
             }
+            let lease =
+                self.local
+                    .take_subscription_lease(&sub.name, sub.binding_generation, &_control);
+            // Round-4 MECHANISM 1: the start-time durability barrier — the
+            // same catalogue flush CREATE/RESUME use. Only a successful
+            // flush may start a follower; on failure the row stays
+            // live-active and a later reconcile retries the barrier.
+            //
+            // Fault-counter form (T2 seam): the counter is decremented
+            // SATURATINGLY (plain load/store — test-only, single-threaded per
+            // instance): an armed counter fails exactly its remaining n
+            // attempts, and an exhausted or un-armed counter stays at 0 so
+            // every later attempt passes. (The previous `fetch_sub` wrapped
+            // to `usize::MAX` at 0, making the SECOND start on any un-armed
+            // supervisor spuriously fail.)
+            #[cfg(test)]
+            {
+                // Saturating decrement (no usize wrap): an exhausted or
+                // un-armed counter stays at 0 and every later attempt passes.
+                let prev = self.start_barrier_faults.load(Ordering::SeqCst);
+                if prev > 0 {
+                    self.start_barrier_faults.store(prev - 1, Ordering::SeqCst);
+                    debug!(
+                        subscription = %sub.name,
+                        "start barrier fault injected (test); start deferred"
+                    );
+                    return Ok(false);
+                }
+            }
+            if let Err(e) = self.local.flush_seed_catalogue().await {
+                debug!(
+                    subscription = %sub.name,
+                    error = %e,
+                    "supervisor: start barrier flush failed; start deferred (reconcile retries)"
+                );
+                return Ok(false);
+            }
+            lease
+        };
+        // Interior window 1: the lease may have been invalidated between the
+        // lease-take inside the block above and here (a concurrent lifecycle
+        // mutation ran its quiesce before we re-check). Never start on an
+        // invalid lease.
+        if !lease.valid.load(Ordering::Acquire) {
+            return Ok(false);
         }
         let streams = self
             .resolve_profile_streams(&sub.profile)
@@ -422,6 +496,11 @@ impl SubscriptionSupervisor {
         }
         let pull_targets = sub.binding_destinations.clone();
         for (index, (db, repo)) in pull_targets.iter().enumerate() {
+            // Interior-window check: an invalidated lease marks nothing in
+            // this iteration and never admits a destination.
+            if !lease.valid.load(Ordering::Acquire) {
+                return Ok(false);
+            }
             super::source::seed::admission::admit(&self.local, &sub.name, &streams, db, repo)
                 .await?;
             let mut owner = None;
@@ -489,6 +568,17 @@ impl SubscriptionSupervisor {
             }
         }
         let source = (self.factory)(sub);
+        // T5 seam: awaited after admission and before spawn — the startup
+        // interior window (round 4).
+        #[cfg(test)]
+        if let Some(hook) = &self.start_race_hook {
+            hook().await;
+        }
+        // Interior window 2 (T5): re-check after the hook / between
+        // admission and spawn; a superseded lease never spawns loops.
+        if !lease.valid.load(Ordering::Acquire) {
+            return Ok(false);
+        }
         let cancel = CancellationToken::new();
         let mut joins = Vec::with_capacity(pull_targets.len());
 
@@ -499,11 +589,10 @@ impl SubscriptionSupervisor {
             if let Some(n) = self.max_iterations {
                 cfg = cfg.with_max_iterations(n);
             }
-            // S5c-X round 3: the loop re-validates its startup snapshot
-            // against the CURRENT row via `may_start_follower` before every
-            // apply.
+            // Round-4 lease: the loop holds this lease; it applies only
+            // while the lease stays valid.
             cfg.subscription = sub.name.clone();
-            cfg.binding_generation = sub.binding_generation;
+            cfg.lease = Some(lease.clone());
             let local = self.local.clone();
             let src = source.clone();
             let tok = cancel.clone();

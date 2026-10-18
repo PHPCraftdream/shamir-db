@@ -701,48 +701,36 @@ async fn subscription_row_opt(shamir: &ShamirDb, name: &str) -> Option<QueryValu
         .await
         .ok()?
         .records;
+    if records.is_empty() {
+        return None;
+    }
     Some(records.remove(0).as_value().into_owned())
 }
 
-/// S5c-X round 3 (P1-A, deterministic — no sleeps): the cascade drop shares
-/// the replication-control interlock. While the lock is held, the
-/// `DROP REPO main CASCADE` batch has not even STARTED its first poll step
-/// (Pending) and the destination is fully intact; once the guard drops, the
-/// cascade completes — and the now-missing destination refuses any NEW
-/// subscription creation that would bind it. (Order 2 — the refusal before
-/// any mutation — is covered by the C6 tests above.)
+/// S5c-X round 4 (T6, deterministic — no sleeps): the cascade drop and a
+/// subscription creation SERIALIZE on the replication-control interlock —
+/// both batch futures are Pending while the lock is held, and the tokio
+/// mutex then wakes them in poll order. Creation does NOT fail for a missing
+/// destination (control.rs skips missing scopes; binding.rs only validates
+/// shape), so the invariant is serialization + consistency, not refusal:
+/// whichever order wins, the end state is consistent and never a partial
+/// drop.
 #[tokio::test]
-async fn binding_cascade_drop_holds_interlock_creation_waits_then_sees_destination_gone() {
+async fn binding_cascade_interlock_serializes_create_and_never_partial_drops() {
     let shamir = setup().await;
     seed_row(&shamir, "main").await;
     let guard = shamir.replication_control_lock().lock().await;
 
+    // Batch 1: DROP REPO main CASCADE.
     let mut b = Batch::new();
     b.id(3);
     b.op("drop", drop_repo("main").cascade());
     let request = b.to_request_via_msgpack();
     let mut cascade = Box::pin(shamir.execute("testdb", &request));
-    assert!(
-        matches!(futures::poll!(cascade.as_mut()), std::task::Poll::Pending),
-        "the cascade drop must wait on the replication-control interlock"
-    );
 
-    // While held: nothing was dropped — repo, table, and the seeded row are
-    // all intact and serving.
-    assert!(
-        shamir.get_db("testdb").unwrap().get_repo("main").is_some(),
-        "the held interlock must prevent any cascade mutation"
-    );
-    let resp = read_users(&shamir, "testdb", "main").await.unwrap();
-    let served = resp.results["r"].records[0].as_value().into_owned();
-    assert_eq!(served.get("name").and_then(|v| v.as_str()), Some("Alice"));
-
-    drop(guard);
-    cascade.await.unwrap();
-
-    // The destination is gone: a batch that would CREATE a profile plus an
-    // ACTIVE subscription binding `testdb/main` is REFUSED — a subscription
-    // can never bind a destination that no longer exists.
+    // Batch 2: profile + ACTIVE subscription bound to testdb/main. Note
+    // `op.paused = false` and no receipt on the repo, so the creation is not
+    // receipt-refused.
     let mut b = Batch::new();
     b.id(4);
     b.op(
@@ -754,14 +742,65 @@ async fn binding_cascade_drop_holds_interlock_creation_waits_then_sees_destinati
         ),
     );
     b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
-    let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap_err();
+    let request = b.to_request_via_msgpack();
+    let mut create = Box::pin(shamir.execute("testdb", &request));
+
+    // BOTH wait on the control lock — serialization proven.
     assert!(
-        !matches!(err, BatchError::ResyncRequired { .. }),
-        "the refusal must be a destination-missing class, not quarantine: {err}"
+        matches!(futures::poll!(cascade.as_mut()), std::task::Poll::Pending),
+        "the cascade drop must wait on the replication-control interlock"
     );
+    assert!(
+        matches!(futures::poll!(create.as_mut()), std::task::Poll::Pending),
+        "the creation must wait on the replication-control interlock"
+    );
+
+    drop(guard);
+    let cascade_result = cascade.await;
+    let create_result = create.await;
+
+    // Accept exactly the two consistent winning orders; reject everything
+    // else. The end state is NEVER a partial drop.
+    if cascade_result.is_ok() && create_result.is_ok() {
+        // Cascade won: `testdb/main` is ABSENT, the other destinations are
+        // INTACT, and the subscription row EXISTS with a binding naming
+        // `testdb/main` for the absent destination (shape-only validation).
+        assert!(
+            shamir.get_db("testdb").unwrap().get_repo("main").is_none(),
+            "the cascade must have removed testdb/main"
+        );
+        assert!(shamir.get_db("testdb").unwrap().get_repo("side").is_some());
+        assert!(shamir.get_db("otherdb").unwrap().get_repo("main").is_some());
+        assert!(read_users(&shamir, "testdb", "side").await.is_ok());
+        assert!(read_users(&shamir, "otherdb", "main").await.is_ok());
+        let row = subscription_row(&shamir, "sub").await;
+        let destinations = row
+            .get("binding_destinations")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert!(
+            destinations
+                .iter()
+                .any(|d| d.get("repo").and_then(|v| v.as_str()) == Some("main")),
+            "the row must bind testdb/main for the absent destination: {row:?}"
+        );
+    } else if cascade_result.is_err() {
+        // The C6 order: the cascade was refused (the binding existed at its
+        // check), so the creation ran first — ALL tables/rows are intact and
+        // serve.
+        create_result.expect("the creation must succeed in the C6 order");
+        let instance = shamir.get_db("testdb").unwrap();
+        assert!(instance.get_repo("main").is_some());
+        assert!(instance.get_repo("side").is_some());
+        assert!(shamir.get_db("otherdb").unwrap().get_repo("main").is_some());
+        let resp = read_users(&shamir, "testdb", "main").await.unwrap();
+        let served = resp.results["r"].records[0].as_value().into_owned();
+        assert_eq!(served.get("name").and_then(|v| v.as_str()), Some("Alice"));
+    } else {
+        panic!(
+            "inconsistent interlock outcome: cascade={cascade_result:?}, create={create_result:?}"
+        );
+    }
 }
 
 /// S5c-X round 3 (P1-C, pending barrier): with the flush fault failing the
@@ -808,8 +847,7 @@ async fn binding_pending_row_refuses_resume_with_typed_error() {
 
 /// S5c-X round 3 (P1-C, final-flip flush failure): the first flush (pending
 /// barrier) succeeds, the flip flush fails, and the compensation runs — the
-/// row ends `pending_durable` (durable), and THE supervisor start predicate
-/// (`may_start_follower`) is FALSE for its generation. After dropping the
+/// row ends `pending_durable` (durable, never durable-active). After dropping the
 /// fault, the retried creation succeeds with a strictly bumped generation
 /// that IS startable. Quarantine coverage stays absent throughout.
 #[tokio::test]
@@ -842,10 +880,6 @@ async fn binding_final_flip_flush_failure_never_makes_row_startable() {
         .and_then(|v| v.as_u64())
         .expect("binding_generation must be present");
     assert!(
-        !shamir.may_start_follower("sub", gen),
-        "a row whose active state was never flush-confirmed must never be startable"
-    );
-    assert!(
         !shamir
             .has_resync_required_subscription_covering("testdb", "main")
             .await
@@ -853,8 +887,7 @@ async fn binding_final_flip_flush_failure_never_makes_row_startable() {
         "a pending row must not gate anything"
     );
 
-    // Disarm and retry: the creation completes, and the new generation IS
-    // flush-confirmed (the supervisor may start a follower for it).
+    // Disarm and retry: the creation completes and the row is durable-active.
     drop(fault);
     let mut b = Batch::new();
     b.id(3);
@@ -871,10 +904,6 @@ async fn binding_final_flip_flush_failure_never_makes_row_startable() {
         .expect("binding_generation must be present");
     assert!(gen2 > gen, "the retried creation must bump the generation");
     assert!(
-        shamir.may_start_follower("sub", gen2),
-        "a successfully flushed active row must be startable"
-    );
-    assert!(
         !shamir
             .has_resync_required_subscription_covering("testdb", "main")
             .await
@@ -883,58 +912,56 @@ async fn binding_final_flip_flush_failure_never_makes_row_startable() {
     );
 }
 
-/// S5c-X round 3 (P1-C, cancellation during the final write): the creation
-/// task is aborted while (or after) the final flip write is in flight.
-/// WHEREVER the abort lands, the row's generation must fail THE start
-/// predicate (`may_start_follower`) — a cancelled write can never leave a
-/// startable row behind.
+/// S5c-X round 4 (T7, deterministic — no sleeps): the creation future is
+/// DROPPED (never aborted) exactly at the final-write Notify seam — the
+/// pending barrier row is durable, the final flip NEVER starts, and the row
+/// can never be startable (reconcile's start gate requires `active`). The
+/// catalogue stays valid throughout.
 #[tokio::test]
-async fn binding_cancellation_during_final_write_leaves_row_unstartable() {
+async fn binding_cancellation_dropped_at_final_write_boundary_leaves_pending_durable() {
     let shamir = setup().await;
     seed_row(&shamir, "main").await;
     create_profile(&shamir, "prof", "main").await;
 
-    let fault =
-        crate::shamir_db::shamir_db::SeedCatalogueFlushFaultForTest::arm_after_passing(&shamir, 1);
+    shamir
+        .final_write_pause
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     let mut b = Batch::new();
     b.id(2);
     b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
-    let s = shamir.clone();
-    let task = tokio::spawn(async move { s.execute("testdb", &b.to_request_via_msgpack()).await });
-
-    // Bounded wait (no sleeps) until the live row flips to `active` — or the
-    // poll budget runs out; the abort lands wherever it lands.
-    for _ in 0..500 {
-        tokio::task::yield_now().await;
-        if let Some(row) = subscription_row_opt(&shamir, "sub").await {
-            if row.get("state").and_then(|v| v.as_str()) == Some("active") {
-                break;
-            }
-        }
+    let request = b.to_request_via_msgpack();
+    let mut create = Box::pin(shamir.execute("testdb", &request));
+    let mut wait = Box::pin(shamir.final_write_arrived.notified());
+    // Biased order polls `wait` first, so the seam's notify_one cannot be
+    // missed once `wait` is registered.
+    tokio::select! {
+        biased;
+        _ = &mut wait => {}
+        res = create.as_mut() => panic!("creation ran past the final-write seam: {res:?}"),
     }
-    task.abort();
-    let _ = task.await;
+    drop(create); // DROP the parked future — never abort
+    shamir
+        .final_write_pause
+        .store(false, std::sync::atomic::Ordering::SeqCst);
 
-    let row = subscription_row(&shamir, "sub").await;
-    let state = row.get("state").and_then(|v| v.as_str()).unwrap_or("");
-    let gen = row
-        .get("binding_generation")
-        .and_then(|v| v.as_u64())
-        .expect("binding_generation must be present");
-    // The invariant, regardless of where the abort landed: if the live row
-    // reads `active`, its flush is the armed (failing) one, so it is not
-    // confirmed; if it reads pending, it never had an active state at all.
-    // BOTH branches must fail the supervisor start predicate.
-    assert!(
-        !shamir.may_start_follower("sub", gen),
-        "a cancelled creation (row state '{state}') must never leave a startable row"
+    // The dropped-at-the-boundary creation left the durable pending barrier.
+    let row = subscription_row_opt(&shamir, "sub")
+        .await
+        .expect("the pending barrier row must be durable");
+    assert_eq!(
+        row.get("state").and_then(|v| v.as_str()),
+        Some(crate::repl_binding::pending::PENDING_STATE),
+        "the final write must never have started"
     );
     assert!(
-        !shamir
-            .has_resync_required_subscription_covering("testdb", "main")
-            .await
-            .unwrap(),
-        "a pending or unconfirmed row must not gate anything"
+        row.get("binding_generation")
+            .and_then(|v| v.as_u64())
+            .is_some(),
+        "the pending barrier carries its binding generation"
     );
-    drop(fault);
+    // The catalogue stays valid.
+    shamir.refresh_resync_quarantine_cache().await.unwrap();
+    crate::repl_binding::validate::validate_subscription_catalogue(&shamir)
+        .await
+        .unwrap();
 }

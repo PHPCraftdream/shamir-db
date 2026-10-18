@@ -2,7 +2,7 @@ use base64::Engine;
 
 use crate::access::Actor;
 use crate::engine::db_instance::db_instance::DbInstance;
-use crate::repl_binding::ConfirmedActive;
+use crate::repl_binding::SubscriptionLease;
 use crate::{DbError, DbResult};
 use dashmap::DashMap;
 use shamir_collections::THasher;
@@ -151,11 +151,10 @@ pub struct ShamirDb {
     /// closed; one atomic load on the healthy path.
     pub(crate) resync_quarantine: Arc<ResyncQuarantineCache>,
     pub(crate) changelog_receivers: Arc<super::revocation::registry::ChangelogReceiverRegistry>,
-    /// S5c-X PR8b-2 round 3 (P1-C): confirmed-start gate — the set of
-    /// `(subscription, binding_generation)` pairs whose durable row is
-    /// `active` with a valid binding, rebuilt wholesale after each
-    /// successful flush. Shared by clone via the inner `Arc`.
-    pub(crate) confirmed_active: ConfirmedActive,
+    /// Round-4 mechanism 2 — per-subscription generation lease registry
+    /// (`name -> Arc<SubscriptionLease>`); shared by clone via the inner
+    /// `Arc`.
+    pub(crate) leases: Arc<DashMap<String, Arc<SubscriptionLease>, THasher>>,
     /// S5c-X PR8b-2 (evidence row 6): per-instance test fault seam for
     /// `flush_seed_catalogue` — the round-2 GLOBAL atomic made concurrent
     /// tests interfere; arming is now per-instance. Production is untouched
@@ -166,6 +165,19 @@ pub struct ShamirDb {
     /// armed fault fires (0 = fail immediately). Test-only.
     #[cfg(test)]
     pub(crate) flush_fault_pass_first: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Round-4 T7 seam: when armed, `write_new_subscription` signals the
+    /// Notify immediately before the final-state row write, so the test can
+    /// drop the CREATE future exactly on the final-write boundary.
+    #[cfg(test)]
+    pub(crate) final_write_pause: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Round-4 T7 seam: one-shot arrival signal for `final_write_pause`.
+    #[cfg(test)]
+    pub(crate) final_write_arrived: std::sync::Arc<tokio::sync::Notify>,
+    /// Round-4 T7 seam: while `final_write_pause` is armed, the CREATE
+    /// future parks on this Notify at the final-write boundary until the
+    /// test releases it (or DROPS the future).
+    #[cfg(test)]
+    pub(crate) final_write_release: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl ShamirDb {
@@ -259,11 +271,17 @@ impl ShamirDb {
             changelog_receivers: Arc::new(
                 super::revocation::registry::ChangelogReceiverRegistry::new(),
             ),
-            confirmed_active: ConfirmedActive::new(),
+            leases: Arc::new(DashMap::with_hasher(THasher::default())),
             #[cfg(test)]
             flush_fault_armed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             flush_fault_pass_first: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
+            final_write_pause: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(test)]
+            final_write_arrived: std::sync::Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            final_write_release: std::sync::Arc::new(tokio::sync::Notify::new()),
         };
 
         if seed {

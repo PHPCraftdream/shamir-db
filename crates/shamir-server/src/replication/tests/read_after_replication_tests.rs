@@ -749,6 +749,15 @@ async fn drop_sub_a(follower: &ShamirDb) {
 #[tokio::test]
 async fn stale_startup_snapshot_is_refused_and_marks_nothing() {
     let leader = Arc::new(build_db(&["items"], false).await);
+    leader
+        .add_repo_as(
+            "app",
+            RepoConfig::new("other", BoxRepoFactory::in_memory())
+                .add_table(TableConfig::new("items")),
+            owner(),
+        )
+        .await
+        .expect("leader second repo");
     let follower = Arc::new(build_db(&["items"], false).await);
     follower
         .add_repo_as(
@@ -821,6 +830,27 @@ async fn stale_startup_snapshot_is_refused_and_marks_nothing() {
         );
     }
 
+    // Seed 2 rows on the leader's G2 destination so the control leg can prove
+    // genuine application. Determinism: the supervisor's long-poll budget
+    // covers journal durability (same assumption as lease_gate_tests.rs's
+    // write_rows fixture — no polling loops).
+    let mut b = Batch::new();
+    b.op(
+        "seed",
+        shamir_query_builder::write::Insert::with_repo("other", "items").rows([
+            shamir_query_builder::doc! { "id" => "k0", "v" => 0 },
+            shamir_query_builder::doc! { "id" => "k1", "v" => 1 },
+        ]),
+    );
+    leader
+        .execute_as(owner(), "app", &b.to_request_via_msgpack())
+        .await
+        .expect("leader seed");
+    let v = leader
+        .current_commit_version("app", "other")
+        .await
+        .expect("leader v");
+
     // Control leg: the CURRENT snapshot starts normally.
     let current_sub = Subscription {
         binding_generation: gen2,
@@ -833,5 +863,16 @@ async fn stale_startup_snapshot_is_refused_and_marks_nothing() {
         "the current snapshot must start"
     );
     assert!(sup.is_running("sub_a"));
-    sup.stop_all().await;
+    // T8: genuinely running AND applying — the loop is joined to completion
+    // (max_iterations(1)); the follower bookmark must have reached the
+    // leader's version on the G2 destination, not merely a registry entry.
+    sup.wait_for_subscription("sub_a").await;
+    let destination = follower
+        .get_db("app")
+        .and_then(|d| d.get_repo("other"))
+        .expect("follower app/other");
+    assert!(
+        destination.replication_bookmark().await.expect("bookmark") >= v,
+        "the control leg must actually apply on app/other"
+    );
 }
