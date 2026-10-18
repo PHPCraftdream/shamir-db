@@ -62,7 +62,6 @@ fn fail_final_flush(repo_name: &str) -> bool {
 }
 
 #[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
 pub(crate) fn set_simulate_checkpoint_uncertain(on: bool) {
     SIMULATE_CHECKPOINT_UNCERTAIN.store(on, Ordering::Release);
 }
@@ -79,7 +78,6 @@ pub(crate) fn set_simulate_checkpoint_uncertain(on: bool) {
 static DISABLE_UNCERTAIN_RECONCILE: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
 pub(crate) fn disable_uncertain_reconcile(on: bool) {
     DISABLE_UNCERTAIN_RECONCILE.store(on, Ordering::Release);
 }
@@ -92,7 +90,6 @@ pub(crate) fn disable_uncertain_reconcile(on: bool) {
 static UNCERTAIN_WITHOUT_COMMIT: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
 pub(crate) fn set_uncertain_without_commit(on: bool) {
     UNCERTAIN_WITHOUT_COMMIT.store(on, Ordering::Release);
 }
@@ -105,7 +102,6 @@ pub(crate) fn set_uncertain_without_commit(on: bool) {
 static CHECKPOINT_RECONCILES: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
 pub(crate) fn checkpoint_reconciles() -> usize {
     CHECKPOINT_RECONCILES.load(Ordering::Acquire)
 }
@@ -120,7 +116,6 @@ pub(crate) fn checkpoint_reconciles() -> usize {
 static CHECKPOINT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
 pub(crate) async fn checkpoint_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
     CHECKPOINT_TEST_LOCK.lock().await
 }
@@ -138,24 +133,8 @@ static COMMIT_PARK_REACHED: Notify = Notify::const_new();
 static COMMIT_PARK_RELEASE: Notify = Notify::const_new();
 
 #[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
 pub(crate) fn arm_commit_park(on: bool) {
     COMMIT_PARK_ARMED.store(on, Ordering::Release);
-}
-
-#[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
-pub(crate) async fn wait_commit_park_reached() {
-    let notified = COMMIT_PARK_REACHED.notified();
-    tokio::pin!(notified);
-    notified.as_mut().enable();
-    notified.await;
-}
-
-#[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
-pub(crate) fn release_commit_park() {
-    COMMIT_PARK_RELEASE.notify_waiters();
 }
 
 /// Same gate, INSIDE the Uncertain reconcile branch (immediately before the
@@ -169,13 +148,11 @@ static RECONCILE_PARK_REACHED: Notify = Notify::const_new();
 static RECONCILE_PARK_RELEASE: Notify = Notify::const_new();
 
 #[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
 pub(crate) fn arm_reconcile_park(on: bool) {
     RECONCILE_PARK_ARMED.store(on, Ordering::Release);
 }
 
 #[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
 pub(crate) async fn wait_reconcile_park_reached() {
     let notified = RECONCILE_PARK_REACHED.notified();
     tokio::pin!(notified);
@@ -184,7 +161,6 @@ pub(crate) async fn wait_reconcile_park_reached() {
 }
 
 #[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
 pub(crate) fn release_reconcile_park() {
     RECONCILE_PARK_RELEASE.notify_waiters();
 }
@@ -439,15 +415,11 @@ pub(crate) async fn checkpoint(
         publish::apply_publication(gate, group.as_ref(), publication);
     }
     (completion.on_published)();
-    // ReceiptCheckpointed fires only AFTER the publication has completed —
+    // Phase::Checkpointed fires only AFTER the publication has completed —
     // a test that drops the apply future at this phase can never observe
     // the commit-without-publication window.
     #[cfg(test)]
-    super::super::test_seam::phase(
-        repo.name(),
-        super::super::test_seam::Phase::ReceiptCheckpointed,
-    )
-    .await;
+    super::super::test_seam::phase(repo.name(), super::super::test_seam::Phase::Checkpointed).await;
     log::info!(
         "follower receipt: Checkpointed upstream {}..={} on repo {}",
         receipt.upstream_start,

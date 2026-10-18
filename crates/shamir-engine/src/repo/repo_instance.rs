@@ -881,6 +881,15 @@ impl RepoInstance {
                 let last_committed = marker.max(max_inflight).max(checkpoint);
 
                 let gate = shamir_tx::RepoTxGate::new(last_committed, next_tx_id);
+                // PR6b-3: durable follower provenance is live from open. A
+                // valid v3 record enables receipt-native visibility before
+                // any read; a legacy or malformed record refuses gate
+                // initialization (fail closed — operator reseeds).
+                if let crate::meta::repl::bookmark_v3::FollowerBookmarkState::Native(_) =
+                    crate::meta::repl::bookmark_v3::classify_follower_bookmark(&info_store).await?
+                {
+                    gate.enable_receipt_native_visibility();
+                }
                 // Best-effort: a WAL-init failure must NOT fail the gate
                 // init. The old contract (see commit_wal_init_failure tests)
                 // keeps the repo_wal OnceCell uninitialised and retryable —

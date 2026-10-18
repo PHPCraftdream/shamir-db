@@ -9,11 +9,15 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use shamir_storage::error::{DbError, FollowerRefusalReason};
+use futures::stream::{self, Stream};
+use shamir_storage::error::{DbError, DbResult, FollowerRefusalReason};
 use shamir_storage::types::{RecordKey, Store};
+use std::pin::Pin;
 
 use crate::meta::recovery_marker::{load_last_committed, save_last_committed_flushed};
-use crate::meta::repl::bookmark_v3::{classify_follower_bookmark, load_bookmark_v3};
+use crate::meta::repl::bookmark_v3::{
+    classify_follower_bookmark, load_bookmark_v3, FollowerBookmarkState,
+};
 use crate::meta::repl_bookmark::{
     load_clean_horizon, load_replication_bookmark, save_fence_record_v3_aware, FenceRecord,
 };
@@ -63,6 +67,21 @@ impl Store for ImageStore {
     }
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
         Ok(self.records.lock().unwrap().remove(&key).is_some())
+    }
+    // The crash image is a metadata-only snapshot: the scanned key spaces are
+    // empty by construction, so an empty stream is the honest answer.
+    fn iter_stream(
+        &self,
+        _batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+        Box::pin(stream::empty())
+    }
+    fn scan_prefix_stream(
+        &self,
+        _prefix: Bytes,
+        _batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+        Box::pin(stream::empty())
     }
 }
 
@@ -153,17 +172,30 @@ async fn legacy_bookmark_crash_images_refuse_repeatedly_without_rewrite() {
     }
 }
 
-/// A floor-without-bookmark crash image (aborted follower before any
-/// bookmark) refuses with `LegacyFollowerState`, repeatedly, and the floor
-/// is preserved verbatim.
+/// A floor-without-bookmark crash image is NOT a repo open: classification
+/// correctly yields `FloorWithoutBookmark` (a LEADER with this state must
+/// still open — covered by
+/// `leader_with_floor_marker_still_opens_and_preserves_floor`). The
+/// FOLLOWER-ATTEMPT adoption over the image (`save_fence_record_v3_aware`)
+/// refuses with `LegacyFollowerState`, repeatedly, with the floor preserved
+/// verbatim and no v3 record minted.
 #[tokio::test]
-async fn floor_only_crash_image_refuses_repeatedly_and_keeps_the_floor() {
+async fn floor_only_crash_image_classifies_unowned_and_refuses_adoption() {
     let image = CrashImage::default();
     let store = image.image();
     // Floor marker WITHOUT any bookmark: unowned pre-receipt follower state.
     save_last_committed_flushed(&store, 7).await.unwrap();
     for attempt in 0..2 {
-        let error = classify_follower_bookmark(&store).await.unwrap_err();
+        assert!(
+            matches!(
+                classify_follower_bookmark(&store).await.unwrap(),
+                FollowerBookmarkState::FloorWithoutBookmark { floor: 7 }
+            ),
+            "attempt {attempt}"
+        );
+        let error = save_fence_record_v3_aware(&store, fence(99))
+            .await
+            .unwrap_err();
         assert!(
             matches!(
                 error,

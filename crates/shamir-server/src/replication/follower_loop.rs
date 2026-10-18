@@ -412,8 +412,13 @@ async fn run_follower_loop_internal(
                 .tx_info_store()
                 .await
                 .map_err(|error| ReplError::Bookmark(error.to_string()))?;
-            super::identity_fence::checks::fence_pull_identity(&info, &resp, seed_receipt.as_ref())
-                .await?;
+            super::identity_fence::checks::fence_pull_identity(
+                &info,
+                &resp,
+                seed_receipt.as_ref(),
+                Some(&repo_instance),
+            )
+            .await?;
         } else {
             super::source::seed::fence::fence_pull(seed_receipt.as_ref(), &resp)?;
         }

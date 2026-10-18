@@ -43,7 +43,6 @@ use crate::repo::changelog_store::write_domain::{RepoWritePermit, RepoWriteReser
 use crate::repo::RepoInstance;
 use crate::tx::ReplicatedEvent;
 
-#[cfg_attr(not(test), allow(dead_code))] // entry: wired by the activation chunk (next stage)
 pub(crate) async fn apply_batch_receipt(
     repo: &RepoInstance,
     info: Arc<dyn Store>,
@@ -528,7 +527,7 @@ async fn try_chunk(
         }
         stage::commit_prepared(repo, permit, info, &plan, old).await?;
         #[cfg(test)]
-        fail_after(repo.name(), Phase::ReceiptPrepared)?;
+        fail_after(repo.name(), Phase::Prepared)?;
     }
     run_chunk_tail(repo, permit, info, gate, &mut plan, old, lease).await
 }
@@ -574,7 +573,7 @@ async fn run_chunk_tail(
         // happen inside it, so every idempotency property is kept).
         let stored = &stored.expect("matched above").receipt;
         // Test seam on the FAST path too (reviewer P1 #2): without this
-        // check a sticky `fail_after = ReceiptMaterialized` flag could never
+        // check a sticky `fail_after = Phase::Materialized` flag could never
         // bite after the first Materialized commit — the retry takes this
         // fast path straight to `durable_tail` and succeeds, so a test
         // expecting the pipeline to PARK on the sticky flag would observe a
@@ -584,7 +583,7 @@ async fn run_chunk_tail(
         //   attempt 2: fast path -> seam fires again -> retry
         //   attempt 3: fast path -> seam fires -> attempt >= 3 -> PARK.
         #[cfg(test)]
-        fail_after(repo.name(), Phase::ReceiptMaterialized)?;
+        fail_after(repo.name(), Phase::Materialized)?;
         let publication = publish::publication_from_receipt(repo, permit, stored).await?;
         let chunk_local_end = stored
             .mapping
@@ -608,7 +607,7 @@ async fn run_chunk_tail(
     let (receipt, counters) =
         stage::commit_materialized_work(repo, permit, info, &work, old).await?;
     #[cfg(test)]
-    fail_after(repo.name(), Phase::ReceiptMaterialized)?;
+    fail_after(repo.name(), Phase::Materialized)?;
     let publication = publish::publication_from_plan(repo, permit, plan, &counters).await?;
     let chunk_local_end = receipt
         .mapping

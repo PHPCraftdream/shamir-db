@@ -105,7 +105,9 @@ async fn retry_contact(info: &Arc<dyn Store>, pull: &ReplResponse, reflush: bool
     if reflush {
         checks::prepare_existing(info).await.unwrap();
     }
-    checks::fence_pull_identity(info, pull, None).await.unwrap();
+    checks::fence_pull_identity(info, pull, None, None)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -287,7 +289,7 @@ async fn adoption_retry(park: bool, reflush: bool) {
     if park {
         // Poll to the known post-set flush barrier, then drop the borrowed
         // contact future. No spawned task or timing-dependent cancellation.
-        let contact = checks::fence_pull_identity(&info, &pull, None);
+        let contact = checks::fence_pull_identity(&info, &pull, None, None);
         tokio::pin!(contact);
         tokio::select! {
             biased;
@@ -296,7 +298,7 @@ async fn adoption_retry(park: bool, reflush: bool) {
         }
     } else {
         assert!(matches!(
-            checks::fence_pull_identity(&info, &pull, None).await,
+            checks::fence_pull_identity(&info, &pull, None, None).await,
             Err(crate::replication::ReplError::Bookmark(_))
         ));
     }
@@ -345,7 +347,7 @@ async fn adoption_retry(park: bool, reflush: bool) {
         gap_first: None,
         gap_through: None,
     };
-    checks::fence_pull_identity(&info, &response, None)
+    checks::fence_pull_identity(&info, &response, None, None)
         .await
         .unwrap();
     assert_eq!(

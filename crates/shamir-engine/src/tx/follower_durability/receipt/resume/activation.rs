@@ -17,12 +17,42 @@ use crate::meta::repl::bookmark_v3::{classify_follower_bookmark, FollowerBookmar
 use crate::repo::RepoInstance;
 
 /// Admission verdict for the first follower apply.
+#[derive(Debug)]
 pub(crate) enum FollowerAdmission {
     /// A valid v3 bookmark record exists: durably identified follower.
     Native,
     /// No bookmark record and no floor/installation conflict: eligible —
     /// the caller must adopt (write the v3 baseline) before any apply work.
     Fresh,
+}
+
+/// Pure admission decision over the classified durable state (PR6b-3
+/// acceptance test 8). Extracted so tests can exercise the capability gate
+/// without a backend: `BoxRepo` is a crate-internal enum and cannot be
+/// constructed around a refusing store from outside the crate. The
+/// capability check precedes EVERY state-driven verdict: an unsupported
+/// backend refuses `Native`, `Fresh` and `Floor` alike — no classification
+/// translation, interner first-touch or allocation happens first.
+/// `Fresh` here means state-eligible only; the seed-install conflict check
+/// stays in [`admit_follower`] because it needs the info store.
+pub(crate) fn admission_decision(
+    supports_atomic_batch: bool,
+    state: FollowerBookmarkState,
+) -> DbResult<FollowerAdmission> {
+    if !supports_atomic_batch {
+        return Err(DbError::AtomicBatchUnsupported(String::new()));
+    }
+    match state {
+        FollowerBookmarkState::Native(_) => Ok(FollowerAdmission::Native),
+        FollowerBookmarkState::Fresh => Ok(FollowerAdmission::Fresh),
+        FollowerBookmarkState::FloorWithoutBookmark { .. } => {
+            // A nonzero durable allocation floor without a v3 record is
+            // unowned pre-receipt follower evidence: reseed required.
+            Err(DbError::FollowerStateRefused {
+                reason: FollowerRefusalReason::LegacyFollowerState,
+            })
+        }
+    }
 }
 
 /// Validate durable follower state at first follower admission. Typed
@@ -32,34 +62,28 @@ pub(crate) async fn admit_follower(
     repo: &RepoInstance,
     info: &Arc<dyn Store>,
 ) -> DbResult<FollowerAdmission> {
-    match classify_follower_bookmark(info).await? {
-        FollowerBookmarkState::Native(_) => Ok(FollowerAdmission::Native),
-        FollowerBookmarkState::Fresh => {
-            if crate::repo::seed_install::SeedInstallState::load(info)
-                .await?
-                .is_some()
-            {
-                // Conflicting installation state: a seed install is in
-                // flight or incomplete — refusing is safer than adopting.
-                return Err(DbError::FollowerStateRefused {
-                    reason: FollowerRefusalReason::LegacyFollowerState,
-                });
-            }
-            if !repo.storage_supports_atomic_batch() {
-                return Err(DbError::AtomicBatchUnsupported(format!(
-                    "follower repo {} requires the receipt apply protocol but its \
-                     backend does not support repository-wide atomic batches",
-                    repo.name()
-                )));
-            }
-            Ok(FollowerAdmission::Fresh)
-        }
-        FollowerBookmarkState::FloorWithoutBookmark { .. } => {
-            // A nonzero durable allocation floor without a v3 record is
-            // unowned pre-receipt follower evidence: reseed required.
-            Err(DbError::FollowerStateRefused {
-                reason: FollowerRefusalReason::LegacyFollowerState,
-            })
-        }
+    let state = classify_follower_bookmark(info).await?;
+    let admission = admission_decision(repo.storage_supports_atomic_batch(), state).map_err(
+        |error| match error {
+            // Restore the repo-identifying message the pure decision cannot know.
+            DbError::AtomicBatchUnsupported(_) => DbError::AtomicBatchUnsupported(format!(
+                "follower repo {} requires the receipt apply protocol but its \
+                 backend does not support repository-wide atomic batches",
+                repo.name()
+            )),
+            other => other,
+        },
+    )?;
+    if matches!(admission, FollowerAdmission::Fresh)
+        && crate::repo::seed_install::SeedInstallState::load(info)
+            .await?
+            .is_some()
+    {
+        // Conflicting installation state: a seed install is in flight or
+        // incomplete — refusing is safer than adopting.
+        return Err(DbError::FollowerStateRefused {
+            reason: FollowerRefusalReason::LegacyFollowerState,
+        });
     }
+    Ok(admission)
 }

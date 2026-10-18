@@ -6,9 +6,9 @@ use tokio::sync::Notify;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Phase {
-    ReceiptPrepared,
-    ReceiptMaterialized,
-    ReceiptCheckpointed,
+    Prepared,
+    Materialized,
+    Checkpointed,
 }
 
 #[derive(Default)]

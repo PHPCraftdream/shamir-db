@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use shamir_storage::storage_in_memory::InMemoryRepo;
-use shamir_storage::types::{RecordKey, Store};
+use shamir_storage::types::RecordKey;
 
 use crate::meta::repl::bookmark_v3::{load_bookmark_v3, save_bookmark_v3, BookmarkV3};
 use crate::meta::MetaEnvelope;

@@ -16,7 +16,7 @@ use crate::replication::error::ReplError;
 /// follower-state refusal into a retryable string (PR6b-3): the refusal
 /// stays machine-readable and terminal; everything else keeps the
 /// `Bookmark` string form.
-
+///
 /// Negative-control seam for tests: when set, the supervisor skips the
 /// `resync_required` quarantine after an identity/epoch fence trip (mirrors
 /// `SKIP_S_CLAMP_FOR_TEST` in the engine's `replication_bound.rs`). Always
@@ -73,6 +73,16 @@ pub(crate) fn hex_lineage(lineage: &[u8; 16]) -> String {
 
 /// Requires `prepare_subscription` once at loop start. Any persistence error
 /// ends that loop; retrying requires a fresh startup durability barrier.
+/// Best-effort WARM-gate visibility enable after identity adoption: the
+/// durable v3 record is the authority and gate-init derives the flag on every
+/// later open — this only closes the gap until the next restart (a zero-event
+/// follower never runs the receipt pipeline, so nothing else enables it).
+async fn enable_visibility(repo: &shamir_db::engine::repo::RepoInstance) {
+    if let Ok(gate) = repo.tx_gate().await {
+        gate.enable_receipt_native_visibility();
+    }
+}
+
 pub(crate) async fn fence_hello_recorded(
     db: &ShamirDb,
     db_name: &str,
@@ -88,7 +98,12 @@ pub(crate) async fn fence_hello_recorded(
             repo: repo_name.into(),
         })?;
     let info = repo.tx_info_store().await.map_err(storage_error)?;
-    fence_hello_identity(&info, db_name, repo_name, response, receipt).await
+    if hello_decide(&info, db_name, repo_name, response, receipt).await? {
+        // Adoption persisted a NEW fence record — gain receipt-native
+        // visibility in the same step (best-effort; see `enable_visibility`).
+        enable_visibility(&repo).await;
+    }
+    Ok(())
 }
 
 /// Hello decision against the same identity store used by startup and Pull.
@@ -99,6 +114,20 @@ pub(crate) async fn fence_hello_identity(
     response: &ReplResponse,
     receipt: Option<&SeedReceipt>,
 ) -> Result<(), ReplError> {
+    hello_decide(info, db_name, repo_name, response, receipt)
+        .await
+        .map(|_| ())
+}
+
+/// [`fence_hello_identity`] reporting whether a NEW fence record was persisted
+/// (the `existing.is_none()` adoption path in [`decide`]).
+async fn hello_decide(
+    info: &Arc<dyn Store>,
+    db_name: &str,
+    repo_name: &str,
+    response: &ReplResponse,
+    receipt: Option<&SeedReceipt>,
+) -> Result<bool, ReplError> {
     let ReplResponse::Hello { repos, .. } = response else {
         return Err(SeedRefusal::MissingIdentity.into());
     };
@@ -119,10 +148,14 @@ pub(crate) async fn fence_hello_identity(
 /// Requires the startup durability barrier; persistence failures end the loop.
 /// cancel-safe: NO — a set may survive an abandoned flush; the next loop start
 /// must reflush the existing record before trusting matching metadata.
+/// `repo` (the destination repo instance) is used only to enable WARM-gate
+/// receipt-native visibility when this call ADOPTS a new fence record; tests
+/// that fence a bare probe store pass `None`.
 pub(crate) async fn fence_pull_identity(
     info: &Arc<dyn Store>,
     response: &ReplResponse,
     receipt: Option<&SeedReceipt>,
+    repo: Option<&shamir_db::engine::repo::RepoInstance>,
 ) -> Result<(), ReplError> {
     let ReplResponse::Pull {
         repo_lineage_id,
@@ -134,14 +167,20 @@ pub(crate) async fn fence_pull_identity(
         // Error envelopes make no identity statement and apply no events.
         return Ok(());
     };
-    decide(
+    let adopted = decide(
         info,
         *repo_lineage_id,
         *history_epoch,
         schema_digest.as_deref(),
         receipt,
     )
-    .await
+    .await?;
+    if adopted {
+        if let Some(repo) = repo {
+            enable_visibility(repo).await;
+        }
+    }
+    Ok(())
 }
 
 async fn decide(
@@ -150,7 +189,7 @@ async fn decide(
     epoch: Option<u64>,
     schema: Option<&str>,
     receipt: Option<&SeedReceipt>,
-) -> Result<(), ReplError> {
+) -> Result<bool, ReplError> {
     let existing = recorded::load(info).await.map_err(storage_error)?;
     let (Some(lineage_id), Some(history_epoch)) = (lineage, epoch) else {
         if let Some(mut record) = existing {
@@ -216,5 +255,7 @@ async fn decide(
             history_epoch = observed.history_epoch,
             "replication identity fence: adopted first observed leader identity (legacy migration occurs once)");
     }
-    Ok(())
+    // `true` exactly when this call persisted a NEW fence record (first
+    // adoption); every later matching response is a metadata-only update.
+    Ok(existing.is_none())
 }

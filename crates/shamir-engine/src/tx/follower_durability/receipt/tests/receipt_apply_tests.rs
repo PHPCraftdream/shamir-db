@@ -160,7 +160,7 @@ async fn outstanding_state(repo: &RepoInstance) -> (Option<[u8; 16]>, Option<Rec
 }
 
 /// Drive `events` through the repository-owned receipt worker until the
-/// STICKY `fail_after = ReceiptPrepared` flag exhausts the 3 Storage retries
+/// STICKY `fail_after = Phase::Prepared` flag exhausts the 3 Storage retries
 /// of `commit_prepared`: the pipeline fails on EVERY attempt, so the worker
 /// parks the chunk guards (never drops them), places the PAUSED RESERVATION
 /// on the write domain (a receipt is outstanding), returns `Err(Storage)`,
@@ -172,7 +172,7 @@ async fn crashed_prepared(
     events: &[ReplicatedEvent],
 ) -> Arc<test_seam::Hook> {
     let hook = Arc::new(test_seam::Hook::default());
-    *hook.fail_after.lock().unwrap() = Some(Phase::ReceiptPrepared);
+    *hook.fail_after.lock().unwrap() = Some(Phase::Prepared);
     hook.fail_after_sticky.store(true, Ordering::Release);
     test_seam::install(name, Arc::clone(&hook));
     let error = apply_replicated_batch(repo, events, 0, ApplyPolicy::Trusted)
@@ -486,7 +486,7 @@ async fn materialized_pause_hits_injected_failure_replays_recorded_counters() {
     drop(counter);
 
     let hook = Arc::new(test_seam::Hook::default());
-    *hook.fail_after.lock().unwrap() = Some(Phase::ReceiptMaterialized);
+    *hook.fail_after.lock().unwrap() = Some(Phase::Materialized);
     // STICKY: a one-shot flag would be consumed by the first retry, and the
     // pipeline retries Storage failures INLINE — the first apply would then
     // succeed within the same call instead of pausing.
@@ -649,7 +649,7 @@ async fn non_retryable_error_parks_guards() {
     let key1 = key_bytes(1).await;
 
     let hook = Arc::new(test_seam::Hook::default());
-    *hook.fail_after.lock().unwrap() = Some(Phase::ReceiptPrepared);
+    *hook.fail_after.lock().unwrap() = Some(Phase::Prepared);
     hook.fail_after_sticky.store(true, Ordering::Release);
     // NON-retryable kind: the retry loop only retries `DbError::Storage`.
     hook.fail_after_reopen.store(true, Ordering::Release);

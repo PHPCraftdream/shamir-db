@@ -134,7 +134,7 @@ async fn missing_identity_is_fail_closed_even_without_a_record() {
     }
     let info = repo(&follower).tx_info_store().await.unwrap();
     assert!(matches!(
-        checks::fence_pull_identity(&info, &pull, None).await,
+        checks::fence_pull_identity(&info, &pull, None, None).await,
         Err(crate::replication::ReplError::Seed(
             SeedRefusal::MissingIdentity
         ))

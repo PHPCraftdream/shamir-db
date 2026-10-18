@@ -1,4 +1,4 @@
-use std::future::poll_fn;
+use std::future::{poll_fn, Future};
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -12,6 +12,8 @@ use tokio::task::JoinHandle;
 
 use crate::repo::RepoInstance;
 use crate::table::table_manager::table_token_for;
+use shamir_storage::error::DbError;
+
 use crate::tx::commit::TxError;
 use crate::tx::commit_phases::{
     FAIL_PHASE_5A_TABLE_TOKEN, FAIL_PHASE_5A_TX_ID, FAIL_PHASE_5C_TX_ID,

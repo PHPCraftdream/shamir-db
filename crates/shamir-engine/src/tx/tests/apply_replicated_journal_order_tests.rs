@@ -1,16 +1,19 @@
 //! S5b-4 re-anchored on the receipt pipeline (PR6b-3): the receipt ordering
 //! is journal verify/confirm → publish → checkpoint → broadcast, so a batch
-//! parked at `Phase::ReceiptCheckpointed` has its events DURABLE and
+//! parked at `Phase::Checkpointed` has its events DURABLE and
 //! confirmed in the follower journal while the live broadcast tail is still
-//! parked. A chunk that fails at `Phase::ReceiptMaterialized` emits neither
+//! parked. A chunk that fails at `Phase::Materialized` emits neither
 //! journal event nor gap.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use shamir_storage::error::DbError;
-use shamir_storage::storage_in_memory::{InMemoryRepo, InMemoryStore};
+use shamir_storage::types::Store;
+use shamir_storage::{
+    error::DbError,
+    storage_in_memory::{InMemoryRepo, InMemoryStore},
+};
 use shamir_tx::{ChangelogEvent, IsolationLevel, JournalRead, TxContext, TxId};
 use shamir_types::access::Actor;
 use shamir_types::types::record_id::RecordId;
@@ -88,7 +91,7 @@ fn downstream(event: &ChangelogEvent, local_version: u64) -> ChangelogEvent {
 }
 
 /// The receipt ordering guarantees: while the pipeline is parked at
-/// `ReceiptCheckpointed` (publication done, broadcast tail not yet run),
+/// `Phase::Checkpointed` (publication done, broadcast tail not yet run),
 /// the follower journal already contains BOTH batch events under their
 /// follower-local versions, confirmed through the completion watermark —
 /// and the live broadcast has delivered nothing yet.
@@ -98,16 +101,15 @@ async fn follower_journal_contains_a_and_b_while_a_broadcast_is_parked() {
     let gate = follower.tx_gate().await.unwrap();
     let handle = follower.changefeed().await.unwrap();
     let mut live = handle.feed.subscribe();
-    let hook = arm_park(Phase::ReceiptCheckpointed);
+    let hook = arm_park(Phase::Checkpointed);
     let event_a = put_event("A", 1, 7);
     let event_b = put_event("B", 2, 9);
+    // Bind the events so the pinned future's borrows and the assertions
+    // below share one owner that outlives the whole apply.
+    let replicated = events(&[event_a.clone(), event_b.clone()]);
+    let events = [event_a, event_b];
 
-    let apply = apply_replicated_batch(
-        &follower,
-        &events(&[event_a, event_b]),
-        0,
-        ApplyPolicy::Trusted,
-    );
+    let apply = apply_replicated_batch(&follower, &replicated, 0, ApplyPolicy::Trusted);
     tokio::pin!(apply);
     let parked = tokio::select! {
         biased;
@@ -125,7 +127,7 @@ async fn follower_journal_contains_a_and_b_while_a_broadcast_is_parked() {
     let read = bounded(&follower, &handle, 1).await;
     assert_eq!(
         read.events,
-        vec![downstream(&event_a, 1), downstream(&event_b, 2)]
+        vec![downstream(&events[0], 1), downstream(&events[1], 2)]
     );
     assert_eq!(read.gap_at, None);
     assert!(matches!(live.try_recv(), Err(TryRecvError::Empty)));
@@ -133,13 +135,13 @@ async fn follower_journal_contains_a_and_b_while_a_broadcast_is_parked() {
     hook.resume.notify_one();
     let outcome = (&mut apply).await.unwrap();
     assert_eq!(outcome, ApplyOutcome::Applied { local_version: 2 });
-    assert_eq!(*live.try_recv().unwrap(), downstream(&event_a, 1));
-    assert_eq!(*live.try_recv().unwrap(), downstream(&event_b, 2));
+    assert_eq!(*live.try_recv().unwrap(), downstream(&events[0], 1));
+    assert_eq!(*live.try_recv().unwrap(), downstream(&events[1], 2));
     assert!(matches!(live.try_recv(), Err(TryRecvError::Empty)));
     test_seam::remove("follower");
 }
 
-/// A chunk that fails at `ReceiptMaterialized` (sticky injected failure —
+/// A chunk that fails at `Phase::Materialized` (sticky injected failure —
 /// the receipt analogue of the retired executor's history-write failure)
 /// publishes NOTHING: no journal event, no gap, no broadcast, no completion
 /// watermark movement.
@@ -151,7 +153,7 @@ async fn follower_materialized_failure_emits_no_journal_event_or_gap() {
     let mut live = handle.feed.subscribe();
 
     let hook = Arc::new(test_seam::Hook::default());
-    *hook.fail_after.lock().unwrap() = Some(Phase::ReceiptMaterialized);
+    *hook.fail_after.lock().unwrap() = Some(Phase::Materialized);
     hook.fail_after_sticky.store(true, Ordering::Release);
     test_seam::install("follower", Arc::clone(&hook));
 

@@ -7,12 +7,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use shamir_storage::error::{DbError, FollowerRefusalReason};
+use shamir_storage::types::RecordKey;
 use shamir_tx::changefeed::{ChangeOp, ChangelogEvent, RecordChange};
 use shamir_types::access::Actor;
 
 use super::super::follower::ignore_bookmark_j;
-use super::helpers::{open_and_reconcile, prepare_follower_image, prepare_image, temp_path};
-use crate::meta::repl_bookmark::load_clean_horizon;
+use super::helpers::{
+    open_and_reconcile, prepare_follower_image, prepare_image, raw_store, temp_path,
+};
 use crate::repo::{BoxRepoFactory, RepoInstance};
 use crate::table::TableConfig;
 use crate::tx::apply_replicated::follower_durability::test_seam::{self, Phase};
@@ -92,11 +95,11 @@ async fn stop(repo: RepoInstance) {
 #[tokio::test(flavor = "current_thread")]
 async fn follower_batch_crash_points_certify_only_the_in_flight_batch() {
     // The two PRE-checkpoint phases leave a durable receipt outstanding;
-    // at `ReceiptCheckpointed` the bookmark already advanced (nothing is in
+    // at `Phase::Checkpointed` the bookmark already advanced (nothing is in
     // flight), which the crash-subprocess matrix covers.
     for (tag, phase) in [
-        ("prepared", Phase::ReceiptPrepared),
-        ("materialized", Phase::ReceiptMaterialized),
+        ("prepared", Phase::Prepared),
+        ("materialized", Phase::Materialized),
     ] {
         let temp = tempfile::TempDir::new().unwrap();
         let name = format!(
@@ -238,4 +241,120 @@ async fn non_follower_repos_keep_exact_conservative_certification() {
         drop(feed);
         stop(repo).await;
     }
+}
+
+// Cold ordering (S5c-X PR6b-3): a legacy bookmark record in `__tx__` must
+// REFUSE the reopen (typed `FollowerStateRefused`) BEFORE WAL replay and
+// publication run: after the failed open the durable `LastCommittedVersion`
+// floor and the changelog clean horizon are unchanged, the legacy bytes are
+// untouched, and no recovery gap marker was written.
+#[cfg(feature = "fjall")]
+#[tokio::test(flavor = "current_thread")]
+async fn legacy_bookmark_refuses_reopen_before_replay() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = format!(
+        "cold-legacy-refusal-{}",
+        temp.path().display().to_string().replace('\\', "_")
+    );
+    let repo = open(temp.path(), &name).await;
+    // REAL in-flight WAL evidence: a committed tx (receipt pipeline) whose
+    // WAL entry survives the close.
+    assert_eq!(
+        apply_replicated_batch(&repo, &[replicated(1, 1)], 0, ApplyPolicy::Trusted)
+            .await
+            .expect("the seed batch applies"),
+        ApplyOutcome::Applied { local_version: 1 }
+    );
+    let info = repo.tx_info_store().await.expect("tx info store");
+    let legacy = crate::meta::MetaEnvelope::new(10u64).encode().unwrap();
+    let bookmark_key = RecordKey::from_slice(
+        crate::meta::MetaKey::ReplicationBookmark
+            .as_record_id()
+            .as_bytes(),
+    );
+    info.set(bookmark_key.clone(), Bytes::from(legacy.clone()))
+        .await
+        .expect("inject legacy bookmark bytes");
+    drop(info);
+    close(repo).await;
+
+    // Baseline from the raw stores AFTER the close, BEFORE the refused open.
+    let tx = raw_store(temp.path(), "__tx__").await;
+    let floor_before = crate::meta::recovery_marker::load_last_committed(&tx)
+        .await
+        .expect("floor baseline");
+    let legacy_before = tx.get(bookmark_key.clone()).await.expect("legacy bytes");
+    let changelog = raw_store(temp.path(), "__changelog__").await;
+    let clean_before = changelog
+        .get(RecordKey::from_slice(
+            &shamir_tx::changefeed::clean_horizon_key(),
+        ))
+        .await
+        .ok();
+    let gap_before = changelog
+        .get(RecordKey::from_slice(
+            &shamir_tx::changefeed::gap_marker_key(),
+        ))
+        .await
+        .ok();
+
+    // The open must FAIL FAST — no retry, no replay.
+    let error = RepoInstance::from_factory(
+        name.clone(),
+        BoxRepoFactory::fjall_raw(temp.path().to_path_buf()),
+        vec![TableConfig::new("items")],
+    )
+    .await;
+    let error = match error {
+        Ok(_) => panic!("legacy follower store must refuse the open"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            error,
+            DbError::FollowerStateRefused {
+                reason: FollowerRefusalReason::LegacyBookmarkFormat
+            }
+        ),
+        "{error:?}"
+    );
+
+    // No replay/publication side effects after the failed open.
+    let tx_after = raw_store(temp.path(), "__tx__").await;
+    assert_eq!(
+        crate::meta::recovery_marker::load_last_committed(&tx_after)
+            .await
+            .expect("floor after"),
+        floor_before,
+        "the durable floor must be unchanged"
+    );
+    assert_eq!(
+        tx_after
+            .get(bookmark_key.clone())
+            .await
+            .expect("bytes after"),
+        legacy_before,
+        "the legacy bookmark bytes must be untouched"
+    );
+    let changelog_after = raw_store(temp.path(), "__changelog__").await;
+    assert_eq!(
+        changelog_after
+            .get(RecordKey::from_slice(
+                &shamir_tx::changefeed::clean_horizon_key()
+            ))
+            .await
+            .ok(),
+        clean_before,
+        "the clean horizon must be unchanged"
+    );
+    assert_eq!(
+        changelog_after
+            .get(RecordKey::from_slice(
+                &shamir_tx::changefeed::gap_marker_key()
+            ))
+            .await
+            .ok(),
+        gap_before,
+        "no gap marker may be written"
+    );
 }

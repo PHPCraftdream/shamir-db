@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use shamir_storage::error::{DbError, DbResult};
-use shamir_storage::storage_in_memory::{InMemoryRepo, InMemoryStore};
-use shamir_storage::types::Store;
+use shamir_storage::storage_in_memory::InMemoryRepo;
+use shamir_storage::types::{Repo, Store};
 use shamir_tx::{IsolationLevel, TxContext, TxId};
 use shamir_types::access::Actor;
 use shamir_types::types::record_id::RecordId;

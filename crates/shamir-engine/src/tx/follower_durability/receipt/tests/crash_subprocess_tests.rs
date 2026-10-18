@@ -26,10 +26,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::meta::recovery_marker::load_last_committed;
 use crate::meta::repl::bookmark_v3::load_bookmark_v3;
 use crate::meta::repl::receipt::receipt_key;
-use crate::meta::MetaKey;
 use crate::repo::{BoxRepoFactory, RepoInstance};
 use crate::table::TableConfig;
 use crate::tx::apply_replicated::apply_replicated_batch;
@@ -372,9 +370,9 @@ async fn receipt_crash_child_scenario() {
     let path = PathBuf::from(std::env::var("SHAMIR_RECEIPT_CRASH_PATH").unwrap());
     let point = std::env::var("SHAMIR_RECEIPT_CRASH_POINT").unwrap();
     let (phase, phase_str): (Phase, &'static str) = match point.as_str() {
-        "prepared" => (Phase::ReceiptPrepared, "prepared"),
-        "materialized" => (Phase::ReceiptMaterialized, "materialized"),
-        "checkpointed" => (Phase::ReceiptCheckpointed, "checkpointed"),
+        "prepared" => (Phase::Prepared, "prepared"),
+        "materialized" => (Phase::Materialized, "materialized"),
+        "checkpointed" => (Phase::Checkpointed, "checkpointed"),
         other => panic!("unknown crash point {other}"),
     };
 
@@ -461,9 +459,9 @@ fn assert_child_died(status: std::process::ExitStatus, output: &str, point: &str
          hook (no SHAMIR_RECEIPT_ABORT_FIRED marker); output: {output}"
     );
     let expected_phase = match point {
-        "prepared" => "ReceiptPrepared",
-        "materialized" => "ReceiptMaterialized",
-        "checkpointed" => "ReceiptCheckpointed",
+        "prepared" => "Prepared",
+        "materialized" => "Materialized",
+        "checkpointed" => "Checkpointed",
         other => panic!("unknown crash point {other}"),
     };
     assert!(

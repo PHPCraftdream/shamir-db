@@ -26,6 +26,7 @@ pub struct BookmarkV3 {
 
 /// Durable follower-role classification of the bookmark record at open /
 /// first follower admission.
+#[derive(Debug)]
 pub enum FollowerBookmarkState {
     /// A valid v3 record exists: the repo is a durably identified follower.
     Native(BookmarkV3),
@@ -175,6 +176,19 @@ pub async fn classify_follower_bookmark(info: &Arc<dyn Store>) -> DbResult<Follo
                 Ok(FollowerBookmarkState::Fresh)
             }
         }
+    }
+}
+
+/// True when `v3`'s outstanding-receipt pointer (if any) resolves to a stored
+/// receipt that is not `Checkpointed`. A dangling or retired pointer is a
+/// corrupt durable state: admission-time resume must refuse it.
+pub async fn receipt_pointer_resolves(info: &Arc<dyn Store>, v3: &BookmarkV3) -> DbResult<bool> {
+    let Some(id) = v3.outstanding_receipt else {
+        return Ok(true);
+    };
+    match crate::meta::repl::receipt::load_outstanding_receipt(info, &id).await? {
+        None => Ok(false),
+        Some(receipt) => Ok(receipt.phase != crate::meta::repl::ReceiptPhase::Checkpointed),
     }
 }
 

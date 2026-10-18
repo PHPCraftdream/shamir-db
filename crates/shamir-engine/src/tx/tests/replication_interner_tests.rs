@@ -83,9 +83,7 @@ async fn later_put_missing_binding_is_atomic_before_first_touch() {
         let mut rx = follower.subscribe_changelog().await.unwrap();
         let event = event(&[101, 202]);
         assert_eq!(
-            apply_batch(&follower, &event, &[(101, "first_touch".into())], 0, policy)
-                .await
-                .unwrap(),
+            apply_batch(&follower, &event, &[(101, "first_touch".into())], 0, policy).await,
             ApplyOutcome::Rejected {
                 reason: ApplyRejectReason::MissingFieldBinding,
             },
@@ -129,8 +127,7 @@ async fn downstream_uses_follower_ids_and_chain_consumer_decodes() {
             0,
             ApplyPolicy::Trusted
         )
-        .await
-        .unwrap(),
+        .await,
         ApplyOutcome::Applied { local_version: 1 },
     );
     let downstream = rx.try_recv().expect("synchronous re-emission");
@@ -159,7 +156,8 @@ async fn downstream_uses_follower_ids_and_chain_consumer_decodes() {
             &[(local_id, "v".into())],
             0,
             ApplyPolicy::Trusted
-        ),
+        )
+        .await,
         ApplyOutcome::Applied { local_version: 1 },
     );
     let table = consumer.get_table("items").await.unwrap();
@@ -185,7 +183,8 @@ async fn trusted_malformed_bytes_reject_without_names_data_or_version() {
             &[(101, "untouched".into())],
             0,
             ApplyPolicy::Trusted
-        ),
+        )
+        .await,
         ApplyOutcome::Rejected {
             reason: ApplyRejectReason::UndecodablePayload,
         },
@@ -285,7 +284,8 @@ async fn wire_roundtrip_and_default_bindings_fail_closed() {
             &decoded.field_bindings,
             0,
             ApplyPolicy::Trusted
-        ),
+        )
+        .await,
         ApplyOutcome::Rejected {
             reason: ApplyRejectReason::MissingFieldBinding,
         },
@@ -312,9 +312,7 @@ async fn legacy_scalar_put_and_delete_allow_default_empty_bindings() {
         assert_eq!(put.event, source);
         assert!(put.field_bindings.is_empty());
         assert_eq!(
-            apply_batch(&follower, &put.event, &put.field_bindings, 0, policy)
-                .await
-                .unwrap(),
+            apply_batch(&follower, &put.event, &put.field_bindings, 0, policy).await,
             ApplyOutcome::Applied { local_version: 1 },
         );
         let table = follower.get_table("items").await.unwrap();
@@ -335,7 +333,8 @@ async fn legacy_scalar_put_and_delete_allow_default_empty_bindings() {
                 &delete.field_bindings,
                 put.event.commit_version,
                 policy
-            ),
+            )
+            .await,
             ApplyOutcome::Applied { local_version: 2 },
         );
         assert_eq!(table.get_bytes(id).await.unwrap(), None);

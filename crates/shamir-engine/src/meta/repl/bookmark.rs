@@ -15,7 +15,6 @@
 
 use crate::meta::recovery_marker::load_last_committed;
 use crate::meta::repl::bookmark_v3::{read_strict_record, save_bookmark_v3, BookmarkV3};
-use crate::meta::repl::fence_record::FenceRecord;
 use shamir_storage::error::{DbError, DbResult, FollowerRefusalReason};
 use shamir_storage::types::Store;
 use std::sync::Arc;

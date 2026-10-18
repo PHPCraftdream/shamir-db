@@ -699,9 +699,11 @@ async fn receipt_io_pause_retry_convergence() {
 // S5c-X PR6b-3: TERMINAL receipt corruption — a valid v3 bookmark whose
 // `outstanding_receipt` pointer references a MISSING receipt. The receipt
 // pipeline fail-stops (`RepoRequiresReopen` family), the supervisor marks
-// the subscription terminal, and a resume re-trips immediately: a dangling
-// pointer can never make progress. (Behavioral resume refusal — the record
-// itself decodes fine, so this is not the typed `FollowerStateRefused`.)
+// the subscription terminal, and a resume is REFUSED AT ADMISSION TIME:
+// the v3 record decodes fine (so this is not the typed
+// `FollowerStateRefused`), but `receipt_pointer_resolves` is false, so the
+// supervisor marks the subscription terminal and returns before any loop is
+// spawned — a dangling pointer can never make progress.
 #[tokio::test]
 async fn terminal_receipt_corruption_stops_supervisor_and_refuses_resume() {
     let follower = build_db().await;
@@ -749,24 +751,36 @@ async fn terminal_receipt_corruption_stops_supervisor_and_refuses_resume() {
         "no events applied past the corrupt pointer"
     );
 
-    // Prune the dead loop's registry entry, then resume administratively;
-    // the next reconcile restarts the loop, which re-trips the SAME
-    // corruption immediately — terminal again, still zero progress.
+    // Admission-time refusal: after pruning the dead loop's registry entry,
+    // an administrative resume + reconcile must NOT start a loop at all —
+    // the supervisor resolves the destination's v3 record, sees the dangling
+    // receipt pointer, marks `reopen_required` and returns BEFORE any loop
+    // spawns. Zero pulls, zero progress.
     sup.reconcile().await;
     assert!(!sup.is_running("sub_a"));
+    let pulls_before_resume = source.pulls.load(Ordering::Acquire);
     alter(
         &follower,
         alter_subscription("sub_a").resume().build().unwrap(),
     )
     .await;
     sup.reconcile().await;
-    wait_for_sub_state(&follower, "reopen_required").await;
+    assert!(
+        !sup.is_running("sub_a"),
+        "the resume was refused at admission: no loop was ever started"
+    );
+    assert_eq!(
+        sub_state(&follower, "sub_a").await.as_deref(),
+        Some("reopen_required"),
+        "the subscription stays terminal reopen_required"
+    );
+    assert_eq!(
+        source.pulls.load(Ordering::Acquire),
+        pulls_before_resume,
+        "the refused resume must not perform any pull"
+    );
     assert_eq!(bookmark(&follower).await, 0);
     assert_eq!(items_row_counter(&follower).await, 0);
-    assert!(
-        source.pulls.load(Ordering::Acquire) >= 2,
-        "the resumed loop pulled again and re-tripped at the pipeline"
-    );
     sup.stop_all().await;
 }
 

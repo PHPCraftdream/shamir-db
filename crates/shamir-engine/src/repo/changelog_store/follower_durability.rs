@@ -12,14 +12,13 @@ impl RepoInstance {
     }
 
     /// Backend capability for the S5c-X PR6b-2 receipt apply protocol.
-    #[allow(dead_code)] // wired by the PR6b-2 receipt-apply chunk (W3+)
     pub(crate) fn storage_supports_atomic_batch(&self) -> bool {
         self.repo.supports_atomic_batch()
     }
 
-    /// Raw named-store access for tests and the receipt pipeline
-    /// (`pub(super)` struct field, exposed deliberately).
-    #[allow(dead_code)] // wired by the PR6b-2 receipt-apply chunk (W3+)
+    /// Raw named-store access, test-only: every caller lives under `tests/`,
+    /// so this would be dead code in the non-test build.
+    #[cfg(test)]
     pub(crate) async fn raw_store(&self, name: &str) -> DbResult<Arc<dyn Store>> {
         self.repo.store_get(name).await
     }
@@ -28,7 +27,6 @@ impl RepoInstance {
     /// The permit is the admitted-API capability: callers must already hold
     /// a `RepoWritePermit` from this repo's write domain; there is NO second
     /// admission mechanism here.
-    #[allow(dead_code)] // wired by the PR6b-2 receipt-apply chunk (W3+)
     pub(crate) async fn begin_repo_atomic_batch(
         &self,
         permit: &RepoWritePermit,

@@ -14,9 +14,8 @@ use shamir_types::types::value::InnerValue;
 use crate::repo::{BoxRepo, RepoInstance};
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
-use crate::tx::{
-    apply_replicated_batch, ApplyOutcome, ApplyPolicy, ApplyRejectReason, ReplicatedEvent,
-};
+use crate::tx::apply_replicated::ApplyRejectReason;
+use crate::tx::{apply_replicated_batch, ApplyOutcome, ApplyPolicy, ReplicatedEvent};
 
 fn event(tables: &[&str]) -> ChangelogEvent {
     ChangelogEvent {

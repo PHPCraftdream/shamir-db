@@ -20,11 +20,14 @@ use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
 use crate::meta::recovery_marker::{load_last_committed, save_last_committed_flushed};
-use crate::meta::repl::bookmark_v3::{classify_follower_bookmark, save_bookmark_v3, BookmarkV3};
+use crate::meta::repl::bookmark_v3::{
+    classify_follower_bookmark, save_bookmark_v3, BookmarkV3, FollowerBookmarkState,
+};
 use crate::meta::MetaEnvelope;
 use crate::repo::seed_install::{SeedInstallState, SeedReceipt};
 use crate::repo::{BoxRepo, RepoInstance};
 use crate::table::TableConfig;
+use crate::tx::apply_replicated::follower_durability::receipt::resume::activation::admission_decision;
 use crate::tx::apply_replicated::follower_durability::receipt::resume::activation::admit_follower;
 use crate::tx::apply_replicated::follower_durability::receipt::resume::activation::FollowerAdmission;
 use crate::tx::{apply_replicated_batch, ApplyPolicy, ReplicatedEvent};
@@ -86,7 +89,7 @@ fn event(leader_version: u64) -> ReplicatedEvent {
                 table: "items".into(),
                 key: RecordId([1; 16]).to_bytes(),
                 op: ChangeOp::Put,
-                value: Some(InnerValue::Str("row").to_bytes().unwrap()),
+                value: Some(InnerValue::Str("row".into()).to_bytes().unwrap()),
             }],
         },
         field_bindings: Vec::new(),
@@ -148,7 +151,14 @@ async fn assert_legacy_bookmark_refusal(repo: &RepoInstance) {
             reason: FollowerRefusalReason::LegacyBookmarkFormat
         }
     ));
-    assert_eq!(repo.replication_bookmark().await.unwrap(), 0);
+    assert!(matches!(
+        repo.replication_bookmark().await.unwrap_err(),
+        DbError::FollowerStateRefused {
+            reason: FollowerRefusalReason::LegacyBookmarkFormat
+        }
+    ));
+    // get_table hits the initialized-table cache (warmed before seeding), so
+    // it does not initialize the gate's legacy refusal — the data check works.
     assert_eq!(
         repo.get_table("items")
             .await
@@ -166,7 +176,7 @@ async fn assert_legacy_bookmark_refusal(repo: &RepoInstance) {
 async fn legacy_bookmark_records_refuse_the_apply_repeatedly() {
     for bytes in legacy_bookmark_bytes() {
         let repo = repo();
-        let info = info();
+        let info = repo.tx_info_store().await.unwrap();
         repo.get_table("items").await.unwrap();
         info.set(bookmark_key(), Bytes::from(bytes.clone()))
             .await
@@ -180,7 +190,7 @@ async fn legacy_bookmark_records_refuse_the_apply_repeatedly() {
 #[tokio::test]
 async fn floor_without_bookmark_refuses_follower_apply_repeatedly() {
     let repo = repo();
-    let info = info();
+    let info = repo.tx_info_store().await.unwrap();
     repo.get_table("items").await.unwrap();
     save_last_committed_flushed(&info, 6).await.unwrap();
     for _ in 0..2 {
@@ -229,7 +239,7 @@ async fn leader_with_floor_marker_still_opens_and_preserves_floor() {
 async fn valid_v3_record_including_zero_bookmark_applies() {
     for bookmark in [0u64, 10] {
         let repo = repo();
-        let info = info();
+        let info = repo.tx_info_store().await.unwrap();
         repo.get_table("items").await.unwrap();
         save_bookmark_v3(
             &info,
@@ -257,7 +267,7 @@ async fn valid_v3_record_including_zero_bookmark_applies() {
 #[tokio::test]
 async fn v3_native_follower_applies_and_checkpoints_the_bookmark() {
     let repo = repo();
-    let info = info();
+    let info = repo.tx_info_store().await.unwrap();
     repo.get_table("items").await.unwrap();
     save_bookmark_v3(
         &info,
@@ -324,7 +334,8 @@ async fn legacy_floor_refusal_holds_across_reopen() {
     shutdown(first).await;
 
     let reopened = open_with_retry(&path, name).await;
-    let reopened_info = reopened.raw_store("__tx__").await.unwrap();
+    // The reopened store handle must stay alive for the assertion scope.
+    let _reopened_info = reopened.raw_store("__tx__").await.unwrap();
     let error = apply_replicated_batch(&reopened, &[event(1)], 0, ApplyPolicy::Trusted)
         .await
         .expect_err("the refusal must survive reopen");
@@ -407,5 +418,57 @@ async fn admit_follower_refuses_floor_without_bookmark() {
     assert!(matches!(
         classify_follower_bookmark(&info).await.unwrap(),
         crate::meta::repl::bookmark_v3::FollowerBookmarkState::FloorWithoutBookmark { floor: 3 }
+    ));
+}
+
+/// Acceptance test 8: the capability refusal precedes EVERY state-driven
+/// verdict. The false-capability backend is exercised through the pure
+/// `admission_decision` function because `BoxRepo` is a crate-internal enum
+/// that cannot be constructed around a refusing store from tests.
+#[tokio::test]
+async fn admission_decision_refuses_unsupported_backends_before_any_state() {
+    let native = BookmarkV3 {
+        fence: None,
+        bookmark: 0,
+        clean_through: None,
+        outstanding_receipt: None,
+    };
+    // Unsupported backend: refused regardless of the classified state.
+    assert!(matches!(
+        admission_decision(false, FollowerBookmarkState::Native(native.clone())).unwrap_err(),
+        DbError::AtomicBatchUnsupported(_)
+    ));
+    assert!(matches!(
+        admission_decision(false, FollowerBookmarkState::Fresh).unwrap_err(),
+        DbError::AtomicBatchUnsupported(_)
+    ));
+    assert!(matches!(
+        admission_decision(
+            false,
+            FollowerBookmarkState::FloorWithoutBookmark { floor: 7 }
+        )
+        .unwrap_err(),
+        DbError::FollowerStateRefused {
+            reason: FollowerRefusalReason::LegacyFollowerState
+        }
+    ));
+    assert!(matches!(
+        admission_decision(
+            true,
+            FollowerBookmarkState::FloorWithoutBookmark { floor: 7 }
+        )
+        .unwrap_err(),
+        DbError::FollowerStateRefused {
+            reason: FollowerRefusalReason::LegacyFollowerState
+        }
+    ));
+    // Supported backend: state-driven verdicts.
+    assert!(matches!(
+        admission_decision(true, FollowerBookmarkState::Native(native)).unwrap(),
+        FollowerAdmission::Native
+    ));
+    assert!(matches!(
+        admission_decision(true, FollowerBookmarkState::Fresh).unwrap(),
+        FollowerAdmission::Fresh
     ));
 }

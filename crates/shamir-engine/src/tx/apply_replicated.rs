@@ -34,13 +34,9 @@
 #[path = "follower_durability/mod.rs"]
 pub mod follower_durability;
 
-use std::sync::Arc;
-
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::KvOp;
-use shamir_tx::{
-    collect_referenced_ids, remap_inner_value_bytes, ChangeOp, ChangelogEvent, MvccStore,
-};
+use shamir_tx::{collect_referenced_ids, remap_inner_value_bytes, ChangeOp, ChangelogEvent};
 use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::RecordView;
 use shamir_types::types::value::InnerValue;
@@ -48,7 +44,6 @@ use shamir_types::types::value::InnerValue;
 use self::follower_durability::receipt::apply_batch_receipt;
 use crate::repo::RepoInstance;
 use crate::table::table_manager::table_token_for;
-use crate::table::RecordCounter;
 
 /// The local outcome of applying one replicated [`ChangelogEvent`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,9 +102,6 @@ pub enum ApplyPolicy {
 
 struct PreparedTable {
     name: String,
-    token: u64,
-    mvcc: Arc<MvccStore>,
-    counter: Arc<RecordCounter>,
     ops: Vec<KvOp>,
 }
 
@@ -250,20 +242,20 @@ async fn prepare_event(
                 },
             }));
         }
+        // PR6b-3: the NoMvccStore rejection MUST stay — probe without
+        // retaining a clone of the store.
         let token = table_token_for(&table_name);
-        let Some(mvcc) = repo
+        let has_mvcc = repo
             .per_table_mvcc()
-            .read_sync(&token, |_, mvcc| Arc::clone(mvcc))
-        else {
+            .read_sync(&token, |_, _| true)
+            .unwrap_or(false);
+        if !has_mvcc {
             return Ok(Err(ApplyOutcome::Rejected {
                 reason: ApplyRejectReason::NoMvccStore,
             }));
-        };
+        }
         prepared.push(PreparedTable {
             name: table_name,
-            token,
-            mvcc,
-            counter: Arc::clone(table.counter()),
             ops,
         });
     }

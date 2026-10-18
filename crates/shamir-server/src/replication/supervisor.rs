@@ -48,6 +48,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use shamir_collections::{THasher, TMap};
+use shamir_db::engine::meta::repl::bookmark_v3::{self, FollowerBookmarkState};
 use shamir_db::query::admin::ReplStream;
 use shamir_db::query::read::{QueryResult, ReadQuery};
 use shamir_db::types::value::QueryValue;
@@ -369,11 +370,8 @@ impl SubscriptionSupervisor {
                     .tx_info_store()
                     .await
                     .map_err(|error| ReplError::Start(error.to_string()))?;
-                if let Err(e) =
-                    shamir_db::engine::meta::repl::bookmark_v3::classify_follower_bookmark(&info)
-                        .await
-                {
-                    if let shamir_db::storage::error::DbError::FollowerStateRefused { reason } = e {
+                match bookmark_v3::classify_follower_bookmark(&info).await {
+                    Err(shamir_db::storage::error::DbError::FollowerStateRefused { reason }) => {
                         let error = ReplError::FollowerStateRefused { reason };
                         self.local
                             .mark_subscription_terminal(
@@ -385,7 +383,38 @@ impl SubscriptionSupervisor {
                             .map_err(|error| ReplError::Start(error.to_string()))?;
                         return Err(error);
                     }
-                    return Err(ReplError::Start(e.to_string()));
+                    Err(e) => return Err(ReplError::Start(e.to_string())),
+                    Ok(state) => {
+                        // R2-W3: admission-time refusal of Resume for a
+                        // corrupt or retired durable receipt pointer — the v3
+                        // record decodes fine, so this is NOT the typed
+                        // refusal above, but a resume would only re-trip at
+                        // the pipeline with zero progress. Refuse BEFORE any
+                        // loop is spawned.
+                        if let FollowerBookmarkState::Native(v3) = &state {
+                            let resolves = bookmark_v3::receipt_pointer_resolves(&info, v3)
+                                .await
+                                .map_err(|error| ReplError::Start(error.to_string()))?;
+                            if !resolves {
+                                let error = ReplError::ReopenRequired {
+                                    db: db.clone(),
+                                    repo: repo.clone(),
+                                    detail:
+                                        "durable follower record references a corrupt or retired receipt pointer; reopen required"
+                                            .into(),
+                                };
+                                self.local
+                                    .mark_subscription_terminal(
+                                        &sub.name,
+                                        "reopen_required",
+                                        &error.to_string(),
+                                    )
+                                    .await
+                                    .map_err(|error| ReplError::Start(error.to_string()))?;
+                                return Err(error);
+                            }
+                        }
+                    }
                 }
             }
         }
