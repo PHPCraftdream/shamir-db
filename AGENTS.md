@@ -40,20 +40,82 @@ ships **23 crates**:
 `shamir-client`, `shamir-sdk`, `shamir-sdk-macros`, `shamir-tunables`,
 `shamir-wasm-host`, `shamir-index`, `shamir-numa`, `shamir-bench-utils`.
 
-Prefer `--workspace` flags over per-crate invocations.
+Prefer `--workspace` flags in CI and scripts. Local pre-push checks are
+scoped to the touched crates (`-p <crate>`) — see "Compile / build / test
+policy".
+
+---
+
+## 🚦 Compile / build / test policy — MANDATORY, highest priority
+
+**Compilation, builds and tests run on GitHub CI, not on this machine.**
+This rule overrides every other section of this file, every skill, every
+brief and every habit ("let me just run it once to be sure"). Where any
+other text contradicts it, this section wins. It binds the main agent,
+every sub-agent and rush executor, and every verifier child.
+
+**Banned unless the user explicitly asks for it in the current
+conversation** (a request for one run does not extend to later runs, and an
+approval from an earlier session does not carry over):
+
+* `cargo test`, `cargo nextest`, `./scripts/test.sh`, `cargo t` / `cargo tl`
+* `cargo build`, `cargo run`, `cargo bench`, `cargo doc`
+* `npm` / `tsc` / `vitest` builds and test runs, WASM builds, e2e and
+  integration harnesses, loom, any release or full-workspace build
+* any other command whose purpose is to build the project or to execute its
+  tests or benchmarks
+
+**Allowed locally before a push — only these**, scoped to the crates you
+touched (`-p <crate>`, plus their dependents when a public signature
+changed; `--workspace` only when asked):
+
+* `cargo check -p <crate> --all-targets` — type-check, runs no tests
+* `cargo clippy -p <crate> --all-targets -- -D warnings`
+* `cargo fmt -p <crate>` and `cargo fmt -p <crate> -- --check`
+* `python -I scripts/ci/check_layout.py` — the instant layout gate
+
+Never push code that fails `check`, `clippy` or `fmt`. Everything else is
+CI's job, and `./scripts/test.sh` is executed **in the PR's CI**:
+
+* Push to a branch and open a draft PR: the fast tier (fmt, layout, clippy
+  and `./scripts/test.sh` lib tests of the affected crates) runs.
+  `gh pr ready` runs the full matrix (`./scripts/test.sh` and the
+  integration run on Ubuntu/Windows/macOS), which is the merge gate;
+  `gh workflow run ci.yml --ref <branch>` forces the full tier on a draft.
+* A failing test, hang or flake is diagnosed from the CI log
+  (`gh run view <id> --log-failed`), fixed in code and re-pushed. It is not
+  reproduced locally; reading code and logs is the debugging tool. When a
+  flake needs repeated runs, the loop runs in CI (a workflow job), not here.
+* The fast tier stops at the first failing crate. Before pushing, read every
+  changed file for the whole class of error (module paths after a move,
+  imports, privacy, `cfg(test)` gating, unused items) instead of letting CI
+  reveal them one at a time.
+
+**Delegated work.** Every brief for a sub-agent, rush executor or verifier
+child carries this policy verbatim, including the allowed list. A child that
+believes it needs a build or test run says so in its final message; the
+orchestrator decides whether to ask the user.
+
+Any text that mentions `./scripts/test.sh`, `cargo t` / `cargo tl` or benches
+describes HOW they are run — in CI, or locally only on the user's
+explicit request. They never grant permission to run them.
 
 ---
 
 ## 🧹 Code quality (MANDATORY)
 
-**Pre-commit gate.** Before committing each task (feature, fix, test,
-refactor) all three checks below must pass. If any fails — do not commit.
+**Pre-push gate.** Before pushing each task (feature, fix, test, refactor)
+the local checks below must pass, scoped to the touched crates (see
+"Compile / build / test policy"). If any fails — do not push.
 
 ```
-cargo fmt --all -- --check                            # formatting drift
-cargo clippy --workspace --all-targets -- -D warnings # lint regressions
-./scripts/test.sh                                     # behavioural tests (cargo tl)
+cargo fmt -p <crate> -- --check                       # formatting drift
+cargo clippy -p <crate> --all-targets -- -D warnings  # lint regressions (type-checks everything)
+python -I scripts/ci/check_layout.py                  # layout limits
 ```
+
+Behavioural tests are not part of the local gate: the PR's CI runs
+`./scripts/test.sh` (fast tier on a draft PR, full matrix at `gh pr ready`).
 
 If `fmt --check` fails, do **not** run `cargo fmt --all` — that
 reformats the entire repo and pollutes a feature diff. Run
@@ -103,6 +165,10 @@ serialisation for unique-index validation).
    bug.
 2. **🟢 Green** — minimum code to make it pass.
 3. **🔵 Refactor** — keep the suite green while you tidy.
+
+Red and Green are observed in the PR's CI (the test is pushed together with
+the fix); do not run the suite locally to watch them — see "Compile / build
+/ test policy".
 
 ---
 
