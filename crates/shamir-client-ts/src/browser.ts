@@ -5,7 +5,7 @@
  * `connect(opts)` is the public factory that browser/bundler consumers call.
  */
 
-import { ShamirClient } from './core/client.js';
+import { ShamirClient } from './core/client/client.js';
 import { BrowserPlatform } from './platform/browser.js';
 import type { ConnectOptions } from './core/types/index.js';
 
@@ -39,9 +39,9 @@ export {
   isRetryableCode,
   isVersionConflict,
   RETRYABLE_ERROR_CODES,
-} from './core/errors.js';
-export type { TxOpened, ScramUserCreated } from './core/client.js';
-export type { Db, Tx } from './core/db.js';
+} from './core/support/errors.js';
+export type { TxOpened, ScramUserCreated } from './core/client/client.js';
+export type { Db, Tx } from './core/client/db.js';
 
 // Builders: per-domain namespace objects (filter / select / write / ddl /
 // admin) + Query / Batch / call —

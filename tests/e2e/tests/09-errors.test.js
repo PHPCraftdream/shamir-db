@@ -10,7 +10,7 @@
  * `Result<T, Error<Status>>`), so callers of the NATIVE binding still recover
  * the code from the message tag. The TS ws-client (the primary SDK) DOES expose
  * a fully-typed `ShamirDbError { code, retryable }` (see
- * `shamir-client-ts/src/core/errors.ts`, covered by
+ * `shamir-client-ts/src/core/support/errors.ts`, covered by
  * `src/core/__tests__/client.test.ts`). This e2e therefore parses the code out
  * of the message and classifies it against the SAME shared retryable table the
  * TS SDK uses, proving the code round-trips end-to-end from the server.

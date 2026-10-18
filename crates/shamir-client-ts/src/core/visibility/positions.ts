@@ -1,4 +1,4 @@
-import type { TransactionInfo } from '../types/batch.js';
+import type { TransactionInfo } from '../types/write/batch.js';
 import type { VisibilityState, VisibilityWait } from './types.js';
 
 export function position(value: unknown): bigint {

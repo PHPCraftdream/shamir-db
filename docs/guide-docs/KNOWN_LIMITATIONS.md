@@ -493,7 +493,7 @@ artifact).
     `create_sorted_index` op — the default 35 s client timeout will abort the
     request long before a 100k-row build completes. There is NO server-side
     per-DDL timeout, so the only timeout that can fire is the client's. See
-    the JSDoc on `createIndex` in `crates/shamir-client-ts/src/core/builders/ddl.ts`.
+    the JSDoc on `createIndex` in `crates/shamir-client-ts/src/core/builders/ddl/`.
   - **Progress visibility + post-crash recovery.** The backfill now emits
     periodic `log::info!` progress lines (rows processed so far, elapsed time)
     so an operator watching logs can confirm the DDL is progressing, not hung.
@@ -1154,7 +1154,7 @@ artifact).
   correction removes).
   **SDK surface (F-22, #815, closed):** `corrupt_records` is now typed on
   the TS side too — `CorruptRecordRef` / `QueryResult.corrupt_records?` in
-  `crates/shamir-client-ts/src/core/types/batch.ts`. Also fixed as part of
+  `crates/shamir-client-ts/src/core/types/write/batch.ts`. Also fixed as part of
   F-22: `CorruptRecordRef.id` now serializes as a base58 string on the
   wire (matching every other `RecordId` on the wire, e.g.
   `InsertedRecord`'s `_id`), not raw msgpack bytes — an F-10-era oversight.
@@ -1166,7 +1166,7 @@ artifact).
   is accepted at every layer of the contract — wire DTO
   (`crates/shamir-query-types/src/read/select_expr.rs`), parser
   (`crates/shamir-engine/src/query/read/parser.rs`), and the public TS type
-  (`crates/shamir-client-ts/src/core/types/query.ts`) — but no evaluator
+  (`crates/shamir-client-ts/src/core/types/read/query.ts`) — but no evaluator
   exists yet. Before F-26, `SelectProjection::new`
   (`crates/shamir-engine/src/query/read/select_projection.rs`) silently
   dropped the item from the projected output via a bare `_ => {}` catch-all

@@ -5,7 +5,7 @@
  * PLATFORM-AGNOSTIC.
  */
 
-import type { TransactionInfo } from '../types/batch.js';
+import type { TransactionInfo } from '../types/write/batch.js';
 import type { VisibilityState } from '../visibility/types.js';
 
 /** One write alias's implicit commit receipt. */

@@ -335,7 +335,7 @@ impl ShamirClient {
 // the buffer is a msgpack-encoded `DbResponse::Error { kind: "error", code,
 // message }`. The JS wrapper in `index.js` decodes every response buffer and,
 // if it detects the `kind: "error"` marker, throws a typed `ShamirDbError`
-// (mirrors the TS SDK's `shamir-client-ts/src/core/errors.ts`) with `.code`
+// (mirrors the TS SDK's `shamir-client-ts/src/core/support/errors.ts`) with `.code`
 // and `.retryable` properties.
 //
 // Infrastructure errors (connection closed, TLS, transport, timeout, …) stay

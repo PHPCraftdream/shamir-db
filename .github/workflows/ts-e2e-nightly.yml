@@ -11,7 +11,7 @@ name: ts-e2e-nightly
 # own workflow:
 #
 #  - `ts-e2e`   : the pure-TypeScript client (`crates/shamir-client-ts`,
-#                 `src/__tests__/e2e-*.test.ts`, ~25 suites). Drives a real
+#                 `src/__tests__/**/e2e-*.test.ts`, ~25 suites). Drives a real
 #                 `shamir-server` over TCP/WS using the pure-TS client — NO
 #                 native binding involved. In per-PR `ci.yml`'s `ts-unit`
 #                 job these suites self-skip (no server binary present);

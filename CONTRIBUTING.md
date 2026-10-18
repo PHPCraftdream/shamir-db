@@ -90,7 +90,7 @@ whole point.
   `clippy --all-targets` *compiles* benches (catches bitrot) but never runs
   them. Run benches manually: `cargo bench`.
 - The Node.js napi e2e suite under `tests/e2e/` and the TS client e2e suite
-  (`crates/shamir-client-ts/src/__tests__/e2e-*.test.ts`) are not wired into
+  (`crates/shamir-client-ts/src/__tests__/**/e2e-*.test.ts`) are not wired into
   per-PR CI (both need a release `shamir-server` build; the napi one also
   needs the MSVC-only `shamir-client-node` binding). They run on the
   scheduled nightly workflow `.github/workflows/ts-e2e-nightly.yml` (cron +

@@ -1,5 +1,5 @@
-import type { TransactionInfo } from '../types/batch.js';
-import { CURRENT_QUERY_LANG_VERSION } from '../scram.js';
+import type { TransactionInfo } from '../types/write/batch.js';
+import { CURRENT_QUERY_LANG_VERSION } from '../protocol/scram.js';
 import { normalizeWait, validateTransactionVisibility } from './positions.js';
 import type { VisibilityWait } from './types.js';
 

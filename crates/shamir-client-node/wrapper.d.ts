@@ -20,7 +20,7 @@ export declare function isRetryableCode(code: string): boolean;
  * classification. Thrown for every `DbResponse::Error` the server returns
  * from `execute`, `repl`, or `createScramUser`.
  *
- * Mirrors the TS SDK's `ShamirDbError` (`shamir-client-ts/src/core/errors.ts`).
+ * Mirrors the TS SDK's `ShamirDbError` (`shamir-client-ts/src/core/support/errors.ts`).
  */
 export declare class ShamirDbError extends Error {
   /** Server error code (e.g. "timeout", "validation", "tx_conflict"). */

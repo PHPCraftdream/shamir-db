@@ -1,4 +1,4 @@
-import { CURRENT_QUERY_LANG_VERSION } from '../scram.js';
+import { CURRENT_QUERY_LANG_VERSION } from '../protocol/scram.js';
 import { normalizeVisibility, normalizeWait, position } from './positions.js';
 import type { VisibilityState, VisibilityWait } from './types.js';
 
