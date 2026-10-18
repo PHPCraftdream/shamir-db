@@ -97,7 +97,7 @@ file crates/shamir-engine/src/query/filter/tests/eval_tests/collection_tests.rs 
 file crates/shamir-engine/src/query/read/aggregate.rs 1779
 file crates/shamir-engine/src/query/read/tests/exec_tests.rs 1222
 file crates/shamir-engine/src/query/read/tests/qv_postprocess_tests.rs 1354
-file crates/shamir-engine/src/repo/repo_instance.rs 2022
+file crates/shamir-engine/src/repo/repo_instance.rs 1967
 file crates/shamir-engine/src/table/read_exec.rs 3092
 file crates/shamir-engine/src/table/table_manager.rs 1536
 file crates/shamir-engine/src/table/table_manager_tx_ops.rs 1552
