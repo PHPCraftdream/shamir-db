@@ -25,7 +25,7 @@
 //! Loops are bounded via `with_max_iterations` (no infinite sleep).
 
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -504,20 +504,23 @@ async fn reopen_required_is_visible_and_resume_refused() {
 // the receipt pipeline retries transient `DbError::Storage` failures).
 // ---------------------------------------------------------------------------
 
-/// A wrapped MVCC history store whose FIRST `iter_range_stream` call yields
-/// EXACTLY ONE transient `DbError::Storage` batch, then delegates — the same
-/// store-swap technique the retired fixture used, re-armed at the seam the
-/// receipt pipeline actually exercises: the cold pre-state read of
-/// `compute_counters` (`get_current_many` → `get_current_bytes` cold path →
-/// `seek_latest_published`'s `iter_range_stream` range scan over the swapped
-/// history; an empty history resolves via the scan alone, so a point `get`
+/// A wrapped MVCC history store whose FIRST THREE `iter_range_stream` calls
+/// yield transient `DbError::Storage` batches, then delegate — the same
+/// store-swap technique the retired fixture used, with a budget large
+/// enough to EXHAUST the apply loop's inline retry (one injected error is
+/// retried inside the same apply call, so it never requires a re-pull),
+/// re-armed at the seam the receipt pipeline actually exercises: the cold
+/// pre-state read of `compute_counters` (`get_current_many` →
+/// `get_current_bytes` cold path → `seek_latest_published`'s
+/// `iter_range_stream` range scan over the swapped history; an empty
+/// history resolves via the scan alone, so a point `get`
 /// injection never fires).
 struct TransientReadHistory {
     inner: Arc<dyn Store>,
-    /// One-shot arm: the next `iter_range_stream` fails once, then the
-    /// wrapper is transparent.
-    armed: AtomicBool,
-    /// Number of INJECTED failures (asserted == 1 after convergence).
+    /// Exhaustion budget: the first three `iter_range_stream` calls fail,
+    /// then the wrapper is transparent. `checked_sub` prevents wrap at 0.
+    remaining: AtomicUsize,
+    /// Number of INJECTED failures (asserted == 3 after convergence).
     failures: AtomicUsize,
 }
 
@@ -553,15 +556,20 @@ impl Store for TransientReadHistory {
         end: Option<Bytes>,
         size: usize,
     ) -> HistoryStream {
-        if !self.armed.swap(false, Ordering::AcqRel) {
-            return self.inner.iter_range_stream(start, end, size);
+        match self
+            .remaining
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+        {
+            Ok(_) => {
+                self.failures.fetch_add(1, Ordering::AcqRel);
+                Box::pin(stream::once(async {
+                    Err(DbError::Storage(
+                        "injected transient receipt-path read failure".into(),
+                    ))
+                }))
+            }
+            Err(_) => self.inner.iter_range_stream(start, end, size),
         }
-        self.failures.fetch_add(1, Ordering::AcqRel);
-        Box::pin(stream::once(async {
-            Err(DbError::Storage(
-                "injected transient receipt-path read failure".into(),
-            ))
-        }))
     }
 
     fn iter_range_stream_reverse(
@@ -651,7 +659,7 @@ async fn receipt_io_pause_retry_convergence() {
     create_profile_and_subscription(&follower).await;
     let history = Arc::new(TransientReadHistory {
         inner: Arc::new(InMemoryStore::new()),
-        armed: AtomicBool::new(true),
+        remaining: AtomicUsize::new(3),
         failures: AtomicUsize::new(0),
     });
     swap_items_mvcc_history(&follower, history.clone()).await;
@@ -668,7 +676,18 @@ async fn receipt_io_pause_retry_convergence() {
         .with_max_iterations(50);
     sup.reconcile().await;
 
-    // The transient failure is retried away and the batch CONVERGES.
+    // Trace: attempts 1-3 of `try_chunk` each fail in `compute_counters`
+    // (stage.rs) — attempt 1 AFTER `commit_prepared` committed the durable
+    // Prepared receipt, so the park in the apply loop places the paused
+    // reservation and the re-pull takes the RESUME path; attempt >= 3 parks
+    // the guards and surfaces `DbError::Storage`, follower_loop backs off
+    // and re-pulls, and pull #2 resumes the receipt (4th scan call — budget
+    // exhausted, delegates) and converges.
+    // The transient failures are EXHAUSTED inline and the batch CONVERGES.
+    // COUNTERFACTUAL: with the budget at 1 (the old one-shot shape) the
+    // single failure is retried inline inside the same apply call and a
+    // passing `pulls >= 2` proves nothing about pause/re-pull — the
+    // exhaustion (3) is what forces the loop-level pause.
     wait_for_bookmark(&follower, leader_version).await;
     assert_eq!(
         bookmark(&follower).await,
@@ -677,12 +696,12 @@ async fn receipt_io_pause_retry_convergence() {
     );
     assert_eq!(
         history.failures.load(Ordering::Acquire),
-        1,
-        "the injected failure happened exactly once"
+        3,
+        "the inline retry budget was exhausted, not merely hit once"
     );
     assert!(
         source.pulls.load(Ordering::Acquire) >= 2,
-        "the pipeline re-pulled after the transient failure"
+        "the pipeline re-pulled after the surfaced (post-exhaustion) error"
     );
     // One local version per event — no replacement allocations.
     let gate = follower

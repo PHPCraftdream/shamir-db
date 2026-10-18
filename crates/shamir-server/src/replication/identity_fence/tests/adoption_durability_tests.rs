@@ -562,12 +562,21 @@ async fn cancelled_first_contact_recovers_visibility_for_zero_event_follower() {
 
     // Poll to the known post-set flush barrier, then drop the borrowed
     // contact future. No spawned task or timing-dependent cancellation.
-    let contact = checks::fence_pull_identity(&info, &pull, None, Some(&repo_handle));
-    tokio::pin!(contact);
-    tokio::select! {
-        biased;
-        _ = probe.reached.notified() => {}
-        result = &mut contact => panic!("contact escaped barrier: {result:?}"),
+    //
+    // The block ENDS before the recovery section: the future — and the
+    // hidden block-scoped local `pin!` stores it in — drops at the closing
+    // brace, so `prepare_existing` and the second contact below run AFTER
+    // cancellation, not beside a live operation. The `Notify` arrival below
+    // proves the drop happened at the parked flush seam (the future was
+    // suspended inside `AdoptionStore::flush` when it was dropped).
+    {
+        let contact = checks::fence_pull_identity(&info, &pull, None, Some(&repo_handle));
+        tokio::pin!(contact);
+        tokio::select! {
+            biased;
+            _ = probe.reached.notified() => {}
+            result = &mut contact => panic!("contact escaped barrier: {result:?}"),
+        }
     }
 
     // The cancelled flush left the v3 readable (through a fresh real-store

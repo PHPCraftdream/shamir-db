@@ -510,11 +510,17 @@ async fn try_chunk(
                 .version
                 .ok_or_else(|| DbError::Storage("prepared event lost its local version".into()))?;
             if let Some(v3) = load_bookmark_v3(info).await? {
+                // Completion evidence is the checkpoint Uncertain read-back
+                // (checkpoint.rs:328-333): durable bookmark advanced AND
+                // receipt retired — written in ONE atomic batch
+                // (checkpoint.rs:263-280), so observing both means the chunk
+                // is committed and published. `clean_through` (J) is
+                // gap-capped (checkpoint.rs:233-248) and does NOT evidence
+                // completion: with an open gap below this chunk, J stays at
+                // the gap while the bookmark + retired receipt + watermarks
+                // prove the chunk is done.
                 if v3.outstanding_receipt.is_none()
                     && v3.bookmark >= leader_end
-                    && v3
-                        .clean_through
-                        .is_some_and(|clean| clean >= chunk_local_end)
                     && gate.last_committed() >= chunk_local_end
                     && gate.durable_watermark() >= chunk_local_end
                 {

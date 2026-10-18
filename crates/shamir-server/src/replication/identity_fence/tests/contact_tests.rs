@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use shamir_db::engine::meta::repl::bookmark_v3::{
-    decode_bookmark_v3, save_bookmark_v3, BookmarkV3,
+    decode_bookmark_v3, load_bookmark_v3, save_bookmark_v3, BookmarkV3,
 };
 use shamir_db::engine::meta::repo_identity::RepoIdentity;
 use shamir_db::engine::meta::{MetaEnvelope, MetaKey};
@@ -242,7 +242,18 @@ async fn bookmark_codec_round_trips_boundaries_and_rejects_trailing_bytes() {
     let info = repo(&follower).tx_info_store().await.unwrap();
     let bookmark_key =
         || RecordKey::from_slice(MetaKey::ReplicationBookmark.as_record_id().as_bytes());
-    for bookmark in [0, u64::MAX] {
+    // Round-trip the v3 bookmark CODEC through `save_bookmark_v3` — the v3
+    // writer the receipt advance path is built on — because the
+    // `recorded::save` fresh-baseline path on an ABSENT key forces the flat
+    // AND fence bookmark to ZERO (bookmark.rs fresh-baseline branch), so it
+    // cannot store an arbitrary bookmark. COUNTERFACTUAL: reverting to the
+    // old "save the supplied record on an absent key and expect it back"
+    // oracle turns the u64::MAX iterations red, because that writer forces
+    // bookmark 0 and the equality against the supplied value is
+    // deterministically false. The fence bookmark is synced to the flat
+    // bookmark exactly like the receipt checkpoint does (the v3 decode
+    // invariant `fence.bookmark == record.bookmark`).
+    for bookmark in [0, 1, u64::MAX - 1, u64::MAX] {
         for observed_identity in [
             None,
             Some(RepoIdentity {
@@ -254,14 +265,50 @@ async fn bookmark_codec_round_trips_boundaries_and_rejects_trailing_bytes() {
             // (the strict writer refuses over foreign bytes and preserves an
             // existing record's bookmark).
             info.remove(bookmark_key()).await.unwrap();
-            let record = recorded::FenceRecord {
-                bookmark,
-                lineage_id: [17; 16],
-                history_epoch: u64::MAX,
-                observed_identity,
-            };
-            recorded::save(&info, record).await.unwrap();
-            assert_eq!(recorded::load(&info).await.unwrap(), Some(record));
+            // Establish the fence with the fresh-baseline writer (it writes
+            // bookmark 0 on an absent key, preserving the identity fields).
+            recorded::save(
+                &info,
+                recorded::FenceRecord {
+                    bookmark: 0,
+                    lineage_id: [17; 16],
+                    history_epoch: u64::MAX,
+                    observed_identity,
+                },
+            )
+            .await
+            .unwrap();
+            let fence_from_baseline = recorded::load(&info)
+                .await
+                .unwrap()
+                .expect("the fresh baseline must be readable");
+            // Write the boundary through the v3 writer, syncing the fence's
+            // bookmark to the record's bookmark.
+            save_bookmark_v3(
+                &info,
+                &BookmarkV3 {
+                    fence: Some(recorded::FenceRecord {
+                        bookmark,
+                        ..fence_from_baseline
+                    }),
+                    bookmark,
+                    clean_through: None,
+                    outstanding_receipt: None,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                recorded::load(&info).await.unwrap(),
+                Some(recorded::FenceRecord {
+                    bookmark,
+                    ..fence_from_baseline
+                })
+            );
+            assert_eq!(
+                load_bookmark_v3(&info).await.unwrap().unwrap().bookmark,
+                bookmark
+            );
             assert_eq!(
                 repo(&follower).replication_bookmark().await.unwrap(),
                 bookmark
@@ -274,7 +321,18 @@ async fn bookmark_codec_round_trips_boundaries_and_rejects_trailing_bytes() {
             bytes.push(0);
             info.set(bookmark_key(), Bytes::from(bytes)).await.unwrap();
             assert!(recorded::load(&info).await.is_err());
-            assert!(recorded::save(&info, record).await.is_err());
+            // `save_bookmark_v3` blind-writes (encode + set), so the
+            // refusal probe goes through the strict aware writer, which
+            // reads before writing and refuses over foreign bytes.
+            assert!(recorded::save(
+                &info,
+                recorded::FenceRecord {
+                    bookmark,
+                    ..fence_from_baseline
+                }
+            )
+            .await
+            .is_err());
         }
     }
     info.remove(bookmark_key()).await.unwrap();
