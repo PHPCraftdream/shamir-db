@@ -5,19 +5,21 @@
 // dependency is always compiled in non-test mode from the dependent's
 // perspective). The hook is a zero-cost `None` on every real path (see
 // `IndexManager::create_index_backfill_hook`'s field doc).
-pub mod backfill_pause_hook;
-pub mod ddl_op_log;
-pub mod index_definition;
-pub mod index_info;
-pub mod index_info_item;
-pub mod index_keys;
 pub mod index_manager;
 pub mod index_manager_unique;
-pub mod index_record_key;
-pub mod index_status;
-pub mod sorted_index_definition;
+pub mod infra;
+pub mod meta;
 pub mod sorted_index_manager;
-pub mod write_barrier_flags;
-
 #[cfg(test)]
 pub mod tests;
+
+pub use infra::backfill_pause_hook;
+pub use infra::ddl_op_log;
+pub use infra::index_keys;
+pub use infra::index_record_key;
+pub use infra::write_barrier_flags;
+pub use meta::index_definition;
+pub use meta::index_info;
+pub use meta::index_info_item;
+pub use meta::index_status;
+pub use meta::sorted_index_definition;
