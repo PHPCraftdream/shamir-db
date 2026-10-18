@@ -1,0 +1,7 @@
+//! Test-module manifest for the base_index `info` tests.
+
+pub mod index_definition_tests;
+pub mod index_info_item_tests;
+pub mod index_info_tests;
+pub mod index_record_key_tests;
+pub mod index_status_tests;
