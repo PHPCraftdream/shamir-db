@@ -1,4 +1,4 @@
-import { ShamirDbError } from '../errors.js';
+import { ShamirDbError } from '../support/errors.js';
 import { position } from './positions.js';
 
 const codes = new Set(['as_of_visibility_timeout', 'as_of_future_version',

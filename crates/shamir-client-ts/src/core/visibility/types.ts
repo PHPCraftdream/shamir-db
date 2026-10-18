@@ -1,4 +1,4 @@
-import type { IsolationLevel, TransactionInfo } from '../types/batch.js';
+import type { IsolationLevel, TransactionInfo } from '../types/write/batch.js';
 
 export type VisibilityWait =
   | { mode: 'strict' }

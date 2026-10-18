@@ -1,6 +1,6 @@
-import type { ShamirClient } from '../client.js';
-import { Tx } from '../db.js';
-import { ShamirDbError } from '../errors.js';
+import type { ShamirClient } from '../client/client.js';
+import { Tx } from '../client/db.js';
+import { ShamirDbError } from '../support/errors.js';
 import { validateTransactionVisibility } from './positions.js';
 import type { TransactionOptions, TransactionResult } from './types.js';
 

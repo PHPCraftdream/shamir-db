@@ -11,8 +11,8 @@
  * PLATFORM-AGNOSTIC.
  */
 
-import type { FilterValue } from '../types/filter.js';
-import { queryRef } from './filter.js';
+import type { FilterValue } from '../types/read/filter.js';
+import { queryRef } from './read/filter.js';
 
 /** Normalise a field spec to the dotted-path string used after `[]`. */
 function dotted(field: string | string[]): string {

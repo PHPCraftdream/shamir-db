@@ -1,4 +1,4 @@
-import type { DurabilityOverride } from '../../../types/ddl.js';
+import type { DurabilityOverride } from '../../../types/schema/ddl.js';
 
 export type WalRetentionBudget = number | string | bigint;
 
