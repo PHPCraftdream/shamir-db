@@ -16,6 +16,8 @@
 //! let qv = Query::from("users").build().to_query_value().unwrap();
 //! ```
 
+pub mod response;
+
 use serde::Serialize;
 use shamir_types::types::value::QueryValue;
 
