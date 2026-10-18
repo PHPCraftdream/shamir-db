@@ -1,31 +1,29 @@
 # Contributing to ShamirDB
 
-## TL;DR — run this before every push (it mirrors the CI gate)
+## TL;DR — run this before every push
 
 ```bash
-cargo fmt --all -- --check                              # 1. formatting
-cargo clippy --workspace --all-targets -- -D warnings   # 2. lints (deny warnings)
-./scripts/test.sh                                       # 3. unit tests (cargo tl)
-./scripts/test.sh --full -E 'kind(test)'                # 4. integration tests (cargo t -E 'kind(test)')
+cargo fmt -p <crate> -- --check                         # 1. formatting
+cargo clippy -p <crate> --all-targets -- -D warnings    # 2. lints (deny warnings; type-checks everything)
+python -I scripts/ci/check_layout.py                    # 3. layout limits
 ```
 
-All four must be **green**. Raw `cargo test` is blocked outright by a
-perimeter guard in `.cargo/config.toml` — the wrapper above (backed by
-`cargo-nextest`) is the only way past it; see `CLAUDE.md`'s "Centralised
-test entry point" section.
+All three must be **green**. **Tests, builds and benches run in the PR's
+GitHub CI, not locally**: push to a branch, open a draft PR (fast tier runs
+`./scripts/test.sh` for the affected crates) and run `gh pr ready` for the
+full matrix (see `CLAUDE.md`'s "Compile / build / test policy"). Raw
+`cargo test` is blocked by a perimeter guard in `.cargo/config.toml`;
+`./scripts/test.sh` (the `cargo-nextest` wrapper) is what CI runs.
 
-These four local commands correspond to 4 of the 5 jobs in
-`.github/workflows/ci.yml` (`fmt`, `clippy`, `test`, `integration` — each of
-those four also runs as an OS matrix across Ubuntu/Windows/macOS in CI, and
-CI's actual `test`/`integration` steps invoke `./scripts/test.sh --locked`
-and `./scripts/test.sh --full --locked -E 'kind(test)'`). There's a fifth
-job, `cooldown` (a supply-chain dependency-freshness check), which isn't
-part of this local gate. If the four above pass locally, the matching CI
-jobs will pass too. No surprises.
+CI's jobs are `fmt`, `clippy`, `test`, `integration` (each an OS matrix
+across Ubuntu/Windows/macOS), `cooldown` (a supply-chain dependency-freshness
+check) and the layout check; CI's `test`/`integration` steps invoke
+`./scripts/test.sh --locked` and `./scripts/test.sh --full --locked -E
+'kind(test)'`.
 
 ---
 
-## Why green-locally now means green-in-CI
+## Why the pinned toolchain keeps local checks equal to CI
 
 The toolchain is **pinned** in [`rust-toolchain.toml`](rust-toolchain.toml)
 (currently `1.93.0`), and CI installs the *same* version
@@ -57,7 +55,8 @@ rustup component add clippy rustfmt
 - **Style-only sweeps** (`cargo fmt --all`, bulk clippy auto-fix) live in their
   own `style:`/`chore:` commit, and the SHA goes into
   `.git-blame-ignore-revs` so `git blame` skips it.
-- Prefer `--workspace` flags over per-crate invocations for the final gate.
+- Local checks are scoped to the touched crates (`-p <crate>`); CI runs the
+  `--workspace` gates.
 - Tests follow the per-module `tests/` layout (see `CLAUDE.md` §"Test
   organisation"); JSON literals in tests are multi-line and indented.
 
@@ -69,8 +68,9 @@ Pinning trades currency for stability — bump deliberately, not by accident:
 
 1. Edit [`rust-toolchain.toml`](rust-toolchain.toml): raise `channel` to the
    new version. `rustup` installs it automatically on the next `cargo` call.
-2. Run the full gate (the four commands above). A newer clippy will likely
-   surface new lints — fix them in a dedicated `chore(clippy): …` commit.
+2. Run the lint gate (the commands above, with `--workspace`). A newer
+   clippy will likely surface new lints — fix them in a dedicated
+   `chore(clippy): …` commit.
 3. Bump the matching `dtolnay/rust-toolchain@<version>` refs in
    **all five jobs** (`fmt`, `clippy`, `test`, `integration`, `cooldown`) of
    `.github/workflows/ci.yml` to the same version.
@@ -90,7 +90,7 @@ whole point.
   `clippy --all-targets` *compiles* benches (catches bitrot) but never runs
   them. Run benches manually: `cargo bench`.
 - The Node.js napi e2e suite under `tests/e2e/` and the TS client e2e suite
-  (`crates/shamir-client-ts/src/__tests__/e2e-*.test.ts`) are not wired into
+  (`crates/shamir-client-ts/src/__tests__/**/e2e-*.test.ts`) are not wired into
   per-PR CI (both need a release `shamir-server` build; the napi one also
   needs the MSVC-only `shamir-client-node` binding). They run on the
   scheduled nightly workflow `.github/workflows/ts-e2e-nightly.yml` (cron +

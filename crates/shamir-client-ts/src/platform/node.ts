@@ -18,8 +18,8 @@ import { createHash, createHmac, timingSafeEqual, randomBytes } from 'node:crypt
 import { createConnection, type Socket as NetSocket } from 'node:net';
 import WebSocket from 'ws';
 import argon2 from 'argon2-browser';
-import type { Platform, Socket, Argon2Params } from '../core/platform.js';
-import { ARGON2_VERSION_13 } from '../core/scram.js';
+import type { Platform, Socket, Argon2Params } from '../core/support/platform.js';
+import { ARGON2_VERSION_13 } from '../core/protocol/scram.js';
 
 class NodeSocket implements Socket {
   private readonly ws: WebSocket;

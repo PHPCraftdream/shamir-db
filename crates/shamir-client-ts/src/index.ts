@@ -5,7 +5,7 @@
  * `connect(opts)` is the public factory that Node consumers call.
  */
 
-import { ShamirClient } from './core/client.js';
+import { ShamirClient } from './core/client/client.js';
 import { NodePlatform } from './platform/node.js';
 import type {
   ConnectOptions,
@@ -66,19 +66,19 @@ export {
   isRetryableCode,
   isVersionConflict,
   RETRYABLE_ERROR_CODES,
-} from './core/errors.js';
+} from './core/support/errors.js';
 export type {
   TxOpened,
   ScramUserCreated,
   SuperuserSet,
   ReplicatorSet,
-} from './core/client.js';
-export { SubscriptionRouter } from './core/subscription-router.js';
-export type { SubscriptionEvent } from './core/subscription-router.js';
-export { SubscriptionHandle } from './core/subscription-handle.js';
-export { CursorIterator } from './core/cursor-iterator.js';
+} from './core/client/client.js';
+export { SubscriptionRouter } from './core/client/subscription-router.js';
+export type { SubscriptionEvent } from './core/client/subscription-router.js';
+export { SubscriptionHandle } from './core/client/subscription-handle.js';
+export { CursorIterator } from './core/client/cursor-iterator.js';
 export type { ResumeOptions, ConnectLocalOptions };
-export type { Db, Tx } from './core/db.js';
+export type { Db, Tx } from './core/client/db.js';
 
 // Builders: per-domain namespace objects (filter / select / write / ddl /
 // admin) + Query / Batch / call —

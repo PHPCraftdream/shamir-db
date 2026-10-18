@@ -38,7 +38,65 @@ workspace ships **23 crates**:
 `shamir-client`, `shamir-sdk`, `shamir-sdk-macros`, `shamir-tunables`,
 `shamir-wasm-host`, `shamir-index`, `shamir-numa`, `shamir-bench-utils`.
 
-Prefer `--workspace` flags over per-crate invocations.
+Prefer `--workspace` flags in CI and scripts. Local pre-push checks are
+scoped to the touched crates (`-p <crate>`) — see "Compile / build / test
+policy".
+
+---
+
+## 🚦 Compile / build / test policy — MANDATORY, highest priority
+
+**Compilation, builds and tests run on GitHub CI, not on this machine.**
+This rule overrides every other section of this file, every skill, every
+brief and every habit ("let me just run it once to be sure"). Where any
+other text contradicts it, this section wins. It binds the main agent,
+every sub-agent and rush executor, and every verifier child.
+
+**Banned unless the user explicitly asks for it in the current
+conversation** (a request for one run does not extend to later runs, and an
+approval from an earlier session does not carry over):
+
+* `cargo test`, `cargo nextest`, `./scripts/test.sh`, `cargo t` / `cargo tl`
+* `cargo build`, `cargo run`, `cargo bench`, `cargo doc`
+* `npm` / `tsc` / `vitest` builds and test runs, WASM builds, e2e and
+  integration harnesses, loom, any release or full-workspace build
+* any other command whose purpose is to build the project or to execute its
+  tests or benchmarks
+
+**Allowed locally before a push — only these**, scoped to the crates you
+touched (`-p <crate>`, plus their dependents when a public signature
+changed; `--workspace` only when asked):
+
+* `cargo check -p <crate> --all-targets` — type-check, runs no tests
+* `cargo clippy -p <crate> --all-targets -- -D warnings`
+* `cargo fmt -p <crate>` and `cargo fmt -p <crate> -- --check`
+* `python -I scripts/ci/check_layout.py` — the instant layout gate
+
+Never push code that fails `check`, `clippy` or `fmt`. Everything else is
+CI's job, and `./scripts/test.sh` is executed **in the PR's CI**:
+
+* Push to a branch and open a draft PR: the fast tier (fmt, layout, clippy
+  and `./scripts/test.sh` lib tests of the affected crates) runs.
+  `gh pr ready` runs the full matrix (`./scripts/test.sh` and the
+  integration run on Ubuntu/Windows/macOS), which is the merge gate;
+  `gh workflow run ci.yml --ref <branch>` forces the full tier on a draft.
+* A failing test, hang or flake is diagnosed from the CI log
+  (`gh run view <id> --log-failed`), fixed in code and re-pushed. It is not
+  reproduced locally; reading code and logs is the debugging tool. When a
+  flake needs repeated runs, the loop runs in CI (a workflow job), not here.
+* The fast tier stops at the first failing crate. Before pushing, read every
+  changed file for the whole class of error (module paths after a move,
+  imports, privacy, `cfg(test)` gating, unused items) instead of letting CI
+  reveal them one at a time.
+
+**Delegated work.** Every brief for a sub-agent, rush executor or verifier
+child carries this policy verbatim, including the allowed list. A child that
+believes it needs a build or test run says so in its final message; the
+orchestrator decides whether to ask the user.
+
+The sections below that mention `./scripts/test.sh`, `cargo t` / `cargo tl`
+or benches describe HOW they are run — in CI, or locally only on the user's
+explicit request. They never grant permission to run them.
 
 ---
 
@@ -103,12 +161,19 @@ The bench artefacts live in `.cargo-target-bench/`, fully isolated from
 `target/debug/` (used by `test` and `clippy --all-targets`). The bench
 incremental cache survives across test / clippy runs.
 
-**Workflow rule.** Within a single /opti cycle: run the full
-gate (`fmt --check` + `clippy --all-targets` + `test --lib`) **once at
-the end**, not between baseline / post-change bench runs. Spacing gate
+Benches run only when the user explicitly asks for them (for example by
+invoking `/opti`) — see "Compile / build / test policy".
+
+**Workflow rule.** Within a single /opti cycle: run the lint gate
+(`fmt --check` + `clippy --all-targets`) **once at the end**, not between
+baseline / post-change bench runs. Spacing gate
 checks through the cycle invalidates the bench cache for nothing.
 
 ### 🧪 Centralised test entry point — MANDATORY
+
+> Tests run in the PR's GitHub CI. Locally they run **only on the user's
+> explicit request** (see "Compile / build / test policy"); this section
+> describes how, and never grants permission to run them.
 
 **Tests are run ONLY through `./scripts/test.sh` (or the
 `cargo t` / `cargo tl` aliases from `.cargo/config.toml`).
@@ -188,8 +253,9 @@ SLOW/TIMEOUT), and `$rc` is the real nextest exit.
 
 **Hangs and test-locks are BUGS — hunt and fix them, never tolerate.** A
 `SLOW`/`TIMEOUT` marker is a deadlock / livelock / backpressure bug (in the
-code OR the test harness). Reproduce it (loop the suite under load — these
-surface under nextest's parallelism, often not in isolation), find the root
+code OR the test harness). Diagnose it from the CI log (and, when repeated
+runs are needed, a looping CI job — these surface under nextest's
+parallelism, often not in isolation), find the root
 (lock-order cycle, bounded-channel backpressure with no drain, a `Barrier`
 a task never reaches, a guard held across `.await`, runtime starvation),
 and FIX it. NEVER raise the timeout to paper over it. The wrapper also reaps
@@ -223,9 +289,10 @@ is to actually use nextest (i.e. `./scripts/test.sh` / `cargo t` /
 `cargo tl`). Bare `cargo test` has no `$NEXTEST` → refused. Nothing to
 discover, nothing to copy, nothing to route around.
 
-**For sub-agents:** every test step in an Agent brief MUST point at
-`./scripts/test.sh` (with `-p` / `@scope` / `-- <filter>` as needed),
-NEVER raw `cargo test`. The wrapper is the contract.
+**For sub-agents:** a brief contains no test or build steps by default (the
+PR's CI runs them). When the user has explicitly asked for a local run, the
+step MUST point at `./scripts/test.sh` (with `-p` / `@scope` / `-- <filter>`
+as needed), NEVER raw `cargo test`. The wrapper is the contract.
 
 If `cargo-nextest` is missing on a fresh checkout:
 ```
@@ -271,18 +338,18 @@ CARGO_TARGET_DIR=D:\dev\rust\.cargo-target-bench cargo bench -p <crate> --bench 
 
 ## 🧹 Code quality (MANDATORY)
 
-**Pre-commit gate.** Before committing each task (feature, fix, test,
-refactor) all three checks below must pass. If any fails — do not commit.
+**Pre-push gate.** Before pushing each task (feature, fix, test, refactor)
+the local checks below must pass, scoped to the touched crates (see
+"Compile / build / test policy"). If any fails — do not push.
 
 ```
-cargo fmt --all -- --check                            # formatting drift
-cargo clippy --workspace --all-targets -- -D warnings # lint regressions
-./scripts/test.sh                                     # behavioural tests (cargo tl)
+cargo fmt -p <crate> -- --check                       # formatting drift
+cargo clippy -p <crate> --all-targets -- -D warnings  # lint regressions (type-checks everything)
+python -I scripts/ci/check_layout.py                  # layout limits
 ```
 
-(Raw `cargo test` is blocked outright by the perimeter guard described
-below in "🧪 Centralised test entry point" — use the wrapper / `cargo tl`
-shown above, never `cargo test --workspace --lib` directly.)
+Behavioural tests are not part of the local gate: the PR's CI runs
+`./scripts/test.sh` (fast tier on a draft PR, full matrix at `gh pr ready`).
 
 If `fmt --check` fails, do **not** run `cargo fmt --all` — that
 reformats the entire repo and pollutes a feature diff. Run
@@ -308,10 +375,10 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
 
 GitHub's web blame reads the file automatically.
 
-**Pre-push hook.** A versioned hook at `.githooks/pre-push` runs the same
-three gate checks before every push so drift / lint regressions / failing
-lib tests can't land on a shared branch. Each contributor activates it
-once per clone:
+**Pre-push hook.** A versioned hook at `.githooks/pre-push` runs the
+pre-push gate (fmt, clippy, layout — no tests) before every push so
+drift / lint regressions can't land on a shared branch. Each contributor
+activates it once per clone:
 
 ```
 git config core.hooksPath .githooks
@@ -319,7 +386,7 @@ git config core.hooksPath .githooks
 
 Bypass in emergencies only — `git push --no-verify` (or
 `SHAMIR_SKIP_PREPUSH=1 git push`). The hook is a fast safety net, not a
-substitute for running the gate yourself before committing.
+substitute for running the gate yourself before pushing.
 
 ### 🚦 CI tiers (draft PR vs full matrix)
 
@@ -353,13 +420,24 @@ CI is segmented into two tiers to keep the shared runner pool responsive
 Scope: source trees only — not lockfiles, generated code, vendored code,
 fixtures or docs.
 
-Existing violations are grandfathered; there is **no repo-wide sweep**.
-The limits are a ratchet: a change must not push a new file or folder over
+Existing violations are grandfathered in the baseline and are being swept
+into subfolders / split files incrementally (owner decision 2026-10-16:
+the goal is an empty baseline). The limits are a ratchet: a change must not push a new file or folder over
 a limit, and must not grow a file or folder that is already over it. New
 logic goes into a new file or subfolder instead; when a task substantially
 rewrites an over-limit file, split it in that task. Delegated briefs
 carry this rule, and the orchestrator checks it on the diff of every
 delegated change (changed paths only, so the check is instant).
+
+**Enforcement.** Both limits are enforced on every PR by
+`scripts/ci/check_layout.py` (FAST + FULL CI tiers; instant, Python
+stdlib only). Current violations are grandfathered in
+`scripts/ci/layout_baseline.txt` as a ratchet: a baselined folder/file
+must not grow above its recorded size, any new violation fails the
+check, and `--update-baseline` only lowers or removes entries (never
+adds). The repo root and `crates/` are exempt from the entry rule
+(workspace container roots); the checker's scope/exclusion list lives
+at the top of the script.
 
 ---
 
@@ -531,6 +609,10 @@ list is exhaustive, the same drift that caused this revision can recur.
 2. **🟢 Green** — minimum code to make it pass.
 3. **🔵 Refactor** — keep the suite green while you tidy.
 
+Red and Green are observed in the PR's CI (the test is pushed together with
+the fix); do not run the suite locally to watch them — see "Compile / build
+/ test policy".
+
 ---
 
 ## ✋ Discipline rules
@@ -567,7 +649,8 @@ sub-agent, a `/workflows` phase — anything that generates code):
    keep the only copy in `.crush/stdin/` — that dir is `.gitignore`d and will
    not survive a stray reset.
 2. Launch the agent from that committed brief.
-3. After the orchestrator verifies the result (diff read + tests re-run),
+3. After the orchestrator verifies the result (diff read + green CI on the
+   PR),
    commit the **generated code + tests** as its own commit (or short series).
    **Commit each verified stage immediately** — do not let multiple stages
    pile up uncommitted.
