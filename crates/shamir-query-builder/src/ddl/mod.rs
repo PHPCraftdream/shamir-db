@@ -29,7 +29,8 @@ mod db;
 mod index;
 mod policy;
 mod repo;
-mod schema;
+#[path = "schema/mod.rs"]
+mod schema_dsl;
 
 pub use db::{create_db, create_table, drop_db, drop_table, rename_db, rename_table};
 pub use index::{
@@ -37,7 +38,8 @@ pub use index::{
 };
 pub use policy::{access_control, auth, metric, migration, replication, retention};
 pub use repo::{alter_repo, create_repo, drop_repo, interner, interner_resolve, rename_repo, res};
-pub use schema::{buffer_config, describe_table, function, list, quantization, schema, validator};
+pub use schema_dsl::schema;
+pub use schema_dsl::{buffer_config, describe_table, function, list, quantization, validator};
 
 /// Internal typed index-kind IR (NOT a wire type) that `CreateIndex::try_build`
 /// and the typed `CreateIndex` constructors route through to make

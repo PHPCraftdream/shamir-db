@@ -1,4 +1,3 @@
-use super::batch_refs::{collect_filter_refs, collect_op_query_refs, split_path_tail};
 use shamir_collections::{new_map, TMap};
 use shamir_query_types::batch::{
     BatchLimits, BatchOp, BatchRequest, ForEachOp, IndexVisibility as WireIndexVisibility,
@@ -14,7 +13,6 @@ use shamir_types::types::value::QueryValue;
 #[path = "op/into_batch_op/repo_admin.rs"]
 mod repo_admin;
 
-use super::build_error::BuildError;
 use super::durability::Durability;
 use super::handle::Handle;
 use super::index_visibility::IndexVisibility;
@@ -22,6 +20,9 @@ use super::into_batch_op::IntoBatchOp;
 use super::isolation::Isolation;
 use super::try_into_batch_op::TryIntoBatchOp;
 use crate::write::BuilderError;
+
+#[path = "batch_refs.rs"]
+mod batch_refs;
 
 /// Fluent batch assembler.
 ///

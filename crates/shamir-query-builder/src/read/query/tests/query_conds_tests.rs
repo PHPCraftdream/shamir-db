@@ -3,7 +3,7 @@
 
 use shamir_types::mpack;
 
-use crate::filter;
+use crate::filter::{self, FilterExt};
 use crate::query::{Conds, Query, QueryBuildError};
 
 use super::query_tests::assert_wire;

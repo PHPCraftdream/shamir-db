@@ -9,7 +9,7 @@ use crate::val::{qref, qref_all, IntoFieldPath};
 /// interprets as inter-query dependencies.
 #[derive(Debug, Clone)]
 pub struct Handle {
-    pub(super) alias: String,
+    pub(in crate::batch) alias: String,
 }
 
 impl Handle {

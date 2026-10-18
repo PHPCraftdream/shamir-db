@@ -1,15 +1,14 @@
-//! Second half of `Batch`'s impl + `$query`-ref walking helpers — see [`super::batch`].
+//! Second half of `Batch`'s impl + `$query`-ref walking helpers — see [`super`].
 
-use super::batch::Batch;
-use super::build_error::BuildError;
-use super::handle::Handle;
-use super::into_batch_op::IntoBatchOp;
+use super::Batch;
+use crate::batch::build_error::BuildError;
+use crate::batch::handle::Handle;
+use crate::batch::into_batch_op::IntoBatchOp;
 use crate::filter::{and, not, or};
 use shamir_query_types::batch::extract_base_alias;
 use shamir_query_types::batch::{BatchOp, BatchRequest, QueryEntry};
 use shamir_query_types::filter::{Filter, FilterValue};
 use shamir_query_types::read::{ReadQuery, Select, SelectItem};
-use shamir_types::types::value::QueryValue;
 
 impl Batch {
     // ── wire encoding (build + encode in one step) ─────────────────

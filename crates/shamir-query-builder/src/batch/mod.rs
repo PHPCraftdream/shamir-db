@@ -8,7 +8,6 @@
 
 #[allow(clippy::module_inception)]
 mod batch;
-mod batch_refs;
 mod op;
 pub use op::{build_error, into_batch_op, try_into_batch_op};
 mod runtime;

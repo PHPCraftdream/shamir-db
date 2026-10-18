@@ -5,7 +5,7 @@ use crate::batch::planner::BatchPlanner;
 use crate::batch::{
     BatchError, BatchLimits, BatchOp, BatchRequest, QueryEntry, ResultEncoding, SubBatchOp,
 };
-use crate::filter::{Cond, Filter, FilterValue};
+use crate::filter::FilterValue;
 use crate::read::ReadQuery;
 
 // -------------------------------------------------------------------------
