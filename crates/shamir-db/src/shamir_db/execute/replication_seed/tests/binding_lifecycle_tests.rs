@@ -499,7 +499,7 @@ async fn binding_cascade_drop_db_over_bound_destination_refused_and_intact() {
 #[tokio::test]
 async fn binding_destination_lifecycle_shares_replication_control_interlock() {
     let shamir = setup().await;
-    let guard = shamir.replication_control_lock().lock().await;
+    let guard = shamir.lock_replication_control().await;
 
     let mut removal = Box::pin(shamir.remove_repo("testdb", "side"));
     assert!(
@@ -707,30 +707,38 @@ async fn subscription_row_opt(shamir: &ShamirDb, name: &str) -> Option<QueryValu
     Some(records.remove(0).as_value().into_owned())
 }
 
-/// S5c-X round 4 (T6, deterministic — no sleeps): the cascade drop and a
-/// subscription creation SERIALIZE on the replication-control interlock —
-/// both batch futures are Pending while the lock is held, and the tokio
-/// mutex then wakes them in poll order. Creation does NOT fail for a missing
-/// destination (control.rs skips missing scopes; binding.rs only validates
-/// shape), so the invariant is serialization + consistency, not refusal:
-/// whichever order wins, the end state is consistent and never a partial
-/// drop.
+/// S5c-X round 5 (T6, deterministic — no sleeps): the cascade drop parks
+/// INSIDE the replication-control interlock (past the binding check, on the
+/// T6 Notify seam) and a concurrent subscription creation is then Pending on
+/// the lock the cascade HOLDS. While the cascade owns the interlock the
+/// destinations are intact and Alice is served; after the release the
+/// cascade completes first and the creation binds to the post-cascade
+/// catalogue — serialization + consistency, never a partial drop.
+///
+/// COUNTERFACTUAL: moving the cascade's `lock_replication_control()`
+/// acquisition AFTER the park/destructive step leaves the lock FREE while
+/// the cascade is parked → the CREATE acquires it and completes → its poll
+/// is Ready → red.
 #[tokio::test]
 async fn binding_cascade_interlock_serializes_create_and_never_partial_drops() {
     let shamir = setup().await;
     seed_row(&shamir, "main").await;
-    let guard = shamir.replication_control_lock().lock().await;
+
+    // Arm the cascade seam: DROP REPO main CASCADE parks INSIDE the
+    // interlock after the binding check.
+    shamir
+        .cascade_pause
+        .store(true, std::sync::atomic::Ordering::SeqCst);
 
     // Batch 1: DROP REPO main CASCADE.
     let mut b = Batch::new();
     b.id(3);
     b.op("drop", drop_repo("main").cascade());
     let request = b.to_request_via_msgpack();
-    let mut cascade = Box::pin(shamir.execute("testdb", &request));
+    let cascade_shamir = shamir.clone();
+    let mut cascade = Box::pin(async move { cascade_shamir.execute("testdb", &request).await });
 
-    // Batch 2: profile + ACTIVE subscription bound to testdb/main. Note
-    // `op.paused = false` and no receipt on the repo, so the creation is not
-    // receipt-refused.
+    // Batch 2: profile + ACTIVE subscription bound to testdb/main.
     let mut b = Batch::new();
     b.id(4);
     b.op(
@@ -743,64 +751,65 @@ async fn binding_cascade_interlock_serializes_create_and_never_partial_drops() {
     );
     b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
     let request = b.to_request_via_msgpack();
-    let mut create = Box::pin(shamir.execute("testdb", &request));
+    let create_shamir = shamir.clone();
+    let mut create = Box::pin(async move { create_shamir.execute("testdb", &request).await });
 
-    // BOTH wait on the control lock — serialization proven.
-    assert!(
-        matches!(futures::poll!(cascade.as_mut()), std::task::Poll::Pending),
-        "the cascade drop must wait on the replication-control interlock"
-    );
+    // The cascade reaches the seam INSIDE the interlock.
+    let mut arrived = Box::pin(shamir.cascade_arrived.notified());
+    tokio::select! {
+        biased;
+        _ = &mut arrived => {}
+        res = cascade.as_mut() => panic!("cascade ran past the seam: {res:?}"),
+    }
+
+    // WHILE the cascade owns the interlock: every destination intact, Alice
+    // served from the repo the cascade is about to drop.
+    assert!(shamir.get_db("testdb").unwrap().get_repo("main").is_some());
+    assert!(shamir.get_db("testdb").unwrap().get_repo("side").is_some());
+    assert!(shamir.get_db("otherdb").unwrap().get_repo("main").is_some());
+    let resp = read_users(&shamir, "testdb", "main").await.unwrap();
+    let served = resp.results["r"].records[0].as_value().into_owned();
+    assert_eq!(served.get("name").and_then(|v| v.as_str()), Some("Alice"));
+
+    // The creation must wait on the lock the cascade HOLDS.
     assert!(
         matches!(futures::poll!(create.as_mut()), std::task::Poll::Pending),
-        "the creation must wait on the replication-control interlock"
+        "the creation must wait on the interlock the cascade holds"
     );
 
-    drop(guard);
+    // Release: the cascade completes FIRST (it holds the lock), then the
+    // creation runs against the post-cascade catalogue.
+    shamir
+        .cascade_pause
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    shamir.cascade_release.notify_one();
     let cascade_result = cascade.await;
     let create_result = create.await;
 
-    // Accept exactly the two consistent winning orders; reject everything
-    // else. The end state is NEVER a partial drop.
-    if cascade_result.is_ok() && create_result.is_ok() {
-        // Cascade won: `testdb/main` is ABSENT, the other destinations are
-        // INTACT, and the subscription row EXISTS with a binding naming
-        // `testdb/main` for the absent destination (shape-only validation).
-        assert!(
-            shamir.get_db("testdb").unwrap().get_repo("main").is_none(),
-            "the cascade must have removed testdb/main"
-        );
-        assert!(shamir.get_db("testdb").unwrap().get_repo("side").is_some());
-        assert!(shamir.get_db("otherdb").unwrap().get_repo("main").is_some());
-        assert!(read_users(&shamir, "testdb", "side").await.is_ok());
-        assert!(read_users(&shamir, "otherdb", "main").await.is_ok());
-        let row = subscription_row(&shamir, "sub").await;
-        let destinations = row
-            .get("binding_destinations")
-            .and_then(|v| v.as_array())
-            .unwrap();
-        assert!(
-            destinations
-                .iter()
-                .any(|d| d.get("repo").and_then(|v| v.as_str()) == Some("main")),
-            "the row must bind testdb/main for the absent destination: {row:?}"
-        );
-    } else if cascade_result.is_err() {
-        // The C6 order: the cascade was refused (the binding existed at its
-        // check), so the creation ran first — ALL tables/rows are intact and
-        // serve.
-        create_result.expect("the creation must succeed in the C6 order");
-        let instance = shamir.get_db("testdb").unwrap();
-        assert!(instance.get_repo("main").is_some());
-        assert!(instance.get_repo("side").is_some());
-        assert!(shamir.get_db("otherdb").unwrap().get_repo("main").is_some());
-        let resp = read_users(&shamir, "testdb", "main").await.unwrap();
-        let served = resp.results["r"].records[0].as_value().into_owned();
-        assert_eq!(served.get("name").and_then(|v| v.as_str()), Some("Alice"));
-    } else {
-        panic!(
-            "inconsistent interlock outcome: cascade={cascade_result:?}, create={create_result:?}"
-        );
-    }
+    // The cascade-first arm: `testdb/main` ABSENT, the other destinations
+    // INTACT, and the subscription row EXISTS binding `testdb/main` for the
+    // absent destination (shape-only validation) — never a partial drop.
+    cascade_result.expect("the cascade must succeed");
+    create_result.expect("the creation must succeed against the post-cascade catalogue");
+    assert!(
+        shamir.get_db("testdb").unwrap().get_repo("main").is_none(),
+        "the cascade must have removed testdb/main"
+    );
+    assert!(shamir.get_db("testdb").unwrap().get_repo("side").is_some());
+    assert!(shamir.get_db("otherdb").unwrap().get_repo("main").is_some());
+    assert!(read_users(&shamir, "testdb", "side").await.is_ok());
+    assert!(read_users(&shamir, "otherdb", "main").await.is_ok());
+    let row = subscription_row(&shamir, "sub").await;
+    let destinations = row
+        .get("binding_destinations")
+        .and_then(|v| v.as_array())
+        .unwrap();
+    assert!(
+        destinations
+            .iter()
+            .any(|d| d.get("repo").and_then(|v| v.as_str()) == Some("main")),
+        "the row must bind testdb/main for the absent destination: {row:?}"
+    );
 }
 
 /// S5c-X round 3 (P1-C, pending barrier): with the flush fault failing the

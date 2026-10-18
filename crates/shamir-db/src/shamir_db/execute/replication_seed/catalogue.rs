@@ -158,7 +158,7 @@ impl ShamirDb {
         expected: &SeedReceipt,
         op: &CreateSubscriptionOp,
     ) -> Result<(), SeedRefusal> {
-        let _control = self.replication_control_lock.lock().await;
+        let _control = self.lock_replication_control().await;
         if !cfg!(unix) {
             return Err(SeedRefusal::IncompleteInstall);
         }

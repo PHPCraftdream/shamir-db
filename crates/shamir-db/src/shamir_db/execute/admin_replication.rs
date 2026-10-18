@@ -31,7 +31,7 @@ use shamir_query_types::ReplicationServe;
 use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
-use super::helpers::{admin_result, db_error_to_batch, to_qv};
+use super::helpers::{admin_result, db_error_to_batch, repl_guard_error_to_batch, to_qv};
 
 impl ShamirAdminExecutor {
     // ------------------------------------------------------------------
@@ -77,7 +77,7 @@ impl ShamirAdminExecutor {
             code: None,
         };
         self.authorize_repl_mutation().await?;
-        let _control = self.shamir.replication_control_lock.lock().await;
+        let _control = self.shamir.lock_replication_control().await;
 
         let name = op.create_replication_profile.clone();
         self.shamir
@@ -149,7 +149,7 @@ impl ShamirAdminExecutor {
             code: None,
         };
         self.authorize_repl_mutation().await?;
-        let _control = self.shamir.replication_control_lock.lock().await;
+        let _control = self.shamir.lock_replication_control().await;
 
         let name = op.drop_replication_profile.clone();
         let table = self
@@ -193,7 +193,7 @@ impl ShamirAdminExecutor {
             code: Some(code.to_string()),
         };
         self.authorize_repl_mutation().await?;
-        let _control = self.shamir.replication_control_lock.lock().await;
+        let _control = self.shamir.lock_replication_control().await;
 
         let name = op.create_publication.clone();
 
@@ -275,7 +275,7 @@ impl ShamirAdminExecutor {
             code: None,
         };
         self.authorize_repl_mutation().await?;
-        let _control = self.shamir.replication_control_lock.lock().await;
+        let _control = self.shamir.lock_replication_control().await;
 
         let name = op.drop_publication.clone();
         let table = self
@@ -331,7 +331,7 @@ impl ShamirAdminExecutor {
         op: &CreateSubscriptionOp,
     ) -> Result<QueryResult, BatchError> {
         self.authorize_repl_mutation().await?;
-        let _control = self.shamir.replication_control_lock.lock().await;
+        let _control = self.shamir.lock_replication_control().await;
 
         let name = op.create_subscription.clone();
 
@@ -401,7 +401,7 @@ impl ShamirAdminExecutor {
             code: None,
         };
         self.authorize_repl_mutation().await?;
-        let _control = self.shamir.replication_control_lock.lock().await;
+        let _control = self.shamir.lock_replication_control().await;
 
         let name = op.drop_subscription.clone();
         let table = self
@@ -416,7 +416,7 @@ impl ShamirAdminExecutor {
         self.shamir
             .ensure_drop_allowed(&name)
             .await
-            .map_err(db_error_to_batch)?; // quiesce (below) before ANY mutation
+            .map_err(repl_guard_error_to_batch)?; // quiesce (below) before ANY mutation
         self.shamir
             .quiesce_subscription_lease_locked(&name, &_control)
             .await;
@@ -459,7 +459,7 @@ impl ShamirAdminExecutor {
             code: Some(code.to_string()),
         };
         self.authorize_repl_mutation().await?;
-        let _control = self.shamir.replication_control_lock.lock().await;
+        let _control = self.shamir.lock_replication_control().await;
 
         let name = op.alter_subscription.clone();
         let table = self
@@ -512,8 +512,9 @@ impl ShamirAdminExecutor {
         // compared via the durable `resync_from_receipt` baseline
         // `mark_subscription_terminal` wrote against the row's current
         // `seed_receipt`. Pause and SetProfile on a quarantined row are
-        // refused too: a state flip can never clear the quarantine (operators
-        // must reseed or DROP). This gate runs FIRST: no row mutation (and no
+        // refused too: a state flip can never clear the quarantine (a quarantined
+        // subscription cannot be dropped or abandoned in place in this version —
+        // only a replacement seed unblocks it). This gate runs FIRST: no row mutation (and no
         // `seed_resume_validated` flip) happens on refusal, and the typed
         // error names the runbook.
         if row_is_quarantined(&record) {
@@ -531,8 +532,7 @@ impl ShamirAdminExecutor {
                     "",
                     "resync_required",
                     format!(
-                        "subscription '{name}' is quarantined (resync_required): \
-                             install a replacement seed per guide/09-seed-recovery.md, then Resume"
+                        "subscription '{name}' is quarantined (resync_required): DROP of a quarantined subscription is refused in this version; install a replacement seed per guide/09-seed-recovery.md, then Resume"
                     ),
                 ));
             }
@@ -910,7 +910,7 @@ impl ShamirDb {
         message: &str,
         expected_binding_generation: Option<u64>,
     ) -> DbResult<()> {
-        let _control = self.replication_control_lock.lock().await;
+        let _control = self.lock_replication_control().await;
         let mut next_entries = self.resync_quarantine_entries().await?;
         let table = self.system_store().subscriptions_table().await?;
         let refs = crate::types::common::new_map();

@@ -98,8 +98,9 @@ pub(crate) async fn write_new_subscription(
     }
     // Round-4 T7 seam: the armed CREATE future PARKS exactly on the
     // final-write boundary — the test drops the future here, so the final
-    // write never starts.
-    #[cfg(test)]
+    // write never starts. Gated `any(test, "test-util")` (round 5):
+    // shamir-server's tests drive the seam cross-crate via the opt-in feature.
+    #[cfg(any(test, feature = "test-util"))]
     if shamir
         .final_write_pause
         .load(std::sync::atomic::Ordering::Acquire)

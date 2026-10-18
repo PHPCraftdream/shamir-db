@@ -69,11 +69,16 @@ impl ResyncQuarantineCache {
         }
         self.snapshot.store(Arc::new(next));
     }
-    /// Replace cache contents from a successful persistence snapshot,
-    /// keeping prepublished keys (with their current reasons) until that
-    /// snapshot confirms their durable state. Callers never call this on
-    /// failure, so a failed persistence never publishes an empty
-    /// replacement — the last safe snapshot stays.
+    /// Replace cache contents from a successful persistence snapshot. The
+    /// durable rows are the single source of truth at refresh time: a key
+    /// the refreshed rows no longer derive is dropped, even if it was
+    /// prepublished by [`publish`]. The pending set protects only the
+    /// window BEFORE refresh — reads and the drop/rename guards see the
+    /// prepublished keys via `entries`/`reason_for` until the next
+    /// successful refresh confirms or clears them. On persist/flush
+    /// FAILURE refresh is never reached, so the last safe snapshot
+    /// (including the prepublished keys) stays — protection never
+    /// regresses.
     pub(crate) fn install(&self, entries: impl IntoIterator<Item = ((String, String), String)>) {
         let current = self.snapshot.load_full();
         let mut fresh: TSet<(String, String)> = TSet::default();
@@ -91,22 +96,9 @@ impl ResyncQuarantineCache {
             // pending set is irrelevant, so `swap_remove` is equivalent.
             pending.swap_remove(key);
         }
-        // Surviving prepublished keys (with their current reasons) are
-        // merged back so protection never regresses below the prepublished
-        // set.
-        for (db, repo) in pending.iter() {
-            if let Some(reason) = current
-                .entries
-                .get(db)
-                .and_then(|repos| repos.get(repo.as_str()))
-                .cloned()
-            {
-                next_entries
-                    .entry(db.clone())
-                    .or_default()
-                    .insert(repo.clone(), reason);
-            }
-        }
+        // Prepublished keys the refreshed rows no longer derive are
+        // dropped with the pending set: the durable rows are the single
+        // source of truth at refresh time.
         self.snapshot.store(Arc::new(QuarantineSnapshot {
             entries: next_entries,
             pending,

@@ -1,6 +1,6 @@
 use futures::StreamExt;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 use std::sync::atomic::Ordering;
 
 use crate::{DbError, DbResult, ShamirDb};
@@ -11,32 +11,89 @@ use crate::{DbError, DbResult, ShamirDb};
 /// barrier. The round-2 GLOBAL atomic let concurrent tests on different
 /// instances interfere; arming is now an instance field.
 /// `SeedCatalogueFlushFaultForTest` is the RAII guard.
-#[cfg(test)]
-pub(crate) struct SeedCatalogueFlushFaultForTest(ShamirDb);
+///
+/// Gated by `#[cfg(any(test, feature = "test-util"))]` (round 5): only test
+/// builds of THIS crate and of downstream crates that opt into the opt-in
+/// `test-util` feature (shamir-server's dev-dependency enables it) see the
+/// seam; production default features are untouched.
+#[cfg(any(test, feature = "test-util"))]
+pub struct SeedCatalogueFlushFaultForTest(ShamirDb);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 impl SeedCatalogueFlushFaultForTest {
     /// Arm the injected `flush_seed_catalogue` failure for this guard's
     /// lifetime (evidence row 6): it fires immediately.
-    pub(crate) fn arm(shamir: &ShamirDb) -> Self {
+    pub fn arm(shamir: &ShamirDb) -> Self {
         Self::arm_after_passing(shamir, 0)
     }
 
     /// Arm the fault so the first `n` `flush_seed_catalogue` calls succeed
     /// and every later one fails — for tests that must observe a success
     /// before the injected failure.
-    pub(crate) fn arm_after_passing(shamir: &ShamirDb, n: usize) -> Self {
+    pub fn arm_after_passing(shamir: &ShamirDb, n: usize) -> Self {
         shamir.flush_fault_armed.store(true, Ordering::SeqCst);
+        shamir.flush_fault_fail_first.store(0, Ordering::SeqCst);
         shamir.flush_fault_pass_first.store(n, Ordering::SeqCst);
+        Self(shamir.clone())
+    }
+
+    /// Round-5 B3 fail-first mode: the first `n` `flush_seed_catalogue`
+    /// calls FAIL, and every LATER call passes again. For tests that need a
+    /// bounded prefix of real failures (barrier deferrals plus terminal-mark
+    /// retry attempts) followed by a succeeding tail — e.g. `mark_with_retry`
+    /// must exhaust its first attempts on the seam and then succeed.
+    pub fn arm_fail_first(shamir: &ShamirDb, n: usize) -> Self {
+        shamir.flush_fault_armed.store(true, Ordering::SeqCst);
+        shamir.flush_fault_fail_first.store(n, Ordering::SeqCst);
+        shamir.flush_fault_pass_first.store(usize::MAX, Ordering::SeqCst);
         Self(shamir.clone())
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 impl Drop for SeedCatalogueFlushFaultForTest {
     fn drop(&mut self) {
         self.0.flush_fault_armed.store(false, Ordering::SeqCst);
+        self.0.flush_fault_fail_first.store(0, Ordering::SeqCst);
         self.0.flush_fault_pass_first.store(0, Ordering::SeqCst);
+    }
+}
+
+/// Round-5 T7 (cross-crate) handle on the final-write seam: arms
+/// `final_write_pause` and hands out the arrival Notify so a downstream
+/// test (shamir-server via `test-util`) can drop a CREATE future exactly on
+/// the final-write boundary. RAII `Drop` disarms.
+#[cfg(any(test, feature = "test-util"))]
+pub struct FinalWriteBarrierForTest(ShamirDb);
+
+#[cfg(any(test, feature = "test-util"))]
+impl FinalWriteBarrierForTest {
+    /// Arm the final-write pause on `shamir`.
+    pub fn arm(shamir: &ShamirDb) -> Self {
+        shamir
+            .final_write_pause
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Self(shamir.clone())
+    }
+
+    /// The arrival Notify: fires when the CREATE future reaches the
+    /// final-write boundary.
+    pub fn arrived(&self) -> std::sync::Arc<tokio::sync::Notify> {
+        self.0.final_write_arrived.clone()
+    }
+
+    /// Disarm before the guard drops (e.g. to let a retry run for real).
+    pub fn disarm(&self) {
+        self.0
+            .final_write_pause
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(any(test, feature = "test-util"))]
+impl Drop for FinalWriteBarrierForTest {
+    fn drop(&mut self) {
+        self.disarm();
     }
 }
 
@@ -99,10 +156,16 @@ impl ShamirDb {
     /// Strict metadata durability for an offline seed; no clean checkpoint is
     /// required merely to flush the authoritative table/repository catalogue.
     pub async fn flush_seed_catalogue(&self) -> DbResult<()> {
-        // Test-only per-instance fault seam (production untouched).
-        #[cfg(test)]
+        // Test-only per-instance fault seam (production untouched; visible
+        // to downstream test builds via the opt-in `test-util` feature).
+        #[cfg(any(test, feature = "test-util"))]
         if self.flush_fault_armed.load(Ordering::SeqCst) {
-            if self.flush_fault_pass_first.load(Ordering::SeqCst) > 0 {
+            if self.flush_fault_fail_first.load(Ordering::SeqCst) > 0 {
+                self.flush_fault_fail_first.fetch_sub(1, Ordering::SeqCst);
+                return Err(DbError::Storage(
+                    "injected seed-catalogue flush failure (test)".into(),
+                ));
+            } else if self.flush_fault_pass_first.load(Ordering::SeqCst) > 0 {
                 self.flush_fault_pass_first.fetch_sub(1, Ordering::SeqCst);
             } else {
                 return Err(DbError::Storage(

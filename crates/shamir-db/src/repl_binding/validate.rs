@@ -10,6 +10,52 @@ use crate::repl_binding::pending::PENDING_STATE;
 use crate::types::value::QueryValue;
 use crate::{DbError, DbResult, ShamirDb};
 
+/// One blocking subscription row, materialised while the binding guard
+/// scans the catalogue so ONE typed error can name them ALL (round 5 B4).
+pub(crate) struct BoundBlocker {
+    pub(crate) name: String,
+    pub(crate) generation: u64,
+    pub(crate) quarantined: bool,
+}
+
+/// Build the typed R2/R3 refusal: names the operation, the destination and
+/// every blocking subscription as `name (binding generation G, quarantined:
+/// true|false)`, with the exact remedy text.
+pub(crate) fn bound_error(
+    operation: &str,
+    db: &str,
+    repo: Option<&str>,
+    blockers: &[BoundBlocker],
+) -> DbError {
+    let mut listed = String::new();
+    for blocker in blockers {
+        listed.push_str(&format!(
+            "\n  - {} (binding generation {}, quarantined: {})",
+            blocker.name, blocker.generation, blocker.quarantined
+        ));
+    }
+    DbError::ReplicationDestinationBound {
+        detail: format!(
+            "cannot {operation} destination '{db}/{}': referenced by {} subscription \
+             binding(s):{listed}\nremedy: drop or reconfigure the referencing subscription(s) first",
+            repo.unwrap_or("*"),
+            blockers.len()
+        ),
+    }
+}
+
+/// Build the typed R1 refusal. Truthful remedy ONLY: in-place abandonment
+/// of a quarantined subscription is not supported in this version.
+pub(crate) fn quarantined_error(name: &str, db: &str, repo: &str) -> DbError {
+    DbError::ReplicationDestinationQuarantined {
+        detail: format!(
+            "subscription '{name}' is quarantined (destination '{db}/{repo}'): \
+             DROP SUBSCRIPTION is refused — in-place abandonment of a quarantined \
+             subscription is not supported in this version"
+        ),
+    }
+}
+
 /// Read every `system/subscriptions` row as an owned [`QueryValue`] — the
 /// standard system-catalogue read pattern (mirrors
 /// `admin_replication.rs::read_all`).
@@ -68,31 +114,71 @@ pub async fn validate_subscription_catalogue(shamir: &ShamirDb) -> DbResult<()> 
 }
 
 impl ShamirDb {
+    /// Is `(db, repo)` covered by a quarantine-cache key that has not been
+    /// durably confirmed yet (prepublished before a persist that may still
+    /// fail, retained until the next successful refresh — round 5 B2)? The
+    /// cache holds BOTH confirmed and pending keys; guards treat any key
+    /// exactly like a durable binding (fail closed).
+    fn destination_is_pending_quarantined(&self, db: &str, repo: Option<&str>) -> bool {
+        match repo {
+            Some(repo) => self.resync_quarantine.reason_for(db, repo).is_some(),
+            // Database-wide target: any key under `db` counts.
+            None => self.resync_quarantine.snapshot().entries.contains_key(db),
+        }
+    }
+
     /// DROP/RENAME guard: refuse when any subscription row's durable binding
-    /// references `(db, repo)` (`repo: None` = any repo in `db`). Rows that
-    /// cannot be parsed propagate the typed catalogue error. Runs BEFORE any
-    /// live or durable mutation of the destination.
+    /// references `(db, repo)` (`repo: None` = any repo in `db`) OR when the
+    /// quarantine cache covers the destination (a prepublished key that the
+    /// failed-persist window left undurable is just as binding — round 5
+    /// B2). Rows that cannot be parsed propagate the typed catalogue error.
+    /// The refusal is the typed
+    /// [`DbError::ReplicationDestinationBound`] naming the operation, the
+    /// destination and EVERY blocking subscription with its binding
+    /// generation. Runs BEFORE any live or durable mutation of the
+    /// destination.
     pub(crate) async fn ensure_destinations_unbound(
         &self,
         db: &str,
         repo: Option<&str>,
     ) -> DbResult<()> {
+        // Collect ALL blocking rows while scanning so one error names them
+        // all (round 5 B4).
+        let mut blockers: Vec<BoundBlocker> = Vec::new();
         for row in read_subscription_rows(self).await? {
             let binding = SubscriptionBinding::from_row(&row)?;
             let name = row
                 .get("name")
                 .and_then(|value| value.as_str())
-                .unwrap_or("<unnamed>");
-            for (bound_db, bound_repo) in binding.destinations() {
-                if bound_db == db && repo.is_none_or(|wanted| wanted == bound_repo) {
-                    return Err(DbError::Validation(format!(
-                        "destination '{db}/{}' is referenced by subscription '{name}' binding; \
-                         drop the subscription (it must not be quarantined) before renaming \
-                         or removing the destination",
-                        bound_repo
-                    )));
-                }
+                .unwrap_or("<unnamed>")
+                .to_string();
+            let hits = binding.destinations().iter().any(|(bound_db, bound_repo)| {
+                bound_db == db && repo.is_none_or(|wanted| wanted == bound_repo)
+            });
+            if hits {
+                blockers.push(BoundBlocker {
+                    name,
+                    generation: binding.generation(),
+                    quarantined: row_is_quarantined(&row),
+                });
             }
+        }
+        if !blockers.is_empty() {
+            return Err(bound_error("DROP or RENAME", db, repo, &blockers));
+        }
+        // Round 5 (B2): no durable row blocks, but the quarantine cache
+        // covers the destination — treat the pending key exactly like a
+        // durable binding.
+        if self.destination_is_pending_quarantined(db, repo) {
+            return Err(DbError::ReplicationDestinationBound {
+                detail: format!(
+                    "cannot DROP or RENAME destination '{db}/{}': its quarantine key is \
+                     prepublished (pending durable confirmation) in the replication \
+                     quarantine cache; remedy: drop or reconfigure the referencing \
+                     subscription(s) first",
+                    repo.unwrap_or("*")
+                ),
+            });
         }
         Ok(())
     }
@@ -145,31 +231,26 @@ impl ShamirDb {
         Ok(())
     }
 
-    /// Subscription-DROP guard: refuse while the row is quarantined —
-    /// dropping is not evidence that its data became consistent; follow the
-    /// reseed runbook. Typed `resync_required` error naming the bound
-    /// destination.
+    /// Subscription-DROP guard: refuse while the row is quarantined — or
+    /// while its bound destination is covered by a (possibly prepublished)
+    /// quarantine-cache key (round 5 B2). Dropping is not evidence that its
+    /// data became consistent; the typed
+    /// [`DbError::ReplicationDestinationQuarantined`] carries ONLY the
+    /// truthful remedy: in-place abandonment of a quarantined subscription
+    /// is not supported in this version.
     pub(crate) async fn ensure_drop_allowed(&self, name: &str) -> DbResult<()> {
         let Some(row) = self.read_subscription_row(name).await? else {
             return Ok(());
         };
-        if !row_is_quarantined(&row) {
-            return Ok(());
-        }
         let (db, repo) = SubscriptionBinding::from_row(&row)?
             .destinations()
             .first()
             .cloned()
             .unwrap_or_else(|| ("<unknown>".to_string(), "<unknown>".to_string()));
-        Err(DbError::resync_required(
-            &db,
-            &repo,
-            format!(
-                "subscription '{name}' is quarantined (resync_required): dropping is refused \
-                 — dropping is not evidence of consistency; follow guide/09-seed-recovery.md \
-                 to reseed"
-            ),
-        ))
+        if row_is_quarantined(&row) || self.destination_is_pending_quarantined(&db, Some(&repo)) {
+            return Err(quarantined_error(name, &db, &repo));
+        }
+        Ok(())
     }
 
     /// Profile-upsert guard: when `profile` already exists and is referenced

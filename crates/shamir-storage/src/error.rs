@@ -156,6 +156,23 @@ pub enum DbError {
     /// Boxed: two inline `String`s, same ratchet as [`DbError::ResyncRequired`].
     #[error("subscription catalogue row '{}' is invalid: {}", .0.subscription, .0.reason)]
     SubscriptionCatalogue(Box<SubscriptionCatalogueError>),
+
+    /// S5c-X PR8b-2 round 5 (B4): a destination lifecycle op (DROP/RENAME of
+    /// a database or repo, DROP DATABASE … CASCADE) hit a destination that is
+    /// referenced by a durable subscription binding — including a destination
+    /// whose quarantine key was only PREPUBLISHED in the quarantine cache.
+    /// The detail names the operation, the destination and EVERY blocking
+    /// subscription with its binding generation.
+    #[error("{detail}")]
+    ReplicationDestinationBound { detail: String },
+
+    /// S5c-X PR8b-2 round 5 (B4): DROP SUBSCRIPTION of a quarantined
+    /// subscription (durably marked or prepublished in the quarantine cache)
+    /// is refused: dropping is not evidence of consistency, and in-place
+    /// abandonment is not supported in this version. Distinct from the
+    /// read-path `resync_required`.
+    #[error("{detail}")]
+    ReplicationDestinationQuarantined { detail: String },
 }
 
 /// Heap payload of [`DbError::SubscriptionCatalogue`].
@@ -222,6 +239,10 @@ impl DbError {
             DbError::IndexDrainInProgress(_) => Some("index_drain_in_progress"),
             DbError::ResyncRequired { .. } => Some("resync_required"),
             DbError::SubscriptionCatalogue(_) => Some("subscription_catalogue_invalid"),
+            DbError::ReplicationDestinationBound { .. } => Some("replication_destination_bound"),
+            DbError::ReplicationDestinationQuarantined { .. } => {
+                Some("replication_destination_quarantined")
+            }
             _ => None,
         }
     }

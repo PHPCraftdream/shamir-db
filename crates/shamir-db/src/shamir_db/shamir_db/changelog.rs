@@ -134,7 +134,7 @@ impl ShamirDb {
         let Some(repo_instance) = self.get_db(db).and_then(|d| d.get_repo(repo)) else {
             return Ok(None);
         };
-        let _control = self.replication_control_lock.lock().await;
+        let _control = self.lock_replication_control().await;
         let receiver = repo_instance.subscribe_changelog().await.ok();
         let wrapped = receiver.map(|receiver| {
             super::revocation::receiver::ChangelogReceiver::new(

@@ -22,9 +22,9 @@ mod tests;
 pub(super) const SYSTEM_DB_NAME: &str = "__system__";
 
 pub use artifact_kind::{ArtifactKind, KIND_FIELD};
-pub use core::{FunctionSource, ShamirDb};
-#[cfg(test)]
-pub(crate) use seed_catalogue::SeedCatalogueFlushFaultForTest;
+pub use core::{FunctionSource, ReplicationControlGuard, ShamirDb};
+#[cfg(any(test, feature = "test-util"))]
+pub use seed_catalogue::{FinalWriteBarrierForTest, SeedCatalogueFlushFaultForTest};
 
 mod shutdown_report;
 pub use shutdown_report::ShutdownReport;

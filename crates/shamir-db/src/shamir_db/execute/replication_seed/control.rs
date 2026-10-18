@@ -122,11 +122,14 @@ pub(super) async fn check_owners(
                 && (stream.scope.repo.is_none()
                     || stream.scope.repo.as_deref() == Some(receipt.source_repo.as_str()))
             {
-                // P1-D.1 (round-3 verdict): shared destination AND identical
-                // replacement receipt = two views of one recovery, not two
-                // competing owners. This applies uniformly to Resume
-                // (`validate_seed_resume`) and installer rebind.
-                if row.get("seed_receipt") == Some(&super::super::helpers::to_qv(receipt)) {
+                // P1-D.1 (round-3 verdict): identical replacement receipt on
+                // a QUARANTINED sibling = two views of one recovery, not
+                // two competing owners. A HEALTHY sibling with the same
+                // receipt is a competing owner — a durable-state property
+                // that must not depend on the network probe.
+                if crate::repl_binding::row_is_quarantined(&row)
+                    && row.get("seed_receipt") == Some(&super::super::helpers::to_qv(receipt))
+                {
                     continue;
                 }
                 return Err(SeedRefusal::CompetingOwner);

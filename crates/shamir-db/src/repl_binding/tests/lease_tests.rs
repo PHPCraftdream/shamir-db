@@ -92,8 +92,11 @@ async fn take_lease(shamir: &ShamirDb) -> (u64, Arc<crate::repl_binding::Subscri
         .get("binding_generation")
         .and_then(|v| v.as_u64())
         .expect("row carries a binding generation");
-    let g = shamir.replication_control_lock().lock().await;
-    let lease = shamir.take_subscription_lease("sub", gen, &g);
+    let g = shamir.lock_replication_control().await;
+    let lease = shamir
+        .take_subscription_lease("sub", gen, &g)
+        .await
+        .expect("no valid lease exists yet; the fresh lease must be issued");
     drop(g);
     (gen, lease)
 }
@@ -167,7 +170,7 @@ async fn quiesce_waits_for_in_flight_apply_and_blocks_new_ones() {
     };
     held.notified().await; // the read guard is held
 
-    let control = shamir.replication_control_lock().lock().await;
+    let control = shamir.lock_replication_control().await;
     let mut q = Box::pin(shamir.quiesce_subscription_lease_locked("sub", &control));
     assert!(
         matches!(futures::poll!(q.as_mut()), Poll::Pending),

@@ -12,7 +12,7 @@ use crate::types::value::QueryValue;
 use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
-use super::helpers::{admin_result, db_error_to_batch, validate_name_component};
+use super::helpers::{admin_result, repl_guard_error_to_batch, validate_name_component};
 
 impl ShamirAdminExecutor {
     pub(super) async fn handle_create_db(
@@ -115,7 +115,7 @@ impl ShamirAdminExecutor {
         // across the binding check AND every destructive step below, so a
         // concurrent CREATE SUBSCRIPTION can never bind the destination
         // mid-cascade.
-        let _control = self.shamir.replication_control_lock().lock().await;
+        let _control = self.shamir.lock_replication_control().await;
 
         // Round 2 (A6): hoist the binding guard BEFORE any cascade mutation —
         // a `DROP DATABASE … CASCADE` over a bound destination is refused
@@ -123,7 +123,16 @@ impl ShamirAdminExecutor {
         self.shamir
             .ensure_destinations_unbound(&op.drop_db, None)
             .await
-            .map_err(db_error_to_batch)?;
+            .map_err(repl_guard_error_to_batch)?;
+
+        // Round-5 T6 test seam: parked INSIDE the interlock after the
+        // binding check — a moved lock acquisition turns the T6 assertions
+        // red.
+        #[cfg(test)]
+        if self.shamir.cascade_pause.load(std::sync::atomic::Ordering::Acquire) {
+            self.shamir.cascade_arrived.notify_one();
+            self.shamir.cascade_release.notified().await;
+        }
 
         // Referential integrity: check for child repositories.
         if let Some(db) = self.shamir.get_db(&op.drop_db) {
@@ -140,16 +149,16 @@ impl ShamirAdminExecutor {
                 }
                 // Cascade: remove every repo (and its tables) first.
                 for repo_name in &repos {
-                    // Remove tables within each repo.
+                    // Remove tables within each repo. B1 fix (round 5):
+                    // tables belong to the database being DROPPED
+                    // (`op.drop_db`), NOT the executor's session database
+                    // (`self.db_name`) — dropping the session db's same-named
+                    // tables here was master data loss.
                     if let Ok(tables) = db.list_tables(repo_name) {
                         for table_name in &tables {
                             let _ = self
                                 .shamir
-                                .drop_table_cleaning_validators(
-                                    &self.db_name,
-                                    repo_name,
-                                    table_name,
-                                )
+                                .drop_table_cleaning_validators(&op.drop_db, repo_name, table_name)
                                 .await;
                         }
                     }
@@ -161,7 +170,7 @@ impl ShamirAdminExecutor {
                         .shamir
                         .remove_repo_locked(&op.drop_db, repo_name, &_control)
                         .await
-                        .map_err(db_error_to_batch)?;
+                        .map_err(repl_guard_error_to_batch)?;
                 }
             }
         }
@@ -169,7 +178,7 @@ impl ShamirAdminExecutor {
             .shamir
             .remove_db_locked(&op.drop_db, &_control)
             .await
-            .map_err(db_error_to_batch)?;
+            .map_err(repl_guard_error_to_batch)?;
         Ok(admin_result(mpack!({
             "dropped": @(QueryValue::Str(op.drop_db.clone())),
             "existed": @(QueryValue::Bool(removed)),
@@ -408,7 +417,7 @@ impl ShamirAdminExecutor {
         // across the binding check AND every destructive step below, so a
         // concurrent CREATE SUBSCRIPTION can never bind the destination
         // mid-cascade.
-        let _control = self.shamir.replication_control_lock().lock().await;
+        let _control = self.shamir.lock_replication_control().await;
 
         // Round 2 (A6): hoist the binding guard BEFORE the child-table
         // cascade loop — a `DROP REPO … CASCADE` over a bound destination is
@@ -416,7 +425,16 @@ impl ShamirAdminExecutor {
         self.shamir
             .ensure_destinations_unbound(&self.db_name, Some(&op.drop_repo))
             .await
-            .map_err(db_error_to_batch)?;
+            .map_err(repl_guard_error_to_batch)?;
+
+        // Round-5 T6 test seam: parked INSIDE the interlock after the
+        // binding check — a moved lock acquisition turns the T6 assertions
+        // red.
+        #[cfg(test)]
+        if self.shamir.cascade_pause.load(std::sync::atomic::Ordering::Acquire) {
+            self.shamir.cascade_arrived.notify_one();
+            self.shamir.cascade_release.notified().await;
+        }
 
         // Referential integrity: check for child tables.
         if let Some(db) = self.shamir.get_db(&self.db_name) {
@@ -453,7 +471,7 @@ impl ShamirAdminExecutor {
             .shamir
             .remove_repo_locked(&self.db_name, &op.drop_repo, &_control)
             .await
-            .map_err(db_error_to_batch)?;
+            .map_err(repl_guard_error_to_batch)?;
         Ok(admin_result(mpack!({
             "dropped_repo": @(QueryValue::Str(op.drop_repo.clone())),
             "existed": @(QueryValue::Bool(removed)),
@@ -464,11 +482,6 @@ impl ShamirAdminExecutor {
         &self,
         op: &crate::query::admin::RenameRepoOp,
     ) -> Result<QueryResult, BatchError> {
-        let err = |msg: String| BatchError::QueryError {
-            alias: String::new(),
-            message: msg,
-            code: None,
-        };
         let err_code = |code: &str, msg: String| BatchError::QueryError {
             alias: String::new(),
             message: msg,
@@ -494,7 +507,7 @@ impl ShamirAdminExecutor {
         self.shamir
             .rename_repo_as(&self.db_name, &op.rename_repo, &op.to, self.actor.clone())
             .await
-            .map_err(|e| err(e.to_string()))?;
+            .map_err(repl_guard_error_to_batch)?;
 
         Ok(admin_result(mpack!({
             "renamed_repo": @(QueryValue::Str(op.rename_repo.clone())),
@@ -506,11 +519,6 @@ impl ShamirAdminExecutor {
         &self,
         op: &crate::query::admin::RenameDbOp,
     ) -> Result<QueryResult, BatchError> {
-        let err = |msg: String| BatchError::QueryError {
-            alias: String::new(),
-            message: msg,
-            code: None,
-        };
         let err_code = |code: &str, msg: String| BatchError::QueryError {
             alias: String::new(),
             message: msg,
@@ -537,7 +545,7 @@ impl ShamirAdminExecutor {
         self.shamir
             .rename_db_as(&op.rename_db, &op.to, self.actor.clone())
             .await
-            .map_err(|e| err(e.to_string()))?;
+            .map_err(repl_guard_error_to_batch)?;
 
         Ok(admin_result(mpack!({
             "renamed_db": @(QueryValue::Str(op.rename_db.clone())),

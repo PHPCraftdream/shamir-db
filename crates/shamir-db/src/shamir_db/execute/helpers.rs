@@ -91,6 +91,25 @@ pub(super) fn db_error_to_batch(error: crate::DbError) -> BatchError {
     }
 }
 
+/// Round-5 (B4): dispatch conversion for the binding-guard refusals. The
+/// two typed guard variants map to their DEDICATED wire codes with the
+/// builder's complete detail text; everything else falls back to the
+/// generic [`db_error_to_batch`]. Every caller of
+/// `ensure_destinations_unbound` / `ensure_drop_allowed` on the
+/// admin-dispatch surface routes through this so the codes survive
+/// (`replication_destination_bound` / `replication_destination_quarantined`).
+pub(super) fn repl_guard_error_to_batch(error: crate::DbError) -> BatchError {
+    match error {
+        crate::DbError::ReplicationDestinationBound { detail } => {
+            BatchError::query_coded("", "replication_destination_bound", detail)
+        }
+        crate::DbError::ReplicationDestinationQuarantined { detail } => {
+            BatchError::query_coded("", "replication_destination_quarantined", detail)
+        }
+        other => db_error_to_batch(other),
+    }
+}
+
 /// Rejects path-traversal characters in database and repository names.
 ///
 /// Only `[A-Za-z0-9_-]` is allowed — no `/`, `\`, `:`, `.`, or any

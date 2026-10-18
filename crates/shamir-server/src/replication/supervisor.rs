@@ -47,12 +47,13 @@
 //! holds no follower locks and never blocks the server. `reconcile` only
 //! reads the catalogue and starts/stops tasks.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use shamir_collections::{THasher, TMap};
 use shamir_db::query::admin::ReplStream;
 use shamir_db::query::read::{QueryResult, ReadQuery};
+use shamir_db::repl_binding::SubscriptionLease;
 use shamir_db::types::value::QueryValue;
 use shamir_db::{SeedRefusal, ShamirDb, SubscriptionBinding};
 use shamir_query_types::admin::ReplDirection;
@@ -62,6 +63,7 @@ use tracing::{debug, info, warn};
 
 use super::error::ReplError;
 use super::follower_loop::{run_follower_loop, FollowerLoopConfig};
+use super::source::seed::terminal;
 use super::source::ReplSource;
 
 /// Test seam (round 4, T5): a hook awaited after admission and before
@@ -125,22 +127,47 @@ pub type ReplSourceFactory =
 /// A running subscription: its stop signal, spawned loop tasks, and the
 /// profile + binding generation it was started against (to detect a rebind
 /// or a replaced binding on reconcile).
+///
+/// `lease` is the [`SubscriptionLease`] every loop of this handle runs
+/// under; `dones[i]` is loop i's done flag (Release/Acquire), set by the
+/// loop's own wrapper task AFTER `run_follower_loop` returned. A handle is
+/// STALE when its lease went invalid OR all its loops finished.
+/// (round 5, A1). NOT `Clone` — `JoinHandle` is not; the spawned loops get
+/// an `Arc` of the shared registry instead.
 struct SubHandle {
     cancel: CancellationToken,
     joins: Vec<JoinHandle<()>>,
+    /// Per-loop done flags, parallel to `joins` (round 5, A1). One flag per
+    /// spawned loop — a shared flag would wrongly mark the whole handle done
+    /// when only one of several target loops finished.
+    dones: Vec<Arc<AtomicBool>>,
+    /// The lease all loops of this handle run under (round 5, A1). Arc
+    /// identity of the lease identifies THIS handle: a newer start installs
+    /// a handle carrying a different lease.
+    lease: Arc<SubscriptionLease>,
     profile: String,
     generation: u64,
     targets: Vec<(String, String)>,
 }
 
 impl SubHandle {
-    /// Cancel the loops and detach the join handles (best-effort stop; the
-    /// tasks observe the token and exit on their next iteration).
+    /// Round-5 A1: `true` when the handle is stale — its lease went invalid
+    /// (superseded by a newer lease / invalidated by the loop's own exit) or
+    /// every loop's wrapper task has set its done flag (the loops returned).
+    /// A stale handle's rows must be re-started through the normal
+    /// start-barrier path instead of being kept as running.
+    fn stale(&self) -> bool {
+        !self.lease.valid.load(Ordering::Acquire)
+            || self.dones.iter().all(|d| d.load(Ordering::Acquire))
+    }
+
+    /// Cancel the loops and detach the join handles. Cancellation is GRACEFUL
+    /// (token only, no `abort()`): each loop observes the token at its next
+    /// await and returns, so the wrapper's exit housekeeping (done flag,
+    /// lease invalidation, self-deregistration) always completes before the
+    /// caller's `join.await` returns.
     fn stop(&self) {
         self.cancel.cancel();
-        for j in &self.joins {
-            j.abort();
-        }
     }
 }
 
@@ -155,8 +182,11 @@ pub struct SubscriptionSupervisor {
     factory: ReplSourceFactory,
     /// Stable follower identity advertised in `ReplHello` (§5.2).
     node_id: String,
-    /// Active loops keyed by subscription name (lock-free, `THasher`).
-    registry: scc::HashMap<String, SubHandle, THasher>,
+    /// Active loops keyed by subscription name (lock-free, `THasher`). An
+    /// `Arc` so each spawned loop can conditionally deregister its own entry
+    /// on exit (round 5, A1) — `scc::HashMap` is not `Clone` for a
+    /// non-`Clone` value (`JoinHandle`).
+    registry: std::sync::Arc<scc::HashMap<String, SubHandle, THasher>>,
     /// Iteration cap forwarded to each loop; `None` in prod (run forever),
     /// `Some(n)` in tests to bound the loop without relying on cancellation.
     max_iterations: Option<usize>,
@@ -165,11 +195,6 @@ pub struct SubscriptionSupervisor {
     validate_replicated_payload: bool,
     // Cold catalogue lifecycle serialization; no follower write lock.
     reconcile_lock: tokio::sync::Mutex<()>,
-    /// Test seam (round 4, T2): the first n start-barrier attempts fail
-    /// without touching the real flush — deterministic, instance-scoped,
-    /// no globals. See [`Self::with_start_barrier_faults`].
-    #[cfg(test)]
-    start_barrier_faults: std::sync::atomic::AtomicUsize,
     /// Test seam (round 4, T5): awaited after admission and before spawn —
     /// the seam that replaces the row between lease-take and spawn. See
     /// [`Self::with_start_race_hook`].
@@ -191,26 +216,14 @@ impl SubscriptionSupervisor {
             local,
             factory,
             node_id: node_id.into(),
-            registry: scc::HashMap::with_hasher(THasher::default()),
+            registry: std::sync::Arc::new(scc::HashMap::with_hasher(THasher::default())),
             max_iterations: None,
             poll_wait_ms: 5000,
             validate_replicated_payload: false,
             reconcile_lock: tokio::sync::Mutex::new(()),
             #[cfg(test)]
-            start_barrier_faults: std::sync::atomic::AtomicUsize::new(0),
-            #[cfg(test)]
             start_race_hook: None,
         }
-    }
-
-    /// Arm `n` deterministic start-barrier failures (tests only): the first
-    /// `n` start-barrier attempts fail without touching the real flush.
-    /// Instance-scoped — no globals.
-    #[cfg(test)]
-    #[must_use]
-    pub fn with_start_barrier_faults(mut self, n: usize) -> Self {
-        self.start_barrier_faults = std::sync::atomic::AtomicUsize::new(n);
-        self
     }
 
     /// Install a hook awaited after admission and before spawn (tests
@@ -291,7 +304,7 @@ impl SubscriptionSupervisor {
         // guard is dropped BEFORE the stop/start phases so the control lock is
         // never held across any callback (`start_subscription`'s startup
         // markings, stop joins, follower-loop terminal marks).
-        let control = self.local.replication_control_lock().lock().await;
+        let control = self.local.lock_replication_control().await;
         let subs = match self.read_subscriptions().await {
             Ok(s) => s,
             Err(e) => {
@@ -302,21 +315,36 @@ impl SubscriptionSupervisor {
         drop(control);
 
         // 1. Stop loops that should no longer run (removed / paused /
-        // rebound / replaced binding).
-        let mut to_stop: Vec<String> = Vec::new();
+        // rebound / replaced binding) or whose handle went STALE (round 5,
+        // A1): a stale handle's loop(s) have already returned or lost their
+        // lease, so the row must be re-started through the normal
+        // start-barrier path by this pass's start phase.
+        let mut to_stop: Vec<(String, &'static str)> = Vec::new();
         self.registry.iter_sync(|name, handle| {
-            let keep = subs.iter().any(|s| {
+            let qualifies = subs.iter().any(|s| {
                 &s.name == name
                     && s.is_active()
                     && s.profile == handle.profile
                     && s.binding_generation == handle.generation
             });
-            if !keep {
-                to_stop.push(name.clone());
+            if !qualifies {
+                to_stop.push((name.clone(), "row no longer qualifies"));
+            } else if handle.stale() {
+                let reason = if !handle.lease.valid.load(Ordering::Acquire) {
+                    "lease superseded"
+                } else {
+                    "task finished"
+                };
+                debug!(
+                    subscription = %name,
+                    reason,
+                    "supervisor: stale follower handle; deregistering for restart"
+                );
+                to_stop.push((name.clone(), reason));
             }
             true
         });
-        for name in to_stop {
+        for (name, _reason) in to_stop {
             if let Some((_, handle)) = self.registry.remove_sync(&name) {
                 handle.stop();
                 for join in handle.joins {
@@ -370,10 +398,12 @@ impl SubscriptionSupervisor {
 
     #[cfg(test)]
     pub(crate) async fn wait_for_subscription(&self, name: &str) {
-        let (_, handle) = self
-            .registry
-            .remove_sync(name)
-            .expect("subscription must be registered");
+        // Joins when the entry is still registered; a loop that already
+        // exited self-deregistered (round 5, A1), so absence means it is
+        // already gone.
+        let Some((_, handle)) = self.registry.remove_sync(name) else {
+            return;
+        };
         for join in handle.joins {
             join.await.expect("subscription task panicked");
         }
@@ -402,7 +432,7 @@ impl SubscriptionSupervisor {
         // barrier (round-4 MECHANISM 1). The whole block evaluates to the
         // lease so the control-lock guard is dropped right after.
         let lease = {
-            let _control = self.local.replication_control_lock().lock().await;
+            let _control = self.local.lock_replication_control().await;
             let stale = match self.read_subscription_row(&sub.name).await {
                 Ok(Some(row)) => {
                     let binding = SubscriptionBinding::from_row(&row)
@@ -421,41 +451,36 @@ impl SubscriptionSupervisor {
                 );
                 return Ok(false);
             }
-            let lease =
-                self.local
-                    .take_subscription_lease(&sub.name, sub.binding_generation, &_control);
+            // Round-5 A2 wiring: `None` = REFUSED — a valid lease for this
+            // name exists somewhere (another supervisor's live follower).
+            // Never kill it: defer; this supervisor's reconcile retries
+            // later, and the refusal keeps exactly one live follower.
+            let Some(lease) = self
+                .local
+                .take_subscription_lease(&sub.name, sub.binding_generation, &_control)
+                .await
+            else {
+                debug!(
+                    subscription = %sub.name,
+                    "a valid lease for this subscription already exists; start deferred"
+                );
+                return Ok(false);
+            };
             // Round-4 MECHANISM 1: the start-time durability barrier — the
             // same catalogue flush CREATE/RESUME use. Only a successful
             // flush may start a follower; on failure the row stays
             // live-active and a later reconcile retries the barrier.
-            //
-            // Fault-counter form (T2 seam): the counter is decremented
-            // SATURATINGLY (plain load/store — test-only, single-threaded per
-            // instance): an armed counter fails exactly its remaining n
-            // attempts, and an exhausted or un-armed counter stays at 0 so
-            // every later attempt passes. (The previous `fetch_sub` wrapped
-            // to `usize::MAX` at 0, making the SECOND start on any un-armed
-            // supervisor spuriously fail.)
-            #[cfg(test)]
-            {
-                // Saturating decrement (no usize wrap): an exhausted or
-                // un-armed counter stays at 0 and every later attempt passes.
-                let prev = self.start_barrier_faults.load(Ordering::SeqCst);
-                if prev > 0 {
-                    self.start_barrier_faults.store(prev - 1, Ordering::SeqCst);
-                    debug!(
-                        subscription = %sub.name,
-                        "start barrier fault injected (test); start deferred"
-                    );
-                    return Ok(false);
-                }
-            }
             if let Err(e) = self.local.flush_seed_catalogue().await {
                 debug!(
                     subscription = %sub.name,
                     error = %e,
                     "supervisor: start barrier flush failed; start deferred (reconcile retries)"
                 );
+                // Round-5 A2: same as the fault-counter arm — the unused
+                // lease must not linger valid, or the retry is refused
+                // forever by W1's valid-lease semantics.
+                self.local
+                    .invalidate_subscription_lease(&sub.name, &lease, &_control);
                 return Ok(false);
             }
             lease
@@ -581,6 +606,7 @@ impl SubscriptionSupervisor {
         }
         let cancel = CancellationToken::new();
         let mut joins = Vec::with_capacity(pull_targets.len());
+        let mut dones: Vec<Arc<AtomicBool>> = Vec::with_capacity(pull_targets.len());
 
         for (db, repo) in pull_targets.iter().cloned() {
             let mut cfg = FollowerLoopConfig::new(self.node_id.clone(), db, repo)
@@ -601,8 +627,16 @@ impl SubscriptionSupervisor {
             // task's terminal callback on a REPLACED binding is a no-op
             // inside `ShamirDb` (generation mismatch ⇒ logged no-op).
             let generation = sub.binding_generation;
+            // Round-5 A1: one done flag PER loop (shared by the SubHandle
+            // and this task) plus the exit-housekeeping captures.
+            let done_flag = Arc::new(AtomicBool::new(false));
+            let done = Arc::clone(&done_flag);
+            let lease_for_exit = Arc::clone(&lease);
+            let registry = self.registry.clone();
             // §5.6 — each loop is its own task; never blocks the server.
             let join = tokio::spawn(async move {
+                // Round-5 B3: marking retries run after the loop returned.
+                let tok_exit = tok.clone();
                 match run_follower_loop(local.clone(), src, cfg, tok).await {
                     Ok(()) => {}
                     Err(e @ ReplError::JournalGap { gap_at, .. })
@@ -617,21 +651,27 @@ impl SubscriptionSupervisor {
                         } else {
                             gap_at
                         };
-                        if let Err(mark_err) = local
-                            .mark_subscription_resync_required_generation(
-                                &sub_name,
-                                gap_at,
-                                from_version,
-                                generation,
-                            )
-                            .await
-                        {
-                            warn!(
-                                subscription = %sub_name,
-                                error = %mark_err,
-                                "supervisor: failed to persist resync_required after terminal replication rejection"
-                            );
-                        }
+                        let (local_m, name_m) = (Arc::clone(&local), sub_name.clone());
+                        terminal::mark_with_retry(
+                            &sub_name,
+                            "resync_required",
+                            &tok_exit,
+                            &lease_for_exit,
+                            || {
+                                let l = Arc::clone(&local_m);
+                                let n = name_m.clone();
+                                async move {
+                                    l.mark_subscription_resync_required_generation(
+                                        &n,
+                                        gap_at,
+                                        from_version,
+                                        generation,
+                                    )
+                                    .await
+                                }
+                            },
+                        )
+                        .await;
                         warn!(
                             subscription = %sub_name,
                             error = %e,
@@ -664,11 +704,15 @@ impl SubscriptionSupervisor {
                                 error = %e,
                                 "identity fence tripped; quarantine disabled by test seam"
                             );
-                            // Negative control must exercise the UNPROTECTED
-                            // path — the pre-quarantine production behaviour,
-                            // i.e. the generic terminal mapping.
-                            super::source::seed::terminal::persist_terminal(
-                                &local, &sub_name, &e, generation,
+                            // Negative control: the UNPROTECTED pre-quarantine
+                            // path (generic terminal mapping), still retried.
+                            terminal::persist_terminal_with_retry(
+                                &local,
+                                &sub_name,
+                                &e,
+                                generation,
+                                &tok_exit,
+                                &lease_for_exit,
                             )
                             .await;
                         } else {
@@ -678,21 +722,29 @@ impl SubscriptionSupervisor {
                             // keeps the TYPED fence reason plus the recorded
                             // and observed identities instead of gap text —
                             // there is no gap; nothing was applied.
-                            if let Err(mark_err) = local
-                                .mark_subscription_terminal_generation(
-                                    &sub_name,
-                                    "resync_required",
-                                    &e.to_string(),
-                                    Some(generation),
-                                )
-                                .await
-                            {
-                                warn!(
-                                    subscription = %sub_name,
-                                    error = %mark_err,
-                                    "supervisor: failed to persist resync_required after identity fence trip"
-                                );
-                            }
+                            let (local_m, name_m, msg_m) =
+                                (Arc::clone(&local), sub_name.clone(), e.to_string());
+                            terminal::mark_with_retry(
+                                &sub_name,
+                                "resync_required (identity fence)",
+                                &tok_exit,
+                                &lease_for_exit,
+                                || {
+                                    let l = Arc::clone(&local_m);
+                                    let n = name_m.clone();
+                                    let msg = msg_m.clone();
+                                    async move {
+                                        l.mark_subscription_terminal_generation(
+                                            &n,
+                                            "resync_required",
+                                            &msg,
+                                            Some(generation),
+                                        )
+                                        .await
+                                    }
+                                },
+                            )
+                            .await;
                             metrics::counter!("shamir_repl_resync_required_total").increment(1);
                             warn!(
                                 subscription = %sub_name,
@@ -703,38 +755,69 @@ impl SubscriptionSupervisor {
                     }
                     Err(e @ ReplError::ReopenRequired { .. }) => {
                         // Generation-aware: a replaced binding outlives the
-                        // stale task's reopen mark.
-                        if let Err(error) = local
-                            .mark_subscription_terminal_generation(
-                                &sub_name,
-                                "reopen_required",
-                                &e.to_string(),
-                                Some(generation),
-                            )
-                            .await
-                        {
-                            warn!(
-                                subscription = %sub_name,
-                                error = %error,
-                                "failed to persist reopen_required"
-                            );
-                        }
+                        // stale task's reopen mark. Round-5 B3: bounded,
+                        // cancellation-aware retry.
+                        let (local_m, name_m, msg_m) =
+                            (Arc::clone(&local), sub_name.clone(), e.to_string());
+                        terminal::mark_with_retry(
+                            &sub_name,
+                            "reopen_required",
+                            &tok_exit,
+                            &lease_for_exit,
+                            || {
+                                let l = Arc::clone(&local_m);
+                                let n = name_m.clone();
+                                let msg = msg_m.clone();
+                                async move {
+                                    l.mark_subscription_terminal_generation(
+                                        &n,
+                                        "reopen_required",
+                                        &msg,
+                                        Some(generation),
+                                    )
+                                    .await
+                                }
+                            },
+                        )
+                        .await;
                     }
                     Err(e) => {
-                        super::source::seed::terminal::persist_terminal(
-                            &local, &sub_name, &e, generation,
+                        terminal::persist_terminal_with_retry(
+                            &local,
+                            &sub_name,
+                            &e,
+                            generation,
+                            &tok_exit,
+                            &lease_for_exit,
                         )
                         .await;
                         warn!(subscription = %sub_name, error = %e, "follower loop terminated");
                     }
                 }
+                // ---- exit housekeeping — SINGLE exit path for ALL arms
+                // (round 5, A1). The loop returned: its apply-gate read guard
+                // is dropped, so the control lock cannot overlap an in-flight
+                // apply of THIS loop. (a) mark done (Release) — staleness
+                // fires only when ALL dones are set. (b) lease
+                // invalidation-if-current (ptr_eq no-op if superseded).
+                // (c) generation-aware self-deregistration: the lease Arc is
+                // unique per start, so a newer handle is never removed.
+                done.store(true, Ordering::Release);
+                let control = local.lock_replication_control().await;
+                local.invalidate_subscription_lease(&sub_name, &lease_for_exit, &control);
+                drop(control);
+                let lease_check = Arc::clone(&lease_for_exit);
+                let _ = registry.remove_if_sync(&sub_name, |h| Arc::ptr_eq(&h.lease, &lease_check));
             });
             joins.push(join);
+            dones.push(done_flag);
         }
 
         let handle = SubHandle {
             cancel,
             joins,
+            dones,
+            lease,
             profile: sub.profile.clone(),
             generation: sub.binding_generation,
             targets: pull_targets,
