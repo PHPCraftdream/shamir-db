@@ -11,15 +11,27 @@ use crate::{DbError, DbResult, ShamirDb};
 #[cfg(test)]
 static SEED_CATALOGUE_FLUSH_FAULT: AtomicBool = AtomicBool::new(false);
 
+/// S5c-X PR8b-2 (evidence row 6, round 2 C9): test-only fault seam guard —
+/// while an instance is alive, `flush_seed_catalogue` fails so terminal
+/// quarantine persistence cannot reach its final durability barrier. Arming
+/// is RAII: dropping the guard (including on panic/unwind) disarms the
+/// fault, so a test can never leak the fault into later tests.
 #[cfg(test)]
-impl ShamirDb {
-    /// Arm the injected `flush_seed_catalogue` failure (evidence row 6).
-    pub(crate) fn arm_seed_catalogue_flush_fault_for_test(&self) {
-        SEED_CATALOGUE_FLUSH_FAULT.store(true, Ordering::SeqCst);
-    }
+pub(crate) struct SeedCatalogueFlushFaultForTest;
 
-    /// Disarm the injected `flush_seed_catalogue` failure.
-    pub(crate) fn disarm_seed_catalogue_flush_fault_for_test(&self) {
+#[cfg(test)]
+impl SeedCatalogueFlushFaultForTest {
+    /// Arm the injected `flush_seed_catalogue` failure for this guard's
+    /// lifetime (evidence row 6).
+    pub(crate) fn arm() -> Self {
+        SEED_CATALOGUE_FLUSH_FAULT.store(true, Ordering::SeqCst);
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for SeedCatalogueFlushFaultForTest {
+    fn drop(&mut self) {
         SEED_CATALOGUE_FLUSH_FAULT.store(false, Ordering::SeqCst);
     }
 }

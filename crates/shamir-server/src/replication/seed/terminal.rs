@@ -6,14 +6,25 @@ use crate::replication::ReplError;
 /// failure as a log line only. The S5c-X PR7 universal identity fence
 /// (`ReplError::IdentityMismatch`) is persisted the same way, so the recorded
 /// and observed identities remain available in per-repository ReplicationStatus.
-/// Other terminal errors keep their prior handling.
-pub(crate) async fn persist_terminal(home: &ShamirDb, name: &str, error: &ReplError) {
+/// Other terminal errors keep their prior handling. The mark is
+/// generation-aware (`mark_subscription_terminal_generation(..., Some(generation))`):
+/// a terminal callback from a task started under an older binding generation
+/// is a logged no-op once the row was replaced under a new generation.
+pub(crate) async fn persist_terminal(
+    home: &ShamirDb,
+    name: &str,
+    error: &ReplError,
+    generation: u64,
+) {
     let (state, message) = match error {
         ReplError::Seed(reason) => (reason.code(), error.to_string()),
         ReplError::IdentityMismatch { code, .. } => (code.code(), error.to_string()),
         _ => return,
     };
-    if let Err(mark_error) = home.mark_subscription_terminal(name, state, &message).await {
+    if let Err(mark_error) = home
+        .mark_subscription_terminal_generation(name, state, &message, Some(generation))
+        .await
+    {
         tracing::warn!(error = %mark_error, "failed to persist terminal replication reason");
     }
 }

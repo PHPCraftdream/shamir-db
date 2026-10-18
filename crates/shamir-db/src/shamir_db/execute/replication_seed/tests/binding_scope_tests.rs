@@ -5,9 +5,10 @@
 //! clear independently.
 
 use shamir_query_builder::batch::Batch;
+#[cfg(unix)]
+use shamir_query_builder::ddl::alter_subscription;
 use shamir_query_builder::ddl::{repl_scope, replication_profile, subscription};
 use shamir_query_builder::doc;
-use shamir_query_builder::write::insert;
 use shamir_query_builder::Query;
 use shamir_query_types::admin::{ReplDirection, ReplMode};
 use shamir_query_types::batch::{BatchError, BatchResponse};
@@ -46,13 +47,15 @@ async fn setup() -> ShamirDb {
     shamir
 }
 
-/// Insert one row into `{db}/{repo}.users` with a distinguishing `name`.
+/// Insert one row into `{db}/{repo}.users` with a distinguishing `name`
+/// (repo-qualified insert builder: the row must land in the repo it names).
 async fn seed_row(shamir: &ShamirDb, db: &str, repo: &str, name: &str) {
     let mut b = Batch::new();
     b.id(1);
     b.insert(
         "ins",
-        insert("users").row(doc! { "name" => name, "age" => 30 }),
+        shamir_query_builder::write::Insert::with_repo(repo, "users")
+            .row(doc! { "name" => name, "age" => 30 }),
     );
     shamir
         .execute(db, &b.to_request_via_msgpack())
@@ -242,4 +245,73 @@ async fn binding_scope_overlapping_quarantines_clear_independently() {
     clear_subscription(&shamir, "sub2").await;
     assert_serves_named_row(&shamir, "testdb", "main", "Alice").await;
     assert_serves_named_row(&shamir, "testdb", "side", "SideRow").await;
+}
+
+/// S5c-X round 2 (C10, Unix-only): overlap clearing through the REAL
+/// recovery path — the offline installer's replacement rebind plus the real
+/// admin `Resume` (probe-backed), not the hand-persisted row rewrite. Two
+/// subscriptions are quarantined over `testdb/main`; rebind + Resume of
+/// sub1 must NOT unblock the destination (sub2 still covers it); only after
+/// sub2 is rebound and Resumed does the destination serve again.
+#[cfg(unix)]
+#[tokio::test]
+async fn binding_scope_overlap_clearing_through_real_reseed_resume() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let db = shamir.create_db("testdb").await;
+    // No inline `users` table on `main`: the installed seed image carries
+    // the table inventory (same layout as `quarantine_reads_tests::t13`).
+    db.add_repo(RepoConfig::new("main", BoxRepoFactory::in_memory()))
+        .await
+        .unwrap();
+    db.add_repo(
+        RepoConfig::new("side", BoxRepoFactory::in_memory())
+            .add_table(crate::engine::table::TableConfig::new("users")),
+    )
+    .await
+    .unwrap();
+
+    quarantine(&shamir, "sub1", "prof1", &[("testdb", "main")]).await;
+    quarantine(&shamir, "sub2", "prof2", &[("testdb", "main")]).await;
+    assert_refused(&shamir, "testdb", "main").await;
+    assert!(read_users(&shamir, "testdb", "side").await.is_ok());
+
+    // Real rebind of sub1 through the offline installer, then the real
+    // admin `Resume`. Both rows share the SAME replacement receipt (epoch
+    // 2), so one probe serves both Resumes.
+    super::quarantine_reads_tests::recovery::install_replacement_seed(&shamir, "sub1", "prof1")
+        .await;
+    shamir.set_replication_resume_probe(super::quarantine_reads_tests::recovery::probe());
+    let mut b = Batch::new();
+    b.id(3);
+    b.try_op("alt", alter_subscription("sub1").resume())
+        .unwrap();
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    // sub2's quarantine still covers the destination.
+    assert_refused(&shamir, "testdb", "main").await;
+    assert!(read_users(&shamir, "testdb", "side").await.is_ok());
+
+    // Rebind + Resume sub2: the LAST lifted quarantine unblocks `main`,
+    // which now serves the replacement seed's row.
+    super::quarantine_reads_tests::recovery::install_replacement_seed(&shamir, "sub2", "prof2")
+        .await;
+    let mut b = Batch::new();
+    b.id(4);
+    b.try_op("alt", alter_subscription("sub2").resume())
+        .unwrap();
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    let resp = read_users(&shamir, "testdb", "main").await.unwrap();
+    let served = resp.results["r"].records[0].as_value().into_owned();
+    assert_eq!(
+        served.get("name").and_then(|v| v.as_str()),
+        Some("replacement"),
+        "the destination must serve the replacement seed after the full recovery"
+    );
+    assert!(read_users(&shamir, "testdb", "side").await.is_ok());
 }

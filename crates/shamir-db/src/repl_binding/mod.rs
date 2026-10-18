@@ -8,6 +8,7 @@
 
 pub mod binding;
 pub mod coverage;
+pub(crate) mod pending;
 pub mod validate;
 
 pub use binding::{SubscriptionBinding, SUBSCRIPTION_BINDING_VERSION};

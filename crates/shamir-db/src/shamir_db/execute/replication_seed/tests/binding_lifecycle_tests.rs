@@ -5,14 +5,14 @@
 
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl::{
-    alter_subscription, drop_replication_profile, drop_subscription, list_subscriptions,
-    repl_scope, replication_profile, subscription,
+    alter_subscription, drop_db, drop_replication_profile, drop_repo, drop_subscription,
+    list_subscriptions, repl_scope, replication_profile, subscription,
 };
 use shamir_query_builder::doc;
-use shamir_query_builder::write::insert;
 use shamir_query_builder::Query;
 use shamir_query_types::admin::{ReplDirection, ReplMode};
 use shamir_query_types::batch::{BatchError, BatchResponse};
+use shamir_types::mpack;
 
 use crate::access::Actor;
 use crate::engine::repo::repo_types::BoxRepoFactory;
@@ -44,13 +44,15 @@ async fn setup() -> ShamirDb {
     shamir
 }
 
-/// Insert one row into `testdb/{repo}.users`.
+/// Insert one row into `testdb/{repo}.users` (repo-qualified insert builder:
+/// the row must land in the repo the helper is given).
 async fn seed_row(shamir: &ShamirDb, repo: &str) {
     let mut b = Batch::new();
     b.id(1);
     b.insert(
         "ins",
-        insert("users").row(doc! { "name" => "Alice", "age" => 30 }),
+        shamir_query_builder::write::Insert::with_repo(repo, "users")
+            .row(doc! { "name" => "Alice", "age" => 30 }),
     );
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
@@ -314,7 +316,8 @@ async fn binding_terminal_flush_failure_keeps_prepublished_protection() {
         .await
         .unwrap();
 
-    shamir.arm_seed_catalogue_flush_fault_for_test();
+    // Arm the flush fault through the RAII guard (panic-safe, self-scoping).
+    let fault = crate::shamir_db::shamir_db::SeedCatalogueFlushFaultForTest::arm();
     let err = shamir
         .mark_subscription_resync_required("sub_side", 5, 2)
         .await
@@ -330,10 +333,10 @@ async fn binding_terminal_flush_failure_keeps_prepublished_protection() {
     assert_eq!(err.code(), Some("resync_required"), "{err}");
     assert!(read_users(&shamir, "testdb", "main").await.is_err());
 
-    // Disarm and re-mark: persistence now completes and the refreshed cache
-    // STILL reflects the persisted row (the gate never regressed below the
-    // prepublished set).
-    shamir.disarm_seed_catalogue_flush_fault_for_test();
+    // Drop the guard (the RAII Drop disarms the fault) and re-mark:
+    // persistence now completes and the refreshed cache STILL reflects the
+    // persisted row (the gate never regressed below the prepublished set).
+    drop(fault);
     shamir
         .mark_subscription_resync_required("sub_side", 5, 2)
         .await
@@ -361,7 +364,7 @@ async fn binding_quarantined_destination_drop_rename_and_subscription_drop_refus
     // row is still present afterwards.
     let mut b = Batch::new();
     b.id(3);
-    b.try_op("drop", drop_subscription("sub")).unwrap();
+    b.op("drop", drop_subscription("sub"));
     let err = shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -408,4 +411,272 @@ async fn binding_quarantined_destination_drop_rename_and_subscription_drop_refus
     // Negative control: an UNBOUND destination in the same db is removable —
     // the guard is exact-key, not database-wide.
     assert!(shamir.remove_repo("testdb", "side").await.unwrap());
+}
+
+/// S5c-X round 2 (C6): `DROP REPO … CASCADE` over a BOUND destination is
+/// refused with the typed binding error BEFORE any cascade mutation — the
+/// repo still exists and its `users` table still lists and serves its seeded
+/// row afterwards. (The builder's cascade support was verified up front:
+/// `shamir_query_builder::ddl::drop_repo(...).cascade()`.)
+#[tokio::test]
+async fn binding_cascade_drop_repo_over_bound_destination_refused_and_intact() {
+    let shamir = setup().await;
+    seed_row(&shamir, "main").await;
+    create_profile(&shamir, "prof", "main").await;
+    let mut b = Batch::new();
+    b.id(2);
+    b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    let mut b = Batch::new();
+    b.id(3);
+    b.op("drop", drop_repo("main").cascade());
+    let err = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("'sub'"),
+        "the refusal must name the bound subscription: {err}"
+    );
+
+    // Nothing was dropped: the repo still lists, and the `users` table still
+    // serves its actual row.
+    assert!(
+        shamir.get_db("testdb").unwrap().get_repo("main").is_some(),
+        "the refused cascade must not remove the repo"
+    );
+    let resp = read_users(&shamir, "testdb", "main").await.unwrap();
+    let served = resp.results["r"].records[0].as_value().into_owned();
+    assert_eq!(served.get("name").and_then(|v| v.as_str()), Some("Alice"));
+}
+
+/// S5c-X round 2 (C6): `DROP DATABASE … CASCADE` over a db holding bound
+/// destinations is refused with the typed binding error BEFORE the cascade —
+/// every repo and table stays intact and keeps serving.
+#[tokio::test]
+async fn binding_cascade_drop_db_over_bound_destination_refused_and_intact() {
+    let shamir = setup().await;
+    seed_row(&shamir, "main").await;
+    create_profile(&shamir, "prof", "main").await;
+    let mut b = Batch::new();
+    b.id(2);
+    b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    let mut b = Batch::new();
+    b.id(3);
+    b.op("drop", drop_db("testdb").cascade());
+    let err = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("'sub'"),
+        "the refusal must name the bound subscription: {err}"
+    );
+
+    // Every repo/table is still there and still serving its data.
+    let instance = shamir.get_db("testdb").unwrap();
+    assert!(instance.get_repo("main").is_some());
+    assert!(instance.get_repo("side").is_some());
+    let resp = read_users(&shamir, "testdb", "main").await.unwrap();
+    let served = resp.results["r"].records[0].as_value().into_owned();
+    assert_eq!(served.get("name").and_then(|v| v.as_str()), Some("Alice"));
+    assert!(read_users(&shamir, "testdb", "side").await.is_ok());
+}
+
+/// S5c-X round 2 (C7, deterministic — no sleeps): destination lifecycle
+/// shares the catalogue replication-control interlock. While the lock is
+/// held, `remove_repo` has not even STARTED its first poll step (Pending);
+/// once the guard drops, the removal completes.
+#[tokio::test]
+async fn binding_destination_lifecycle_shares_replication_control_interlock() {
+    let shamir = setup().await;
+    let guard = shamir.replication_control_lock().lock().await;
+
+    let mut removal = Box::pin(shamir.remove_repo("testdb", "side"));
+    assert!(
+        matches!(futures::poll!(removal.as_mut()), std::task::Poll::Pending),
+        "remove_repo must wait on the replication-control interlock"
+    );
+
+    drop(guard);
+    assert!(
+        removal.await.unwrap(),
+        "the removal must succeed after unlock"
+    );
+}
+
+/// S5c-X round 2 (C8): the pending-creation barrier. With the seed-catalogue
+/// flush fault armed, subscription creation fails AFTER the row is durably
+/// written: the raw row reads `state = pending_durable` with its full
+/// binding fields, and a pending row must not gate anything. Disarming the
+/// fault lets the SAME creation retry succeed (overwriting the pending row)
+/// and the row reaches its final `active` state.
+#[tokio::test]
+async fn binding_pending_durable_barrier_survives_failed_flush_until_retry() {
+    let shamir = setup().await;
+    seed_row(&shamir, "main").await;
+    create_profile(&shamir, "prof", "main").await;
+
+    let fault = crate::shamir_db::shamir_db::SeedCatalogueFlushFaultForTest::arm();
+    let mut b = Batch::new();
+    b.id(2);
+    b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
+    let err = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("seed-catalogue"),
+        "the injected flush fault must surface: {err}"
+    );
+
+    // The raw row is durably PENDING: state `pending_durable`, full binding
+    // fields present — but it produces no quarantine coverage.
+    let row = subscription_row(&shamir, "sub").await;
+    assert_eq!(
+        row.get("state").and_then(|v| v.as_str()),
+        Some(crate::repl_binding::pending::PENDING_STATE)
+    );
+    assert_eq!(row.get("binding_version").and_then(|v| v.as_u64()), Some(1));
+    let binding_generation = row
+        .get("binding_generation")
+        .and_then(|v| v.as_u64())
+        .expect("binding_generation must be present");
+    assert!(
+        binding_generation >= 1,
+        "durable-sequence generation: monotonic, exact value depends on prior catalogue commits"
+    );
+    let destinations = row
+        .get("binding_destinations")
+        .and_then(|v| v.as_array())
+        .unwrap();
+    assert_eq!(destinations.len(), 1);
+    assert_eq!(
+        destinations[0].get("repo").and_then(|v| v.as_str()),
+        Some("main")
+    );
+    assert!(
+        !shamir
+            .has_resync_required_subscription_covering("testdb", "main")
+            .await
+            .unwrap(),
+        "a pending row must not gate anything"
+    );
+
+    // Disarm (drop the guard) and retry the SAME creation: overwriting a
+    // `pending_durable` row is allowed, and the row reaches `active`.
+    drop(fault);
+    let mut b = Batch::new();
+    b.id(3);
+    b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    let row = subscription_row(&shamir, "sub").await;
+    assert_eq!(row.get("state").and_then(|v| v.as_str()), Some("active"));
+}
+
+/// S5c-X round 2 (C11, corrupted-profile leg): a `replication_profiles` row
+/// whose `streams` field is not decodable (a plain string) refuses any NEW
+/// subscription referencing it (`seed_wrong_scope`), and corrupting the
+/// profile of an EXISTING bound+quarantined subscription does NOT unblock
+/// its destination — coverage is binding-based, never profile-resolution
+/// based.
+#[tokio::test]
+async fn binding_corrupted_profile_stream_refuses_creation_and_never_unblocks() {
+    let shamir = setup().await;
+    seed_row(&shamir, "main").await;
+
+    // (a) Write a corrupted profile row (streams = non-decodable Str) via
+    // SetOp; creating a subscription referencing it is refused.
+    let table = shamir
+        .system_store()
+        .replication_profiles_table()
+        .await
+        .unwrap();
+    let mut m = crate::types::common::new_map();
+    m.insert("name".to_string(), QueryValue::Str("corrupt".to_string()));
+    m.insert(
+        "streams".to_string(),
+        QueryValue::Str("not-a-stream-list".to_string()),
+    );
+    let set_op = crate::query::write::SetOp {
+        set: crate::query::TableRef::new("replication_profiles"),
+        key: mpack!({"name": @(QueryValue::Str("corrupt".to_string()))}),
+        value: QueryValue::Map(m),
+    };
+    shamir
+        .system_store()
+        .set_via_implicit_tx(&table, &set_op)
+        .await
+        .unwrap();
+    let mut b = Batch::new();
+    b.id(2);
+    b.op(
+        "sub",
+        subscription("sub", "tcp://peer:9000", "pub", "corrupt"),
+    );
+    let err = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("seed_wrong_scope"), "{err}");
+
+    // (b) An existing bound+quarantined subscription keeps its destination
+    // refused even when its profile row becomes corrupted.
+    create_profile(&shamir, "prof", "main").await;
+    let mut b = Batch::new();
+    b.id(3);
+    b.op(
+        "sub2",
+        subscription("sub2", "tcp://peer:9000", "pub", "prof"),
+    );
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    shamir
+        .mark_subscription_resync_required("sub2", 7, 3)
+        .await
+        .unwrap();
+    assert!(read_users(&shamir, "testdb", "main").await.is_err());
+
+    // Corrupt the REFERENCED profile row the same way.
+    let mut m = crate::types::common::new_map();
+    m.insert("name".to_string(), QueryValue::Str("prof".to_string()));
+    m.insert(
+        "streams".to_string(),
+        QueryValue::Str("not-a-stream-list".to_string()),
+    );
+    let set_op = crate::query::write::SetOp {
+        set: crate::query::TableRef::new("replication_profiles"),
+        key: mpack!({"name": @(QueryValue::Str("prof".to_string()))}),
+        value: QueryValue::Map(m),
+    };
+    let table = shamir
+        .system_store()
+        .replication_profiles_table()
+        .await
+        .unwrap();
+    shamir
+        .system_store()
+        .set_via_implicit_tx(&table, &set_op)
+        .await
+        .unwrap();
+    let err = read_users(&shamir, "testdb", "main").await.unwrap_err();
+    assert_eq!(
+        err.code(),
+        Some("resync_required"),
+        "the corrupted profile must NOT unblock the bound destination: {err}"
+    );
 }

@@ -239,6 +239,19 @@ impl SubscriptionSupervisor {
     ///   replacement.
     pub async fn reconcile(&self) {
         let _lifecycle = self.reconcile_lock.lock().await;
+        // S5c-X PR8b-2 round 2: bracket ONLY the catalogue read with the
+        // lifecycle interlock (`ShamirDb::replication_control_lock`, shared
+        // with subscription catalogue writers — creation's `pending_durable`
+        // barrier in `repl_binding::pending`, seed install, and destination
+        // lifecycle ops). Serializing the cold-path read means a reconcile
+        // snapshot is either fully pre-write or fully post-durable: it never
+        // observes a half-created (`pending_durable`) row. Lock order is
+        // `reconcile_lock` → control lock; no code path takes `reconcile_lock`
+        // while holding the control lock, so no deadlock is possible. The
+        // guard is dropped BEFORE the stop/start phases so the control lock is
+        // never held across any callback (`start_subscription`'s startup
+        // markings, stop joins, follower-loop terminal marks).
+        let control = self.local.replication_control_lock().lock().await;
         let subs = match self.read_subscriptions().await {
             Ok(s) => s,
             Err(e) => {
@@ -246,6 +259,7 @@ impl SubscriptionSupervisor {
                 return;
             }
         };
+        drop(control);
 
         // 1. Stop loops that should no longer run (removed / paused /
         // rebound / replaced binding).
@@ -369,6 +383,10 @@ impl SubscriptionSupervisor {
                     repo: repo.clone(),
                     owner,
                 };
+                // They run synchronously under the reconcile lock against
+                // the current row — never from a stale task — so the
+                // generation-less `mark_subscription_terminal(..., None)`
+                // is correct here.
                 self.local
                     .mark_subscription_terminal(&sub.name, "duplicate_owner", &error.to_string())
                     .await
@@ -483,8 +501,10 @@ impl SubscriptionSupervisor {
                             // Negative control must exercise the UNPROTECTED
                             // path — the pre-quarantine production behaviour,
                             // i.e. the generic terminal mapping.
-                            super::source::seed::terminal::persist_terminal(&local, &sub_name, &e)
-                                .await;
+                            super::source::seed::terminal::persist_terminal(
+                                &local, &sub_name, &e, generation,
+                            )
+                            .await;
                         } else {
                             // Same catalogue state the gap path persists via
                             // `mark_subscription_resync_required_generation`
@@ -516,11 +536,14 @@ impl SubscriptionSupervisor {
                         }
                     }
                     Err(e @ ReplError::ReopenRequired { .. }) => {
+                        // Generation-aware: a replaced binding outlives the
+                        // stale task's reopen mark.
                         if let Err(error) = local
-                            .mark_subscription_terminal(
+                            .mark_subscription_terminal_generation(
                                 &sub_name,
                                 "reopen_required",
                                 &e.to_string(),
+                                Some(generation),
                             )
                             .await
                         {
@@ -532,8 +555,10 @@ impl SubscriptionSupervisor {
                         }
                     }
                     Err(e) => {
-                        super::source::seed::terminal::persist_terminal(&local, &sub_name, &e)
-                            .await;
+                        super::source::seed::terminal::persist_terminal(
+                            &local, &sub_name, &e, generation,
+                        )
+                        .await;
                         warn!(subscription = %sub_name, error = %e, "follower loop terminated");
                     }
                 }
@@ -594,7 +619,7 @@ impl SubscriptionSupervisor {
         let records = read_all(&table, "subscriptions")
             .await
             .map_err(|e| e.to_string())?;
-        Ok(records
+        records
             .into_iter()
             .map(|r| {
                 // S5c-X PR8b-2: the binding is strictly validated; a row
@@ -634,7 +659,7 @@ impl SubscriptionSupervisor {
                     binding_destinations,
                 })
             })
-            .collect())
+            .collect()
     }
 }
 

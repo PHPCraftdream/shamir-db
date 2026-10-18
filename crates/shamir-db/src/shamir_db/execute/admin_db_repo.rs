@@ -111,6 +111,14 @@ impl ShamirAdminExecutor {
             })));
         }
 
+        // Round 2 (A6): hoist the binding guard BEFORE any cascade mutation —
+        // a `DROP DATABASE … CASCADE` over a bound destination is refused
+        // with the typed error before any repo/table is dropped.
+        self.shamir
+            .ensure_destinations_unbound(&op.drop_db, None)
+            .await
+            .map_err(db_error_to_batch)?;
+
         // Referential integrity: check for child repositories.
         if let Some(db) = self.shamir.get_db(&op.drop_db) {
             let repos = db.list_repos();
@@ -387,6 +395,14 @@ impl ShamirAdminExecutor {
                 })));
             }
         }
+
+        // Round 2 (A6): hoist the binding guard BEFORE the child-table
+        // cascade loop — a `DROP REPO … CASCADE` over a bound destination is
+        // refused with the typed error before any table is dropped.
+        self.shamir
+            .ensure_destinations_unbound(&self.db_name, Some(&op.drop_repo))
+            .await
+            .map_err(db_error_to_batch)?;
 
         // Referential integrity: check for child tables.
         if let Some(db) = self.shamir.get_db(&self.db_name) {

@@ -393,7 +393,7 @@ async fn resync_required_round_trips_through_status_and_list_then_refuses_recove
     // reseed runbook instead.
     let mut b = Batch::new();
     b.id(5);
-    b.try_op("drop", drop_subscription("sub_a")).unwrap();
+    b.op("drop", drop_subscription("sub_a"));
     let error = shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -747,11 +747,14 @@ async fn sub_field(shamir: &ShamirDb, name: &str, field: &str) -> Option<String>
     })
 }
 
-/// S5c-X PR8b-2 (evidence rows 3 + 5, recreate-profile leg): once a row is
-/// bound, recreating `profile_a` with DIFFERENT scopes is refused with
-/// `binding_destination_mismatch`; the row keeps its ORIGINAL binding — the
-/// original destinations stay blocked after the profile was deleted and the
-/// proposed new scopes are NOT quarantined.
+/// S5c-X PR8b-2 (evidence rows 3 + 5, recreate-profile leg; round 2 C11
+/// reorder): the REAL recreate-after-delete flow — once a row is bound, the
+/// DURABLE binding outlives everything: deleting `profile_a`, recreating it
+/// with DIFFERENT scopes (which now succeeds — no profile row exists to
+/// guard; the upsert-mismatch refusal while the profile is still referenced
+/// lives in `binding_lifecycle_tests::binding_profile_replacement_…`), and
+/// recreating it with the SAME scopes never lifts the quarantine; the row
+/// keeps its ORIGINAL binding and the original destinations stay blocked.
 #[tokio::test]
 async fn recreating_profile_with_different_scopes_keeps_original_binding() {
     let shamir = setup().await;
@@ -790,9 +793,19 @@ async fn recreating_profile_with_different_scopes_keeps_original_binding() {
         .await
         .unwrap();
 
-    // Recreate profile_a with DIFFERENT scopes → typed refusal.
+    // S5c-X round 2 (C11): the REAL recreate-after-delete flow. DELETE the
+    // referenced profile FIRST — no profile row exists to guard anymore, so
+    // recreating it with DIFFERENT scopes SUCCEEDS now.
     let mut b = Batch::new();
     b.id(2);
+    b.op("drp", drop_replication_profile("profile_a"));
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    let mut b = Batch::new();
+    b.id(3);
     b.op(
         "crp2",
         replication_profile("profile_a").stream(
@@ -801,15 +814,10 @@ async fn recreating_profile_with_different_scopes_keeps_original_binding() {
             ReplMode::ReadOnly,
         ),
     );
-    let error = shamir
+    shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
-        .unwrap_err();
-    assert_eq!(
-        error.code(),
-        Some("binding_destination_mismatch"),
-        "error: {error}"
-    );
+        .expect("recreating an UNREFERENCED profile with new scopes must succeed");
 
     // The row keeps its ORIGINAL binding: testdb/main only.
     let row = sub_row(&shamir, "sub_a").await;
@@ -823,21 +831,19 @@ async fn recreating_profile_with_different_scopes_keeps_original_binding() {
         Some("main")
     );
 
-    // The ORIGINAL destination stays blocked (even with profile_a now
-    // deleted), and the proposed new scope is NOT quarantined.
-    let mut b = Batch::new();
-    b.id(3);
-    b.op("drp", drop_replication_profile("profile_a"));
-    shamir
-        .execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    // The ORIGINAL destination stays blocked (the binding outlived both the
+    // profile and its different-scopes recreation), and the proposed new
+    // scope is NOT quarantined.
     let outcome = shamir.read_changelog_bounded("testdb", "main", 0, 10).await;
     assert!(
         outcome.is_err(),
         "original bound destination must stay quarantined"
     );
-    assert_eq!(outcome.unwrap_err().code(), Some("resync_required"));
+    let error = match outcome {
+        Err(error) => error,
+        Ok(_) => panic!("original bound destination must stay quarantined after reopen"),
+    };
+    assert_eq!(error.code(), Some("resync_required"));
     // `side` was never bound: writes AND reads work with actual data.
     let mut b = Batch::new();
     b.id(4);
@@ -859,6 +865,36 @@ async fn recreating_profile_with_different_scopes_keeps_original_binding() {
         .unwrap();
     let served = resp.results["r"].records[0].as_value().into_owned();
     assert_eq!(served.get("name").and_then(|v| v.as_str()), Some("Side"));
+
+    // Drop again, then recreate with the SAME scopes: the original gate
+    // STILL holds (same-scopes recreation never lifts a quarantine).
+    let mut b = Batch::new();
+    b.id(6);
+    b.op("drp2", drop_replication_profile("profile_a"));
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    let mut b = Batch::new();
+    b.id(7);
+    b.op(
+        "same",
+        replication_profile("profile_a").stream(
+            repl_scope("testdb").repo("main").build(),
+            ReplDirection::Pull,
+            ReplMode::ReadOnly,
+        ),
+    );
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    let outcome = shamir.read_changelog_bounded("testdb", "main", 0, 10).await;
+    let error = match outcome {
+        Err(error) => error,
+        Ok(_) => panic!("same-scopes recreation must keep the quarantine gate"),
+    };
+    assert_eq!(error.code(), Some("resync_required"));
 }
 
 /// Raw subscription-row read (status/list only project a subset of fields).

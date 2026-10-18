@@ -329,21 +329,10 @@ impl ShamirAdminExecutor {
         &self,
         op: &CreateSubscriptionOp,
     ) -> Result<QueryResult, BatchError> {
-        let err = |msg: String| BatchError::QueryError {
-            alias: String::new(),
-            message: msg,
-            code: None,
-        };
         self.authorize_repl_mutation().await?;
         let _control = self.shamir.replication_control_lock.lock().await;
 
         let name = op.create_subscription.clone();
-        let table = self
-            .shamir
-            .system_store()
-            .subscriptions_table()
-            .await
-            .map_err(|e| err(e.to_string()))?;
 
         // S5c-X PR8b-2 (a): refuse same-name overwrite (binding must never
         // detach coverage from data already written).
@@ -368,11 +357,6 @@ impl ShamirAdminExecutor {
             QueryValue::Str(op.publication.clone()),
         );
         m.insert("profile".to_string(), QueryValue::Str(op.profile.clone()));
-        // `state` drives 386-b pause/resume; a fresh subscription is active.
-        m.insert(
-            "state".to_string(),
-            QueryValue::Str(if op.paused { "paused" } else { "active" }.to_string()),
-        );
         let mut record = QueryValue::Map(m);
         self.shamir
             .bind_seed_creation(op, &mut record)
@@ -382,34 +366,25 @@ impl ShamirAdminExecutor {
         // S5c-X PR8b-2 (b): the profile must resolve NOW (a refusal
         // otherwise) and the concrete Pull destinations become the row's
         // durable binding, in the SAME subscription-row transaction.
-        let streams = super::replication_seed::catalogue::streams(self, &op.profile)
+        let streams = super::replication_seed::catalogue::streams(&self.shamir, &op.profile)
             .await
             .map_err(super::replication_seed::control::batch_error)?;
         let destinations =
             SubscriptionBinding::from_streams(&name, &streams).map_err(db_error_to_batch)?;
+        // Generation placeholder: `write_new_subscription` below stamps the
+        // monotonic `next_generation` over the existing catalogue rows.
         let binding_row = SubscriptionBinding::new(SUBSCRIPTION_BINDING_VERSION, 1, destinations)
             .map_err(db_error_to_batch)?;
         binding_row.write_to_row(&mut record);
-
-        let set_op = crate::query::write::SetOp {
-            set: crate::query::TableRef::new("subscriptions"),
-            key: mpack!({"name": @(QueryValue::Str(name.clone()))}),
-            value: record,
-        };
-        self.shamir
-            .system_store()
-            .set_via_implicit_tx(&table, &set_op)
+        // Round 2 (A4): durability-before-start — the row is written and
+        // flushed as `pending_durable` FIRST, THEN flipped to the requested
+        // state. A follower can never observe a startable row whose durable
+        // barrier has not been flushed; on flip failure the row compensates
+        // back to `pending_durable`.
+        let requested_state = if op.paused { "paused" } else { "active" };
+        crate::repl_binding::pending::write_new_subscription(&self.shamir, record, requested_state)
             .await
-            .map_err(|e| err(e.to_string()))?;
-        self.shamir
-            .system_store()
-            .persist_table_interner(&table, None)
-            .await
-            .map_err(|e| err(e.to_string()))?;
-        self.shamir
-            .flush_seed_catalogue()
-            .await
-            .map_err(|e| err(e.to_string()))?;
+            .map_err(db_error_to_batch)?;
         Ok(admin_result(mpack!({
             "created_subscription": @(QueryValue::Str(name)),
         })))
@@ -552,9 +527,10 @@ impl ShamirAdminExecutor {
         // resolve the proposed profile (a missing profile is a typed
         // refusal) and require exact equality with the row's binding.
         if let SubAction::SetProfile(proposed_profile) = &op.action {
-            let streams = super::replication_seed::catalogue::streams(self, proposed_profile)
-                .await
-                .map_err(super::replication_seed::control::batch_error)?;
+            let streams =
+                super::replication_seed::catalogue::streams(&self.shamir, proposed_profile)
+                    .await
+                    .map_err(super::replication_seed::control::batch_error)?;
             self.shamir
                 .ensure_set_profile_binding_unchanged(&record, proposed_profile, &streams)
                 .await
@@ -807,16 +783,17 @@ impl ShamirDb {
         Ok(self.quarantined_read_reason(db_name, repo_name).is_some())
     }
     /// Quarantine reason for an ordinary READ of `(db_name, repo_name)`, or
-    /// `None` when the repo is readable. Healthy path (empty cache): one
-    /// `Relaxed` `is_empty` load and no allocation / map lock — this is what
-    /// the wire-layer cursor gate in `shamir-server` rides on.
+    /// `None` when the repo is readable. Healthy path: ONE snapshot load +
+    /// one exact map miss — no allocation, no map lock — this is what the
+    /// wire-layer cursor gate in `shamir-server` rides on.
     pub(crate) fn quarantined_read_reason(&self, db_name: &str, repo_name: &str) -> Option<String> {
-        // Healthy-path fast path: one Relaxed load, no allocation, no map
-        // lock when the cache is empty (no subscription is quarantined).
-        if self.resync_quarantine.is_empty() {
-            return None;
-        }
-        self.resync_quarantine.reason_for(db_name, repo_name)
+        // One load per lookup: the guard pins the snapshot for the lookup.
+        let snapshot = self.resync_quarantine.snapshot();
+        snapshot
+            .entries
+            .get(db_name)?
+            .get(repo_name)
+            .map(|reason| reason.to_string())
     }
 
     /// Public seam for wire-layer read gates (e.g. cursor-based journal reads

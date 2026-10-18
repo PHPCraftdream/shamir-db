@@ -1,6 +1,7 @@
 use crate::query::admin::{CreateSubscriptionOp, ReplStream};
 use crate::query::read::ReadQuery;
 use crate::query::write::SetOp;
+use crate::repl_binding::pending::next_generation;
 use crate::repl_binding::{SubscriptionBinding, SUBSCRIPTION_BINDING_VERSION};
 use crate::types::value::QueryValue;
 use crate::{DbResult, ShamirDb};
@@ -146,12 +147,18 @@ impl ShamirDb {
     /// `last_terminal_reason` — only a post-reseed `Resume` may clear the
     /// quarantine; (3) anything else ⇒ `ConflictingBinding` (a healthy row's
     /// receipt is never overwritten). A new name creates a fresh paused row.
+    ///
+    /// Round 2 (A5): the WHOLE install runs under `replication_control_lock`
+    /// — an offline install writes the subscription catalogue and must not
+    /// race destination lifecycle ops (`remove_db`/`remove_repo`/renames,
+    /// which take the same lock before their binding guard).
     pub async fn install_seed_subscription(
         &self,
         image: &RepoInstance,
         expected: &SeedReceipt,
         op: &CreateSubscriptionOp,
     ) -> Result<(), SeedRefusal> {
+        let _control = self.replication_control_lock.lock().await;
         if !cfg!(unix) {
             return Err(SeedRefusal::IncompleteInstall);
         }
@@ -166,12 +173,11 @@ impl ShamirDb {
             return Err(SeedRefusal::WrongScope);
         }
         // S5c-X PR8b-2: the seed-installed row carries the same durable
-        // binding an ordinary creation would write.
+        // binding an ordinary creation would write; the GENERATION is stamped
+        // per-branch below (monotonic — an exact retry must not be rejected
+        // because the row's generation advanced).
         let destinations = SubscriptionBinding::from_streams(&op.create_subscription, &scope)
             .map_err(|_| SeedRefusal::WrongScope)?;
-        let wanted_binding =
-            SubscriptionBinding::new(SUBSCRIPTION_BINDING_VERSION, 1, destinations)
-                .map_err(|_| SeedRefusal::WrongScope)?;
         let records = rows(self, "subscriptions")
             .await
             .map_err(|_| SeedRefusal::ConflictingBinding)?;
@@ -184,10 +190,13 @@ impl ShamirDb {
             let scope_matches = existing["upstream"].as_str() == Some(op.upstream.as_str())
                 && existing["publication"].as_str() == Some(op.publication.as_str())
                 && existing["profile"].as_str() == Some(op.profile.as_str());
-            // Exact-retry branch: the existing row already carries the SAME
-            // binding the resolved profile computes now AND the SAME receipt.
+            // Exact-retry branch (round 2 A5): the existing row already
+            // carries the SAME scope + destinations + receipt. Destinations
+            // are compared, NOT full binding equality — generations change
+            // across replacement rebinds and a legitimate retry must still
+            // match.
             if scope_matches
-                && existing_binding == wanted_binding
+                && existing_binding.destinations() == destinations
                 && existing.get("seed_receipt") == Some(&super::super::helpers::to_qv(expected))
             {
                 return self
@@ -199,18 +208,34 @@ impl ShamirDb {
             // durably quarantined — DROP is refused, so rebinding the NEW
             // receipt onto the EXISTING row is the only sanctioned recovery.
             // A replacement seed must serve exactly the same bound
-            // destinations, so scope AND binding must match; `op.paused` was
-            // enforced at the top. `check_owners` skips the row with the same
-            // name, so it only protects against a competing owner of the
-            // scope. Everything but `seed_receipt` is preserved: only a
-            // post-reseed `Resume` may lift the quarantine.
+            // destinations, so scope AND destinations must match; `op.paused`
+            // was enforced at the top. NO `check_owners` call (round 2 A5):
+            // the sibling ownership predates the rebind — this row's binding
+            // was accepted with that sibling already in place, and re-proving
+            // ownership now would block sanctioned recovery. Everything but
+            // `seed_receipt` (and a bumped generation) is preserved: only a
+            // post-reseed `Resume` may lift the quarantine. The bump is at
+            // least +1 over the row's current generation AND above the
+            // durable MVCC-version floor, so a rebind also beats any
+            // concurrent allocation.
             if crate::repl_binding::row_is_quarantined(existing) {
-                if !scope_matches || existing_binding != wanted_binding {
+                if !scope_matches || existing_binding.destinations() != destinations {
                     return Err(SeedRefusal::ConflictingBinding);
                 }
-                super::control::check_owners(self, &op.create_subscription, expected).await?;
+                let replacement_binding = SubscriptionBinding::new(
+                    SUBSCRIPTION_BINDING_VERSION,
+                    std::cmp::max(
+                        existing_binding.generation() + 1,
+                        next_generation(self, &records)
+                            .await
+                            .map_err(|_| SeedRefusal::ConflictingBinding)?,
+                    ),
+                    destinations.clone(),
+                )
+                .map_err(|_| SeedRefusal::ConflictingBinding)?;
                 let mut record = existing.clone();
                 binding(&mut record, expected);
+                replacement_binding.write_to_row(&mut record);
                 return persist(self, record)
                     .await
                     .map_err(|_| SeedRefusal::ConflictingBinding);
@@ -219,6 +244,16 @@ impl ShamirDb {
             return Err(SeedRefusal::ConflictingBinding);
         }
         super::control::check_owners(self, &op.create_subscription, expected).await?;
+        // New row (round 2 A5): monotonic generation across the whole
+        // catalogue, not a hardcoded 1.
+        let new_binding = SubscriptionBinding::new(
+            SUBSCRIPTION_BINDING_VERSION,
+            next_generation(self, &records)
+                .await
+                .map_err(|_| SeedRefusal::ConflictingBinding)?,
+            destinations,
+        )
+        .map_err(|_| SeedRefusal::ConflictingBinding)?;
         let mut fields = crate::types::common::new_map();
         fields.insert(
             "name".into(),
@@ -233,7 +268,7 @@ impl ShamirDb {
         fields.insert("state".into(), QueryValue::Str("paused".into()));
         let mut record = QueryValue::Map(fields);
         binding(&mut record, expected);
-        wanted_binding.write_to_row(&mut record);
+        new_binding.write_to_row(&mut record);
         persist(self, record)
             .await
             .map_err(|_| SeedRefusal::ConflictingBinding)

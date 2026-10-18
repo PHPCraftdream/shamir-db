@@ -84,6 +84,13 @@ impl ShamirDb {
             return Ok(false);
         }
 
+        // Round 2 (A6) lifecycle interlock: ONE lock shared with the
+        // subscription catalogue writers — the binding guard below is a
+        // check-then-act, so it must run under the same interlock the
+        // catalogue writers hold, otherwise a concurrent CREATE SUBSCRIPTION
+        // could bind this destination between the check and the drop.
+        let _control = self.replication_control_lock.lock().await;
+
         // S5c-X PR8b-2: refuse DROP of a destination referenced by a durable
         // subscription binding BEFORE any live or durable mutation.
         self.ensure_destinations_unbound(name, None).await?;
@@ -142,6 +149,10 @@ impl ShamirDb {
     /// - The destination must NOT exist (in-memory AND persisted).
     pub async fn rename_db_as(&self, from: &str, to: &str, _actor: Actor) -> DbResult<()> {
         // ── Guards ────────────────────────────────────────────────────
+        // Round 2 (A6) lifecycle interlock: taken BEFORE the binding guard
+        // — ONE lock shared with the subscription catalogue writers, so the
+        // check-then-act below cannot race a concurrent catalogue write.
+        let _control = self.replication_control_lock.lock().await;
         // S5c-X PR8b-2: refuse RENAME of a destination referenced by a
         // durable subscription binding BEFORE any live or durable mutation
         // (repo: None — the whole database is the destination set).
@@ -525,6 +536,10 @@ impl ShamirDb {
     }
 
     pub async fn remove_repo(&self, db_name: &str, repo_name: &str) -> DbResult<bool> {
+        // Round 2 (A6) lifecycle interlock: ONE lock shared with the
+        // subscription catalogue writers — the check-then-act binding guard
+        // below cannot race a concurrent CREATE SUBSCRIPTION.
+        let _control = self.replication_control_lock.lock().await;
         // S5c-X PR8b-2: refuse DROP of a referenced destination BEFORE any
         // live or durable mutation.
         self.ensure_destinations_unbound(db_name, Some(repo_name))
@@ -577,6 +592,10 @@ impl ShamirDb {
         to: &str,
         _actor: Actor,
     ) -> DbResult<()> {
+        // Round 2 (A6) lifecycle interlock: taken BEFORE the binding guard
+        // — ONE lock shared with the subscription catalogue writers, so the
+        // check-then-act below cannot race a concurrent catalogue write.
+        let _control = self.replication_control_lock.lock().await;
         // S5c-X PR8b-2: refuse RENAME of a destination referenced by a
         // durable subscription binding BEFORE any live or durable mutation.
         self.ensure_destinations_unbound(db_name, Some(from))

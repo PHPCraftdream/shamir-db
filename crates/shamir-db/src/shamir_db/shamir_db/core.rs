@@ -565,6 +565,16 @@ impl ShamirDb {
         &self.db_create_lock
     }
 
+    /// ONE lifecycle interlock shared by replication catalogue writers
+    /// (admin subscription/profile handlers, terminal marking, the pending
+    /// creation barrier, seed install, and the supervisor's reconcile read
+    /// phase) AND destination lifecycle ops (`remove_db`/`rename_db_as`/
+    /// `remove_repo`/`rename_repo_as`). Exposed so `shamir-server` can take
+    /// the same interlock — never hold it across an unbounded await.
+    pub fn replication_control_lock(&self) -> &Arc<Mutex<()>> {
+        &self.replication_control_lock
+    }
+
     /// Per-database lock serialising repo admin mutations, keyed by
     /// `db_name` (task #546 TOCTOU close). Alter-repo operations clone the
     /// entry's Arc out of the DashMap before awaiting the mutex so guards

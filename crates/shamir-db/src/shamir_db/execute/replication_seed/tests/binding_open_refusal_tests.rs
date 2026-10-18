@@ -36,7 +36,7 @@ fn legacy_row(name: &str, state: &str) -> QueryValue {
 }
 
 /// Overwrite the `binding_destinations` field with `value` (malformed shapes).
-fn with_destinations(row: QueryValue, value: QueryValue) -> QueryValue {
+fn with_destinations(mut row: QueryValue, value: QueryValue) -> QueryValue {
     if let QueryValue::Map(ref mut m) = row {
         m.insert("binding_destinations".to_string(), value);
     }
@@ -44,7 +44,7 @@ fn with_destinations(row: QueryValue, value: QueryValue) -> QueryValue {
 }
 
 /// Overwrite the `binding_version` field (unsupported shapes).
-fn with_version(row: QueryValue, version: u64) -> QueryValue {
+fn with_version(mut row: QueryValue, version: u64) -> QueryValue {
     if let QueryValue::Map(ref mut m) = row {
         m.insert(
             "binding_version".to_string(),
@@ -119,7 +119,12 @@ async fn open_after_persisting(
 
 /// Assert the typed open refusal names `subscription`.
 fn assert_catalogue_refusal(result: Result<ShamirDb, DbError>, subscription: &str) {
-    let err = result.unwrap_err();
+    // `ShamirDb` has no `Debug` bound: destructure with `match`, not
+    // `unwrap_err()`.
+    let err = match result {
+        Ok(_) => panic!("open must be refused for subscription '{subscription}'"),
+        Err(err) => err,
+    };
     assert_eq!(
         err.code(),
         Some("subscription_catalogue_invalid"),

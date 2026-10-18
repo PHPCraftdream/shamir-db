@@ -198,7 +198,7 @@ async fn t4_every_admin_action_including_drop_is_refused_while_quarantined() {
     // typed code and does not mutate the row.
     let mut b = Batch::new();
     b.id(6);
-    b.try_op("drop", drop_subscription("sub")).unwrap();
+    b.op("drop", drop_subscription("sub"));
     let err = shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -278,7 +278,7 @@ async fn t6_quarantine_survives_restart() {
         // there is no drop-and-reinstall recovery anymore.
         let mut b = Batch::new();
         b.id(3);
-        b.try_op("drop", drop_subscription("sub")).unwrap();
+        b.op("drop", drop_subscription("sub"));
         let err = shamir
             .execute("testdb", &b.to_request_via_msgpack())
             .await
@@ -508,12 +508,13 @@ async fn t12_gated_journal_source_refuses_once_quarantined() {
 /// seed-install path) refuses non-Unix targets, so every helper touching the
 /// real installer is compiled out on Windows/macOS.
 #[cfg(unix)]
-mod recovery {
+pub(crate) mod recovery {
     use std::sync::Arc;
 
     use async_trait::async_trait;
     use shamir_engine::meta::repo_identity::RepoIdentity;
     use shamir_engine::repo::{SeedImageWriter, SeedReceipt, SeedTable};
+    use shamir_query_builder::doc;
     use shamir_query_types::admin::{
         CreatePublicationOp, CreateSubscriptionOp, ReplDirection, ReplMode, ReplScope, ReplStream,
     };
@@ -580,7 +581,7 @@ mod recovery {
         }
     }
 
-    pub(super) fn probe() -> Arc<dyn ResumeProbe> {
+    pub(crate) fn probe() -> Arc<dyn ResumeProbe> {
         Arc::new(HelloProbe(matching_hello()))
     }
 
@@ -595,10 +596,11 @@ mod recovery {
     /// `history_epoch`, fresh staging, `users` inventory carrying ONE
     /// replacement row), then run `install_seed_profile` +
     /// `install_seed_subscription` over the EXISTING (quarantined) row —
-    /// same name/upstream/publication/profile, `paused: true`. The installer
+    /// same name/upstream/publication, `profile_name` the installed profile
+    /// (also the profile the subscription op references). The installer
     /// rebinding writes the NEW receipt onto the row WITHOUT clearing the
     /// quarantine; only a post-reseed `Resume` lifts it.
-    pub(super) async fn install_replacement_seed(shamir: &ShamirDb, sub: &str) {
+    pub(crate) async fn install_replacement_seed(shamir: &ShamirDb, sub: &str, profile_name: &str) {
         let repo = shamir.get_db("testdb").unwrap().get_repo("main").unwrap();
         let receipt = replacement_receipt();
         let mut writer = SeedImageWriter::begin(
@@ -648,7 +650,10 @@ mod recovery {
             direction: ReplDirection::Pull,
             mode: ReplMode::ReadOnly,
         }];
-        shamir.install_seed_profile("prof", &streams).await.unwrap();
+        shamir
+            .install_seed_profile(profile_name, &streams)
+            .await
+            .unwrap();
         shamir
             .install_seed_subscription(
                 &repo,
@@ -657,7 +662,7 @@ mod recovery {
                     create_subscription: sub.to_string(),
                     upstream: "tcp://peer:9000".into(),
                     publication: "pub".into(),
-                    profile: "prof".into(),
+                    profile: profile_name.to_string(),
                     paused: true,
                 },
             )
@@ -703,7 +708,7 @@ async fn t13_replacement_seed_rebinds_quarantined_row_then_resume() {
 
     // Real recovery: the OFFLINE installer rebinds the NEW receipt on the
     // EXISTING quarantined row (same name/upstream/publication/profile).
-    recovery::install_replacement_seed(&shamir, "sub").await;
+    recovery::install_replacement_seed(&shamir, "sub", "prof").await;
 
     // The row now carries the NEW receipt but is STILL quarantined: marker
     // intact, state still `resync_required`, baseline receipt still the
@@ -809,4 +814,145 @@ async fn t14_bound_destination_stays_refused_after_profile_drop_and_reopen() {
     // bindings — the profile is gone, the refusal is not.
     let err = read_users(&shamir, "main").await.unwrap_err();
     assert_eq!(err.code(), Some("resync_required"), "{err}");
+}
+
+/// S5c-X PR8b-2 round 2 (C12, Unix-only): the durable
+/// reseed→reopen→Resume proof. Both quarantined subscriptions are rebound
+/// by the REAL offline installer (generations bump monotonically), the
+/// quarantine survives a full reopen (cache rebuilt from the persisted
+/// bindings), and the overlap rule holds through the real admin `Resume`
+/// path: lifting one quarantine must not unblock the destination another
+/// quarantined row still covers.
+#[cfg(unix)]
+#[tokio::test]
+async fn t15_replacement_rebind_survives_reopen_and_resume_requires_full_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let sys_path = dir.path().join("meta");
+    let repo_path = dir.path().join("main");
+
+    {
+        let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
+            .await
+            .unwrap();
+        shamir.create_db("testdb").await;
+        // No inline tables: the installed seed image carries the `users`
+        // inventory.
+        shamir
+            .add_repo(
+                "testdb",
+                RepoConfig::new("main", BoxRepoFactory::fjall(repo_path.clone())),
+            )
+            .await
+            .unwrap();
+        quarantine(&shamir, "sub1", "prof", "main").await;
+        quarantine(&shamir, "sub2", "prof2", "main").await;
+        let err = read_users(&shamir, "main").await.unwrap_err();
+        assert_eq!(err.code(), Some("resync_required"));
+
+        // Capture each row's pre-rebind generation. Durable-sequence
+        // generations are monotonic but not small predictable integers —
+        // only the ordering guarantees matter.
+        let before = super::super::catalogue::rows(&shamir, "subscriptions")
+            .await
+            .unwrap();
+        let gen_before = |name: &str| {
+            before
+                .iter()
+                .find(|r| r.get("name").and_then(|v| v.as_str()) == Some(name))
+                .unwrap_or_else(|| panic!("subscription '{name}' must exist"))
+                .get("binding_generation")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_else(|| panic!("'{name}' must carry binding_generation"))
+        };
+        let sub1_gen_before = gen_before("sub1");
+        let sub2_gen_before = gen_before("sub2");
+
+        // Real rebind of BOTH rows through the offline installer.
+        recovery::install_replacement_seed(&shamir, "sub1", "prof").await;
+        recovery::install_replacement_seed(&shamir, "sub2", "prof2").await;
+
+        // Raw-row assertions: both still quarantined, generations strictly
+        // bumped past their pre-rebind values and ordered by creation +
+        // bump (sub2 > sub1), and both carry the REPLACEMENT receipt.
+        let records = super::super::catalogue::rows(&shamir, "subscriptions")
+            .await
+            .unwrap();
+        let mut generations = std::collections::BTreeMap::new();
+        for name in ["sub1", "sub2"] {
+            let row = records
+                .iter()
+                .find(|r| r.get("name").and_then(|v| v.as_str()) == Some(name))
+                .unwrap_or_else(|| panic!("subscription '{name}' must exist"));
+            assert_eq!(
+                row.get("quarantined").and_then(|v| v.as_bool()),
+                Some(true),
+                "'{name}' must still be quarantined after the rebind"
+            );
+            let generation = row
+                .get("binding_generation")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_else(|| panic!("'{name}' must carry binding_generation"));
+            let gen_before = if name == "sub1" {
+                sub1_gen_before
+            } else {
+                sub2_gen_before
+            };
+            assert!(
+                generation > gen_before,
+                "'{name}' must carry its monotonic replacement generation"
+            );
+            generations.insert(name, generation);
+            assert_eq!(
+                row["seed_receipt"]["source_identity"]["history_epoch"].as_u64(),
+                Some(2),
+                "'{name}' must carry the REPLACEMENT receipt (history_epoch 2)"
+            );
+        }
+        let sub1_gen_after = generations["sub1"];
+        let sub2_gen_after = generations["sub2"];
+        assert!(
+            sub2_gen_after > sub1_gen_after,
+            "creation + bump ordering: sub2's generation must exceed sub1's"
+        );
+        // Rebinding alone never unblocks: reads stay refused.
+        let err = read_users(&shamir, "main").await.unwrap_err();
+        assert_eq!(err.code(), Some("resync_required"));
+    }
+
+    // Reopen with the bounded fjall-lock retry (mirrors `durable_repo_tests`).
+    let mut shamir = None;
+    for _ in 0..100 {
+        match ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone())).await {
+            Ok(opened) => {
+                shamir = Some(opened);
+                break;
+            }
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+        }
+    }
+    let shamir = shamir.expect("system store still locked after retries");
+
+    // The quarantine survives the reopen: the cache is rebuilt from the
+    // persisted rows' durable bindings.
+    let err = read_users(&shamir, "main").await.unwrap_err();
+    assert_eq!(err.code(), Some("resync_required"), "{err}");
+
+    // Fresh probe for the new instance. The recovery module's probe matches
+    // its replacement receipt (epoch 2), and BOTH rows were rebound to that
+    // same receipt — one probe serves both Resumes.
+    shamir.set_replication_resume_probe(recovery::probe());
+    resume_subscription(&shamir, 6, "sub1").await.unwrap();
+    // sub1's quarantine is lifted, but sub2 still covers the destination.
+    let err = read_users(&shamir, "main").await.unwrap_err();
+    assert_eq!(err.code(), Some("resync_required"), "{err}");
+
+    resume_subscription(&shamir, 7, "sub2").await.unwrap();
+    let resp = read_users(&shamir, "main").await.unwrap();
+    assert_eq!(resp.results["r"].records.len(), 1);
+    let served = resp.results["r"].records[0].as_value().into_owned();
+    assert_eq!(
+        served.get("name").and_then(|v| v.as_str()),
+        Some("replacement")
+    );
+    assert_eq!(served.get("age").and_then(|v| v.as_i64()), Some(1));
 }

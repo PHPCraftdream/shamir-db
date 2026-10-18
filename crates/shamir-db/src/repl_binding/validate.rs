@@ -6,6 +6,7 @@
 use crate::query::admin::ReplStream;
 use crate::repl_binding::binding::SubscriptionBinding;
 use crate::repl_binding::coverage::row_is_quarantined;
+use crate::repl_binding::pending::PENDING_STATE;
 use crate::types::value::QueryValue;
 use crate::{DbError, DbResult, ShamirDb};
 
@@ -124,9 +125,18 @@ impl ShamirDb {
     /// Same-name overwrite guard: refuse CREATE SUBSCRIPTION when a row with
     /// the name already exists — a replacement binding must never silently
     /// detach quarantine coverage from data already written under the old
-    /// binding.
+    /// binding. EXCEPTION (round 2 A4): a row still at
+    /// `pending_durable` is an unfinished creation barrier — no follower can
+    /// have started on it — so retrying the creation overwrites it (logged).
     pub(crate) async fn ensure_subscription_absent(&self, name: &str) -> DbResult<()> {
-        if self.read_subscription_row(name).await?.is_some() {
+        if let Some(row) = self.read_subscription_row(name).await? {
+            if row.get("state").and_then(|value| value.as_str()) == Some(PENDING_STATE) {
+                log::info!(
+                    "subscription '{name}' is a pending_durable creation-barrier row; \
+                     overwriting it (no follower can have started on it)"
+                );
+                return Ok(());
+            }
             return Err(DbError::Validation(format!(
                 "subscription '{name}' already exists: same-name overwrite is refused \
                  (S5c-X PR8b-2); use a new name"
@@ -205,11 +215,11 @@ impl ShamirDb {
     ) -> DbResult<()> {
         let proposed = SubscriptionBinding::from_streams(new_profile, proposed_streams)?;
         let bound = SubscriptionBinding::from_row(row)?;
-        if bound.destinations() != proposed.destinations() {
+        // `from_streams` returns the destination Vec directly, not a binding.
+        if bound.destinations() != proposed.as_slice() {
             return Err(DbError::Validation(format!(
-                "cannot set profile '{new_profile}': its Pull destinations {:#?} differ from \
-                 the bound destinations {:#?}",
-                proposed.destinations(),
+                "cannot set profile '{new_profile}': its Pull destinations {proposed:#?} differ \
+                 from the bound destinations {:#?}",
                 bound.destinations()
             )));
         }
