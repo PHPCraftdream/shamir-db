@@ -60,6 +60,23 @@ describe.skipIf(!SERVER_AVAILABLE)(
         server = null;
       }
     }, 15_000);
+
+    // Shared 6-row fixture — identical copy of part 1's 'filter-deep' seed:
+    // the assertions below pin exact tag/qty partitions, so this suite seeds
+    // its own deterministic copy on its own server.
+    let fDb: string;
+
+    it('fixture-setup: create db + seed shared rows', async () => {
+      fDb = await setupDb(client!, 'qshared', ['t']);
+      await seed(client!, fDb, 't', [
+        { id: 'a', qty: 1, tag: 'red', profile: { age: 25, city: 'NYC' } },
+        { id: 'b', qty: 5, tag: 'red', profile: { age: 30, city: 'LA' } },
+        { id: 'c', qty: 10, tag: 'blue', profile: { age: 35, city: 'NYC' } },
+        { id: 'd', qty: 25, tag: 'blue', profile: { age: 40, city: 'SF' } },
+        { id: 'e', qty: 50, tag: 'green', profile: { age: 45, city: 'LA' } },
+        { id: 'f', qty: 100, tag: 'green', profile: { age: 50, city: 'NYC' } },
+      ]);
+    });
     // ═══════════════════════════════════════════════════════════════════
     // 11. PATTERN MATCHING — like / ilike / regex (P1 gap)
     // ═══════════════════════════════════════════════════════════════════

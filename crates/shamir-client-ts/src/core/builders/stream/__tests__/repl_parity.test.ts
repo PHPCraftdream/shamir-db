@@ -47,9 +47,9 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_PATH = resolve(
   __dirname,
-  // From src/core/builders/__tests__ up to crates/, then into the sibling
-  // shamir-query-builder crate. Five levels of `..`.
-  '../../../../..',
+  // From src/core/builders/stream/__tests__ up to crates/, then into the sibling
+  // shamir-query-builder crate. Six levels of `..`.
+  '../../../../../..',
   'shamir-query-builder',
   'tests',
   'fixtures',

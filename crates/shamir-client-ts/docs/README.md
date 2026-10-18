@@ -543,7 +543,7 @@ The package has a platform-agnostic `core/` layer (types, client logic, builders
 npm test
 ```
 
-Runs [vitest](https://vitest.dev/) with the unit test suite. The live e2e test (`src/__tests__/e2e.test.ts`) spawns a release `shamir-server` binary and is skipped automatically if the binary is absent. To run it:
+Runs [vitest](https://vitest.dev/) with the unit test suite. The live e2e test (`src/__tests__/engine/e2e.test.ts`) spawns a release `shamir-server` binary and is skipped automatically if the binary is absent. To run it:
 
 ```bash
 cargo build --release -p shamir-server   # needs openssl on PATH

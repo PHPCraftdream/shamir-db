@@ -19,9 +19,9 @@ import type { ShamirClient } from '../../index.js';
 
 // ─── server binary path ───────────────────────────────────────────────────────
 
-// File layout: src/__tests__/connect.test.ts → src → shamir-client-ts → crates → shamir-db
+// File layout: src/__tests__/connection/connect.test.ts → __tests__ → src → shamir-client-ts → crates → repo root
 const _fileUrl = new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1');
-const REPO_ROOT = path.resolve(path.dirname(_fileUrl), '../../../..');
+const REPO_ROOT = path.resolve(path.dirname(_fileUrl), '../../../../..');
 
 const SERVER_BIN = path.join(
   REPO_ROOT,
@@ -241,6 +241,10 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
 describe('connect.test skip reason', () => {
   it('reports why the integration test was skipped', () => {
+    // Guard against a stale REPO_ROOT after file moves: if the probe below
+    // fails, SERVER_AVAILABLE was checked against the wrong directory and
+    // the skip above would silently mask lost integration coverage.
+    expect(fs.existsSync(path.join(REPO_ROOT, 'Cargo.toml'))).toBe(true);
     if (SERVER_AVAILABLE) {
       // Not skipped — integration tests ran above.
       expect(true).toBe(true);

@@ -59,6 +59,10 @@ import {
   mergeInternerDelta,
   touchFields,
   executeWithTouch,
+  type TxOpened,
+  type ScramUserCreated,
+  type SuperuserSet,
+  type ReplicatorSet,
 } from './client-internals.js';
 
 export type { TxOpened, ScramUserCreated, SuperuserSet, ReplicatorSet } from './client-internals.js';
