@@ -193,3 +193,4 @@ export function listIndexes(
 
 export function listUsers(): ListOp {
   return { list: 'users' };
+}
