@@ -37,10 +37,10 @@ import type {
   RevokeRoleOp,
   SetSuperuserOp,
   SetReplicatorOp,
-} from '../../types/admin.js';
+} from '../../types/access/admin.js';
 
-import type { Filter } from '../../types/filter.js';
-import type { WireValue } from '../../types/write.js';
+import type { Filter } from '../../types/read/filter.js';
+import type { WireValue } from '../../types/write/write.js';
 
 import {
   canonicalDropUser,
@@ -57,7 +57,7 @@ import {
   canonicalRenameGroup,
   canonicalAddGroupMember,
   canonicalRemoveGroupMember,
-} from '../../hmac.js';
+} from '../../protocol/hmac.js';
 
 // ── ResourceRef constructors (access.rs, untagged, single-key) ──────
 

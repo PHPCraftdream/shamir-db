@@ -7,7 +7,7 @@
 // native class with:
 //
 //   1. **ShamirDbError** — a typed Error subclass mirroring the TS SDK's
-//      `ShamirDbError` (`shamir-client-ts/src/core/errors.ts`), carrying
+//      `ShamirDbError` (`shamir-client-ts/src/core/support/errors.ts`), carrying
 //      `.code` and `.retryable`.
 //   2. **execute** — accepts a plain JS object, returns a plain JS object
 //      (msgpack encode/decode happens here, as before).
@@ -28,7 +28,7 @@ const native = require('./index.js');
 
 // ---------------------------------------------------------------------------
 // ShamirDbError — mirrors the TS SDK's ShamirDbError
-// (shamir-client-ts/src/core/errors.ts).
+// (shamir-client-ts/src/core/support/errors.ts).
 // ---------------------------------------------------------------------------
 
 /**

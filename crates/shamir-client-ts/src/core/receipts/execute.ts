@@ -6,7 +6,7 @@
  * PLATFORM-AGNOSTIC.
  */
 
-import type { BatchResponse } from '../types/batch.js';
+import type { BatchResponse } from '../types/write/batch.js';
 import type { VisibilityWait } from '../visibility/types.js';
 import { extractReceipts } from './extract.js';
 import type { AliasReceipt } from './types.js';

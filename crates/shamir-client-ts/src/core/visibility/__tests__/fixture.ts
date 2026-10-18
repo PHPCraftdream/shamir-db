@@ -1,6 +1,6 @@
-import type { Platform, Socket } from '../../platform.js';
-import { ShamirClient } from '../../client.js';
-import { encode, decode } from '../../framing.js';
+import type { Platform, Socket } from '../../support/platform.js';
+import { ShamirClient } from '../../client/client.js';
+import { encode, decode } from '../../protocol/framing.js';
 
 export async function fixture(requestTimeoutMs = 0): Promise<{
   client: ShamirClient;
