@@ -4,7 +4,8 @@
 //! refusal REPEATS: nothing is rewritten, no v3 is minted, counters and
 //! floor are unchanged. There is no runnable legacy executor to replay it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -34,28 +35,57 @@ impl CrashImage {
         self.records.lock().unwrap().insert(key, value);
     }
 
-    fn image(&self) -> Arc<dyn Store> {
+    fn image(&self) -> Arc<ImageStore> {
         Arc::new(ImageStore {
             records: Mutex::new(self.records.lock().unwrap().clone()),
+            writes: AtomicUsize::new(0),
+            mutated_keys: Mutex::new(BTreeSet::new()),
         })
     }
 }
 
-/// Read/write view of a crash image. Writes that MUTATE the image fail (the
-/// refusal path must never rewrite refused state); only count them.
+/// Read/write view of a crash image. Scans iterate the REAL map. Mutating
+/// writes are counted in a ledger (the refusal path must never rewrite
+/// refused state) while the immutable snapshot itself is never rewritten.
 struct ImageStore {
     records: Mutex<BTreeMap<RecordKey, Bytes>>,
+    writes: AtomicUsize,
+    mutated_keys: Mutex<BTreeSet<Vec<u8>>>,
+}
+
+impl ImageStore {
+    fn record_mutation(&self, key: &[u8]) {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        self.mutated_keys.lock().unwrap().insert(key.to_vec());
+    }
+
+    fn mutations(&self) -> usize {
+        self.writes.load(Ordering::SeqCst)
+    }
+
+    fn mutated_keys(&self) -> Vec<Vec<u8>> {
+        self.mutated_keys.lock().unwrap().iter().cloned().collect()
+    }
 }
 
 #[async_trait]
 impl Store for ImageStore {
     async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
         let key = RecordKey::from_slice(&(self.records.lock().unwrap().len() as u64).to_be_bytes());
-        self.set(key.clone(), value).await?;
+        // Mirror `set`: the generated key must land in the write ledger too.
+        self.records.lock().unwrap().insert(key.clone(), value);
+        self.record_mutation(key.as_ref());
         Ok(key)
     }
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
-        Ok(self.records.lock().unwrap().insert(key, value).is_none())
+        let inserted = self
+            .records
+            .lock()
+            .unwrap()
+            .insert(key.clone(), value)
+            .is_none();
+        self.record_mutation(key.as_ref());
+        Ok(inserted)
     }
     async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
         self.records
@@ -66,22 +96,49 @@ impl Store for ImageStore {
             .ok_or_else(|| DbError::NotFound("crash image key".into()))
     }
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
-        Ok(self.records.lock().unwrap().remove(&key).is_some())
+        let removed = self.records.lock().unwrap().remove(&key).is_some();
+        self.record_mutation(key.as_ref());
+        Ok(removed)
     }
-    // The crash image is a metadata-only snapshot: the scanned key spaces are
-    // empty by construction, so an empty stream is the honest answer.
+    // Scans iterate the REAL map in sorted batches — the crash image is a
+    // metadata snapshot with real records, so an empty stream would lie.
     fn iter_stream(
         &self,
-        _batch_size: usize,
+        batch_size: usize,
     ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
-        Box::pin(stream::empty())
+        let snapshot: Vec<(RecordKey, Bytes)> = self
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let batch_size = batch_size.max(1);
+        let batches: Vec<Vec<(RecordKey, Bytes)>> = snapshot
+            .chunks(batch_size)
+            .map(<[(RecordKey, Bytes)]>::to_vec)
+            .collect();
+        Box::pin(stream::iter(batches.into_iter().map(Ok)))
     }
     fn scan_prefix_stream(
         &self,
-        _prefix: Bytes,
-        _batch_size: usize,
+        prefix: Bytes,
+        batch_size: usize,
     ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
-        Box::pin(stream::empty())
+        let snapshot: Vec<(RecordKey, Bytes)> = self
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(key, _)| key.as_ref().starts_with(prefix.as_ref()))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let batch_size = batch_size.max(1);
+        let batches: Vec<Vec<(RecordKey, Bytes)>> = snapshot
+            .chunks(batch_size)
+            .map(<[(RecordKey, Bytes)]>::to_vec)
+            .collect();
+        Box::pin(stream::iter(batches.into_iter().map(Ok)))
     }
 }
 
@@ -117,19 +174,23 @@ fn legacy_bookmark_fixtures() -> Vec<(Vec<u8>, &'static str)> {
 }
 
 /// One legacy crash image: floor marker + the legacy bookmark bytes.
-fn legacy_crash_image(bookmark_bytes: &[u8]) -> Arc<dyn Store> {
+fn legacy_crash_image(bookmark_bytes: &[u8]) -> Arc<ImageStore> {
     let image = CrashImage::default();
     image.set(bookmark_key(), Bytes::from(bookmark_bytes.to_vec()));
     image.image()
 }
 
 async fn assert_refused_repeatedly(
-    image: &Arc<dyn Store>,
+    image: &Arc<ImageStore>,
     expected_bytes: &[u8],
     reason: FollowerRefusalReason,
     label: &str,
 ) {
+    let bookmark_bytes = bookmark_key().as_ref().to_vec();
+    // The metadata APIs take `&Arc<dyn Store>`; coerce once up front.
+    let store: Arc<dyn Store> = image.clone();
     for attempt in 0..2 {
+        let writes_before = image.mutations();
         let check = |result: DbError| {
             assert!(
                 matches!(result, DbError::FollowerStateRefused { reason: r } if r == reason),
@@ -137,21 +198,32 @@ async fn assert_refused_repeatedly(
                  got {result:?}"
             );
         };
-        check(load_bookmark_v3(image).await.unwrap_err());
-        check(classify_follower_bookmark(image).await.unwrap_err());
-        check(load_replication_bookmark(image).await.unwrap_err());
-        check(load_clean_horizon(image).await.unwrap_err());
+        check(load_bookmark_v3(&store).await.unwrap_err());
+        check(classify_follower_bookmark(&store).await.unwrap_err());
+        check(load_replication_bookmark(&store).await.unwrap_err());
+        check(load_clean_horizon(&store).await.unwrap_err());
         // The refusal path must NEVER mint a v3 record over refused bytes.
         check(
-            save_fence_record_v3_aware(image, fence(99))
+            save_fence_record_v3_aware(&store, fence(99))
                 .await
                 .unwrap_err(),
         );
         // The stored bytes are untouched — no rewrite, no adoption.
         assert_eq!(
-            image.get(bookmark_key()).await.unwrap().as_ref(),
+            store.get(bookmark_key()).await.unwrap().as_ref(),
             expected_bytes,
             "attempt {attempt} for {label}"
+        );
+        // No mutating write touched the image during the refusal calls, and
+        // the refused bookmark key is not among the mutated keys.
+        assert_eq!(
+            image.mutations(),
+            writes_before,
+            "attempt {attempt} for {label}: refusal must not write"
+        );
+        assert!(
+            !image.mutated_keys().contains(&bookmark_bytes),
+            "attempt {attempt} for {label}: the refused key must stay unwritten"
         );
     }
 }
@@ -183,17 +255,20 @@ async fn legacy_bookmark_crash_images_refuse_repeatedly_without_rewrite() {
 async fn floor_only_crash_image_classifies_unowned_and_refuses_adoption() {
     let image = CrashImage::default();
     let store = image.image();
+    // The metadata APIs take `&Arc<dyn Store>`; coerce once up front.
+    let dyn_store: Arc<dyn Store> = store.clone();
     // Floor marker WITHOUT any bookmark: unowned pre-receipt follower state.
-    save_last_committed_flushed(&store, 7).await.unwrap();
+    save_last_committed_flushed(&dyn_store, 7).await.unwrap();
+    let writes_before = store.mutations();
     for attempt in 0..2 {
         assert!(
             matches!(
-                classify_follower_bookmark(&store).await.unwrap(),
+                classify_follower_bookmark(&dyn_store).await.unwrap(),
                 FollowerBookmarkState::FloorWithoutBookmark { floor: 7 }
             ),
             "attempt {attempt}"
         );
-        let error = save_fence_record_v3_aware(&store, fence(99))
+        let error = save_fence_record_v3_aware(&dyn_store, fence(99))
             .await
             .unwrap_err();
         assert!(
@@ -205,8 +280,14 @@ async fn floor_only_crash_image_classifies_unowned_and_refuses_adoption() {
             ),
             "attempt {attempt}: {error:?}"
         );
-        assert_eq!(load_last_committed(&store).await.unwrap(), Some(7));
-        assert!(load_bookmark_v3(&store).await.unwrap().is_none());
+        assert_eq!(load_last_committed(&dyn_store).await.unwrap(), Some(7));
+        assert!(load_bookmark_v3(&dyn_store).await.unwrap().is_none());
+        // No NEW mutations during the refusal loop — the refused adoption
+        // wrote nothing, and the bookmark key was never touched.
+        assert_eq!(store.mutations(), writes_before, "attempt {attempt}");
+        assert!(!store
+            .mutated_keys()
+            .contains(&bookmark_key().as_ref().to_vec()));
     }
 }
 
@@ -216,9 +297,11 @@ async fn floor_only_crash_image_classifies_unowned_and_refuses_adoption() {
 async fn v3_crash_image_still_classifies_native() {
     let image = CrashImage::default();
     let store = image.image();
-    save_last_committed_flushed(&store, 2).await.unwrap();
+    // The metadata APIs take `&Arc<dyn Store>`; coerce once up front.
+    let dyn_store: Arc<dyn Store> = store.clone();
+    save_last_committed_flushed(&dyn_store, 2).await.unwrap();
     crate::meta::repl::bookmark_v3::save_bookmark_v3(
-        &store,
+        &dyn_store,
         &crate::meta::repl::bookmark_v3::BookmarkV3 {
             fence: Some(fence(2)),
             bookmark: 2,
@@ -229,9 +312,9 @@ async fn v3_crash_image_still_classifies_native() {
     .await
     .unwrap();
     assert!(matches!(
-        classify_follower_bookmark(&store).await.unwrap(),
+        classify_follower_bookmark(&dyn_store).await.unwrap(),
         crate::meta::repl::bookmark_v3::FollowerBookmarkState::Native(_)
     ));
-    assert_eq!(load_replication_bookmark(&store).await.unwrap(), 2);
-    assert_eq!(load_clean_horizon(&store).await.unwrap(), Some(2));
+    assert_eq!(load_replication_bookmark(&dyn_store).await.unwrap(), 2);
+    assert_eq!(load_clean_horizon(&dyn_store).await.unwrap(), Some(2));
 }

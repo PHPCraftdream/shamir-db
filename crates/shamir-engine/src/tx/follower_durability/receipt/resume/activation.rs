@@ -7,6 +7,12 @@
 //! and no migration: the operator reseeds the affected subscription.
 //! `Fresh` means the caller must ADOPT (write the v3 baseline) before any
 //! apply work.
+//!
+//! Refusal ordering: the durable-state refusal (legacy/malformed evidence) is
+//! a property of the durable state — classification is read-only — and is
+//! reported FIRST; the backend capability gate guards every verdict that
+//! would allow follower work (Native/Fresh) before any adoption write or
+//! allocation.
 
 use std::sync::Arc;
 
@@ -29,25 +35,30 @@ pub(crate) enum FollowerAdmission {
 /// Pure admission decision over the classified durable state (PR6b-3
 /// acceptance test 8). Extracted so tests can exercise the capability gate
 /// without a backend: `BoxRepo` is a crate-internal enum and cannot be
-/// constructed around a refusing store from outside the crate. The
-/// capability check precedes EVERY state-driven verdict: an unsupported
-/// backend refuses `Native`, `Fresh` and `Floor` alike — no classification
-/// translation, interner first-touch or allocation happens first.
+/// constructed around a refusing store from outside the crate.
+///
+/// Order: the durable-state refusal comes FIRST — it is a property of the
+/// durable state and classification is read-only, so it must be reported
+/// regardless of backend capability. The capability gate then guards every
+/// verdict that would allow follower work (`Native`/`Fresh`) before any
+/// adoption write or allocation happens.
 /// `Fresh` here means state-eligible only; the seed-install conflict check
 /// stays in [`admit_follower`] because it needs the info store.
 pub(crate) fn admission_decision(
     supports_atomic_batch: bool,
     state: FollowerBookmarkState,
 ) -> DbResult<FollowerAdmission> {
-    if !supports_atomic_batch {
-        return Err(DbError::AtomicBatchUnsupported(String::new()));
-    }
     match state {
-        FollowerBookmarkState::Native(_) => Ok(FollowerAdmission::Native),
-        FollowerBookmarkState::Fresh => Ok(FollowerAdmission::Fresh),
+        FollowerBookmarkState::Native(_) if supports_atomic_batch => Ok(FollowerAdmission::Native),
+        FollowerBookmarkState::Fresh if supports_atomic_batch => Ok(FollowerAdmission::Fresh),
+        FollowerBookmarkState::Native(_) | FollowerBookmarkState::Fresh => {
+            Err(DbError::AtomicBatchUnsupported(String::new()))
+        }
         FollowerBookmarkState::FloorWithoutBookmark { .. } => {
             // A nonzero durable allocation floor without a v3 record is
             // unowned pre-receipt follower evidence: reseed required.
+            // Durable-state refusal: reported first, regardless of backend
+            // capability — the classification itself is read-only.
             Err(DbError::FollowerStateRefused {
                 reason: FollowerRefusalReason::LegacyFollowerState,
             })

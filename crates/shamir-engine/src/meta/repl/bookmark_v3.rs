@@ -180,15 +180,23 @@ pub async fn classify_follower_bookmark(info: &Arc<dyn Store>) -> DbResult<Follo
 }
 
 /// True when `v3`'s outstanding-receipt pointer (if any) resolves to a stored
-/// receipt that is not `Checkpointed`. A dangling or retired pointer is a
-/// corrupt durable state: admission-time resume must refuse it.
+/// receipt that is not `Checkpointed`. A MISSING receipt and an UNDECODABLE
+/// (corrupt) one are equally unresolved: both are terminal durable corruption
+/// and admission-time resume must refuse them. Only transient store I/O
+/// errors propagate as `Err`.
 pub async fn receipt_pointer_resolves(info: &Arc<dyn Store>, v3: &BookmarkV3) -> DbResult<bool> {
     let Some(id) = v3.outstanding_receipt else {
         return Ok(true);
     };
-    match crate::meta::repl::receipt::load_outstanding_receipt(info, &id).await? {
-        None => Ok(false),
-        Some(receipt) => Ok(receipt.phase != crate::meta::repl::ReceiptPhase::Checkpointed),
+    let bytes = match info.get(crate::meta::repl::receipt::receipt_key()).await {
+        Err(DbError::NotFound(_)) => return Ok(false),
+        Err(error) => return Err(error),
+        Ok(bytes) => bytes,
+    };
+    match crate::meta::repl::receipt::decode_receipt(&id, &bytes) {
+        Ok(receipt) => Ok(receipt.phase != crate::meta::repl::ReceiptPhase::Checkpointed),
+        // Corrupt bytes are durable corruption, not a transient failure.
+        Err(_) => Ok(false),
     }
 }
 

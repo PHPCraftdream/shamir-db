@@ -64,7 +64,7 @@ use crate::replication::supervisor::{ReplSourceFactory, Subscription, Subscripti
 
 /// Build an in-memory `ShamirDb` with db `app`, repo `main`, table `items`,
 /// owned by `alice`. Used for both leader and follower (independent data).
-async fn build_db() -> Arc<ShamirDb> {
+pub(crate) async fn build_db() -> Arc<ShamirDb> {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64_from_username("alice"));
     shamir.create_db_as("app", owner.clone()).await;
@@ -127,7 +127,7 @@ async fn write_rows(leader: &ShamirDb, base: usize, n: usize) {
 
 /// Create a replication profile with a single `pull` stream over `app/main`,
 /// then a subscription bound to it — both on the FOLLOWER catalogue.
-async fn create_profile_and_subscription(follower: &ShamirDb) {
+pub(crate) async fn create_profile_and_subscription(follower: &ShamirDb) {
     let mut b = Batch::new();
     b.id(1);
     b.op(
@@ -149,7 +149,7 @@ async fn create_profile_and_subscription(follower: &ShamirDb) {
 }
 
 /// Run an `alter_subscription` terminal op on the follower catalogue.
-async fn alter(follower: &ShamirDb, op: shamir_query_types::batch::BatchOp) {
+pub(crate) async fn alter(follower: &ShamirDb, op: shamir_query_types::batch::BatchOp) {
     let mut b = Batch::new();
     b.id(1);
     b.op("as", op);
@@ -186,7 +186,7 @@ async fn wait_for_bookmark(follower: &ShamirDb, target: u64) {
     panic!("follower bookmark did not reach {target} (last={b})");
 }
 
-async fn bookmark(follower: &ShamirDb) -> u64 {
+pub(crate) async fn bookmark(follower: &ShamirDb) -> u64 {
     follower
         .get_db("app")
         .and_then(|d| d.get_repo("main"))
@@ -578,7 +578,7 @@ async fn swap_items_mvcc_history(follower: &ShamirDb, history: Arc<TransientRead
 }
 
 /// One leader-originated event (insert of row `k1` at commit_version 1).
-fn single_insert_event() -> Vec<ReplicatedEvent> {
+pub(crate) fn single_insert_event() -> Vec<ReplicatedEvent> {
     vec![ReplicatedEvent {
         event: ChangelogEvent {
             repo: "main".into(),
@@ -597,7 +597,7 @@ fn single_insert_event() -> Vec<ReplicatedEvent> {
     }]
 }
 
-async fn items_row_counter(follower: &ShamirDb) -> u64 {
+pub(crate) async fn items_row_counter(follower: &ShamirDb) -> u64 {
     follower
         .get_db("app")
         .unwrap()
@@ -614,7 +614,7 @@ async fn items_row_counter(follower: &ShamirDb) -> u64 {
 
 /// Poll until the subscription row reaches `expected` (terminal-state
 /// persistence is async — the loop task reports it).
-async fn wait_for_sub_state(follower: &ShamirDb, expected: &str) {
+pub(crate) async fn wait_for_sub_state(follower: &ShamirDb, expected: &str) {
     for _ in 0..200 {
         if sub_state(follower, "sub_a").await.as_deref() == Some(expected) {
             return;
@@ -784,9 +784,9 @@ async fn terminal_receipt_corruption_stops_supervisor_and_refuses_resume() {
     sup.stop_all().await;
 }
 
-struct PartialSource {
-    events: Vec<u8>,
-    pulls: AtomicUsize,
+pub(crate) struct PartialSource {
+    pub(crate) events: Vec<u8>,
+    pub(crate) pulls: AtomicUsize,
 }
 
 #[async_trait]
@@ -841,7 +841,7 @@ async fn healthy_destination_can_resume_persisted_reopen_state() {
     );
 }
 
-async fn sub_state(follower: &ShamirDb, name: &str) -> Option<String> {
+pub(crate) async fn sub_state(follower: &ShamirDb, name: &str) -> Option<String> {
     let table = follower.system_store().subscriptions_table().await.ok()?;
     let interner = table.interner_for_test().get().await.ok()?;
     let refs = shamir_db::types::common::new_map();

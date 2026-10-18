@@ -5,6 +5,7 @@
 pub mod bookmark;
 pub mod bookmark_v3;
 pub mod fence_record;
+pub mod gate_provenance;
 pub mod receipt;
 pub use bookmark_v3::{
     classify_follower_bookmark, decode_bookmark_v3, encode_bookmark_v3, load_bookmark_v3,

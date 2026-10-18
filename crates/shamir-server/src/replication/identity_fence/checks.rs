@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use shamir_db::engine::meta::repl::bookmark_v3::load_bookmark_v3;
 use shamir_db::engine::meta::repl_bookmark::load_replication_bookmark;
 use shamir_db::engine::meta::repo_identity::RepoIdentity;
 use shamir_db::engine::repo::SeedReceipt;
@@ -73,10 +74,14 @@ pub(crate) fn hex_lineage(lineage: &[u8; 16]) -> String {
 
 /// Requires `prepare_subscription` once at loop start. Any persistence error
 /// ends that loop; retrying requires a fresh startup durability barrier.
-/// Best-effort WARM-gate visibility enable after identity adoption: the
-/// durable v3 record is the authority and gate-init derives the flag on every
-/// later open — this only closes the gap until the next restart (a zero-event
-/// follower never runs the receipt pipeline, so nothing else enables it).
+/// Best-effort WARM-gate visibility enable. Presence-based and idempotent: a
+/// durable v3 record for this repository enables receipt-native visibility on
+/// every successful identity decision, not only at fence creation. A
+/// failed/cancelled adoption flush can leave the v3 record readable without
+/// being durable, so the retry over the EXISTING record must still enable.
+/// Gate-init derives the flag on every later open; this only closes the gap
+/// until the next restart (a zero-event follower never runs the receipt
+/// pipeline, so nothing else enables it).
 async fn enable_visibility(repo: &shamir_db::engine::repo::RepoInstance) {
     if let Ok(gate) = repo.tx_gate().await {
         gate.enable_receipt_native_visibility();
@@ -98,9 +103,13 @@ pub(crate) async fn fence_hello_recorded(
             repo: repo_name.into(),
         })?;
     let info = repo.tx_info_store().await.map_err(storage_error)?;
-    if hello_decide(&info, db_name, repo_name, response, receipt).await? {
-        // Adoption persisted a NEW fence record — gain receipt-native
-        // visibility in the same step (best-effort; see `enable_visibility`).
+    hello_decide(&info, db_name, repo_name, response, receipt).await?;
+    // Presence-based visibility enable (best-effort; see `enable_visibility`).
+    if load_bookmark_v3(&info)
+        .await
+        .map_err(storage_error)?
+        .is_some()
+    {
         enable_visibility(&repo).await;
     }
     Ok(())
@@ -114,20 +123,17 @@ pub(crate) async fn fence_hello_identity(
     response: &ReplResponse,
     receipt: Option<&SeedReceipt>,
 ) -> Result<(), ReplError> {
-    hello_decide(info, db_name, repo_name, response, receipt)
-        .await
-        .map(|_| ())
+    hello_decide(info, db_name, repo_name, response, receipt).await
 }
 
-/// [`fence_hello_identity`] reporting whether a NEW fence record was persisted
-/// (the `existing.is_none()` adoption path in [`decide`]).
+/// Hello decision against the same identity store used by startup and Pull.
 async fn hello_decide(
     info: &Arc<dyn Store>,
     db_name: &str,
     repo_name: &str,
     response: &ReplResponse,
     receipt: Option<&SeedReceipt>,
-) -> Result<bool, ReplError> {
+) -> Result<(), ReplError> {
     let ReplResponse::Hello { repos, .. } = response else {
         return Err(SeedRefusal::MissingIdentity.into());
     };
@@ -149,7 +155,10 @@ async fn hello_decide(
 /// cancel-safe: NO — a set may survive an abandoned flush; the next loop start
 /// must reflush the existing record before trusting matching metadata.
 /// `repo` (the destination repo instance) is used only to enable WARM-gate
-/// receipt-native visibility when this call ADOPTS a new fence record; tests
+/// receipt-native visibility, PRESENCE-based: any durable v3 record for this
+/// repository enables it on every successful identity decision, not only at
+/// creation — a failed/cancelled adoption flush can leave the record
+/// readable, so the retry over the EXISTING record must still enable. Tests
 /// that fence a bare probe store pass `None`.
 pub(crate) async fn fence_pull_identity(
     info: &Arc<dyn Store>,
@@ -167,7 +176,7 @@ pub(crate) async fn fence_pull_identity(
         // Error envelopes make no identity statement and apply no events.
         return Ok(());
     };
-    let adopted = decide(
+    decide(
         info,
         *repo_lineage_id,
         *history_epoch,
@@ -175,8 +184,12 @@ pub(crate) async fn fence_pull_identity(
         receipt,
     )
     .await?;
-    if adopted {
-        if let Some(repo) = repo {
+    if let Some(repo) = repo {
+        if load_bookmark_v3(info)
+            .await
+            .map_err(storage_error)?
+            .is_some()
+        {
             enable_visibility(repo).await;
         }
     }
@@ -189,7 +202,7 @@ async fn decide(
     epoch: Option<u64>,
     schema: Option<&str>,
     receipt: Option<&SeedReceipt>,
-) -> Result<bool, ReplError> {
+) -> Result<(), ReplError> {
     let existing = recorded::load(info).await.map_err(storage_error)?;
     let (Some(lineage_id), Some(history_epoch)) = (lineage, epoch) else {
         if let Some(mut record) = existing {
@@ -255,7 +268,7 @@ async fn decide(
             history_epoch = observed.history_epoch,
             "replication identity fence: adopted first observed leader identity (legacy migration occurs once)");
     }
-    // `true` exactly when this call persisted a NEW fence record (first
-    // adoption); every later matching response is a metadata-only update.
-    Ok(existing.is_none())
+    // Every successful identity decision is enough: visibility is
+    // presence-based, resolved by the caller against the durable v3 record.
+    Ok(())
 }

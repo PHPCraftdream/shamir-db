@@ -11,10 +11,13 @@ use shamir_storage::error::{DbError, FollowerRefusalReason};
 use shamir_storage::types::RecordKey;
 use shamir_tx::changefeed::{ChangeOp, ChangelogEvent, RecordChange};
 use shamir_types::access::Actor;
+use shamir_types::types::record_id::RecordId;
+use shamir_wal::{WalDurability, WalEntryV2, WalOpV2};
 
 use super::super::follower::ignore_bookmark_j;
 use super::helpers::{
-    open_and_reconcile, prepare_follower_image, prepare_image, raw_store, temp_path,
+    open_and_reconcile, open_refusal_with_retry, prepare_follower_image, prepare_image, raw_store,
+    temp_path,
 };
 use crate::repo::{BoxRepoFactory, RepoInstance};
 use crate::table::TableConfig;
@@ -245,9 +248,12 @@ async fn non_follower_repos_keep_exact_conservative_certification() {
 
 // Cold ordering (S5c-X PR6b-3): a legacy bookmark record in `__tx__` must
 // REFUSE the reopen (typed `FollowerStateRefused`) BEFORE WAL replay and
-// publication run: after the failed open the durable `LastCommittedVersion`
-// floor and the changelog clean horizon are unchanged, the legacy bytes are
-// untouched, and no recovery gap marker was written.
+// publication run. The fixture carries a REAL surviving WAL entry (a
+// `WalEntryV2` Put appended through the repo's own WAL and synced before
+// close) alongside the legacy bytes. After the failed open the durable
+// `LastCommittedVersion` floor and the changelog clean horizon are
+// unchanged, the legacy bytes are untouched, and no recovery gap marker
+// was written.
 #[cfg(feature = "fjall")]
 #[tokio::test(flavor = "current_thread")]
 async fn legacy_bookmark_refuses_reopen_before_replay() {
@@ -265,6 +271,34 @@ async fn legacy_bookmark_refuses_reopen_before_replay() {
             .expect("the seed batch applies"),
         ApplyOutcome::Applied { local_version: 1 }
     );
+    // A real WAL entry through the repo's own WAL (the receipt executor is
+    // WAL-less; its durability is atomic receipt batches): a Put of the same
+    // key shape the seed event used, at commit_version 2. The WAL manager's
+    // `recover()` is a non-consuming replay, so the pre-close assertion
+    // below leaves the entry intact for any later recovery.
+    {
+        let wal = repo.repo_wal().await.expect("repo WAL");
+        let mut rid_bytes = [0u8; 16];
+        rid_bytes[0] = 1;
+        let entry = WalEntryV2::new(
+            wal.fresh_txn_id(),
+            crate::repo::repo_token(&name),
+            vec![WalOpV2::Put {
+                table_id_interned: 0,
+                rid: RecordId(rid_bytes),
+                body: bytes::Bytes::from_static(b"payload"),
+            }],
+        )
+        .with_commit_version(2);
+        wal.begin_grouped(&entry, WalDurability::Buffered)
+            .await
+            .expect("append WAL entry");
+        wal.sync_wal().await.expect("sync WAL");
+        assert!(
+            !wal.recover().await.expect("WAL replay").is_empty(),
+            "the WAL must carry the real entry before the close"
+        );
+    }
     let info = repo.tx_info_store().await.expect("tx info store");
     let legacy = crate::meta::MetaEnvelope::new(10u64).encode().unwrap();
     let bookmark_key = RecordKey::from_slice(
@@ -278,37 +312,34 @@ async fn legacy_bookmark_refuses_reopen_before_replay() {
     drop(info);
     close(repo).await;
 
-    // Baseline from the raw stores AFTER the close, BEFORE the refused open.
-    let tx = raw_store(temp.path(), "__tx__").await;
-    let floor_before = crate::meta::recovery_marker::load_last_committed(&tx)
-        .await
-        .expect("floor baseline");
-    let legacy_before = tx.get(bookmark_key.clone()).await.expect("legacy bytes");
-    let changelog = raw_store(temp.path(), "__changelog__").await;
-    let clean_before = changelog
-        .get(RecordKey::from_slice(
-            &shamir_tx::changefeed::clean_horizon_key(),
-        ))
-        .await
-        .ok();
-    let gap_before = changelog
-        .get(RecordKey::from_slice(
-            &shamir_tx::changefeed::gap_marker_key(),
-        ))
-        .await
-        .ok();
-
-    // The open must FAIL FAST — no retry, no replay.
-    let error = RepoInstance::from_factory(
-        name.clone(),
-        BoxRepoFactory::fjall_raw(temp.path().to_path_buf()),
-        vec![TableConfig::new("items")],
-    )
-    .await;
-    let error = match error {
-        Ok(_) => panic!("legacy follower store must refuse the open"),
-        Err(error) => error,
+    // Baseline from the raw stores AFTER the close, BEFORE the refused
+    // open. Each raw store owns an `Arc<Database>` with an exclusive fjall
+    // lock — every handle is dropped before the reopen.
+    let (floor_before, legacy_before, clean_before, gap_before) = {
+        let tx = raw_store(temp.path(), "__tx__").await;
+        let floor_before = crate::meta::recovery_marker::load_last_committed(&tx)
+            .await
+            .expect("floor baseline");
+        let legacy_before = tx.get(bookmark_key.clone()).await.expect("legacy bytes");
+        let changelog = raw_store(temp.path(), "__changelog__").await;
+        let clean_before = changelog
+            .get(RecordKey::from_slice(
+                &shamir_tx::changefeed::clean_horizon_key(),
+            ))
+            .await
+            .ok();
+        let gap_before = changelog
+            .get(RecordKey::from_slice(
+                &shamir_tx::changefeed::gap_marker_key(),
+            ))
+            .await
+            .ok();
+        (floor_before, legacy_before, clean_before, gap_before)
     };
+
+    // The open must FAIL FAST on the typed refusal — only fjall lock lag
+    // retries.
+    let error = open_refusal_with_retry(temp.path(), &name).await;
     assert!(
         matches!(
             error,
@@ -319,42 +350,45 @@ async fn legacy_bookmark_refuses_reopen_before_replay() {
         "{error:?}"
     );
 
-    // No replay/publication side effects after the failed open.
-    let tx_after = raw_store(temp.path(), "__tx__").await;
-    assert_eq!(
-        crate::meta::recovery_marker::load_last_committed(&tx_after)
-            .await
-            .expect("floor after"),
-        floor_before,
-        "the durable floor must be unchanged"
-    );
-    assert_eq!(
-        tx_after
-            .get(bookmark_key.clone())
-            .await
-            .expect("bytes after"),
-        legacy_before,
-        "the legacy bookmark bytes must be untouched"
-    );
-    let changelog_after = raw_store(temp.path(), "__changelog__").await;
-    assert_eq!(
-        changelog_after
-            .get(RecordKey::from_slice(
-                &shamir_tx::changefeed::clean_horizon_key()
-            ))
-            .await
-            .ok(),
-        clean_before,
-        "the clean horizon must be unchanged"
-    );
-    assert_eq!(
-        changelog_after
-            .get(RecordKey::from_slice(
-                &shamir_tx::changefeed::gap_marker_key()
-            ))
-            .await
-            .ok(),
-        gap_before,
-        "no gap marker may be written"
-    );
+    // No replay/publication side effects after the failed open. Handles are
+    // again scoped so nothing raw is alive longer than the assertion.
+    {
+        let tx_after = raw_store(temp.path(), "__tx__").await;
+        assert_eq!(
+            crate::meta::recovery_marker::load_last_committed(&tx_after)
+                .await
+                .expect("floor after"),
+            floor_before,
+            "the durable floor must be unchanged"
+        );
+        assert_eq!(
+            tx_after
+                .get(bookmark_key.clone())
+                .await
+                .expect("bytes after"),
+            legacy_before,
+            "the legacy bookmark bytes must be untouched"
+        );
+        let changelog_after = raw_store(temp.path(), "__changelog__").await;
+        assert_eq!(
+            changelog_after
+                .get(RecordKey::from_slice(
+                    &shamir_tx::changefeed::clean_horizon_key()
+                ))
+                .await
+                .ok(),
+            clean_before,
+            "the clean horizon must be unchanged"
+        );
+        assert_eq!(
+            changelog_after
+                .get(RecordKey::from_slice(
+                    &shamir_tx::changefeed::gap_marker_key()
+                ))
+                .await
+                .ok(),
+            gap_before,
+            "no gap marker may be written"
+        );
+    }
 }

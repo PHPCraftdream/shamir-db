@@ -4,6 +4,7 @@ use super::super::table::{TableConfig, TableManager};
 use super::fk_reverse_cache::FkReverseCache;
 use super::group_commit::GroupCommit;
 use super::repo_types::{BoxRepo, BoxRepoFactory, RepoFactory};
+use crate::meta::repl::gate_provenance::with_follower_provenance as provenance_gate;
 use crate::query::batch::BatchError;
 use crate::query::write::WriteResult;
 use crate::repo::changelog_store::write_domain::RepoWriteDomain;
@@ -879,17 +880,7 @@ impl RepoInstance {
                 let checkpoint =
                     super::durability_policy::checkpoint_allocation_floor(self).await?;
                 let last_committed = marker.max(max_inflight).max(checkpoint);
-
-                let gate = shamir_tx::RepoTxGate::new(last_committed, next_tx_id);
-                // PR6b-3: durable follower provenance is live from open. A
-                // valid v3 record enables receipt-native visibility before
-                // any read; a legacy or malformed record refuses gate
-                // initialization (fail closed — operator reseeds).
-                if let crate::meta::repl::bookmark_v3::FollowerBookmarkState::Native(_) =
-                    crate::meta::repl::bookmark_v3::classify_follower_bookmark(&info_store).await?
-                {
-                    gate.enable_receipt_native_visibility();
-                }
+                let gate = provenance_gate(last_committed, next_tx_id, &info_store).await?;
                 // Best-effort: a WAL-init failure must NOT fail the gate
                 // init. The old contract (see commit_wal_init_failure tests)
                 // keeps the repo_wal OnceCell uninitialised and retryable —
@@ -899,7 +890,7 @@ impl RepoInstance {
                         gate.completion().install_abort_coverage(coverage);
                     }
                 }
-                Ok::<Arc<shamir_tx::RepoTxGate>, DbError>(Arc::new(gate))
+                Ok::<Arc<shamir_tx::RepoTxGate>, DbError>(gate)
             })
             .await
             .cloned()

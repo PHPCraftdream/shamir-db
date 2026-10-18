@@ -2,10 +2,14 @@
 //! A separate durable marker fixture retains consumer/supervisor gap refusal.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
+use bytes::Bytes;
 use shamir_db::engine::meta::repl::bookmark_v3::{save_bookmark_v3, BookmarkV3};
+use shamir_db::engine::meta::{MetaEnvelope, MetaKey};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig, RepoInstance};
 use shamir_db::engine::table::TableConfig;
 use shamir_db::engine::tx::apply_replicated::apply_replicated_batch;
@@ -15,6 +19,7 @@ use shamir_db::storage::types::{RecordKey, Repo};
 use shamir_db::types::value::QueryValue;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl::alter_subscription;
 use shamir_query_builder::ddl::{
     list_subscriptions, repl_scope, replication_profile, replication_status, subscription,
 };
@@ -33,6 +38,11 @@ use crate::replication::follower_loop::{run_follower_loop, FollowerLoopConfig};
 use crate::replication::in_process::InProcessReplSource;
 use crate::replication::source::ReplSource;
 use crate::replication::supervisor::{ReplSourceFactory, SubscriptionSupervisor};
+
+use super::supervisor_tests::{
+    alter, bookmark, build_db, create_profile_and_subscription, items_row_counter,
+    single_insert_event, sub_state, wait_for_sub_state, PartialSource,
+};
 
 fn runtime() -> Runtime {
     Builder::new_current_thread().enable_all().build().unwrap()
@@ -416,4 +426,270 @@ fn clean_reopen_allows_follower_at_head() {
         assert_eq!(repo(&follower).replication_bookmark().await.unwrap(), h);
     });
     drop(rt);
+}
+
+// ---------------------------------------------------------------------------
+// S5c-X PR6b-3 round 3 — supervisor terminal-state tests (moved here from the
+// dissolved `supervisor_receipt_terminal_tests` module for the layout ratchet).
+// ---------------------------------------------------------------------------
+
+// S5c-X PR6b-3 round 3: a legacy durable bookmark must refuse gate
+// initialization with the TYPED `FollowerStateRefused` and terminal
+// `resync_required` persistence (not a flattened generic `Start` error).
+#[tokio::test]
+async fn legacy_bookmark_gate_refusal_marks_typed_terminal() {
+    let follower = build_db().await;
+    create_profile_and_subscription(&follower).await;
+    // Seed legacy bookmark bytes BEFORE any reconcile: gate init classifies
+    // the destination and refuses (the tests own the legacy fixture bytes —
+    // no production legacy writer exists).
+    let info = follower
+        .get_db("app")
+        .unwrap()
+        .get_repo("main")
+        .unwrap()
+        .tx_info_store()
+        .await
+        .unwrap();
+    info.set(
+        RecordKey::from_slice(MetaKey::ReplicationBookmark.as_record_id().as_bytes()),
+        Bytes::from(MetaEnvelope::new(10u64).encode().unwrap()),
+    )
+    .await
+    .unwrap();
+
+    let events = single_insert_event();
+    let source = Arc::new(PartialSource {
+        events: rmp_serde::to_vec_named(&events).unwrap(),
+        pulls: AtomicUsize::new(0),
+    });
+    let shared = source.clone();
+    let factory: ReplSourceFactory = Arc::new(move |_| shared.clone());
+    let sup = SubscriptionSupervisor::new(follower.clone(), factory, "follower-1")
+        .with_poll_wait_ms(20)
+        .with_max_iterations(2);
+    sup.reconcile().await;
+    // Synchronous in start_subscription: typed arm marks and returns before
+    // any loop spawns.
+    assert_eq!(
+        sub_state(&follower, "sub_a").await.as_deref(),
+        Some("resync_required"),
+        "typed refusal must persist terminal resync_required"
+    );
+    assert!(!sup.is_running("sub_a"));
+    assert_eq!(source.pulls.load(Ordering::Acquire), 0);
+
+    // The subscription is no longer active → reconcile must not start it.
+    sup.reconcile().await;
+    assert!(!sup.is_running("sub_a"));
+    assert_eq!(source.pulls.load(Ordering::Acquire), 0);
+    sup.stop_all().await;
+}
+
+/// A [`PartialSource`] that, on its FIRST pull, seeds a durable v3 bookmark
+/// with a DANGLING outstanding-receipt pointer into the destination info
+/// store, then serves events as usual — modelling "initial pull, then the
+/// receipt pipeline fail-stops".
+struct SeedingSource {
+    events: Vec<u8>,
+    pulls: AtomicUsize,
+    follower: Arc<ShamirDb>,
+    seeded: AtomicBool,
+}
+
+#[async_trait]
+impl ReplSource for SeedingSource {
+    async fn hello(&self, _node: &str) -> Result<ReplResponse, ReplError> {
+        // Exercise first-Pull adoption: no successful Hello in this fixture.
+        Err(ReplError::Transport("fixture starts with Pull".into()))
+    }
+
+    async fn pull(
+        &self,
+        _db: &str,
+        _repo: &str,
+        _from: u64,
+        _limit: u32,
+        _wait: Option<u32>,
+    ) -> Result<ReplResponse, ReplError> {
+        self.pulls.fetch_add(1, Ordering::AcqRel);
+        if !self.seeded.swap(true, Ordering::AcqRel) {
+            let info = self
+                .follower
+                .get_db("app")
+                .unwrap()
+                .get_repo("main")
+                .unwrap()
+                .tx_info_store()
+                .await
+                .unwrap();
+            save_bookmark_v3(
+                &info,
+                &BookmarkV3 {
+                    fence: None,
+                    bookmark: 0,
+                    clean_through: None,
+                    outstanding_receipt: Some([9u8; 16]),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        Ok(ReplResponse::Pull {
+            schema_digest: None,
+            repo_lineage_id: Some([1; 16]),
+            history_epoch: Some(0),
+            gap_first: None,
+            gap_through: None,
+            leader_epoch: 1,
+            events: self.events.clone(),
+            gap_at: None,
+            current_version: 1,
+        })
+    }
+}
+
+// S5c-X PR6b-3 round 3: the INITIAL pipeline trip still marks terminal —
+// the loop classifies the freshly seeded v3 as Native, resume lookup hits
+// the dangling receipt pointer (`RepoRequiresReopen`), and the supervisor's
+// ReopenRequired arm persists `reopen_required`; every later start attempt
+// is refused at admission with zero further pulls.
+#[tokio::test]
+async fn initial_pipeline_trip_marks_terminal_then_resume_refused_at_admission() {
+    let follower = build_db().await;
+    create_profile_and_subscription(&follower).await;
+
+    let events = single_insert_event();
+    let source = Arc::new(SeedingSource {
+        events: rmp_serde::to_vec_named(&events).unwrap(),
+        pulls: AtomicUsize::new(0),
+        follower: follower.clone(),
+        seeded: AtomicBool::new(false),
+    });
+    let shared = source.clone();
+    let factory: ReplSourceFactory = Arc::new(move |_| shared.clone());
+    let sup = SubscriptionSupervisor::new(follower.clone(), factory, "follower-1")
+        .with_poll_wait_ms(20)
+        .with_max_iterations(2);
+    sup.reconcile().await;
+
+    // No v3 yet → classify Fresh → admission passes → loop spawns → pull #1
+    // seeds the dangling pointer and serves events → admit_follower classifies
+    // Native → resume lookup fails with `RepoRequiresReopen` → the loop maps
+    // it to `ReopenRequired` → the supervisor marks terminal.
+    wait_for_sub_state(&follower, "reopen_required").await;
+    assert_eq!(
+        source.pulls.load(Ordering::Acquire),
+        1,
+        "exactly the initial pull must happen"
+    );
+    assert_eq!(bookmark(&follower).await, 0, "no events applied");
+    assert_eq!(items_row_counter(&follower).await, 0);
+
+    // Prune the dead loop; admission now sees Native + dangling pointer.
+    sup.reconcile().await;
+    assert!(!sup.is_running("sub_a"));
+
+    // An administrative resume stays refused at admission.
+    alter(
+        &follower,
+        alter_subscription("sub_a").resume().build().unwrap(),
+    )
+    .await;
+    sup.reconcile().await;
+    assert!(!sup.is_running("sub_a"));
+    assert_eq!(
+        source.pulls.load(Ordering::Acquire),
+        1,
+        "the refused resume must not perform any pull"
+    );
+    assert_eq!(
+        sub_state(&follower, "sub_a").await.as_deref(),
+        Some("reopen_required")
+    );
+    sup.stop_all().await;
+}
+
+// S5c-X PR6b-3 round 3: a valid v3 bookmark whose `outstanding_receipt`
+// pointer references UNDECODABLE receipt bytes must be terminal exactly
+// like a MISSING one: `receipt_pointer_resolves` treats corrupt bytes as
+// unresolved, so the supervisor's admission pre-check marks
+// `reopen_required` BEFORE any loop is spawned — zero pulls, zero progress,
+// and an administrative resume stays refused.
+#[tokio::test]
+async fn malformed_receipt_bytes_stop_supervisor_and_refuse_resume() {
+    let follower = build_db().await;
+    create_profile_and_subscription(&follower).await;
+    let info = follower
+        .get_db("app")
+        .unwrap()
+        .get_repo("main")
+        .unwrap()
+        .tx_info_store()
+        .await
+        .unwrap();
+    save_bookmark_v3(
+        &info,
+        &BookmarkV3 {
+            fence: None,
+            bookmark: 0,
+            clean_through: None,
+            outstanding_receipt: Some([1u8; 16]),
+        },
+    )
+    .await
+    .unwrap();
+    // The receipt key itself is crate-private to the engine; rebuild it here.
+    info.set(
+        RecordKey::from_slice(
+            shamir_db::engine::meta::MetaKey::ReplicationReceipt
+                .as_record_id()
+                .as_bytes(),
+        ),
+        Bytes::from_static(b"corrupted receipt bytes"),
+    )
+    .await
+    .unwrap();
+
+    let events = single_insert_event();
+    let source = Arc::new(PartialSource {
+        events: rmp_serde::to_vec_named(&events).unwrap(),
+        pulls: AtomicUsize::new(0),
+    });
+    let shared = source.clone();
+    let factory: ReplSourceFactory = Arc::new(move |_| shared.clone());
+    let sup = SubscriptionSupervisor::new(follower.clone(), factory, "follower-1")
+        .with_poll_wait_ms(20)
+        .with_max_iterations(2);
+    sup.reconcile().await;
+    // Admission pre-check: classify Native → pointer resolves → get finds
+    // bytes, decode fails → unresolved → terminal reopen_required, NO loop.
+    wait_for_sub_state(&follower, "reopen_required").await;
+    assert!(!sup.is_running("sub_a"));
+    assert_eq!(
+        source.pulls.load(Ordering::Acquire),
+        0,
+        "admission refuses before any pull"
+    );
+    assert_eq!(bookmark(&follower).await, 0);
+    assert_eq!(items_row_counter(&follower).await, 0);
+
+    // An administrative resume stays refused at admission.
+    alter(
+        &follower,
+        alter_subscription("sub_a").resume().build().unwrap(),
+    )
+    .await;
+    sup.reconcile().await;
+    assert!(!sup.is_running("sub_a"));
+    assert_eq!(
+        source.pulls.load(Ordering::Acquire),
+        0,
+        "the refused resume must not perform any pull"
+    );
+    assert_eq!(
+        sub_state(&follower, "sub_a").await.as_deref(),
+        Some("reopen_required")
+    );
+    sup.stop_all().await;
 }

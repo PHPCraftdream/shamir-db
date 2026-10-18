@@ -342,10 +342,27 @@ impl SubscriptionSupervisor {
                 return Err(error);
             }
             if let Some(destination) = self.local.get_db(db).and_then(|db| db.get_repo(repo)) {
-                let gate = destination
-                    .tx_gate()
-                    .await
-                    .map_err(|error| ReplError::Start(error.to_string()))?;
+                // Map by error KIND, not by string: a typed follower-state
+                // refusal from gate init (legacy/malformed durable bookmark)
+                // stays machine-readable and terminal (same shape as the
+                // classify-refused arm below); every other error keeps the
+                // generic retryable `Start` mapping.
+                let gate = match destination.tx_gate().await {
+                    Ok(gate) => gate,
+                    Err(shamir_db::storage::error::DbError::FollowerStateRefused { reason }) => {
+                        let error = ReplError::FollowerStateRefused { reason };
+                        self.local
+                            .mark_subscription_terminal(
+                                &sub.name,
+                                "resync_required",
+                                &error.to_string(),
+                            )
+                            .await
+                            .map_err(|error| ReplError::Start(error.to_string()))?;
+                        return Err(error);
+                    }
+                    Err(error) => return Err(ReplError::Start(error.to_string())),
+                };
                 if gate.requires_reopen() {
                     let error = ReplError::ReopenRequired {
                         db: db.clone(),

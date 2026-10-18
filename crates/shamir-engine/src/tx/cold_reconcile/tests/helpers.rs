@@ -5,7 +5,7 @@ use crate::meta::recovery_marker::save_last_committed_flushed;
 use crate::meta::repl::bookmark_v3::{save_bookmark_v3, BookmarkV3};
 use crate::repo::{BoxRepoFactory, RepoFactory, RepoInstance};
 use crate::table::TableConfig;
-use shamir_storage::error::DbResult;
+use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{Repo as _, Store};
 use shamir_tx::changefeed::cold::{encode_event, read_event};
 use shamir_tx::changefeed::{clean_horizon_key, ChangelogEvent};
@@ -31,6 +31,42 @@ pub(super) async fn open_with_retry(path: &Path, name: &str) -> RepoInstance {
         }
     }
     unreachable!("retry loop always returns or panics")
+}
+
+/// Open a legacy follower store and return the typed refusal. The refusal
+/// itself must be immediate (fail fast — no replay); only fjall's OS-level
+/// lock lag after a close is retried.
+pub(super) async fn open_refusal_with_retry(path: &Path, name: &str) -> DbError {
+    let mut last: Option<shamir_storage::error::DbError> = None;
+    for attempt in 0..25u32 {
+        match RepoInstance::from_factory(
+            name.to_owned(),
+            BoxRepoFactory::fjall_raw(path),
+            vec![TableConfig::new("items")],
+        )
+        .await
+        {
+            Ok(_) => panic!("legacy follower store must refuse the open"),
+            Err(error)
+                if matches!(
+                    &error,
+                    shamir_storage::error::DbError::FollowerStateRefused {
+                        reason: shamir_storage::error::FollowerRefusalReason::LegacyBookmarkFormat
+                    }
+                ) =>
+            {
+                return error
+            }
+            Err(error) if attempt < 24 => {
+                last = Some(error);
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(error) => {
+                panic!("expected the legacy refusal after retries: last={last:?}, got {error}")
+            }
+        }
+    }
+    panic!("legacy follower store never refused: last={:?}", last)
 }
 
 pub(super) async fn open_unrecovered(path: &Path) -> RepoInstance {

@@ -438,3 +438,75 @@ async fn floor_without_v3_refuses_adoption_with_legacy_follower_state() {
     let info = repo(&follower).tx_info_store().await.unwrap();
     assert!(load_bookmark_v3(&info).await.unwrap().is_none());
 }
+
+// S5c-X PR6b-3 round 3: visibility is PRESENCE-based. A failed adoption flush
+// leaves the v3 record readable-but-not-durable; the retry over the EXISTING
+// record must still enable receipt-native visibility, otherwise a zero-event
+// follower (which never runs the receipt pipeline) keeps a stale warm gate.
+#[tokio::test]
+async fn warm_visibility_enabled_on_retry_over_existing_v3_zero_event_follower() {
+    let follower = build_memory().await;
+    let pull = ReplResponse::Pull {
+        schema_digest: None,
+        repo_lineage_id: Some([7u8; 16]),
+        history_epoch: Some(0),
+        gap_first: None,
+        gap_through: None,
+        leader_epoch: 1,
+        events: Vec::new(),
+        gap_at: None,
+        current_version: 0,
+    };
+    let probe = Arc::new(AdoptionStore {
+        inner: Arc::new(InMemoryStore::new()),
+        durable: AtomicBool::new(false),
+        flushes: AtomicUsize::new(0),
+        park: false,
+        reached: Notify::new(),
+    });
+    let info: Arc<dyn Store> = probe.clone();
+    let repo_handle = repo(&follower);
+
+    // (1) Warm gate: no durable v3 record yet → visibility disabled.
+    assert!(!repo_handle
+        .tx_gate()
+        .await
+        .unwrap()
+        .receipt_native_visibility_enabled());
+
+    // (2) First contact: the fail-once flush makes the v3 set land readable
+    // but NOT durable, and the contact errors — nothing enabled visibility.
+    assert!(matches!(
+        checks::fence_pull_identity(&info, &pull, None, Some(&repo_handle)).await,
+        Err(ReplError::Bookmark(_))
+    ));
+    assert!(recorded::load(&info).await.unwrap().is_some());
+    assert!(!probe.durable.load(Ordering::Acquire));
+    assert!(!repo_handle
+        .tx_gate()
+        .await
+        .unwrap()
+        .receipt_native_visibility_enabled());
+
+    // (3) Reflush makes the record durable; the retry over the existing
+    // record succeeds AND enables visibility (presence-based, not
+    // creation-based).
+    checks::prepare_existing(&info).await.unwrap();
+    assert!(probe.durable.load(Ordering::Acquire));
+    checks::fence_pull_identity(&info, &pull, None, Some(&repo_handle))
+        .await
+        .unwrap();
+
+    // (4) Gate enabled, record durable, zero events applied.
+    assert!(repo_handle
+        .tx_gate()
+        .await
+        .unwrap()
+        .receipt_native_visibility_enabled());
+    assert!(probe.durable.load(Ordering::Acquire));
+    assert_eq!(
+        repo_handle.replication_bookmark().await.unwrap(),
+        0,
+        "zero-event follower: empty pull must not advance the bookmark"
+    );
+}

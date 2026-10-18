@@ -252,9 +252,14 @@ async fn valid_v3_record_including_zero_bookmark_applies() {
         )
         .await
         .unwrap();
-        let outcome = apply_replicated_batch(&repo, &[event(1)], 0, ApplyPolicy::Trusted)
-            .await
-            .unwrap();
+        // Offer an event ABOVE the seeded bookmark: `apply_fresh` computes
+        // the watermark as max(caller bookmark, durable bookmark) and
+        // `prepare_event` skips events <= watermark, so event(bookmark + 1)
+        // is the first version that survives and applies.
+        let outcome =
+            apply_replicated_batch(&repo, &[event(bookmark + 1)], 0, ApplyPolicy::Trusted)
+                .await
+                .unwrap();
         assert_eq!(
             outcome,
             crate::tx::ApplyOutcome::Applied { local_version: 1 }
@@ -421,10 +426,14 @@ async fn admit_follower_refuses_floor_without_bookmark() {
     ));
 }
 
-/// Acceptance test 8: the capability refusal precedes EVERY state-driven
-/// verdict. The false-capability backend is exercised through the pure
-/// `admission_decision` function because `BoxRepo` is a crate-internal enum
-/// that cannot be constructed around a refusing store from tests.
+/// Acceptance test 8: refusal order — the durable-state refusal comes first
+/// (`FloorWithoutBookmark` refuses with `FollowerStateRefused` regardless of
+/// backend capability; classification is read-only), then the capability
+/// gate refuses every verdict that would allow follower work
+/// (`Native`/`Fresh` on an unsupported backend). The false-capability
+/// backend is exercised through the pure `admission_decision` function
+/// because `BoxRepo` is a crate-internal enum that cannot be constructed
+/// around a refusing store from tests.
 #[tokio::test]
 async fn admission_decision_refuses_unsupported_backends_before_any_state() {
     let native = BookmarkV3 {
