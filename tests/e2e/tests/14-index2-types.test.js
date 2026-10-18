@@ -570,7 +570,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     // #1036: the client-side query builder now validates field count
     // BEFORE the request ever reaches the server (mirrors the server's own
     // "Sorted index requires exactly one field (composite TBD)" check —
-    // see crates/shamir-client-ts/src/core/builders/ddl.ts and
+    // see crates/shamir-client-ts/src/core/builders/ddl/ and
     // crates/shamir-query-builder/src/ddl/create_index_build_error.rs), so
     // this test now observes the CLIENT's message, not the server's. Match
     // the substring stable across both variants instead of the

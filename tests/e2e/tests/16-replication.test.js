@@ -259,7 +259,7 @@ module.exports = async function ({ client, server, fixtures, test, assert, asser
   // Unlike ReplHello/ReplPull above (the privileged `client.repl(Buffer)`
   // napi method), these are ordinary `BatchOp`s sent through
   // `client.execute()` — built exclusively via the `replication` builder
-  // namespace (`crates/shamir-client-ts/src/core/builders/replication.ts`),
+  // namespace (`crates/shamir-client-ts/src/core/builders/stream/replication.ts`),
   // never hand-assembled wire objects (repo-wide rule, CLAUDE.md).
   //
   // Response shapes are per `crates/shamir-db/src/shamir_db/execute/

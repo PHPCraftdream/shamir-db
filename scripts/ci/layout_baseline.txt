@@ -1,13 +1,7 @@
 # layout baseline: current violations of the layout limits
 # format: dir <path> <n> | file <path> <n>; maintained by check_layout.py
 dir crates/shamir-client-node 10
-dir crates/shamir-client-ts 10
-dir crates/shamir-client-ts/src/__tests__ 34
-dir crates/shamir-client-ts/src/core 19
-dir crates/shamir-client-ts/src/core/__tests__ 13
-dir crates/shamir-client-ts/src/core/builders 14
-dir crates/shamir-client-ts/src/core/builders/__tests__ 15
-dir crates/shamir-client-ts/src/core/types 12
+dir crates/shamir-client-ts 8
 dir crates/shamir-client/src 11
 dir crates/shamir-client/src/tests 12
 dir crates/shamir-client/tests 8
@@ -94,10 +88,6 @@ dir crates/shamir-wasm-host/src 16
 dir crates/shamir-wasm-host/src/tests 11
 dir crates/shamir-wasm-host/src/wasm 9
 dir scripts 15
-file crates/shamir-client-ts/src/__tests__/e2e-data.test.ts 1285
-file crates/shamir-client-ts/src/__tests__/e2e.test.ts 1049
-file crates/shamir-client-ts/src/core/builders/ddl.ts 1407
-file crates/shamir-client-ts/src/core/client.ts 1402
 file crates/shamir-client/src/client.rs 1318
 file crates/shamir-connect/tests/integration_resume.rs 1216
 file crates/shamir-db/benches/engine_perf.rs 1365

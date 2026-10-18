@@ -1,0 +1,493 @@
+/**
+ * `Query` — the OQL read fluent builder. The CODE that assembles a
+ * {@link ReadQuery} wire object (declared in `../types/query.ts`). Mirrors
+ * `crates/shamir-query-builder/src/query/` + `read_query.rs`.
+ *
+ * `.build()` returns a plain object ready to drop into a batch's `queries`
+ * map. Defaults are omitted to match the server's serde defaults and the
+ * shapes used by the existing e2e suite (e.g. a plain `SELECT *` omits
+ * `select` entirely).
+ *
+ * PLATFORM-AGNOSTIC.
+ */
+
+import type { Filter, FieldPath, FilterValue } from '../../types/read/filter.js';
+import type {
+  TableRefWire,
+  Select,
+  SelectItem,
+  GroupBy,
+  OrderBy,
+  OrderByItem,
+  OrderDirection,
+  NullsOrder,
+  Pagination,
+  At,
+  Temporal,
+  ReadQuery,
+} from '../../types/read/query.js';
+import type { QueryResult } from '../../types/write/batch.js';
+import type { WireValue } from '../../types/write/write.js';
+import type { ExecCtx } from '../../support/exec-ctx.js';
+import { and, or, filter as filterNs } from './filter.js';
+import { field as selectField } from './select.js';
+
+/** Normalise a field spec (bare string or path array) to the wire form. */
+function fp(field: string | string[]): FieldPath {
+  return typeof field === 'string' ? [field] : field;
+}
+
+/** A point-in-time at an exact version. */
+export function atVersion(version: number): At {
+  return { version };
+}
+
+/** A point-in-time at an epoch-millis timestamp (resolved engine-side). */
+export function atTimestamp(timestamp: number): At {
+  return { timestamp };
+}
+
+type PaginationMode = 'none' | 'limitoffset' | 'page' | 'after';
+
+/** Fluent builder for an OQL `ReadQuery`. */
+export class Query {
+  private readonly from: TableRefWire;
+
+  private selectItems: SelectItem[] | null = null;
+  private selectDistinct = false;
+  private whereFilter: Filter | null = null;
+  private groupFields: FieldPath[] | null = null;
+  private havingFilter: Filter | null = null;
+  private orderItems: OrderByItem[] = [];
+
+  private paginationMode: PaginationMode = 'none';
+  private limitValue: number | null = null;
+  private offsetValue = 0;
+  private pageNumber = 1;
+  private pageSize = 0;
+  private afterKey: WireValue[] | null = null;
+  private afterLimit: number | null = null;
+  private afterId: string | null = null;
+
+  private countTotalFlag = false;
+  private temporalValue: Temporal | null = null;
+  private withVersionFlag = false;
+  private explainFlag = false;
+  private ctxValue: ExecCtx | null = null;
+
+  private constructor(from: TableRefWire) {
+    this.from = from;
+  }
+
+  /** Query a table in the default repo ("main"). */
+  static from(table: string): Query {
+    return new Query(table);
+  }
+
+  /** Query a table in an explicit repo. */
+  static withRepo(repo: string, table: string): Query {
+    return new Query(repo === 'main' ? table : [repo, table]);
+  }
+
+  // ── Projection ─────────────────────────────────────────────────────
+
+  /**
+   * Set the projection. Accepts a list of field names/paths (shorthand for
+   * `field` items) or explicit {@link SelectItem}s (aggregates, functions).
+   */
+  select(items: Array<string | string[]> | SelectItem[]): this {
+    this.selectItems = items.map((it) =>
+      typeof it === 'string' || Array.isArray(it) ? selectField(it) : it,
+    );
+    return this;
+  }
+
+  /** Explicit `SELECT *`. */
+  selectAll(): this {
+    this.selectItems = [{ type: 'all' }];
+    return this;
+  }
+
+  /** Return distinct results. */
+  distinct(on = true): this {
+    this.selectDistinct = on;
+    return this;
+  }
+
+  // ── WHERE ──────────────────────────────────────────────────────────
+
+  /** Set the WHERE filter (replaces any previous one). */
+  where(filter: Filter): this {
+    this.whereFilter = filter;
+    return this;
+  }
+
+  /** AND the given filter into the existing WHERE (smart-flattened). */
+  andWhere(filter: Filter): this {
+    this.whereFilter =
+      this.whereFilter === null ? filter : and(this.whereFilter, filter);
+    return this;
+  }
+
+  /** OR the given filter into the existing WHERE (smart-flattened). */
+  orWhere(filter: Filter): this {
+    this.whereFilter =
+      this.whereFilter === null ? filter : or(this.whereFilter, filter);
+    return this;
+  }
+
+  // ── Inline AND where-* methods ────────────────────────────────────
+  // Each builds a leaf Filter via the existing `filter.*` constructors and
+  // AND-combines it into the current WHERE (same semantics as `andWhere`).
+
+  /** AND `field == value`. */
+  whereEq(field: string | string[], value: FilterValue): this {
+    return this.andWhere(filterNs.eq(field, value));
+  }
+  /** AND `field != value`. */
+  whereNe(field: string | string[], value: FilterValue): this {
+    return this.andWhere(filterNs.ne(field, value));
+  }
+  /** AND `field > value`. */
+  whereGt(field: string | string[], value: FilterValue): this {
+    return this.andWhere(filterNs.gt(field, value));
+  }
+  /** AND `field >= value`. */
+  whereGte(field: string | string[], value: FilterValue): this {
+    return this.andWhere(filterNs.gte(field, value));
+  }
+  /** AND `field < value`. */
+  whereLt(field: string | string[], value: FilterValue): this {
+    return this.andWhere(filterNs.lt(field, value));
+  }
+  /** AND `field <= value`. */
+  whereLte(field: string | string[], value: FilterValue): this {
+    return this.andWhere(filterNs.lte(field, value));
+  }
+  /** AND `field IN (values…)`. */
+  whereIn(field: string | string[], values: FilterValue[]): this {
+    return this.andWhere(filterNs.in_(field, values));
+  }
+  /** AND `field LIKE pattern`. */
+  whereLike(field: string | string[], pattern: string): this {
+    return this.andWhere(filterNs.like(field, pattern));
+  }
+
+  // ── Inline OR where-* methods ─────────────────────────────────────
+  // Same leaves, OR-combined (same semantics as `orWhere`).
+
+  /** OR `field == value`. */
+  orWhereEq(field: string | string[], value: FilterValue): this {
+    return this.orWhere(filterNs.eq(field, value));
+  }
+  /** OR `field != value`. */
+  orWhereNe(field: string | string[], value: FilterValue): this {
+    return this.orWhere(filterNs.ne(field, value));
+  }
+  /** OR `field > value`. */
+  orWhereGt(field: string | string[], value: FilterValue): this {
+    return this.orWhere(filterNs.gt(field, value));
+  }
+  /** OR `field >= value`. */
+  orWhereGte(field: string | string[], value: FilterValue): this {
+    return this.orWhere(filterNs.gte(field, value));
+  }
+  /** OR `field < value`. */
+  orWhereLt(field: string | string[], value: FilterValue): this {
+    return this.orWhere(filterNs.lt(field, value));
+  }
+  /** OR `field <= value`. */
+  orWhereLte(field: string | string[], value: FilterValue): this {
+    return this.orWhere(filterNs.lte(field, value));
+  }
+  /** OR `field IN (values…)`. */
+  orWhereIn(field: string | string[], values: FilterValue[]): this {
+    return this.orWhere(filterNs.in_(field, values));
+  }
+  /** OR `field LIKE pattern`. */
+  orWhereLike(field: string | string[], pattern: string): this {
+    return this.orWhere(filterNs.like(field, pattern));
+  }
+
+  // ── Grouped where ─────────────────────────────────────────────────
+
+  /**
+   * AND a nested group: the callback receives the filter namespace and must
+   * return a `Filter`; that filter is AND-combined into the current WHERE.
+   * Equivalent to `.andWhere(cb(filter))`.
+   */
+  whereGroup(cb: (f: typeof filterNs) => Filter): this {
+    return this.andWhere(cb(filterNs));
+  }
+
+  /**
+   * OR a nested group: the callback receives the filter namespace and must
+   * return a `Filter`; that filter is OR-combined into the current WHERE.
+   * Equivalent to `.orWhere(cb(filter))`.
+   */
+  whereGroupOr(cb: (f: typeof filterNs) => Filter): this {
+    return this.orWhere(cb(filterNs));
+  }
+
+  // ── GROUP BY / HAVING ──────────────────────────────────────────────
+
+  /** GROUP BY the given fields (names or paths). */
+  groupBy(...fields: Array<string | string[]>): this {
+    this.groupFields = fields.map(fp);
+    return this;
+  }
+
+  /** HAVING filter, applied after grouping. Requires `groupBy`. */
+  having(filter: Filter): this {
+    this.havingFilter = filter;
+    return this;
+  }
+
+  // ── ORDER BY ───────────────────────────────────────────────────────
+
+  /** Append one or more explicit ORDER BY items. */
+  orderBy(items: OrderByItem | OrderByItem[]): this {
+    if (Array.isArray(items)) this.orderItems.push(...items);
+    else this.orderItems.push(items);
+    return this;
+  }
+
+  /** Append an ascending sort on `field`. */
+  orderByAsc(field: string | string[], nulls?: NullsOrder): this {
+    return this.pushOrder(field, 'asc', nulls);
+  }
+
+  /** Append a descending sort on `field`. */
+  orderByDesc(field: string | string[], nulls?: NullsOrder): this {
+    return this.pushOrder(field, 'desc', nulls);
+  }
+
+  private pushOrder(
+    field: string | string[],
+    direction: OrderDirection,
+    nulls?: NullsOrder,
+  ): this {
+    const item: OrderByItem = { field: fp(field), direction };
+    if (nulls !== undefined) item.nulls = nulls;
+    this.orderItems.push(item);
+    return this;
+  }
+
+  // ── Pagination ─────────────────────────────────────────────────────
+
+  /** LIMIT n (switches to limit/offset pagination). */
+  limit(n: number): this {
+    this.paginationMode = 'limitoffset';
+    this.limitValue = n;
+    return this;
+  }
+
+  /** OFFSET n (switches to limit/offset pagination). */
+  offset(n: number): this {
+    this.paginationMode = 'limitoffset';
+    this.offsetValue = n;
+    return this;
+  }
+
+  /** Page-based pagination: 1-based `page` of `pageSize` records. */
+  page(page: number, pageSize: number): this {
+    this.paginationMode = 'page';
+    this.pageNumber = page;
+    this.pageSize = pageSize;
+    return this;
+  }
+
+  /**
+   * Keyset (seek) pagination: resume after the row identified by `key`
+   * (the sort values of the last row seen). Pass an optional `limit` to
+   * cap the page size.
+   *
+   * `afterId` (task #537) is an optional record-id tie-breaker: the base58
+   * `_id` string of the last row from the previous page (surfaced as `_id`
+   * in read results). Pass it so rows tied on the same ORDER BY value across
+   * a page boundary are not silently dropped — the server resumes STRICTLY
+   * past that specific row rather than past the bare sort value. Omitting it
+   * keeps today's backward-compatible behavior.
+   *
+   * Not to be confused with `Batch`'s `opts.after` dependency list (see
+   * `batch.ts`'s `add()`) — that's inter-query DAG ordering; this is
+   * single-query result-set pagination. No name collision in TS (`Batch` has
+   * no `.after()` method, only an `after` option on `.add()`), but the two
+   * concepts share the word so it's worth the cross-reference.
+   */
+  after(key: WireValue[], limit?: number, afterId?: string): this {
+    this.paginationMode = 'after';
+    this.afterKey = key;
+    this.afterLimit = limit ?? null;
+    this.afterId = afterId ?? null;
+    return this;
+  }
+
+  /** Compute and return the total matching count (expensive). */
+  countTotal(on = true): this {
+    this.countTotalFlag = on;
+    return this;
+  }
+
+  // ── Temporal ───────────────────────────────────────────────────────
+
+  /** Read as of an exact version. */
+  asOfVersion(version: number): this {
+    this.temporalValue = { kind: 'as_of', at: atVersion(version) };
+    return this;
+  }
+
+  /** Read as of an epoch-millis timestamp (resolved engine-side). */
+  asOfTimestamp(timestamp: number): this {
+    this.temporalValue = { kind: 'as_of', at: atTimestamp(timestamp) };
+    return this;
+  }
+
+  /** Read as of an explicit {@link At} point. */
+  asOf(at: At): this {
+    this.temporalValue = { kind: 'as_of', at };
+    return this;
+  }
+
+  /**
+   * Range read over history. `from`/`to` bound the window (either may be
+   * omitted for an open bound); `limit` caps the version count; `order`
+   * defaults to "asc" (oldest → newest).
+   */
+  history(
+    opts: { from?: At; to?: At; limit?: number; order?: OrderDirection } = {},
+  ): this {
+    const t: Extract<Temporal, { kind: 'history' }> = {
+      kind: 'history',
+      order: opts.order ?? 'asc',
+    };
+    if (opts.from !== undefined) t.from = opts.from;
+    if (opts.to !== undefined) t.to = opts.to;
+    if (opts.limit !== undefined) t.limit = opts.limit;
+    this.temporalValue = t;
+    return this;
+  }
+
+  /** Include each record's version in the result (for as_of cursors / CAS). */
+  withVersion(on = true): this {
+    this.withVersionFlag = on;
+    return this;
+  }
+
+  /**
+   * EXPLAIN / dry-run: run only the planner and return a plan preview
+   * (index selection, plan type, estimated rows) WITHOUT materialising any
+   * rows. The preview lands in `QueryResult.explain`. Mirrors the Rust
+   * `ReadQuery::explain` flag.
+   */
+  explain(on = true): this {
+    this.explainFlag = on;
+    return this;
+  }
+
+  // ── Build ──────────────────────────────────────────────────────────
+
+  /** Assemble the wire {@link ReadQuery}. */
+  build(): ReadQuery {
+    if (this.havingFilter !== null && this.groupFields === null) {
+      throw new Error('having() requires groupBy()');
+    }
+    if (
+      this.paginationMode === 'page' &&
+      (this.pageNumber === 0 || this.pageSize === 0)
+    ) {
+      throw new Error(
+        'page() requires a 1-based page number and a non-zero page size',
+      );
+    }
+
+    const q: ReadQuery = { from: this.from };
+
+    // select: omit a plain `SELECT *` (server defaults to all()).
+    if (this.selectItems !== null || this.selectDistinct) {
+      const select: Select = {
+        items: this.selectItems ?? [{ type: 'all' }],
+        distinct: this.selectDistinct,
+      };
+      q.select = select;
+    }
+
+    if (this.whereFilter !== null) q.where = this.whereFilter;
+
+    if (this.groupFields !== null) {
+      const group: GroupBy = { fields: this.groupFields };
+      if (this.havingFilter !== null) group.having = this.havingFilter;
+      q.group_by = group;
+    }
+
+    if (this.orderItems.length > 0) {
+      const order: OrderBy = { items: this.orderItems };
+      q.order_by = order;
+    }
+
+    const pagination = this.buildPagination();
+    if (pagination !== null) q.pagination = pagination;
+
+    if (this.countTotalFlag) q.count_total = true;
+    if (this.temporalValue !== null) q.temporal = this.temporalValue;
+    if (this.withVersionFlag) q.with_version = true;
+    if (this.explainFlag) q.explain = true;
+
+    return q;
+  }
+
+  /** @internal Bind an execution context (set by `Db.query()` / `Db.withRepo()`). */
+  bindCtx(ctx: ExecCtx): this {
+    this.ctxValue = ctx;
+    return this;
+  }
+
+  /**
+   * Build + execute as a single-op batch, returning the `QueryResult`.
+   * Throws if the query is not bound to a `Db`.
+   */
+  async ex(): Promise<QueryResult> {
+    if (!this.ctxValue) {
+      throw new Error(
+        'Query is not bound to a Db; use db.query(...) or db.run(query)',
+      );
+    }
+    const batch = { id: 1, queries: { _: this.build() } };
+    const resp = await this.ctxValue.exec(batch);
+    return resp.results['_']!;
+  }
+
+  /** Shortcut: `.ex()` then return `.records`. */
+  async rows(): Promise<Array<Record<string, WireValue>>> {
+    return (await this.ex()).records;
+  }
+
+  private buildPagination(): Pagination | null {
+    switch (this.paginationMode) {
+      case 'page':
+        return {
+          mode: 'Page',
+          page: this.pageNumber,
+          page_size: this.pageSize,
+        };
+      case 'limitoffset': {
+        const p: Pagination = { mode: 'LimitOffset', offset: this.offsetValue };
+        if (this.limitValue !== null) p.limit = this.limitValue;
+        return p;
+      }
+      case 'after': {
+        const p: Pagination = {
+          mode: 'After',
+          key: this.afterKey!,
+        };
+        if (this.afterLimit !== null) p.limit = this.afterLimit;
+        // Task #537: emit the tie-breaker only when set → old-client wire
+        // shape (no `after_id` key) stays byte-identical.
+        if (this.afterId !== null) p.after_id = this.afterId;
+        return p;
+      }
+      default:
+        return null;
+    }
+  }
+}

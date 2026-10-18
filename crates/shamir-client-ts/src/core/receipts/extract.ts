@@ -8,7 +8,7 @@
  */
 
 import { normalizeVisibility, position } from '../visibility/positions.js';
-import type { TransactionInfo, VisibilityState } from '../types/batch.js';
+import type { TransactionInfo, VisibilityState } from '../types/write/batch.js';
 import type { AliasReceipt } from './types.js';
 
 const MAX_U64 = 18446744073709551615n;

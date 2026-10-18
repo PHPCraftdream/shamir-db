@@ -1,4 +1,4 @@
-import type { CreateRepoOp, AlterRepoOp, DescribeRepoOp, DurabilityOverride } from '../../../types/ddl.js';
+import type { CreateRepoOp, AlterRepoOp, DescribeRepoOp, DurabilityOverride } from '../../../types/schema/ddl.js';
 import { durabilityOverride } from './durability.js';
 export { validateWalRetentionBudget } from './durability.js';
 

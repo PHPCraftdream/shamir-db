@@ -28,7 +28,7 @@ npm run build       # builds @shamir/client's dist/ + shamir-server release + .n
 
 1. `cd crates/shamir-client-ts && npm ci && npm run build` —
    produces `crates/shamir-client-ts/dist/` (a gitignored artifact,
-   `tsc -p tsconfig.build.json`). `@shamir/client`'s own `devDependencies`
+   `tsc -p configs/tsconfig.build.json`). `@shamir/client`'s own `devDependencies`
    (including `typescript`) are never installed by `tests/e2e`'s own
    `npm install` — npm does not install a `file:`-linked package's
    `devDependencies` — so this step's own `npm ci` (inside
