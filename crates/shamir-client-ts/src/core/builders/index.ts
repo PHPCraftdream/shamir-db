@@ -11,7 +11,7 @@
  * PLATFORM-AGNOSTIC.
  */
 
-export * from './filter.js';
+export * from './read/filter.js';
 export {
   all, field, countAll,
   aggregate, count, sum, avg, min, max,
@@ -20,9 +20,9 @@ export {
   select,
   // `expr` is NOT re-exported here — it collides with filter.ts's `expr`
   // (the `$expr` FilterValue builder). Use `select.expr(...)` or import
-  // directly from './select.js'.
-} from './select.js';
-export * from './write.js';
+  // directly from './read/select.js'.
+} from './read/select.js';
+export * from './write/write.js';
 export * from './admin/repo-admin/index.js';
 export {
   currentOnly, olderThan, olderThanAge,
@@ -44,13 +44,13 @@ export {
   renameRepo, renameDb,
   ddl,
   // `field` is NOT re-exported here — it collides with select.field.
-  // Use `ddl.field(...)` or import directly from './ddl.js'.
-} from './ddl.js';
+  // Use `ddl.field(...)` or import directly from './ddl/index.js'.
+} from './ddl/index.js';
 export * from './admin/index.js';
-export * from './replication.js';
-export * from './query.js';
-export * from './call.js';
-export * from './batch.js';
+export * from './stream/replication.js';
+export * from './read/query.js';
+export * from './write/call.js';
+export * from './write/batch.js';
 export * from './handle.js';
-export * from './subscribe.js';
-export * from './cursor.js';
+export * from './stream/subscribe.js';
+export * from './read/cursor.js';

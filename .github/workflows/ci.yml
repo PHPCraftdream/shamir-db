@@ -241,7 +241,7 @@ jobs:
   # forcing `--test-threads=1` on the whole suite.
   #
   # NOTE: the Node.js napi e2e suite under `tests/e2e/` AND the TS client
-  # e2e suite (`crates/shamir-client-ts/src/__tests__/e2e-*.test.ts`) are
+  # e2e suite (`crates/shamir-client-ts/src/__tests__/**/e2e-*.test.ts`) are
   # intentionally NOT wired into this per-PR gate — both require a release
   # `shamir-server` build (and the napi one needs the MSVC-built
   # `shamir-client-node` binding, excluded from the workspace), too heavy
@@ -290,7 +290,7 @@ jobs:
   # toolchain and no server binary needed.
   #
   # The TS package's `npm test` (vitest run) ALSO collects the
-  # `src/__tests__/e2e-*.test.ts` suites, but those self-skip via
+  # `src/__tests__/**/e2e-*.test.ts` suites, but those self-skip via
   # `describe.skipIf(!SERVER_AVAILABLE)` when no `shamir-server` release
   # binary is resolvable (see `src/__tests__/e2e-harness.ts`'s
   # `SERVER_AVAILABLE` / `serverBinPath()`: `SHAMIR_SERVER_BIN` →
