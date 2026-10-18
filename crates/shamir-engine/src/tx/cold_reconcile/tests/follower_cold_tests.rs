@@ -16,8 +16,8 @@ use shamir_wal::{WalDurability, WalEntryV2, WalOpV2};
 
 use super::super::follower::ignore_bookmark_j;
 use super::helpers::{
-    open_and_reconcile, open_refusal_with_retry, prepare_follower_image, prepare_image, raw_store,
-    temp_path,
+    open_and_reconcile, open_refusal_with_retry, prepare_follower_image, prepare_image,
+    raw_store_with_retry, temp_path,
 };
 use crate::repo::{BoxRepoFactory, RepoInstance};
 use crate::table::TableConfig;
@@ -313,15 +313,20 @@ async fn legacy_bookmark_refuses_reopen_before_replay() {
     close(repo).await;
 
     // Baseline from the raw stores AFTER the close, BEFORE the refused
-    // open. Each raw store owns an `Arc<Database>` with an exclusive fjall
-    // lock — every handle is dropped before the reopen.
-    let (floor_before, legacy_before, clean_before, gap_before) = {
-        let tx = raw_store(temp.path(), "__tx__").await;
+    // open. One raw store at a time: the handle must be dropped before the
+    // next open — each raw store owns an exclusive fjall database lock.
+    let (floor_before, legacy_before) = {
+        let tx = raw_store_with_retry(temp.path(), "__tx__").await;
         let floor_before = crate::meta::recovery_marker::load_last_committed(&tx)
             .await
             .expect("floor baseline");
         let legacy_before = tx.get(bookmark_key.clone()).await.expect("legacy bytes");
-        let changelog = raw_store(temp.path(), "__changelog__").await;
+        (floor_before, legacy_before)
+    };
+    // The handle must be dropped before the next open — each raw store owns
+    // an exclusive fjall database lock.
+    let (clean_before, gap_before) = {
+        let changelog = raw_store_with_retry(temp.path(), "__changelog__").await;
         let clean_before = changelog
             .get(RecordKey::from_slice(
                 &shamir_tx::changefeed::clean_horizon_key(),
@@ -334,7 +339,7 @@ async fn legacy_bookmark_refuses_reopen_before_replay() {
             ))
             .await
             .ok();
-        (floor_before, legacy_before, clean_before, gap_before)
+        (clean_before, gap_before)
     };
 
     // The open must FAIL FAST on the typed refusal — only fjall lock lag
@@ -350,10 +355,10 @@ async fn legacy_bookmark_refuses_reopen_before_replay() {
         "{error:?}"
     );
 
-    // No replay/publication side effects after the failed open. Handles are
-    // again scoped so nothing raw is alive longer than the assertion.
+    // Handles are again one at a time: the handle must be dropped before
+    // the next open — each raw store owns an exclusive fjall database lock.
     {
-        let tx_after = raw_store(temp.path(), "__tx__").await;
+        let tx_after = raw_store_with_retry(temp.path(), "__tx__").await;
         assert_eq!(
             crate::meta::recovery_marker::load_last_committed(&tx_after)
                 .await
@@ -369,7 +374,11 @@ async fn legacy_bookmark_refuses_reopen_before_replay() {
             legacy_before,
             "the legacy bookmark bytes must be untouched"
         );
-        let changelog_after = raw_store(temp.path(), "__changelog__").await;
+    }
+    // The handle must be dropped before the next open — each raw store owns
+    // an exclusive fjall database lock.
+    {
+        let changelog_after = raw_store_with_retry(temp.path(), "__changelog__").await;
         assert_eq!(
             changelog_after
                 .get(RecordKey::from_slice(

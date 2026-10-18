@@ -219,6 +219,27 @@ pub(super) async fn raw_store(path: &Path, name: &str) -> Arc<dyn Store> {
     store
 }
 
+/// A fresh exclusive-lock open right after a close can hit brief fjall lock
+/// lag.
+pub(super) async fn raw_store_with_retry(path: &Path, name: &str) -> Arc<dyn Store> {
+    let mut last_error = None;
+    for _ in 0..25 {
+        match BoxRepoFactory::fjall_raw(path.to_path_buf()).create().await {
+            Ok(raw) => {
+                let store = raw.store_get(name).await.expect("open raw store");
+                drop(raw);
+                return store;
+            }
+            Err(error) => last_error = Some(error),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!(
+        "raw store open with retry exhausted: {:?}",
+        last_error.expect("at least one attempt")
+    );
+}
+
 pub(super) async fn journal_event(store: &dyn Store, version: u64) -> Option<ChangelogEvent> {
     read_event(store, version)
         .await

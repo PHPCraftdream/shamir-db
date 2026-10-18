@@ -224,6 +224,29 @@ fn local_end(receipt: &ReplicationReceipt) -> u64 {
         .unwrap_or(0)
 }
 
+/// The documented gap invariant (docs/guide-docs/follower-journal-durability.md):
+/// a certified GAP does not reject otherwise valid follower batches — the
+/// upstream bookmark advances while the clean-history horizon J remains at
+/// the last gap-free version. Cap the candidate horizon at the journal
+/// feed's first open gap; a J already certified above the gap never
+/// regresses.
+pub(crate) async fn certified_clean_through(
+    repo: &RepoInstance,
+    old: &BookmarkV3,
+    end: u64,
+) -> DbResult<Option<u64>> {
+    let candidate = old.clean_through.map_or(end, |j| j.max(end));
+    let first_gap = repo.changefeed().await?.feed.first_gap_version();
+    let capped = if first_gap == 0 {
+        candidate
+    } else {
+        candidate.min(first_gap - 1)
+    };
+    Ok(old
+        .clean_through
+        .map_or_else(|| (capped > 0).then_some(capped), |j| Some(j.max(capped))))
+}
+
 async fn stage_checkpoint_batch(
     repo: &RepoInstance,
     permit: &RepoWritePermit,
@@ -232,6 +255,7 @@ async fn stage_checkpoint_batch(
 ) -> DbResult<Box<dyn AtomicBatch>> {
     let end = local_end(receipt);
     let bookmark = old.bookmark.max(receipt.upstream_end);
+    let clean_through = certified_clean_through(repo, old, end).await?;
     // Keep the v3 decode invariant `fence.bookmark == bookmark`: the legacy
     // writers sync the embedded fence's bookmark on every advance, and the
     // fence decoder rejects the record otherwise.
@@ -239,7 +263,7 @@ async fn stage_checkpoint_batch(
     let bookmark = BookmarkV3 {
         fence,
         bookmark,
-        clean_through: Some(old.clean_through.map_or(end, |j| j.max(end))),
+        clean_through,
         outstanding_receipt: None,
     };
     let mut batch = repo.begin_repo_atomic_batch(permit).await?;

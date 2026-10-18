@@ -14,6 +14,7 @@ use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig, RepoInstance};
 use shamir_db::engine::table::TableConfig;
 use shamir_db::engine::tx::apply_replicated::apply_replicated_batch;
 use shamir_db::engine::tx::{ApplyOutcome, ApplyPolicy, ReplicatedEvent};
+use shamir_db::storage::error::{DbError, FollowerRefusalReason};
 use shamir_db::storage::storage_fjall::FjallRepo;
 use shamir_db::storage::types::{RecordKey, Repo};
 use shamir_db::types::value::QueryValue;
@@ -433,9 +434,129 @@ fn clean_reopen_allows_follower_at_head() {
 // dissolved `supervisor_receipt_terminal_tests` module for the layout ratchet).
 // ---------------------------------------------------------------------------
 
-// S5c-X PR6b-3 round 3: a legacy durable bookmark must refuse gate
-// initialization with the TYPED `FollowerStateRefused` and terminal
-// `resync_required` persistence (not a flattened generic `Start` error).
+// Unit tests for the gate-init refusal mapping itself (`refuse_gate_init`):
+// the supervisor cannot reach a FAILING `tx_gate()` through the integration
+// fixture below — the gate OnceCell is initialized during open recovery
+// (engine tx/recovery step 1) and open itself refuses legacy/malformed bytes,
+// so the supervisor always sees the cached, successfully-initialized gate.
+// These drive every error kind DIRECTLY against the real supervisor + real
+// terminal persistence.
+#[tokio::test]
+async fn gate_init_error_legacy_refusal_is_typed_and_marks_terminal() {
+    let follower = build_db().await;
+    create_profile_and_subscription(&follower).await;
+    let source = Arc::new(PartialSource {
+        events: Vec::new(),
+        pulls: AtomicUsize::new(0),
+    });
+    let shared = source.clone();
+    let factory: ReplSourceFactory = Arc::new(move |_| shared.clone());
+    let sup = SubscriptionSupervisor::new(follower.clone(), factory, "unit")
+        .with_poll_wait_ms(20)
+        .with_max_iterations(2);
+    // Counterfactual: flattening the helper's match to a blanket
+    // `ReplError::Start(error.to_string())` (the round-2 shape) turns this
+    // red — the return would be `Start` and `resync_required` never persists.
+    let error = sup
+        .refuse_gate_init(
+            "sub_a",
+            DbError::FollowerStateRefused {
+                reason: FollowerRefusalReason::LegacyBookmarkFormat,
+            },
+        )
+        .await;
+    assert!(
+        matches!(
+            error,
+            ReplError::FollowerStateRefused {
+                reason: FollowerRefusalReason::LegacyBookmarkFormat
+            }
+        ),
+        "typed refusal must stay machine-readable, got {error:?}"
+    );
+    assert_eq!(
+        sub_state(&follower, "sub_a").await.as_deref(),
+        Some("resync_required"),
+        "typed refusal must persist terminal resync_required"
+    );
+    sup.stop_all().await;
+}
+
+#[tokio::test]
+async fn gate_init_error_malformed_refusal_is_typed_and_marks_terminal() {
+    let follower = build_db().await;
+    create_profile_and_subscription(&follower).await;
+    let source = Arc::new(PartialSource {
+        events: Vec::new(),
+        pulls: AtomicUsize::new(0),
+    });
+    let shared = source.clone();
+    let factory: ReplSourceFactory = Arc::new(move |_| shared.clone());
+    let sup = SubscriptionSupervisor::new(follower.clone(), factory, "unit")
+        .with_poll_wait_ms(20)
+        .with_max_iterations(2);
+    // Counterfactual: same as the legacy variant — a blanket `Start` mapping
+    // would return `Start` and never persist `resync_required`.
+    let error = sup
+        .refuse_gate_init(
+            "sub_a",
+            DbError::FollowerStateRefused {
+                reason: FollowerRefusalReason::MalformedBookmark,
+            },
+        )
+        .await;
+    assert!(
+        matches!(
+            error,
+            ReplError::FollowerStateRefused {
+                reason: FollowerRefusalReason::MalformedBookmark
+            }
+        ),
+        "typed refusal must stay machine-readable, got {error:?}"
+    );
+    assert_eq!(
+        sub_state(&follower, "sub_a").await.as_deref(),
+        Some("resync_required"),
+        "typed refusal must persist terminal resync_required"
+    );
+    sup.stop_all().await;
+}
+
+#[tokio::test]
+async fn gate_init_error_other_error_keeps_start_and_marks_nothing() {
+    let follower = build_db().await;
+    create_profile_and_subscription(&follower).await;
+    let before = sub_state(&follower, "sub_a").await;
+    let source = Arc::new(PartialSource {
+        events: Vec::new(),
+        pulls: AtomicUsize::new(0),
+    });
+    let shared = source.clone();
+    let factory: ReplSourceFactory = Arc::new(move |_| shared.clone());
+    let sup = SubscriptionSupervisor::new(follower.clone(), factory, "unit")
+        .with_poll_wait_ms(20)
+        .with_max_iterations(2);
+    let error = sup
+        .refuse_gate_init("sub_a", DbError::Storage("gate init i/o".into()))
+        .await;
+    assert!(
+        matches!(error, ReplError::Start(_)),
+        "non-refusal gate error must keep the generic retryable Start mapping, got {error:?}"
+    );
+    assert_eq!(
+        sub_state(&follower, "sub_a").await,
+        before,
+        "non-refusal gate error must mark nothing"
+    );
+    sup.stop_all().await;
+}
+
+// S5c-X PR6b-3 round 3 (re-commented round 4): this seeds legacy bytes into
+// the ALREADY-OPEN repo, so it exercises the admission-time classifier arm
+// (`classify_follower_bookmark` in the supervisor's resume path) and terminal
+// persistence — NOT the early gate-init arm, which the unit tests above cover
+// directly: the gate OnceCell initializes during open recovery and open
+// itself refuses legacy bytes, so a failing `tx_gate()` is unreachable here.
 #[tokio::test]
 async fn legacy_bookmark_gate_refusal_marks_typed_terminal() {
     let follower = build_db().await;

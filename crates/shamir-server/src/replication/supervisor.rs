@@ -213,6 +213,38 @@ impl SubscriptionSupervisor {
         self.reconcile().await;
     }
 
+    /// Map a gate-initialization failure by KIND: a typed follower-state
+    /// refusal stays machine-readable and terminal — the subscription is
+    /// marked `resync_required` and the typed error is returned; every
+    /// other error keeps the generic retryable `Start` mapping and marks
+    /// nothing. Extracted (round 4) so tests can drive every kind
+    /// directly: the supervisor cannot reach a FAILING `tx_gate()` through
+    /// this fixture — the gate OnceCell is initialized during open
+    /// recovery (tx/recovery.rs:373 → repo_instance.rs:860) and open
+    /// itself refuses legacy/malformed bytes
+    /// (durability_policy/repo_impl.rs:64-65), so the supervisor always
+    /// sees the cached gate.
+    pub(super) async fn refuse_gate_init(
+        &self,
+        sub_name: &str,
+        error: shamir_db::storage::error::DbError,
+    ) -> ReplError {
+        match error {
+            shamir_db::storage::error::DbError::FollowerStateRefused { reason } => {
+                let error = ReplError::FollowerStateRefused { reason };
+                if let Err(persist) = self
+                    .local
+                    .mark_subscription_terminal(sub_name, "resync_required", &error.to_string())
+                    .await
+                {
+                    return ReplError::Start(persist.to_string());
+                }
+                error
+            }
+            error => ReplError::Start(error.to_string()),
+        }
+    }
+
     /// Converge running loops to the declarative catalogue state. Idempotent.
     ///
     /// - For each `active` subscription with a resolvable profile and NOT
@@ -342,26 +374,12 @@ impl SubscriptionSupervisor {
                 return Err(error);
             }
             if let Some(destination) = self.local.get_db(db).and_then(|db| db.get_repo(repo)) {
-                // Map by error KIND, not by string: a typed follower-state
-                // refusal from gate init (legacy/malformed durable bookmark)
-                // stays machine-readable and terminal (same shape as the
-                // classify-refused arm below); every other error keeps the
-                // generic retryable `Start` mapping.
+                // Gate-init failures map by KIND, not by string — see
+                // `refuse_gate_init` below (typed refusal → terminal
+                // `resync_required`; anything else → retryable `Start`).
                 let gate = match destination.tx_gate().await {
                     Ok(gate) => gate,
-                    Err(shamir_db::storage::error::DbError::FollowerStateRefused { reason }) => {
-                        let error = ReplError::FollowerStateRefused { reason };
-                        self.local
-                            .mark_subscription_terminal(
-                                &sub.name,
-                                "resync_required",
-                                &error.to_string(),
-                            )
-                            .await
-                            .map_err(|error| ReplError::Start(error.to_string()))?;
-                        return Err(error);
-                    }
-                    Err(error) => return Err(ReplError::Start(error.to_string())),
+                    Err(error) => return Err(self.refuse_gate_init(&sub.name, error).await),
                 };
                 if gate.requires_reopen() {
                     let error = ReplError::ReopenRequired {

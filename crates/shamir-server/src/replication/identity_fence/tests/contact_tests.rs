@@ -10,6 +10,7 @@ use shamir_db::engine::meta::repl::bookmark_v3::{
 use shamir_db::engine::meta::repo_identity::RepoIdentity;
 use shamir_db::engine::meta::{MetaEnvelope, MetaKey};
 use shamir_db::engine::repo::BoxRepoFactory;
+use shamir_db::storage::error::{DbError, FollowerRefusalReason};
 use shamir_db::storage::types::RecordKey;
 use shamir_db::SeedRefusal;
 use shamir_query_types::wire::repl::ReplResponse;
@@ -239,6 +240,8 @@ fn memory_and_hybrid_reopen_with_new_lineage_and_stop_followers() {
 async fn bookmark_codec_round_trips_boundaries_and_rejects_trailing_bytes() {
     let follower = build_memory().await;
     let info = repo(&follower).tx_info_store().await.unwrap();
+    let bookmark_key =
+        || RecordKey::from_slice(MetaKey::ReplicationBookmark.as_record_id().as_bytes());
     for bookmark in [0, u64::MAX] {
         for observed_identity in [
             None,
@@ -247,6 +250,10 @@ async fn bookmark_codec_round_trips_boundaries_and_rejects_trailing_bytes() {
                 history_epoch: u64::MAX,
             }),
         ] {
+            // Fixture reset: each boundary pair round-trips from a clean key
+            // (the strict writer refuses over foreign bytes and preserves an
+            // existing record's bookmark).
+            info.remove(bookmark_key()).await.unwrap();
             let record = recorded::FenceRecord {
                 bookmark,
                 lineage_id: [17; 16],
@@ -259,15 +266,51 @@ async fn bookmark_codec_round_trips_boundaries_and_rejects_trailing_bytes() {
                 repo(&follower).replication_bookmark().await.unwrap(),
                 bookmark
             );
-            let mut bytes = MetaEnvelope::new((1u16, record)).encode().unwrap();
+            // Honest trailing-byte probe: append one byte to the bytes the
+            // real v3 writer produced, and expect the strict reader to
+            // refuse. A refused state keeps refusing — the writer never
+            // overwrites it (fixture reset below, not production behaviour).
+            let mut bytes = info.get(bookmark_key()).await.unwrap().to_vec();
             bytes.push(0);
-            info.set(
-                RecordKey::from_slice(MetaKey::ReplicationBookmark.as_record_id().as_bytes()),
-                Bytes::from(bytes),
-            )
-            .await
-            .unwrap();
+            info.set(bookmark_key(), Bytes::from(bytes)).await.unwrap();
             assert!(recorded::load(&info).await.is_err());
+            assert!(recorded::save(&info, record).await.is_err());
         }
     }
+    info.remove(bookmark_key()).await.unwrap();
+
+    // Legacy tuple version 1 (the pre-v3 fixed-width fence encoding, no
+    // trailing bytes) is a typed legacy refusal, never a rewrite: `load`
+    // reports `LegacyBookmarkFormat` and `save` declines to mint a v3 record
+    // over it.
+    let legacy = MetaEnvelope::new((
+        1u16,
+        recorded::FenceRecord {
+            bookmark: 7,
+            lineage_id: [17; 16],
+            history_epoch: 0,
+            observed_identity: None,
+        },
+    ))
+    .encode()
+    .unwrap();
+    info.set(bookmark_key(), Bytes::from(legacy)).await.unwrap();
+    assert!(matches!(
+        recorded::load(&info).await,
+        Err(DbError::FollowerStateRefused {
+            reason: FollowerRefusalReason::LegacyBookmarkFormat
+        })
+    ));
+    assert!(recorded::save(
+        &info,
+        recorded::FenceRecord {
+            bookmark: 0,
+            lineage_id: [17; 16],
+            history_epoch: 0,
+            observed_identity: None,
+        }
+    )
+    .await
+    .is_err());
+    info.remove(bookmark_key()).await.unwrap();
 }

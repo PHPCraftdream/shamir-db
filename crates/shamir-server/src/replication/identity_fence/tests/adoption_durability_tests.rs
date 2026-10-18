@@ -457,15 +457,19 @@ async fn warm_visibility_enabled_on_retry_over_existing_v3_zero_event_follower()
         gap_at: None,
         current_version: 0,
     };
+    let repo_handle = repo(&follower);
+    // Round 4: the probe wraps the repository's REAL `__tx__` store (a fresh
+    // handle returns the same memoized store), so durable provenance is
+    // observable through the repo itself — `replication_bookmark()` is
+    // meaningful, unlike a fixture wrapping a detached store.
     let probe = Arc::new(AdoptionStore {
-        inner: Arc::new(InMemoryStore::new()),
+        inner: repo_handle.tx_info_store().await.unwrap(),
         durable: AtomicBool::new(false),
         flushes: AtomicUsize::new(0),
         park: false,
         reached: Notify::new(),
     });
     let info: Arc<dyn Store> = probe.clone();
-    let repo_handle = repo(&follower);
 
     // (1) Warm gate: no durable v3 record yet → visibility disabled.
     assert!(!repo_handle
@@ -476,11 +480,19 @@ async fn warm_visibility_enabled_on_retry_over_existing_v3_zero_event_follower()
 
     // (2) First contact: the fail-once flush makes the v3 set land readable
     // but NOT durable, and the contact errors — nothing enabled visibility.
+    // The fence record and v3 bookmark are both READABLE through a fresh
+    // real-store handle (the probe's `set` passes through to the repo store).
     assert!(matches!(
         checks::fence_pull_identity(&info, &pull, None, Some(&repo_handle)).await,
         Err(ReplError::Bookmark(_))
     ));
     assert!(recorded::load(&info).await.unwrap().is_some());
+    assert!(
+        load_bookmark_v3(&repo_handle.tx_info_store().await.unwrap())
+            .await
+            .unwrap()
+            .is_some()
+    );
     assert!(!probe.durable.load(Ordering::Acquire));
     assert!(!repo_handle
         .tx_gate()
@@ -504,9 +516,92 @@ async fn warm_visibility_enabled_on_retry_over_existing_v3_zero_event_follower()
         .unwrap()
         .receipt_native_visibility_enabled());
     assert!(probe.durable.load(Ordering::Acquire));
+
+    // (5) Durable provenance: the repo's OWN store holds the v3 baseline.
+    let v3 = load_bookmark_v3(&repo_handle.tx_info_store().await.unwrap())
+        .await
+        .unwrap()
+        .expect("repo's own __tx__ store must hold the durable v3 baseline");
+    assert_eq!(v3.bookmark, 0, "zero-event follower: baseline bookmark 0");
+    assert!(v3.fence.is_some(), "adoption records the fence");
     assert_eq!(
         repo_handle.replication_bookmark().await.unwrap(),
         0,
         "zero-event follower: empty pull must not advance the bookmark"
     );
+}
+
+// Round 4: a CANCELLED first contact with a REAL metadata store. The
+// pre-existing cancellation tests pass NO repo handle — this closes exactly
+// that gap: visibility stays disabled after the abandoned flush, and the
+// recovery path (prepare_existing + retry) enables it with durable v3
+// provenance in the repo's own store.
+#[tokio::test]
+async fn cancelled_first_contact_recovers_visibility_for_zero_event_follower() {
+    let follower = build_memory().await;
+    let pull = ReplResponse::Pull {
+        schema_digest: None,
+        repo_lineage_id: Some([7u8; 16]),
+        history_epoch: Some(0),
+        gap_first: None,
+        gap_through: None,
+        leader_epoch: 1,
+        events: Vec::new(),
+        gap_at: None,
+        current_version: 0,
+    };
+    let repo_handle = repo(&follower);
+    let probe = Arc::new(AdoptionStore {
+        inner: repo_handle.tx_info_store().await.unwrap(),
+        durable: AtomicBool::new(false),
+        flushes: AtomicUsize::new(0),
+        park: true,
+        reached: Notify::new(),
+    });
+    let info: Arc<dyn Store> = probe.clone();
+
+    // Poll to the known post-set flush barrier, then drop the borrowed
+    // contact future. No spawned task or timing-dependent cancellation.
+    let contact = checks::fence_pull_identity(&info, &pull, None, Some(&repo_handle));
+    tokio::pin!(contact);
+    tokio::select! {
+        biased;
+        _ = probe.reached.notified() => {}
+        result = &mut contact => panic!("contact escaped barrier: {result:?}"),
+    }
+
+    // The cancelled flush left the v3 readable (through a fresh real-store
+    // handle) but NOT durable, and nothing enabled visibility.
+    assert!(
+        load_bookmark_v3(&repo_handle.tx_info_store().await.unwrap())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(!probe.durable.load(Ordering::Acquire));
+    assert!(!repo_handle
+        .tx_gate()
+        .await
+        .unwrap()
+        .receipt_native_visibility_enabled());
+
+    // Recovery: reflush, then a straight retry over the existing record.
+    checks::prepare_existing(&info).await.unwrap();
+    checks::fence_pull_identity(&info, &pull, None, Some(&repo_handle))
+        .await
+        .unwrap();
+
+    assert!(repo_handle
+        .tx_gate()
+        .await
+        .unwrap()
+        .receipt_native_visibility_enabled());
+    assert!(probe.durable.load(Ordering::Acquire));
+    let v3 = load_bookmark_v3(&repo_handle.tx_info_store().await.unwrap())
+        .await
+        .unwrap()
+        .expect("repo's own __tx__ store must hold the durable v3 baseline");
+    assert_eq!(v3.bookmark, 0);
+    assert!(v3.fence.is_some());
+    assert_eq!(repo_handle.replication_bookmark().await.unwrap(), 0);
 }

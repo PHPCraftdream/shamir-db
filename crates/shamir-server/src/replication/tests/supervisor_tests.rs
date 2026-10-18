@@ -25,12 +25,12 @@
 //! Loops are bounded via `with_max_iterations` (no infinite sleep).
 
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures_util::stream::Stream;
+use futures_util::stream::{self, Stream};
 use shamir_db::access::{principal64_from_username, Actor};
 use shamir_db::engine::meta::repl::bookmark_v3::{save_bookmark_v3, BookmarkV3};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
@@ -504,12 +504,20 @@ async fn reopen_required_is_visible_and_resume_refused() {
 // the receipt pipeline retries transient `DbError::Storage` failures).
 // ---------------------------------------------------------------------------
 
-/// A wrapped MVCC history store whose `get` fails EXACTLY ONCE with a
-/// transient `DbError::Storage`, then delegates — the same store-swap
-/// technique the retired fixture used, but on the receipt pipeline's READ
-/// path (counter pre-state / `get_current_many` cold fallback).
+/// A wrapped MVCC history store whose FIRST `iter_range_stream` call yields
+/// EXACTLY ONE transient `DbError::Storage` batch, then delegates — the same
+/// store-swap technique the retired fixture used, re-armed at the seam the
+/// receipt pipeline actually exercises: the cold pre-state read of
+/// `compute_counters` (`get_current_many` → `get_current_bytes` cold path →
+/// `seek_latest_published`'s `iter_range_stream` range scan over the swapped
+/// history; an empty history resolves via the scan alone, so a point `get`
+/// injection never fires).
 struct TransientReadHistory {
     inner: Arc<dyn Store>,
+    /// One-shot arm: the next `iter_range_stream` fails once, then the
+    /// wrapper is transparent.
+    armed: AtomicBool,
+    /// Number of INJECTED failures (asserted == 1 after convergence).
     failures: AtomicUsize,
 }
 
@@ -524,11 +532,6 @@ impl Store for TransientReadHistory {
     }
 
     async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
-        if self.failures.fetch_add(1, Ordering::AcqRel) == 0 {
-            return Err(DbError::Storage(
-                "injected transient receipt-path read failure".into(),
-            ));
-        }
         self.inner.get(key).await
     }
 
@@ -550,7 +553,15 @@ impl Store for TransientReadHistory {
         end: Option<Bytes>,
         size: usize,
     ) -> HistoryStream {
-        self.inner.iter_range_stream(start, end, size)
+        if !self.armed.swap(false, Ordering::AcqRel) {
+            return self.inner.iter_range_stream(start, end, size);
+        }
+        self.failures.fetch_add(1, Ordering::AcqRel);
+        Box::pin(stream::once(async {
+            Err(DbError::Storage(
+                "injected transient receipt-path read failure".into(),
+            ))
+        }))
     }
 
     fn iter_range_stream_reverse(
@@ -640,6 +651,7 @@ async fn receipt_io_pause_retry_convergence() {
     create_profile_and_subscription(&follower).await;
     let history = Arc::new(TransientReadHistory {
         inner: Arc::new(InMemoryStore::new()),
+        armed: AtomicBool::new(true),
         failures: AtomicUsize::new(0),
     });
     swap_items_mvcc_history(&follower, history.clone()).await;

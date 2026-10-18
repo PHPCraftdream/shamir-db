@@ -441,10 +441,7 @@ async fn apply_fresh(
                 ..fence
             }),
             bookmark: new_bookmark,
-            clean_through: Some(
-                old.clean_through
-                    .map_or(chunk_local_end, |j| j.max(chunk_local_end)),
-            ),
+            clean_through: checkpoint::certified_clean_through(repo, &old, chunk_local_end).await?,
             outstanding_receipt: None,
         };
         start = end;
