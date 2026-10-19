@@ -373,4 +373,4 @@ impl RateLimiter for InMemoryRateLimiter {
     }
 }
 
-// Tests live in crate::server::tests::rate_limit_tests.
+// Tests live in crate::server::tests::security::rate_limit_tests.
