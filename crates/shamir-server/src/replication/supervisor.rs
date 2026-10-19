@@ -65,7 +65,7 @@ use super::error::ReplError;
 use super::follower_loop::{run_follower_loop, FollowerLoopConfig};
 use super::source::seed::terminal;
 use super::source::ReplSource;
-use super::startup_lease::StartupLeaseGuard;
+use super::seed::startup_lease::StartupLeaseGuard;
 
 /// Test seam (round 4, T5): a hook awaited after admission and before
 /// spawn — the seam that replaces the row between lease-take and spawn.
