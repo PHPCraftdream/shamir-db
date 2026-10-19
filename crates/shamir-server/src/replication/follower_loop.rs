@@ -64,6 +64,19 @@ const INITIAL_BACKOFF_MS: u64 = 200;
 /// `reconnect_backoff_ms.max` tunable in REPLICATION §6.1.
 const MAX_BACKOFF_MS: u64 = 30_000;
 
+/// PR6b-3 stall visibility: after this many consecutive swallowed failures
+/// WITHOUT durable-bookmark progress, persist a `status_message` on the
+/// subscription row so the stall is observable via status/list (a stalled
+/// follower must never be silent again — CI showed `state=active`,
+/// `status_message=null` while a loop retried forever).
+///
+/// Bound justification: it is strictly greater than the engine's inline
+/// retry budget of 3, so the `receipt_io_pause_retry_convergence` scenario
+/// (3 failures, then convergence) can NEVER trip it by construction. 10 is
+/// also small enough that, under the capped exponential backoff (200 ms →
+/// 30 s), a genuinely stuck loop surfaces within minutes.
+pub(crate) const STALL_VISIBILITY_THRESHOLD: usize = 10;
+
 /// Configuration for [`run_follower_loop`]: per-repo identity + tunables,
 /// grouped so the loop entry point stays under the argument-count lint and
 /// callers can build the config once and reuse it across restarts.
@@ -90,6 +103,12 @@ pub struct FollowerLoopConfig {
     /// callers pass `None`; tests pass a small cap to avoid relying on
     /// cancellation timing.
     pub max_iterations: Option<usize>,
+    /// PR6b-3 stall visibility: the subscription row name to mark when the
+    /// loop swallows [`STALL_VISIBILITY_THRESHOLD`] consecutive failures
+    /// without bookmark progress. `None` (direct/test callers) keeps the
+    /// loop retry-only; the supervisor always sets it so the stall surfaces
+    /// as a persistent `status_message`.
+    pub subscription: Option<String>,
 }
 
 impl FollowerLoopConfig {
@@ -105,6 +124,7 @@ impl FollowerLoopConfig {
             #[cfg(test)]
             identity_fence: true,
             max_iterations: None,
+            subscription: None,
         }
     }
 
@@ -133,6 +153,15 @@ impl FollowerLoopConfig {
     #[must_use]
     pub fn with_max_iterations(mut self, n: usize) -> Self {
         self.max_iterations = Some(n);
+        self
+    }
+
+    /// Set the subscription row to mark on a no-progress stall
+    /// ([`STALL_VISIBILITY_THRESHOLD`] swallowed failures without bookmark
+    /// progress). The supervisor wires this; direct callers may omit it.
+    #[must_use]
+    pub fn with_subscription(mut self, name: impl Into<String>) -> Self {
+        self.subscription = Some(name.into());
         self
     }
 }
@@ -218,7 +247,9 @@ async fn run_follower_loop_internal(
         #[cfg(test)]
         identity_fence,
         max_iterations,
+        subscription,
     } = cfg;
+    let subscription = subscription.as_deref();
     #[cfg(not(test))]
     let identity_fence = true;
     let apply_policy = if validate_replicated_payload {
@@ -307,6 +338,12 @@ async fn run_follower_loop_internal(
 
     let mut backoff_ms = INITIAL_BACKOFF_MS;
     let mut iter = 0usize;
+    // PR6b-3 stall visibility: consecutive swallowed failures and the last
+    // durable bookmark observed. Progress = the bookmark advancing beyond
+    // the previous iteration's value; any progress resets the counter.
+    let mut consecutive_failures: usize = 0;
+    let mut prev_bookmark: Option<u64> = None;
+    let mut stall_reported = false;
 
     loop {
         // Cancellation check — cheap and race-free (CancellationToken).
@@ -337,6 +374,16 @@ async fn run_follower_loop_internal(
                     repo: repo.clone(),
                 };
                 warn!(node_id = %node_id, error = %e, "follower_loop: backing off");
+                consecutive_failures += 1;
+                note_swallowed_failure(
+                    &db,
+                    &node_id,
+                    subscription,
+                    consecutive_failures,
+                    &e.to_string(),
+                    &mut stall_reported,
+                )
+                .await;
                 sleep_backoff(&cancel, &mut backoff_ms).await;
                 continue;
             }
@@ -353,7 +400,18 @@ async fn run_follower_loop_internal(
             });
         }
         let bookmark = match repo_instance.replication_bookmark().await {
-            Ok(v) => v,
+            Ok(v) => {
+                // PR6b-3: durable progress resets the stall counter (and
+                // clears a previously reported stall message).
+                if prev_bookmark.is_some_and(|prev| v > prev) {
+                    consecutive_failures = 0;
+                    if stall_reported {
+                        clear_stall(&db, &node_id, subscription, v, &mut stall_reported).await;
+                    }
+                }
+                prev_bookmark = Some(v);
+                v
+            }
             Err(e) => {
                 // PR6b-3: a refused durable follower state is TERMINAL — no
                 // migration exists, the operator reseeds. Never retry it.
@@ -362,6 +420,16 @@ async fn run_follower_loop_internal(
                 }
                 let re = ReplError::Bookmark(e.to_string());
                 warn!(node_id = %node_id, error = %re, "follower_loop: bookmark read failed");
+                consecutive_failures += 1;
+                note_swallowed_failure(
+                    &db,
+                    &node_id,
+                    subscription,
+                    consecutive_failures,
+                    &re.to_string(),
+                    &mut stall_reported,
+                )
+                .await;
                 sleep_backoff(&cancel, &mut backoff_ms).await;
                 continue;
             }
@@ -390,6 +458,16 @@ async fn run_follower_loop_internal(
             | Err(e @ ReplError::Seed(_)) => return Err(e),
             Err(e) => {
                 warn!(node_id = %node_id, error = %e, "follower_loop: pull failed, backing off");
+                consecutive_failures += 1;
+                note_swallowed_failure(
+                    &db,
+                    &node_id,
+                    subscription,
+                    consecutive_failures,
+                    &e.to_string(),
+                    &mut stall_reported,
+                )
+                .await;
                 sleep_backoff(&cancel, &mut backoff_ms).await;
                 continue;
             }
@@ -468,6 +546,16 @@ async fn run_follower_loop_internal(
                     code = %code,
                     "follower_loop: leader returned error: {message}"
                 );
+                consecutive_failures += 1;
+                note_swallowed_failure(
+                    &db,
+                    &node_id,
+                    subscription,
+                    consecutive_failures,
+                    &format!("leader error code {code}: {message}"),
+                    &mut stall_reported,
+                )
+                .await;
                 sleep_backoff(&cancel, &mut backoff_ms).await;
                 continue;
             }
@@ -512,6 +600,16 @@ async fn run_follower_loop_internal(
             Err(e) => {
                 let re = ReplError::Decode(e.to_string());
                 warn!(node_id = %node_id, error = %re, "follower_loop: decode failed, backing off");
+                consecutive_failures += 1;
+                note_swallowed_failure(
+                    &db,
+                    &node_id,
+                    subscription,
+                    consecutive_failures,
+                    &re.to_string(),
+                    &mut stall_reported,
+                )
+                .await;
                 sleep_backoff(&cancel, &mut backoff_ms).await;
                 continue;
             }
@@ -581,9 +679,113 @@ async fn run_follower_loop_internal(
                     });
                 }
                 warn!(error = %e, "follower_loop: batch apply failed, backing off");
+                consecutive_failures += 1;
+                note_swallowed_failure(
+                    &db,
+                    &node_id,
+                    subscription,
+                    consecutive_failures,
+                    &e.to_string(),
+                    &mut stall_reported,
+                )
+                .await;
                 sleep_backoff(&cancel, &mut backoff_ms).await;
             }
         }
+    }
+}
+
+/// PR6b-3 stall visibility: once [`STALL_VISIBILITY_THRESHOLD`] consecutive
+/// swallowed failures accumulate without durable-bookmark progress, persist
+/// a `status_message` on the subscription row so operators (and tests) can
+/// OBSERVE the stalled loop via the existing status/list admin surface.
+///
+/// Mechanism choice: [`ShamirDb::mark_subscription_terminal`] with
+/// `state = "active"` is the lightest EXISTING persistent write (there is
+/// no status-only API in `shamir-db` and production changes outside
+/// `shamir-server` are out of scope). It writes `status_message` +
+/// `last_terminal_reason` but — because the state is not
+/// `resync_required` — installs NO quarantine, leaves the row `active` so
+/// `reconcile()` keeps (re)starting the loop, and the loop itself keeps
+/// retrying: the stall stays visible, not terminal.
+///
+/// Fires once per stall streak (`stall_reported` guard); cleared by
+/// [`clear_stall`] on the next durable progress.
+async fn note_swallowed_failure(
+    db: &ShamirDb,
+    node_id: &str,
+    subscription: Option<&str>,
+    failures: usize,
+    last_error: &str,
+    stall_reported: &mut bool,
+) {
+    if failures < STALL_VISIBILITY_THRESHOLD || *stall_reported {
+        return;
+    }
+    *stall_reported = true;
+    let message = format!(
+        "follower stalled: {failures} consecutive failures without progress; \
+         last error: {last_error}"
+    );
+    let Some(name) = subscription else {
+        warn!(
+            node_id = %node_id,
+            failures,
+            "follower_loop: stalled without progress (no subscription row to mark)"
+        );
+        return;
+    };
+    match db
+        .mark_subscription_terminal(name, "active", &message)
+        .await
+    {
+        Ok(()) => warn!(
+            node_id = %node_id,
+            subscription = %name,
+            failures,
+            "follower_loop: stall persisted to subscription status_message"
+        ),
+        Err(e) => warn!(
+            node_id = %node_id,
+            subscription = %name,
+            error = %e,
+            "follower_loop: failed to persist stall status_message"
+        ),
+    }
+}
+
+/// PR6b-3: the bookmark advanced after a reported stall — overwrite the
+/// stall `status_message` with a progress note so a RECOVERED loop is as
+/// visible as a stalled one was.
+async fn clear_stall(
+    db: &ShamirDb,
+    node_id: &str,
+    subscription: Option<&str>,
+    bookmark: u64,
+    stall_reported: &mut bool,
+) {
+    *stall_reported = false;
+    let Some(name) = subscription else {
+        return;
+    };
+    let message = format!("replication progress restored; durable bookmark at {bookmark}");
+    if let Err(e) = db
+        .mark_subscription_terminal(name, "active", &message)
+        .await
+    {
+        warn!(
+            node_id = %node_id,
+            subscription = %name,
+            error = %e,
+            "follower_loop: failed to persist progress status_message"
+        );
+    } else {
+        info!(
+            node_id = %node_id,
+            subscription = %name,
+            bookmark,
+            "follower_loop: stall cleared (bookmark advanced)"
+        );
     }
 }
 

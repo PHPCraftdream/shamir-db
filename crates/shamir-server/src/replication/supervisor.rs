@@ -460,7 +460,13 @@ impl SubscriptionSupervisor {
         for (db, repo) in pull_targets.iter().cloned() {
             let mut cfg = FollowerLoopConfig::new(self.node_id.clone(), db, repo)
                 .with_poll_wait_ms(self.poll_wait_ms)
-                .with_validate_replicated_payload(self.validate_replicated_payload);
+                .with_validate_replicated_payload(self.validate_replicated_payload)
+                // PR6b-3 stall visibility: let the loop persist a
+                // status_message on this row after repeated no-progress
+                // failures (the loop swallows transient errors internally,
+                // so the supervisor can never observe them via the loop's
+                // return value).
+                .with_subscription(sub.name.clone());
             if let Some(n) = self.max_iterations {
                 cfg = cfg.with_max_iterations(n);
             }
