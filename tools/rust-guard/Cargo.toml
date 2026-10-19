@@ -1,0 +1,21 @@
+[package]
+name = "rust-guard"
+version = "0.1.0"
+edition = "2021"
+description = "Source-integrity gates: module reachability, structure and conservation checks"
+publish = false
+
+# Standalone crate: keep cargo from binding to any ancestor workspace.
+[workspace]
+
+[[bin]]
+name = "rust-guard"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+quote = "1"
+proc-macro2 = { version = "1", features = ["span-locations"] }
+serde = { version = "1", features = ["derive"] }
+syn = { version = "2", features = ["full", "visit", "extra-traits"] }
+toml = "0.8"

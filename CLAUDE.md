@@ -439,6 +439,33 @@ adds). The repo root and `crates/` are exempt from the entry rule
 (workspace container roots); the checker's scope/exclusion list lives
 at the top of the script.
 
+### 🛡️ rust-guard source-integrity gates (CI)
+
+`tools/rust-guard` (workspace-excluded binary) enforces three gates in the
+`source-integrity` CI job (runs on draft AND ready PRs and master pushes;
+self-tests run in the `rust-guard self-test` job, CI only):
+
+* `modules` — every tracked `.rs` under `crates/*/` and `tools/*/` must be
+  reachable from a target root or listed in `.rust-guard/exceptions.toml`
+  (the lost-test case).
+* `structure` — AST rules on the PR's changed files: no logic in
+  `mod.rs`, no inline `#[cfg(test)]` modules, no local `use`, no impl
+  outside `.rust-guard/owned_impl.toml`'s owner modules, no visibility
+  widening or new `#[allow]` vs the merge base.
+* `conservation` — per active campaign (`.rust-guard/stages.toml`,
+  normally empty = no-op): every item survives between revisions, or the
+  change is declared in the campaign's delta file.
+
+Adding an exception: `.rust-guard/exceptions.toml` (`[[exception]]` /
+`[[producer]]`) or `.rust-guard/owned_impl.toml` — exact path/name plus
+`owner` and `reason`; an exception that is no longer needed is a
+`STALE_EXCEPTION` failure.
+
+Writing a delta file (shape: `tools/rust-guard/README.md`, "Delta
+file"): every entry needs `path`, `item`, `reason`, `owner`; each entry
+is consumed once and leftovers are `UNUSED_ALLOWANCE`; **test losses
+and `#[ignore]` changes are never declarable**.
+
 ---
 
 ## 🔒 Code ideology (NORMATIVE)

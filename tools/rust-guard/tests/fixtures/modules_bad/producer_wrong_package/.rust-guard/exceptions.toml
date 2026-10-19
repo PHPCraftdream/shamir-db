@@ -1,0 +1,14 @@
+# Producer is declared for the WRONG package: it must not cover this
+# crate's macro (has_producer matches on packages membership), so the
+# macro is UNRESOLVED_MACRO and the producer itself turns out stale.
+[[exception]]
+path = "crates/fix/src/generated.rs"
+package = "fix"
+reason = "emitted by declare_mods! (codegen stand-in)"
+owner = "@rust-guard"
+
+[[producer]]
+name = "macro_rules"
+packages = ["some-other-package"]
+owner = "@rust-guard"
+reason = "scoped elsewhere; must not leak into this package"

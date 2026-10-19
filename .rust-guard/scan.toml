@@ -1,0 +1,4 @@
+# rust-guard scan configuration (repo-level, explicit — never hard-coded
+# in the tool). `exclude_paths` are exact repo-relative path prefixes
+# skipped by roots, the module walk and the conservation inventory.
+exclude_paths = ["tools/rust-guard/tests/fixtures"]
