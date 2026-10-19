@@ -86,6 +86,11 @@ async fn synced_batch_survives_immediate_drop() {
 /// verifies the default path is accepted and produces correct results.
 #[tokio::test]
 async fn buffered_batch_executes_successfully() {
+    // FLAKE-2: install a logger so the engine's `shutdown stage slow` warnings
+    // reach nextest's captured output when this test fails.
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .is_test(true)
+        .try_init();
     let dir = tempfile::tempdir().unwrap();
     let sys_path = dir.path().join("meta.redb");
     let repo_path = dir.path().join("data.redb");
