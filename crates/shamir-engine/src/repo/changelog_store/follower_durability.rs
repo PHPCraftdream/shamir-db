@@ -11,6 +11,10 @@ impl RepoInstance {
         self.repo.store_get("__changelog__").await
     }
 
+    pub fn validate_repo_wide_atomic_batch(&self, destination: &str) -> DbResult<()> {
+        self.repo.validate_repo_wide_atomic_batch(destination)
+    }
+
     /// Backend capability for the S5c-X PR6b-2 receipt apply protocol.
     pub(crate) fn storage_supports_atomic_batch(&self) -> bool {
         self.repo.supports_atomic_batch()

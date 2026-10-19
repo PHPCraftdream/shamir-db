@@ -15,7 +15,9 @@ use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
-use shamir_query_builder::ddl::{repl_scope, replication_profile, subscription};
+use shamir_query_builder::ddl::{repl_scope, replication_profile};
+use shamir_query_builder::doc;
+use shamir_query_builder::write::Insert;
 use shamir_query_types::admin::{ReplDirection, ReplMode};
 
 use crate::replication::supervisor::{ReplSourceFactory, SubscriptionSupervisor};
@@ -39,8 +41,9 @@ async fn build_membuffer_follower() -> Arc<ShamirDb> {
 }
 
 /// Create the replication profile + subscription bound to `app/main` on the
-/// follower catalogue.
-async fn create_profile_and_subscription(follower: &ShamirDb, name: &str) {
+/// follower catalogue. This succeeds only on capable repositories; legacy-row
+/// supervisor tests must install a deliberate row without invoking CREATE.
+async fn create_profile(follower: &ShamirDb) {
     let mut b = Batch::new();
     b.id(1);
     b.op(
@@ -51,14 +54,29 @@ async fn create_profile_and_subscription(follower: &ShamirDb, name: &str) {
             ReplMode::ReadOnly,
         ),
     );
-    b.op(
-        "cs",
-        subscription(name, "tcp://leader:9000", "pub_ab", "prof_ab"),
-    );
     follower
         .execute("app", &b.to_request_via_msgpack())
         .await
-        .expect("create profile+subscription");
+        .expect("create profile");
+}
+
+async fn create_legacy_subscription(follower: &ShamirDb, name: &str) {
+    let mut batch = Batch::new();
+    batch.id(42);
+    batch.op(
+        "legacy",
+        Insert::into("subscriptions").rows([doc! {
+            "name" => name,
+            "upstream" => "tcp://leader:9000",
+            "publication" => "pub_ab",
+            "profile" => "prof_ab",
+            "state" => "active",
+        }]),
+    );
+    follower
+        .execute("system", &batch.to_request_via_msgpack())
+        .await
+        .expect("inject pre-existing legacy subscription row");
 }
 
 async fn sub_row(follower: &ShamirDb, name: &str) -> (Option<String>, Option<String>) {
@@ -102,7 +120,8 @@ async fn sub_row(follower: &ShamirDb, name: &str) -> (Option<String>, Option<Str
 #[tokio::test]
 async fn membuffer_destination_is_refused_up_front() {
     let follower = build_membuffer_follower().await;
-    create_profile_and_subscription(&follower, "gate_sub").await;
+    create_profile(&follower).await;
+    create_legacy_subscription(&follower, "gate_sub").await;
     // The factory panics: a refusal must happen BEFORE any source is built.
     let factory: ReplSourceFactory =
         Arc::new(|_| panic!("must refuse destination before constructing source"));
@@ -121,8 +140,8 @@ async fn membuffer_destination_is_refused_up_front() {
     );
     let message = message.expect("refusal message must name the remedy");
     assert!(
-        message.contains("MemBuffer-wrapped backend")
-            && message.contains("re-create it as a raw/replica repository"),
+        message.contains("atomic batches")
+            && message.contains("raw in-memory or raw fjall repository"),
         "unexpected status_message: {message}"
     );
 
@@ -148,7 +167,8 @@ async fn membuffer_destination_is_refused_up_front() {
 #[tokio::test]
 async fn unsupported_backend_persists_terminal_status_without_spinning() {
     let follower = build_membuffer_follower().await;
-    create_profile_and_subscription(&follower, "gate_sub").await;
+    create_profile(&follower).await;
+    create_legacy_subscription(&follower, "gate_sub").await;
     let calls = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&calls);
     let factory: ReplSourceFactory = Arc::new(move |_| {
@@ -172,7 +192,7 @@ async fn unsupported_backend_persists_terminal_status_without_spinning() {
     assert!(
         message
             .as_deref()
-            .is_some_and(|m| m.contains("MemBuffer-wrapped backend")),
+            .is_some_and(|message| message.contains("raw in-memory or raw fjall repository")),
         "unexpected status_message: {message:?}"
     );
 
@@ -180,7 +200,6 @@ async fn unsupported_backend_persists_terminal_status_without_spinning() {
     // start a loop nor flip the row back to active (no tight retry).
     sup.reconcile().await;
     sup.reconcile().await;
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert!(!sup.is_running("gate_sub"));
     assert_eq!(calls.load(Ordering::Acquire), 0);
     let (state, _) = sub_row(&follower, "gate_sub").await;

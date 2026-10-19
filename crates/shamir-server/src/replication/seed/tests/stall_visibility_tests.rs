@@ -16,6 +16,7 @@ use shamir_db::access::principal64_from_username;
 use shamir_db::access::Actor;
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
+use shamir_db::engine::tx::ReplicatedEvent;
 use shamir_db::query::filter::FilterContext;
 use shamir_db::types::common::new_map;
 use shamir_db::ShamirDb;
@@ -170,7 +171,7 @@ async fn repeated_failures_without_progress_surface_status_message() {
     assert_eq!(
         message,
         "follower stalled: 10 consecutive failures without progress; \
-         last error: leader unreachable",
+         last error: replication transport error: leader unreachable",
         "unexpected status_message: {message}"
     );
 }
@@ -181,6 +182,7 @@ async fn repeated_failures_without_progress_surface_status_message() {
 struct StreakySource {
     inner: InProcessReplSource,
     pulls: Mutex<u32>,
+    progress_observed: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
 #[async_trait]
@@ -205,7 +207,17 @@ impl ReplSource for StreakySource {
         if n <= 10 {
             return Err(ReplError::Transport("streak one".into()));
         }
-        if n <= 12 {
+        if n == 11 {
+            let response = self
+                .inner
+                .pull(db, repo, from_version, limit, wait_ms)
+                .await?;
+            if let Some(sender) = self.progress_observed.lock().await.take() {
+                let _ = sender.send(());
+            }
+            return Ok(response);
+        }
+        if n == 12 {
             return self
                 .inner
                 .pull(db, repo, from_version, limit, wait_ms)
@@ -250,23 +262,34 @@ async fn progress_overwrites_stall_message_and_counter_restarts() {
 
     let follower = build_db("follower").await;
     create_subscription_row(&follower, "stall_sub").await;
-    // 10 failures + 2 healthy pulls (one applied + one idle) + 10 failures.
+    // 10 failures, apply+idle, then 10 failures.
+    let (progress_tx, progress_rx) = tokio::sync::oneshot::channel();
     let source = StreakySource {
         inner: InProcessReplSource::new(leader),
         pulls: Mutex::new(0),
+        progress_observed: Mutex::new(Some(progress_tx)),
     };
     let cfg = FollowerLoopConfig::new("follower-1", "app", "main")
         .with_poll_wait_ms(0)
         .with_subscription("stall_sub")
         .with_max_iterations(25);
-    run_follower_loop(
+    let run = tokio::spawn(run_follower_loop(
         Arc::new(follower.clone()),
         Arc::new(source),
         cfg,
         CancellationToken::new(),
-    )
-    .await
-    .expect("stall/recovery/stall must never terminate the loop");
+    ));
+    progress_rx
+        .await
+        .expect("the successful progress pull must be observed");
+    let (_, progress_message) = read_subscription_row(&follower).await;
+    assert_eq!(
+        progress_message.as_deref(),
+        Some("replication progress restored; durable bookmark at 1")
+    );
+    run.await
+        .expect("follower task")
+        .expect("stall/recovery/stall must never terminate the loop");
     // The healthy window durably applied the leader's event.
     let repo = follower.get_db("app").unwrap().get_repo("main").unwrap();
     assert_eq!(repo.replication_bookmark().await.unwrap(), 1, "converged");
@@ -276,7 +299,7 @@ async fn progress_overwrites_stall_message_and_counter_restarts() {
         message.as_deref(),
         Some(
             "follower stalled: 10 consecutive failures without progress; \
-             last error: streak two"
+             last error: replication transport error: streak two"
         ),
         "the second streak must report with a RESTARTED counter: {message:?}"
     );
@@ -304,7 +327,7 @@ impl ReplSource for EmptyBacklogSource {
     ) -> Result<ReplResponse, ReplError> {
         Ok(ReplResponse::Pull {
             leader_epoch: 1,
-            events: Vec::new(),
+            events: rmp_serde::to_vec_named(&Vec::<ReplicatedEvent>::new()).unwrap(),
             gap_at: None,
             current_version: 5,
             repo_lineage_id: Some([2; 16]),

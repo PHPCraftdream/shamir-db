@@ -631,6 +631,13 @@ async fn run_follower_loop_internal(
             // genuinely caught-up leader (`current_version == bookmark`) is
             // healthy idle and must NOT count.
             if current_version > bookmark {
+                if prev_bookmark.is_some_and(|previous| bookmark > previous) {
+                    consecutive_failures = 0;
+                    if stall_reported {
+                        clear_stall(&db, &node_id, subscription, bookmark, &mut stall_reported)
+                            .await;
+                    }
+                }
                 consecutive_failures += 1;
                 note_swallowed_failure(
                     &db,
@@ -664,29 +671,30 @@ async fn run_follower_loop_internal(
         )
         .await
         {
-            Ok(outcome @ (ApplyOutcome::Applied { .. } | ApplyOutcome::Skipped)) => {
-                // R7-5: a SUCCESSFUL apply that did NOT advance the durable
-                // bookmark (`Skipped`, or an `Applied` local version at/below
-                // the bookmark) is a NO-PROGRESS iteration — feed the stall
-                // measure so a spinning-but-successful loop stays visible.
-                let advanced = match &outcome {
-                    ApplyOutcome::Applied { local_version } => *local_version > bookmark,
-                    // `Rejected` is matched separately below; treating it as
-                    // non-advancing here keeps this inner match total.
-                    ApplyOutcome::Skipped | ApplyOutcome::Rejected { .. } => false,
-                };
+            Ok(_outcome @ (ApplyOutcome::Applied { .. } | ApplyOutcome::Skipped)) => {
+                let post_apply_bookmark = repo_instance
+                    .replication_bookmark()
+                    .await
+                    .map_err(|error| ReplError::Bookmark(error.to_string()))?;
+                let advanced = post_apply_bookmark > bookmark;
+                if advanced {
+                    consecutive_failures = 0;
+                    if stall_reported {
+                        clear_stall(
+                            &db,
+                            &node_id,
+                            subscription,
+                            post_apply_bookmark,
+                            &mut stall_reported,
+                        )
+                        .await;
+                    }
+                }
                 if !advanced {
                     consecutive_failures += 1;
-                    let detail = match &outcome {
-                        ApplyOutcome::Applied { local_version } => format!(
-                            "applied batch allocated local version {local_version} but the \
-                             durable bookmark stayed at {bookmark}"
-                        ),
-                        ApplyOutcome::Skipped | ApplyOutcome::Rejected { .. } => format!(
-                            "applied batch was skipped (already at/below watermark {bookmark}); \
-                             no version spent"
-                        ),
-                    };
+                    let detail = format!(
+                        "successful apply left durable bookmark at {post_apply_bookmark} (previously {bookmark})"
+                    );
                     note_swallowed_failure(
                         &db,
                         &node_id,

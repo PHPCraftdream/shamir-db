@@ -227,15 +227,31 @@ fn seeded_raw_fjall_image_reboots_atomic_batch_capable_and_applies() {
                 event,
                 field_bindings: Vec::new(),
             }],
-            74,
+            73,
             ApplyPolicy::Trusted,
         )
         .await
         .unwrap();
         assert_eq!(
             outcome,
-            ApplyOutcome::Applied { local_version: 1 },
-            "first replicated batch must apply on the seeded follower"
+            ApplyOutcome::Applied { local_version: 2 },
+            "seed install committed local baseline 1, so the first applied batch              takes local version 2 (independent of the upstream bookmark)",
+        );
+        let table = repo.get_table("items").await.unwrap();
+        let refs = crate::types::common::new_map();
+        let ctx = table
+            .info_store_read_view()
+            .filter_context(&refs)
+            .await
+            .unwrap();
+        let rows = table
+            .read(&crate::query::read::ReadQuery::new("items"), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.records.len(),
+            1,
+            "the event's record data must be applied"
         );
         assert_eq!(
             repo.replication_bookmark().await.unwrap(),

@@ -158,14 +158,10 @@ pub enum ReplError {
     },
 
     /// S5c-X PR6b-3 R7 — the destination repository's storage backend does
-    /// not support repository-wide atomic batches (a MemBuffer/Cached-wrapped
-    /// backend). **Terminal**: the receipt pipeline can never activate on it,
-    /// so the loop MUST stop instead of warn+backoff+retrying forever; the
-    /// operator re-creates the destination as a raw/replica repository.
-    #[error(
-        "destination repository {db}/{repo} uses a MemBuffer-wrapped backend; \
-         re-create it as a raw/replica repository (atomic batches unsupported)"
-    )]
+    /// does not support repository-wide atomic batches. **Terminal**: the
+    /// receipt pipeline can never activate on it, so the loop stops instead of
+    /// retrying; use a raw in-memory or raw fjall destination.
+    #[error("destination repository {db}/{repo} does not support repository-wide atomic batches; use a raw in-memory or raw fjall repository")]
     AtomicBatchUnsupported {
         /// Destination database name.
         db: String,

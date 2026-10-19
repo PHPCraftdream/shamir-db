@@ -374,23 +374,10 @@ impl SubscriptionSupervisor {
                 return Err(error);
             }
             if let Some(destination) = self.local.get_db(db).and_then(|db| db.get_repo(repo)) {
-                // R7-2(i) — UP-FRONT capability refusal. The destination repo
-                // handle (RepoInstance) does NOT expose BoxRepo's
-                // `supports_atomic_batch` publicly, but its info store does:
-                // `Store::supports_atomic_batch` is `true` only on raw
-                // backends (raw fjall / raw in-memory) and keeps the default
-                // `false` on wrapper stores (MemBufferStore/CachedStore) —
-                // exactly the stacks whose receipt admission later fails with
-                // `DbError::AtomicBatchUnsupported`. Refuse BEFORE spawning so
-                // a seeded follower with a MemBuffer-wrapped destination can
-                // never enter the warn+backoff+retry-forever loop. RESUME goes
-                // through this same `start_subscription` path (reconcile →
-                // start), so it is covered too.
-                let info = destination
-                    .tx_info_store()
-                    .await
-                    .map_err(|error| ReplError::Start(error.to_string()))?;
-                if !info.supports_atomic_batch() {
+                // Validate repo-wide batch support before probing or spawning.
+                if let Err(storage_error) =
+                    destination.validate_repo_wide_atomic_batch(&format!("{db}/{repo}"))
+                {
                     let error = ReplError::AtomicBatchUnsupported {
                         db: db.clone(),
                         repo: repo.clone(),
@@ -399,7 +386,7 @@ impl SubscriptionSupervisor {
                         .mark_subscription_terminal(
                             &sub.name,
                             "resync_required",
-                            &error.to_string(),
+                            &format!("{error}: {storage_error}"),
                         )
                         .await
                         .map_err(|error| ReplError::Start(error.to_string()))?;
@@ -428,6 +415,10 @@ impl SubscriptionSupervisor {
                         .map_err(|error| ReplError::Start(error.to_string()))?;
                     return Err(error);
                 }
+                let info = destination
+                    .tx_info_store()
+                    .await
+                    .map_err(|error| ReplError::Start(error.to_string()))?;
                 // PR6b-3: refuse resume of a repo whose durable follower
                 // state this version does not support (legacy bookmark,
                 // malformed record, floor-without-bookmark evidence). A
