@@ -1,6 +1,6 @@
-Round9 IMPLEMENTATION — current worktree: D:/dev/rust/shamir-db/worktrees/s5cx-quarantine-reads
+Round9 IMPLEMENTATION — current worktree: worktrees/s5cx-quarantine-reads
 
-NO builds/tests/clippy/rustc/nextest. NO cargo until parent final formatting. NO git writes. Read AGENTS.md, CLAUDE.md, and C:/Users/Computer/.agents/skills/rust-intel/SKILL.md before edits. Never run git reset/checkout/clean/stash/restore/rm or any git command that mutates the working tree/index. Edit files only; orchestrator handles commits. Explicit no-git-writes prohibition waives prompt-first commit. Persist this exact task brief before code; do not commit it.
+NO builds/tests/clippy/rustc/nextest. NO cargo until parent final formatting. NO git writes. Read AGENTS.md, CLAUDE.md, and the rust-intel skill before edits. Never run git reset/checkout/clean/stash/restore/rm or any git command that mutates the working tree/index. Edit files only; orchestrator handles commits. Explicit no-git-writes prohibition waives prompt-first commit. Persist this exact task brief before code; do not commit it.
 
 Fix ONLY Round9 compile/test problems; no design refactor:
 - changelog.rs: add missing `ChangelogReceiver` import via verified public reexport `crate::shamir_db::ChangelogReceiver`.
