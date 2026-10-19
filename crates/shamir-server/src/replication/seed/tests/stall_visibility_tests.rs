@@ -176,13 +176,27 @@ async fn repeated_failures_without_progress_surface_status_message() {
     );
 }
 
-/// Fails the first 10 pulls ("streak one"), then delegates twice to the
+/// Fails the first 10 pulls ("streak one"), then delegates ONCE to the
 /// healthy inner source (durable progress), then fails every further pull
 /// ("streak two") — stall → recovery → fresh stall in ONE loop run.
+///
+/// Fully deterministic, no sleeps/yields as synchronization:
+///
+/// * Stage 1 — the test arms [`Self::stall_seen`] only AFTER it has read the
+///   threshold-10 stall message from the follower's PERSISTED row; pull #11
+///   (the healthy one) awaits that oneshot at entry, so the healthy pull
+///   cannot run before the stall write is observed. Cannot deadlock: the
+///   receiver is armed before the loop task is spawned.
+/// * Stages 2/3 — the test polls the follower's OWN durable state (the
+///   persisted row, then the repo bookmark) inside a
+///   `tokio::time::timeout` budget; bounded timeout polling of real
+///   persisted state, never an unbounded sleep.
 struct StreakySource {
     inner: InProcessReplSource,
     pulls: Mutex<u32>,
-    progress_observed: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// Armed by the test after the stage-1 stall message is persisted; taken
+    /// by pull #11 before the healthy pull proceeds.
+    stall_seen: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 
 #[async_trait]
@@ -208,16 +222,16 @@ impl ReplSource for StreakySource {
             return Err(ReplError::Transport("streak one".into()));
         }
         if n == 11 {
-            let response = self
-                .inner
-                .pull(db, repo, from_version, limit, wait_ms)
-                .await?;
-            if let Some(sender) = self.progress_observed.lock().await.take() {
-                let _ = sender.send(());
-            }
-            return Ok(response);
-        }
-        if n == 12 {
+            // Stage-1 handoff: the test resolves this receiver only after the
+            // threshold-10 stall message was read back from the PERSISTED row.
+            let rx = self
+                .stall_seen
+                .lock()
+                .await
+                .take()
+                .expect("stage-1 gate must be armed before the loop is spawned");
+            rx.await
+                .expect("stage-1 sender dropped before the healthy pull");
             return self
                 .inner
                 .pull(db, repo, from_version, limit, wait_ms)
@@ -227,17 +241,47 @@ impl ReplSource for StreakySource {
     }
 }
 
+/// Bounded wait on the follower's persisted subscription row until
+/// `status_message` equals `want` (stage 1 and stage 2). Panics with `what`
+/// on timeout — that panic is the stage's counterfactual failure point.
+///
+/// The deadline is VIRTUAL time (`start_paused`) and must exceed the follower's
+/// own retry backoff up to the stall threshold: the loop sleeps 0.2, 0.4, 0.8,
+/// 1.6, 3.2, 6.4, 12.8, 25.6 and 30.0 (capped) seconds after failures 1..9
+/// before the tenth failure writes the message (`follower_loop.rs:61-65`,
+/// `:877-882`) = 80.8 s. 300 s leaves a wide margin and costs no real time.
+async fn await_row_message(follower: &ShamirDb, want: &str, what: &'static str) {
+    tokio::time::timeout(std::time::Duration::from_secs(300), async {
+        loop {
+            let (_, message) = read_subscription_row(follower).await;
+            if message.as_deref() == Some(want) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{what}: status_message never became {want:?}"));
+}
+
 /// R7-5: durable progress must OVERWRITE a reported stall message with the
 /// progress note AND restart the failure counter, so a later fresh
 /// 10-failure streak reports again with the fresh count.
 ///
-/// COUNTERFACTUAL: if the counter were NOT restarted on progress, the
-/// post-progress streak continues at 11 (counts 11..20 ≥ threshold 10 with
-/// the latch cleared by `clear_stall`) and the message would read "…11
-/// consecutive failures…" — the first failing assertion is the
-/// exact-match `assert_eq!` on `10 consecutive failures` below. Without the
-/// progress overwrite, the message could never have been the progress note
-/// between the two streaks at all.
+/// COUNTERFACTUALS (first failing assertion per stage):
+/// * Stage 1 — if `note_swallowed_failure`'s threshold stall write is
+///   removed, the stage-1 `await_row_message` poll below never matches and
+///   its `unwrap_or_else(panic!)` fires ("stage 1").
+/// * Stage 2 — if `clear_stall`'s progress write is removed while the
+///   counter reset stays, the stage-2 `await_row_message` poll never sees
+///   the progress note and panics ("stage 2"); the bookmark assertion after
+///   it would still pass.
+/// * Stage 3 — if the counter were NOT restarted on progress, the
+///   post-progress streak continues at 11 (counts 11..20 ≥ threshold 10 with
+///   the latch cleared by `clear_stall`) and the message would read "…11
+///   consecutive failures…" — the exact-match `assert_eq!` on
+///   `10 consecutive failures` at the end of the test is the first failing
+///   assertion.
 #[tokio::test(start_paused = true)]
 async fn progress_overwrites_stall_message_and_counter_restarts() {
     let leader = build_db("alice").await;
@@ -263,11 +307,16 @@ async fn progress_overwrites_stall_message_and_counter_restarts() {
     let follower = build_db("follower").await;
     create_subscription_row(&follower, "stall_sub").await;
     // 10 failures, apply+idle, then 10 failures.
-    let (progress_tx, progress_rx) = tokio::sync::oneshot::channel();
+    const STALL_ONE: &str = "follower stalled: 10 consecutive failures without progress; \
+         last error: replication transport error: streak one";
+    const PROGRESS: &str = "replication progress restored; durable bookmark at 1";
+    const STALL_TWO: &str = "follower stalled: 10 consecutive failures without progress; \
+         last error: replication transport error: streak two";
+    let (stall_seen_tx, stall_seen_rx) = tokio::sync::oneshot::channel();
     let source = StreakySource {
         inner: InProcessReplSource::new(leader),
         pulls: Mutex::new(0),
-        progress_observed: Mutex::new(Some(progress_tx)),
+        stall_seen: Mutex::new(Some(stall_seen_rx)),
     };
     let cfg = FollowerLoopConfig::new("follower-1", "app", "main")
         .with_poll_wait_ms(0)
@@ -279,29 +328,35 @@ async fn progress_overwrites_stall_message_and_counter_restarts() {
         cfg,
         CancellationToken::new(),
     ));
-    progress_rx
-        .await
-        .expect("the successful progress pull must be observed");
-    let (_, progress_message) = read_subscription_row(&follower).await;
+
+    // Stage 1: the threshold-10 stall message is PERSISTED before the healthy
+    // pull may run (pull #11 blocks on the oneshot we resolve here).
+    await_row_message(&follower, STALL_ONE, "stage 1").await;
+    stall_seen_tx
+        .send(())
+        .expect("stage-1 receiver still parked in pull #11");
+
+    // Stage 2: observe the follower's OWN durable progress — the persisted
+    // progress note (written by clear_stall after the apply) — never an
+    // in-source signal that races the follower's write.
+    await_row_message(&follower, PROGRESS, "stage 2").await;
+    let repo = follower.get_db("app").unwrap().get_repo("main").unwrap();
     assert_eq!(
-        progress_message.as_deref(),
-        Some("replication progress restored; durable bookmark at 1")
+        repo.replication_bookmark().await.unwrap(),
+        1,
+        "the healthy window durably applied the leader's event"
     );
+
+    // Stage 3: the remaining pulls fail ("streak two"); the loop finishes its
+    // iteration budget and the fresh message carries a RESTARTED count of 10
+    // (not 11..20).
     run.await
         .expect("follower task")
         .expect("stall/recovery/stall must never terminate the loop");
-    // The healthy window durably applied the leader's event.
-    let repo = follower.get_db("app").unwrap().get_repo("main").unwrap();
-    assert_eq!(repo.replication_bookmark().await.unwrap(), 1, "converged");
-    let (_, message) = read_subscription_row(&follower).await;
-    // Fresh streak of exactly 10 → fresh count in the message.
     assert_eq!(
-        message.as_deref(),
-        Some(
-            "follower stalled: 10 consecutive failures without progress; \
-             last error: replication transport error: streak two"
-        ),
-        "the second streak must report with a RESTARTED counter: {message:?}"
+        read_subscription_row(&follower).await.1.as_deref(),
+        Some(STALL_TWO),
+        "the second streak must report with a RESTARTED counter"
     );
 }
 

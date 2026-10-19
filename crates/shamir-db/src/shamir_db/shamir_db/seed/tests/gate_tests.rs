@@ -237,20 +237,32 @@ fn seeded_raw_fjall_image_reboots_atomic_batch_capable_and_applies() {
             ApplyOutcome::Applied { local_version: 2 },
             "seed install committed local baseline 1, so the first applied batch              takes local version 2 (independent of the upstream bookmark)",
         );
+        // Read back through the follower's OWN visible floor: the applied
+        // record body is a scalar `InnerValue::Str` (exactly what a leader's
+        // changelog event carries), so a full `table.read` scan cannot serve
+        // it — the scan consumer validates every row with `RecordView::new`
+        // (`shamir-types/src/record_view/lens/view.rs:41`), which rejects a
+        // non-map top level (`NonMapTopLevel`), and the scan silently skips
+        // such rows (`shamir-engine/src/table/read_exec.rs:1262`). The point
+        // read (`TableManager::get` → `MvccStore::get_current_bytes`) decodes
+        // the stored bytes as `InnerValue` and is the correct post-apply read
+        // API; it is floor-capped at `gate.last_committed()`
+        // (`shamir-tx/src/mvcc_store/mod.rs:1330`), so it observes the row
+        // only after publication raised the floor to 2.
+        //
+        // COUNTERFACTUAL: the visible floor is raised twice — by
+        // `MvccStore::publish_materialized`'s `gate.raise_published`
+        // (`shamir-tx/src/mvcc_store/mvcc_history.rs:697`) and by the re-owned
+        // version guard's commit (`receipt/publish.rs:174-182`,
+        // `shamir-tx/src/version_guard.rs:150-164`). Only if BOTH are missing
+        // does the floor stay at the baseline 1, this `get` resolve the cell
+        // as absent, and this assertion be the FIRST to fail ("record not
+        // found"); the exact-payload check below holds either way.
         let table = repo.get_table("items").await.unwrap();
-        let refs = crate::types::common::new_map();
-        let ctx = table
-            .info_store_read_view()
-            .filter_context(&refs)
-            .await
-            .unwrap();
-        let rows = table
-            .read(&crate::query::read::ReadQuery::new("items"), &ctx)
-            .await
-            .unwrap();
+        let got = table.get(RecordId([2u8; 16])).await.unwrap();
         assert_eq!(
-            rows.records.len(),
-            1,
+            got,
+            InnerValue::Str("hello".into()),
             "the event's record data must be applied"
         );
         assert_eq!(

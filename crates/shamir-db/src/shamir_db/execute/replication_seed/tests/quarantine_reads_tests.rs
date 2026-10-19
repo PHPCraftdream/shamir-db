@@ -458,10 +458,17 @@ async fn t6_quarantine_survives_restart() {
         // Durable repo, persisted via the facade so the boot reload finds the
         // catalogue row. No inline tables: the installed seed image carries
         // the `users` table (writer registration + catalogue write).
+        // RAW fjall (no MemBuffer): this test installs a replacement SEED on
+        // the repo and binds a SUBSCRIPTION to it, and the new CREATE/RESUME
+        // admission (repo-wide atomic-batch capability, see supervisor.rs
+        // validate_repo_wide_atomic_batch) correctly refuses MemBuffer-wrapped
+        // destinations with `atomic_batch_unsupported`. Raw fjall is also the
+        // backend the seed writes through, so the durable directory survives
+        // the restart below.
         shamir
             .add_repo(
                 "testdb",
-                RepoConfig::new("main", BoxRepoFactory::fjall(repo_path.clone())),
+                RepoConfig::new("main", BoxRepoFactory::fjall_raw(repo_path.clone())),
             )
             .await
             .unwrap();
