@@ -5,11 +5,6 @@ dir crates/shamir-client-ts 8
 dir crates/shamir-client/src 11
 dir crates/shamir-client/src/tests 12
 dir crates/shamir-client/tests 8
-dir crates/shamir-connect/src/common 20
-dir crates/shamir-connect/src/common/tests 13
-dir crates/shamir-connect/src/server 19
-dir crates/shamir-connect/src/server/tests 9
-dir crates/shamir-connect/tests 9
 dir crates/shamir-db/src/shamir_db 9
 dir crates/shamir-db/src/shamir_db/execute 25
 dir crates/shamir-db/src/shamir_db/shamir_db 15
@@ -64,7 +59,6 @@ dir crates/shamir-wasm-host/src/tests 11
 dir crates/shamir-wasm-host/src/wasm 9
 dir scripts 15
 file crates/shamir-client/src/client.rs 1318
-file crates/shamir-connect/tests/integration_resume.rs 1216
 file crates/shamir-db/benches/engine_perf.rs 1365
 file crates/shamir-db/src/shamir_db/execute/admin_schema.rs 1395
 file crates/shamir-db/src/shamir_db/shamir_db/access_control.rs 1255

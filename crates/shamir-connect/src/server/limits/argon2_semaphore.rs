@@ -138,4 +138,4 @@ impl<'a> Drop for Argon2Permit<'a> {
     }
 }
 
-// Tests live in crate::server::tests::argon2_semaphore_tests.
+// Tests live in crate::server::tests::security::argon2_semaphore_tests.

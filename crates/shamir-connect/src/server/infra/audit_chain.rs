@@ -441,4 +441,4 @@ impl AuditChainWriter {
     }
 }
 
-// Tests live in crate::server::tests::audit_chain_tests.
+// Tests live in crate::server::tests::infra_tests::audit_chain_tests.
