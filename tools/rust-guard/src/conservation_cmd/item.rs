@@ -4,6 +4,7 @@
 
 use proc_macro2::TokenStream;
 use quote::ToTokens;
+use std::hash::Hasher;
 use syn::spanned::Spanned;
 use syn::{ImplItem, Item as SynItem, ItemMacro};
 
@@ -104,6 +105,10 @@ pub struct Extractor<'a> {
     pub package: &'a str,
     pub path: &'a str,
     pub logical_prefix: String,
+    /// cfg predicate inherited from the enclosing modules; items with no
+    /// `#[cfg]` of their own take this one, both present compose with
+    /// `&&` (finding 7: cfg predicates must propagate down the tree).
+    pub inherited_cfg: Option<String>,
 }
 
 impl Extractor<'_> {
@@ -112,11 +117,13 @@ impl Extractor<'_> {
         for item in items {
             match item {
                 SynItem::Mod(m) => {
+                    let mod_cfg = combine_cfg(self.inherited_cfg.as_deref(), attr_cfg(&m.attrs));
                     if let Some((_, body)) = &m.content {
                         let inner = Extractor {
                             package: self.package,
                             path: self.path,
                             logical_prefix: format!("{}::{}", self.logical_prefix, m.ident),
+                            inherited_cfg: mod_cfg,
                         };
                         inner.extract(body, out);
                     }
@@ -231,7 +238,7 @@ impl Extractor<'_> {
             enclosing: None,
             impl_head: String::new(),
             signature: String::new(),
-            cfg,
+            cfg: combine_cfg(self.inherited_cfg.as_deref(), cfg),
             test,
             fingerprint: hash_text(&body_tokens),
             path: self.path.to_owned(),
@@ -255,7 +262,7 @@ impl Extractor<'_> {
                 enclosing: Some(enclosing.to_owned()),
                 impl_head: impl_head.to_owned(),
                 signature: tokens_of(m.sig.clone()),
-                cfg: m.cfg,
+                cfg: combine_cfg(self.inherited_cfg.as_deref(), m.cfg),
                 test: m.test,
                 fingerprint: hash_tokens(&m.body),
                 path: self.path.to_owned(),
@@ -293,7 +300,10 @@ fn impl_member(m: &ImplItem) -> Option<Member> {
         ImplItem::Type(t) => (
             t.ident.to_string(),
             t.to_token_stream(),
-            TokenStream::new(),
+            // The value of an associated type IS its body: fingerprint the
+            // type expression so a changed impl type is a finding even
+            // though the method bodies did not move.
+            t.ty.to_token_stream(),
             &t.attrs,
         ),
         _ => return None,
@@ -332,7 +342,12 @@ fn trait_member(m: &syn::TraitItem) -> Option<Member> {
         syn::TraitItem::Type(t) => (
             t.ident.to_string(),
             t.to_token_stream(),
-            TokenStream::new(),
+            // Same for trait-member type defaults; a bare declaration
+            // (no default) has an empty body, bounds live in the sig.
+            t.default
+                .as_ref()
+                .map(|(_, ty)| ty.to_token_stream())
+                .unwrap_or_default(),
             &t.attrs,
         ),
         _ => return None,
@@ -461,8 +476,18 @@ fn hash_tokens(ts: &TokenStream) -> String {
     hash_text(&ts.to_string())
 }
 
+/// Composes an inherited cfg predicate with the item's own: no parent
+/// means the child stands alone, no child means inheritance, both chain
+/// with `&&` (the composed text is only compared for equality).
+pub fn combine_cfg(parent: Option<&str>, child: Option<String>) -> Option<String> {
+    match (parent, child) {
+        (None, c) => c,
+        (Some(p), None) => Some(p.to_owned()),
+        (Some(p), Some(c)) => Some(format!("{p} && {c}")),
+    }
+}
+
 fn hash_text(text: &str) -> String {
-    use std::hash::Hasher;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     h.write(text.as_bytes());
     format!("{:016x}", h.finish())

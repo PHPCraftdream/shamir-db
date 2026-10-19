@@ -4,8 +4,10 @@
 #[path = "sub/inner.rs"]
 mod aliased;
 
-// Mutually exclusive cfg_attr alternatives: only `a` is statically
-// resolvable; `b` is covered by an exception entry.
+// Mutually exclusive cfg_attr alternatives: BOTH are real, reachable
+// files. The guard resolves every non-unsatisfiable alternative, so both
+// `a.rs` and `b.rs` are accounted for with NO exception entry and no
+// DUPLICATE_FILE (they are distinct physical files).
 #[cfg_attr(feature = "a", path = "a.rs")]
 #[cfg_attr(feature = "b", path = "b.rs")]
 mod alt;

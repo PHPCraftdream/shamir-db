@@ -1,3 +1,5 @@
+// Real (comment-only) head diff so the two commits differ; the test
+// asserts BASE_MISMATCH from the stale delta pin.
 pub struct Plan {
     pub a: u32,
 }

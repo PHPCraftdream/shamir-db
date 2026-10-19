@@ -4,6 +4,7 @@
 use crate::finding::{exit_code, Report};
 use crate::gitfs::GitFs;
 use serde::Deserialize;
+use syn::Item;
 
 use super::{diff, owned, rules};
 
@@ -241,12 +242,11 @@ fn warn_primary_export(fs: &GitFs, files: &[String]) {
             .items
             .iter()
             .filter(|i| {
-                use syn::Item::*;
-                matches!(i, Fn(f) if f.vis != syn::Visibility::Inherited)
-                    || matches!(i, Struct(s) if s.vis != syn::Visibility::Inherited)
-                    || matches!(i, Enum(e) if e.vis != syn::Visibility::Inherited)
-                    || matches!(i, Union(u) if u.vis != syn::Visibility::Inherited)
-                    || matches!(i, Trait(t) if t.vis != syn::Visibility::Inherited)
+                matches!(i, Item::Fn(f) if f.vis != syn::Visibility::Inherited)
+                    || matches!(i, Item::Struct(s) if s.vis != syn::Visibility::Inherited)
+                    || matches!(i, Item::Enum(e) if e.vis != syn::Visibility::Inherited)
+                    || matches!(i, Item::Union(u) if u.vis != syn::Visibility::Inherited)
+                    || matches!(i, Item::Trait(t) if t.vis != syn::Visibility::Inherited)
             })
             .count();
         if count > 1 {

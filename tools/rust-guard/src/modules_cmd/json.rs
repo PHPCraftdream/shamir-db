@@ -4,7 +4,7 @@
 //! descent parser covers the subset cargo emits (objects, arrays, strings
 //! with standard escapes, numbers, booleans, null).
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 /// A parsed JSON value. Booleans and null (unused by this reader) are
 /// kept as their literal text.
@@ -41,7 +41,7 @@ impl Json {
     }
 
     /// Collects string elements of an array into a set.
-    pub fn str_set(&self) -> HashSet<String> {
+    pub fn str_set(&self) -> BTreeSet<String> {
         self.as_arr()
             .map(|items| {
                 items

@@ -5,6 +5,10 @@
 //! against it via the global `--repo` flag (cwd is the temp repo too,
 //! so cwd-relative config files such as `.rust-guard/exceptions.toml`
 //! resolve to the fixture copies).
+//!
+//! Conservation-only helpers (two-commit repos, delta files) are plain
+//! functions in `conservation_tests.rs` itself, so the other test
+//! binaries never carry dead code and no `#[allow]` is needed anywhere.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,9 +32,6 @@ const PKG_MANIFEST: &str = "[package]\nname = \"fix\"\nversion = \"0.1.0\"\nedit
 pub struct TempRepo {
     /// Absolute path of the temp repo (also passed as `--repo`).
     pub root: PathBuf,
-    /// SHA of the first commit (two-commit conservation repos).
-    #[allow(dead_code)] // conservation_tests only; dead in the other test binaries
-    pub base_sha: String,
 }
 
 impl TempRepo {
@@ -45,36 +46,18 @@ impl TempRepo {
         repo
     }
 
-    /// Two-commit repo: `fixtures/<fixture>/base` is committed first,
-    /// then `fixtures/<fixture>/head` is copied over and committed.
-    /// `base_sha` holds the first commit's SHA.
-    #[allow(dead_code)] // conservation_tests only; dead in the other test binaries
-    pub fn two_commit(fixture: &str) -> Self {
-        let mut repo = Self::with_fixture(&format!("{fixture}/base"));
-        repo.base_sha = repo.head_sha();
-        copy_fixture(&repo.root, &format!("{fixture}/head"));
-        repo.commit_all("head");
-        repo
-    }
-
     fn empty_repo() -> Self {
         let root = unique_root();
         fs::create_dir_all(&root).expect("create temp dir");
-        Self {
-            root,
-            base_sha: String::new(),
-        }
+        Self { root }
     }
 
-    /// Stages everything and commits.
-    fn commit_all(&self, message: &str) {
+    /// Stages everything and commits. `--allow-empty` so a fixture pair
+    /// with identical trees still yields a two-commit history (finding 9:
+    /// the second `git commit` otherwise fails before the guard runs).
+    pub(crate) fn commit_all(&self, message: &str) {
         self.git(&["add", "-A"]);
-        self.git(&["commit", "-m", message]);
-    }
-
-    /// Full SHA of HEAD.
-    fn head_sha(&self) -> String {
-        self.git(&["rev-parse", "HEAD"]).trim().to_owned()
+        self.git(&["commit", "--allow-empty", "-m", message]);
     }
 
     /// Runs git in the repo; panics on failure.
@@ -92,16 +75,6 @@ impl TempRepo {
             text(&out.stderr)
         );
         text(&out.stdout)
-    }
-
-    /// Writes `contents` to `rel` inside the repo.
-    #[allow(dead_code)] // conservation_tests only; dead in the other test binaries
-    pub fn write(&self, rel: &str, contents: &str) {
-        let path = self.root.join(rel);
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir).expect("create dir");
-        }
-        fs::write(path, contents).expect("write file");
     }
 
     /// Runs the built binary with `--repo <root>` and cwd = repo root.
@@ -158,7 +131,8 @@ fn unique_root() -> PathBuf {
     std::env::temp_dir().join(format!("rust-guard-selftest-{}-{n}", std::process::id()))
 }
 
-fn copy_fixture(dst: &Path, fixture: &str) {
+/// Copies `fixtures/<fixture>` over the repo (no-op when absent).
+pub(crate) fn copy_fixture(dst: &Path, fixture: &str) {
     let src = fixtures_dir().join(fixture);
     if src.is_dir() {
         copy_tree(&src, dst);
@@ -179,14 +153,20 @@ fn copy_tree(src: &Path, dst: &Path) {
     }
 }
 
-/// Writes the minimal workspace scaffold the `modules`/`conservation`
-/// gates need (`cargo metadata --no-deps` must succeed in the temp repo).
-fn write_scaffold(root: &Path) {
+/// Writes the minimal workspace scaffold the `modules` gate needs
+/// (`cargo metadata --no-deps` must succeed in the temp repo). A fixture
+/// that ships its OWN root/package manifest keeps it: the fixture copy
+/// happens first and existing files are never overwritten (finding 7:
+/// conservation fixtures carry custom `[workspace]` members).
+pub(crate) fn write_scaffold(root: &Path) {
     for (rel, contents) in [
         ("Cargo.toml", ROOT_MANIFEST),
         ("crates/fix/Cargo.toml", PKG_MANIFEST),
     ] {
         let path = root.join(rel);
+        if path.exists() {
+            continue;
+        }
         fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
         fs::write(path, contents).expect("write manifest");
     }

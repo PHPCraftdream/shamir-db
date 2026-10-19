@@ -5,12 +5,14 @@
 //! `MALFORMED_DELTA` findings):
 //!
 //! ```toml
-//! base = "abc123..."          # expected base SHA (abbreviated ok)
+//! base = "abc123..."          # REQUIRED: expected base SHA (abbreviated ok)
 //!
 //! [[removed]]                 # an item intentionally deleted
 //! path = "crates/x/src/old.rs"   # base file the item lived in
-//! item  = "shamir_x::old::Plan"  # logical item path, its `::name`
-//!                                # tail, or the bare name
+//! `item`   = "shamir_x::old::Plan"  # full logical item path (exact)
+//!                                # match — no `::name` tails, no bare
+//!                                # names: loose matching could pair the
+//!                                # allowance with the wrong item
 //! reason = "superseded by Planner"
 //! owner  = "@alice"
 //!
@@ -72,6 +74,8 @@ pub struct Entry {
 /// Parsed delta file.
 #[derive(Debug, Deserialize, Default)]
 pub struct Delta {
+    /// REQUIRED whenever a delta file is given; a file without it is
+    /// `MALFORMED_DELTA` (a pin that cannot drift is no pin at all).
     #[serde(default)]
     pub base: Option<String>,
     #[serde(default, rename = "moved")]
@@ -97,23 +101,27 @@ pub fn load(path: Option<&str>) -> Result<Delta, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
     let delta: Delta =
         toml::from_str(&text).map_err(|e| format!("MALFORMED_DELTA: cannot parse {path}: {e}"))?;
-    let all = delta.all();
-    if all.is_empty() && delta.base.is_none() {
+    if delta
+        .base
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
         return Err(format!(
-            "MALFORMED_DELTA: {path} declares nothing (no base, no entries)"
+            "MALFORMED_DELTA: {path} is missing the required `base` SHA"
         ));
     }
-    for e in all {
-        if e.path.trim().is_empty()
+    let all = delta.all();
+    if all.iter().any(|e| {
+        e.path.trim().is_empty()
             || e.item.trim().is_empty()
             || e.reason.trim().is_empty()
             || e.owner.trim().is_empty()
-        {
-            return Err(format!(
-                "MALFORMED_DELTA: {path}: entry for `{}` needs non-empty path, item, reason, owner",
-                e.path
-            ));
-        }
+    }) {
+        return Err(format!(
+            "MALFORMED_DELTA: {path}: every entry needs non-empty path, item, reason, owner"
+        ));
     }
     Ok(delta)
 }
@@ -183,8 +191,9 @@ impl Delta {
     }
 }
 
-/// `item` matches a logical item path exactly, by `::name` tail, or by
-/// bare name.
+/// `item` matches a logical item path EXACTLY — no `::name` tails, no
+/// bare names: suffix matching could silently pair an allowance with a
+/// different item that happens to share the tail.
 pub fn item_matches(pattern: &str, logical: &str) -> bool {
-    logical == pattern || logical.ends_with(&format!("::{pattern}"))
+    logical == pattern
 }

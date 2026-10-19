@@ -54,37 +54,67 @@ pub fn check_file(path: &str, file: &File, cfg: &OwnedImplConfig, report: &mut R
     let Some(logical) = logical_module_path(path) else {
         return;
     };
-    for item in &file.items {
-        let Item::Impl(imp) = item else { continue };
-        if imp.trait_.is_some() {
-            continue; // trait impls are not governed
-        }
-        let Some(name) = self_type_name(&imp.self_ty) else {
-            continue;
-        };
-        let Some(entry) = cfg.for_type(&name) else {
-            continue;
-        };
-        let owned = logical == entry.module || logical.starts_with(&format!("{}::", entry.module));
-        if !owned {
-            report.add(
-                path,
-                imp.impl_token.span.start().line,
-                "OWNED_IMPL",
-                format!(
-                    "inherent impl of `{name}` must live in `{}` or its descendants (here: `{logical}`)",
-                    entry.module
-                ),
-            );
+    walk_impls(path, &file.items, &logical, cfg, report);
+}
+
+/// Walks items for governed impls; recurses into INLINE modules, where
+/// the logical path extends through the inline mod names (finding 10d).
+fn walk_impls(
+    path: &str,
+    items: &[Item],
+    logical: &str,
+    cfg: &OwnedImplConfig,
+    report: &mut Report,
+) {
+    for item in items {
+        match item {
+            Item::Impl(imp) => {
+                if imp.trait_.is_some() {
+                    continue; // trait impls are not governed
+                }
+                let Some(name) = self_type_name(&imp.self_ty) else {
+                    continue;
+                };
+                let Some(entry) = cfg.for_type(&name) else {
+                    continue;
+                };
+                let owned =
+                    logical == entry.module || logical.starts_with(&format!("{}::", entry.module));
+                if !owned {
+                    report.add(
+                        path,
+                        imp.impl_token.span.start().line,
+                        "OWNED_IMPL",
+                        format!(
+                            "inherent impl of `{name}` must live in `{}` or its descendants (here: `{logical}`)",
+                            entry.module
+                        ),
+                    );
+                }
+            }
+            Item::Mod(m) => {
+                if let Some((_, inner)) = &m.content {
+                    let inner_logical = format!("{logical}::{}", m.ident);
+                    walk_impls(path, inner, &inner_logical, cfg, report);
+                }
+            }
+            _ => {}
         }
     }
 }
 
-/// First path segment of the impl self type (`RepoInstance` from
-/// `RepoInstance<..>` or qualified paths); `None` for other shapes.
+/// LAST segment of an impl self type path (`RepoInstance` from
+/// `RepoInstance<..>`, `crate::fix::RepoInstance` or any other plain
+/// path — the last segment is the type's own name); `None` for other
+/// shapes. `<T as Trait>::Assoc` self types (a path carrying a `QSelf`)
+/// stay out of scope on purpose: their governing type is not a single
+/// plain name, so ownership is undefined here.
 fn self_type_name(ty: &Type) -> Option<String> {
     if let Type::Path(p) = ty {
-        return p.path.segments.first().map(|s| s.ident.to_string());
+        if p.qself.is_some() {
+            return None;
+        }
+        return p.path.segments.last().map(|s| s.ident.to_string());
     }
     None
 }

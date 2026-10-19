@@ -29,13 +29,133 @@ pub struct TargetRoot {
     pub package: String,
 }
 
-/// Discovers all target roots from the given filesystem view.
-pub fn discover(fs: &GitFs) -> Result<Vec<TargetRoot>, String> {
+/// A manifest-level problem discovered while scanning roots. Callers
+/// turn these into `BAD_MANIFEST` findings (fail closed): a manifest
+/// that is unreadable, unparseable, or names undeclared
+/// `required-features` must never be silently skipped, or every target
+/// under it disappears from the scan.
+#[derive(Debug, Clone)]
+pub struct RootProblem {
+    pub manifest: String,
+    pub message: String,
+}
+
+/// Discovers all target roots plus the manifest problems encountered.
+pub fn discover_with_problems(fs: &GitFs) -> Result<(Vec<TargetRoot>, Vec<RootProblem>), String> {
     let mut roots = Vec::new();
+    let mut problems = Vec::new();
     for manifest in manifest_paths(fs)? {
-        add_targets(fs, &manifest, &mut roots);
+        add_targets(fs, &manifest, &mut roots, &mut problems);
     }
-    Ok(roots)
+    Ok((roots, problems))
+}
+
+/// Discovers target roots purely from git objects — NO cargo. Parses the
+/// ROOT `Cargo.toml` on `fs` (`[workspace]` members/exclude, `*` globs
+/// expanded segment-wise against the pinned tree listing) plus every
+/// member manifest on the same pinned view. Used by the `conservation`
+/// gate so BOTH revision inventories come from their own revision: the
+/// working tree's `cargo metadata` would silently drop targets that the
+/// BASE still had (finding 7). Problems fail closed like everywhere else.
+pub fn discover_from_manifests(fs: &GitFs) -> Result<(Vec<TargetRoot>, Vec<RootProblem>), String> {
+    let mut roots = Vec::new();
+    let mut problems = Vec::new();
+    let listing = pinned_files(fs)?;
+    let manifest = "Cargo.toml";
+    let mut problem = |message: String| {
+        problems.push(RootProblem {
+            manifest: manifest.to_owned(),
+            message,
+        });
+    };
+    let text = match fs.read_checked(manifest) {
+        Ok(t) => t,
+        Err(e) => {
+            problem(format!("root manifest: {e}"));
+            return Ok((roots, problems));
+        }
+    };
+    let Ok(doc) = text.parse::<toml::Table>() else {
+        problem("root manifest is not parseable TOML".into());
+        return Ok((roots, problems));
+    };
+    if let Some(ws) = doc.get("workspace").and_then(|w| w.as_table()) {
+        let members: Vec<String> = ws
+            .get("members")
+            .and_then(|m| m.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if members.is_empty() {
+            problem("workspace declares no members".into());
+        }
+        let exclude: Vec<String> = ws
+            .get("exclude")
+            .and_then(|e| e.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for pat in &members {
+            for dir in expand_member_glob(pat, &listing) {
+                if dir.starts_with("vendor/") || exclude.iter().any(|e| glob_matches(e, &dir)) {
+                    continue;
+                }
+                add_targets(fs, &format!("{dir}/Cargo.toml"), &mut roots, &mut problems);
+            }
+        }
+    } else if doc.get("package").is_some() {
+        // Single-package repository: the root manifest is the package.
+        add_targets(fs, manifest, &mut roots, &mut problems);
+    } else {
+        problem("root manifest has neither [workspace] nor [package]".into());
+    }
+    Ok((roots, problems))
+}
+
+/// File listing of the pinned view (`ls-tree` at the rev); falls back to
+/// the tracked-file listing when no revision is pinned.
+fn pinned_files(fs: &GitFs) -> Result<Vec<String>, String> {
+    match fs.list_tree() {
+        Ok(t) => Ok(t),
+        Err(e) if e.contains("no revision pinned") => fs.tracked_files(),
+        Err(e) => Err(e),
+    }
+}
+
+/// Every directory of the listing matching a workspace-members pattern.
+/// Patterns are `/`-separated; `*` matches exactly one path segment.
+fn expand_member_glob(pattern: &str, listing: &[String]) -> Vec<String> {
+    let mut dirs: Vec<String> = Vec::new();
+    for f in listing {
+        let segs: Vec<&str> = f.split('/').collect();
+        let mut acc = String::new();
+        // All ancestor directories of the file (file name dropped).
+        for seg in &segs[..segs.len().saturating_sub(1)] {
+            if !acc.is_empty() {
+                acc.push('/');
+            }
+            acc.push_str(seg);
+            if !dirs.contains(&acc.clone()) {
+                dirs.push(acc.clone());
+            }
+        }
+    }
+    dirs.retain(|d| glob_matches(pattern, d));
+    dirs
+}
+
+/// Segment-wise glob match: `*` matches exactly one `/`-separated
+/// segment, everything else must be equal. Empty patterns match nothing.
+fn glob_matches(pattern: &str, candidate: &str) -> bool {
+    let p: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
+    let c: Vec<&str> = candidate.split('/').filter(|s| !s.is_empty()).collect();
+    p.len() == c.len() && p.iter().zip(&c).all(|(a, b)| *a == "*" || a == b)
 }
 
 /// Every package manifest to consider: workspace members from cargo
@@ -50,7 +170,13 @@ fn manifest_paths(fs: &GitFs) -> Result<Vec<String>, String> {
     };
 
     let meta = run_cargo_metadata(fs)?;
-    let members = meta.get("members").map(|m| m.str_set()).unwrap_or_default();
+    // `workspace_members` holds package IDs; `members` in the manifest is
+    // a different (path-ish) shape. Membership is decided by matching
+    // `packages[].id` against this set.
+    let members = meta
+        .get("workspace_members")
+        .map(|m| m.str_set())
+        .unwrap_or_default();
     if let Some(packages) = meta.get("packages").and_then(|p| p.as_arr()) {
         for pkg in packages {
             let id = pkg.get("id").and_then(|i| i.as_str()).unwrap_or("");
@@ -104,12 +230,26 @@ fn rel_from_abs(fs: &GitFs, abs: &str) -> String {
         .to_owned()
 }
 
-/// Parses one manifest and appends its target roots.
-fn add_targets(fs: &GitFs, manifest: &str, roots: &mut Vec<TargetRoot>) {
+/// Parses one manifest and appends its target roots. Any failure to read
+/// or interpret the manifest is a structured problem, never a silent skip.
+fn add_targets(
+    fs: &GitFs,
+    manifest: &str,
+    roots: &mut Vec<TargetRoot>,
+    problems: &mut Vec<RootProblem>,
+) {
+    let mut problem = |message: String| {
+        problems.push(RootProblem {
+            manifest: manifest.to_owned(),
+            message,
+        });
+    };
     let Some(text) = fs.read(manifest) else {
+        problem("manifest is unreadable or missing".into());
         return;
     };
     let Ok(doc) = text.parse::<toml::Table>() else {
+        problem("manifest is not parseable TOML".into());
         return;
     };
     let pkg = doc.get("package").and_then(|p| p.as_table());
@@ -123,14 +263,20 @@ fn add_targets(fs: &GitFs, manifest: &str, roots: &mut Vec<TargetRoot>) {
 
     let auto = |flag: &str| -> bool { pkg.get(flag).and_then(|v| v.as_bool()).unwrap_or(true) };
     let exists = |p: &str| fs.exists(p);
+    // Declared feature names, for `required-features` validation.
+    let features: Vec<String> = doc
+        .get("features")
+        .and_then(|f| f.as_table())
+        .map(|t| t.keys().map(|k| k.to_owned()).collect())
+        .unwrap_or_default();
 
-    // [lib] — explicit path or the default location.
+    // [lib] — explicit path (manifest-relative, joined to the package
+    // directory) or the default location.
     let lib = doc.get("lib").and_then(|t| t.as_table());
-    let lib_path = lib
-        .and_then(|t| t.get("path"))
-        .and_then(|p| p.as_str())
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("{dir}/src/lib.rs"));
+    let lib_path = match lib.and_then(|t| t.get("path")).and_then(|p| p.as_str()) {
+        Some(raw) => join_rel(&dir, raw),
+        None => format!("{dir}/src/lib.rs"),
+    };
     if exists(&lib_path) {
         roots.push(TargetRoot {
             path: lib_path,
@@ -139,12 +285,12 @@ fn add_targets(fs: &GitFs, manifest: &str, roots: &mut Vec<TargetRoot>) {
         });
     }
 
-    // build.rs — [package] build key or the conventional file.
-    let build_path = pkg
-        .get("build")
-        .and_then(|b| b.as_str())
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("{dir}/build.rs"));
+    // build.rs — [package] build key (manifest-relative) or the
+    // conventional file.
+    let build_path = match pkg.get("build").and_then(|b| b.as_str()) {
+        Some(raw) => join_rel(&dir, raw),
+        None => format!("{dir}/build.rs"),
+    };
     if exists(&build_path) {
         roots.push(TargetRoot {
             path: build_path,
@@ -172,7 +318,19 @@ fn add_targets(fs: &GitFs, manifest: &str, roots: &mut Vec<TargetRoot>) {
             conv_dir,
             auto: auto_flag,
         };
-        add_explicit(fs, doc.get(key), &dir, &package, &spec, roots);
+        add_explicit(
+            &PkgCtx {
+                fs,
+                dir: &dir,
+                package: &package,
+                manifest,
+            },
+            doc.get(key),
+            &features,
+            &spec,
+            roots,
+            problems,
+        );
     }
 
     // src/main.rs is a bin root only when not already declared explicitly
@@ -204,31 +362,68 @@ struct TargetSpec {
     auto: bool,
 }
 
+/// Context of the package currently being scanned, shared by explicit
+/// target handling.
+struct PkgCtx<'a> {
+    fs: &'a GitFs,
+    dir: &'a str,
+    package: &'a str,
+    manifest: &'a str,
+}
+
 /// Adds targets from one explicit table array, falling back to auto-
 /// discovery of the conventional directory when the array is absent.
+///
+/// `required-features` policy (fail closed, documented in README): a
+/// target with non-empty required-features is a root only when every
+/// named feature is declared in `[features]` — otherwise cargo would
+/// never build it and, more importantly, nothing guarantees it exists;
+/// undeclared names are a `BAD_MANIFEST` problem. Auto-discovered
+/// targets cannot carry required-features and are unaffected.
 fn add_explicit(
-    fs: &GitFs,
+    pkg: &PkgCtx,
     entries: Option<&toml::Value>,
-    dir: &str,
-    package: &str,
+    features: &[String],
     spec: &TargetSpec,
     roots: &mut Vec<TargetRoot>,
+    problems: &mut Vec<RootProblem>,
 ) {
     let kind = spec.kind;
-    let exists = |p: &str| fs.exists(p);
+    let dir = pkg.dir;
+    let exists = |p: &str| pkg.fs.exists(p);
     let mut seen: Vec<String> = Vec::new();
     if let Some(arr) = entries.and_then(|e| e.as_array()) {
         for t in arr {
             let Some(path) = t.get("path").and_then(|p| p.as_str()) else {
                 continue;
             };
+            let required: Vec<&str> = t
+                .get("required-features")
+                .and_then(|f| f.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            let undeclared: Vec<&str> = required
+                .iter()
+                .filter(|f| !features.iter().any(|d| d == *f))
+                .copied()
+                .collect();
+            if !undeclared.is_empty() {
+                problems.push(RootProblem {
+                    manifest: pkg.manifest.to_owned(),
+                    message: format!(
+                        "target kind `{kind:?}` requires undeclared features: {}",
+                        undeclared.join(", ")
+                    ),
+                });
+                continue;
+            }
             let path = join_rel(dir, path);
             if exists(&path) && !seen.contains(&path) {
                 seen.push(path.clone());
                 roots.push(TargetRoot {
                     path,
                     kind,
-                    package: package.to_owned(),
+                    package: pkg.package.to_owned(),
                 });
             }
         }
@@ -237,20 +432,24 @@ fn add_explicit(
         return;
     }
     // Conventional auto-discovery: files directly in the dir, plus
-    // `<dir>/<name>/main.rs` subdirectory targets.
+    // `<dir>/<name>/main.rs` — the subdirectory target form exists ONLY
+    // for immediate children (`src/bin/x/main.rs`), never any nested
+    // path ending in `/main.rs` (e.g. `tests/case/crash_matrix.rs`
+    // mounted by `tests/crash_recovery.rs` is helper data, not a root).
     let prefix = format!("{dir}/{}/", spec.conv_dir);
-    for f in fs.tracked_files().unwrap_or_default() {
+    for f in pkg.fs.tracked_files().unwrap_or_default() {
         if !f.starts_with(&prefix) || !f.ends_with(".rs") || seen.contains(&f) {
             continue;
         }
         let rest = &f[prefix.len()..];
-        let is_root = !rest.contains('/') || rest.ends_with("/main.rs");
+        let is_root =
+            !rest.contains('/') || (rest.ends_with("/main.rs") && rest.matches('/').count() == 1);
         if is_root && !seen.contains(&f.to_owned()) {
             seen.push(f.clone());
             roots.push(TargetRoot {
                 path: f,
                 kind,
-                package: package.to_owned(),
+                package: pkg.package.to_owned(),
             });
         }
     }

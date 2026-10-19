@@ -460,43 +460,37 @@ jobs:
       # Conservation runs only when the PR touches Rust files of a package
       # named in an active campaign (`.rust-guard/stages.toml`). With
       # `campaigns = []` (the normal state) this is a documented no-op.
+      # Selection lives in scripts/ci/rust_guard_select.py (unit-tested in
+      # scripts/ci/tests/test_rust_guard_select.py): it reads the changed
+      # files on stdin, captures `cargo metadata` to a file ONCE, strips the
+      # repo root so absolute manifest paths become repo-relative like the
+      # `git diff --name-only` paths (the round-1 bug: absolute vs relative
+      # never matched and every campaign was silently skipped), and emits
+      # one `<name>\t<delta>\t<pkgs>` line per campaign to run. Any parse /
+      # usage error exits 2 — the step fails closed.
       - name: rust-guard conservation (per active campaign)
         if: github.event_name == 'pull_request'
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import json, os, subprocess, sys, tomllib
-
-          campaigns = tomllib.load(open(".rust-guard/stages.toml", "rb")).get("campaigns", [])
-          if not campaigns:
-              print("::notice::.rust-guard/stages.toml has no active campaigns; conservation is a no-op")
-              sys.exit(0)
-
-          meta = json.loads(subprocess.run(
-              ["cargo", "metadata", "--no-deps", "--format-version", "1"],
-              check=True, capture_output=True, text=True).stdout)
-          pkg_dirs = {}
-          for p in meta["packages"]:
-              pkg_dirs.setdefault(p["name"], os.path.dirname(p["manifest_path"]))
-
-          changed = subprocess.run(
-              ["git", "diff", "--name-only", os.environ["MERGE_BASE"] + "...HEAD"],
-              check=True, capture_output=True, text=True).stdout.splitlines()
-
-          guard = "tools/rust-guard/target/debug/rust-guard"
-          ran = False
-          for c in campaigns:
-              dirs = [pkg_dirs[name] for name in c["packages"] if name in pkg_dirs]
-              touched = [f for f in changed if any(f.startswith(d + "/") for d in dirs)]
-              if not touched:
-                  continue
-              subprocess.run([guard, "conservation", "--repo", ".",
-                              "--base", os.environ["MERGE_BASE"], "--head", "HEAD",
-                              "--delta", c["delta"]], check=True)
-              ran = True
-          if not ran:
-              print("::notice::no campaign package touched by this diff; conservation skipped")
-          PY
+          cargo metadata --no-deps --format-version 1 > metadata.json
+          git diff --name-only "$MERGE_BASE"...HEAD \
+            | python3 -I scripts/ci/rust_guard_select.py \
+                --stages .rust-guard/stages.toml \
+                --metadata metadata.json --root . > campaigns.tsv
+          guard="tools/rust-guard/target/debug/rust-guard"
+          ran=0
+          while IFS=$'\t' read -r name delta pkgs; do
+            [ -n "$name" ] || continue
+            echo "::notice::conservation campaign '$name' (packages: $pkgs)"
+            "$guard" conservation --repo . \
+              --base "$MERGE_BASE" --head HEAD \
+              --packages "$pkgs" --delta "$delta"
+            ran=1
+          done < campaigns.tsv
+          rm -f metadata.json campaigns.tsv
+          if [ "$ran" -eq 0 ]; then
+            echo "::notice::no campaign package touched by this diff; conservation skipped"
+          fi
       # Same ratchet the fmt job runs; repeated here so the source-integrity
       # job is self-contained (cheap, stdlib-only).
       - name: baseline monotonic check

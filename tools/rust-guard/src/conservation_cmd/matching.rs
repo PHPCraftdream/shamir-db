@@ -8,26 +8,32 @@
 //!    when a `[[moved]]` entry is declared, otherwise the pair falls
 //!    apart into ITEM_LOST + ITEM_ADDED;
 //! 3. everything equal except the name, unique on both sides — renames,
-//!    declared with `[[renamed]]`.
+//!    declared with `[[renamed]]`; the rename comparison normalises the
+//!    item's OWN name out of the signature tokens (the signature keeps
+//!    `fn helper` vs `fn helper2`, which would otherwise never pair).
 //!
 //! Remaining base items are losses, remaining head items additions.
 //! Tests are never excusable: a lost test is `TEST_LOST` regardless of
 //! the delta. Names-only counting is impossible by construction: an
-//! identity pair with a different fingerprint is BODY_CHANGED, and a
-//! same-name/same-enclosing leftover with a changed body never pairs —
-//! signature equality plus fingerprint difference still pairs (pass 2)
-//! and reports BODY_CHANGED.
+//! identity pair with a different fingerprint is `BODY_CHANGED`, with a
+//! different signature `SIGNATURE_CHANGED`, and a same-name/same-
+//! enclosing leftover with a changed body never pairs — signature
+//! equality plus fingerprint difference still pairs (pass 2) and
+//! reports BODY_CHANGED.
 
 use super::delta::Delta;
-use super::item::{identity, weak_key, Item};
+use super::item::{identity, weak_key, Item, TestKind};
 use crate::finding::Report;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// One accepted pairing and what drifted between the two sides.
 struct Pair {
     b: usize,
     h: usize,
     body_changed: bool,
+    /// Normalised signature tokens differ (a parameter/return type or
+    /// bounds changed while the body may be identical).
+    signature_changed: bool,
 }
 
 /// Runs the comparison and fills `report`. `delta` is consumed as
@@ -95,8 +101,9 @@ pub fn compare(base: &[Item], head: &[Item], delta: &mut Delta, report: &mut Rep
     }
     pairs = still;
 
-    // Pass 3: renames — equal kind/enclosing/signature/fingerprint,
-    // different name, unique head candidate.
+    // Pass 3: renames — equal kind/enclosing/fingerprint and equal
+    // signature with the item's own name normalised out, different name,
+    // unique head candidate.
     let mut rename_pairs: Vec<(usize, usize)> = Vec::new();
     base_left.retain(|&b| {
         let cands: Vec<usize> = head_left
@@ -108,7 +115,7 @@ pub fn compare(base: &[Item], head: &[Item], delta: &mut Delta, report: &mut Rep
                     && b.package == h.package
                     && b.enclosing == h.enclosing
                     && b.impl_head == h.impl_head
-                    && b.signature == h.signature
+                    && rename_sig(b) == rename_sig(h)
                     && b.fingerprint == h.fingerprint
                     && b.name != h.name
             })
@@ -130,6 +137,7 @@ pub fn compare(base: &[Item], head: &[Item], delta: &mut Delta, report: &mut Rep
                 b: *bi,
                 h: *hi,
                 body_changed: b.fingerprint != h.fingerprint,
+                signature_changed: rename_sig(b) != rename_sig(h),
             });
         } else {
             base_left.push(*bi);
@@ -193,11 +201,26 @@ pub fn compare(base: &[Item], head: &[Item], delta: &mut Delta, report: &mut Rep
         );
     }
 
-    // Drift on paired items: test attributes and body fingerprint.
+    // Drift on paired items: test attributes, body fingerprint and
+    // signature. A single [[changed]] entry excuses both kinds of drift
+    // on one item (consumed once).
     for p in &pairs {
         let (b, h) = (&base[p.b], &head[p.h]);
         report_test_change(b, h, report);
-        if p.body_changed && !consume_side(delta, "changed", b, h) {
+        let excused =
+            (p.body_changed || p.signature_changed) && consume_side(delta, "changed", b, h);
+        if p.signature_changed && !excused {
+            report.add(
+                &h.path,
+                h.line,
+                "SIGNATURE_CHANGED",
+                format!(
+                    "signature of `{}` differs from base ({}:{}): base `{}` vs head `{}`",
+                    h.logical, b.path, b.line, b.signature, h.signature
+                ),
+            );
+        }
+        if p.body_changed && !excused {
             report.add(
                 &h.path,
                 h.line,
@@ -244,7 +267,7 @@ fn pair_pass<F>(
 where
     F: Fn(&Item) -> String,
 {
-    let mut by_key: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut by_key: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for &h in head_left.iter() {
         by_key.entry(key(&head[h])).or_default().push(h);
     }
@@ -269,6 +292,7 @@ where
                         b,
                         h,
                         body_changed: base[b].fingerprint != head[h].fingerprint,
+                        signature_changed: base[b].signature != head[h].signature,
                     });
                     still_head(head_left, h);
                 }
@@ -367,13 +391,28 @@ fn report_test_change(b: &Item, h: &Item, report: &mut Report) {
     }
 }
 
-fn kind_name(k: &super::item::TestKind) -> &'static str {
-    use super::item::TestKind as K;
+fn kind_name(k: &TestKind) -> &'static str {
     match k {
-        K::None => "none",
-        K::Plain => "#[test]",
-        K::Tokio => "#[tokio::test]",
-        K::PropTest => "proptest!",
-        K::Loom => "loom model",
+        TestKind::None => "none",
+        TestKind::Plain => "#[test]",
+        TestKind::Tokio => "#[tokio::test]",
+        TestKind::PropTest => "proptest!",
+        TestKind::Loom => "loom model",
     }
+}
+
+/// Signature with the item's own name normalised out, for the RENAME
+/// comparison only: extracted fn signatures keep the function name
+/// (`fn helper (x : u32) -> u32` vs `fn helper2 (x : u32) -> u32`),
+/// which would make a pure rename unpairable. Both sides reduce to
+/// `fn (x : u32) -> u32`. Non-fn signatures are returned unchanged.
+fn rename_sig(it: &Item) -> String {
+    if it.kind == "fn" {
+        if let Some(rest) = it.signature.strip_prefix("fn ") {
+            if let Some(after) = rest.strip_prefix(it.name.as_str()) {
+                return format!("fn{after}");
+            }
+        }
+    }
+    it.signature.clone()
 }

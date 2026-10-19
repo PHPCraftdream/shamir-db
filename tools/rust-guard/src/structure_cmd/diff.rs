@@ -2,7 +2,8 @@
 //! revision (`--base`, or the merge base of `--changed-since`).
 //!
 //! * `VIS_WIDENING` — an item's visibility grew (private <
-//!   `pub(super)`/`pub(in)` < `pub(crate)` < `pub`).
+//!   `pub(self)`/`pub(super)`/`pub(in)` < `pub(crate)` < `pub`),
+//!   including a brand-new file introducing `pub(crate)`+ items.
 //! * `ALLOW_ADDED` — an `#[allow(...)]`/`#![allow(...)]` attribute that
 //!   does not exist (textually, normalised) in the base file.
 //!
@@ -12,7 +13,7 @@ use super::select::Delta;
 use crate::finding::Report;
 use crate::gitfs::GitFs;
 use proc_macro2::Span;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use syn::spanned::Spanned;
 use syn::visit::Visit;
@@ -34,63 +35,117 @@ pub fn check_files(
         }
     };
     for path in files {
-        let (Some(head_src), Some(base_src)) = (head_fs.read(path), base_fs.read(path)) else {
-            continue; // new or deleted file: nothing to compare
-        };
-        let (Ok(head), Ok(base)) = (syn::parse_file(&head_src), syn::parse_file(&base_src)) else {
-            continue; // unparseable revisions are reported by other rules
-        };
-        check_vis(path, &base, &head, delta, report);
-        check_allows(path, &base, &head, delta, report);
+        let (head_src, base_src) = (head_fs.read(path), base_fs.read(path));
+        match (head_src, base_src) {
+            (Some(head_src), Some(base_src)) => {
+                let (Ok(head), Ok(base)) = (syn::parse_file(&head_src), syn::parse_file(&base_src))
+                else {
+                    continue; // unparseable revisions are reported by other rules
+                };
+                check_vis(path, &base, &head, delta, report);
+                check_allows(path, &base, &head, delta, report);
+            }
+            (Some(head_src), None) => {
+                // New file: nothing to diff, but a brand-new file
+                // introducing `pub(crate)`+ items is still a widening
+                // (finding 10c).
+                if let Ok(head) = syn::parse_file(&head_src) {
+                    check_new_file(path, &head, delta, report);
+                }
+            }
+            _ => continue, // deleted file or unparseable head: other rules report
+        }
     }
 }
 
-/// Ordered visibility levels for the widening comparison.
+/// Ordered visibility levels for the widening comparison. `pub(self)`,
+/// `pub(super)` and `pub(in path)` share one tier: each confines the item
+/// to an ancestor of the defining module, so `pub(super) -> pub(crate)`
+/// still moves up a tier (finding 10a).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum VisRank {
     Private,
-    /// `pub(super)`/`pub(in)` and `pub(crate)`: one restricted tier.
-    Restricted,
+    /// `pub(self)`/`pub(super)`/`pub(in path)`: confined to an ancestor
+    /// of the defining module.
+    RestrictedSuper,
+    /// `pub(crate)`: visible anywhere inside the crate.
+    RestrictedCrate,
     Public,
 }
 
 fn rank(v: &Visibility) -> VisRank {
     match v {
         Visibility::Inherited => VisRank::Private,
-        Visibility::Restricted(_) => VisRank::Restricted,
+        Visibility::Restricted(r) => {
+            // `pub(crate)` is syntactically a restricted vis whose path
+            // is exactly `crate`.
+            if r.path.is_ident("crate") {
+                VisRank::RestrictedCrate
+            } else {
+                VisRank::RestrictedSuper
+            }
+        }
         Visibility::Public(_) => VisRank::Public,
     }
 }
 
 /// Item identity for cross-revision matching: top level items by
 /// (kind, name), members of inherent impl blocks by (impl type, name).
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct ItemKey {
     kind: &'static str,
     name: String,
 }
 
-/// Collects `key -> (visibility, line)` for one revision.
-fn vis_index(file: &File) -> HashMap<ItemKey, (VisRank, usize)> {
-    let mut out = HashMap::new();
+/// Collects `key -> (visibility, line)` for one revision. Recurses into
+/// INLINE modules: the key carries the module path so base and head
+/// entries match across revisions (finding 10b). Also covers struct
+/// fields (`Struct::field`): a private field becoming `pub`/`pub(crate)`
+/// is a widening.
+fn vis_index(file: &File) -> BTreeMap<ItemKey, (VisRank, usize)> {
+    let mut out = BTreeMap::new();
+    collect_vis(&file.items, &[], &mut out);
+    out
+}
+
+fn collect_vis(items: &[Item], prefix: &[String], out: &mut BTreeMap<ItemKey, (VisRank, usize)>) {
     let add = |kind: &'static str,
                name: String,
                vis: &Visibility,
                span: Span,
-               out: &mut HashMap<ItemKey, (VisRank, usize)>| {
+               out: &mut BTreeMap<ItemKey, (VisRank, usize)>| {
         out.insert(ItemKey { kind, name }, (rank(vis), span.start().line));
     };
-    for item in &file.items {
+    for item in items {
         match item {
-            Item::Fn(i) => add("fn", i.sig.ident.to_string(), &i.vis, i.span(), &mut out),
-            Item::Struct(i) => add("struct", i.ident.to_string(), &i.vis, i.span(), &mut out),
-            Item::Enum(i) => add("enum", i.ident.to_string(), &i.vis, i.span(), &mut out),
-            Item::Union(i) => add("union", i.ident.to_string(), &i.vis, i.span(), &mut out),
-            Item::Trait(i) => add("trait", i.ident.to_string(), &i.vis, i.span(), &mut out),
-            Item::Type(i) => add("type", i.ident.to_string(), &i.vis, i.span(), &mut out),
-            Item::Const(i) => add("const", i.ident.to_string(), &i.vis, i.span(), &mut out),
-            Item::Static(i) => add("static", i.ident.to_string(), &i.vis, i.span(), &mut out),
-            Item::Mod(i) => add("mod", i.ident.to_string(), &i.vis, i.span(), &mut out),
+            Item::Fn(i) => add("fn", qualified(prefix, &i.sig.ident), &i.vis, i.span(), out),
+            Item::Struct(i) => {
+                let name = qualified(prefix, &i.ident);
+                add("struct", name.clone(), &i.vis, i.span(), out);
+                for field in i.fields.iter() {
+                    let Some(ident) = &field.ident else { continue };
+                    add(
+                        "field",
+                        format!("{name}::{}", ident),
+                        &field.vis,
+                        field.span(),
+                        out,
+                    );
+                }
+            }
+            Item::Enum(i) => add("enum", qualified(prefix, &i.ident), &i.vis, i.span(), out),
+            Item::Union(i) => add("union", qualified(prefix, &i.ident), &i.vis, i.span(), out),
+            Item::Trait(i) => add("trait", qualified(prefix, &i.ident), &i.vis, i.span(), out),
+            Item::Type(i) => add("type", qualified(prefix, &i.ident), &i.vis, i.span(), out),
+            Item::Const(i) => add("const", qualified(prefix, &i.ident), &i.vis, i.span(), out),
+            Item::Static(i) => add("static", qualified(prefix, &i.ident), &i.vis, i.span(), out),
+            Item::Mod(i) => {
+                let name = qualified(prefix, &i.ident);
+                add("mod", name.clone(), &i.vis, i.span(), out);
+                if let Some((_, inner)) = &i.content {
+                    collect_vis(inner, &[name], out);
+                }
+            }
             Item::Impl(i) => {
                 // Inherent-impl members are matched per (impl type, name).
                 let ty = impl_self_name(i);
@@ -124,6 +179,14 @@ fn vis_index(file: &File) -> HashMap<ItemKey, (VisRank, usize)> {
             _ => {}
         }
     }
+}
+
+fn qualified(prefix: &[String], ident: &syn::Ident) -> String {
+    let mut out = prefix.join("::");
+    if !out.is_empty() {
+        out.push_str("::");
+    }
+    out.push_str(&ident.to_string());
     out
 }
 
@@ -174,9 +237,44 @@ fn check_vis(path: &str, base: &File, head: &File, delta: &Delta, report: &mut R
 fn vis_word(r: VisRank) -> &'static str {
     match r {
         VisRank::Private => "private",
-        VisRank::Restricted => "pub(super)/pub(in)/pub(crate)",
+        VisRank::RestrictedSuper => "pub(super)/pub(in)",
+        VisRank::RestrictedCrate => "pub(crate)",
         VisRank::Public => "pub",
     }
+}
+
+/// Rule 6c (finding 10c): a file that does not exist in base is skipped
+/// by the pairwise diff — but a brand-new file introducing `pub(crate)`
+/// or `pub` items widens the crate's surface just the same. Items that
+/// are private or confined to an ancestor module are fine.
+fn check_new_file(path: &str, head: &File, delta: &Delta, report: &mut Report) {
+    let idx = vis_index(head);
+    // One widening item per new file is enough to block the merge.
+    let Some((key, (head_rank, line))) = idx
+        .into_iter()
+        .filter(|(k, _)| k.kind != "mod")
+        .filter(|(_, (r, _))| *r >= VisRank::RestrictedCrate)
+        .min_by_key(|(_, (r, l))| (*r, *l))
+    else {
+        return;
+    };
+    if let Some(entry) = delta.covers("VIS_WIDENING", path) {
+        eprintln!(
+            "INFO: {path}:{line}: new-file widening of `{}` accepted by delta ({}: {})",
+            entry.item, entry.owner, entry.reason
+        );
+        return;
+    }
+    let to = vis_word(head_rank);
+    report.add(
+        path,
+        line,
+        "VIS_WIDENING",
+        format!(
+            "new file introduces `{}` at {to} visibility; list the path in the delta file or narrow it",
+            key_label(&key)
+        ),
+    );
 }
 
 fn key_label(key: &ItemKey) -> String {
@@ -186,7 +284,7 @@ fn key_label(key: &ItemKey) -> String {
 /// Rule 6b: `#[allow(...)]`/`#![allow(...)]` attributes present in head
 /// but not in base (matched on normalised attribute text).
 fn check_allows(path: &str, base: &File, head: &File, delta: &Delta, report: &mut Report) {
-    let mut base_set: HashSet<u64> = HashSet::new();
+    let mut base_set: BTreeSet<u64> = BTreeSet::new();
     collect_allow_hashes(base, &mut base_set);
     let mut head_attrs: Vec<(String, usize)> = Vec::new();
     collect_allow_texts(head, &mut head_attrs);
@@ -220,7 +318,7 @@ fn collect_allow_texts(file: &File, out: &mut Vec<(String, usize)>) {
     out.append(&mut v.out);
 }
 
-fn collect_allow_hashes(file: &File, out: &mut HashSet<u64>) {
+fn collect_allow_hashes(file: &File, out: &mut BTreeSet<u64>) {
     let mut texts = Vec::new();
     collect_allow_texts(file, &mut texts);
     for (text, _) in texts {

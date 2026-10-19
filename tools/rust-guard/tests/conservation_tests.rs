@@ -4,103 +4,271 @@
 
 mod harness;
 
-use crate::harness::{assert_clean, assert_finding, TempRepo};
+use crate::harness::{assert_clean, assert_finding, copy_fixture, TempRepo};
+use std::process::Output;
+
+/// A two-commit repo plus the first commit's SHA (`--base` argument).
+struct ConsRepo {
+    repo: TempRepo,
+    /// SHA of the first commit (the fixture's `base/` tree).
+    base_sha: String,
+}
+
+impl ConsRepo {
+    /// Two-commit repo: `fixtures/<fixture>/base` is committed first,
+    /// then `fixtures/<fixture>/head` is copied over and committed (the
+    /// commit is `--allow-empty`, so identical trees still work).
+    fn two_commit(fixture: &str) -> Self {
+        let repo = TempRepo::with_fixture(&format!("{fixture}/base"));
+        let base_sha = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+        copy_fixture(&repo.root, &format!("{fixture}/head"));
+        repo.commit_all("head");
+        Self { repo, base_sha }
+    }
+
+    /// Writes `contents` to `rel` inside the repo (delta files).
+    fn write(&self, rel: &str, contents: &str) {
+        let path = self.repo.root.join(rel);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).expect("create dir");
+        }
+        std::fs::write(path, contents).expect("write file");
+    }
+
+    /// Runs `conservation --base <sha1> --head HEAD`.
+    fn compare(&self) -> Output {
+        let base = self.base_sha.clone();
+        self.repo
+            .run_guard(&["conservation", "--base", &base, "--head", "HEAD"])
+    }
+
+    /// Writes `delta` to the repo and runs the comparison with `--delta`.
+    fn compare_with_delta(&self, delta: &str) -> Output {
+        self.write("delta.toml", delta);
+        let base = self.base_sha.clone();
+        self.repo.run_guard(&[
+            "conservation",
+            "--base",
+            &base,
+            "--head",
+            "HEAD",
+            "--delta",
+            "delta.toml",
+        ])
+    }
+}
+
+/// stderr as text — the guard prints its findings there.
+fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
 
 const LIB: &str = "crates/fix/src/lib.rs";
 
-fn compare(repo: &TempRepo) -> std::process::Output {
-    let base = repo.base_sha.clone();
-    repo.run_guard(&["conservation", "--base", &base, "--head", "HEAD"])
-}
-
-fn compare_with_delta(repo: &TempRepo, delta: &str) -> std::process::Output {
-    repo.write("delta.toml", delta);
-    let base = repo.base_sha.clone();
-    repo.run_guard(&[
-        "conservation",
-        "--base",
-        &base,
-        "--head",
-        "HEAD",
-        "--delta",
-        "delta.toml",
-    ])
-}
-
 #[test]
 fn deleted_test_is_never_declarable() {
-    let repo = TempRepo::two_commit("conservation/test_lost");
-    assert_finding(&compare(&repo), "TEST_LOST");
+    let repo = ConsRepo::two_commit("conservation/test_lost");
+    assert_finding(&repo.compare(), "TEST_LOST");
 }
 
 #[test]
 fn newly_ignored_test_is_reported() {
-    let repo = TempRepo::two_commit("conservation/test_ignored");
-    assert_finding(&compare(&repo), "TEST_IGNORED");
+    let repo = ConsRepo::two_commit("conservation/test_ignored");
+    assert_finding(&repo.compare(), "TEST_IGNORED");
 }
 
 #[test]
 fn declared_rename_is_accepted() {
-    let repo = TempRepo::two_commit("conservation/renamed_ok");
+    // Counterfactual: before the rename comparison normalised the item's
+    // own name out of the signature tokens, `fn helper` vs `fn helper2`
+    // could never pair (signatures differ) — this fixture would report
+    // ITEM_LOST + ITEM_ADDED instead of passing.
+    let repo = ConsRepo::two_commit("conservation/renamed_ok");
     let delta = format!(
         "base = \"{}\"\n\n\
          [[renamed]]\n\
          path = \"{LIB}\"\n\
-         item = \"helper\"\n\
-         to_item = \"helper2\"\n\
+         item = \"fix::lib::helper\"\n\
+         to_item = \"fix::lib::helper2\"\n\
          reason = \"clearer name\"\n\
          owner = \"@rust-guard\"\n",
         repo.base_sha
     );
-    assert_clean(&compare_with_delta(&repo, &delta));
+    assert_clean(&repo.compare_with_delta(&delta));
+}
+
+#[test]
+fn undeclared_rename_is_a_loss_and_an_addition() {
+    // The same rename without a [[renamed]] declaration must NOT pass:
+    // the items fall apart into a loss + an addition.
+    let repo = ConsRepo::two_commit("conservation/renamed_ok");
+    let out = repo.compare();
+    let err = stderr(&out);
+    assert!(!out.status.success(), "expected exit != 0:\n{err}");
+    assert!(
+        err.contains("ITEM_LOST") && err.contains("ITEM_ADDED"),
+        "expected ITEM_LOST + ITEM_ADDED:\n{err}"
+    );
+}
+
+#[test]
+fn declared_test_rename_is_accepted() {
+    // Counterfactual: fails without the rename pairing's TEST handling
+    // because pass 3 only pairs when kind/enclosing/fingerprint and the
+    // name-normalised signature are equal — before that, a renamed
+    // `#[test]` fn fell apart into a loss + an addition; and as a TEST it
+    // can never be excused by `[[removed]]`/`[[added]]`, so the run could
+    // never come back clean.
+    let repo = ConsRepo::two_commit("conservation/renamed_test");
+    let delta = format!(
+        "base = \"{}\"\n\n\
+         [[renamed]]\n\
+         path = \"{LIB}\"\n\
+         item = \"fix::lib::helper\"\n\
+         to_item = \"fix::lib::helper2\"\n\
+         reason = \"clearer name\"\n\
+         owner = \"@rust-guard\"\n",
+        repo.base_sha
+    );
+    assert_clean(&repo.compare_with_delta(&delta));
+}
+
+#[test]
+fn undeclared_test_rename_is_a_lost_test() {
+    // With no [[renamed]] entry the rename pair is rejected in pass 3.
+    // Counterfactual (assertion vs ITEM_LOST + ITEM_ADDED): an undeclared
+    // renamed TEST yields TEST_LOST only — the head side of the rejected
+    // pair is itself a test, and new test items are never additions, so
+    // reporting ITEM_ADDED here would be wrong.
+    let repo = ConsRepo::two_commit("conservation/renamed_test");
+    let out = repo.compare();
+    let err = stderr(&out);
+    assert!(!out.status.success(), "expected exit != 0:\n{err}");
+    assert!(err.contains("TEST_LOST"), "expected TEST_LOST:\n{err}");
+    assert!(
+        !err.contains("ITEM_ADDED"),
+        "the renamed test's head side must not be an addition:\n{err}"
+    );
+}
+
+#[test]
+fn test_cfg_change_is_reported() {
+    // Counterfactual: fails without the cfg comparison in
+    // report_test_change because an identity pair was compared on kind,
+    // ignore status and fingerprint only — a test that gains (or changes)
+    // a `#[cfg(...)]` predicate between revisions paired silently and the
+    // run was clean.
+    let repo = ConsRepo::two_commit("conservation/test_cfg_changed");
+    assert_finding(&repo.compare(), "TEST_ATTR_CHANGED");
 }
 
 #[test]
 fn undeclared_body_change_is_reported() {
-    let repo = TempRepo::two_commit("conservation/body_changed");
-    assert_finding(&compare(&repo), "BODY_CHANGED");
+    let repo = ConsRepo::two_commit("conservation/body_changed");
+    assert_finding(&repo.compare(), "BODY_CHANGED");
+}
+
+#[test]
+fn signature_change_with_identical_body_is_reported() {
+    // Counterfactual: exact-identity pairs were compared on fingerprint
+    // and test attrs only; a parameter/return type change with the same
+    // body (same fingerprint) passed silently. The signature comparison
+    // makes it SIGNATURE_CHANGED.
+    let repo = ConsRepo::two_commit("conservation/signature_changed");
+    assert_finding(&repo.compare(), "SIGNATURE_CHANGED");
 }
 
 #[test]
 fn unmatched_delta_entry_is_reported() {
-    let repo = TempRepo::two_commit("conservation/unused_allowance");
+    // The base and head trees are IDENTICAL: this exercises the
+    // `--allow-empty` head commit (finding 9) — before it, `git commit`
+    // failed here before the guard ever ran.
+    let repo = ConsRepo::two_commit("conservation/unused_allowance");
     let delta = format!(
         "base = \"{}\"\n\n\
          [[changed]]\n\
          path = \"{LIB}\"\n\
-         item = \"no_such_item\"\n\
+         item = \"fix::lib::no_such_item\"\n\
          reason = \"typo in the delta\"\n\
          owner = \"@rust-guard\"\n",
         repo.base_sha
     );
-    assert_finding(&compare_with_delta(&repo, &delta), "UNUSED_ALLOWANCE");
+    assert_finding(&repo.compare_with_delta(&delta), "UNUSED_ALLOWANCE");
 }
 
 #[test]
 fn wrong_base_sha_is_reported() {
-    let repo = TempRepo::two_commit("conservation/base_mismatch");
+    // The head tree carries a real (comment-only) diff, so this fixture
+    // exercises the non-empty-commit path; `unused_allowance` covers the
+    // `--allow-empty` path.
+    let repo = ConsRepo::two_commit("conservation/base_mismatch");
     let delta = "base = \"deadbeefdead\"\n\n\
                  [[changed]]\n\
                  path = \"crates/fix/src/lib.rs\"\n\
-                 item = \"helper\"\n\
+                 item = \"fix::lib::helper\"\n\
                  reason = \"stale base pin\"\n\
                  owner = \"@rust-guard\"\n";
-    assert_finding(&compare_with_delta(&repo, delta), "BASE_MISMATCH");
+    assert_finding(&repo.compare_with_delta(delta), "BASE_MISMATCH");
 }
 
 #[test]
 fn duplicate_head_candidates_are_unpairable() {
     // One base item, two head candidates with the same kind/name/
     // enclosing and signature — matching.rs cannot choose a pairing.
-    let repo = TempRepo::two_commit("conservation/unpairable_duplicate");
-    assert_finding(&compare(&repo), "UNPAIRABLE_DUPLICATE");
+    let repo = ConsRepo::two_commit("conservation/unpairable_duplicate");
+    assert_finding(&repo.compare(), "UNPAIRABLE_DUPLICATE");
+}
+
+#[test]
+fn base_only_package_is_a_loss_not_silence() {
+    // Counterfactual: discovery used the WORKING tree's cargo metadata,
+    // so the base-only package (`crates/gone`, deleted at head) never
+    // entered the base inventory and its items vanished silently. With
+    // manifest-based discovery from each pinned revision they are
+    // ITEM_LOST findings naming their logical paths.
+    let repo = ConsRepo::two_commit("conservation/gone_pkg");
+    let out = repo.compare();
+    let err = stderr(&out);
+    assert!(!out.status.success(), "expected exit != 0:\n{err}");
+    assert!(err.contains("ITEM_LOST"), "expected ITEM_LOST:\n{err}");
+    assert!(
+        err.contains("gone::lib::Artifact") && err.contains("gone::lib::stash"),
+        "expected losses from the deleted package:\n{err}"
+    );
+    // The surviving package stays silent.
+    assert!(
+        !err.contains("fix::lib::Plan"),
+        "surviving package must not be flagged:\n{err}"
+    );
 }
 
 #[test]
 fn missing_base_rev_blocks_the_comparison() {
-    let repo = TempRepo::two_commit("conservation/test_lost");
+    let repo = ConsRepo::two_commit("conservation/test_lost");
     assert_finding(
-        &repo.run_guard(&["conservation", "--base", "does-not-exist", "--head", "HEAD"]),
+        &repo
+            .repo
+            .run_guard(&["conservation", "--base", "does-not-exist", "--head", "HEAD"]),
         "BLOCKED_COMPARISON",
+    );
+}
+
+#[test]
+fn delta_without_base_sha_is_malformed() {
+    // Finding 12: a delta file without `base` is MALFORMED_DELTA, not an
+    // unpinned comparison. Reported as a hard error line (not a counted
+    // finding), so assert directly instead of via assert_finding.
+    let repo = ConsRepo::two_commit("conservation/body_changed");
+    let delta = "[[changed]]\n\
+                 path = \"crates/fix/src/lib.rs\"\n\
+                 item = \"fix::lib::helper\"\n\
+                 reason = \"no base pin\"\n\
+                 owner = \"@rust-guard\"\n";
+    let out = repo.compare_with_delta(delta);
+    let err = stderr(&out);
+    assert!(!out.status.success(), "expected exit != 0:\n{err}");
+    assert!(
+        err.contains("MALFORMED_DELTA"),
+        "expected MALFORMED_DELTA:\n{err}"
     );
 }

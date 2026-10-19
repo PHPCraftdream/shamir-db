@@ -1,5 +1,0 @@
-[[exception]]
-path = "crates/fix/src/b.rs"
-package = "fix"
-reason = 'cfg_attr(feature = "b") alternative path; not statically reachable'
-owner = "@rust-guard"

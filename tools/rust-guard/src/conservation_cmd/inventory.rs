@@ -2,20 +2,55 @@
 //!
 //! Reads only immutable git objects: `GitFs::list_tree` (via
 //! `git ls-tree -r -z --name-only <rev>`) bounds the file set and
-//! `GitFs::read` (`git show <rev>:<path>`) provides the bytes — the
-//! working tree is never consulted. Package/target roots come from
-//! `modules_cmd::roots` (cargo metadata members plus workspace-excluded
-//! packages; `vendor/*` skipped), optionally narrowed by `--packages`.
+//! `GitFs::read_checked` (`git show <rev>:<path>`) provides the bytes —
+//! the working tree is never consulted, and no cargo is invoked: target
+//! roots come from `roots::discover_from_manifests`, which parses the
+//! pinned ROOT `Cargo.toml` ([workspace] members/exclude globs) and each
+//! member manifest on the SAME pinned view (finding 7: the BASE
+//! inventory must come from the BASE revision, so a target deleted at
+//! head still yields its items as losses).
+//!
+//! Fail closed: an unreadable or unparseable source, or a manifest
+//! problem, is collected into `Inventory::errors` and becomes an
+//! `INVENTORY_ERROR` finding — never a silent skip.
+//!
+//! The walk follows `mod x;` declarations (including ones INSIDE inline
+//! `mod x { }` blocks, with the extended directory context), literal
+//! `include!("file.rs")` edges, and threads the inherited cfg predicate
+//! down into every extracted item.
 
-use super::item::{Extractor, Item};
+use super::item::{combine_cfg, Extractor, Item};
 use crate::gitfs::GitFs;
-use crate::modules_cmd::resolution;
+use crate::modules_cmd::resolution::{self, Resolution};
 use crate::modules_cmd::roots::{self, RootKind};
 use syn::Item as SynItem;
 
+/// Everything extracted from one revision: the items plus the fail-closed
+/// problems (each rendered as an `INVENTORY_ERROR` finding by the caller).
+pub struct Inventory {
+    pub items: Vec<Item>,
+    /// `(path, message)` pairs, one per unreadable/unparseable source or
+    /// manifest problem.
+    pub errors: Vec<(String, String)>,
+}
+
+/// Context of the file (or inline-module position) currently walked.
+struct Ctx {
+    file: String,
+    is_root: bool,
+    logical: String,
+    package: String,
+    /// Directory context for non-`#[path]` `mod x;` resolution.
+    mod_dir: String,
+    /// Base directory for `#[path]` resolution.
+    attr_dir: String,
+    /// cfg predicate inherited from the enclosing modules.
+    cfg: Option<String>,
+}
+
 /// Builds the inventory of all `.rs` items reachable from the target
 /// roots of `rev`, restricted to `packages` (all when empty).
-pub fn build(rev: &str, packages: &[String], repo: &std::path::Path) -> Result<Vec<Item>, String> {
+pub fn build(rev: &str, packages: &[String], repo: &std::path::Path) -> Result<Inventory, String> {
     let fs = GitFs::open(Some(rev), repo)?;
     // Fail early when the revision does not name a commit.
     if fs.commit_sha(rev).is_none() {
@@ -32,8 +67,15 @@ pub fn build(rev: &str, packages: &[String], repo: &std::path::Path) -> Result<V
                 && !crate::modules_cmd::has_excluded_dir(p)
         })
         .collect();
-    let all_roots = roots::discover(&fs)?;
-    let mut out: Vec<Item> = Vec::new();
+    let (all_roots, problems) = roots::discover_from_manifests(&fs)?;
+    let mut inv = Inventory {
+        items: Vec::new(),
+        errors: problems
+            .into_iter()
+            .map(|p| (p.manifest, p.message))
+            .collect(),
+    };
+    let mut visited: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for root in &all_roots {
         if !packages.is_empty() && !packages.contains(&root.package) {
             continue;
@@ -41,30 +83,31 @@ pub fn build(rev: &str, packages: &[String], repo: &std::path::Path) -> Result<V
         if !tree.contains(&root.path) {
             continue;
         }
-        walk_root(
-            &fs,
-            &tree,
-            root.package.as_str(),
-            &root.path,
-            root.kind,
-            &mut out,
-        );
+        walk_root(&fs, &tree, root, &mut inv, &mut visited);
     }
-    Ok(out)
+    Ok(inv)
 }
 
-/// Walks one target root, following `mod x;` / inline `mod x { }` and
-/// recording every item with its logical path.
+/// Walks one target root, following `mod x;` / inline `mod x { }` /
+/// `include!` and recording every item with its logical path.
 fn walk_root(
     fs: &GitFs,
     tree: &[String],
-    package: &str,
-    root_path: &str,
-    kind: RootKind,
-    out: &mut Vec<Item>,
+    root: &roots::TargetRoot,
+    inv: &mut Inventory,
+    visited: &mut std::collections::BTreeSet<String>,
 ) {
-    let logical = format!("{package}::{}", kind_prefix(kind));
-    walk_file(fs, tree, package, root_path, true, &logical, out);
+    let logical = format!("{}::{}", root.package, kind_prefix(root.kind));
+    let ctx = Ctx {
+        file: root.path.clone(),
+        is_root: true,
+        package: root.package.clone(),
+        logical,
+        mod_dir: resolution::mod_dir_for(&root.path, true),
+        attr_dir: resolution::dir_of(&root.path),
+        cfg: None,
+    };
+    walk_file(fs, tree, &ctx, inv, visited);
 }
 
 fn kind_prefix(kind: RootKind) -> &'static str {
@@ -78,59 +121,160 @@ fn kind_prefix(kind: RootKind) -> &'static str {
     }
 }
 
-/// Recursive file walk. `mod_dir` follows `resolution::mod_dir_for`.
+/// Recursive file walk: extracts the file's items, then follows every
+/// `mod x;` (top level or inside an inline module) and literal
+/// `include!` edge. `visited` guards against inclusion cycles.
 fn walk_file(
     fs: &GitFs,
     tree: &[String],
-    package: &str,
-    file: &str,
-    is_root: bool,
-    logical: &str,
-    out: &mut Vec<Item>,
+    ctx: &Ctx,
+    inv: &mut Inventory,
+    visited: &mut std::collections::BTreeSet<String>,
 ) {
-    let Some(source) = fs.read(file) else {
-        return; // unreachable in practice: bounded by the tree listing
+    if !visited.insert(ctx.file.clone()) {
+        return; // cycle guard; identical re-extractions are deduped later
+    }
+    // Fail closed: a file in the tree listing that cannot be read, or
+    // that does not parse, is an INVENTORY_ERROR, not a silent skip.
+    let source = match fs.read_checked(&ctx.file) {
+        Ok(s) => s,
+        Err(e) => {
+            inv.errors.push((ctx.file.clone(), format!("{e}")));
+            return;
+        }
     };
-    let Ok(parsed) = syn::parse_file(&source) else {
-        return; // parse failures are surfaced by the `modules` gate
+    let parsed = match syn::parse_file(&source) {
+        Ok(p) => p,
+        Err(e) => {
+            inv.errors
+                .push((ctx.file.clone(), format!("unparseable Rust source: {e}")));
+            return;
+        }
     };
     let ext = Extractor {
-        package,
-        path: file,
-        logical_prefix: logical.to_owned(),
+        package: &ctx.package,
+        path: &ctx.file,
+        logical_prefix: ctx.logical.clone(),
+        inherited_cfg: ctx.cfg.clone(),
     };
-    ext.extract(&parsed.items, out);
-    let mod_dir = resolution::mod_dir_for(file, is_root);
-    for item in &parsed.items {
-        if let SynItem::Mod(m) = item {
-            let Some((_, inner)) = &m.content else {
+    ext.extract(&parsed.items, &mut inv.items);
+    process_items(fs, tree, &parsed.items, ctx, inv, visited);
+}
+
+/// Follows the module edges of one item list (the items of a file or of
+/// an inline module body). Extraction of the items themselves already
+/// happened in `walk_file` / the `Extractor`; here only the DECLARATIONS
+/// are resolved and recursed into.
+fn process_items(
+    fs: &GitFs,
+    tree: &[String],
+    items: &[SynItem],
+    ctx: &Ctx,
+    inv: &mut Inventory,
+    visited: &mut std::collections::BTreeSet<String>,
+) {
+    for item in items {
+        match item {
+            SynItem::Mod(m) => {
                 let name = m.ident.to_string();
-                let path_attr = mod_path_attr(&m.attrs);
-                if let resolution::Resolution::Found(child) =
-                    resolution::resolve(fs, file, &name, &mod_dir, path_attr.as_deref())
-                {
-                    if tree.contains(&child) {
-                        walk_file(
-                            fs,
-                            tree,
-                            package,
-                            &child,
-                            false,
-                            &format!("{logical}::{name}"),
-                            out,
-                        );
+                let cfg = combine_cfg(ctx.cfg.as_deref(), super::item::attr_cfg(&m.attrs));
+                match &m.content {
+                    // Inline module: no file needed; it extends the
+                    // directory context (edition-2018+ rule: `mod a {
+                    // mod b; }` resolves `b` under `a/`), its children
+                    // may well be EXTERNAL `mod x;` declarations.
+                    Some((_, inner)) => {
+                        let inner_dir = append_dir(&ctx.mod_dir, &name);
+                        let inner_ctx = Ctx {
+                            file: ctx.file.clone(),
+                            is_root: ctx.is_root,
+                            package: ctx.package.clone(),
+                            logical: format!("{}::{name}", ctx.logical),
+                            mod_dir: inner_dir.clone(),
+                            attr_dir: inner_dir,
+                            cfg: cfg.clone(),
+                        };
+                        process_items(fs, tree, inner, &inner_ctx, inv, visited);
+                    }
+                    None => {
+                        let path_attr = mod_path_attr(&m.attrs);
+                        let resolved = if let Some(attr) = path_attr {
+                            resolution::resolve_attr(fs, &ctx.attr_dir, &attr)
+                        } else {
+                            resolution::resolve(fs, &name, &ctx.mod_dir, &ctx.attr_dir, None)
+                        };
+                        if let Resolution::Found(child) = resolved {
+                            if tree.contains(&child) {
+                                let child_ctx = Ctx {
+                                    file: child.clone(),
+                                    is_root: false,
+                                    package: ctx.package.clone(),
+                                    logical: format!("{}::{name}", ctx.logical),
+                                    mod_dir: resolution::mod_dir_for(&child, false),
+                                    attr_dir: resolution::dir_of(&child),
+                                    cfg,
+                                };
+                                walk_file(fs, tree, &child_ctx, inv, visited);
+                            }
+                        }
+                        // Missing/ambiguous/generated child modules are
+                        // the `modules` gate's findings; here the child
+                        // simply contributes no items.
                     }
                 }
-                continue;
-            };
-            let inner_ext = Extractor {
-                package,
-                path: file,
-                logical_prefix: format!("{logical}::{}", m.ident),
-            };
-            inner_ext.extract(inner, out);
+            }
+            SynItem::Macro(im) if macro_name(im) == "include" => {
+                if let Ok(lit) = syn::parse2::<syn::LitStr>(im.mac.tokens.clone()) {
+                    match resolution::resolve_include(fs, &ctx.file, &lit.value()) {
+                        Resolution::Found(target) if target.ends_with(".rs") => {
+                            let child_ctx = Ctx {
+                                mod_dir: resolution::mod_dir_for(&target, false),
+                                attr_dir: resolution::dir_of(&target),
+                                file: target,
+                                is_root: false,
+                                package: ctx.package.clone(),
+                                // The included items belong to the SAME
+                                // logical module as the includer.
+                                logical: ctx.logical.clone(),
+                                cfg: ctx.cfg.clone(),
+                            };
+                            walk_file(fs, tree, &child_ctx, inv, visited);
+                        }
+                        Resolution::Missing { tried } => inv.errors.push((
+                            ctx.file.clone(),
+                            format!(
+                                "include! target not found at this revision (tried {})",
+                                tried.join(", ")
+                            ),
+                        )),
+                        // Generated includes are the `modules` gate's
+                        // UNRESOLVED_INCLUDE finding; nothing static to
+                        // inventory.
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
         }
     }
+}
+
+/// Appends one segment to a `/`-separated directory context.
+fn append_dir(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{dir}/{name}")
+    }
+}
+
+fn macro_name(im: &syn::ItemMacro) -> String {
+    im.mac
+        .path
+        .segments
+        .last()
+        .map(|s| s.ident.to_string())
+        .unwrap_or_default()
 }
 
 /// Literal `#[path = "..."]` (cfg_attr variants are handled by the

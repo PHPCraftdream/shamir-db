@@ -12,6 +12,82 @@
 
 use crate::gitfs::GitFs;
 
+/// True when a PARSED cfg predicate is statically unsatisfiable — the
+/// forms provably impossible without feature/target evaluation:
+/// `any()` (no alternatives), `not(all())`, an `all(...)` containing an
+/// unsatisfiable branch, and an `any(...)` whose every branch is
+/// unsatisfiable. Works on the syn expression, so token spacing can
+/// never influence the outcome. Everything else (feature checks, target
+/// comparisons) is treated as satisfiable.
+pub fn cfg_unsatisfiable(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Call(call) => {
+            let fname = func_name(&call.func);
+            let args: Vec<&syn::Expr> = call.args.iter().collect();
+            match fname.as_str() {
+                "any" => args.is_empty() || args.iter().all(|a| cfg_unsatisfiable(a)),
+                "all" => args.iter().any(|a| cfg_unsatisfiable(a)),
+                "not" => {
+                    args.len() == 1
+                        && matches!(args[0], syn::Expr::Call(c) if func_name(&c.func) == "all")
+                        && c_is_all_empty(args[0])
+                }
+                _ => false,
+            }
+        }
+        syn::Expr::Paren(inner) => cfg_unsatisfiable(&inner.expr),
+        _ => false,
+    }
+}
+
+fn c_is_all_empty(expr: &syn::Expr) -> bool {
+    matches!(expr, syn::Expr::Call(c) if func_name(&c.func) == "all" && c.args.is_empty())
+}
+
+/// Last segment of the callee path (`any`, `all`, `not`, ...).
+fn func_name(expr: &syn::Expr) -> String {
+    match expr {
+        syn::Expr::Path(p) => p
+            .path
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// Renders a predicate to a canonical token string (for equality tests).
+pub fn pred_key(expr: &syn::Expr) -> String {
+    quote::ToTokens::to_token_stream(expr).to_string()
+}
+
+/// True when two predicates can provably never hold together. Only one
+/// structural family is provable without full evaluation: one side is
+/// `not(X)` and the other is `X` (modulo parenthesisation/spacing).
+pub fn mutually_exclusive(a: &syn::Expr, b: &syn::Expr) -> bool {
+    let (ka, kb) = (pred_key(a), pred_key(b));
+    if ka == kb {
+        return false;
+    }
+    negation_of(b, &ka) || negation_of(a, &kb)
+}
+
+/// True when `expr` is `not(inner)` and `inner` renders to `key`.
+fn negation_of(expr: &syn::Expr, key: &str) -> bool {
+    match expr {
+        syn::Expr::Call(c) if func_name(&c.func) == "not" && c.args.len() == 1 => {
+            let inner = &c.args[0];
+            let inner = match inner {
+                syn::Expr::Paren(p) => &p.expr,
+                other => other,
+            };
+            pred_key(inner) == key
+        }
+        _ => false,
+    }
+}
+
 /// Outcome of resolving one `mod x;`.
 pub enum Resolution {
     /// Found a physical file.
@@ -45,17 +121,18 @@ pub fn mod_dir_for(file: &str, is_root: bool) -> String {
 }
 
 /// Resolves `mod name;` declared in `file` (with its mod-dir context and
-/// optional `#[path]`/`cfg_attr` alternative).
+/// optional `#[path]`/`cfg_attr` alternative). `attr_dir` is the base for
+/// `#[path]` resolution: the declaring file's directory, or the inline
+/// module's directory context when the `mod` sits inside an inline block.
 pub fn resolve(
     fs: &GitFs,
-    file: &str,
     name: &str,
     mod_dir: &str,
+    attr_dir: &str,
     path_attr: Option<&str>,
 ) -> Resolution {
-    let file_dir = dir_of(file);
     if let Some(attr) = path_attr {
-        return resolve_attr(fs, &file_dir, attr);
+        return resolve_attr(fs, attr_dir, attr);
     }
     let base = if mod_dir.is_empty() {
         String::new()
@@ -73,18 +150,21 @@ pub fn resolve(
     }
 }
 
-/// Resolves a literal `#[path]` attribute relative to the declaring file's
-/// directory; appends `.rs` when missing (Rust does the same).
-fn resolve_attr(fs: &GitFs, file_dir: &str, attr: &str) -> Resolution {
+/// Resolves a literal `#[path]` attribute relative to `base_dir` (the
+/// declaring file's directory, or the inline module's directory context —
+/// rustc rules: inside `mod a { #[path = "b.rs"] mod c; }` in `src/lib.rs`
+/// the path resolves at `src/a/b.rs`); appends `.rs` when missing (Rust
+/// does the same).
+pub fn resolve_attr(fs: &GitFs, base_dir: &str, attr: &str) -> Resolution {
     if attr.contains("OUT_DIR") || attr.contains("env!") || attr.contains("${") {
         return Resolution::Generated(attr.to_owned());
     }
     let rel = if attr.starts_with('/') {
         attr.trim_start_matches('/').to_owned()
-    } else if file_dir.is_empty() {
+    } else if base_dir.is_empty() {
         attr.replace('\\', "/")
     } else {
-        format!("{file_dir}/{}", attr.replace('\\', "/"))
+        format!("{base_dir}/{}", attr.replace('\\', "/"))
     };
     if fs.exists(&rel) {
         return Resolution::Found(rel);
@@ -123,11 +203,4 @@ pub fn dir_of(path: &str) -> String {
         Some(i) => path[..i].to_owned(),
         None => String::new(),
     }
-}
-
-/// True when the predicate text is statically unsatisfiable (`any()` with
-/// no arguments — the only form provably impossible without evaluation).
-pub fn cfg_unsatisfiable(pred: &str) -> bool {
-    let t = pred.trim();
-    t == "any()" || t == "any( )"
 }

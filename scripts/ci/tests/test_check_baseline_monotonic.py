@@ -23,7 +23,12 @@ import check_baseline_monotonic as cbm  # noqa: E402
 def run_main(
     base_text=None, head_text=None, extra=(), root="/fake/repo"
 ):
-    """Run cbm.main with injected git content; return (exit_code, stdout)."""
+    """Run cbm.main with injected git content; return (exit_code, stdout).
+
+    Pass ``cbm.MISSING`` to simulate the baseline file not existing at that
+    revision.  ``None`` now means "do the real git read" — never pass it to
+    simulate a missing file (see the round-1 bug noted in the tests below).
+    """
     argv = ["--base", "origin/master"] + list(extra)
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -136,15 +141,29 @@ class MainTest(unittest.TestCase):
         self.assertIn("baseline monotonic check: OK", out)
 
     def test_missing_baseline_at_head_exit_0_with_note(self):
-        code, out = run_main(base_text="dir d 8\n", head_text=None)
+        # Counterfactual (round-1 bug): with ``head_text=None`` main read the
+        # content with a real `git show` against /fake/repo; that raised (or
+        # on some platforms the test failed for the wrong reason), so this
+        # branch — exit 0 + "nothing to protect" — was never exercised.  The
+        # MISSING sentinel makes "file absent at this rev" explicit.
+        code, out = run_main(base_text="dir d 8\n", head_text=cbm.MISSING)
         self.assertEqual(code, 0)
         self.assertIn("nothing to protect", out)
 
     def test_missing_baseline_at_base_is_empty(self):
-        # Bootstrap: any HEAD entry counts as NEW.
-        code, out = run_main(base_text=None, head_text="dir d 1\n")
+        # Counterfactual (round-1 bug): ``base_text=None`` sent main into the
+        # real-git path, so this test ran `git -C /fake/repo show` and never
+        # verified the bootstrap rule.  With MISSING, base is treated as an
+        # empty baseline and any HEAD entry counts as NEW.
+        code, out = run_main(base_text=cbm.MISSING, head_text="dir d 1\n")
         self.assertEqual(code, 1)
         self.assertIn("NEW dir d 1", out)
+
+    def test_missing_at_both_revs_exit_0(self):
+        # MISSING at both revs: head wins (nothing to protect).
+        code, out = run_main(base_text=cbm.MISSING, head_text=cbm.MISSING)
+        self.assertEqual(code, 0)
+        self.assertIn("nothing to protect", out)
 
     def test_malformed_head_line_exit_2(self):
         code, _ = run_main(base_text="", head_text="bogus line here\n")

@@ -52,6 +52,14 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# Sentinel: ``base_text=MISSING`` / ``head_text=MISSING`` means "the baseline
+# file does not exist at this revision" (what ``git_show`` returning None
+# means).  ``None`` keeps its original meaning of "read the content from git
+# for real" — passing None no longer simulates a missing file (round-1 bug:
+# the missing-baseline tests were silently running real git against a fake
+# repo and testing nothing).
+MISSING = object()
+
 sys.path.insert(
     0,
     str(Path(__file__).resolve().parent),
@@ -147,10 +155,14 @@ def main(
     argv: list[str] | None = None,
     *,
     root: Path | str | None = None,
-    base_text: str | None = None,
-    head_text: str | None = None,
+    base_text: str | object | None = None,
+    head_text: str | object | None = None,
 ) -> int:
-    """Entry point; ``base_text``/``head_text`` inject git content in tests."""
+    """Entry point; ``base_text``/``head_text`` inject git content in tests.
+
+    ``MISSING`` simulates the file not existing at that revision; ``None``
+    means "invoke git normally".
+    """
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--baseline", default=None, help="baseline path inside the repo")
     parser.add_argument("--base", default=None, help="base revision (required locally)")
@@ -171,7 +183,11 @@ def main(
             base_text = git_show(args.base, rel, root_path)
         if head_text is None:
             head_text = git_show(args.head, rel, root_path)
-        if head_text is None:
+        if base_text is MISSING:
+            # Missing at base -> empty baseline (bootstrap): every HEAD
+            # entry becomes NEW.
+            base_text = ""
+        if head_text is MISSING:
             print(
                 "baseline monotonic check: OK (no baseline at %s; nothing to protect)"
                 % args.head

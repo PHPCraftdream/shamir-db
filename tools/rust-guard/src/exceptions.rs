@@ -53,7 +53,9 @@ pub struct Producer {
 pub struct Exceptions {
     #[serde(default, rename = "exception")]
     pub exceptions: Vec<Exception>,
-    #[serde(default)]
+    /// Written `[[producer]]` in every doc and the shipped template —
+    /// the key must match that spelling.
+    #[serde(default, rename = "producer")]
     pub producers: Vec<Producer>,
     #[serde(default, rename = "inline_tests")]
     pub inline_tests: Vec<InlineTests>,
@@ -74,12 +76,36 @@ impl Exceptions {
         Ok(parsed)
     }
 
-    /// Structural sanity: every producer must name at least one package.
+    /// Structural sanity: every producer must name at least one package,
+    /// and every record of every kind must carry a non-empty `reason` and
+    /// `owner` — an unattributed exception is an unaccountable one.
     fn validate(&self, path: &str) -> Result<(), String> {
         for p in &self.producers {
             if p.packages.is_empty() {
                 return Err(format!("{path}: [[producer]] {} lists no packages", p.name));
             }
+            check_owner_reason(
+                path,
+                &format!("[[producer]] {}", p.name),
+                &p.reason,
+                &p.owner,
+            )?;
+        }
+        for e in &self.exceptions {
+            check_owner_reason(
+                path,
+                &format!("[[exception]] {}", e.path),
+                &e.reason,
+                &e.owner,
+            )?;
+        }
+        for t in &self.inline_tests {
+            check_owner_reason(
+                path,
+                &format!("[[inline_tests]] {}", t.path),
+                &t.reason,
+                &t.owner,
+            )?;
         }
         Ok(())
     }
@@ -94,8 +120,22 @@ impl Exceptions {
         self.inline_tests.iter().find(|e| e.path == path)
     }
 
-    /// True when a macro/include producer with this name is declared.
-    pub fn has_producer(&self, name: &str) -> bool {
-        self.producers.iter().any(|p| p.name == name)
+    /// True when a macro/include producer with this name is declared for
+    /// `package`. Producers are package-scoped: a `[[producer]]` whose
+    /// `packages` list does not contain the current package must not
+    /// suppress findings in other packages (validate() rejects empty
+    /// lists, so every producer names at least one package).
+    pub fn has_producer(&self, name: &str, package: &str) -> bool {
+        self.producers
+            .iter()
+            .any(|p| p.name == name && p.packages.iter().any(|x| x == package))
     }
+}
+
+/// Rejects an empty `reason`/`owner` on one exception record.
+fn check_owner_reason(path: &str, what: &str, reason: &str, owner: &str) -> Result<(), String> {
+    if reason.trim().is_empty() || owner.trim().is_empty() {
+        return Err(format!("{path}: {what} needs non-empty reason and owner"));
+    }
+    Ok(())
 }
