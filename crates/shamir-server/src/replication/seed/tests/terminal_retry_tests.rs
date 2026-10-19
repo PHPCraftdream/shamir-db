@@ -218,13 +218,16 @@ async fn persistent_follower(meta: std::path::PathBuf) -> Arc<ShamirDb> {
     follower
 }
 
-/// Reopen the persistent follower, retrying the fjall DIRECTORY lock: the
-/// lock is held until the LAST `Arc<ShamirDb>`/store clone drops and is
-/// released LAZILY; the `stop_all` calls + drops above release the clones,
-/// and the bounded retry absorbs the lazy release. Only the lock error is
-/// retried (fjall itself already waits between its own lock attempts); any
-/// other initialisation failure fails the test at once. (Same precedent as
-/// `shamir-engine`'s `reopen_disk_repo` and `open_retry` test helpers.)
+/// Reopen the persistent follower, retrying the fjall DIRECTORY lock. The lock
+/// is held until the LAST clone of the first database's store drops; one of
+/// those clones belongs to the drainer's background repo handle, which exits
+/// only after its 50 ms liveness tick (`drainer.rs:1666-1687`) observes that the
+/// foreground handle is gone. The test runs on a PAUSED clock, where a tick
+/// fires only when the runtime is idle and time auto-advances: `yield_now`
+/// never advances it (and a running `spawn_blocking` open inhibits advancing),
+/// so each retry SLEEPS 50 ms of virtual time between attempts. Only the lock
+/// error is retried; any other initialisation failure fails the test at once.
+/// (Same precedent as `shamir-engine`'s `reopen_disk_repo` / `open_retry`.)
 #[cfg(unix)]
 async fn reopen_follower_with_lock_retry(meta: std::path::PathBuf) -> ShamirDb {
     let mut last_lock_error = None;
@@ -234,7 +237,7 @@ async fn reopen_follower_with_lock_retry(meta: std::path::PathBuf) -> ShamirDb {
             Err(err) if err.to_string().contains("Locked") => last_lock_error = Some(err),
             Err(err) => panic!("reopen persistent follower: {err:?}"),
         }
-        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     panic!(
         "reopen persistent follower: lock never released: {:?}",
@@ -398,6 +401,18 @@ async fn terminal_marking_retries_until_success() {
     );
     // Loop#1's honest application is untouched by loop#2's fence trip.
     assert!(bookmark(&follower, "main").await >= version);
+
+    // Deterministic writer stop BEFORE the drop: the system repo's changefeed
+    // journal writer owns the `__changelog__` Fjall partition store until its
+    // channel closes, and that close is gated on background ticks that do not
+    // reliably run before the reopen under `start_paused`. The module contract
+    // requires stop/drain before re-opening the same store (changefeed.rs),
+    // so use the graceful API instead of waiting. The lock-only retry helper
+    // below stays as a safety net; it must not be what makes this pass.
+    follower
+        .stop_system_journal_writer_for_test()
+        .await
+        .expect("stop follower system journal writer");
 
     drop(follower);
     let reopened = Arc::new(reopen_follower_with_lock_retry(follower_meta).await);
