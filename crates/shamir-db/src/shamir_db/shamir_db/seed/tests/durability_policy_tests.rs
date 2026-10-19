@@ -211,6 +211,11 @@ async fn mem_repo_synced_policy_commits_recoverably() {
 /// Boot catalogue reopening must install the supplied policy before recovery.
 #[tokio::test]
 async fn boot_reopen_inherits_policy_and_recovered_prefix() {
+    // FLAKE-2: install a logger so the engine's `shutdown stage slow` warnings
+    // reach nextest's captured output when this test fails.
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .is_test(true)
+        .try_init();
     let dir = tempfile::TempDir::new().unwrap();
     let meta = dir.path().join("metadata");
     let data = dir.path().join("data");
