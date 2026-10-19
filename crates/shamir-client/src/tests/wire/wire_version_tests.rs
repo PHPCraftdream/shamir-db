@@ -5,7 +5,7 @@
 //! (without `server_query_version`) must deserialise with the field
 //! defaulting to `0`, so new clients treat the connection as v1.
 
-use crate::wire_frames::{WireAuthOk, WireResumeOk};
+use crate::client::transport::{WireAuthOk, WireResumeOk};
 
 // ── WireAuthOk ────────────────────────────────────────────────────────────────
 

@@ -1,13 +1,7 @@
-pub mod ambient_sync_tests;
-pub mod batch_has_refs_tests;
-pub mod cursor_stream_tests;
-pub mod demux_tests;
-pub mod interner_cache_tests;
+pub mod client;
+pub mod interner;
 pub mod receipts;
 #[path = "visibility/repo_admin/mod.rs"]
 pub mod repo_admin;
-pub mod resume_wire_tests;
-pub mod timeout_tests;
-pub mod v2_passthrough_tests;
 pub mod visibility;
-pub mod wire_version_tests;
+pub mod wire;
