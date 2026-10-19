@@ -1,6 +1,8 @@
 use crate::query::admin::{CreateSubscriptionOp, ReplStream};
 use crate::query::read::ReadQuery;
 use crate::query::write::SetOp;
+use crate::repl_binding::pending::next_generation;
+use crate::repl_binding::{SubscriptionBinding, SUBSCRIPTION_BINDING_VERSION};
 use crate::types::value::QueryValue;
 use crate::{DbResult, ShamirDb};
 use shamir_engine::repo::{RepoInstance, SeedInstallState, SeedReceipt};
@@ -134,13 +136,29 @@ impl ShamirDb {
         self.flush_seed_catalogue().await
     }
 
-    /// Offline filesystem-authorized final install step. Exact retry never pauses an active row.
+    /// Offline filesystem-authorized final install step. Three branches on an
+    /// existing row of the same name: (1) EXACT-RETRY — binding, upstream,
+    /// publication, profile and `seed_receipt` all already match ⇒ flush only;
+    /// (2) REPLACEMENT (S5c-X verdict evidence row 9, quarantined-DROP is
+    /// refused) — the row is durably `quarantined` and the NEW receipt binds
+    /// on the SAME scope (upstream/publication/profile and binding must match
+    /// exactly): only the `seed_receipt` is rewritten, preserving `state`, the
+    /// `quarantined` marker, `resync_from_receipt`, `status_message` and
+    /// `last_terminal_reason` — only a post-reseed `Resume` may clear the
+    /// quarantine; (3) anything else ⇒ `ConflictingBinding` (a healthy row's
+    /// receipt is never overwritten). A new name creates a fresh paused row.
+    ///
+    /// Round 2 (A5): the WHOLE install runs under `replication_control_lock`
+    /// — an offline install writes the subscription catalogue and must not
+    /// race destination lifecycle ops (`remove_db`/`remove_repo`/renames,
+    /// which take the same lock before their binding guard).
     pub async fn install_seed_subscription(
         &self,
         image: &RepoInstance,
         expected: &SeedReceipt,
         op: &CreateSubscriptionOp,
     ) -> Result<(), SeedRefusal> {
+        let _control = self.lock_replication_control().await;
         if !cfg!(unix) {
             return Err(SeedRefusal::IncompleteInstall);
         }
@@ -160,6 +178,12 @@ impl ShamirDb {
         if !matches_scope(&scope, expected) {
             return Err(SeedRefusal::WrongScope);
         }
+        // S5c-X PR8b-2: the seed-installed row carries the same durable
+        // binding an ordinary creation would write; the GENERATION is stamped
+        // per-branch below (monotonic — an exact retry must not be rejected
+        // because the row's generation advanced).
+        let destinations = SubscriptionBinding::from_streams(&op.create_subscription, &scope)
+            .map_err(|_| SeedRefusal::WrongScope)?;
         let records = rows(self, "subscriptions")
             .await
             .map_err(|_| SeedRefusal::ConflictingBinding)?;
@@ -167,19 +191,79 @@ impl ShamirDb {
             .iter()
             .find(|row| row["name"].as_str() == Some(op.create_subscription.as_str()))
         {
-            if existing["upstream"].as_str() != Some(op.upstream.as_str())
-                || existing["publication"].as_str() != Some(op.publication.as_str())
-                || existing["profile"].as_str() != Some(op.profile.as_str())
-                || existing.get("seed_receipt") != Some(&super::super::helpers::to_qv(expected))
+            let existing_binding = SubscriptionBinding::from_row(existing)
+                .map_err(|_| SeedRefusal::ConflictingBinding)?;
+            let scope_matches = existing["upstream"].as_str() == Some(op.upstream.as_str())
+                && existing["publication"].as_str() == Some(op.publication.as_str())
+                && existing["profile"].as_str() == Some(op.profile.as_str());
+            // Exact-retry branch (round 2 A5): the existing row already
+            // carries the SAME scope + destinations + receipt. Destinations
+            // are compared, NOT full binding equality — generations change
+            // across replacement rebinds and a legitimate retry must still
+            // match.
+            if scope_matches
+                && existing_binding.destinations() == destinations
+                && existing.get("seed_receipt") == Some(&super::super::helpers::to_qv(expected))
             {
-                return Err(SeedRefusal::ConflictingBinding);
+                return self
+                    .flush_seed_catalogue()
+                    .await
+                    .map_err(|_| SeedRefusal::ConflictingBinding);
             }
-            return self
-                .flush_seed_catalogue()
-                .await
-                .map_err(|_| SeedRefusal::ConflictingBinding);
+            // REPLACEMENT branch (S5c-X verdict evidence row 9): the row is
+            // durably quarantined — DROP is refused, so rebinding the NEW
+            // receipt onto the EXISTING row is the only sanctioned recovery.
+            // A replacement seed must serve exactly the same bound
+            // destinations, so scope AND destinations must match; `op.paused`
+            // was enforced at the top. NO `check_owners` call (round 2 A5):
+            // the sibling ownership predates the rebind — this row's binding
+            // was accepted with that sibling already in place, and re-proving
+            // ownership now would block sanctioned recovery. Everything but
+            // `seed_receipt` (and a bumped generation) is preserved: only a
+            // post-reseed `Resume` may lift the quarantine. The bump is at
+            // least +1 over the row's current generation AND above the
+            // durable MVCC-version floor, so a rebind also beats any
+            // concurrent allocation.
+            if crate::repl_binding::row_is_quarantined(existing) {
+                if !scope_matches || existing_binding.destinations() != destinations {
+                    return Err(SeedRefusal::ConflictingBinding);
+                }
+                let replacement_binding = SubscriptionBinding::new(
+                    SUBSCRIPTION_BINDING_VERSION,
+                    std::cmp::max(
+                        existing_binding.generation() + 1,
+                        next_generation(self, &records)
+                            .await
+                            .map_err(|_| SeedRefusal::ConflictingBinding)?,
+                    ),
+                    destinations.clone(),
+                )
+                .map_err(|_| SeedRefusal::ConflictingBinding)?;
+                let mut record = existing.clone();
+                binding(&mut record, expected);
+                // Replacement-seed rebind: invalidate the old generation's
+                // lease (quiesce) before the row changes.
+                self.quiesce_subscription_lease_locked(&op.create_subscription, &_control)
+                    .await;
+                replacement_binding.write_to_row(&mut record);
+                return persist(self, record)
+                    .await
+                    .map_err(|_| SeedRefusal::ConflictingBinding);
+            }
+            // Never overwrite a healthy row's receipt.
+            return Err(SeedRefusal::ConflictingBinding);
         }
         super::control::check_owners(self, &op.create_subscription, expected).await?;
+        // New row (round 2 A5): monotonic generation across the whole
+        // catalogue, not a hardcoded 1.
+        let new_binding = SubscriptionBinding::new(
+            SUBSCRIPTION_BINDING_VERSION,
+            next_generation(self, &records)
+                .await
+                .map_err(|_| SeedRefusal::ConflictingBinding)?,
+            destinations,
+        )
+        .map_err(|_| SeedRefusal::ConflictingBinding)?;
         let mut fields = crate::types::common::new_map();
         fields.insert(
             "name".into(),
@@ -194,6 +278,7 @@ impl ShamirDb {
         fields.insert("state".into(), QueryValue::Str("paused".into()));
         let mut record = QueryValue::Map(fields);
         binding(&mut record, expected);
+        new_binding.write_to_row(&mut record);
         persist(self, record)
             .await
             .map_err(|_| SeedRefusal::ConflictingBinding)

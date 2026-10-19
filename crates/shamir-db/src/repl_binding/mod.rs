@@ -1,0 +1,20 @@
+//! Durable subscription binding + quarantine coverage (S5c-X PR8b-2).
+//!
+//! The subscription row — not the current replication profile — is the
+//! durable authority for `resync_required` quarantine coverage. Every row
+//! carries a versioned, validated destination binding written in the same
+//! transaction as the row itself; rows lacking it are refused at open with
+//! a typed catalogue error.
+
+pub mod binding;
+pub mod coverage;
+pub mod lease;
+pub(crate) mod pending;
+pub mod validate;
+
+#[cfg(test)]
+mod tests;
+
+pub use binding::{SubscriptionBinding, SUBSCRIPTION_BINDING_VERSION};
+pub(crate) use coverage::{quarantined_row_keys, row_is_quarantined};
+pub use lease::SubscriptionLease;

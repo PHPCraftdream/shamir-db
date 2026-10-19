@@ -938,3 +938,30 @@ async fn resync_required_destination_is_excluded_from_downstream_serving() {
         "an uncovered db must stay servable"
     );
 }
+
+/// Raw catalogue read of one subscription row's `binding_generation` via the
+/// PUBLIC system-store path (mirrors `supervisor.rs::read_all`: the
+/// FilterContext is built engine-side from `info_store_read_view`).
+pub(crate) async fn sub_binding_generation(follower: &ShamirDb, name: &str) -> Option<u64> {
+    let table = follower.system_store().subscriptions_table().await.ok()?;
+    let refs = shamir_db::types::common::new_map();
+    let ctx = table
+        .info_store_read_view()
+        .filter_context(&refs)
+        .await
+        .ok()?;
+    let query = shamir_db::query::read::ReadQuery::new("subscriptions");
+    let result = table.read(&query, &ctx).await.ok()?;
+    result
+        .records
+        .iter()
+        .find(|r| {
+            r.as_value()
+                .get("name")
+                .and_then(|v| v.as_str())
+                .is_some_and(|n| n == name)
+        })?
+        .as_value()
+        .get("binding_generation")
+        .and_then(|v| v.as_u64())
+}

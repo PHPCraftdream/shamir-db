@@ -22,7 +22,8 @@ use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl::alter_subscription;
 use shamir_query_builder::ddl::{
-    list_subscriptions, repl_scope, replication_profile, replication_status, subscription,
+    drop_subscription, list_subscriptions, repl_scope, replication_profile, replication_status,
+    subscription,
 };
 use shamir_query_builder::doc;
 use shamir_query_builder::query::Query;
@@ -42,7 +43,7 @@ use crate::replication::supervisor::{ReplSourceFactory, SubscriptionSupervisor};
 
 use super::supervisor_tests::{
     alter, bookmark, build_db, create_profile_and_subscription, items_row_counter,
-    single_insert_event, sub_state, wait_for_sub_state, PartialSource,
+    single_insert_event, sub_binding_generation, sub_state, wait_for_sub_state, PartialSource,
 };
 
 fn runtime() -> Runtime {
@@ -813,4 +814,173 @@ async fn malformed_receipt_bytes_stop_supervisor_and_refuse_resume() {
         Some("reopen_required")
     );
     sup.stop_all().await;
+}
+
+/// S5c-X PR8b-2 evidence row 5 (stale terminal callback): a callback carrying
+/// a binding generation that no longer matches the row's durable binding is a
+/// logged no-op — the row's `state` does NOT change and the quarantine cache
+/// does not grow. The CORRECT generation flips the row. In-process, no
+/// timing races: both calls go through the same
+/// `mark_subscription_resync_required_generation` seam the supervisor uses.
+/// The row's REAL binding generation is read from the catalogue; the stale
+/// call uses a far-future generation.
+#[tokio::test]
+async fn stale_generation_callback_does_not_mark_replacement() {
+    let follower = build_db().await;
+    create_profile_and_subscription(&follower).await;
+
+    // Nothing quarantined yet.
+    assert!(!follower
+        .has_resync_required_subscription_covering("app", "main")
+        .await
+        .unwrap());
+
+    // The row's REAL durable generation (durable-sequence values are
+    // monotonic but not small predictable integers).
+    let gen = sub_binding_generation(&follower, "sub_a")
+        .await
+        .expect("row exists");
+    assert!(gen >= 1);
+
+    // STALE generation (far past the row's): a no-op — no state flip, no
+    // cache growth.
+    follower
+        .mark_subscription_resync_required_generation("sub_a", 100, 42, gen + 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        sub_state(&follower, "sub_a").await.as_deref(),
+        Some("active"),
+        "a stale-generation callback must not mark the row"
+    );
+    assert!(
+        !follower
+            .has_resync_required_subscription_covering("app", "main")
+            .await
+            .unwrap(),
+        "a stale-generation callback must not grow the quarantine cache"
+    );
+
+    // The CORRECT generation (the row's durable one) marks the row and
+    // covers exactly its bound destination.
+    follower
+        .mark_subscription_resync_required_generation("sub_a", 100, 42, gen)
+        .await
+        .unwrap();
+    assert_eq!(
+        sub_state(&follower, "sub_a").await.as_deref(),
+        Some("resync_required"),
+        "the current-generation callback must mark the row"
+    );
+    assert!(
+        follower
+            .has_resync_required_subscription_covering("app", "main")
+            .await
+            .unwrap(),
+        "the bound destination must be excluded from serving"
+    );
+    assert!(
+        !follower
+            .has_resync_required_subscription_covering("app", "other")
+            .await
+            .unwrap(),
+        "an uncovered repo must stay servable"
+    );
+}
+
+/// S5c-X PR8b-2 D1: a DROP + identical re-CREATE of the same subscription
+/// name must be stamped with a STRICTLY GREATER durable binding generation
+/// (the monotonic `next_generation` floor over the system repo's durable
+/// MVCC version), so the OLD task's terminal callback
+/// (`mark_subscription_resync_required_generation` with the pre-drop
+/// generation) is a logged no-op on the replacement row, while the CURRENT
+/// task's callback (with the recreated row's generation) marks it
+/// `resync_required` and quarantines exactly its bound destination.
+#[tokio::test]
+async fn replacement_generation_blocks_old_task_callback() {
+    let follower = build_db().await;
+    create_profile_and_subscription(&follower).await;
+
+    // 1. Read the raw row through the public catalogue read path (mirrors
+    //    `supervisor.rs::read_all`) for the pre-drop binding generation.
+    let gen_before = sub_binding_generation(&follower, "sub_a")
+        .await
+        .expect("row exists after CREATE");
+
+    // 2. DROP while the subscription is active — must succeed.
+    let mut b = Batch::new();
+    b.id(1);
+    b.op("drop", drop_subscription("sub_a"));
+    follower
+        .execute("app", &b.to_request_via_msgpack())
+        .await
+        .expect("drop active subscription");
+    assert_eq!(
+        sub_state(&follower, "sub_a").await.as_deref(),
+        None,
+        "the dropped row must be gone"
+    );
+
+    // 3. Re-create identically → the generation strictly increases.
+    let mut b = Batch::new();
+    b.id(2);
+    b.op(
+        "cs",
+        subscription("sub_a", "tcp://leader:9000", "pub_a", "prof_a"),
+    );
+    follower
+        .execute("app", &b.to_request_via_msgpack())
+        .await
+        .expect("re-create subscription");
+    let gen_after = sub_binding_generation(&follower, "sub_a")
+        .await
+        .expect("row exists after re-CREATE");
+    assert!(
+        gen_after > gen_before,
+        "generation must strictly increase across DROP + re-CREATE: \
+         {gen_before} -> {gen_after}"
+    );
+
+    // 4. OLD task's callback (pre-drop generation) is a no-op.
+    follower
+        .mark_subscription_resync_required_generation("sub_a", 100, 42, gen_before)
+        .await
+        .unwrap();
+    assert_eq!(
+        sub_state(&follower, "sub_a").await.as_deref(),
+        Some("active"),
+        "the old task's generation must not mark the replacement row"
+    );
+    assert!(
+        !follower
+            .has_resync_required_subscription_covering("app", "main")
+            .await
+            .unwrap(),
+        "the old task's generation must not grow the quarantine cache"
+    );
+
+    // 5. CURRENT task's callback (the recreated row's generation) marks it.
+    follower
+        .mark_subscription_resync_required_generation("sub_a", 100, 42, gen_after)
+        .await
+        .unwrap();
+    assert_eq!(
+        sub_state(&follower, "sub_a").await.as_deref(),
+        Some("resync_required"),
+        "the current generation must mark the row"
+    );
+    assert!(
+        follower
+            .has_resync_required_subscription_covering("app", "main")
+            .await
+            .unwrap(),
+        "the bound destination must be excluded from serving"
+    );
+    assert!(
+        !follower
+            .has_resync_required_subscription_covering("app", "other")
+            .await
+            .unwrap(),
+        "an uncovered repo must stay servable"
+    );
 }

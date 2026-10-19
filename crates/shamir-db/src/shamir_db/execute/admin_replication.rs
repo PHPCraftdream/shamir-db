@@ -1,17 +1,7 @@
-//! Admin handlers: replication DDL (386-a).
-//!
-//! Persistence + CRUD + read for the publication/subscription model. These
-//! handlers write `replication_profiles` / `publications` / `subscriptions`
-//! records into the `system` repo via [`SystemStore`], mirroring the
-//! users/roles model (`admin_users_roles.rs`): so the catalogue itself
-//! replicates (V1a). Starting the follower pull-loop from a subscription is a
-//! *separate* concern (386-b) and is intentionally NOT done here — these ops
-//! only make the definitions durable and queryable.
-//!
-//! Authorization: every mutating op is global-admin only (`Manage` on
-//! [`ResourcePath::Root`]) — the closest analog is `handle_create_role`.
-//! Read-only introspection (`list_*`, `replication_status`) requires `List`
-//! on the root, matching `ListOp::Databases`.
+//! Admin handlers: replication DDL (386-a). Rows go into the `system` repo
+//! via [`SystemStore`] so the catalogue itself replicates (V1a); the
+//! follower pull-loop is 386-b. Mutating ops are global-admin only
+//! (`Manage` on [`ResourcePath::Root`]); introspection requires `List`.
 
 use crate::access::{Action, ResourcePath};
 use crate::query::admin::{
@@ -20,22 +10,27 @@ use crate::query::admin::{
 };
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
+use crate::repl_binding::pending::PENDING_STATE;
+use crate::repl_binding::{row_is_quarantined, SubscriptionBinding, SUBSCRIPTION_BINDING_VERSION};
 use crate::types::value::QueryValue;
 use shamir_query_types::admin::ReplDirection;
 use shamir_query_types::ReplicationServe;
 use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
-use super::helpers::{admin_result, to_qv};
-use super::quarantine_helpers::admin_replication::row_is_quarantined;
+use super::helpers::{admin_result, db_error_to_batch, repl_guard_error_to_batch, to_qv};
+
+/// The uncoded [`BatchError`] mapper shared by this file's handlers.
+pub(super) fn batch_err(msg: String) -> BatchError {
+    BatchError::QueryError {
+        alias: String::new(),
+        message: msg,
+        code: None,
+    }
+}
 
 impl ShamirAdminExecutor {
-    // ------------------------------------------------------------------
-    // shared guards / small helpers
-    // ------------------------------------------------------------------
-
-    /// Authorize a replication mutation: global-admin only (Manage on the
-    /// root). System bypasses inside `authorize_access`.
+    /// Authorize a replication mutation: global-admin only (Manage on root).
     async fn authorize_repl_mutation(&self) -> Result<(), BatchError> {
         self.shamir
             .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
@@ -47,7 +42,7 @@ impl ShamirAdminExecutor {
             })
     }
 
-    /// Authorize a replication read (List on the root).
+    /// Authorize a replication read (List on root).
     async fn authorize_repl_read(&self) -> Result<(), BatchError> {
         self.shamir
             .authorize_access(&self.actor, &ResourcePath::Root, Action::List)
@@ -59,27 +54,44 @@ impl ShamirAdminExecutor {
             })
     }
 
-    // ------------------------------------------------------------------
-    // replication profiles
-    // ------------------------------------------------------------------
+    // ---------------------- replication profiles ----------------------
 
     pub(super) async fn handle_create_replication_profile(
         &self,
         op: &CreateReplicationProfileOp,
     ) -> Result<QueryResult, BatchError> {
-        let err = |msg: String| BatchError::QueryError {
-            alias: String::new(),
-            message: msg,
-            code: None,
-        };
+        let err = batch_err;
         self.authorize_repl_mutation().await?;
-        let _control = self.shamir.replication_control_lock.lock().await;
+        let _control = self.shamir.lock_replication_control().await;
 
         let name = op.create_replication_profile.clone();
         self.shamir
             .validate_seed_profile_change(&name, &op.streams)
             .await
             .map_err(super::replication_seed::control::batch_error)?;
+
+        // S5c-X PR8b-2: an UPSERT must not change the bound destination set
+        // of referencing subscription rows.
+        let profile_table = self
+            .shamir
+            .system_store()
+            .replication_profiles_table()
+            .await
+            .map_err(|e| err(e.to_string()))?;
+        let profile_exists = Self::read_all(&profile_table, "replication_profiles")
+            .await
+            .map_err(|e| err(e.to_string()))?
+            .iter()
+            .any(|row| row.get("name").and_then(|v| v.as_str()) == Some(name.as_str()));
+        if profile_exists {
+            self.shamir
+                .ensure_profile_binding_unchanged(&name, &op.streams)
+                .await
+                .map_err(|e| {
+                    BatchError::query_coded("", "binding_destination_mismatch", e.to_string())
+                })?;
+        }
+
         let mut m = crate::types::common::new_map();
         m.insert("name".to_string(), QueryValue::Str(name.clone()));
         m.insert("streams".to_string(), to_qv(&op.streams));
@@ -115,13 +127,9 @@ impl ShamirAdminExecutor {
         &self,
         op: &DropReplicationProfileOp,
     ) -> Result<QueryResult, BatchError> {
-        let err = |msg: String| BatchError::QueryError {
-            alias: String::new(),
-            message: msg,
-            code: None,
-        };
+        let err = batch_err;
         self.authorize_repl_mutation().await?;
-        let _control = self.shamir.replication_control_lock.lock().await;
+        let _control = self.shamir.lock_replication_control().await;
 
         let name = op.drop_replication_profile.clone();
         let table = self
@@ -146,35 +154,26 @@ impl ShamirAdminExecutor {
         })))
     }
 
-    // ------------------------------------------------------------------
-    // publications
-    // ------------------------------------------------------------------
+    // ------------------------- publications ---------------------------
 
     pub(super) async fn handle_create_publication(
         &self,
         op: &CreatePublicationOp,
     ) -> Result<QueryResult, BatchError> {
-        let err = |msg: String| BatchError::QueryError {
-            alias: String::new(),
-            message: msg,
-            code: None,
-        };
+        let err = batch_err;
         let err_code = |code: &str, msg: String| BatchError::QueryError {
             alias: String::new(),
             message: msg,
             code: Some(code.to_string()),
         };
         self.authorize_repl_mutation().await?;
-        let _control = self.shamir.replication_control_lock.lock().await;
+        let _control = self.shamir.lock_replication_control().await;
 
         let name = op.create_publication.clone();
 
         // S5c-X 2b: an ephemeral backend (no persistent WAL) may only be
-        // published downstream when the repo's durability policy sets an
-        // EXPLICIT `replication_serve = completed_reseed` — the operator has
-        // acknowledged that every data-losing reopen mints a new incarnation
-        // and downstream followers must reseed. Checked BEFORE any store
-        // write: a rejected publication leaves the catalogue untouched.
+        // published when the durability policy sets an EXPLICIT
+        // `replication_serve = completed_reseed`. Checked BEFORE any write.
         for scope in &op.scopes {
             let Some(db) = self.shamir.get_db(&scope.db) else {
                 // Unknown db: nothing to check (no repos resolve).
@@ -241,13 +240,9 @@ impl ShamirAdminExecutor {
         &self,
         op: &DropPublicationOp,
     ) -> Result<QueryResult, BatchError> {
-        let err = |msg: String| BatchError::QueryError {
-            alias: String::new(),
-            message: msg,
-            code: None,
-        };
+        let err = batch_err;
         self.authorize_repl_mutation().await?;
-        let _control = self.shamir.replication_control_lock.lock().await;
+        let _control = self.shamir.lock_replication_control().await;
 
         let name = op.drop_publication.clone();
         let table = self
@@ -273,11 +268,7 @@ impl ShamirAdminExecutor {
     }
 
     pub(super) async fn handle_list_publications(&self) -> Result<QueryResult, BatchError> {
-        let err = |msg: String| BatchError::QueryError {
-            alias: String::new(),
-            message: msg,
-            code: None,
-        };
+        let err = batch_err;
         self.authorize_repl_read().await?;
 
         let table = self
@@ -294,23 +285,34 @@ impl ShamirAdminExecutor {
         })))
     }
 
-    // ------------------------------------------------------------------
-    // subscriptions
-    // ------------------------------------------------------------------
+    // ------------------------ subscriptions ---------------------------
 
     pub(super) async fn handle_create_subscription(
         &self,
         op: &CreateSubscriptionOp,
     ) -> Result<QueryResult, BatchError> {
-        let err = |msg: String| BatchError::QueryError {
-            alias: String::new(),
-            message: msg,
-            code: None,
-        };
         self.authorize_repl_mutation().await?;
-        let _control = self.shamir.replication_control_lock.lock().await;
+        let _control = self.shamir.lock_replication_control().await;
 
         let name = op.create_subscription.clone();
+
+        // S5c-X PR8b-2 (a): refuse same-name overwrite (binding must never
+        // detach coverage from written data).
+        self.shamir
+            .ensure_subscription_absent(&name)
+            .await
+            .map_err(|_| {
+                BatchError::query_coded(
+                    "",
+                    "already_exists",
+                    format!(
+                        "subscription '{name}' already exists: same-name overwrite is refused (S5c-X PR8b-2); use a new name"
+                    ),
+                )
+            })?;
+
+        // PR6b-3: every concrete Pull destination of the profile must admit
+        // repo-wide atomic batches BEFORE the subscription row exists.
         let profile_streams =
             super::replication_seed::catalogue::streams(&self.shamir, &op.profile)
                 .await
@@ -349,6 +351,7 @@ impl ShamirAdminExecutor {
                 }
             }
         }
+
         let mut m = crate::types::common::new_map();
         m.insert("name".to_string(), QueryValue::Str(name.clone()));
         m.insert("upstream".to_string(), QueryValue::Str(op.upstream.clone()));
@@ -357,42 +360,32 @@ impl ShamirAdminExecutor {
             QueryValue::Str(op.publication.clone()),
         );
         m.insert("profile".to_string(), QueryValue::Str(op.profile.clone()));
-        // `state` drives 386-b pause/resume; a fresh subscription is active.
-        m.insert(
-            "state".to_string(),
-            QueryValue::Str(if op.paused { "paused" } else { "active" }.to_string()),
-        );
         let mut record = QueryValue::Map(m);
         self.shamir
             .bind_seed_creation(op, &mut record)
             .await
             .map_err(super::replication_seed::control::batch_error)?;
 
-        let table = self
-            .shamir
-            .system_store()
-            .subscriptions_table()
+        // S5c-X PR8b-2 (b): the profile must resolve NOW and the concrete
+        // Pull destinations become the row's durable binding, in the SAME
+        // subscription-row transaction.
+        let streams = super::replication_seed::catalogue::streams(&self.shamir, &op.profile)
             .await
-            .map_err(|e| err(e.to_string()))?;
-        let set_op = crate::query::write::SetOp {
-            set: crate::query::TableRef::new("subscriptions"),
-            key: mpack!({"name": @(QueryValue::Str(name.clone()))}),
-            value: record,
-        };
-        self.shamir
-            .system_store()
-            .set_via_implicit_tx(&table, &set_op)
+            .map_err(super::replication_seed::control::batch_error)?;
+        let destinations =
+            SubscriptionBinding::from_streams(&name, &streams).map_err(db_error_to_batch)?;
+        // Generation placeholder: `write_new_subscription` stamps the
+        // monotonic `next_generation` over the catalogue rows.
+        let binding_row = SubscriptionBinding::new(SUBSCRIPTION_BINDING_VERSION, 1, destinations)
+            .map_err(db_error_to_batch)?;
+        binding_row.write_to_row(&mut record);
+        // Round 2 (A4): durability-before-start — the row is written as
+        // `pending_durable` FIRST, THEN flipped; a follower can never
+        // observe a startable row whose durable barrier has not flushed.
+        let requested_state = if op.paused { "paused" } else { "active" };
+        crate::repl_binding::pending::write_new_subscription(&self.shamir, record, requested_state)
             .await
-            .map_err(|e| err(e.to_string()))?;
-        self.shamir
-            .system_store()
-            .persist_table_interner(&table, None)
-            .await
-            .map_err(|e| err(e.to_string()))?;
-        self.shamir
-            .flush_seed_catalogue()
-            .await
-            .map_err(|e| err(e.to_string()))?;
+            .map_err(db_error_to_batch)?;
         Ok(admin_result(mpack!({
             "created_subscription": @(QueryValue::Str(name)),
         })))
@@ -402,13 +395,9 @@ impl ShamirAdminExecutor {
         &self,
         op: &DropSubscriptionOp,
     ) -> Result<QueryResult, BatchError> {
-        let err = |msg: String| BatchError::QueryError {
-            alias: String::new(),
-            message: msg,
-            code: None,
-        };
+        let err = batch_err;
         self.authorize_repl_mutation().await?;
-        let _control = self.shamir.replication_control_lock.lock().await;
+        let _control = self.shamir.lock_replication_control().await;
 
         let name = op.drop_subscription.clone();
         let table = self
@@ -417,6 +406,17 @@ impl ShamirAdminExecutor {
             .subscriptions_table()
             .await
             .map_err(|e| err(e.to_string()))?;
+
+        // S5c-X PR8b-2: dropping a quarantined subscription is refused —
+        // dropping is not evidence of consistency.
+        self.shamir
+            .ensure_drop_allowed(&name)
+            .await
+            .map_err(repl_guard_error_to_batch)?; // quiesce (below) before ANY mutation
+        self.shamir
+            .quiesce_subscription_lease_locked(&name, &_control)
+            .await;
+
         let del_op = crate::query::write::DeleteOp {
             delete_from: crate::query::TableRef::new("subscriptions"),
             where_clause: crate::query::filter::Filter::Eq {
@@ -428,8 +428,8 @@ impl ShamirAdminExecutor {
         };
         let result = self.delete_repl(&table, &del_op).await?;
         if result {
-            // PR8b: dropping may remove a `resync_required` row and lift the
-            // quarantine. Boxed (Round-14): await state off the caller's frame.
+            // PR8b: the delete can remove a non-quarantined row's cache
+            // entry (boxed: Round-14).
             Box::pin(self.shamir.refresh_resync_quarantine_cache())
                 .await
                 .map_err(|e| err(e.to_string()))?;
@@ -444,18 +444,14 @@ impl ShamirAdminExecutor {
         &self,
         op: &AlterSubscriptionOp,
     ) -> Result<QueryResult, BatchError> {
-        let err = |msg: String| BatchError::QueryError {
-            alias: String::new(),
-            message: msg,
-            code: None,
-        };
+        let err = batch_err;
         let err_code = |code: &str, msg: String| BatchError::QueryError {
             alias: String::new(),
             message: msg,
             code: Some(code.to_string()),
         };
         self.authorize_repl_mutation().await?;
-        let _control = self.shamir.replication_control_lock.lock().await;
+        let _control = self.shamir.lock_replication_control().await;
 
         let name = op.alter_subscription.clone();
         let table = self
@@ -488,16 +484,23 @@ impl ShamirAdminExecutor {
         }
 
         let mut record = existing.records[0].as_value().into_owned();
-        // S5c-X PR8b: any action on a quarantined (`resync_required` or
-        // durably `quarantined`-marked) subscription is refused until a
-        // replacement seed has been bound since the quarantine began —
-        // compared via the durable `resync_from_receipt` baseline
-        // `mark_subscription_terminal` wrote against the row's current
-        // `seed_receipt`. Pause and SetProfile on a quarantined row are
-        // refused too: a state flip can never clear the quarantine (operators
-        // must reseed or DROP). This gate runs FIRST: no row mutation (and no
-        // `seed_resume_validated` flip) happens on refusal, and the typed
-        // error names the runbook.
+        // S5c-X PR8b-2 round 3 (P1-C): a `pending_durable` row is an
+        // unfinished creation barrier with NO durable active state — refuse
+        // every action (re-run CREATE or DROP it).
+        if record.get("state").and_then(|value| value.as_str()) == Some(PENDING_STATE) {
+            return Err(BatchError::query_coded(
+                "",
+                "pending_creation_barrier",
+                format!(
+                    "subscription '{name}' is an unfinished creation barrier (pending_durable): \
+                     it has no durable active state — re-run CREATE to complete or DROP it"
+                ),
+            ));
+        }
+        // S5c-X PR8b: any action on a quarantined subscription is refused
+        // until a replacement seed has been bound (durable
+        // `resync_from_receipt` baseline); Pause/SetProfile are refused
+        // outright. Runs FIRST: no row mutation happens on refusal.
         if row_is_quarantined(&record) {
             let reseeded = match &op.action {
                 SubAction::Resume => {
@@ -513,8 +516,7 @@ impl ShamirAdminExecutor {
                     "",
                     "resync_required",
                     format!(
-                        "subscription '{name}' is quarantined (resync_required): \
-                             install a replacement seed per guide/09-seed-recovery.md, then Resume"
+                        "subscription '{name}' is quarantined (resync_required): DROP of a quarantined subscription is refused in this version; install a replacement seed per guide/09-seed-recovery.md, then Resume"
                     ),
                 ));
             }
@@ -565,14 +567,32 @@ impl ShamirAdminExecutor {
             .validate_seed_resume_action(&record, &op.action)
             .await
             .map_err(super::replication_seed::control::batch_error)?;
+        // S5c-X PR8b-2: SetProfile must not change the destination set —
+        // resolve the proposed profile and require exact equality with the
+        // row's binding.
+        if let SubAction::SetProfile(proposed_profile) = &op.action {
+            let streams =
+                super::replication_seed::catalogue::streams(&self.shamir, proposed_profile)
+                    .await
+                    .map_err(super::replication_seed::control::batch_error)?;
+            self.shamir
+                .ensure_set_profile_binding_unchanged(&record, proposed_profile, &streams)
+                .await
+                .map_err(|e| {
+                    BatchError::query_coded("", "binding_destination_mismatch", e.to_string())
+                })?;
+        }
         if let QueryValue::Map(ref mut m) = record {
             match &op.action {
                 SubAction::Pause => {
+                    // quiesce first: drain an in-flight apply, block new ones
+                    self.shamir
+                        .quiesce_subscription_lease_locked(&name, &_control)
+                        .await;
                     m.insert("state".to_string(), QueryValue::Str("paused".to_string()));
                 }
                 SubAction::Resume => {
-                    // Refuse to reactivate over a dead destination gate. A
-                    // missing profile or destination is not this check's concern.
+                    // Refuse to reactivate over a dead destination gate.
                     let profile = m
                         .get("profile")
                         .and_then(|value| value.as_str())
@@ -630,8 +650,7 @@ impl ShamirAdminExecutor {
                         }
                     }
                     // S5c-X PR8b: a successful (post-reseed) Resume lifts the
-                    // quarantine — remove the durable marker and its receipt
-                    // baseline alongside the state flip.
+                    // quarantine — remove the marker + baseline fields.
                     m.shift_remove("status_message");
                     m.shift_remove("quarantined");
                     m.shift_remove("resync_from_receipt");
@@ -639,18 +658,31 @@ impl ShamirAdminExecutor {
                     m.insert("state".to_string(), QueryValue::Str("active".to_string()));
                 }
                 SubAction::SetProfile(p) => {
+                    // Binding/generation unchanged: destinations proven identical above.
                     m.insert("profile".to_string(), QueryValue::Str(p.clone()));
                 }
             }
         }
-        let set_op = crate::query::write::SetOp {
-            set: crate::query::TableRef::new("subscriptions"),
-            key: mpack!({"name": @(QueryValue::Str(name.clone()))}),
-            value: record,
+        // successful Resume resolves this same name across older binding generations
+        // only after the durable replace, interner flush, catalogue flush, and refresh.
+        let resume_rollback = if matches!(op.action, SubAction::Resume) {
+            SubscriptionBinding::from_row(&record).ok().map(|binding| {
+                let keys = binding.destinations().to_vec();
+                // Rebind increments generation; same-name pending claims from older generations
+                // remain until recovery succeeds. Exact token rollback runs only after durability.
+                let claims = self
+                    .shamir
+                    .resync_quarantine
+                    .owner_claims_for_subscription(&name, &keys);
+                (claims, keys)
+            })
+        } else {
+            None
         };
+        // Round 6 item 1: Resume `shift_remove`s marker fields, and a plain `SetOp`
+        // MERGES - persist via the true-replace helper (one implicit tx staging).
         self.shamir
-            .system_store()
-            .set_via_implicit_tx(&table, &set_op)
+            .replace_subscription_row(&table, name.clone(), record)
             .await
             .map_err(|e| err(e.to_string()))?;
         self.shamir
@@ -658,27 +690,27 @@ impl ShamirAdminExecutor {
             .persist_table_interner(&table, None)
             .await
             .map_err(|e| err(e.to_string()))?;
-        // Round-12 (stack layout): pinned like the refresh below.
-        Box::pin(self.shamir.flush_seed_catalogue())
+        Box::pin(self.shamir.flush_seed_catalogue()) // Round-12 stack pin
             .await
             .map_err(|e| err(e.to_string()))?;
-        // PR8b: Pause/Resume/SetProfile can flip the persisted `state`; rebuild
-        // the read-quarantine cache post-commit. Boxed (Round-14): await state
-        // off the caller's frame.
+        // PR8b: rebuild the read-quarantine cache post-commit (Round-14).
         Box::pin(self.shamir.refresh_resync_quarantine_cache())
             .await
             .map_err(|e| err(e.to_string()))?;
+        if let Some((claims, keys)) = resume_rollback {
+            for claim in claims {
+                self.shamir
+                    .resync_quarantine
+                    .rollback_pending(&claim, keys.clone());
+            }
+        }
         Ok(admin_result(mpack!({
             "altered_subscription": @(QueryValue::Str(name)),
         })))
     }
 
     pub(super) async fn handle_list_subscriptions(&self) -> Result<QueryResult, BatchError> {
-        let err = |msg: String| BatchError::QueryError {
-            alias: String::new(),
-            message: msg,
-            code: None,
-        };
+        let err = batch_err;
         self.authorize_repl_read().await?;
 
         let table = self
@@ -696,11 +728,7 @@ impl ShamirAdminExecutor {
     }
 
     pub(super) async fn handle_replication_status(&self) -> Result<QueryResult, BatchError> {
-        let err = |msg: String| BatchError::QueryError {
-            alias: String::new(),
-            message: msg,
-            code: None,
-        };
+        let err = batch_err;
         self.authorize_repl_read().await?;
 
         // 386-a: status is the set of subscriptions with their `state`.
@@ -724,9 +752,7 @@ impl ShamirAdminExecutor {
         })))
     }
 
-    // ------------------------------------------------------------------
-    // internal storage helpers
-    // ------------------------------------------------------------------
+    // -------------------- internal storage helpers --------------------
 
     /// Read every record of a system-store table as owned `QueryValue`s.
     async fn read_all(
@@ -744,19 +770,14 @@ impl ShamirAdminExecutor {
             .collect())
     }
 
-    /// Route a repl delete through the implicit-tx file-WAL path. Returns
-    /// whether any record was removed.
+    /// Route a repl delete through the implicit-tx file-WAL path.
     async fn delete_repl(
         &self,
         table: &crate::engine::table::TableManager,
         op: &crate::query::write::DeleteOp,
     ) -> Result<bool, BatchError> {
         use crate::access::Actor;
-        let err = |msg: String| BatchError::QueryError {
-            alias: String::new(),
-            message: msg,
-            code: None,
-        };
+        let err = batch_err;
         let repo = self
             .shamir
             .system_store()

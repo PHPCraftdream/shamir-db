@@ -31,7 +31,10 @@
 //! are logged + retried with backoff. Epoch/gap/rejection and reopen-required
 //! errors terminate the loop; a dead destination gate is never retried.
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+
+use shamir_db::repl_binding::SubscriptionLease;
 
 use shamir_db::engine::{
     tx::ReplicatedEvent,
@@ -43,6 +46,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::error::ReplError;
+use super::source::seed::terminal::{clear_stall, note_swallowed_failure};
 use super::source::{leader_epoch_of, ReplSource};
 
 /// Default pull batch size (REPLICATION §6.1 `pull_limit`). Each pull returns
@@ -80,7 +84,11 @@ pub(crate) const STALL_VISIBILITY_THRESHOLD: usize = 10;
 /// Configuration for [`run_follower_loop`]: per-repo identity + tunables,
 /// grouped so the loop entry point stays under the argument-count lint and
 /// callers can build the config once and reuse it across restarts.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is implemented manually because the lease (an `Arc` over the
+/// db-side [`SubscriptionLease`], which carries a `tokio::sync::RwLock`) has
+/// no `Debug` impl of its own in `shamir-db`.
+#[derive(Clone)]
 pub struct FollowerLoopConfig {
     /// Stable identity advertised in `ReplHello`.
     pub node_id: String,
@@ -103,12 +111,48 @@ pub struct FollowerLoopConfig {
     /// callers pass `None`; tests pass a small cap to avoid relying on
     /// cancellation timing.
     pub max_iterations: Option<usize>,
-    /// PR6b-3 stall visibility: the subscription row name to mark when the
+    /// S5c-X round 3: the subscription this loop serves. Empty means
+    /// "unsupervised loop" (direct/test callers) with no lease — the
+    /// lease gates below are skipped entirely — and stall visibility is
+    /// disabled. A non-empty name enables PR6b-3 stall visibility: when the
     /// loop swallows [`STALL_VISIBILITY_THRESHOLD`] consecutive failures
-    /// without bookmark progress. `None` (direct/test callers) keeps the
-    /// loop retry-only; the supervisor always sets it so the stall surfaces
-    /// as a persistent `status_message`.
-    pub subscription: Option<String>,
+    /// without bookmark progress, that subscription row is marked with a
+    /// persistent `status_message` (the supervisor always sets it).
+    pub subscription: String,
+    /// S5c-X round 4: the per-subscription generation lease — the loop
+    /// applies only while the lease is valid. `None` for unsupervised
+    /// loops (empty [`Self::subscription`]).
+    pub lease: Option<Arc<SubscriptionLease>>,
+    /// Test-only apply park for selected target loops.
+    #[cfg(test)]
+    pub(crate) apply_park: Option<Arc<ApplyParkHook>>,
+    /// Per-loop exit notification for test observability.
+    #[cfg(test)]
+    pub(crate) exit_hook: Option<Arc<ApplyParkHook>>,
+}
+
+impl std::fmt::Debug for FollowerLoopConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FollowerLoopConfig")
+            .field("node_id", &self.node_id)
+            .field("db", &self.db)
+            .field("repo", &self.repo)
+            .field("poll_wait_ms", &self.poll_wait_ms)
+            .field(
+                "validate_replicated_payload",
+                &self.validate_replicated_payload,
+            )
+            .field("max_iterations", &self.max_iterations)
+            .field("subscription", &self.subscription)
+            .field(
+                "lease",
+                &self
+                    .lease
+                    .as_ref()
+                    .map(|l| format!("generation={}", l.generation)),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl FollowerLoopConfig {
@@ -124,7 +168,12 @@ impl FollowerLoopConfig {
             #[cfg(test)]
             identity_fence: true,
             max_iterations: None,
-            subscription: None,
+            subscription: String::new(),
+            lease: None,
+            #[cfg(test)]
+            apply_park: None,
+            #[cfg(test)]
+            exit_hook: None,
         }
     }
 
@@ -161,7 +210,7 @@ impl FollowerLoopConfig {
     /// progress). The supervisor wires this; direct callers may omit it.
     #[must_use]
     pub fn with_subscription(mut self, name: impl Into<String>) -> Self {
-        self.subscription = Some(name.into());
+        self.subscription = name.into();
         self
     }
 }
@@ -171,6 +220,38 @@ impl FollowerLoopConfig {
 pub(crate) struct IdentityStoreOverride {
     pub(crate) info: Arc<dyn shamir_db::storage::types::Store>,
     pub(crate) startup_reflush: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct ApplyParkHook {
+    pub(crate) repo: Option<String>,
+    pub(crate) after_apply: bool,
+    pub(crate) arrived: Arc<tokio::sync::Notify>,
+    pub(crate) release: Arc<tokio::sync::Notify>,
+    pub(crate) exited: Arc<tokio::sync::Notify>,
+}
+
+/// Test-only park at the configured phase; cancellation releases a parked loop.
+#[cfg(test)]
+async fn apply_park_wait(
+    repo: &str,
+    hook: Option<&ApplyParkHook>,
+    cancel: &CancellationToken,
+) -> bool {
+    if let Some(hook) = hook {
+        if hook.repo.as_deref() == Some(repo) {
+            hook.arrived.notify_one();
+            tokio::select! {
+                _ = hook.release.notified() => true,
+                _ = cancel.cancelled() => false,
+            }
+        } else {
+            true
+        }
+    } else {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -248,8 +329,17 @@ async fn run_follower_loop_internal(
         identity_fence,
         max_iterations,
         subscription,
+        lease,
+        #[cfg(test)]
+        apply_park,
+        #[cfg(test)]
+            exit_hook: _,
     } = cfg;
-    let subscription = subscription.as_deref();
+    let subscription = if subscription.is_empty() {
+        None
+    } else {
+        Some(subscription.as_str())
+    };
     #[cfg(not(test))]
     let identity_fence = true;
     let apply_policy = if validate_replicated_payload {
@@ -274,6 +364,22 @@ async fn run_follower_loop_internal(
             identity_store.as_ref().map(|store| &store.info),
         )
         .await?;
+    }
+    // S5c-X round 4: lease-based start gate. The loop holds the lease the
+    // supervisor took under the control lock; it never starts when the lease
+    // was already superseded (DROP / PAUSE / rebind ran their quiesce before
+    // the hand-off). Unsupervised loops (no lease) skip the check.
+    if let Some(l) = &lease {
+        if !l.valid.load(Ordering::Acquire) {
+            info!(
+                node_id = %node_id,
+                db = %db_name,
+                repo = %repo,
+                subscription = %subscription.unwrap_or(""),
+                "follower_loop: binding lease already superseded; exiting"
+            );
+            return Ok(());
+        }
     }
     let mut max_seen_epoch = match source.hello(&node_id).await {
         Ok(resp) => {
@@ -362,6 +468,21 @@ async fn run_follower_loop_internal(
             }
         }
         iter += 1;
+
+        // S5c-X round 4: re-check the lease at the TOP of every iteration,
+        // BEFORE the bookmark read / pull / apply. A superseded lease means
+        // the binding was mutated (DROP / PAUSE / rebind); the loop exits
+        // cleanly and reconcile owns any restart.
+        if let Some(l) = &lease {
+            if !l.valid.load(Ordering::Acquire) {
+                info!(
+                    node_id = %node_id,
+                    subscription = %subscription.unwrap_or(""),
+                    "follower_loop: binding lease superseded; exiting"
+                );
+                return Ok(());
+            }
+        }
 
         // 2. read the durable bookmark on the follower (R1-b).
         let repo_instance = match db.get_db(&db_name).and_then(|d| d.get_repo(&repo)) {
@@ -663,6 +784,30 @@ async fn run_follower_loop_internal(
 
         // PR6b-3: the receipt pipeline is the ONLY apply path; admission
         // refuses unsupported durable follower states with a typed error.
+        // Round-4 lease: hold the READ guard across the engine apply. A
+        // concurrent lifecycle mutation (DROP/PAUSE/terminal/rebind) takes
+        // the WRITE gate under the control lock and waits for this apply to
+        // finish. The loop NEVER takes the control lock while holding this
+        // guard.
+        let _apply_guard = match &lease {
+            Some(l) => {
+                let g = l.apply_gate.read().await;
+                if !l.valid.load(Ordering::Acquire) {
+                    info!(node_id = %node_id, subscription = %subscription.unwrap_or(""),
+                        "follower_loop: binding superseded before apply; exiting");
+                    return Ok(());
+                }
+                Some(g)
+            }
+            None => None,
+        };
+
+        #[cfg(test)]
+        if let Some(hook) = apply_park.as_deref() {
+            if !hook.after_apply && !apply_park_wait(&repo, Some(hook), &cancel).await {
+                return Ok(());
+            }
+        }
         match shamir_db::engine::tx::apply_replicated::apply_replicated_batch(
             &repo_instance,
             &events,
@@ -769,108 +914,15 @@ async fn run_follower_loop_internal(
                 sleep_backoff(&cancel, &mut backoff_ms).await;
             }
         }
-    }
-}
-
-/// PR6b-3 stall visibility: once [`STALL_VISIBILITY_THRESHOLD`] consecutive
-/// swallowed failures accumulate without durable-bookmark progress, persist
-/// a `status_message` on the subscription row so operators (and tests) can
-/// OBSERVE the stalled loop via the existing status/list admin surface.
-///
-/// Mechanism choice: [`ShamirDb::mark_subscription_terminal`] with
-/// `state = "active"` is the lightest EXISTING persistent write (there is
-/// no status-only API in `shamir-db` and production changes outside
-/// `shamir-server` are out of scope). It writes `status_message` +
-/// `last_terminal_reason` but — because the state is not
-/// `resync_required` — installs NO quarantine, leaves the row `active` so
-/// `reconcile()` keeps (re)starting the loop, and the loop itself keeps
-/// retrying: the stall stays visible, not terminal.
-///
-/// Fires once per stall streak (`stall_reported` guard); cleared by
-/// [`clear_stall`] on the next durable progress.
-async fn note_swallowed_failure(
-    db: &ShamirDb,
-    node_id: &str,
-    subscription: Option<&str>,
-    failures: usize,
-    last_error: &str,
-    stall_reported: &mut bool,
-) {
-    if failures < STALL_VISIBILITY_THRESHOLD || *stall_reported {
-        return;
-    }
-    let message = format!(
-        "follower stalled: {failures} consecutive failures without progress; \
-         last error: {last_error}"
-    );
-    let Some(name) = subscription else {
-        warn!(
-            node_id = %node_id,
-            failures,
-            "follower_loop: stalled without progress (no subscription row to mark)"
-        );
-        return;
-    };
-    // R7-5: the latch is set ONLY after a SUCCESSFUL persistence — on Err it
-    // stays clear so the NEXT failure retries the write (a failed write must
-    // never silence the stall permanently).
-    match db
-        .mark_subscription_terminal(name, "active", &message)
-        .await
-    {
-        Ok(()) => {
-            *stall_reported = true;
-            warn!(
-                node_id = %node_id,
-                subscription = %name,
-                failures,
-                "follower_loop: stall persisted to subscription status_message"
-            );
+        drop(_apply_guard);
+        #[cfg(test)]
+        if let Some(hook) = apply_park.as_deref() {
+            if hook.after_apply && !apply_park_wait(&repo, Some(hook), &cancel).await {
+                return Ok(());
+            }
         }
-        Err(e) => warn!(
-            node_id = %node_id,
-            subscription = %name,
-            error = %e,
-            "follower_loop: failed to persist stall status_message (will retry on next failure)"
-        ),
     }
 }
-
-/// PR6b-3: the bookmark advanced after a reported stall — overwrite the
-/// stall `status_message` with a progress note so a RECOVERED loop is as
-/// visible as a stalled one was.
-async fn clear_stall(
-    db: &ShamirDb,
-    node_id: &str,
-    subscription: Option<&str>,
-    bookmark: u64,
-    stall_reported: &mut bool,
-) {
-    *stall_reported = false;
-    let Some(name) = subscription else {
-        return;
-    };
-    let message = format!("replication progress restored; durable bookmark at {bookmark}");
-    if let Err(e) = db
-        .mark_subscription_terminal(name, "active", &message)
-        .await
-    {
-        warn!(
-            node_id = %node_id,
-            subscription = %name,
-            error = %e,
-            "follower_loop: failed to persist progress status_message"
-        );
-    } else {
-        info!(
-            node_id = %node_id,
-            subscription = %name,
-            bookmark,
-            "follower_loop: stall cleared (bookmark advanced)"
-        );
-    }
-}
-
 /// Exponential backoff sleep that is cancellation-aware. Doubles
 /// `backoff_ms` on each call (capped at `MAX_BACKOFF_MS`); leaves it
 /// untouched on cancellation (the loop is about to return anyway).
