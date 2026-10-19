@@ -1,0 +1,56 @@
+name: flake-loop
+
+# Manual flake hunt (FLAKE-2): runs the two Windows-flaky shutdown tests in a
+# loop with full logs. Dispatch with `gh workflow run flake-loop.yml --ref <branch>`.
+on:
+  workflow_dispatch:
+  # A workflow that exists only on a branch cannot be dispatched through the
+  # API, so the FLAKE-2 branch also runs it when this file changes.
+  push:
+    branches: [fix/windows-flush-stall]
+    paths: [".github/workflows/flake-loop.yml"]
+
+jobs:
+  flake-loop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      # Same pinned nextest the CI jobs use (`scripts/test.sh` requires it).
+      - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af  # v2.87.11
+        with:
+          tool: nextest@0.9.137
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - name: Run target tests 30x with full logs
+        shell: bash
+        run: |
+          failed=0
+          logdir="$PWD/flake-logs"
+          mkdir -p "$logdir"
+          for i in $(seq 1 30); do
+            log="$logdir/iteration-$i.log"
+            echo "=== iteration $i ==="
+            # `shell: bash` runs with -e: capture the exit code explicitly so a
+            # failing iteration does not end the loop.
+            rc=0
+            ./scripts/test.sh -p shamir-db -- durability_levels_tests durability_policy_tests >"$log" 2>&1 || rc=$?
+            echo "=== iteration $i exit code: $rc ==="
+            grep -E "SLOW|FAIL|TIMEOUT|shutdown stage slow" "$log" || true
+            if [ "$rc" -ne 0 ]; then
+              failed=1
+              echo "=== iteration $i FAILED; full log follows ==="
+              cat "$log"
+            fi
+          done
+          echo "logs kept at: $logdir"
+          exit "$failed"
+      - name: Upload iteration logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flake-logs-${{ matrix.os }}
+          path: flake-logs/
