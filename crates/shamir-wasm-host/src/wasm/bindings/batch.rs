@@ -1,8 +1,8 @@
-use super::wasm_function::{read_guest_mem, HostState};
+use super::super::wasm_function::{read_guest_mem, HostState};
 use shamir_types::types::value::QueryValue;
 
 /// Host implementation of `batch_put(key_ptr, key_len, val_ptr, val_len)`.
-pub(super) fn host_batch_put(
+pub(in crate::wasm) fn host_batch_put(
     mut caller: wasmtime::Caller<'_, HostState>,
     key_ptr: i32,
     key_len: i32,
@@ -27,7 +27,7 @@ pub(super) fn host_batch_put(
 }
 
 /// Host implementation of `batch_get(key_ptr, key_len) -> i64`.
-pub(super) fn host_batch_get(
+pub(in crate::wasm) fn host_batch_get(
     mut caller: wasmtime::Caller<'_, HostState>,
     key_ptr: i32,
     key_len: i32,

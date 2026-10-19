@@ -1,10 +1,7 @@
 //! Built-in functions shipped with the engine.
 
-use super::context::{FnBatch, FnCtx};
-use super::contract::ShamirFunction;
-use super::error::{FnResult, FunctionError};
-use super::params::Params;
 use super::scalar::builtin_scalars;
+use crate::{FnBatch, FnCtx, FnResult, FunctionError, Params, ShamirFunction};
 use async_trait::async_trait;
 use shamir_types::types::value::QueryValue;
 

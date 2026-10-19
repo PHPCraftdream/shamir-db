@@ -15,42 +15,37 @@
 //! PURELY ADDITIVE (F6a): wired into nothing yet — production still runs a
 //! single [`WalSegment`] via `WalSink::File`. F6b cuts `repo_instance` over.
 
-mod sealed_retained_bytes;
-mod sync_snapshot;
-#[cfg(test)]
-mod sync_test_seam;
-
 use std::fs::remove_file;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+pub(super) use std::path::PathBuf;
+pub(super) use std::sync::{Arc, Mutex};
 
-use shamir_storage::error::{DbError, DbResult};
-use tokio::task::spawn_blocking;
+pub(super) use shamir_storage::error::{DbError, DbResult};
+pub(super) use tokio::task::spawn_blocking;
 
-use crate::wal_entry_v2::WalEntryV2;
-use crate::wal_segment::WalSegment;
+pub(super) use crate::wal_entry_v2::WalEntryV2;
+pub(super) use crate::wal_segment::WalSegment;
 
 /// Metadata for one sealed (closed) segment. Its file is fully written
 /// (no torn tail) and may be replayed or deleted but never appended.
 #[derive(Clone)]
-struct SealedMeta {
-    seq: u64,
-    path: PathBuf,
+pub(super) struct SealedMeta {
+    pub(super) seq: u64,
+    pub(super) path: PathBuf,
     /// Highest `commit_version` in this segment — the truncation key. A
     /// sealed segment is reclaimable once `max_version <= durable_watermark`.
     /// `0` means "no versioned record" (legacy / non-versioned) and pins the
     /// segment: it is NEVER truncated by version (I5).
-    max_version: u64,
-    synced: bool,
+    pub(super) max_version: u64,
+    pub(super) synced: bool,
 }
 
 /// Mutable state guarded by the single coarse `Mutex`. Sealed-list mutation
 /// happens only on rotation (the append leader) and truncation — both rare,
 /// never on a per-record hot path.
-struct Inner {
-    sealed: Vec<SealedMeta>,
-    active: Arc<WalSegment>,
-    active_seq: u64,
+pub(super) struct Inner {
+    pub(super) sealed: Vec<SealedMeta>,
+    pub(super) active: Arc<WalSegment>,
+    pub(super) active_seq: u64,
 }
 
 /// Segmented WAL sink over a directory of numbered segments.
@@ -65,17 +60,17 @@ struct Inner {
 /// do not contend on a hot path. CAPSTONE replaces this with a
 /// single-writer task.
 pub struct SegmentSet {
-    dir: PathBuf,
-    max_bytes: u64,
-    inner: Mutex<Inner>,
+    pub(super) dir: PathBuf,
+    pub(super) max_bytes: u64,
+    pub(super) inner: Mutex<Inner>,
     // Cold sync/rotation exclusion only; ordinary appends never acquire it.
     pub(crate) sync_gate: Arc<tokio::sync::Mutex<()>>,
     #[cfg(test)]
-    pub(crate) sync_test: sync_test_seam::SyncTestSeam,
+    pub(crate) sync_test: super::sync_test_seam::SyncTestSeam,
 }
 
 /// Format a segment file name from its seq: `NNNNNNNN.wal` (zero-padded 8).
-fn seg_file_name(seq: u64) -> String {
+pub(super) fn seg_file_name(seq: u64) -> String {
     format!("{seq:08}.wal")
 }
 
@@ -129,7 +124,7 @@ impl SegmentSet {
                 max_bytes,
                 sync_gate: Arc::new(tokio::sync::Mutex::new(())),
                 #[cfg(test)]
-                sync_test: sync_test_seam::SyncTestSeam::default(),
+                sync_test: super::sync_test_seam::SyncTestSeam::default(),
                 inner: Mutex::new(Inner {
                     sealed: Vec::new(),
                     active,
@@ -213,7 +208,7 @@ impl SegmentSet {
             max_bytes,
             sync_gate: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(test)]
-            sync_test: sync_test_seam::SyncTestSeam::default(),
+            sync_test: super::sync_test_seam::SyncTestSeam::default(),
             inner: Mutex::new(Inner {
                 sealed,
                 active,
@@ -584,7 +579,7 @@ impl SegmentSet {
     }
 
     pub async fn sealed_retained_bytes(&self) -> DbResult<u64> {
-        sealed_retained_bytes::measure(self).await
+        super::sealed_retained_bytes::measure(self).await
     }
 
     /// Test-only (task #531): clone the active segment's `Arc<WalSegment>` so

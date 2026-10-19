@@ -11,10 +11,10 @@
 //! )))?;
 //! ```
 
-use crate::context::{FnBatch, FnCtx};
-use crate::contract::ShamirFunction;
-use crate::error::FnResult;
-use crate::params::Params;
+use super::context::{FnBatch, FnCtx};
+use super::contract::ShamirFunction;
+use super::error::FnResult;
+use super::params::Params;
 use async_trait::async_trait;
 use shamir_types::types::value::QueryValue;
 use std::future::Future;

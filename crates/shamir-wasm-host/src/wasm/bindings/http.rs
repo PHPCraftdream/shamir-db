@@ -1,5 +1,5 @@
-use super::super::net_gateway::{HttpRequest, HttpResponse};
-use super::wasm_function::{read_guest_mem, write_value_to_guest, HostState};
+use super::super::wasm_function::{read_guest_mem, write_value_to_guest, HostState};
+use crate::gateway::net_gateway::{HttpRequest, HttpResponse};
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::QueryValue;
 
@@ -17,7 +17,7 @@ use shamir_types::types::value::QueryValue;
 /// ```text
 /// { "method": Str, "url": Str, "headers": Map|List, "body": Bin }
 /// ```
-pub(super) fn decode_http_request(val: &QueryValue) -> Result<HttpRequest, String> {
+pub(in crate::wasm) fn decode_http_request(val: &QueryValue) -> Result<HttpRequest, String> {
     let map = match val {
         QueryValue::Map(entries) => entries,
         _ => return Err("http_fetch: request must be a Map".to_string()),
@@ -83,7 +83,7 @@ pub(super) fn decode_http_request(val: &QueryValue) -> Result<HttpRequest, Strin
 /// ```text
 /// { "status": Int, "headers": Map, "body": Bin }
 /// ```
-pub(super) fn encode_http_response(resp: HttpResponse) -> QueryValue {
+pub(in crate::wasm) fn encode_http_response(resp: HttpResponse) -> QueryValue {
     let mut header_map = new_map_wc(resp.headers.len());
     for (k, v) in resp.headers {
         header_map.insert(k, QueryValue::Str(v));
@@ -111,7 +111,7 @@ pub(super) fn encode_http_response(resp: HttpResponse) -> QueryValue {
 /// Only "no net gateway configured" traps (config bug, like db/ctx.call).
 /// All runtime errors (allowlist denial, curl failure, timeout) are
 /// returned as catchable `Err` via the envelope.
-pub(super) fn host_http_fetch(
+pub(in crate::wasm) fn host_http_fetch(
     mut caller: wasmtime::Caller<'_, HostState>,
     (req_ptr, req_len): (i32, i32),
 ) -> Box<dyn std::future::Future<Output = Result<i64, wasmtime::Error>> + Send + '_> {

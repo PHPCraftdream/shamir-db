@@ -1,6 +1,6 @@
 //! [`WasmEngine`] and [`WasmLimits`] — Wasmtime engine configuration.
 
-use super::super::error::{FnResult, FunctionError};
+use crate::runtime::error::{FnResult, FunctionError};
 use wasmtime::{Engine, InstanceAllocationStrategy, PoolingAllocationConfig};
 
 // ── WasmEngine ────────────────────────────────────────────────────────

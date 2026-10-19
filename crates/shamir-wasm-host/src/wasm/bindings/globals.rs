@@ -1,4 +1,4 @@
-use super::wasm_function::{read_guest_mem, HostState};
+use super::super::wasm_function::{read_guest_mem, HostState};
 use shamir_types::types::value::QueryValue;
 
 /// Host implementation of `global_set(key_ptr, key_len, val_ptr, val_len)`.
@@ -22,7 +22,7 @@ use shamir_types::types::value::QueryValue;
 /// compiled-in, not guest-supplied, so they sit outside this fix's threat
 /// model, but a future native `env.*` writer would need its own guard if one
 /// is ever added.
-pub(super) fn host_global_set(
+pub(in crate::wasm) fn host_global_set(
     mut caller: wasmtime::Caller<'_, HostState>,
     key_ptr: i32,
     key_len: i32,
@@ -61,7 +61,7 @@ pub(super) fn host_global_set(
 /// If the requested key starts with `"env."`, the suffix (the env-var name)
 /// must be present in the invocation's `secret_grants` — otherwise the
 /// global looks absent (returns 0). Non-`env.` keys are returned normally.
-pub(super) fn host_global_get(
+pub(in crate::wasm) fn host_global_get(
     mut caller: wasmtime::Caller<'_, HostState>,
     key_ptr: i32,
     key_len: i32,

@@ -84,7 +84,7 @@
 //! future WASI target, or letting guests declare their own
 //! `Cargo.toml`/dependencies).
 
-use super::error::{FnResult, FunctionError};
+use crate::runtime::error::{FnResult, FunctionError};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;

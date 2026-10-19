@@ -1,6 +1,6 @@
-use super::super::context::{FnBatch, FnCtx};
-use super::super::params::Params;
-use super::wasm_function::{read_guest_mem, HostState};
+use super::super::wasm_function::{read_guest_mem, HostState};
+use crate::runtime::context::{FnBatch, FnCtx};
+use crate::runtime::params::Params;
 use shamir_types::types::value::QueryValue;
 
 // ── Async host import: call ───────────────────────────────────────────
@@ -38,7 +38,7 @@ use shamir_types::types::value::QueryValue;
 /// The `Caller<'_, HostState>` is kept alive for the entire future lifetime
 /// because the returned `Box<dyn Future + Send + '_>` captures it. Wasmtime
 /// guarantees `Caller` is `Send` when `T: Send` and async support is active.
-pub(super) fn host_call(
+pub(in crate::wasm) fn host_call(
     mut caller: wasmtime::Caller<'_, HostState>,
     (name_ptr, name_len, params_ptr, params_len): (i32, i32, i32, i32),
 ) -> Box<dyn std::future::Future<Output = Result<i64, wasmtime::Error>> + Send + '_> {

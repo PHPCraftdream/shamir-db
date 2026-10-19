@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
 
-use super::super::context::BatchContext;
+use super::super::super::runtime::context::BatchContext;
 
 // ── Native test functions ─────────────────────────────────────────────
 

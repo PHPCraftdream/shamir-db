@@ -4,11 +4,7 @@
 //! * [`WasmEngine`] / [`WasmLimits`] — engine configuration (`wasm_engine`).
 //! * [`WasmFunction`] — the [`ShamirFunction`] implementation (`wasm_function`).
 
-mod host_batch;
-mod host_call;
-mod host_db;
-mod host_globals;
-mod host_http;
+mod bindings;
 mod wasm_engine;
 mod wasm_function;
 mod wasm_sanitizer;

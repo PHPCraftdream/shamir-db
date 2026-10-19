@@ -19,10 +19,10 @@ use shamir_types::access::Actor;
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
 
-use super::db_gateway::DbGateway;
-use super::env_policy::EnvPolicy;
-use super::net_gateway::NetGateway;
 use super::registry::FunctionRegistry;
+use crate::gateway::db_gateway::DbGateway;
+use crate::gateway::env_policy::EnvPolicy;
+use crate::gateway::net_gateway::NetGateway;
 
 // ── BatchContext ──────────────────────────────────────────────────────
 

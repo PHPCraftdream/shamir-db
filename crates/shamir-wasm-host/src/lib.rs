@@ -19,35 +19,23 @@
 
 mod builtin;
 mod compile;
-mod context;
-mod contract;
-mod db_gateway;
-mod env_policy;
-mod error;
-mod fn_adapter;
-mod meta;
-mod net_gateway;
-mod params;
-mod registry;
-mod scalar;
+mod gateway;
+mod runtime;
 mod wasm;
 
-pub use builtin::Argon2idFunction;
-pub use compile::{compile_rust_source, compile_rust_source_with_timeout, WASM_COMPILE_TIMEOUT};
-pub use context::{BatchContext, FnBatch, FnCtx, GlobalVars};
-pub use contract::ShamirFunction;
-pub use db_gateway::DbGateway;
-pub use env_policy::EnvPolicy;
-pub use error::{FnResult, FunctionError};
-pub use fn_adapter::FnAdapter;
-pub use meta::{CreateFunctionOptions, FunctionMeta, Security, Visibility};
-pub use net_gateway::{
-    check_url_allowed, check_url_allowed_resolved, HttpRequest, HttpResponse, NetGateway,
-    ResolvedPin,
+pub use builtin::{
+    builtin_aggs, builtin_scalars, Argon2idFunction, CreateFunctionOptions, FunctionMeta, Security,
+    Visibility,
 };
-pub use params::Params;
-pub use registry::FunctionRegistry;
-pub use scalar::{builtin_aggs, builtin_scalars};
+pub use compile::{compile_rust_source, compile_rust_source_with_timeout, WASM_COMPILE_TIMEOUT};
+pub use gateway::{
+    check_url_allowed, check_url_allowed_resolved, DbGateway, EnvPolicy, HttpRequest, HttpResponse,
+    NetGateway, ResolvedPin,
+};
+pub use runtime::{
+    BatchContext, FnAdapter, FnBatch, FnCtx, FnResult, FunctionError, FunctionRegistry, GlobalVars,
+    Params, ShamirFunction,
+};
 pub use wasm::{verify_wasm_module, WasmEngine, WasmFunction, WasmLimits, SANCTIONED_HOST_IMPORTS};
 
 #[cfg(test)]

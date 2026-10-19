@@ -43,15 +43,19 @@
 #[cfg(test)]
 mod tests;
 
-pub mod active_key;
 pub mod event_header;
-pub mod segment_meta;
+
+mod entry;
+mod segment;
 pub mod segment_set;
-pub mod wal_entry_v2;
 pub mod wal_group_commit;
-pub mod wal_segment;
-pub mod wal_sink;
-pub mod wal_ticket;
+
+pub use entry::active_key;
+pub use entry::segment_meta;
+pub use entry::wal_entry_v2;
+pub use segment::wal_segment;
+pub use segment::wal_sink;
+pub use segment::wal_ticket;
 
 pub use active_key::WalActiveKey;
 pub use event_header::{WalEventHeader, WalExtraChange};

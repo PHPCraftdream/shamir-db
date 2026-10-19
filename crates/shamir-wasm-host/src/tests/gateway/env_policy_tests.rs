@@ -1,4 +1,4 @@
-use crate::env_policy::glob_matches;
+use crate::gateway::env_policy::glob_matches;
 
 #[test]
 fn glob_star_only() {
