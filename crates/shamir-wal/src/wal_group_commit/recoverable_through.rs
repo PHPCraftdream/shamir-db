@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 use shamir_storage::error::{DbError, DbResult};
 use tokio::sync::Notify;
 
-use super::{WalCoverage, WalGroupCommit, WalSink};
+use super::group_commit::WalGroupCommit;
+use super::wal_coverage::WalCoverage;
+use crate::wal_sink::WalSink;
 
 static SYNC_NOW_CALLS: AtomicU64 = AtomicU64::new(0);
 static SYNC_LEADER_ROUNDS: AtomicU64 = AtomicU64::new(0);

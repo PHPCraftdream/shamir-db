@@ -1,4 +1,4 @@
-use crate::net_gateway::{
+use crate::gateway::net_gateway::{
     canonicalize_ip, check_host_allowed, check_url_allowed, check_url_allowed_resolved, parse_url,
 };
 use std::net::{IpAddr, Ipv4Addr};
