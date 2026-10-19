@@ -1,7 +1,12 @@
-pub mod base;
-pub mod common;
-pub mod record_id;
-pub mod repo_record;
+//! Re-exports only (CLAUDE.md §module-layout) — logic lives in topical
+//! subfolders.
+
+mod basic;
+mod ids;
+pub use basic::base;
+pub use basic::common;
+pub use ids::record_id;
+pub use ids::repo_record;
 pub mod value;
 pub mod value_error;
 
