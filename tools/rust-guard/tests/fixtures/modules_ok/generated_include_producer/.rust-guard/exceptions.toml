@@ -1,0 +1,7 @@
+# The include! body is emitted by build.rs at compile time; the scoped
+# `include` producer covers exactly this package's generated includes.
+[[producer]]
+name = "include"
+packages = ["fix"]
+owner = "@rust-guard"
+reason = "build.rs codegen emits OUT_DIR includes"
