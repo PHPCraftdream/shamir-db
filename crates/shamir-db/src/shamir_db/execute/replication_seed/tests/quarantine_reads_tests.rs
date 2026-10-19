@@ -821,9 +821,11 @@ async fn t14_bound_destination_stays_refused_after_profile_drop_and_reopen() {
 
 /// Round 2 (C12, Unix-only): the durable reseed→reopen→Resume proof with
 /// the REAL installer (monotonic generations). The quarantine survives a
-/// reopen and the item-6 aggregation rule holds through the real admin
-/// `Resume`: lifting one quarantine unblocks ONLY its exclusive
-/// destination.
+/// reopen and the round-7 item-2 aggregation rule holds through the real
+/// admin `Resume`: every subscription keeps a SINGLE-stream scope (the
+/// `matches_scope` admission rule, `catalogue.rs` — exactly ONE stream) and
+/// the two rows OVERLAP on `testdb/main`; lifting one quarantine must NOT
+/// unblock the destination the other still covers.
 #[cfg(unix)]
 #[tokio::test]
 async fn t15_replacement_rebind_survives_reopen_and_resume_requires_full_recovery() {
@@ -845,21 +847,10 @@ async fn t15_replacement_rebind_survives_reopen_and_resume_requires_full_recover
             )
             .await
             .unwrap();
-        // sub1's EXCLUSIVE destination (round 6 item 6); `users` registered
-        // through the persisting facade so it reloads after the reopen.
-        let side_path = dir.path().join("side");
-        shamir
-            .add_repo(
-                "testdb",
-                RepoConfig::new("side", BoxRepoFactory::fjall(side_path.clone())),
-            )
-            .await
-            .unwrap();
-        shamir
-            .add_table("testdb", "side", "users", false)
-            .await
-            .unwrap();
-        quarantine_repos(&shamir, "sub1", "prof", &["main", "side"]).await;
+        // Round 7 item 2 fixture admission rule: each row keeps a
+        // SINGLE-stream scope (`matches_scope`, `catalogue.rs`); the overlap
+        // on `testdb/main` comes from TWO single-destination subscriptions.
+        quarantine(&shamir, "sub1", "prof", "main").await;
         quarantine(&shamir, "sub2", "prof2", "main").await;
         let err = read_users(&shamir, "main").await.unwrap_err();
         assert_eq!(err.code(), Some("resync_required"));
@@ -884,13 +875,7 @@ async fn t15_replacement_rebind_survives_reopen_and_resume_requires_full_recover
         // Real recovery: install the image ONCE, rebind BOTH rows (same
         // receipt).
         recovery::install_replacement_image(&shamir).await;
-        recovery::rebind_to_replacement_covering(
-            &shamir,
-            "sub1",
-            "prof",
-            &[("testdb", "main"), ("testdb", "side")],
-        )
-        .await;
+        recovery::rebind_to_replacement(&shamir, "sub1", "prof").await;
         recovery::rebind_to_replacement(&shamir, "sub2", "prof2").await;
 
         // Raw-row assertions: still quarantined, generations strictly
@@ -962,16 +947,14 @@ async fn t15_replacement_rebind_survives_reopen_and_resume_requires_full_recover
     // replacement receipt, so one probe serves the Resume.
     shamir.set_replication_resume_probe(recovery::probe());
     resume_subscription(&shamir, 6, "sub1").await.unwrap();
-    // Round 6 item 6 — coverage aggregation, NOT a second active writer:
-    // sub1's EXCLUSIVE `side` serves, the SHARED `main` STILL refuses
-    // (sub2's quarantined row covers it). The test ENDS here: resolving
-    // sub2 needs a second reseed, and the rule needs no second writer.
+    // Round 7 item 2 — coverage aggregation, NOT a second active writer:
+    // sub1's Resume succeeds, but the SHARED `main` STILL refuses (sub2's
+    // quarantined row covers it). The test ENDS here: resolving sub2 needs
+    // a second reseed, and the rule needs no second writer. (There is no
+    // exclusive destination anymore: each row's single bound destination IS
+    // the shared one.)
     // COUNTERFACTUAL: pre-round-6 semantics (a resumed row clears the
     // shared destination's protection) turn the still-refused `main` red.
-    assert!(
-        read_users(&shamir, "side").await.is_ok(),
-        "sub1's exclusive destination must serve after sub1's Resume"
-    );
     let err = read_users(&shamir, "main").await.unwrap_err();
     assert_eq!(err.code(), Some("resync_required"), "{err}");
 }

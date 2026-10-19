@@ -138,19 +138,22 @@ async fn delivery_gate_is_panic_safe_when_closed() {
     assert!(gate.try_with_delivery(|| ()).is_none());
 }
 
-/// Round 6 item 5 ORACLE: a pending key leaves the cache ONLY through an
-/// explicit `confirm_pending` / `rollback_pending` — `install` (a refresh)
-/// is NOT a persistence acknowledgement and must keep unmatched pending
-/// keys (entries included) so reads/guards never regress below the
-/// prepublished set.
+/// Round 6 item 5 ORACLE (updated round 7 item 5): a pending key leaves the
+/// cache ONLY through an explicit `confirm_pending` / `rollback_pending` by
+/// its OWN `name:generation` owner — `install` (a refresh) is NOT a
+/// persistence acknowledgement and must keep unmatched pending keys
+/// (entries included); and an owner's rollback never touches ANOTHER
+/// subscription's claim on the same key, including another claim from the
+/// same logical owner with a distinct token.
 /// COUNTERFACTUAL: reverting `install` to dropping unmatched pending keys
-/// (pre-round-6) turns the two post-refresh `pending` assertions red.
+/// turns the post-refresh `pending` assertions red; reverting owner-scoping
+/// or exact-token resolution makes the concurrent-claim assertions red.
 #[tokio::test]
 async fn quarantine_cache_replace_clears_persisted_removal_but_keeps_pending_failure() {
     let cache = crate::shamir_db::execute::ResyncQuarantineCache::new();
     let active = ("db".to_string(), "active".to_string());
     let pending = ("db".to_string(), "pending".to_string());
-    cache.publish([(pending.clone(), "prepublished".to_string())]);
+    let owner = cache.publish([(pending.clone(), "prepublished".to_string())], "a:1");
     // A refresh that derives other rows must keep the pending key protected.
     cache.install([(active.clone(), "persisted".to_string())]);
     assert!(cache.reason_for("db", "active").is_some());
@@ -161,15 +164,22 @@ async fn quarantine_cache_replace_clears_persisted_removal_but_keeps_pending_fai
     // keeps the pending key (and its reason) until explicit confirmation.
     cache.install(Vec::<((String, String), String)>::new());
     assert!(cache.reason_for("db", "pending").is_some());
-    // confirm_pending drops the entry (no refresh derived it anymore).
-    cache.confirm_pending([pending.clone()]);
-    assert!(cache.reason_for("db", "pending").is_none());
-    // rollback_pending is the definitive variant: pending key gone, entry
-    // dropped, whatever the refresh derived.
-    cache.publish([(pending.clone(), "failed prepublish".to_string())]);
-    cache.install(Vec::<((String, String), String)>::new());
+    // A concurrent B mark claims the same key before A resolves.
+    let owner_b = cache.publish([(pending.clone(), "B prepublished".to_string())], "b:1");
+    // A stale token for A must not affect either pending claim.
+    cache.rollback_pending("a:1:999", [pending.clone()]);
     assert!(cache.reason_for("db", "pending").is_some());
-    cache.rollback_pending([pending.clone()]);
+    // Resolving A cannot clear the key while B's claim remains.
+    cache.confirm_pending(&owner, [pending.clone()]);
+    assert!(cache.reason_for("db", "pending").is_some());
+    cache.confirm_pending(&owner_b, [pending.clone()]);
+    assert!(cache.reason_for("db", "pending").is_none());
+
+    // A later token for A is independent of the already-resolved old token.
+    let owner_a_new = cache.publish([(pending.clone(), "A new token".to_string())], "a:1");
+    cache.rollback_pending(&owner, [pending.clone()]);
+    assert!(cache.reason_for("db", "pending").is_some());
+    cache.rollback_pending(&owner_a_new, [pending.clone()]);
     assert!(cache.reason_for("db", "pending").is_none());
 }
 

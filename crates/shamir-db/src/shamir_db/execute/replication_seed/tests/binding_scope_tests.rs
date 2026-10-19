@@ -246,14 +246,15 @@ async fn binding_scope_overlapping_quarantines_clear_independently() {
     assert_serves_named_row(&shamir, "testdb", "side", "SideRow").await;
 }
 
-/// S5c-X round 6 item 6 (C10, Unix-only): COVERAGE-AGGREGATION through the
-/// REAL recovery path. Both subscriptions cover the SHARED `testdb/main`;
-/// each ALSO has an EXCLUSIVE destination (`side` for sub1, `otherdb/main`
-/// for sub2). Resuming sub1 must unblock ONLY sub1's exclusive destination:
-/// the shared destination STILL refuses because sub2's quarantined row
-/// still covers it. Two quarantined subscriptions overlapping one
-/// destination are NOT simultaneous active writers — the protection is
-/// aggregation over every covering row.
+/// S5c-X round 7 item 2 (C10, Unix-only): COVERAGE-AGGREGATION through the
+/// REAL recovery path. Fixture admission rule: `matches_scope`
+/// (`catalogue.rs`) requires a subscription's scope to be EXACTLY ONE
+/// stream, so each row here keeps a SINGLE-stream scope (`testdb/main`)
+/// and the overlap is shown by TWO single-destination subscriptions bound
+/// to the SAME destination. Resuming sub1 must NOT unblock `testdb/main`:
+/// sub2's quarantined row still covers it. Two quarantined subscriptions
+/// overlapping one destination are NOT simultaneous active writers — the
+/// protection is aggregation over every covering row.
 /// COUNTERFACTUAL: reverting to pre-round-6 semantics (a resumed row clears
 /// the shared destination's protection, or `check_owners` treats the
 /// quarantined sibling as a competing writer) turns the still-refused
@@ -270,60 +271,31 @@ async fn binding_scope_overlap_clearing_through_real_reseed_resume() {
     db.add_repo(RepoConfig::new("main", BoxRepoFactory::in_memory()))
         .await
         .unwrap();
-    // sub1's EXCLUSIVE destination.
-    db.add_repo(
-        RepoConfig::new("side", BoxRepoFactory::in_memory())
-            .add_table(crate::engine::table::TableConfig::new("users")),
-    )
-    .await
-    .unwrap();
-    let otherdb = shamir.create_db("otherdb").await;
-    // sub2's EXCLUSIVE destination.
-    otherdb
-        .add_repo(
-            RepoConfig::new("main", BoxRepoFactory::in_memory())
-                .add_table(crate::engine::table::TableConfig::new("users")),
-        )
-        .await
-        .unwrap();
-    seed_row(&shamir, "testdb", "side", "SideRow").await;
 
-    quarantine(
-        &shamir,
-        "sub1",
-        "prof1",
-        &[("testdb", "main"), ("testdb", "side")],
-    )
-    .await;
-    quarantine(
-        &shamir,
-        "sub2",
-        "prof2",
-        &[("testdb", "main"), ("otherdb", "main")],
-    )
-    .await;
+    // BOTH rows are single-stream (`matches_scope` admission rule) and
+    // overlap on the ONE destination `testdb/main`.
+    quarantine(&shamir, "sub1", "prof1", &[("testdb", "main")]).await;
+    quarantine(&shamir, "sub2", "prof2", &[("testdb", "main")]).await;
     assert_refused(&shamir, "testdb", "main").await;
-    assert_refused(&shamir, "testdb", "side").await;
-    assert_refused(&shamir, "otherdb", "main").await;
 
     // Real recovery: install the replacement image ONCE, then rebind BOTH
-    // rows — sub1 keeps main + its exclusive side; sub2 keeps main + its
-    // exclusive otherdb/main. They share the SAME replacement receipt, so
-    // the round-3 same-receipt `check_owners` rule keeps the quarantined
-    // siblings from competing during each Resume.
+    // rows — each keeps its SINGLE-stream `testdb/main` scope. They share
+    // the SAME replacement receipt, so the round-3 same-receipt
+    // `check_owners` rule keeps the quarantined siblings from competing
+    // during each Resume.
     super::quarantine_reads_tests::recovery::install_replacement_image(&shamir).await;
     super::quarantine_reads_tests::recovery::rebind_to_replacement_covering(
         &shamir,
         "sub1",
         "prof1",
-        &[("testdb", "main"), ("testdb", "side")],
+        &[("testdb", "main")],
     )
     .await;
     super::quarantine_reads_tests::recovery::rebind_to_replacement_covering(
         &shamir,
         "sub2",
         "prof2",
-        &[("testdb", "main"), ("otherdb", "main")],
+        &[("testdb", "main")],
     )
     .await;
     shamir.set_replication_resume_probe(super::quarantine_reads_tests::recovery::probe());
@@ -336,21 +308,19 @@ async fn binding_scope_overlap_clearing_through_real_reseed_resume() {
         .await
         .unwrap();
 
-    // sub1's EXCLUSIVE destination serves again (durable marker removal is
-    // covered by `binding_scope_resume_removes_quarantine_marker_durably`).
-    assert_serves_named_row(&shamir, "testdb", "side", "SideRow").await;
     // The SHARED destination is STILL covered by sub2's quarantined row —
-    // coverage aggregation, not a competing active writer.
+    // coverage aggregation, not a competing active writer. (sub1 has no
+    // exclusive destination: its single bound destination is the shared
+    // one, and its durable marker removal is covered by
+    // `binding_scope_resume_removes_quarantine_marker_durably`.)
     assert_refused(&shamir, "testdb", "main").await;
-    // sub2's exclusive destination is still covered by sub2 itself.
-    assert_refused(&shamir, "otherdb", "main").await;
 }
 
 /// Round 6 item 1: after quarantine → REAL replacement install + rebind →
 /// admin `Resume`, the DURABLE row must have `quarantined`, `status_message`
 /// and `resync_from_receipt` REMOVED and `state == "active"` (Resume
-/// persists through `replace_subscription_row`: DELETE + SET in ONE
-/// implicit tx).
+/// persists through `replace_subscription_row`: ONE implicit tx staging the
+/// WHOLE replacement bytes).
 /// COUNTERFACTUAL: restoring the merge-SET persist (`set_via_implicit_tx`)
 /// keeps `quarantined: true` on the durable row (the `execute_set_tx` merge
 /// branch copies omitted keys' old bytes verbatim) and turns the three
@@ -459,6 +429,10 @@ async fn binding_scope_resume_marker_removal_survives_reopen() {
         .find(|r| r.get("name").and_then(|v| v.as_str()) == Some("sub"))
         .expect("subscription row must exist");
     assert_eq!(row.get("quarantined"), None);
+    // Round 7 item 1: ALL THREE marker fields must stay gone after the
+    // reopen (not only `quarantined`).
+    assert_eq!(row.get("status_message"), None);
+    assert_eq!(row.get("resync_from_receipt"), None);
     assert_eq!(row.get("state").and_then(|v| v.as_str()), Some("active"));
     let resp = read_users(&shamir, "testdb", "main").await.unwrap();
     let served = resp.results["r"].records[0].as_value().into_owned();
@@ -466,4 +440,190 @@ async fn binding_scope_resume_marker_removal_survives_reopen() {
         served.get("name").and_then(|v| v.as_str()),
         Some("replacement")
     );
+}
+
+/// Round 7 item 1: DIRECT test on the true-replace helper. An existing row
+/// is replaced with a modified record — one field CHANGED (`upstream`) and
+/// the marker fields REMOVED (exactly what the Resume arm persists) — and a
+/// fresh read proves the removal reached durability and the change took
+/// (no merge with the old bytes: the helper stages
+/// `KvOp::Set(id, value.to_bytes())` through `update_tx`, the WHOLE new
+/// record).
+/// COUNTERFACTUAL: persisting through a merge-SET (`set_via_implicit_tx`)
+/// copies omitted keys' old bytes verbatim, so `quarantined`,
+/// `status_message` and `resync_from_receipt` reappear on the fresh read.
+#[tokio::test]
+async fn replace_subscription_row_true_replaces_fields() {
+    let shamir = setup().await;
+    quarantine(&shamir, "sub", "prof", &[("testdb", "main")]).await;
+
+    let table = shamir.system_store().subscriptions_table().await.unwrap();
+    let rows = super::super::catalogue::rows(&shamir, "subscriptions")
+        .await
+        .unwrap();
+    let mut record = rows
+        .iter()
+        .find(|r| r.get("name").and_then(|v| v.as_str()) == Some("sub"))
+        .expect("subscription row must exist")
+        .clone();
+    // The durable row carries the markers after the mark.
+    assert_eq!(
+        record.get("quarantined").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    if let QueryValue::Map(ref mut m) = record {
+        m.shift_remove("quarantined");
+        m.shift_remove("status_message");
+        m.shift_remove("resync_from_receipt");
+        m.shift_remove("last_terminal_reason");
+        m.insert("state".to_string(), QueryValue::Str("active".to_string()));
+        // A CHANGED field: must carry the new value, not the merged old one.
+        m.insert(
+            "upstream".to_string(),
+            QueryValue::Str("tcp://peer:9100".to_string()),
+        );
+    }
+    shamir
+        .replace_subscription_row(&table, "sub".to_string(), record)
+        .await
+        .unwrap();
+
+    // FRESH read from the store (no cache): removals + change are durable.
+    let rows = super::super::catalogue::rows(&shamir, "subscriptions")
+        .await
+        .unwrap();
+    let row = rows
+        .iter()
+        .find(|r| r.get("name").and_then(|v| v.as_str()) == Some("sub"))
+        .expect("replaced row must exist");
+    assert_eq!(row.get("quarantined"), None);
+    assert_eq!(row.get("status_message"), None);
+    assert_eq!(row.get("resync_from_receipt"), None);
+    assert_eq!(row.get("last_terminal_reason"), None);
+    assert_eq!(row.get("state").and_then(|v| v.as_str()), Some("active"));
+    assert_eq!(
+        row.get("upstream").and_then(|v| v.as_str()),
+        Some("tcp://peer:9100"),
+        "the whole-record replace must persist the CHANGED field"
+    );
+}
+
+/// Round 7 item 1 (Unix-only): Pause and SetProfile persist through the SAME
+/// true-replace helper (the old staged-DELETE+SET shape aborted every ALTER
+/// with NotFound), so their durable rows must hold EXACTLY the intended
+/// fields: Pause flips `state` to `paused`; SetProfile swaps `profile`
+/// (destination set proven identical by the guard) — both keep the rest of
+/// the record intact and never invent marker fields.
+/// COUNTERFACTUAL: the pre-round-7 helper (staged DELETE then SET in the
+/// same tx) makes BOTH actions fail with NotFound — SET's tx-aware preread
+/// sees its own tx's staged removal — so any assertion below is unreachable
+/// red. A merge-SET persist would additionally resurrect shift_remove'ed
+/// fields on quarantined rows (see
+/// `replace_subscription_row_true_replaces_fields`).
+#[cfg(unix)]
+#[tokio::test]
+async fn pause_and_set_profile_persist_exact_durable_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let sys_path = dir.path().join("meta");
+    let repo_path = dir.path().join("main");
+    {
+        let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
+            .await
+            .unwrap();
+        let db = shamir.create_db("testdb").await;
+        db.add_repo(RepoConfig::new(
+            "main",
+            BoxRepoFactory::fjall(repo_path.clone()),
+        ))
+        .await
+        .unwrap();
+        db.add_repo(RepoConfig::new("side", BoxRepoFactory::in_memory()))
+            .await
+            .unwrap();
+        // TWO single-stream profiles over the SAME destination (the SetProfile
+        // guard requires an identical Pull destination set).
+        let mut b = Batch::new();
+        b.id(2);
+        b.op(
+            "prof_a",
+            replication_profile("prof_a").stream(
+                repl_scope("testdb").repo("main").build(),
+                ReplDirection::Pull,
+                ReplMode::ReadOnly,
+            ),
+        );
+        b.op(
+            "prof_b",
+            replication_profile("prof_b").stream(
+                repl_scope("testdb").repo("main").build(),
+                ReplDirection::Pull,
+                ReplMode::ReadOnly,
+            ),
+        );
+        b.op(
+            "sub",
+            subscription("sub", "tcp://peer:9000", "pub", "prof_a"),
+        );
+        shamir
+            .execute("testdb", &b.to_request_via_msgpack())
+            .await
+            .unwrap();
+
+        // SetProfile: the durable row's `profile` flips, everything else stays.
+        let mut b = Batch::new();
+        b.id(3);
+        b.try_op("alt", alter_subscription("sub").set_profile("prof_b"))
+            .unwrap();
+        shamir
+            .execute("testdb", &b.to_request_via_msgpack())
+            .await
+            .unwrap();
+        let rows = super::super::catalogue::rows(&shamir, "subscriptions")
+            .await
+            .unwrap();
+        let row = rows
+            .iter()
+            .find(|r| r.get("name").and_then(|v| v.as_str()) == Some("sub"))
+            .expect("row must survive SetProfile");
+        assert_eq!(row.get("profile").and_then(|v| v.as_str()), Some("prof_b"));
+        assert_eq!(row.get("state").and_then(|v| v.as_str()), Some("active"));
+        assert_eq!(row.get("quarantined"), None);
+        assert_eq!(row.get("status_message"), None);
+
+        // Pause: the durable row's `state` flips to `paused`.
+        let mut b = Batch::new();
+        b.id(4);
+        b.try_op("alt", alter_subscription("sub").pause()).unwrap();
+        shamir
+            .execute("testdb", &b.to_request_via_msgpack())
+            .await
+            .unwrap();
+        let rows = super::super::catalogue::rows(&shamir, "subscriptions")
+            .await
+            .unwrap();
+        let row = rows
+            .iter()
+            .find(|r| r.get("name").and_then(|v| v.as_str()) == Some("sub"))
+            .expect("row must survive Pause");
+        assert_eq!(row.get("state").and_then(|v| v.as_str()), Some("paused"));
+        assert_eq!(row.get("profile").and_then(|v| v.as_str()), Some("prof_b"));
+        assert_eq!(row.get("quarantined"), None);
+        assert_eq!(row.get("status_message"), None);
+        assert_eq!(row.get("resync_from_receipt"), None);
+    }
+    let reopened = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
+        .await
+        .unwrap();
+    let rows = super::super::catalogue::rows(&reopened, "subscriptions")
+        .await
+        .unwrap();
+    let row = rows
+        .iter()
+        .find(|r| r.get("name").and_then(|v| v.as_str()) == Some("sub"))
+        .expect("paused SetProfile row must survive reopen");
+    assert_eq!(row.get("state").and_then(|v| v.as_str()), Some("paused"));
+    assert_eq!(row.get("profile").and_then(|v| v.as_str()), Some("prof_b"));
+    assert_eq!(row.get("quarantined"), None);
+    assert_eq!(row.get("status_message"), None);
+    assert_eq!(row.get("resync_from_receipt"), None);
 }

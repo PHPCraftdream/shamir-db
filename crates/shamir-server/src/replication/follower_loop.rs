@@ -105,6 +105,12 @@ pub struct FollowerLoopConfig {
     /// applies only while the lease is valid. `None` for unsupervised
     /// loops (empty [`Self::subscription`]).
     pub lease: Option<Arc<SubscriptionLease>>,
+    /// Test-only apply park for selected target loops.
+    #[cfg(test)]
+    pub(crate) apply_park: Option<Arc<ApplyParkHook>>,
+    /// Per-loop exit notification for test observability.
+    #[cfg(test)]
+    pub(crate) exit_hook: Option<Arc<ApplyParkHook>>,
 }
 
 impl std::fmt::Debug for FollowerLoopConfig {
@@ -146,6 +152,10 @@ impl FollowerLoopConfig {
             max_iterations: None,
             subscription: String::new(),
             lease: None,
+            #[cfg(test)]
+            apply_park: None,
+            #[cfg(test)]
+            exit_hook: None,
         }
     }
 
@@ -183,6 +193,25 @@ impl FollowerLoopConfig {
 pub(crate) struct IdentityStoreOverride {
     pub(crate) info: Arc<dyn shamir_db::storage::types::Store>,
     pub(crate) startup_reflush: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct ApplyParkHook {
+    pub(crate) repo: Option<String>,
+    pub(crate) arrived: Arc<tokio::sync::Notify>,
+    pub(crate) release: Arc<tokio::sync::Notify>,
+    pub(crate) exited: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+async fn apply_park_wait(repo: &str, hook: Option<&ApplyParkHook>) {
+    if let Some(hook) = hook {
+        if hook.repo.as_deref() == Some(repo) {
+            hook.arrived.notify_one();
+            hook.release.notified().await;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -261,6 +290,10 @@ async fn run_follower_loop_internal(
         max_iterations,
         subscription,
         lease,
+        #[cfg(test)]
+        apply_park,
+        #[cfg(test)]
+            exit_hook: _,
     } = cfg;
     #[cfg(not(test))]
     let identity_fence = true;
@@ -611,6 +644,12 @@ async fn run_follower_loop_internal(
             }
             None => None,
         };
+
+        // Round-7 item 6 test seam: park INSIDE the apply — the read guard
+        // above is taken AND validated, so a loop parked here provably holds
+        // the lease's apply read guard. cfg(test)-only, no-op unless armed.
+        #[cfg(test)]
+        apply_park_wait(&repo, apply_park.as_deref()).await;
 
         // PR6b-2 activation: fresh repositories take the receipt path;
         // repositories with a stored legacy v1/v2 bookmark keep the legacy

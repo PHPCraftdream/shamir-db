@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! Round-6 item 2 — terminal marking retries guard on GENERATION currency,
 //! not `lease.valid`. The B3 test moved here from `lease_gate_tests.rs` and
 //! was REWRITTEN: the injected flush failures now hit TERMINAL persistence
@@ -9,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use shamir_db::shamir_db::shamir_db::SeedCatalogueFlushFaultForTest;
+use shamir_db::{ShamirDb, SystemStoreConfig};
 use shamir_query_types::wire::repl::ReplResponse;
 
 use crate::replication::error::ReplError;
@@ -50,26 +53,34 @@ impl ReplSource for WrongIdentitySource {
     }
 }
 
-/// COUNTERFACTUAL (round-6 item 2): reverting `mark_with_retry`'s currency
-/// guard to the old `lease.valid` check makes this test RED — the terminal
-/// mark itself quiesces/invalidates the subscription's lease FIRST
-/// (`admin_replication.rs::mark_subscription_terminal_generation` →
-/// `quiesce_subscription_lease_locked`), so with the old guard attempt 2
-/// sees `valid == false` and exits immediately; the row never lands
-/// `resync_required` and the final state/coverage assertions go red. The
-/// generation-currency guard reads the CURRENT subscription row, which the
-/// mark's own quiesce never touches.
+/// COUNTERFACTUAL (round-7 item 3): the durable row SET and the quarantine
+/// cache publication both PRECEDE the faulted flush
+/// (`admin_replication.rs` — cache publish :910, row SET :938-946, flush
+/// :960), so after even the FIRST failed flush the row already reads
+/// `resync_required` and the coverage already holds — the durable-row /
+/// coverage assertions below CANNOT distinguish a retrying mark from a
+/// single-attempt one. A single-attempt implementation (e.g. reverting
+/// `mark_with_retry`'s retry loop, or its generation-currency guard, which
+/// aborts after the first failure) records EXACTLY ONE flush attempt with
+/// ONE injected failure — the `attempts == 3` / `failures == 2` seam-counter
+/// assertions are what turn that reversion RED. (The round-6 COUNTERFACTUAL
+/// claimed the row would remain `active` under reversion — that claim was
+/// FALSE, precisely because of the SET-before-flush ordering above.)
 ///
 /// Flush-budget arithmetic (`arm_fail_first(2)` armed INSIDE the
 /// `start_race_hook`, which fires AFTER the barrier flush and BEFORE spawn):
-/// reconcile#2's barrier flush passes uncounted; loop#2 trips the identity
-/// fence on its first pull (no flush); marking attempt 1 consumes fault #1,
-/// attempt 2 consumes fault #2, attempt 3's flush passes → the mark lands.
-/// Exactly 2 faults, 3 mark flushes, none left over.
+/// reconcile#2's barrier flush passes uncounted (the counters are
+/// snapshotted right after arming, and every flush between arming and the
+/// final read belongs to the marking window — loop#2's fence trip performs
+/// no flush); loop#2 trips the identity fence on its first pull (no flush);
+/// marking attempt 1 consumes fault #1, attempt 2 consumes fault #2,
+/// attempt 3's flush passes → the mark lands. Exactly 2 failures, 3 mark
+/// flush attempts, none left over.
 ///
 /// Determinism: `tokio::time::pause` (start_paused) auto-advances the
 /// production retry sleeps on the current-thread runtime; the fence trips on
 /// the mutated pull BEFORE decode/apply.
+#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn terminal_marking_retries_until_success() {
     let leader = build_db().await;
@@ -116,7 +127,27 @@ async fn terminal_marking_retries_until_success() {
         })
     };
 
-    let follower = build_db().await;
+    let follower_tmp = tempfile::tempdir().expect("follower system-store directory");
+    let follower_meta = follower_tmp.path().join("shamir_db_meta.redb");
+    let follower = Arc::new(
+        ShamirDb::init(SystemStoreConfig::Fjall(follower_meta.clone()))
+            .await
+            .expect("init persistent follower"),
+    );
+    let owner =
+        shamir_db::access::Actor::User(shamir_db::access::principal64_from_username("alice"));
+    follower.create_db_as("app", owner.clone()).await;
+    for repo in ["main", "other"] {
+        let cfg = shamir_db::engine::repo::RepoConfig::new(
+            repo,
+            shamir_db::engine::repo::BoxRepoFactory::in_memory(),
+        )
+        .add_table(shamir_db::engine::table::TableConfig::new("items"));
+        follower
+            .add_repo_as("app", cfg, owner.clone())
+            .await
+            .expect("add follower repo");
+    }
     create_profile_and_subscription(&follower).await;
     let sup =
         SubscriptionSupervisor::new(follower.clone(), factory, "follower-1").with_max_iterations(1);
@@ -127,12 +158,16 @@ async fn terminal_marking_retries_until_success() {
     wait_until_bookmark_covers(&follower, "main", version).await;
 
     // Reconcile#2: the start_race_hook arms the REAL catalogue-flush seam
-    // when it fires (after the barrier flush, before spawn). The RAII fault
-    // guard is parked in a captured `Mutex<Option<_>>` and dropped only
-    // AFTER the assertions, so the seam stays armed while loop#2 runs.
+    // when it fires (after the barrier flush, before spawn) and snapshots
+    // the seam counters IMMEDIATELY (the diff baseline — the barrier flush
+    // happened before arming and must not pollute). The RAII fault guard is
+    // parked in a captured `Mutex<Option<_>>` and dropped only AFTER the
+    // assertions, so the seam stays armed while loop#2 runs.
     let fault_slot: Arc<Mutex<Option<SeedCatalogueFlushFaultForTest>>> = Arc::new(Mutex::new(None));
+    let baseline: Arc<Mutex<(usize, usize)>> = Arc::new(Mutex::new((0, 0)));
     let hook_follower = follower.clone();
     let hook_slot = fault_slot.clone();
+    let hook_baseline = baseline.clone();
     let sup2 = SubscriptionSupervisor::new(
         follower.clone(),
         {
@@ -151,9 +186,11 @@ async fn terminal_marking_retries_until_success() {
     .with_start_race_hook(Arc::new(move || {
         let follower = hook_follower.clone();
         let slot = hook_slot.clone();
+        let baseline = hook_baseline.clone();
         Box::pin(async move {
-            *slot.lock().expect("fault slot") =
-                Some(SeedCatalogueFlushFaultForTest::arm_fail_first(&follower, 2));
+            let guard = SeedCatalogueFlushFaultForTest::arm_fail_first(&follower, 2);
+            *baseline.lock().expect("counter baseline") = (guard.attempts(), guard.failures());
+            *slot.lock().expect("fault slot") = Some(guard);
         })
     }));
 
@@ -163,8 +200,37 @@ async fn terminal_marking_retries_until_success() {
     sup2.reconcile().await;
     sup2.wait_for_subscription("sub_a").await; // joins loop#2 + its marking
 
+    // Round-7 item 3: the mark must have returned only after the SUCCESSFUL
+    // flush — the seam recorded EXACTLY 3 flush attempts with 2 injected
+    // failures during the marking window (diffed against the post-arming
+    // baseline so barrier flushes cannot pollute). Read BEFORE disarming.
+    let (attempts, failures) = {
+        let slot = fault_slot.lock().expect("fault slot");
+        let (base_a, base_f) = *baseline.lock().expect("counter baseline");
+        let guard = slot.as_ref().expect("seam still armed");
+        (guard.attempts() - base_a, guard.failures() - base_f)
+    };
+    assert_eq!(
+        attempts, 3,
+        "the marking must have retried to a SUCCESSFUL flush: 2 failed attempts + 1 success"
+    );
+    assert_eq!(
+        failures, 2,
+        "exactly the 2 injected failures must have been consumed"
+    );
+    {
+        let slot = fault_slot.lock().expect("fault slot");
+        let guard = slot.as_ref().expect("seam still armed");
+        assert_eq!(guard.successes(), 1, "the third marking flush must succeed");
+    }
+
     // Release the seam only after the assertions (drop the RAII fault guard).
     *fault_slot.lock().expect("fault slot") = None;
+
+    drop(sup2);
+    drop(sup);
+    drop(fault_slot);
+    drop(baseline);
 
     assert_eq!(
         sub_state(&follower, "sub_a").await.as_deref(),
@@ -180,4 +246,23 @@ async fn terminal_marking_retries_until_success() {
     );
     // Loop#1's honest application is untouched by loop#2's fence trip.
     assert!(bookmark(&follower, "main").await >= version);
+
+    drop(follower);
+    let reopened = Arc::new(
+        ShamirDb::init(SystemStoreConfig::Fjall(follower_meta))
+            .await
+            .expect("reopen persistent follower"),
+    );
+    assert_eq!(
+        sub_state(&reopened, "sub_a").await.as_deref(),
+        Some("resync_required"),
+        "the terminal state must survive reopening the system store"
+    );
+    assert!(
+        reopened
+            .has_resync_required_subscription_covering("app", "main")
+            .await
+            .unwrap(),
+        "the reopened quarantine must cover app/main"
+    );
 }

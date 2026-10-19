@@ -34,6 +34,7 @@ impl SeedCatalogueFlushFaultForTest {
         shamir.flush_fault_armed.store(true, Ordering::SeqCst);
         shamir.flush_fault_fail_first.store(0, Ordering::SeqCst);
         shamir.flush_fault_pass_first.store(n, Ordering::SeqCst);
+        Self::reset_counters(shamir);
         Self(shamir.clone())
     }
 
@@ -48,7 +49,28 @@ impl SeedCatalogueFlushFaultForTest {
         shamir
             .flush_fault_pass_first
             .store(usize::MAX, Ordering::SeqCst);
+        Self::reset_counters(shamir);
         Self(shamir.clone())
+    }
+
+    /// Round 7 seam counters: how many `flush_seed_catalogue` ATTEMPTS were
+    /// made while this guard was armed, and how many were injected
+    /// FAILURES. Reset by every `arm*` constructor and by `Drop`.
+    pub fn attempts(&self) -> usize {
+        self.0.flush_fault_attempts.load(Ordering::SeqCst)
+    }
+    pub fn failures(&self) -> usize {
+        self.0.flush_fault_failures.load(Ordering::SeqCst)
+    }
+    /// Number of fully completed real flushes during this armed interval.
+    pub fn successes(&self) -> usize {
+        self.0.flush_fault_successes.load(Ordering::SeqCst)
+    }
+
+    fn reset_counters(shamir: &ShamirDb) {
+        shamir.flush_fault_attempts.store(0, Ordering::SeqCst);
+        shamir.flush_fault_failures.store(0, Ordering::SeqCst);
+        shamir.flush_fault_successes.store(0, Ordering::SeqCst);
     }
 }
 
@@ -58,6 +80,7 @@ impl Drop for SeedCatalogueFlushFaultForTest {
         self.0.flush_fault_armed.store(false, Ordering::SeqCst);
         self.0.flush_fault_fail_first.store(0, Ordering::SeqCst);
         self.0.flush_fault_pass_first.store(0, Ordering::SeqCst);
+        Self::reset_counters(&self.0);
     }
 }
 
@@ -193,14 +216,19 @@ impl ShamirDb {
         // to downstream test builds via the opt-in `test-util` feature).
         #[cfg(any(test, feature = "test-util"))]
         if self.flush_fault_armed.load(Ordering::SeqCst) {
+            // Round 7 seam counters: count every attempt while armed; the
+            // injected-failure branches count their failures below.
+            self.flush_fault_attempts.fetch_add(1, Ordering::SeqCst);
             if self.flush_fault_fail_first.load(Ordering::SeqCst) > 0 {
                 self.flush_fault_fail_first.fetch_sub(1, Ordering::SeqCst);
+                self.flush_fault_failures.fetch_add(1, Ordering::SeqCst);
                 return Err(DbError::Storage(
                     "injected seed-catalogue flush failure (test)".into(),
                 ));
             } else if self.flush_fault_pass_first.load(Ordering::SeqCst) > 0 {
                 self.flush_fault_pass_first.fetch_sub(1, Ordering::SeqCst);
             } else {
+                self.flush_fault_failures.fetch_add(1, Ordering::SeqCst);
                 return Err(DbError::Storage(
                     "injected seed-catalogue flush failure (test)".into(),
                 ));
@@ -213,6 +241,10 @@ impl ShamirDb {
         repo.flush_buffers().await?;
         repo.flush_all_history().await?;
         repo.flush_seed_metadata().await?;
+        #[cfg(any(test, feature = "test-util"))]
+        if self.flush_fault_armed.load(Ordering::SeqCst) {
+            self.flush_fault_successes.fetch_add(1, Ordering::SeqCst);
+        }
         Ok(())
     }
 }

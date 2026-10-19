@@ -121,7 +121,16 @@ impl ShamirAdminExecutor {
         // a `DROP DATABASE … CASCADE` over a bound destination is refused
         // with the typed error before any repo/table is dropped.
         self.shamir
-            .ensure_destinations_unbound(&op.drop_db, None, "DROP DATABASE CASCADE")
+            .ensure_destinations_unbound(
+                &op.drop_db,
+                None,
+                // Round 7 item 8: the refusal must name the EXACT operation.
+                if op.cascade {
+                    "DROP DATABASE CASCADE"
+                } else {
+                    "DROP DATABASE"
+                },
+            )
             .await
             .map_err(repl_guard_error_to_batch)?;
 
@@ -427,7 +436,16 @@ impl ShamirAdminExecutor {
         // cascade loop — a `DROP REPO … CASCADE` over a bound destination is
         // refused with the typed error before any table is dropped.
         self.shamir
-            .ensure_destinations_unbound(&self.db_name, Some(&op.drop_repo), "DROP REPO CASCADE")
+            .ensure_destinations_unbound(
+                &self.db_name,
+                Some(&op.drop_repo),
+                // Round 7 item 8: the refusal must name the EXACT operation.
+                if op.cascade {
+                    "DROP REPO CASCADE"
+                } else {
+                    "DROP REPO"
+                },
+            )
             .await
             .map_err(repl_guard_error_to_batch)?;
 

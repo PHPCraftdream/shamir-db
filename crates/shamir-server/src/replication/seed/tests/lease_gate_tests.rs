@@ -387,10 +387,11 @@ async fn start_barrier_failure_defers_start_until_retry() {
         "nothing may be marked on a deferred start"
     );
     assert_eq!(bookmark(&follower, "main").await, 0);
-    assert!(
-        follower.subscription_lease("sub_a").is_none(),
-        "the failed barrier must invalidate (remove) its just-taken lease"
-    );
+    // Round-7 item 7: the RAII `StartupLeaseGuard::Drop` cleanup is ASYNC
+    // (it spawns a detached task — `seed/startup_lease.rs`), so the lease
+    // removal must be awaited with the bounded helper, never asserted
+    // synchronously.
+    wait_until_lease_gone(&follower, "sub_a").await;
 
     // Clear the fault: the retrying reconcile runs the barrier for real and
     // starts the loop.
@@ -476,9 +477,13 @@ async fn pause_flush_failure_stops_live_follower_and_never_restarts() {
 // A1 — pause/resume back-to-back; cancelled quiesce recovery
 // ---------------------------------------------------------------------------
 
-/// COUNTERFACTUAL: reverting W2's stale-handle sweep (or the exit-path lease
-/// invalidation) leaves the dead handle registered / its lease valid → the
-/// restarted loop never spawns → the bookmark is stuck at v1 → red.
+/// COUNTERFACTUAL (round-7 item 4a): reverting the SYSTEM-driven exit-path
+/// deregistration / stale-handle sweep leaves the dead (invalidated-lease)
+/// handle registered → the start phase skips the name
+/// (`registry.contains_sync`) → the loop is never restarted → the bookmark
+/// is stuck at v1 and never reaches v2 → red. (Round-6 version used
+/// `with_max_iterations(1)` + a manual `wait_for_subscription` registry
+/// removal, which never exercised the supervisor's own stale-handle path.)
 #[tokio::test]
 async fn pause_resume_back_to_back_restarts_and_applies_new_event() {
     let leader = build_db().await;
@@ -488,15 +493,25 @@ async fn pause_resume_back_to_back_restarts_and_applies_new_event() {
     let follower = build_db().await;
     create_profile_and_subscription(&follower).await;
 
-    let sup = supervisor(follower.clone(), leader.clone()).with_max_iterations(1);
+    // Run-forever supervisor: the loop stays LIVE (no iteration cap). The
+    // short long-poll budget lets the superseded loop return promptly after
+    // the pause's quiesce invalidates its lease (T3's recipe).
+    let sup = supervisor(follower.clone(), leader.clone()).with_poll_wait_ms(100);
     sup.reconcile().await;
-    sup.wait_for_subscription("sub_a").await; // loop#1 applied, exited,
-    wait_until_bookmark_covers(&follower, "main", v1).await; // self-deregistered
+    assert!(sup.is_running("sub_a"), "the loop must be live");
+    // Round-7 item 4a applied-oracle: bounded wait for the follower's
+    // bookmark covering v1 (never a manual registry touch).
+    wait_until_bookmark_covers(&follower, "main", v1).await;
     let gen = sub_generation(&follower, "sub_a").await;
 
-    // PAUSE then RESUME back-to-back: the row ends active with the SAME
-    // generation.
+    // PAUSE the LIVE follower (real batch): the quiesce invalidates the
+    // lease, the loop exits on its own (top-of-iteration lease check), and
+    // its exit-path teardown deregisters — SYSTEM-driven, observed via the
+    // bounded wait (NEVER the manual-removal helper `wait_for_subscription`).
     pause_op_future(follower.clone()).await.expect("pause");
+    wait_until_deregistered(&sup, "sub_a").await;
+
+    // RESUME back-to-back: the row ends active with the SAME generation.
     op_future(
         follower.clone(),
         shamir_query_builder::ddl::alter_subscription("sub_a")
@@ -521,20 +536,29 @@ async fn pause_resume_back_to_back_restarts_and_applies_new_event() {
     write_rows(&leader, 10, 2).await;
     let v2 = leader_version(&leader).await;
 
-    sup.notify_changed().await; // sweeps the stale handle, RESTARTS
-    sup.wait_for_subscription("sub_a").await; // joins loop#2
+    // THE SAME supervisor's reconcile restarts the loop: its stale-handle
+    // sweep (if the handle is still registered) or the start phase (after
+    // the SYSTEM-driven self-deregistration above) starts it under a FRESH
+    // lease. Bounded wait — the loop runs forever.
+    sup.reconcile().await;
+    wait_until_bookmark_covers(&follower, "main", v2).await;
     assert!(
-        bookmark(&follower, "main").await >= v2,
-        "the restarted loop must have applied the NEW events"
+        sup.is_running("sub_a"),
+        "the restarted loop must be live under its fresh lease"
     );
 }
 
 /// A CANCELLED quiesce — the PAUSE future dropped while its write gate is
-/// blocked — leaves the row active and the lease invalid; the stale-handle
-/// sweep then restarts the follower under a FRESH lease.
+/// blocked — leaves the row active and the lease invalid; the SAME
+/// supervisor's stale-handle sweep then restarts the follower under a FRESH
+/// lease (round-7 item 4b: ONE run-forever supervisor throughout — the
+/// round-6 version's `stop_all` + new-supervisor restart never exercised
+/// the sweep).
 ///
-/// COUNTERFACTUAL: reverting the stale sweep → no restart → the bookmark is
-/// stuck at v1 → red.
+/// COUNTERFACTUAL: reverting the stale sweep → the invalidated handle stays
+/// registered → reconcile's start phase skips the name
+/// (`registry.contains_sync`) → no restart → the bookmark is stuck at v1
+/// (never reaches v2) → red.
 #[tokio::test]
 async fn cancelled_quiesce_leaves_active_row_recoverable() {
     let leader = build_db().await;
@@ -545,13 +569,13 @@ async fn cancelled_quiesce_leaves_active_row_recoverable() {
     let follower = build_db().await;
     create_profile_and_subscription(&follower).await;
 
-    // Run-forever: loop#1 stays LIVE (its lease stays valid and present)
-    // while it long-polls between iterations.
+    // ONE run-forever supervisor for the whole test: loop#1 stays LIVE
+    // (long-polling between iterations) while the quiesce is cancelled.
     let sup = supervisor(follower.clone(), leader.clone());
     sup.reconcile().await;
-    // Deterministic: loop#1 applied v1 (notify-based follower-side
-    // readiness) and is now parked in its long-poll holding NO guard.
-    await_journal_ready(&follower, "main", v1).await;
+    assert!(sup.is_running("sub_a"), "loop#1 must be live");
+    // Deterministic: loop#1 applied v1 (bounded follower-side applied-oracle).
+    wait_until_bookmark_covers(&follower, "main", v1).await;
 
     // Block the quiesce write gate: hold the live lease's read guard.
     let lease = follower
@@ -604,22 +628,21 @@ async fn cancelled_quiesce_leaves_active_row_recoverable() {
         "resume must not bump the binding generation"
     );
 
-    // NEW leader rows + readiness BEFORE the restarting reconcile.
+    // NEW leader rows BEFORE the restarting reconcile.
     write_rows(&leader, 10, 2).await;
     let v2 = leader_version(&leader).await;
 
-    // Round-6 item 7(a): loop#1 of the run-forever supervisor is still
-    // long-polling on its (now invalid) OLD lease — joining it unbounded
-    // here would hang until its long-poll returns. Stop it deterministically:
-    // `stop_all` cancels gracefully and joins; the restart then runs on a NEW
-    // bounded supervisor.
-    sup.stop_all().await;
-    let sup2 = supervisor(follower.clone(), leader.clone()).with_max_iterations(1);
-    sup2.reconcile().await; // sweeps nothing; starts a FRESH loop under a FRESH lease
-    sup2.wait_for_subscription("sub_a").await; // joins the restarted loop
+    // Round-7 item 4b: reconcile ON THE SAME supervisor. Loop#1 is still
+    // long-polling on its (now invalid) OLD lease — typically still parked
+    // mid-pull here, so the STALE-HANDLE SWEEP (lease superseded) is the
+    // path that deregisters it and frees the start phase to restart under a
+    // FRESH lease. Bounded applied-oracle: the restarted loop's bookmark
+    // covering v2.
+    sup.reconcile().await;
+    wait_until_bookmark_covers(&follower, "main", v2).await;
     assert!(
-        bookmark(&follower, "main").await >= v2,
-        "the restarted loop must apply the NEW events under its FRESH lease"
+        sup.is_running("sub_a"),
+        "the restarted loop must be live under its FRESH lease"
     );
 }
 

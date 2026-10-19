@@ -156,18 +156,19 @@ impl ShamirDb {
                 .and_then(|value| value.as_str())
                 .unwrap_or("<unnamed>")
                 .to_string();
-            // Round 6 item 8: evaluate the flag on the HIT destination —
-            // `row_is_quarantined` alone misses a healthy row whose hit
-            // destination is pending-quarantined in the cache.
-            let hit = binding
-                .destinations()
-                .iter()
-                .find(|(bound_db, bound_repo)| {
-                    bound_db == db && repo.is_none_or(|wanted| wanted == bound_repo)
-                });
-            if let Some((hit_db, hit_repo)) = hit {
+            // Round 6 item 8 / round 7 item 8: the pending-quarantine flag
+            // is evaluated over EVERY matching destination of the row — a
+            // FIRST-match-only check reported `quarantined: false` for a
+            // healthy row whose SECOND matching destination is pending.
+            let matches =
+                |d: &(String, String)| d.0 == db && repo.is_none_or(|wanted| wanted == d.1);
+            let hit = binding.destinations().iter().find(|d| matches(d));
+            if hit.is_some() {
                 let quarantined = row_is_quarantined(&row)
-                    || self.destination_is_pending_quarantined(hit_db, Some(hit_repo.as_str()));
+                    || binding.destinations().iter().any(|d| {
+                        matches(d)
+                            && self.destination_is_pending_quarantined(&d.0, Some(d.1.as_str()))
+                    });
                 blockers.push(BoundBlocker {
                     name,
                     generation: binding.generation(),

@@ -340,11 +340,15 @@ async fn drop_subscription_refused_when_any_bound_destination_is_quarantined() {
         .unwrap();
 
     // Prepublish the pending quarantine key for the SECOND destination only
-    // (pub(crate) cache seam — no durable row change).
-    shamir.resync_quarantine.publish([(
-        ("testdb".to_string(), "side".to_string()),
-        "pending (test seam)".to_string(),
-    )]);
+    // (pub(crate) cache seam — no durable row change). Round 7 item 5:
+    // pending claims carry an owner.
+    shamir.resync_quarantine.publish(
+        [(
+            ("testdb".to_string(), "side".to_string()),
+            "pending (test seam)".to_string(),
+        )],
+        "sub:1",
+    );
 
     let mut b = Batch::new();
     b.id(3);
@@ -357,5 +361,80 @@ async fn drop_subscription_refused_when_any_bound_destination_is_quarantined() {
         err.code(),
         Some("replication_destination_quarantined"),
         "the pending SECOND destination must refuse the drop: {err}"
+    );
+}
+
+/// Round 7 item 8: the blocker's `quarantined` flag is evaluated over EVERY
+/// matching destination of the row, not only the FIRST. `sub` binds
+/// [main (healthy), side (pending via a direct cache prepublish)]; a
+/// database-wide guard call must report the row with `quarantined: true`
+/// because its SECOND matching destination is pending.
+/// COUNTERFACTUAL: reverting to the pre-round-7 FIRST-match classification
+/// turns this red — the first matching destination (`main`) is healthy, so
+/// the blocker was reported `quarantined: false` even though a bound
+/// destination of the same row is pending-quarantined.
+#[tokio::test]
+async fn blocker_quarantined_flag_covers_any_matching_pending_destination() {
+    let shamir = setup().await;
+    shamir
+        .get_db("testdb")
+        .unwrap()
+        .add_repo(
+            RepoConfig::new("side", BoxRepoFactory::in_memory())
+                .add_table(crate::engine::table::TableConfig::new("users")),
+        )
+        .await
+        .unwrap();
+    let mut b = Batch::new();
+    b.id(2);
+    b.op(
+        "profile",
+        replication_profile("prof")
+            .stream(
+                repl_scope("testdb").repo("main").build(),
+                ReplDirection::Pull,
+                ReplMode::ReadOnly,
+            )
+            .stream(
+                repl_scope("testdb").repo("side").build(),
+                ReplDirection::Pull,
+                ReplMode::ReadOnly,
+            ),
+    );
+    b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    // Prepublish the pending key for the SECOND destination only (the
+    // durable row stays healthy).
+    shamir.resync_quarantine.publish(
+        [(
+            ("testdb".to_string(), "side".to_string()),
+            "pending (test seam)".to_string(),
+        )],
+        "sub:1",
+    );
+
+    // Database-wide guard: BOTH destinations of `sub` match. Direct
+    // unit-style call — the typed error text must name the blocker with
+    // `quarantined: true`.
+    let err = shamir
+        .ensure_destinations_unbound("testdb", None, "DROP DATABASE")
+        .await
+        .expect_err("a pending bound destination must block the database drop");
+    let detail = match &err {
+        crate::DbError::ReplicationDestinationBound { detail } => detail.clone(),
+        other => panic!("typed bound error expected, got {other}"),
+    };
+    assert!(
+        detail.contains("sub (binding generation"),
+        "the blocking row must be named: {detail}"
+    );
+    assert!(
+        detail.contains("quarantined: true"),
+        "the SECOND destination being pending must classify the blocker as \
+         quarantined: {detail}"
     );
 }
