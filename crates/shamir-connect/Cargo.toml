@@ -76,3 +76,41 @@ harness = false
 
 [lints]
 workspace = true
+
+# Integration tests live in topical subfolders, so autodiscovery (which only
+# scans tests/*.rs at the top level) is replaced by explicit targets.
+[[test]]
+name = "integration_admin"
+path = "tests/admin/integration_admin.rs"
+
+[[test]]
+name = "integration_bootstrap"
+path = "tests/lifecycle/integration_bootstrap.rs"
+
+[[test]]
+name = "integration_changepw"
+path = "tests/lifecycle/integration_changepw.rs"
+
+[[test]]
+name = "integration_full_auth"
+path = "tests/auth/integration_full_auth.rs"
+
+[[test]]
+name = "integration_log_redaction"
+path = "tests/audit/integration_log_redaction.rs"
+
+[[test]]
+name = "integration_resume"
+path = "tests/resume/main.rs"
+
+[[test]]
+name = "integration_rotation"
+path = "tests/lifecycle/integration_rotation.rs"
+
+[[test]]
+name = "integration_session"
+path = "tests/session/integration_session.rs"
+
+[[test]]
+name = "integration_username_precis"
+path = "tests/identity/integration_username_precis.rs"

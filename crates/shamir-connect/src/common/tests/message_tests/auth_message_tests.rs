@@ -9,7 +9,7 @@ use crate::common::kdf_params::KdfParams;
 use crate::common::types::{BindingMode, ProtocolVersion, TransportKind};
 use crate::common::username::NormalizedUsername;
 
-const TEST_VECTOR_TOML: &str = include_str!("../../../test-vectors/auth_message_default.toml");
+const TEST_VECTOR_TOML: &str = include_str!("../../../../test-vectors/auth_message_default.toml");
 
 #[derive(serde::Deserialize)]
 struct Vector {
