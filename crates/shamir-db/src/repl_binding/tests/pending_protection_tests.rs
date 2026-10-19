@@ -1,8 +1,9 @@
-//! Round 6 item 5 + round 7 item 5 — a pending quarantine key is removed
+//! Round 6 item 5 + round 7 item 5 + round 8 item 5 — a pending quarantine key is removed
 //! ONLY by an explicit confirmation/rollback of its OWN
 //! `name:generation` owner (after the owning mark's SET + interner persist
-//! + flush + refresh ALL succeeded, or a definitive rollback). A refresh
-//! triggered by an UNRELATED subscription — or that subscription's
+//! + flush + refresh ALL succeeded, or a definitive rollback).
+//!
+//! A refresh triggered by an UNRELATED subscription — or that subscription's
 //! successful Resume — must never clear another owner's pending claim.
 
 use crate::engine::repo::repo_types::BoxRepoFactory;

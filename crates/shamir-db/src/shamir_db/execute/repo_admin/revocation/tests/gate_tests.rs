@@ -175,6 +175,20 @@ async fn quarantine_cache_replace_clears_persisted_removal_but_keeps_pending_fai
     cache.confirm_pending(&owner_b, [pending.clone()]);
     assert!(cache.reason_for("db", "pending").is_none());
 
+    // The old A generation is resolved by the same-name Resume selector;
+    // a prefix-like but distinct subscription name remains untouched.
+    let owner_a = cache.publish([(pending.clone(), "A".to_string())], "alpha:1");
+    let distinct_name = cache.publish([(pending.clone(), "distinct".to_string())], "alphabeta:1");
+    let old_generation = cache.publish([(pending.clone(), "old A".to_string())], "alpha:2");
+    let selected = cache.owner_claims_for_subscription("alpha", std::slice::from_ref(&pending));
+    assert_eq!(selected, vec![owner_a.clone(), old_generation.clone()]);
+    cache.confirm_pending(&selected[0], [pending.clone()]);
+    assert!(cache.reason_for("db", "pending").is_some());
+    cache.confirm_pending(&selected[1], [pending.clone()]);
+    assert!(cache.reason_for("db", "pending").is_some());
+    cache.confirm_pending(&distinct_name, [pending.clone()]);
+    assert!(cache.reason_for("db", "pending").is_none());
+
     // A later token for A is independent of the already-resolved old token.
     let owner_a_new = cache.publish([(pending.clone(), "A new token".to_string())], "a:1");
     cache.rollback_pending(&owner, [pending.clone()]);

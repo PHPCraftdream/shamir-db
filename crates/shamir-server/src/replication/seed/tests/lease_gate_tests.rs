@@ -473,17 +473,20 @@ async fn pause_flush_failure_stops_live_follower_and_never_restarts() {
     );
 }
 
+struct ReleasePark(Arc<Notify>);
+impl Drop for ReleasePark {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // A1 — pause/resume back-to-back; cancelled quiesce recovery
 // ---------------------------------------------------------------------------
 
-/// COUNTERFACTUAL (round-7 item 4a): reverting the SYSTEM-driven exit-path
-/// deregistration / stale-handle sweep leaves the dead (invalidated-lease)
-/// handle registered → the start phase skips the name
-/// (`registry.contains_sync`) → the loop is never restarted → the bookmark
-/// is stuck at v1 and never reaches v2 → red. (Round-6 version used
-/// `with_max_iterations(1)` + a manual `wait_for_subscription` registry
-/// removal, which never exercised the supervisor's own stale-handle path.)
+/// COUNTERFACTUAL: if the stale-handle sweep is removed, the invalidated
+/// handle remains registered and start skips the same active generation;
+/// the follower stays at v1 instead of applying v2.
 #[tokio::test]
 async fn pause_resume_back_to_back_restarts_and_applies_new_event() {
     let leader = build_db().await;
@@ -493,25 +496,43 @@ async fn pause_resume_back_to_back_restarts_and_applies_new_event() {
     let follower = build_db().await;
     create_profile_and_subscription(&follower).await;
 
-    // Run-forever supervisor: the loop stays LIVE (no iteration cap). The
-    // short long-poll budget lets the superseded loop return promptly after
-    // the pause's quiesce invalidates its lease (T3's recipe).
-    let sup = supervisor(follower.clone(), leader.clone()).with_poll_wait_ms(100);
+    let arrived = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let _cleanup = ReleasePark(Arc::clone(&release));
+    let hook = Arc::new(crate::replication::follower_loop::ApplyParkHook {
+        repo: Some("main".into()),
+        after_apply: true,
+        arrived: Arc::clone(&arrived),
+        release: Arc::clone(&release),
+        exited: Arc::new(Notify::new()),
+    });
+    let sup = supervisor(follower.clone(), leader.clone()).with_apply_park(hook);
     sup.reconcile().await;
     assert!(sup.is_running("sub_a"), "the loop must be live");
-    // Round-7 item 4a applied-oracle: bounded wait for the follower's
-    // bookmark covering v1 (never a manual registry touch).
-    wait_until_bookmark_covers(&follower, "main", v1).await;
-    let gen = sub_generation(&follower, "sub_a").await;
+    let original_lease = follower
+        .subscription_lease("sub_a")
+        .expect("original lease");
+    let gen = original_lease.generation;
+    arrived.notified().await;
+    assert_eq!(
+        bookmark(&follower, "main").await,
+        v1,
+        "the park follows the real v1 apply"
+    );
 
-    // PAUSE the LIVE follower (real batch): the quiesce invalidates the
-    // lease, the loop exits on its own (top-of-iteration lease check), and
-    // its exit-path teardown deregisters — SYSTEM-driven, observed via the
-    // bounded wait (NEVER the manual-removal helper `wait_for_subscription`).
     pause_op_future(follower.clone()).await.expect("pause");
-    wait_until_deregistered(&sup, "sub_a").await;
+    assert!(
+        sup.is_running("sub_a"),
+        "pause must leave old handle registered"
+    );
+    assert_eq!(
+        follower
+            .subscription_lease("sub_a")
+            .map(|lease| lease.valid.load(Ordering::Acquire)),
+        Some(false),
+        "pause must invalidate the old lease while its handle remains registered"
+    );
 
-    // RESUME back-to-back: the row ends active with the SAME generation.
     op_future(
         follower.clone(),
         shamir_query_builder::ddl::alter_subscription("sub_a")
@@ -525,40 +546,34 @@ async fn pause_resume_back_to_back_restarts_and_applies_new_event() {
         sub_state(&follower, "sub_a").await.as_deref(),
         Some("active")
     );
-    assert_eq!(
-        sub_generation(&follower, "sub_a").await,
-        gen,
-        "pause/resume must not bump the binding generation"
+    assert_eq!(sub_generation(&follower, "sub_a").await, gen);
+    assert!(
+        sup.is_running("sub_a"),
+        "old handle must still be registered before sweep"
     );
 
-    // NEW leader rows BEFORE the restarting reconcile; the restarted loop's
-    // bookmark covering v2 is the applied-oracle (round-6 item 7d).
     write_rows(&leader, 10, 2).await;
     let v2 = leader_version(&leader).await;
 
-    // THE SAME supervisor's reconcile restarts the loop: its stale-handle
-    // sweep (if the handle is still registered) or the start phase (after
-    // the SYSTEM-driven self-deregistration above) starts it under a FRESH
-    // lease. Bounded wait — the loop runs forever.
     sup.reconcile().await;
-    wait_until_bookmark_covers(&follower, "main", v2).await;
+    let fresh_lease = follower
+        .subscription_lease("sub_a")
+        .expect("sweep must start fresh lease");
     assert!(
-        sup.is_running("sub_a"),
-        "the restarted loop must be live under its fresh lease"
+        !Arc::ptr_eq(&original_lease, &fresh_lease),
+        "the restarted loop must own a new lease"
     );
+    arrived.notified().await;
+    assert!(bookmark(&follower, "main").await >= v2);
+    assert!(sup.is_running("sub_a"), "restarted loop must be live");
+    sup.stop_all().await;
 }
 
-/// A CANCELLED quiesce — the PAUSE future dropped while its write gate is
-/// blocked — leaves the row active and the lease invalid; the SAME
-/// supervisor's stale-handle sweep then restarts the follower under a FRESH
-/// lease (round-7 item 4b: ONE run-forever supervisor throughout — the
-/// round-6 version's `stop_all` + new-supervisor restart never exercised
-/// the sweep).
-///
-/// COUNTERFACTUAL: reverting the stale sweep → the invalidated handle stays
-/// registered → reconcile's start phase skips the name
-/// (`registry.contains_sync`) → no restart → the bookmark is stuck at v1
-/// (never reaches v2) → red.
+/// COUNTERFACTUAL: if the stale-handle sweep is removed, the invalid original
+/// handle remains registered, so reconcile skips the active row at
+/// `registry.contains_sync`; after reconcile returns, its bookmark is still
+/// the v1 apply and cannot cover v2. The fresh-loop bookmark assertion is
+/// therefore red without the real sweep.
 #[tokio::test]
 async fn cancelled_quiesce_leaves_active_row_recoverable() {
     let leader = build_db().await;
@@ -569,46 +584,53 @@ async fn cancelled_quiesce_leaves_active_row_recoverable() {
     let follower = build_db().await;
     create_profile_and_subscription(&follower).await;
 
-    // ONE run-forever supervisor for the whole test: loop#1 stays LIVE
-    // (long-polling between iterations) while the quiesce is cancelled.
-    let sup = supervisor(follower.clone(), leader.clone());
+    let arrived = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let cleanup = ReleasePark(Arc::clone(&release));
+    let hook = Arc::new(crate::replication::follower_loop::ApplyParkHook {
+        repo: Some("main".into()),
+        after_apply: true,
+        arrived: Arc::clone(&arrived),
+        release: Arc::clone(&release),
+        exited: Arc::new(Notify::new()),
+    });
+    let sup = supervisor(follower.clone(), leader.clone()).with_apply_park(hook);
     sup.reconcile().await;
-    assert!(sup.is_running("sub_a"), "loop#1 must be live");
-    // Deterministic: loop#1 applied v1 (bounded follower-side applied-oracle).
-    wait_until_bookmark_covers(&follower, "main", v1).await;
-
-    // Block the quiesce write gate: hold the live lease's read guard.
-    let lease = follower
-        .subscription_lease("sub_a")
-        .expect("loop#1 is live, its lease must exist");
+    assert!(sup.is_running("sub_a"), "loop#1 must be registered");
+    let lease = follower.subscription_lease("sub_a").expect("loop lease");
     let gen = lease.generation;
-    let g = lease.apply_gate.read().await;
-
-    // The REAL PAUSE batch: its quiesce stores valid=false, then parks on
-    // the write gate → Pending.
-    let mut pause = pause_op_future(follower.clone());
+    arrived.notified().await;
     assert!(
-        matches!(poll!(pause.as_mut()), std::task::Poll::Pending),
-        "the pause quiesce must be blocked by the held read guard"
+        sup.is_running("sub_a"),
+        "parked original handle must remain registered"
     );
+    assert!(
+        follower
+            .subscription_lease("sub_a")
+            .is_some_and(|l| l.valid.load(Ordering::Acquire)),
+        "the original lease remains valid while parked after apply"
+    );
+    assert!(
+        bookmark(&follower, "main").await > 0,
+        "apply bookmark must advance before park"
+    );
+
+    let g = lease.apply_gate.read().await;
+    let mut pause = pause_op_future(follower.clone());
+    assert!(matches!(poll!(pause.as_mut()), std::task::Poll::Pending));
     assert_eq!(
         sub_state(&follower, "sub_a").await.as_deref(),
-        Some("active"),
-        "the cancelled quiesce must leave the row ACTIVE"
+        Some("active")
     );
     assert_eq!(
         follower
             .subscription_lease("sub_a")
             .map(|l| l.valid.load(Ordering::Acquire)),
-        Some(false),
-        "the quiesce already flipped the lease's valid flag"
+        Some(false)
     );
-
-    // CANCELLED: drop the parked PAUSE future (never abort), then the guard.
     drop(pause);
     drop(g);
 
-    // RESUME succeeds: row active, SAME generation.
     op_future(
         follower.clone(),
         shamir_query_builder::ddl::alter_subscription("sub_a")
@@ -622,28 +644,28 @@ async fn cancelled_quiesce_leaves_active_row_recoverable() {
         sub_state(&follower, "sub_a").await.as_deref(),
         Some("active")
     );
-    assert_eq!(
-        sub_generation(&follower, "sub_a").await,
-        gen,
-        "resume must not bump the binding generation"
-    );
-
-    // NEW leader rows BEFORE the restarting reconcile.
-    write_rows(&leader, 10, 2).await;
-    let v2 = leader_version(&leader).await;
-
-    // Round-7 item 4b: reconcile ON THE SAME supervisor. Loop#1 is still
-    // long-polling on its (now invalid) OLD lease — typically still parked
-    // mid-pull here, so the STALE-HANDLE SWEEP (lease superseded) is the
-    // path that deregisters it and frees the start phase to restart under a
-    // FRESH lease. Bounded applied-oracle: the restarted loop's bookmark
-    // covering v2.
-    sup.reconcile().await;
-    wait_until_bookmark_covers(&follower, "main", v2).await;
+    assert_eq!(sub_generation(&follower, "sub_a").await, gen);
     assert!(
         sup.is_running("sub_a"),
-        "the restarted loop must be live under its FRESH lease"
+        "the invalid old handle must remain registered until sweep"
     );
+
+    write_rows(&leader, 10, 2).await;
+    let v2 = leader_version(&leader).await;
+    sup.reconcile().await;
+    let fresh_lease = follower
+        .subscription_lease("sub_a")
+        .expect("sweep must start fresh lease");
+    assert!(
+        !Arc::ptr_eq(&lease, &fresh_lease),
+        "the stale sweep must install a fresh lease"
+    );
+    arrived.notified().await;
+    assert!(bookmark(&follower, "main").await >= v2);
+    assert!(sup.is_running("sub_a"), "replacement loop must be live");
+    release.notify_one();
+    drop(cleanup);
+    sup.stop_all().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -663,7 +685,6 @@ async fn second_supervisor_defers_then_takes_over_after_invalidation() {
     let follower = build_db().await;
     create_profile_and_subscription(&follower).await;
 
-    // One shared factory so both supervisors build identical sources.
     let factory: ReplSourceFactory = {
         let leader = leader.clone();
         Arc::new(move |_sub: &Subscription| {
@@ -675,13 +696,9 @@ async fn second_supervisor_defers_then_takes_over_after_invalidation() {
     let sup_b =
         SubscriptionSupervisor::new(follower.clone(), factory, "follower-b").with_max_iterations(1);
 
-    // sup_a runs the LIVE follower L1.
     sup_a.reconcile().await;
     assert!(sup_a.is_running("sub_a"), "L1 must be live");
 
-    // sup_b's reconcile is REFUSED: L1's lease is valid, so there is already
-    // exactly one live follower — sup_b defers (starts nothing) and sup_a
-    // stays running.
     sup_b.reconcile().await;
     assert_eq!(sup_b.active_count(), 0, "the refusal must start nothing");
     assert!(
@@ -689,17 +706,13 @@ async fn second_supervisor_defers_then_takes_over_after_invalidation() {
         "the refusal must never kill the live follower (W1)"
     );
 
-    // sup_a shuts down: cancel → loops exit gracefully → W2's exit path
-    // invalidates L1 and self-deregisters; stop_all joins them.
     sup_a.stop_all().await;
     assert!(!sup_a.is_running("sub_a"));
 
-    // NEW leader rows + readiness BEFORE sup_b's takeover reconcile.
     write_rows(&leader, 10, 2).await;
     let v2 = leader_version(&leader).await;
     await_journal_ready(&leader, "main", v2).await;
 
-    // sup_b now takes over under a FRESH lease L2 and applies the new rows.
     sup_b.reconcile().await;
     sup_b.wait_for_subscription("sub_a").await;
     assert!(

@@ -585,17 +585,17 @@ impl ShamirAdminExecutor {
                 }
             }
         }
-        // Round 7 item 5: destinations whose pending quarantine keys a
-        // successful Resume rolls back, under THIS row's `name:generation` owner
-        // (an unrelated Resume must never erase another claim); empty Pause/Set.
+        // successful Resume resolves this same name across older binding generations
+        // only after the durable replace, interner flush, catalogue flush, and refresh.
         let resume_rollback = if matches!(op.action, SubAction::Resume) {
             SubscriptionBinding::from_row(&record).ok().map(|binding| {
-                let owner = format!("{}:{}", name, binding.generation());
                 let keys = binding.destinations().to_vec();
+                // Rebind increments generation; same-name pending claims from older generations
+                // remain until recovery succeeds. Exact token rollback runs only after durability.
                 let claims = self
                     .shamir
                     .resync_quarantine
-                    .owner_claims_for(&owner, &keys);
+                    .owner_claims_for_subscription(&name, &keys);
                 (claims, keys)
             })
         } else {
@@ -969,7 +969,7 @@ impl ShamirDb {
             }
         }
         if let Some(error) = stream_error {
-            return Err(error.into());
+            return Err(error);
         }
         let id = id.ok_or_else(|| {
             shamir_storage::error::DbError::NotFound(format!(

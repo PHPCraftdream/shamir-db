@@ -199,18 +199,31 @@ pub(crate) struct IdentityStoreOverride {
 #[derive(Clone)]
 pub(crate) struct ApplyParkHook {
     pub(crate) repo: Option<String>,
+    pub(crate) after_apply: bool,
     pub(crate) arrived: Arc<tokio::sync::Notify>,
     pub(crate) release: Arc<tokio::sync::Notify>,
     pub(crate) exited: Arc<tokio::sync::Notify>,
 }
 
+/// Test-only park at the configured phase; cancellation releases a parked loop.
 #[cfg(test)]
-async fn apply_park_wait(repo: &str, hook: Option<&ApplyParkHook>) {
+async fn apply_park_wait(
+    repo: &str,
+    hook: Option<&ApplyParkHook>,
+    cancel: &CancellationToken,
+) -> bool {
     if let Some(hook) = hook {
         if hook.repo.as_deref() == Some(repo) {
             hook.arrived.notify_one();
-            hook.release.notified().await;
+            tokio::select! {
+                _ = hook.release.notified() => true,
+                _ = cancel.cancelled() => false,
+            }
+        } else {
+            true
         }
+    } else {
+        true
     }
 }
 
@@ -645,11 +658,12 @@ async fn run_follower_loop_internal(
             None => None,
         };
 
-        // Round-7 item 6 test seam: park INSIDE the apply — the read guard
-        // above is taken AND validated, so a loop parked here provably holds
-        // the lease's apply read guard. cfg(test)-only, no-op unless armed.
         #[cfg(test)]
-        apply_park_wait(&repo, apply_park.as_deref()).await;
+        if let Some(hook) = apply_park.as_deref() {
+            if !hook.after_apply && !apply_park_wait(&repo, Some(hook), &cancel).await {
+                return Ok(());
+            }
+        }
 
         // PR6b-2 activation: fresh repositories take the receipt path;
         // repositories with a stored legacy v1/v2 bookmark keep the legacy
@@ -683,6 +697,13 @@ async fn run_follower_loop_internal(
                 }
                 warn!(error = %e, "follower_loop: batch apply failed, backing off");
                 sleep_backoff(&cancel, &mut backoff_ms).await;
+            }
+        }
+        drop(_apply_guard);
+        #[cfg(test)]
+        if let Some(hook) = apply_park.as_deref() {
+            if hook.after_apply && !apply_park_wait(&repo, Some(hook), &cancel).await {
+                return Ok(());
             }
         }
     }

@@ -179,6 +179,7 @@ async fn multi_target_exit_refcount_last_exit_removes() {
         .with_poll_wait_ms(100)
         .with_apply_park(Arc::new(ApplyParkHook {
             repo: Some("other".into()),
+            after_apply: false,
             arrived: Arc::clone(&arrived),
             release: Arc::clone(&release),
             exited: Arc::clone(&exited),

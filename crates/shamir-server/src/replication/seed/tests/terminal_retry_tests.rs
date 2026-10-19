@@ -1,5 +1,3 @@
-#![cfg(unix)]
-
 //! Round-6 item 2 — terminal marking retries guard on GENERATION currency,
 //! not `lease.valid`. The B3 test moved here from `lease_gate_tests.rs` and
 //! was REWRITTEN: the injected flush failures now hit TERMINAL persistence
@@ -11,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use shamir_db::shamir_db::shamir_db::SeedCatalogueFlushFaultForTest;
+#[cfg(unix)]
 use shamir_db::{ShamirDb, SystemStoreConfig};
 use shamir_query_types::wire::repl::ReplResponse;
 
@@ -19,8 +18,10 @@ use crate::replication::in_process::InProcessReplSource;
 use crate::replication::source::ReplSource;
 use crate::replication::supervisor::{ReplSourceFactory, Subscription, SubscriptionSupervisor};
 
+#[cfg(unix)]
+use super::lease_gate_tests::bookmark;
 use super::lease_gate_tests::{
-    bookmark, build_db, create_profile_and_subscription, leader_version, sub_state,
+    build_db, create_profile_and_subscription, leader_version, sub_state,
     wait_until_bookmark_covers, write_rows,
 };
 
@@ -80,6 +81,145 @@ impl ReplSource for WrongIdentitySource {
 /// Determinism: `tokio::time::pause` (start_paused) auto-advances the
 /// production retry sleeps on the current-thread runtime; the fence trips on
 /// the mutated pull BEFORE decode/apply.
+/// The durable reopen leg requires the Fjall system-store backend and its
+/// platform-specific file locking; the portable retry oracle below exercises
+/// the same real supervisor marking path without requiring reopen semantics.
+#[tokio::test(start_paused = true)]
+async fn terminal_marking_retries_three_flush_attempts_portably() {
+    let leader = build_db().await;
+    write_rows(&leader, 0, 2).await;
+    let version = leader_version(&leader).await;
+
+    let inner = InProcessReplSource::new((*leader).clone());
+    let mut bad_pull = inner.pull("app", "main", 1, 1000, Some(0)).await.unwrap();
+    let expected = leader
+        .get_db("app")
+        .unwrap()
+        .get_repo("main")
+        .unwrap()
+        .repo_identity()
+        .await
+        .unwrap();
+    if let ReplResponse::Pull {
+        repo_lineage_id, ..
+    } = &mut bad_pull
+    {
+        let mut observed = expected;
+        observed.lineage_id[0] ^= 1;
+        *repo_lineage_id = Some(observed.lineage_id);
+    }
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let factory: ReplSourceFactory = {
+        let leader = leader.clone();
+        let bad_pull = bad_pull.clone();
+        let counter = counter.clone();
+        Arc::new(move |_sub: &Subscription| {
+            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                Arc::new(InProcessReplSource::new((*leader).clone())) as Arc<dyn ReplSource>
+            } else {
+                Arc::new(WrongIdentitySource {
+                    inner: InProcessReplSource::new((*leader).clone()),
+                    bad_pull: bad_pull.clone(),
+                }) as Arc<dyn ReplSource>
+            }
+        })
+    };
+    let follower = build_db().await;
+    create_profile_and_subscription(&follower).await;
+    let sup = SubscriptionSupervisor::new(follower.clone(), factory, "follower-portable")
+        .with_max_iterations(1);
+
+    sup.reconcile().await;
+    sup.wait_for_subscription("sub_a").await;
+    wait_until_bookmark_covers(&follower, "main", version).await;
+
+    let fault_slot: Arc<Mutex<Option<SeedCatalogueFlushFaultForTest>>> = Arc::new(Mutex::new(None));
+    let baseline: Arc<Mutex<(usize, usize)>> = Arc::new(Mutex::new((0, 0)));
+    let hook_follower = follower.clone();
+    let hook_slot = fault_slot.clone();
+    let hook_baseline = baseline.clone();
+    let sup2 = SubscriptionSupervisor::new(
+        follower.clone(),
+        {
+            let leader = leader.clone();
+            let bad_pull = bad_pull.clone();
+            Arc::new(move |_sub: &Subscription| {
+                Arc::new(WrongIdentitySource {
+                    inner: InProcessReplSource::new((*leader).clone()),
+                    bad_pull: bad_pull.clone(),
+                }) as Arc<dyn ReplSource>
+            })
+        },
+        "follower-portable-2",
+    )
+    .with_max_iterations(1)
+    .with_start_race_hook(Arc::new(move || {
+        let follower = hook_follower.clone();
+        let slot = hook_slot.clone();
+        let baseline = hook_baseline.clone();
+        Box::pin(async move {
+            let guard = SeedCatalogueFlushFaultForTest::arm_fail_first(&follower, 2);
+            *baseline.lock().expect("counter baseline") = (guard.attempts(), guard.failures());
+            *slot.lock().expect("fault slot") = Some(guard);
+        })
+    }));
+
+    sup2.reconcile().await;
+    sup2.wait_for_subscription("sub_a").await;
+    let (attempts, failures, successes) = {
+        let slot = fault_slot.lock().expect("fault slot");
+        let (base_a, base_f) = *baseline.lock().expect("counter baseline");
+        let guard = slot.as_ref().expect("seam still armed");
+        (
+            guard.attempts() - base_a,
+            guard.failures() - base_f,
+            guard.successes(),
+        )
+    };
+    assert_eq!(attempts, 3, "2 failed flushes and 1 successful flush");
+    assert_eq!(failures, 2, "both injected failures must be consumed");
+    assert_eq!(successes, 1, "the terminal mark must complete a real flush");
+    *fault_slot.lock().expect("fault slot") = None;
+    drop(sup2);
+    drop(sup);
+
+    assert_eq!(
+        sub_state(&follower, "sub_a").await.as_deref(),
+        Some("resync_required")
+    );
+    assert!(follower
+        .has_resync_required_subscription_covering("app", "main")
+        .await
+        .unwrap());
+}
+
+#[cfg(unix)]
+async fn persistent_follower(meta: std::path::PathBuf) -> Arc<ShamirDb> {
+    let follower = Arc::new(
+        ShamirDb::init(SystemStoreConfig::Fjall(meta))
+            .await
+            .expect("init persistent follower"),
+    );
+    let owner =
+        shamir_db::access::Actor::User(shamir_db::access::principal64_from_username("alice"));
+    follower.create_db_as("app", owner.clone()).await;
+    for repo in ["main", "other"] {
+        let cfg = shamir_db::engine::repo::RepoConfig::new(
+            repo,
+            shamir_db::engine::repo::BoxRepoFactory::in_memory(),
+        )
+        .add_table(shamir_db::engine::table::TableConfig::new("items"));
+        follower
+            .add_repo_as("app", cfg, owner.clone())
+            .await
+            .expect("add follower repo");
+    }
+    follower
+}
+
+/// COUNTERFACTUAL: a single-attempt terminal mark produces exactly one
+/// failed flush (1 attempt, 1 failure, 0 successes), not the 3/2/1 record.
 #[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn terminal_marking_retries_until_success() {
@@ -129,25 +269,7 @@ async fn terminal_marking_retries_until_success() {
 
     let follower_tmp = tempfile::tempdir().expect("follower system-store directory");
     let follower_meta = follower_tmp.path().join("shamir_db_meta.redb");
-    let follower = Arc::new(
-        ShamirDb::init(SystemStoreConfig::Fjall(follower_meta.clone()))
-            .await
-            .expect("init persistent follower"),
-    );
-    let owner =
-        shamir_db::access::Actor::User(shamir_db::access::principal64_from_username("alice"));
-    follower.create_db_as("app", owner.clone()).await;
-    for repo in ["main", "other"] {
-        let cfg = shamir_db::engine::repo::RepoConfig::new(
-            repo,
-            shamir_db::engine::repo::BoxRepoFactory::in_memory(),
-        )
-        .add_table(shamir_db::engine::table::TableConfig::new("items"));
-        follower
-            .add_repo_as("app", cfg, owner.clone())
-            .await
-            .expect("add follower repo");
-    }
+    let follower = persistent_follower(follower_meta.clone()).await;
     create_profile_and_subscription(&follower).await;
     let sup =
         SubscriptionSupervisor::new(follower.clone(), factory, "follower-1").with_max_iterations(1);

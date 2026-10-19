@@ -137,6 +137,30 @@ impl ResyncQuarantineCache {
         }
         claims
     }
+    pub(crate) fn owner_claims_for_subscription(
+        &self,
+        name: &str,
+        keys: &[(String, String)],
+    ) -> Vec<String> {
+        let snapshot = self.snapshot.load();
+        let mut claims = Vec::new();
+        for key in keys {
+            if let Some(owners) = snapshot.pending.get(key) {
+                for claim in owners.iter().filter(|claim| {
+                    claim
+                        .rsplit_once(':')
+                        .and_then(|(owner, _token)| owner.rsplit_once(':'))
+                        .is_some_and(|(claim_name, _generation)| claim_name == name)
+                }) {
+                    if !claims.contains(claim) {
+                        claims.push(claim.clone());
+                    }
+                }
+            }
+        }
+        claims
+    }
+
     /// Replace cache contents from a successful refresh of the durable
     /// rows. Round 6 item 5: refresh is NOT a persistence acknowledgement —
     /// the pending set is left UNTOUCHED here, and every pending key the

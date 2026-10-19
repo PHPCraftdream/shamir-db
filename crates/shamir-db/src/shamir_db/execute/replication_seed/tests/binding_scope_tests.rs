@@ -508,18 +508,172 @@ async fn replace_subscription_row_true_replaces_fields() {
     );
 }
 
-/// Round 7 item 1 (Unix-only): Pause and SetProfile persist through the SAME
-/// true-replace helper (the old staged-DELETE+SET shape aborted every ALTER
-/// with NotFound), so their durable rows must hold EXACTLY the intended
-/// fields: Pause flips `state` to `paused`; SetProfile swaps `profile`
-/// (destination set proven identical by the guard) — both keep the rest of
-/// the record intact and never invent marker fields.
-/// COUNTERFACTUAL: the pre-round-7 helper (staged DELETE then SET in the
-/// same tx) makes BOTH actions fail with NotFound — SET's tx-aware preread
-/// sees its own tx's staged removal — so any assertion below is unreachable
-/// red. A merge-SET persist would additionally resurrect shift_remove'ed
-/// fields on quarantined rows (see
-/// `replace_subscription_row_true_replaces_fields`).
+/// COUNTERFACTUAL: generation-only claim lookup leaks A after G2; prefix
+/// matching consumes B too. The final serve/refuse checks distinguish both.
+#[cfg(unix)]
+#[tokio::test]
+async fn resume_releases_stale_same_name_claim_after_recovery() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let db = shamir.create_db("testdb").await;
+    db.add_repo(RepoConfig::new("main", BoxRepoFactory::in_memory()))
+        .await
+        .unwrap();
+    quarantine(&shamir, "sub", "prof", &[("testdb", "main")]).await;
+    let fault = crate::shamir_db::shamir_db::SeedCatalogueFlushFaultForTest::arm(&shamir);
+    assert!(shamir
+        .mark_subscription_resync_required("sub", 8, 4)
+        .await
+        .is_err());
+    drop(fault);
+    let keys = vec![("testdb".to_string(), "main".to_string())];
+    let before_rows = super::super::catalogue::rows(&shamir, "subscriptions")
+        .await
+        .unwrap();
+    let row = before_rows
+        .iter()
+        .find(|r| r.get("name").and_then(|v| v.as_str()) == Some("sub"))
+        .unwrap();
+    let generation = row
+        .get("binding_generation")
+        .and_then(|v| v.as_u64())
+        .unwrap();
+    let old_claims = shamir
+        .resync_quarantine
+        .owner_claims_for(&format!("sub:{generation}"), &keys);
+    assert!(!old_claims.is_empty());
+    let b_claim = shamir
+        .resync_quarantine
+        .publish([(keys[0].clone(), "B pending".into())], "sub:other:7");
+    super::quarantine_reads_tests::recovery::install_replacement_image(&shamir).await;
+    super::quarantine_reads_tests::recovery::rebind_to_replacement(&shamir, "sub", "prof").await;
+    let after_rows = super::super::catalogue::rows(&shamir, "subscriptions")
+        .await
+        .unwrap();
+    let row = after_rows
+        .iter()
+        .find(|r| r.get("name").and_then(|v| v.as_str()) == Some("sub"))
+        .unwrap();
+    let generation2 = row
+        .get("binding_generation")
+        .and_then(|v| v.as_u64())
+        .unwrap();
+    assert!(generation2 > generation);
+    shamir.set_replication_resume_probe(super::quarantine_reads_tests::recovery::probe());
+    let mut batch = Batch::new();
+    batch.id(15);
+    batch
+        .try_op("resume", alter_subscription("sub").resume())
+        .unwrap();
+    shamir
+        .execute("testdb", &batch.to_request_via_msgpack())
+        .await
+        .unwrap();
+    assert!(shamir
+        .resync_quarantine
+        .owner_claims_for(&format!("sub:{generation}"), &keys)
+        .is_empty());
+    assert_eq!(
+        shamir
+            .resync_quarantine
+            .owner_claims_for("sub:other:7", &keys),
+        vec![b_claim.clone()]
+    );
+    assert_refused(&shamir, "testdb", "main").await;
+    shamir
+        .resync_quarantine
+        .rollback_pending(&b_claim, keys.clone());
+    assert_serves_named_row(&shamir, "testdb", "main", "replacement").await;
+}
+
+/// A SetProfile-only mutation must preserve the complete row except for
+/// `profile`, both immediately and after reopening the Fjall system store.
+/// COUNTERFACTUAL: if SetProfile drops any unrelated field, the fresh complete
+/// row comparison below fails; if its persistence is not durable, reopen fails.
+#[cfg(unix)]
+#[tokio::test]
+async fn set_profile_alone_preserves_complete_row_through_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let sys_path = dir.path().join("meta");
+    let repo_path = dir.path().join("main");
+    let before;
+    {
+        let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
+            .await
+            .unwrap();
+        let db = shamir.create_db("testdb").await;
+        db.add_repo(RepoConfig::new("main", BoxRepoFactory::fjall(repo_path)))
+            .await
+            .unwrap();
+        let mut b = Batch::new();
+        b.id(2);
+        for profile in ["prof_a", "prof_b"] {
+            b.op(
+                profile,
+                replication_profile(profile).stream(
+                    repl_scope("testdb").repo("main").build(),
+                    ReplDirection::Pull,
+                    ReplMode::ReadOnly,
+                ),
+            );
+        }
+        b.op(
+            "sub",
+            subscription("sub", "tcp://peer:9000", "pub", "prof_a"),
+        );
+        shamir
+            .execute("testdb", &b.to_request_via_msgpack())
+            .await
+            .unwrap();
+        before = super::super::catalogue::rows(&shamir, "subscriptions")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row.get("name").and_then(|v| v.as_str()) == Some("sub"))
+            .expect("created subscription row");
+        let mut expected = before.clone();
+        let QueryValue::Map(fields) = &mut expected else {
+            panic!("subscription row must be a map")
+        };
+        fields.insert("profile".into(), QueryValue::Str("prof_b".into()));
+        let mut change = Batch::new();
+        change.id(3);
+        change
+            .try_op("alt", alter_subscription("sub").set_profile("prof_b"))
+            .unwrap();
+        shamir
+            .execute("testdb", &change.to_request_via_msgpack())
+            .await
+            .unwrap();
+        let fresh = super::super::catalogue::rows(&shamir, "subscriptions")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row.get("name").and_then(|v| v.as_str()) == Some("sub"))
+            .expect("SetProfile row");
+        assert_eq!(fresh, expected, "SetProfile may change profile only");
+    }
+    let reopened = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
+        .await
+        .unwrap();
+    let fresh = super::super::catalogue::rows(&reopened, "subscriptions")
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row.get("name").and_then(|v| v.as_str()) == Some("sub"))
+        .expect("reopened SetProfile row");
+    let mut expected = before;
+    let QueryValue::Map(fields) = &mut expected else {
+        panic!("subscription row must be a map")
+    };
+    fields.insert("profile".into(), QueryValue::Str("prof_b".into()));
+    assert_eq!(
+        fresh, expected,
+        "complete SetProfile row must survive reopen"
+    );
+}
+
+/// Pause and SetProfile persist through the same true-replace helper.
+/// COUNTERFACTUAL: staged DELETE+merge SET aborts ALTER; Resume marker-removal regression above catches omitted-field merging.
 #[cfg(unix)]
 #[tokio::test]
 async fn pause_and_set_profile_persist_exact_durable_row() {
