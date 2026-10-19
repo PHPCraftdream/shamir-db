@@ -3,7 +3,54 @@
 
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::Repo;
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// Shutdown-stage timing threshold: stages slower than this are logged.
+const STAGE_WARN_THRESHOLD: Duration = Duration::from_secs(1);
+
+/// Logs `repo`/`stage` when it ran longer than [`STAGE_WARN_THRESHOLD`] —
+/// from `Drop`, so a stage that is CANCELLED by an enclosing deadline (the
+/// very stall being diagnosed) is reported too. Shutdown paths only.
+struct StageTimer<'a> {
+    repo: &'a str,
+    stage: &'a str,
+    start: tokio::time::Instant,
+    finished: bool,
+}
+
+impl Drop for StageTimer<'_> {
+    fn drop(&mut self) {
+        let elapsed = self.start.elapsed();
+        if elapsed >= STAGE_WARN_THRESHOLD {
+            let how = if self.finished {
+                "took"
+            } else {
+                "was cancelled or still running after"
+            };
+            log::warn!(
+                "shutdown stage slow: repo '{}' stage '{}' {} {:?}",
+                self.repo,
+                self.stage,
+                how,
+                elapsed
+            );
+        }
+    }
+}
+
+async fn timed_stage<F: Future>(repo: &str, stage: &str, fut: F) -> F::Output {
+    let mut timer = StageTimer {
+        repo,
+        stage,
+        start: tokio::time::Instant::now(),
+        finished: false,
+    };
+    let out = fut.await;
+    timer.finished = true;
+    out
+}
 
 use crate::tx::apply_replicated::follower_durability::receipt::{ApplyOutcome, ReceiptApplyJob};
 use crate::tx::cold_reconcile::lifecycle::{RepoWorkerLifecycle, WorkerTerminal};
@@ -28,7 +75,13 @@ impl RepoInstance {
 
         let result = tokio::time::timeout_at(deadline, async {
             if let Some(lifecycle) = lifecycle {
-                match Box::pin(lifecycle.shutdown_until(deadline)).await {
+                match Box::pin(timed_stage(
+                    &self.name,
+                    "lifecycle_drain",
+                    lifecycle.shutdown_until(deadline),
+                ))
+                .await
+                {
                     Ok(WorkerTerminal::Completed) => {}
                     Ok(WorkerTerminal::Failed(msg)) => {
                         return Err(DbError::Storage(format!("worker failed: {msg}")));
@@ -38,7 +91,16 @@ impl RepoInstance {
             }
 
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            match tokio::time::timeout_at(deadline, self.quiesce_commits(remaining)).await {
+            match tokio::time::timeout_at(
+                deadline,
+                timed_stage(
+                    &self.name,
+                    "quiesce_commits",
+                    self.quiesce_commits(remaining),
+                ),
+            )
+            .await
+            {
                 Ok(result) => result?,
                 Err(_) => {
                     return Err(DbError::Internal(format!(
@@ -47,7 +109,12 @@ impl RepoInstance {
                     )));
                 }
             }
-            match tokio::time::timeout_at(deadline, self.flush_buffers()).await {
+            match tokio::time::timeout_at(
+                deadline,
+                timed_stage(&self.name, "flush_buffers", self.flush_buffers()),
+            )
+            .await
+            {
                 Ok(result) => result?,
                 Err(_) => {
                     return Err(DbError::Storage(
@@ -55,7 +122,16 @@ impl RepoInstance {
                     ));
                 }
             }
-            match tokio::time::timeout_at(deadline, self.finish_clean_shutdown(deadline)).await {
+            match tokio::time::timeout_at(
+                deadline,
+                timed_stage(
+                    &self.name,
+                    "finish_clean_shutdown",
+                    self.finish_clean_shutdown(deadline),
+                ),
+            )
+            .await
+            {
                 Ok(result) => result,
                 Err(_) => Err(DbError::Storage("clean shutdown timed out".into())),
             }
@@ -116,7 +192,7 @@ impl RepoInstance {
         // drainer (no commit), this is a cheap no-op. A drain error is returned
         // after subsequent stores are still flushed; recovery on next open can
         // then converge from WAL.
-        if let Err(e) = self.drainer().drain_all(self).await {
+        if let Err(e) = timed_stage(&self.name, "drain_all", self.drainer().drain_all(self)).await {
             log::warn!("flush_buffers: drain_all {}: {}", self.name, e);
             if first_err.is_none() {
                 first_err = Some(e);
@@ -125,7 +201,8 @@ impl RepoInstance {
 
         match self.tx_info_store().await {
             Ok(store) => {
-                if let Err(e) = store.flush_drain().await {
+                if let Err(e) = timed_stage(&self.name, "tx_info_store", store.flush_drain()).await
+                {
                     log::warn!("flush_buffers: tx_info_store {}: {}", self.name, e);
                     if first_err.is_none() {
                         first_err = Some(e);
@@ -155,7 +232,13 @@ impl RepoInstance {
                     continue;
                 }
             };
-            if let Err(e) = table.data_store().flush_drain().await {
+            if let Err(e) = timed_stage(
+                &self.name,
+                &format!("data_store {table_name}"),
+                table.data_store().flush_drain(),
+            )
+            .await
+            {
                 log::warn!(
                     "flush_buffers: data_store {}/{}: {}",
                     self.name,
@@ -166,7 +249,13 @@ impl RepoInstance {
                     first_err = Some(e);
                 }
             }
-            if let Err(e) = table.info_store().flush_drain().await {
+            if let Err(e) = timed_stage(
+                &self.name,
+                &format!("info_store {table_name}"),
+                table.info_store().flush_drain(),
+            )
+            .await
+            {
                 log::warn!(
                     "flush_buffers: info_store {}/{}: {}",
                     self.name,
@@ -185,7 +274,9 @@ impl RepoInstance {
         // WAL entries whose deltas cover these ids can be truncated on next boot.
         match self.repo_interner().await {
             Ok(repo_interner) => {
-                if let Err(e) = repo_interner.persist().await {
+                if let Err(e) =
+                    timed_stage(&self.name, "interner_persist", repo_interner.persist()).await
+                {
                     log::warn!("flush_buffers: repo interner persist {}: {}", self.name, e);
                     if first_err.is_none() {
                         first_err = Some(e);
@@ -207,7 +298,7 @@ impl RepoInstance {
         // `persist(SyncAll)` makes ALL of it durable, byte-for-byte the same
         // end state as the loop. Non-fjall backends: default no-op — their
         // per-store `flush()` semantics are unchanged.
-        if let Err(e) = self.repo.persist_once().await {
+        if let Err(e) = timed_stage(&self.name, "persist_once", self.repo.persist_once()).await {
             log::warn!("flush_buffers: persist_once {}: {}", self.name, e);
             if first_err.is_none() {
                 first_err = Some(e);
