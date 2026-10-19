@@ -17,11 +17,16 @@ type QuarantineEntries = TFxMap<String, QuarantineRepos>;
 type QuarantineRepos = TFxMap<String, Arc<str>>;
 
 /// Immutable snapshot: two levels keyed by db then repo, plus the set of
-/// prepublished (not yet durably confirmed) keys.
+/// prepublished (not yet durably confirmed) keys and the set of keys the
+/// LAST successful refresh derived from the durable rows (`derived` —
+/// round 6 item 5: `confirm_pending` needs it to tell a rows-backed key,
+/// whose entry survives confirmation, from a pending-only key, whose entry
+/// must go).
 #[derive(Default)]
 pub(crate) struct QuarantineSnapshot {
     pub(crate) entries: QuarantineEntries,
     pending: TSet<(String, String)>,
+    derived: TSet<(String, String)>,
 }
 
 pub(crate) struct ResyncQuarantineCache {
@@ -59,6 +64,7 @@ impl ResyncQuarantineCache {
         let mut next = QuarantineSnapshot {
             entries: current.entries.clone(),
             pending: current.pending.clone(),
+            derived: current.derived.clone(),
         };
         for ((db, repo), reason) in entries {
             let repos = next.entries.entry(db.clone()).or_default();
@@ -69,16 +75,23 @@ impl ResyncQuarantineCache {
         }
         self.snapshot.store(Arc::new(next));
     }
-    /// Replace cache contents from a successful persistence snapshot. The
-    /// durable rows are the single source of truth at refresh time: a key
-    /// the refreshed rows no longer derive is dropped, even if it was
-    /// prepublished by [`publish`]. The pending set protects only the
-    /// window BEFORE refresh — reads and the drop/rename guards see the
-    /// prepublished keys via `entries`/`reason_for` until the next
-    /// successful refresh confirms or clears them. On persist/flush
+    /// Replace cache contents from a successful refresh of the durable
+    /// rows. Round 6 item 5: refresh is NOT a persistence acknowledgement —
+    /// the pending set is left UNTOUCHED here, and every pending key the
+    /// refreshed rows no longer derive KEEPS its current reason in
+    /// `entries`, so reads and the drop/rename guards never regress below
+    /// the prepublished set. A pending key leaves the cache only through an
+    /// explicit [`Self::confirm_pending`] (after the owning mark's SET +
+    /// interner persist + flush + refresh all succeeded) or
+    /// [`Self::rollback_pending`] (definitive rollback). On persist/flush
     /// FAILURE refresh is never reached, so the last safe snapshot
     /// (including the prepublished keys) stays — protection never
     /// regresses.
+    ///
+    /// COUNTERFACTUAL: reverting to the pre-round-6 behavior of dropping
+    /// unmatched pending keys (and their entries) here turns
+    /// `quarantine_cache_replace_clears_persisted_removal_but_keeps_pending`
+    /// and `pending_quarantine_survives_unrelated_refresh` red.
     pub(crate) fn install(&self, entries: impl IntoIterator<Item = ((String, String), String)>) {
         let current = self.snapshot.load_full();
         let mut fresh: TSet<(String, String)> = TSet::default();
@@ -90,19 +103,86 @@ impl ResyncQuarantineCache {
                 .or_default()
                 .insert(repo, Arc::from(reason));
         }
-        let mut pending = current.pending.clone();
-        for key in fresh.iter() {
-            // Deprecated `IndexSet::remove` is not used: order in the
-            // pending set is irrelevant, so `swap_remove` is equivalent.
-            pending.swap_remove(key);
+        // Pending keys survive untouched; re-add the current reason of every
+        // pending key the refreshed rows no longer derive so guards never
+        // see the key vanish (see doc above).
+        for key in current.pending.iter() {
+            if fresh.contains(key) {
+                continue;
+            }
+            if let Some(reason) = current
+                .entries
+                .get(&key.0)
+                .and_then(|repos| repos.get(&key.1))
+                .cloned()
+            {
+                next_entries
+                    .entry(key.0.clone())
+                    .or_default()
+                    .insert(key.1.clone(), reason);
+            }
         }
-        // Prepublished keys the refreshed rows no longer derive are
-        // dropped with the pending set: the durable rows are the single
-        // source of truth at refresh time.
         self.snapshot.store(Arc::new(QuarantineSnapshot {
             entries: next_entries,
-            pending,
+            pending: current.pending.clone(),
+            derived: fresh,
         }));
+    }
+    /// Explicit persistence acknowledgement (round 6 item 5): `key` leaves
+    /// the pending set; its entry is dropped UNLESS the last refresh's rows
+    /// still derive it (then the entry is the durable truth, not the
+    /// pending protection). Called only after the owning mark's SET +
+    /// interner persist + flush + refresh ALL succeeded.
+    pub(crate) fn confirm_pending(&self, keys: impl IntoIterator<Item = (String, String)>) {
+        let current = self.snapshot.load_full();
+        let mut next = QuarantineSnapshot {
+            entries: current.entries.clone(),
+            pending: current.pending.clone(),
+            derived: current.derived.clone(),
+        };
+        for key in keys {
+            next.pending.swap_remove(&key);
+            if !next.derived.contains(&key) {
+                if let Some(repos) = next.entries.get_mut(&key.0) {
+                    repos.remove(&key.1);
+                    if repos.is_empty() {
+                        next.entries.remove(&key.0);
+                    }
+                }
+            }
+        }
+        self.snapshot.store(Arc::new(next));
+    }
+    /// Definitive documented rollback (round 6 item 5): `key` always leaves
+    /// the pending set, but its ENTRY is dropped only when the last
+    /// refresh's rows no longer derive it — the durable rows are the source
+    /// of truth (mirrors `confirm_pending`). A still-quarantined sibling
+    /// subscription covering the same destination keeps its row-derived
+    /// entry.
+    pub(crate) fn rollback_pending(&self, keys: impl IntoIterator<Item = (String, String)>) {
+        let current = self.snapshot.load_full();
+        let mut next = QuarantineSnapshot {
+            entries: current.entries.clone(),
+            pending: current.pending.clone(),
+            derived: current.derived.clone(),
+        };
+        for key in keys {
+            next.pending.swap_remove(&key);
+            // COUNTERFACTUAL: dropping the entry unconditionally here makes
+            // a shared destination serve while another still-quarantined
+            // subscription covers it → the still-refused assertions in
+            // `binding_scope_overlap_clearing_through_real_reseed_resume`
+            // and quarantine_reads_tests t15 go red.
+            if !next.derived.contains(&key) {
+                if let Some(repos) = next.entries.get_mut(&key.0) {
+                    repos.remove(&key.1);
+                    if repos.is_empty() {
+                        next.entries.remove(&key.0);
+                    }
+                }
+            }
+        }
+        self.snapshot.store(Arc::new(next));
     }
 }
 impl Default for ResyncQuarantineCache {

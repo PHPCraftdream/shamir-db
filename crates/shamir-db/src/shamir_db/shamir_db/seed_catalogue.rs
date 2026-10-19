@@ -61,6 +61,37 @@ impl Drop for SeedCatalogueFlushFaultForTest {
     }
 }
 
+/// Round-6 item 5 test seam: while armed on an instance,
+/// `mark_subscription_terminal_generation` fails its row SET BEFORE the row
+/// changes — so the terminal mark prepublishes its quarantine keys but the
+/// durable row is untouched. The pending keys must keep reads and the
+/// drop/rename guards closed until an explicit confirmation
+/// (`TerminalRowSetFaultForTest` is the RAII guard; same
+/// `#[cfg(any(test, feature = "test-util"))]` gating as the flush-fault
+/// seams).
+#[cfg(any(test, feature = "test-util"))]
+pub struct TerminalRowSetFaultForTest(ShamirDb);
+
+#[cfg(any(test, feature = "test-util"))]
+impl TerminalRowSetFaultForTest {
+    /// Arm the injected row-SET failure for this guard's lifetime.
+    pub fn arm(shamir: &ShamirDb) -> Self {
+        shamir
+            .row_set_fault_armed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Self(shamir.clone())
+    }
+}
+
+#[cfg(any(test, feature = "test-util"))]
+impl Drop for TerminalRowSetFaultForTest {
+    fn drop(&mut self) {
+        self.0
+            .row_set_fault_armed
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Round-5 T7 (cross-crate) handle on the final-write seam: arms
 /// `final_write_pause` and hands out the arrival Notify so a downstream
 /// test (shamir-server via `test-util`) can drop a CREATE future exactly on

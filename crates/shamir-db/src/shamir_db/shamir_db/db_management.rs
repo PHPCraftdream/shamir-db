@@ -103,7 +103,7 @@ impl ShamirDb {
 
         // S5c-X PR8b-2: refuse DROP of a destination referenced by a durable
         // subscription binding BEFORE any live or durable mutation.
-        self.ensure_destinations_unbound(name, None).await?;
+        self.ensure_destinations_unbound(name, None, "DROP").await?;
 
         let removed = self.dbs.remove(name).is_some();
 
@@ -166,7 +166,8 @@ impl ShamirDb {
         // S5c-X PR8b-2: refuse RENAME of a destination referenced by a
         // durable subscription binding BEFORE any live or durable mutation
         // (repo: None — the whole database is the destination set).
-        self.ensure_destinations_unbound(from, None).await?;
+        self.ensure_destinations_unbound(from, None, "RENAME")
+            .await?;
         if from == SYSTEM_DB_NAME {
             return Err(DbError::Validation(format!(
                 "cannot rename the system database '{}'",
@@ -565,7 +566,7 @@ impl ShamirDb {
     ) -> DbResult<bool> {
         // S5c-X PR8b-2: refuse DROP of a referenced destination BEFORE any
         // live or durable mutation.
-        self.ensure_destinations_unbound(db_name, Some(repo_name))
+        self.ensure_destinations_unbound(db_name, Some(repo_name), "DROP")
             .await?;
         if let Some(db) = self.get_db(db_name) {
             let removed = db.remove_repo(repo_name).await;
@@ -621,7 +622,7 @@ impl ShamirDb {
         let _control = self.lock_replication_control().await;
         // S5c-X PR8b-2: refuse RENAME of a destination referenced by a
         // durable subscription binding BEFORE any live or durable mutation.
-        self.ensure_destinations_unbound(db_name, Some(from))
+        self.ensure_destinations_unbound(db_name, Some(from), "RENAME")
             .await?;
         let db = self
             .get_db(db_name)

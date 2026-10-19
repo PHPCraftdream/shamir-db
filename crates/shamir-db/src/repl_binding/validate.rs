@@ -127,20 +127,24 @@ impl ShamirDb {
         }
     }
 
-    /// DROP/RENAME guard: refuse when any subscription row's durable binding
-    /// references `(db, repo)` (`repo: None` = any repo in `db`) OR when the
-    /// quarantine cache covers the destination (a prepublished key that the
-    /// failed-persist window left undurable is just as binding — round 5
-    /// B2). Rows that cannot be parsed propagate the typed catalogue error.
-    /// The refusal is the typed
+    /// Destination binding guard: refuse when any subscription row's durable
+    /// binding references `(db, repo)` (`repo: None` = any repo in `db`) OR
+    /// when the quarantine cache covers the destination (a prepublished key
+    /// that the failed-persist window left undurable is just as binding —
+    /// round 5 B2). `operation` is the ACTUAL operation string from the
+    /// caller (round 6 item 8: "DROP", "RENAME", "DROP DATABASE CASCADE",
+    /// "DROP REPO CASCADE") — the refusal must never name a different
+    /// operation than the one attempted. The refusal is the typed
     /// [`DbError::ReplicationDestinationBound`] naming the operation, the
     /// destination and EVERY blocking subscription with its binding
-    /// generation. Runs BEFORE any live or durable mutation of the
-    /// destination.
+    /// generation; the blocker's `quarantined` flag covers the HIT
+    /// destination's cache-pending state, not just the row marker. Runs
+    /// BEFORE any live or durable mutation of the destination.
     pub(crate) async fn ensure_destinations_unbound(
         &self,
         db: &str,
         repo: Option<&str>,
+        operation: &str,
     ) -> DbResult<()> {
         // Collect ALL blocking rows while scanning so one error names them
         // all (round 5 B4).
@@ -152,19 +156,27 @@ impl ShamirDb {
                 .and_then(|value| value.as_str())
                 .unwrap_or("<unnamed>")
                 .to_string();
-            let hits = binding.destinations().iter().any(|(bound_db, bound_repo)| {
-                bound_db == db && repo.is_none_or(|wanted| wanted == bound_repo)
-            });
-            if hits {
+            // Round 6 item 8: evaluate the flag on the HIT destination —
+            // `row_is_quarantined` alone misses a healthy row whose hit
+            // destination is pending-quarantined in the cache.
+            let hit = binding
+                .destinations()
+                .iter()
+                .find(|(bound_db, bound_repo)| {
+                    bound_db == db && repo.is_none_or(|wanted| wanted == bound_repo)
+                });
+            if let Some((hit_db, hit_repo)) = hit {
+                let quarantined = row_is_quarantined(&row)
+                    || self.destination_is_pending_quarantined(hit_db, Some(hit_repo.as_str()));
                 blockers.push(BoundBlocker {
                     name,
                     generation: binding.generation(),
-                    quarantined: row_is_quarantined(&row),
+                    quarantined,
                 });
             }
         }
         if !blockers.is_empty() {
-            return Err(bound_error("DROP or RENAME", db, repo, &blockers));
+            return Err(bound_error(operation, db, repo, &blockers));
         }
         // Round 5 (B2): no durable row blocks, but the quarantine cache
         // covers the destination — treat the pending key exactly like a
@@ -172,7 +184,7 @@ impl ShamirDb {
         if self.destination_is_pending_quarantined(db, repo) {
             return Err(DbError::ReplicationDestinationBound {
                 detail: format!(
-                    "cannot DROP or RENAME destination '{db}/{}': its quarantine key is \
+                    "cannot {operation} destination '{db}/{}': its quarantine key is \
                      prepublished (pending durable confirmation) in the replication \
                      quarantine cache; remedy: drop or reconfigure the referencing \
                      subscription(s) first",
@@ -242,13 +254,22 @@ impl ShamirDb {
         let Some(row) = self.read_subscription_row(name).await? else {
             return Ok(());
         };
-        let (db, repo) = SubscriptionBinding::from_row(&row)?
-            .destinations()
-            .first()
-            .cloned()
-            .unwrap_or_else(|| ("<unknown>".to_string(), "<unknown>".to_string()));
-        if row_is_quarantined(&row) || self.destination_is_pending_quarantined(&db, Some(&repo)) {
-            return Err(quarantined_error(name, &db, &repo));
+        // Round 6 item 8: consult EVERY bound destination, not only the
+        // first — a quarantined/pending SECOND destination must refuse the
+        // drop just like the first (a first-only check let the refusal slip
+        // whenever the healthy destination happened to be listed first).
+        let destinations = SubscriptionBinding::from_row(&row)?.destinations().to_vec();
+        let checked = if destinations.is_empty() {
+            vec![("<unknown>".to_string(), "<unknown>".to_string())]
+        } else {
+            destinations
+        };
+        for (db, repo) in &checked {
+            if row_is_quarantined(&row)
+                || self.destination_is_pending_quarantined(db, Some(repo.as_str()))
+            {
+                return Err(quarantined_error(name, db, repo));
+            }
         }
         Ok(())
     }

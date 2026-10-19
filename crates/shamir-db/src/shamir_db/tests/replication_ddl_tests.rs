@@ -390,7 +390,11 @@ async fn resync_required_round_trips_through_status_and_list_then_refuses_recove
 
     // S5c-X PR8b-2: dropping a quarantined subscription is REFUSED —
     // dropping is not evidence that its data became consistent; follow the
-    // reseed runbook instead.
+    // reseed runbook instead. Round 6, traced: `ensure_drop_allowed` returns
+    // the typed quarantine error and the admin dispatch maps it to the
+    // DEDICATED `replication_destination_quarantined` code — the read-path
+    // `resync_required` above is only for reads and the Resume/Pause gate.
+    // COUNTERFACTUAL: `resync_required` here is the stale round-5 oracle.
     let mut b = Batch::new();
     b.id(5);
     b.op("drop", drop_subscription("sub_a"));
@@ -398,7 +402,11 @@ async fn resync_required_round_trips_through_status_and_list_then_refuses_recove
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap_err();
-    assert_eq!(error.code(), Some("resync_required"), "{error}");
+    assert_eq!(
+        error.code(),
+        Some("replication_destination_quarantined"),
+        "{error}"
+    );
     assert_eq!(
         sub_field(&shamir, "sub_a", "state").await,
         Some("resync_required".into()),

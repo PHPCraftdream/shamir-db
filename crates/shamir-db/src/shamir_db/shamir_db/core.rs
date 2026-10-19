@@ -131,28 +131,22 @@ pub struct ShamirDb {
     pub(super) validators: Arc<ValidatorRegistry>,
     /// Base directory for durable repos, derived from the system store
     /// config. `Some(p)` for redb-backed (production) homes; `None` for
-    /// in-memory (tests). Wire-created repos default to a durable redb
-    /// engine under this root; in-memory homes fall back to in-memory repos
-    /// — coherent with the home's durability class.
+    /// in-memory (tests), which fall back to in-memory repos.
     pub(super) data_root: Option<std::path::PathBuf>,
     /// Injected write-side user-administration port (task #559). `None` for
-    /// embedded/no-directory deployments and tests; `Some` when `shamir-server`
-    /// wires its directory-backed impl (then the four re-targeted handlers
-    /// stop returning `not_supported`).
+    /// embedded deployments; `Some` when `shamir-server` wires its
+    /// directory-backed impl (handlers stop returning `not_supported`).
     pub(super) user_admin_port: Option<Arc<dyn UserAdminPort>>,
     /// Injected read-only principal resolver (task #559). `None` for
-    /// embedded/no-directory deployments; `Some` lets `access_tree` /
-    /// `ListOp::Users` / owner-delegation scope lookup read real directory
-    /// state. When `None`, names resolve to `None` (degraded but safe).
+    /// embedded deployments; then names resolve to `None` (degraded but
+    /// safe).
     pub(super) principal_resolver: Option<Arc<dyn PrincipalResolver>>,
-    /// Experimental-feature gate for the online storage-engine migration API
-    /// (`StartMigration` / `CommitMigration` / `RollbackMigration` /
-    /// `MigrationStatus`). Defaults to `false` — no client can begin a
-    /// migration until an operator explicitly calls
+    /// Experimental-feature gate for the online storage-engine migration
+    /// API. Defaults to `false` — no client can begin a migration until an
+    /// operator explicitly calls
     /// [`Self::enable_experimental_migration_api`]. `Relaxed` ordering is
-    /// sufficient: a coarse, rarely-toggled admin switch set once at startup,
-    /// not a hot-path atomic. Shared via `Arc` so all clones observe the
-    /// toggle (the established `Arc<...>` shared-state pattern here).
+    /// sufficient (coarse, rarely-toggled admin switch); shared via `Arc`
+    /// so all clones observe the toggle.
     pub(super) experimental_migration_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// Server-default policy, validated at initialization and each repository open.
     pub(super) durability_policy: DurabilityPolicy,
@@ -169,11 +163,8 @@ pub struct ShamirDb {
     /// (`name -> Arc<SubscriptionLease>`); shared by clone via the inner `Arc`.
     pub(crate) leases: Arc<DashMap<String, Arc<SubscriptionLease>, THasher>>,
     /// S5c-X PR8b-2 (evidence row 6): per-instance test fault seam for
-    /// `flush_seed_catalogue` — the round-2 GLOBAL atomic made concurrent
-    /// tests interfere; arming is now per-instance. Gated
-    /// `#[cfg(any(test, feature = "test-util"))]`: only test builds of THIS
-    /// crate and of downstream crates opting into `test-util` see it;
-    /// production default features are untouched.
+    /// `flush_seed_catalogue` (the round-2 GLOBAL atomic made concurrent
+    /// tests interfere). Gated `any(test, "test-util")` like all seams here.
     #[cfg(any(test, feature = "test-util"))]
     pub(crate) flush_fault_armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// `flush_seed_catalogue` passes that still succeed before the armed
@@ -184,6 +175,13 @@ pub struct ShamirDb {
     /// (round-5 B3 fail-first mode). Test-only.
     #[cfg(any(test, feature = "test-util"))]
     pub(crate) flush_fault_fail_first: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Round-6 item 5 seam: when armed,
+    /// `mark_subscription_terminal_generation` fails its row SET BEFORE the
+    /// row changes — the prepublished quarantine keys must stay pending
+    /// while the durable row is untouched. Test-only, same gating as the
+    /// flush-fault seams.
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) row_set_fault_armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Round-4 T7 seam: when armed, `write_new_subscription` signals the Notify
     /// immediately before the final-state row write, so the test can drop the
     /// CREATE future exactly on the final-write boundary. Gated
@@ -309,6 +307,8 @@ impl ShamirDb {
             flush_fault_pass_first: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(any(test, feature = "test-util"))]
             flush_fault_fail_first: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(any(test, feature = "test-util"))]
+            row_set_fault_armed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(any(test, feature = "test-util"))]
             final_write_pause: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(any(test, feature = "test-util"))]

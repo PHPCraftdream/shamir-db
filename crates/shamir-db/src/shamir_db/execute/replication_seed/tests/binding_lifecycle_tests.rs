@@ -369,7 +369,15 @@ async fn binding_quarantined_destination_drop_rename_and_subscription_drop_refus
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap_err();
-    assert_eq!(err.code(), Some("resync_required"), "{err}");
+    // Round 6, traced: the DROP SUBSCRIPTION guard surfaces the DEDICATED
+    // `replication_destination_quarantined` code, not the read-path
+    // `resync_required`. COUNTERFACTUAL: `resync_required` is the stale
+    // round-5 oracle.
+    assert_eq!(
+        err.code(),
+        Some("replication_destination_quarantined"),
+        "{err}"
+    );
     let mut b = Batch::new();
     b.id(4);
     b.op("ls", list_subscriptions());
@@ -386,22 +394,30 @@ async fn binding_quarantined_destination_drop_rename_and_subscription_drop_refus
         .clone();
     assert_eq!(subs.len(), 1, "the refused DROP must not delete the row");
 
-    // Facade destination guards: every refusal names the referencing
-    // subscription, and the repo survives.
+    // Facade destination guards: every refusal carries the coded
+    // `replication_destination_bound` and names the blocker FORM-INDEPENDENTLY
+    // — `bound_error` lists `- sub (binding generation G, quarantined:
+    // ...)` UNQUOTED, so assert the name + generation form, never `'sub'`.
+    // COUNTERFACTUAL: the old `contains("'sub'")` is the stale round-5
+    // oracle (production lists blockers unquoted).
     let err = shamir.remove_repo("testdb", "main").await.unwrap_err();
-    assert!(err.to_string().contains("'sub'"), "{err}");
+    assert_eq!(err.code(), Some("replication_destination_bound"), "{err}");
+    assert!(err.to_string().contains("sub (binding generation"), "{err}");
     let err = shamir
         .rename_repo_as("testdb", "main", "main2", Actor::System)
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("'sub'"), "{err}");
+    assert_eq!(err.code(), Some("replication_destination_bound"), "{err}");
+    assert!(err.to_string().contains("sub (binding generation"), "{err}");
     let err = shamir.remove_db("testdb").await.unwrap_err();
-    assert!(err.to_string().contains("'sub'"), "{err}");
+    assert_eq!(err.code(), Some("replication_destination_bound"), "{err}");
+    assert!(err.to_string().contains("sub (binding generation"), "{err}");
     let err = shamir
         .rename_db_as("testdb", "testdb2", Actor::System)
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("'sub'"), "{err}");
+    assert_eq!(err.code(), Some("replication_destination_bound"), "{err}");
+    assert!(err.to_string().contains("sub (binding generation"), "{err}");
     assert!(
         shamir.get_db("testdb").unwrap().get_repo("main").is_some(),
         "no live mutation may precede the guard refusals"
@@ -438,8 +454,12 @@ async fn binding_cascade_drop_repo_over_bound_destination_refused_and_intact() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap_err();
+    // Round 6: the coded `replication_destination_bound` refusal names the
+    // blocker UNQUOTED (`sub (binding generation ...)`).
+    // COUNTERFACTUAL: `contains("'sub'")` is the stale round-5 oracle.
+    assert_eq!(err.code(), Some("replication_destination_bound"), "{err}");
     assert!(
-        err.to_string().contains("'sub'"),
+        err.to_string().contains("sub (binding generation"),
         "the refusal must name the bound subscription: {err}"
     );
 
@@ -477,8 +497,11 @@ async fn binding_cascade_drop_db_over_bound_destination_refused_and_intact() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap_err();
+    // Round 6: coded `replication_destination_bound`, blocker UNQUOTED.
+    // COUNTERFACTUAL: `contains("'sub'")` is the stale round-5 oracle.
+    assert_eq!(err.code(), Some("replication_destination_bound"), "{err}");
     assert!(
-        err.to_string().contains("'sub'"),
+        err.to_string().contains("sub (binding generation"),
         "the refusal must name the bound subscription: {err}"
     );
 

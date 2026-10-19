@@ -24,7 +24,9 @@ pub(super) const SYSTEM_DB_NAME: &str = "__system__";
 pub use artifact_kind::{ArtifactKind, KIND_FIELD};
 pub use core::{FunctionSource, ReplicationControlGuard, ShamirDb};
 #[cfg(any(test, feature = "test-util"))]
-pub use seed_catalogue::{FinalWriteBarrierForTest, SeedCatalogueFlushFaultForTest};
+pub use seed_catalogue::{
+    FinalWriteBarrierForTest, SeedCatalogueFlushFaultForTest, TerminalRowSetFaultForTest,
+};
 
 mod shutdown_report;
 pub use shutdown_report::ShutdownReport;

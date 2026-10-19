@@ -47,7 +47,7 @@
 //! holds no follower locks and never blocks the server. `reconcile` only
 //! reads the catalogue and starts/stops tasks.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use shamir_collections::{THasher, TMap};
@@ -65,6 +65,7 @@ use super::error::ReplError;
 use super::follower_loop::{run_follower_loop, FollowerLoopConfig};
 use super::source::seed::terminal;
 use super::source::ReplSource;
+use super::startup_lease::StartupLeaseGuard;
 
 /// Test seam (round 4, T5): a hook awaited after admission and before
 /// spawn — the seam that replaces the row between lease-take and spawn.
@@ -431,7 +432,7 @@ impl SubscriptionSupervisor {
         // the control lock is still held, then run the start-time durability
         // barrier (round-4 MECHANISM 1). The whole block evaluates to the
         // lease so the control-lock guard is dropped right after.
-        let lease = {
+        let lease_guard = {
             let _control = self.local.lock_replication_control().await;
             let stale = match self.read_subscription_row(&sub.name).await {
                 Ok(Some(row)) => {
@@ -466,6 +467,18 @@ impl SubscriptionSupervisor {
                 );
                 return Ok(false);
             };
+            // Round-6 item 3: RAII startup lease — from the moment of
+            // issuance EVERY early exit or cancellation of this start
+            // (barrier-failure, profile-resolution error, coverage mismatch,
+            // admission error, dropped in-flight future) invalidates the
+            // lease via `StartupLeaseGuard::Drop`; no valid lease is ever
+            // stranded without a follower. The old explicit invalidation in
+            // the barrier-error branch below is subsumed by the guard.
+            let lease_guard = StartupLeaseGuard::new(
+                Arc::clone(&self.local),
+                sub.name.clone(),
+                Arc::clone(&lease),
+            );
             // Round-4 MECHANISM 1: the start-time durability barrier — the
             // same catalogue flush CREATE/RESUME use. Only a successful
             // flush may start a follower; on failure the row stays
@@ -476,15 +489,14 @@ impl SubscriptionSupervisor {
                     error = %e,
                     "supervisor: start barrier flush failed; start deferred (reconcile retries)"
                 );
-                // Round-5 A2: same as the fault-counter arm — the unused
-                // lease must not linger valid, or the retry is refused
-                // forever by W1's valid-lease semantics.
-                self.local
-                    .invalidate_subscription_lease(&sub.name, &lease, &_control);
+                // The unused lease must not linger valid (round-5 A2), or
+                // the retry is refused forever by W1's valid-lease
+                // semantics — the guard's Drop (on this return) cleans it.
                 return Ok(false);
             }
-            lease
+            lease_guard
         };
+        let lease = lease_guard.lease();
         // Interior window 1: the lease may have been invalidated between the
         // lease-take inside the block above and here (a concurrent lifecycle
         // mutation ran its quiesce before we re-check). Never start on an
@@ -607,6 +619,19 @@ impl SubscriptionSupervisor {
         let cancel = CancellationToken::new();
         let mut joins = Vec::with_capacity(pull_targets.len());
         let mut dones: Vec<Arc<AtomicBool>> = Vec::with_capacity(pull_targets.len());
+        // Round-6 item 4: reference count of LIVE target loops, shared by
+        // every wrapper of this start. All target loops run under ONE lease,
+        // but teardown (lease invalidation + handle deregistration) must run
+        // exactly once, when the LAST loop exits: only then is it guaranteed
+        // that no sibling still holds an apply read guard — all loops have
+        // returned. A "stop siblings on first exit" design would need a
+        // second cancellation pass plus a re-join for no benefit: while any
+        // target lives, its lease must stay valid.
+        let live_targets = Arc::new(AtomicUsize::new(pull_targets.len()));
+        // Round-6 item 3: the loops now own the lease — defuse the startup
+        // guard so its Drop no longer invalidates it (the wrappers' last-
+        // exit teardown owns cleanup from here on).
+        lease_guard.defuse();
 
         for (db, repo) in pull_targets.iter().cloned() {
             let mut cfg = FollowerLoopConfig::new(self.node_id.clone(), db, repo)
@@ -632,6 +657,7 @@ impl SubscriptionSupervisor {
             let done_flag = Arc::new(AtomicBool::new(false));
             let done = Arc::clone(&done_flag);
             let lease_for_exit = Arc::clone(&lease);
+            let live = Arc::clone(&live_targets);
             let registry = self.registry.clone();
             // §5.6 — each loop is its own task; never blocks the server.
             let join = tokio::spawn(async move {
@@ -653,10 +679,11 @@ impl SubscriptionSupervisor {
                         };
                         let (local_m, name_m) = (Arc::clone(&local), sub_name.clone());
                         terminal::mark_with_retry(
+                            &local,
                             &sub_name,
                             "resync_required",
                             &tok_exit,
-                            &lease_for_exit,
+                            generation,
                             || {
                                 let l = Arc::clone(&local_m);
                                 let n = name_m.clone();
@@ -707,12 +734,7 @@ impl SubscriptionSupervisor {
                             // Negative control: the UNPROTECTED pre-quarantine
                             // path (generic terminal mapping), still retried.
                             terminal::persist_terminal_with_retry(
-                                &local,
-                                &sub_name,
-                                &e,
-                                generation,
-                                &tok_exit,
-                                &lease_for_exit,
+                                &local, &sub_name, &e, generation, &tok_exit,
                             )
                             .await;
                         } else {
@@ -725,10 +747,11 @@ impl SubscriptionSupervisor {
                             let (local_m, name_m, msg_m) =
                                 (Arc::clone(&local), sub_name.clone(), e.to_string());
                             terminal::mark_with_retry(
+                                &local,
                                 &sub_name,
                                 "resync_required (identity fence)",
                                 &tok_exit,
-                                &lease_for_exit,
+                                generation,
                                 || {
                                     let l = Arc::clone(&local_m);
                                     let n = name_m.clone();
@@ -760,10 +783,11 @@ impl SubscriptionSupervisor {
                         let (local_m, name_m, msg_m) =
                             (Arc::clone(&local), sub_name.clone(), e.to_string());
                         terminal::mark_with_retry(
+                            &local,
                             &sub_name,
                             "reopen_required",
                             &tok_exit,
-                            &lease_for_exit,
+                            generation,
                             || {
                                 let l = Arc::clone(&local_m);
                                 let n = name_m.clone();
@@ -783,12 +807,7 @@ impl SubscriptionSupervisor {
                     }
                     Err(e) => {
                         terminal::persist_terminal_with_retry(
-                            &local,
-                            &sub_name,
-                            &e,
-                            generation,
-                            &tok_exit,
-                            &lease_for_exit,
+                            &local, &sub_name, &e, generation, &tok_exit,
                         )
                         .await;
                         warn!(subscription = %sub_name, error = %e, "follower loop terminated");
@@ -798,16 +817,21 @@ impl SubscriptionSupervisor {
                 // (round 5, A1). The loop returned: its apply-gate read guard
                 // is dropped, so the control lock cannot overlap an in-flight
                 // apply of THIS loop. (a) mark done (Release) — staleness
-                // fires only when ALL dones are set. (b) lease
-                // invalidation-if-current (ptr_eq no-op if superseded).
-                // (c) generation-aware self-deregistration: the lease Arc is
-                // unique per start, so a newer handle is never removed.
+                // fires only when ALL dones are set. (b) REFERENCE-COUNTED
+                // teardown (round-6 item 4): only the LAST exiting loop —
+                // the only one guaranteed no sibling still holds an apply
+                // read guard — invalidates the shared lease and removes the
+                // handle (generation-aware, ptr_eq: a newer handle is never
+                // removed).
                 done.store(true, Ordering::Release);
-                let control = local.lock_replication_control().await;
-                local.invalidate_subscription_lease(&sub_name, &lease_for_exit, &control);
-                drop(control);
-                let lease_check = Arc::clone(&lease_for_exit);
-                let _ = registry.remove_if_sync(&sub_name, |h| Arc::ptr_eq(&h.lease, &lease_check));
+                if live.fetch_sub(1, Ordering::AcqRel) == 1 {
+                    let control = local.lock_replication_control().await;
+                    local.invalidate_subscription_lease(&sub_name, &lease_for_exit, &control);
+                    drop(control);
+                    let lease_check = Arc::clone(&lease_for_exit);
+                    let _ =
+                        registry.remove_if_sync(&sub_name, |h| Arc::ptr_eq(&h.lease, &lease_check));
+                }
             });
             joins.push(join);
             dones.push(done_flag);
@@ -939,7 +963,9 @@ fn decode_streams(v: &QueryValue) -> Result<Vec<ReplStream>, String> {
 /// Read every record of a system-store table as owned `QueryValue`s.
 ///
 /// Mirrors `admin_replication.rs::read_all` — the system catalogue read path.
-async fn read_all(
+/// `pub(crate)` (round-6 item 2): `seed/terminal.rs`'s generation-currency
+/// check reuses this reader instead of duplicating it.
+pub(crate) async fn read_all(
     table: &shamir_db::engine::table::TableManager,
     table_name: &str,
 ) -> shamir_db::DbResult<Vec<QueryValue>> {

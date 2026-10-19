@@ -1,19 +1,24 @@
-//! S5c-X round 5 — supervisor lease/barrier tests (W3).
+//! S5c-X round 5 — supervisor lease/barrier tests (W3); round-6 item 7
+//! test-oracle fixes.
 //! Fixtures replicate `supervisor_tests.rs` locally (leader/follower
 //! `build_db`, builder-batch catalogue writes, a supervisor factory) —
 //! nothing is imported from that module. All synchronisation is Notify-,
-//! join- and gate-based: `wait_for_subscription` joins the loop tasks,
-//! `await_journal_progress` notify-parks on engine completion, real
-//! catalogue seams (`SeedCatalogueFlushFaultForTest`, the lease
+//! join-, gate- and bounded-yield-based: `wait_for_subscription` joins the
+//! loop tasks, the applied-oracle is the FOLLOWER's bookmark reaching the
+//! captured leader version (`await_journal_progress` is COMPLETION progress,
+//! NOT journal persistence — `repo_instance.rs::await_journal_progress`),
+//! real catalogue seams (`SeedCatalogueFlushFaultForTest`, the lease
 //! `apply_gate`, the final-write seam) block real mutators, and
 //! `tokio::time::pause` advances the B3 retry sleeps. NO sleeps and NO
-//! yield budgets anywhere in this file. Scenarios:
+//! unbounded waits anywhere in this file. Scenarios:
+//!   * T1 — create → reconcile starts a fresh subscription.
 //!   * T2 — a REAL catalogue-flush fault at the start barrier defers the
 //!     start (nothing spawned, nothing marked, lease invalidated); the
 //!     retrying reconcile starts it.
 //!   * T3 — a REAL flush fault fails the PAUSE of a LIVE follower: the row
 //!     reads `paused`, the lease is invalid, the loop is stopped by the
-//!     system, and reconcile never restarts a paused row.
+//!     system (SYSTEM-driven deregistration, item-4 teardown), and reconcile
+//!     never restarts a paused row.
 //!   * T4 — an obsolete G1 loop parked mid-Pull applies nothing after the
 //!     binding was replaced by a strictly-greater G2 (incl. REAL DROP quiesce).
 //!   * T5 — the start-race hook replaces the row between lease-take and
@@ -25,10 +30,12 @@
 //!     valid and takes over only after invalidation.
 //!   * T7r — a CREATE dropped at the final-write boundary leaves a
 //!     `pending_durable` row that reconcile never starts.
-//!   * B3 — terminal marking retries through REAL flush faults until the row
-//!     ends `resync_required`.
+//!
+//!   (Round 6: the B3 terminal-retry test moved to `terminal_retry_tests.rs`;
+//!   item-3/item-4 counterfactuals live in `startup_lease_tests.rs` and
+//!   `multi_target_exit_tests.rs`.)
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -45,7 +52,6 @@ use shamir_query_builder::doc;
 use shamir_query_builder::write::insert;
 use shamir_query_types::admin::{ReplDirection, ReplMode};
 use shamir_query_types::batch::{BatchError, BatchOp, BatchResponse};
-use shamir_query_types::wire::repl::ReplResponse;
 use tokio::sync::Notify;
 
 /// A boxed follower-catalogue batch future (`poll!`-able / droppable mid-flight).
@@ -64,7 +70,7 @@ use crate::replication::supervisor::{ReplSourceFactory, Subscription, Subscripti
 /// In-memory `ShamirDb` with db `app`, repos `main` + `other` (each a
 /// `users`-less `items` table), owned by `alice`. Used for the leader
 /// (rows land in `app/main`) and the follower (bindings may target either).
-async fn build_db() -> Arc<ShamirDb> {
+pub(crate) async fn build_db() -> Arc<ShamirDb> {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64_from_username("alice"));
     shamir.create_db_as("app", owner.clone()).await;
@@ -80,9 +86,10 @@ async fn build_db() -> Arc<ShamirDb> {
 }
 
 /// Write `n` rows into `app/main/items` on the leader (fixture write
-/// helper). Callers capture `leader_version` and pass it to
-/// [`await_journal_ready`] — journal durability is awaited, never assumed.
-async fn write_rows(leader: &ShamirDb, base: usize, n: usize) {
+/// helper). Callers capture `leader_version` and use the FOLLOWER's bookmark
+/// coverage of it as the applied-oracle (round-6 item 7d):
+/// `await_journal_progress` is completion progress, NOT journal durability.
+pub(crate) async fn write_rows(leader: &ShamirDb, base: usize, n: usize) {
     let owner = Actor::User(principal64_from_username("alice"));
     for i in base..(base + n) {
         let mut batch = Batch::named("ins");
@@ -107,16 +114,18 @@ async fn write_rows(leader: &ShamirDb, base: usize, n: usize) {
 }
 
 /// Leader commit version of `app/main` after the fixture writes.
-async fn leader_version(leader: &ShamirDb) -> u64 {
+pub(crate) async fn leader_version(leader: &ShamirDb) -> u64 {
     leader
         .current_commit_version("app", "main")
         .await
         .expect("leader version")
 }
 
-/// Notify-based journal readiness: parks until the repo's completion prefix
-/// covers `version` — no sleeps, no polling (round 5 replaces the
-/// "long-poll covers durability" assumption).
+/// Notify-based COMPLETION-progress wait: parks until the repo's completion
+/// prefix covers `version` (round-6 item 7d: this is completion progress,
+/// NOT a journal-persistence confirmation — see
+/// `repo_instance.rs::await_journal_progress`). Used only where a live loop's
+/// having APPLIED is the oracle (its bookmark is checked separately).
 async fn await_journal_ready(db: &ShamirDb, repo: &str, version: u64) {
     db.get_db("app")
         .and_then(|d| d.get_repo(repo))
@@ -127,7 +136,7 @@ async fn await_journal_ready(db: &ShamirDb, repo: &str, version: u64) {
 }
 
 /// Follower `app/{repo}` replication bookmark.
-async fn bookmark(follower: &ShamirDb, repo: &str) -> u64 {
+pub(crate) async fn bookmark(follower: &ShamirDb, repo: &str) -> u64 {
     follower
         .get_db("app")
         .and_then(|d| d.get_repo(repo))
@@ -139,7 +148,7 @@ async fn bookmark(follower: &ShamirDb, repo: &str) -> u64 {
 
 /// Create profile `prof_a` over `app/main` + ACTIVE subscription `sub_a`
 /// bound to it — both on the FOLLOWER catalogue (builder batches only).
-async fn create_profile_and_subscription(follower: &ShamirDb) {
+pub(crate) async fn create_profile_and_subscription(follower: &ShamirDb) {
     let mut b = Batch::new();
     b.id(1);
     b.op(
@@ -193,7 +202,7 @@ async fn recreate_sub_a_over_prof_b(follower: &ShamirDb, id: u32) {
 }
 
 /// Run one builder op against the follower catalogue.
-async fn run_op(follower: &ShamirDb, op: BatchOp) {
+pub(crate) async fn run_op(follower: &ShamirDb, op: BatchOp) {
     let mut b = Batch::new();
     b.id(1);
     b.op("op", op);
@@ -226,7 +235,7 @@ fn pause_op_future(follower: Arc<ShamirDb>) -> BoxedBatch {
 
 /// Supervisor factory over an `InProcessReplSource` on the leader, with a
 /// generous long-poll budget (deterministic journal catch-up, no sleeps).
-fn supervisor(follower: Arc<ShamirDb>, leader: Arc<ShamirDb>) -> SubscriptionSupervisor {
+pub(crate) fn supervisor(follower: Arc<ShamirDb>, leader: Arc<ShamirDb>) -> SubscriptionSupervisor {
     let factory: ReplSourceFactory = Arc::new(move |_sub: &Subscription| {
         Arc::new(InProcessReplSource::new((*leader).clone())) as Arc<dyn ReplSource>
     });
@@ -235,7 +244,7 @@ fn supervisor(follower: Arc<ShamirDb>, leader: Arc<ShamirDb>) -> SubscriptionSup
 
 /// Raw catalogue read of one subscription row (mirrors
 /// `supervisor.rs::read_all`: the FilterContext is built engine-side).
-async fn sub_row(follower: &ShamirDb, name: &str) -> Option<QueryValue> {
+pub(crate) async fn sub_row(follower: &ShamirDb, name: &str) -> Option<QueryValue> {
     let table = follower.system_store().subscriptions_table().await.ok()?;
     let refs = shamir_db::types::common::new_map();
     let ctx = table
@@ -256,17 +265,63 @@ async fn sub_row(follower: &ShamirDb, name: &str) -> Option<QueryValue> {
         .map(|r| r.as_value().into_owned())
 }
 
-async fn sub_state(follower: &ShamirDb, name: &str) -> Option<String> {
+pub(crate) async fn sub_state(follower: &ShamirDb, name: &str) -> Option<String> {
     sub_row(follower, name)
         .await
         .and_then(|r| r.get("state").and_then(|v| v.as_str()).map(String::from))
 }
 
-async fn sub_generation(follower: &ShamirDb, name: &str) -> u64 {
+pub(crate) async fn sub_generation(follower: &ShamirDb, name: &str) -> u64 {
     sub_row(follower, name)
         .await
         .and_then(|r| r.get("binding_generation").and_then(|v| v.as_u64()))
         .expect("row carries a binding generation")
+}
+
+// ---------------------------------------------------------------------------
+// Bounded wait helpers (round-6 item 7)
+// ---------------------------------------------------------------------------
+
+/// Bounded yield-wait: NO sleeps — yields the current-thread runtime until
+/// `done` holds; panics after the yield budget so a real hang fails loudly
+/// instead of stalling CI.
+pub(crate) async fn wait_until(mut done: impl FnMut() -> bool) {
+    for _ in 0..10_000 {
+        if done() {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("wait_until: condition not reached within the yield budget");
+}
+
+/// Round-6 item 7d applied-oracle: the FOLLOWER's bookmark of `app/{repo}`
+/// reaches the captured leader `version`. This is the REAL readiness
+/// condition for a live loop — the old leader-side `await_journal_ready`
+/// claim was completion progress, not journal persistence, and said nothing
+/// about the follower.
+pub(crate) async fn wait_until_bookmark_covers(follower: &ShamirDb, repo: &str, version: u64) {
+    for _ in 0..10_000 {
+        if bookmark(follower, repo).await >= version {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("follower bookmark of app/{repo} never reached v{version}");
+}
+
+/// SYSTEM-driven deregistration: bounded wait for the loop's own exit plus
+/// the item-4 teardown to remove the registry entry — no manual handle
+/// removal (`wait_for_subscription` removes the entry itself and must not be
+/// used as a stop oracle).
+pub(crate) async fn wait_until_deregistered(sup: &SubscriptionSupervisor, name: &str) {
+    wait_until(|| !sup.is_running(name)).await;
+}
+
+/// Bounded wait until no lease exists for `name` (round-6 item 3: the RAII
+/// startup-lease cleanup runs on a detached task).
+pub(crate) async fn wait_until_lease_gone(follower: &ShamirDb, name: &str) {
+    wait_until(|| follower.subscription_lease(name).is_none()).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -278,12 +333,14 @@ async fn create_then_reconcile_starts_fresh_subscription() {
     let leader = build_db().await;
     write_rows(&leader, 0, 3).await;
     let version = leader_version(&leader).await;
-    await_journal_ready(&leader, "main", version).await;
 
     let follower = build_db().await;
     create_profile_and_subscription(&follower).await;
 
     // No faults — the fresh subscription MUST start on the first reconcile.
+    // (Round-6 item 7d: the leader version is captured BEFORE the reconcile;
+    // readiness is the follower's bookmark covering it, asserted below —
+    // not a leader-side `await_journal_ready` claim.)
     let sup = supervisor(follower.clone(), leader.clone()).with_max_iterations(1);
     sup.reconcile().await;
     sup.wait_for_subscription("sub_a").await; // joins the loop
@@ -351,24 +408,32 @@ async fn start_barrier_failure_defers_start_until_retry() {
 // ---------------------------------------------------------------------------
 
 /// COUNTERFACTUALS: without the pause's quiesce-before-mutation the lease
-/// would stay valid and the loop would keep long-polling
-/// (`wait_for_subscription` never sees the exit → hang/red); without W2's
-/// exit-path lease invalidation the later restart could not be taken
-/// (covered by the T1/A1 tests' lease assertions).
+/// would stay valid and the loop would keep long-polling (the loop never
+/// exits → `wait_until_deregistered` panics → red); without W2's exit-path
+/// lease invalidation the later restart could not be taken (covered by the
+/// T1/A1 tests' lease assertions).
+/// Round-6 item 7(c): the applied-oracle is the FOLLOWER's bookmark covering
+/// the captured leader version (bounded wait), and deregistration is awaited
+/// SYSTEM-driven (loop's own exit + item-4 teardown) — no manual handle
+/// removal via `wait_for_subscription`. The long-poll budget is small so the
+/// parked pull returns promptly after the lease goes invalid.
 #[tokio::test]
 async fn pause_flush_failure_stops_live_follower_and_never_restarts() {
     let leader = build_db().await;
     write_rows(&leader, 0, 2).await;
     let version = leader_version(&leader).await;
-    await_journal_ready(&leader, "main", version).await;
 
     let follower = build_db().await;
     create_profile_and_subscription(&follower).await;
 
     // Run-forever supervisor: the loop stays LIVE, long-polling.
-    let sup = supervisor(follower.clone(), leader.clone());
+    let sup = supervisor(follower.clone(), leader.clone()).with_poll_wait_ms(100);
     sup.reconcile().await;
     assert!(sup.is_running("sub_a"), "the loop must be live");
+
+    // The follower APPLIED the captured leader version (real applied-oracle,
+    // bounded wait — not a leader-side readiness claim).
+    wait_until_bookmark_covers(&follower, "main", version).await;
 
     // Arm the REAL seam, then execute the PAUSE batch: quiesce → row flip →
     // flush FAILS → the batch errors, but the row is already `paused` and
@@ -392,10 +457,10 @@ async fn pause_flush_failure_stops_live_follower_and_never_restarts() {
         "the pause's quiesce must have invalidated the lease"
     );
 
-    // The loop is stopped BY THE SYSTEM: joins when the registry entry is
-    // still there; a no-op when W2's self-deregistration already removed it
-    // — either way it returns only after the loop exited.
-    sup.wait_for_subscription("sub_a").await;
+    // The loop is stopped BY THE SYSTEM: bounded wait for the loop's own
+    // exit + the exit-path teardown to deregister the handle (round-6 item
+    // 7(c) — never the manual-removal helper).
+    wait_until_deregistered(&sup, "sub_a").await;
     assert!(!sup.is_running("sub_a"));
 
     drop(fault);
@@ -419,7 +484,6 @@ async fn pause_resume_back_to_back_restarts_and_applies_new_event() {
     let leader = build_db().await;
     write_rows(&leader, 0, 3).await;
     let v1 = leader_version(&leader).await;
-    await_journal_ready(&leader, "main", v1).await;
 
     let follower = build_db().await;
     create_profile_and_subscription(&follower).await;
@@ -427,7 +491,7 @@ async fn pause_resume_back_to_back_restarts_and_applies_new_event() {
     let sup = supervisor(follower.clone(), leader.clone()).with_max_iterations(1);
     sup.reconcile().await;
     sup.wait_for_subscription("sub_a").await; // loop#1 applied, exited,
-    assert!(bookmark(&follower, "main").await >= v1); // self-deregistered
+    wait_until_bookmark_covers(&follower, "main", v1).await; // self-deregistered
     let gen = sub_generation(&follower, "sub_a").await;
 
     // PAUSE then RESUME back-to-back: the row ends active with the SAME
@@ -452,11 +516,10 @@ async fn pause_resume_back_to_back_restarts_and_applies_new_event() {
         "pause/resume must not bump the binding generation"
     );
 
-    // NEW leader rows BEFORE the restarting reconcile; journal readiness is
-    // awaited, never assumed.
+    // NEW leader rows BEFORE the restarting reconcile; the restarted loop's
+    // bookmark covering v2 is the applied-oracle (round-6 item 7d).
     write_rows(&leader, 10, 2).await;
     let v2 = leader_version(&leader).await;
-    await_journal_ready(&leader, "main", v2).await;
 
     sup.notify_changed().await; // sweeps the stale handle, RESTARTS
     sup.wait_for_subscription("sub_a").await; // joins loop#2
@@ -544,10 +607,16 @@ async fn cancelled_quiesce_leaves_active_row_recoverable() {
     // NEW leader rows + readiness BEFORE the restarting reconcile.
     write_rows(&leader, 10, 2).await;
     let v2 = leader_version(&leader).await;
-    await_journal_ready(&leader, "main", v2).await;
 
-    sup.notify_changed().await; // sweeps the stale handle, restarts
-    sup.wait_for_subscription("sub_a").await; // joins the restarted loop
+    // Round-6 item 7(a): loop#1 of the run-forever supervisor is still
+    // long-polling on its (now invalid) OLD lease — joining it unbounded
+    // here would hang until its long-poll returns. Stop it deterministically:
+    // `stop_all` cancels gracefully and joins; the restart then runs on a NEW
+    // bounded supervisor.
+    sup.stop_all().await;
+    let sup2 = supervisor(follower.clone(), leader.clone()).with_max_iterations(1);
+    sup2.reconcile().await; // sweeps nothing; starts a FRESH loop under a FRESH lease
+    sup2.wait_for_subscription("sub_a").await; // joins the restarted loop
     assert!(
         bookmark(&follower, "main").await >= v2,
         "the restarted loop must apply the NEW events under its FRESH lease"
@@ -858,143 +927,33 @@ async fn dropped_creation_pending_row_is_never_started_by_reconcile() {
     assert!(follower.subscription_lease("sub_b").is_none());
 
     // Reconcile (no faults): the start gate must refuse the pending row —
-    // nothing spawns, no lease is ever issued, bookmark stays 0.
+    // nothing spawns for sub_b and no lease is ever issued for it, while the
+    // ACTIVE sub_a legitimately starts (bounded supervisor: the entry is
+    // registered synchronously at the end of `start_subscription`).
+    // Round-6 item 7(b): the old `active_count() == 0` oracle was WRONG —
+    // reconcile legitimately starts active sub_a; the oracles are sub_b-
+    // specific instead.
     let sup = supervisor(follower.clone(), leader).with_max_iterations(1);
     sup.reconcile().await;
     assert!(!sup.is_running("sub_b"), "a pending row must never start");
-    assert_eq!(sup.active_count(), 0);
+    assert!(
+        sup.is_running("sub_a"),
+        "the ACTIVE row legitimately starts"
+    );
+    assert_eq!(
+        sup.active_count(),
+        1,
+        "exactly the active sub_a is registered"
+    );
     assert!(
         follower.subscription_lease("sub_b").is_none(),
         "no lease may ever be issued for a pending row"
     );
+    // app/main carries only sub_a's legit start — there are no leader rows,
+    // so nothing was applied (bookmark 0) and sub_b stays pending_durable.
     assert_eq!(bookmark(&follower, "main").await, 0);
     assert_eq!(
         sub_state(&follower, "sub_b").await.as_deref(),
         Some("pending_durable")
-    );
-}
-
-// ---------------------------------------------------------------------------
-// B3 — terminal marking retries through REAL flush faults
-// ---------------------------------------------------------------------------
-
-/// Source whose pull reply carries a WRONG repo lineage (identity fence
-/// trips `IdentityMismatch` on every pull; hello delegates untouched) — the
-/// epoch-order recipe from `identity_fence/tests/epoch_order_tests.rs`.
-struct WrongIdentitySource {
-    inner: InProcessReplSource,
-    bad_pull: ReplResponse,
-}
-
-#[async_trait]
-impl ReplSource for WrongIdentitySource {
-    async fn hello(
-        &self,
-        node_id: &str,
-    ) -> Result<shamir_query_types::wire::repl::ReplResponse, ReplError> {
-        self.inner.hello(node_id).await
-    }
-
-    async fn pull(
-        &self,
-        _db: &str,
-        _repo: &str,
-        _from_version: u64,
-        _limit: u32,
-        _wait_ms: Option<u32>,
-    ) -> Result<shamir_query_types::wire::repl::ReplResponse, ReplError> {
-        Ok(self.bad_pull.clone())
-    }
-}
-
-/// COUNTERFACTUAL: reverting `mark_with_retry` to fail-and-log leaves the
-/// row `active` (the flushed marking never lands while the seam fails) →
-/// the `resync_required` assertions go red.
-///
-/// Determinism: `tokio::time::pause` (start_paused) auto-advances the
-/// production retry sleeps on the current-thread runtime; the fence trips on
-/// the mutated pull BEFORE decode/apply.
-#[tokio::test(start_paused = true)]
-async fn terminal_marking_retries_until_success() {
-    let leader = build_db().await;
-    write_rows(&leader, 0, 2).await;
-    let version = leader_version(&leader).await;
-    await_journal_ready(&leader, "main", version).await;
-
-    // Build the WRONG-identity pull reply from the real leader (identity
-    // regression via the source — the epoch_order recipe).
-    let inner = InProcessReplSource::new((*leader).clone());
-    let mut bad_pull = inner.pull("app", "main", 1, 1000, Some(0)).await.unwrap();
-    let expected = leader
-        .get_db("app")
-        .unwrap()
-        .get_repo("main")
-        .unwrap()
-        .repo_identity()
-        .await
-        .unwrap();
-    if let ReplResponse::Pull {
-        repo_lineage_id, ..
-    } = &mut bad_pull
-    {
-        let mut observed = expected;
-        observed.lineage_id[0] ^= 1;
-        *repo_lineage_id = Some(observed.lineage_id);
-    }
-
-    // The factory hands loop#1 the HONEST source and every later start the
-    // WRONG-identity source.
-    let counter = Arc::new(AtomicUsize::new(0));
-    let factory: ReplSourceFactory = {
-        let leader = leader.clone();
-        let bad_pull = bad_pull.clone();
-        let counter = counter.clone();
-        Arc::new(move |_sub: &Subscription| {
-            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
-                Arc::new(InProcessReplSource::new((*leader).clone())) as Arc<dyn ReplSource>
-            } else {
-                Arc::new(WrongIdentitySource {
-                    inner: InProcessReplSource::new((*leader).clone()),
-                    bad_pull: bad_pull.clone(),
-                }) as Arc<dyn ReplSource>
-            }
-        })
-    };
-
-    let follower = build_db().await;
-    create_profile_and_subscription(&follower).await;
-    let sup =
-        SubscriptionSupervisor::new(follower.clone(), factory, "follower-1").with_max_iterations(1);
-
-    // loop#1: applies v1, exits, self-deregisters, lease invalidated.
-    sup.reconcile().await;
-    sup.wait_for_subscription("sub_a").await;
-    assert!(bookmark(&follower, "main").await >= version);
-
-    // Arm the REAL seam: the next TWO flushes fail, then pass. Budget:
-    // reconcile#2 barrier (fail), reconcile#3 barrier (fail), reconcile#4
-    // barrier (pass → loop#2 spawns and trips the fence), marking attempt 1
-    // (fail), attempt 2 (fail), attempt 3 (pass).
-    let fault = SeedCatalogueFlushFaultForTest::arm_fail_first(&follower, 2);
-
-    sup.reconcile().await; // barrier fail #1 — deferred
-    assert!(!sup.is_running("sub_a"));
-    sup.reconcile().await; // barrier fail #2 — deferred
-    assert!(!sup.is_running("sub_a"));
-    sup.reconcile().await; // barrier passes → loop#2 trips the fence
-    sup.wait_for_subscription("sub_a").await; // joins loop#2 + its marking
-
-    drop(fault);
-    assert_eq!(
-        sub_state(&follower, "sub_a").await.as_deref(),
-        Some("resync_required"),
-        "the retried terminal marking must have landed"
-    );
-    assert!(
-        follower
-            .has_resync_required_subscription_covering("app", "main")
-            .await
-            .unwrap(),
-        "the quarantine must cover app/main"
     );
 }

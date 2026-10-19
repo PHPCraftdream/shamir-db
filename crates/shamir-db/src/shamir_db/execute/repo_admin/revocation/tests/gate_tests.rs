@@ -138,22 +138,39 @@ async fn delivery_gate_is_panic_safe_when_closed() {
     assert!(gate.try_with_delivery(|| ()).is_none());
 }
 
+/// Round 6 item 5 ORACLE: a pending key leaves the cache ONLY through an
+/// explicit `confirm_pending` / `rollback_pending` — `install` (a refresh)
+/// is NOT a persistence acknowledgement and must keep unmatched pending
+/// keys (entries included) so reads/guards never regress below the
+/// prepublished set.
+/// COUNTERFACTUAL: reverting `install` to dropping unmatched pending keys
+/// (pre-round-6) turns the two post-refresh `pending` assertions red.
 #[tokio::test]
 async fn quarantine_cache_replace_clears_persisted_removal_but_keeps_pending_failure() {
     let cache = crate::shamir_db::execute::ResyncQuarantineCache::new();
     let active = ("db".to_string(), "active".to_string());
     let pending = ("db".to_string(), "pending".to_string());
     cache.publish([(pending.clone(), "prepublished".to_string())]);
+    // A refresh that derives other rows must keep the pending key protected.
     cache.install([(active.clone(), "persisted".to_string())]);
     assert!(cache.reason_for("db", "active").is_some());
     assert!(cache.reason_for("db", "pending").is_some());
     cache.install([(pending.clone(), "persisted pending".to_string())]);
     assert!(cache.reason_for("db", "pending").is_some());
+    // Refresh is NOT an acknowledgement: even an install deriving NOTHING
+    // keeps the pending key (and its reason) until explicit confirmation.
     cache.install(Vec::<((String, String), String)>::new());
+    assert!(cache.reason_for("db", "pending").is_some());
+    // confirm_pending drops the entry (no refresh derived it anymore).
+    cache.confirm_pending([pending.clone()]);
     assert!(cache.reason_for("db", "pending").is_none());
+    // rollback_pending is the definitive variant: pending key gone, entry
+    // dropped, whatever the refresh derived.
     cache.publish([(pending.clone(), "failed prepublish".to_string())]);
     cache.install(Vec::<((String, String), String)>::new());
     assert!(cache.reason_for("db", "pending").is_some());
+    cache.rollback_pending([pending.clone()]);
+    assert!(cache.reason_for("db", "pending").is_none());
 }
 
 #[tokio::test]

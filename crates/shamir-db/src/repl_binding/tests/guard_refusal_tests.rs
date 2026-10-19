@@ -293,3 +293,69 @@ async fn prepublished_quarantine_cache_blocks_destination_lifecycle() {
 
     drop(fault);
 }
+
+/// Round 6 item 8: `ensure_drop_allowed` consults EVERY bound destination,
+/// not only the first. `sub` binds [main, side]; ONLY `side` is
+/// pending-quarantined (its cache key is prepublished directly, the durable
+/// row stays healthy). The DROP must be refused with the typed quarantine
+/// code and the row must survive.
+/// COUNTERFACTUAL: reverting to the pre-round-6 FIRST-destination-only
+/// check turns this red — the first-only check examined `main` (healthy)
+/// and let the DROP of a subscription whose SECOND destination is
+/// quarantined through, detaching quarantine coverage from `side`.
+#[tokio::test]
+async fn drop_subscription_refused_when_any_bound_destination_is_quarantined() {
+    let shamir = setup().await;
+    // ONE profile bound to TWO destinations: [main (healthy), side (pending)].
+    let mut b = Batch::new();
+    b.id(2);
+    b.op(
+        "profile",
+        replication_profile("prof")
+            .stream(
+                repl_scope("testdb").repo("main").build(),
+                ReplDirection::Pull,
+                ReplMode::ReadOnly,
+            )
+            .stream(
+                repl_scope("testdb").repo("side").build(),
+                ReplDirection::Pull,
+                ReplMode::ReadOnly,
+            ),
+    );
+    b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
+    // `side` (the second destination) must exist for the scope resolution.
+    shamir
+        .get_db("testdb")
+        .unwrap()
+        .add_repo(
+            RepoConfig::new("side", BoxRepoFactory::in_memory())
+                .add_table(crate::engine::table::TableConfig::new("users")),
+        )
+        .await
+        .unwrap();
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    // Prepublish the pending quarantine key for the SECOND destination only
+    // (pub(crate) cache seam — no durable row change).
+    shamir.resync_quarantine.publish([(
+        ("testdb".to_string(), "side".to_string()),
+        "pending (test seam)".to_string(),
+    )]);
+
+    let mut b = Batch::new();
+    b.id(3);
+    b.op("drop", drop_subscription("sub"));
+    let err = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.code(),
+        Some("replication_destination_quarantined"),
+        "the pending SECOND destination must refuse the drop: {err}"
+    );
+}

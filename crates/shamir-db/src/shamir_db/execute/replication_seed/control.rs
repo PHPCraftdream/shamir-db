@@ -127,6 +127,20 @@ pub(super) async fn check_owners(
                 // two competing owners. A HEALTHY sibling with the same
                 // receipt is a competing owner — a durable-state property
                 // that must not depend on the network probe.
+                //
+                // Round 6 item 6 — the OVERLAP RULE: a healthy same-receipt
+                // sibling on a shared destination is a competing ACTIVE
+                // writer (refused, as coded above). Two QUARANTINED
+                // subscriptions overlapping one destination are NOT
+                // simultaneous active writers: the destination's protection
+                // is COVERAGE AGGREGATION — every covering quarantined row
+                // must be resolved before the destination serves again
+                // (clearing one never clears the other's protection).
+                // COUNTERFACTUAL: treating overlap as active-writer
+                // competition (or clearing protection once one sibling is
+                // resolved) turns the still-refused shared-destination
+                // assertions in `binding_scope_overlap_clearing_through_
+                // real_reseed_resume` and `t15` red.
                 if crate::repl_binding::row_is_quarantined(&row)
                     && row.get("seed_receipt") == Some(&super::super::helpers::to_qv(receipt))
                 {

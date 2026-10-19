@@ -24,6 +24,7 @@ pub(crate) mod identity_fence;
 pub mod in_process;
 pub mod prod_factory;
 pub mod source;
+mod startup_lease;
 pub mod supervisor;
 pub mod wire_source;
 
