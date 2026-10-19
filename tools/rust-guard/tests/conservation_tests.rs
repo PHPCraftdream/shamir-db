@@ -349,20 +349,19 @@ fn path_mounted_test_deletion_is_a_loss() {
 }
 
 #[test]
-fn fallback_branch_test_change_is_a_loss() {
-    // The module carries a `cfg_attr(feature = "x", path = "gen.rs")`
-    // alternative AND a default `m.rs` file; the test lives in the
-    // DEFAULT branch (m.rs) and its CONTENT changes (the test is
-    // removed, the file stays) between base and head.
-    // Counterfactual: pre-fix, conservation followed only the attr path
-    // `gen.rs` and never inventoried the default `m.rs`, so deleting
-    // the fallback-branch test was silent — the comparison passed clean
-    // while a test vanished. The fix also walks the default branch when
-    // attribute alternatives exist (and tags each branch with its own
-    // composed cfg), so base inventories `t_fb` and head does not =>
-    // TEST_LOST.
+fn cfg_attr_path_is_rejected_during_conservation_inventory() {
+    // `cfg_attr(path)` is unsupported, not default resolution; one structured
+    // unsupported-path finding is emitted for each revision.
     let repo = ConsRepo::two_commit("conservation/fallback_changed");
-    assert_finding(&repo.compare(), "TEST_LOST");
+    let output = repo.compare();
+    let stderr = stderr(&output);
+    assert_eq!(
+        stderr.matches("UNSUPPORTED_CFG_ATTR_PATH").count(),
+        2,
+        "expected one structured finding per revision: {stderr}"
+    );
+    assert!(stderr.contains("UNSUPPORTED_CFG_ATTR_PATH"));
+    assert!(!stderr.contains("INVENTORY_ERROR"));
 }
 
 #[test]
@@ -379,16 +378,11 @@ fn unresolved_child_module_is_an_inventory_error() {
 
 #[test]
 fn phantom_default_branch_is_not_inventoried() {
-    // `#[path = "gen.rs"] mod m;` is an UNCONDITIONAL path attribute:
-    // rustc compiles ONLY `gen.rs`, never the default `m.rs` (a phantom
-    // file). The fixture keeps a `m.rs` at base and deletes it at head;
-    // it must not influence the inventory either way.
-    // Counterfactual: pre-fix, the file-backed mod arm walked the alt
-    // AND unconditionally resolved+walked the default branch, so base
-    // inventoried `t_phantom` from the phantom `m.rs` while head (m.rs
-    // deleted) did not — a spurious TEST_LOST for a file rustc never
-    // compiles. Post-fix the default branch is skipped when any alt has
-    // `pred: None`, and the run is CLEAN.
+    // Unconditional `#[path]` replaces default resolution; this fixture pins
+    // the contract that the phantom default file cannot create a lost item.
+    // Counterfactual: walking both the explicit path and the default m.rs
+    // would add the base-only t_phantom test from m.rs to inventory and thus
+    // report TEST_LOST even though the unconditional path selects gen.rs.
     let repo = ConsRepo::two_commit("conservation/uncond_path_default_ignored");
     assert_clean(&repo.compare());
 }

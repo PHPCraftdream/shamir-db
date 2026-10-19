@@ -28,13 +28,9 @@ pub fn check_files(
     report: &mut Report,
 ) {
     for path in files {
-        // Counterfactual: a file that does not exist at this rev
-        // (`ReadError::Missing`) keeps the old silent-skip behavior —
-        // the `modules` gate owns missing files. An exists-but-unreadable
-        // file (`ReadError::Io`) must surface as a finding instead of
-        // disappearing from every rule. A unit-level Io assertion is not
-        // reachable through the binary's GitFs in this layout, so the
-        // behavior is pinned by this read of the contract, not a fixture.
+        // `ReadError::Missing` remains a silent skip for selected paths removed
+        // from the working tree; `ReadError::Io` (including invalid UTF-8)
+        // must surface as UNREADABLE_FILE rather than disappearing from every rule.
         let src = match fs.read_checked(path) {
             Err(crate::gitfs::ReadError::Missing) => continue,
             Err(e @ crate::gitfs::ReadError::Io(_)) => {

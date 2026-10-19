@@ -16,11 +16,8 @@ fn write(repo: &TempRepo, rel: &str, contents: &str) {
 
 #[test]
 fn compiler_accepted_resolution_is_clean() {
-    // `#[path]` (name-value attr), genuinely exclusive cfg_attr path
-    // alternatives (`unix` / `not(unix)` — BOTH reachable, no exception
-    // entry), BOTH branches of a lone `#[cfg_attr]` path (attr target and
-    // the default `maybe.rs` fallback), an inherited `#[cfg(unix)]`
-    // gating an inline module's child, a file shared across two TARGETS
+    // `#[path]`, plain inherited cfg propagation; path normalization; and
+    // a file shared across two TARGETS
     // (`benches/common.rs` auto-discovered AND `mod common;`-included),
     // a bin target (`src/bin/x.rs`, mod-free `fn main`), non-mod-rs
     // parent resolution, an inline `mod nested { pub mod leaf; }` that
@@ -33,18 +30,12 @@ fn compiler_accepted_resolution_is_clean() {
     //   hit a literal-backslash filename and NOTHING resolved;
     // - inline mods resolved before `content` was inspected, wrongly
     //   demanding `nested.rs`/`nested/mod.rs`;
-    // - the second cfg_attr alternative was dropped/excepted instead of
-    //   resolved, leaving `b.rs` unaccounted (or needing an exception);
     // - `#[path = "..."]` was read with `parse_args::<LitStr>()`, which
     //   cannot extract a name-value attribute, so `aliased` missed;
-    // - the default fallback branch of the lone `#[cfg_attr]` mod was
-    //   never modelled, leaving `maybe.rs` unaccounted;
-    // - `#[path = "./sub/../sub/positive.rs"]` was used un-normalised as
-    //   a lookup/visited key, so `positive` was MISSING_MOD_FILE;
-    // - the cfg_attr default branch was modelled as one negated
-    //   candidate PER attr predicate, so `fallback_ok.rs`'s default
-    //   branch went inactive while the (missing) attr branch was
-    //   reported MISSING_MOD_FILE even though the default resolved;
+    // - `#[path = "./sub/../sub/positive.rs"]` normalises before its
+    //   repository-relative visited key is recorded. If lookup used the raw
+    //   spelling while the tree used the normalised key, the run reported
+    //   `UNACCOUNTED_FILE` for `sub/positive.rs`.
     // - the inherited `#[cfg(unix)]` was not AND-ed into the inline
     //   module's file-backed child, so `gated/leaf2.rs`'s two edges
     //   (`all(unix)` vs `not(unix)`) were not mutually exclusive and
@@ -80,23 +71,35 @@ fn missing_path_target_is_reported() {
 }
 
 #[test]
-fn cfg_attr_with_neither_branch_present_is_reported() {
-    // A lone `#[cfg_attr(feature = "x", path = "only_x.rs")] mod m;`
-    // with NEITHER `only_x.rs` nor the default `m.rs`/`m/mod.rs` on
-    // disk: the attr branch resolves to Missing with fallback=false,
-    // so walk.rs reports MISSING_MOD_FILE (walk.rs treats a missing
-    // FALLBACK branch as silent "pred is false" by design).
-    // Counterfactual: the fallback branch is silent by design, so
-    // without a real attr-branch finding neither the `only_x.rs` nor
-    // the `m.rs` slot would be accounted for — the missing module
-    // would pass the gate unnoticed.
+fn cfg_attr_path_is_rejected() {
+    // Counterfactual: without structured classification this would only be
+    // reported as MISSING_MOD_FILE or treated as a normal default module.
     let repo = TempRepo::with_fixture("modules_bad/cfg_attr_neither");
-    assert_finding(&repo.run_guard(&["modules"]), "MISSING_MOD_FILE");
+    let output = repo.run_guard(&["modules"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("UNSUPPORTED_CFG_ATTR_PATH").count(),
+        1,
+        "expected one structured rejection: {stderr}"
+    );
+}
+
+#[test]
+fn multiple_cfg_attr_paths_are_rejected() {
+    // Counterfactual: without checking the later attribute this reports no
+    // unsupported-path finding. The assertion requires exactly one code.
+    let repo = TempRepo::with_fixture("modules_bad/cfg_attr_neither_two");
+    let output = repo.run_guard(&["modules"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("UNSUPPORTED_CFG_ATTR_PATH").count(),
+        1,
+        "expected one structured rejection: {stderr}"
+    );
 }
 
 #[test]
 fn ambiguous_resolution_is_reported() {
-    // Both `dup.rs` and `dup/mod.rs` for one `mod dup;`.
     let repo = TempRepo::with_fixture("modules_bad/ambiguous");
     assert_finding(&repo.run_guard(&["modules"]), "AMBIGUOUS_MOD");
 }
@@ -304,44 +307,79 @@ fn cargo_metadata_failure_is_a_finding_and_scan_continues() {
     // `members = ["crates/nope"]` makes `cargo metadata` fail. The gate
     // must NOT die as an infra error: the failure is a
     // CARGO_METADATA_FAILED finding and the scan CONTINUES on the
-    // hand-parsed manifests (here: none resolve, so the crate's files
-    // are unaccounted on top).
+    // hand-scanned manifests, including the malformed gadget manifest.
     // Counterfactual: fails without the hand-scan fallback because
     // run_cargo_metadata's error propagated as `Err` and the run printed
     // `rust-guard: error` instead of findings.
-    let repo = TempRepo::with_fixture("modules_ok");
+    let repo = TempRepo::with_fixture("modules_bad/bad_manifest");
     write(
         &repo,
         "Cargo.toml",
         "[workspace]\nmembers = [\"crates/nope\"]\nresolver = \"2\"\n",
     );
-    assert_finding(&repo.run_guard(&["modules"]), "CARGO_METADATA_FAILED");
+    let output = repo.run_guard(&["modules"]);
+    assert_finding(&output, "CARGO_METADATA_FAILED");
+    assert_finding(&output, "BAD_MANIFEST");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("tools/gadget/Cargo.toml"),
+        "expected malformed manifest path: {stderr}"
+    );
+    assert!(
+        !stderr.contains("rust-guard: error"),
+        "infra abort: {stderr}"
+    );
 }
 
 #[test]
-fn missing_cfg_attr_candidates_reported_once() {
-    // Two `cfg_attr` path alternatives (`a.rs`, `b.rs`) on one `mod m;`,
-    // with NEITHER alternative NOR the default `m.rs` on disk.
-    // Counterfactual: pre-fix, the deferred Missing reporting emitted
-    // one MISSING_MOD_FILE PER missing candidate — two findings for the
-    // same mod/line (one per attr candidate). Post-fix the missing
-    // candidates' tried-path lists are aggregated into ONE finding per
-    // `mod`.
-    let repo = TempRepo::with_fixture("modules_bad/cfg_attr_neither_two");
-    let out = repo.run_guard(&["modules"]);
-    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+fn same_source_exclusive_mounts_still_walk_children_for_duplicate_detection() {
+    // Counterfactual: if the walk were cached only by physical file, the
+    // `b` mount would not visit shared.rs children. Actual trace: lib.rs:1
+    // reaches shared.rs under `a`/unix, :4 reaches it under `b`/not(unix);
+    // shared.rs:1 mounts shared/child.rs under each composed cfg; lib.rs:7
+    // mounts that same child directly under not(unix). a::child/direct are
+    // exclusive but b::child/direct conflict, proving the second logical mount.
+    let repo = TempRepo::with_fixture("modules_bad/logical_child_dup");
+    let output = repo.run_guard(&["modules"]);
+    assert_finding(&output, "DUPLICATE_FILE");
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !out.status.success(),
-        "expected exit != 0, got success\n{err}"
+        stderr.contains("child.rs"),
+        "expected child-file conflict: {stderr}"
+    );
+}
+
+#[test]
+fn exclusive_shared_source_mounts_are_clean_without_child_conflict() {
+    // Counterfactual: without composed exclusive-cfg handling, the two
+    // logical mounts of shared.rs itself would look like DUPLICATE_FILE.
+    // Final trace: lib.rs:1/3 mount shared.rs as a on unix and b on not(unix);
+    // shared.rs:1 mounts shared/leaf.rs under those same composed predicates.
+    // Each physical file therefore has only pairwise-exclusive reaching edges.
+    let repo = TempRepo::with_fixture("modules_ok/exclusive_shared");
+    assert_clean(&repo.run_guard(&["modules"]));
+}
+
+#[test]
+fn recursive_path_mount_reports_mount_cycle() {
+    // Counterfactual: without ancestor checking, the file-backed mod edge
+    // would recursively revisit lib.rs without bound. The path in this fixture
+    // targets exactly the root ancestor, which emits MOUNT_CYCLE at lib.rs:1.
+    let repo = TempRepo::with_fixture("modules_bad/mount_cycle");
+    let output = repo.run_guard(&["modules"]);
+    assert_finding(&output, "MOUNT_CYCLE");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("crates/fix/src/lib.rs"),
+        "cycle must identify lib.rs: {stderr}"
     );
     assert!(
-        !err.contains("rust-guard: error"),
-        "infra error, not findings:\n{err}"
+        !stderr.contains("rust-guard: error"),
+        "infra error: {stderr}"
     );
-    // assert_finding only does `contains`; here we need the COUNT.
     assert_eq!(
-        err.matches("MISSING_MOD_FILE").count(),
+        stderr.matches("MOUNT_CYCLE").count(),
         1,
-        "expected exactly one MISSING_MOD_FILE for the mod:\n{err}"
+        "expected one cycle finding: {stderr}"
     );
 }

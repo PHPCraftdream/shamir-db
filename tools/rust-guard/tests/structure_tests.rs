@@ -269,6 +269,36 @@ fn delta_with_no_selected_files_is_unused_allowance() {
 }
 
 #[test]
+fn delta_with_empty_item_is_malformed() {
+    let repo = DiffRepo::two_commit("structure/new_file_widen");
+    // Counterfactual: without validating whitespace-only item keys, this
+    // otherwise valid delta reaches matching instead of returning malformed.
+    // scan_with_delta supplies repo.base_sha, so this pins item validation.
+    let delta = "[[allow_widen]]\npath = \"crates/fix/src/lib.rs\"\nitem = \"  \"\nreason = \"empty item\"\nowner = \"team-a\"\n";
+    let out = repo.scan_with_delta(delta);
+    let err = stderr(&out);
+    assert!(!out.status.success(), "expected validation failure: {err}");
+    assert!(
+        err.contains("non-empty item"),
+        "expected item validation: {err}"
+    );
+}
+
+#[test]
+fn delta_with_missing_item_is_malformed() {
+    let repo = DiffRepo::two_commit("structure/new_file_widen");
+    // `item` is a required delta field; this pins deserialize-time rejection.
+    let delta = "[[allow_widen]]\npath = \"crates/fix/src/lib.rs\"\nreason = \"missing item\"\nowner = \"team-a\"\n";
+    let out = repo.scan_with_delta(delta);
+    let err = stderr(&out);
+    assert!(!out.status.success(), "expected validation failure: {err}");
+    assert!(
+        err.contains("cannot parse") && err.contains("item"),
+        "expected missing-item parse validation: {err}"
+    );
+}
+
+#[test]
 fn delta_without_base_is_unused_allowance() {
     // Finding 9: without `--base`/`--changed-since` the diff (the only
     // consumer of delta entries) never runs; a non-empty delta was
@@ -362,17 +392,17 @@ fn moved_file_that_adds_allow_is_allow_added() {
     // R7d: a file MOVED from old.rs to new.rs (identical bodies) is
     // paired with its base counterpart, so a newly added `#[allow]` is
     // still an ALLOW_ADDED finding.
-    // Counterfactual: fails without attribute-insensitive fingerprints
-    // because syn prints the added `#[allow(dead_code)]` into the item's
-    // token stream, so new.rs's fingerprint multiset matches no base
-    // file; the moved-file pairing never fires and the new-file check
-    // reports VIS_WIDENING for the pub fn instead of ALLOW_ADDED.
-    // The pairing INFO line additionally proves the moved path ran: with
-    // a non-deletion-aware harness (a COPY scenario, old.rs still present
-    // at head) the absent-at-head candidate rule could not pair at all.
+    // Counterfactual: if pairing fails, the new-file branch reports BOTH
+    // VIS_WIDENING and ALLOW_ADDED. The moved-file INFO line proves pairing;
+    // asserting no VIS_WIDENING pins that behavior.
     let repo = DiffRepo::two_commit("structure/moved_adds_allow");
     let out = repo.scan();
     assert_finding(&out, "ALLOW_ADDED");
+    assert!(
+        !stderr(&out).contains("VIS_WIDENING"),
+        "moved file must not be checked as a new file: {}",
+        stderr(&out)
+    );
     assert!(
         stderr(&out).contains("paired with base `crates/fix/src/old.rs` as a moved file"),
         "expected the moved-file pairing INFO line:\n{}",
@@ -434,27 +464,27 @@ fn copy_is_not_moved_is_vis_widening() {
 }
 
 #[test]
-fn deleted_selected_file_is_skipped() {
-    // Finding 11 (UNREADABLE_FILE): the `ReadError::Io` arm of
-    // rules::check_files stays contract-pinned — no fixture in this
-    // layout can make git-tracked content unreadable through `git
-    // show`/fs read — but the `Missing` skip is exercised here: a file
-    // deleted between base and head must not panic or produce a
-    // PARSE/IO finding. (Selection walks the HEAD tree, so the deleted
-    // file is normally never selected; this run pins that benign
-    // outcome end-to-end.)
-    // Counterfactual: any panic/IO finding on the missing path would
-    // fail this assert_clean.
-    let repo = DiffRepo::two_commit("structure/moved_adds_allow");
-    let base = repo.base_sha.clone();
-    let out = repo.repo.run_guard(&[
-        "structure",
-        "--paths",
-        "crates/fix/src/old.rs",
-        "--base",
-        &base,
-    ]);
+fn selected_missing_worktree_file_is_skipped() {
+    // True counterfactual: previously a worktree-only removal selected no
+    // git-index path, so this test asserted clean without reaching Missing.
+    // Keeping the path indexed now exercises the read_checked NotFound arm.
+    let repo = TempRepo::with_fixture("structure/new_file_widen");
+    std::fs::remove_file(repo.root.join("crates/fix/src/lib.rs"))
+        .expect("remove tracked working-tree file");
+    let out = repo.run_guard(&["structure", "--paths", "crates/fix/src/lib.rs"]);
     assert_clean(&out);
+}
+
+#[test]
+fn selected_invalid_utf8_worktree_file_is_unreadable() {
+    // `ls-files` still selects this indexed path; [ff fe] is invalid UTF-8.
+    // InvalidData maps to Io, not Missing; removing that error report makes
+    // this assertion fail, while the companion test pins the NotFound skip.
+    let repo = TempRepo::with_fixture("structure/new_file_widen");
+    std::fs::write(repo.root.join("crates/fix/src/lib.rs"), [0xff, 0xfe])
+        .expect("write invalid UTF-8");
+    let out = repo.run_guard(&["structure", "--paths", "crates/fix/src/lib.rs"]);
+    assert_finding(&out, "UNREADABLE_FILE");
 }
 
 #[test]

@@ -74,7 +74,16 @@ fn execute(args: ConservationArgs) -> Result<u8, String> {
     // Fail closed: every unreadable/unparseable source or manifest problem
     // is a finding, never a silent gap in the inventory.
     for (path, msg) in base_inv.errors.drain(..).chain(head_inv.errors.drain(..)) {
-        report.add(&path, 1, "INVENTORY_ERROR", msg);
+        let code = if msg.starts_with("UNSUPPORTED_CFG_ATTR_PATH:") {
+            "UNSUPPORTED_CFG_ATTR_PATH"
+        } else {
+            "INVENTORY_ERROR"
+        };
+        let message = msg
+            .strip_prefix("UNSUPPORTED_CFG_ATTR_PATH: ")
+            .unwrap_or(&msg)
+            .to_owned();
+        report.add(&path, 1, code, message);
     }
     // Split impl blocks merge into one logical member: dedup identical
     // items (same identity + fingerprint + signature + test state).

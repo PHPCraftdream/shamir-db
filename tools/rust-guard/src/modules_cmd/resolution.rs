@@ -1,14 +1,10 @@
 //! `mod` declaration resolution rules.
 //!
 //! Rust's contextual rules, implemented over `/`-separated repo-relative
-//! paths:
-//!
-//! * `#[path = "..."]` (literal, or via `#[cfg_attr(pred, path = "...")]`)
-//!   is relative to the directory of the file containing the `mod`.
-//! * Otherwise, for `mod x;` in file `F`: if `F` is a target root or named
-//!   `mod.rs`, candidates are `dir(F)/x.rs` and `dir(F)/x/mod.rs`; for any
-//!   other file `dir(F)/stem.rs`, candidates live under `dir(F)/stem/`.
-//! * Both candidates existing is an ambiguity error.
+//! paths. Literal unconditional `#[path = "..."]` resolves relative to the
+//! declaring file (or inline module directory); otherwise default Rust
+//! module-directory rules apply. Conditional `#[cfg_attr(..., path = "...")]`
+//! is intentionally rejected as `UNSUPPORTED_CFG_ATTR_PATH`.
 
 use crate::gitfs::GitFs;
 
@@ -98,9 +94,8 @@ fn exclusive_pair(a: &syn::Expr, b: &syn::Expr) -> bool {
 }
 
 /// Composes the predicates that guard one reaching edge: the inherited
-/// cfg chain, the module's own `#[cfg]` and an alternative's
-/// `cfg_attr` predicate. All present parts are AND-ed (`all(a, b)`); a
-/// missing part drops out; an empty composition is `None`
+/// cfg chain and the module's own `#[cfg]`. All present parts are AND-ed
+/// (`all(a, b)`); a missing part drops out; an empty composition is `None`
 /// (unconditional).
 pub fn compose_cfg(parts: &[Option<&syn::Expr>]) -> Option<syn::Expr> {
     let present: Vec<&syn::Expr> = parts.iter().filter_map(|p| *p).collect();
@@ -118,18 +113,12 @@ pub fn compose_cfg(parts: &[Option<&syn::Expr>]) -> Option<syn::Expr> {
     }
 }
 
-/// Negation of a predicate (`not(p)`), for the implicit default branch
-/// of a `#[cfg_attr(pred, path = "...")]` module.
-pub fn negated(pred: &syn::Expr) -> syn::Expr {
-    syn::parse_quote!(not(#pred))
-}
-
 /// Lexically normalises a repo-relative `/` path: `.` segments are
 /// dropped and `..` pop the preceding segment. `Err(())` when the path
 /// escapes the repo root — the caller must report that, never follow the
-/// escape (finding 2 of the real-repo CI run: `#[path =
-/// "../x/mod.rs"]` mounts kept their un-normalised spelling as the
-/// visited key and were reported as lost/unaccounted).
+/// escape. Normalising before lookup also ensures the visited-key matches
+/// the repository-relative file key; otherwise the file can be walked under
+/// one spelling and later reported as `UNACCOUNTED_FILE` under another.
 pub fn normalize_rel(rel: &str) -> Result<String, ()> {
     let mut out: Vec<&str> = Vec::new();
     for seg in rel.split('/') {
@@ -197,9 +186,9 @@ pub fn mod_dir_for(file: &str, is_root: bool) -> String {
 }
 
 /// Resolves `mod name;` declared in `file` (with its mod-dir context and
-/// optional `#[path]`/`cfg_attr` alternative). `attr_dir` is the base for
-/// `#[path]` resolution: the declaring file's directory, or the inline
-/// module's directory context when the `mod` sits inside an inline block.
+/// optional unconditional `#[path]`). `attr_dir` is the base for `#[path]`
+/// resolution: the declaring file's directory, or the inline module's
+/// directory context when the `mod` sits inside an inline block.
 pub fn resolve(
     fs: &GitFs,
     name: &str,
@@ -291,79 +280,58 @@ pub fn dir_of(path: &str) -> String {
 
 // ---------- attribute-path extraction (shared by modules + conservation) ----------
 
-/// One candidate file path for a `mod`, tagged with the predicate that
-/// guards it (`None` for an unconditional `#[path]`).
-pub struct PathAlt {
-    pub pred: Option<syn::Expr>,
-    pub path: String,
-}
-
-/// Collects every candidate path of a `mod` from its attributes:
-/// literal `#[path = "..."]` (a NAME-VALUE attribute, read via
-/// `require_name_value`) and ALL `#[cfg_attr(pred, path = "...")]`
-/// alternatives — mutually exclusive branches must all stay reachable,
-/// dropping all but the first wrongly hides whole modules.
-///
-/// Shared by the `modules` walker and the `conservation` inventory: the
-/// inventory previously re-parsed `#[path]` with
-/// `parse_args::<LitStr>()`, which cannot read a name-value attribute,
-/// so every path-mounted module silently fell back to default
-/// resolution (finding R4).
-pub fn path_alternatives(attrs: &[syn::Attribute]) -> Vec<PathAlt> {
-    let mut out = Vec::new();
-    for a in attrs {
-        if a.path().is_ident("path") {
-            if let Ok(nv) = a.meta.require_name_value() {
-                if let Some(s) = lit_str_of(&nv.value) {
-                    out.push(PathAlt {
-                        pred: None,
-                        path: s,
-                    });
-                }
-            }
-        } else if a.path().is_ident("cfg_attr") {
-            if let Ok(args) = a.parse_args::<CfgAttrArgs>() {
-                for meta in args.attrs {
-                    if let syn::Meta::NameValue(nv) = meta {
-                        if nv.path.is_ident("path") {
-                            if let Some(s) = lit_str_of(&nv.value) {
-                                out.push(PathAlt {
-                                    pred: Some(args.pred.clone()),
-                                    path: s,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
+/// Returns the literal unconditional `#[path = "..."]`, if present.
+pub fn path_attr(attrs: &[syn::Attribute]) -> Option<String> {
+    attrs.iter().find_map(|attr| {
+        if !attr.path().is_ident("path") {
+            return None;
         }
-    }
-    out
+        let value = attr.meta.require_name_value().ok()?;
+        let syn::Expr::Lit(lit) = &value.value else {
+            return None;
+        };
+        let syn::Lit::Str(path) = &lit.lit else {
+            return None;
+        };
+        Some(path.value())
+    })
 }
 
-/// String value of a literal expression (`"a.rs"`), if it is one.
-fn lit_str_of(expr: &syn::Expr) -> Option<String> {
-    match expr {
-        syn::Expr::Lit(lit) => match &lit.lit {
-            syn::Lit::Str(s) => Some(s.value()),
-            _ => None,
-        },
-        _ => None,
+/// Detects direct `path` metadata at any nesting level under a `cfg_attr`.
+/// Invalid cfg_attr syntax is handled as a parse/source error elsewhere.
+pub fn cfg_attr_has_path(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        attr.path().is_ident("cfg_attr")
+            && attr
+                .parse_args::<CfgAttrArgs>()
+                .is_ok_and(|args| args.attrs.iter().any(meta_has_path))
+    })
+}
+
+fn meta_has_path(meta: &syn::Meta) -> bool {
+    if meta.path().is_ident("path") {
+        return true;
     }
+    meta.path().is_ident("cfg_attr")
+        && meta
+            .require_list()
+            .ok()
+            .and_then(|list| syn::parse2::<CfgAttrArgs>(list.tokens.clone()).ok())
+            .is_some_and(|args| args.attrs.iter().any(meta_has_path))
 }
 
 /// Parsed contents of `#[cfg_attr(pred, attr, attr, ...)]`.
 struct CfgAttrArgs {
-    pred: syn::Expr,
+    _pred: syn::Meta,
     attrs: syn::punctuated::Punctuated<syn::Meta, syn::Token![,]>,
 }
 
 impl syn::parse::Parse for CfgAttrArgs {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let pred: syn::Expr = input.parse()?;
+        let pred: syn::Meta = input.call(syn::Meta::parse)?;
         input.parse::<syn::Token![,]>()?;
         let attrs =
             syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated(input)?;
-        Ok(Self { pred, attrs })
+        Ok(Self { _pred: pred, attrs })
     }
 }

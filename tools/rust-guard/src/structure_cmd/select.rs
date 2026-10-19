@@ -51,6 +51,12 @@ impl Delta {
         let delta: Delta =
             toml::from_str(&text).map_err(|e| format!("cannot parse {path}: {e}"))?;
         for e in delta.allow_widen.iter().chain(delta.allow.iter()) {
+            if e.item.trim().is_empty() {
+                return Err(format!(
+                    "{path}: delta entry for {} needs a non-empty item",
+                    e.path
+                ));
+            }
             if e.reason.trim().is_empty() || e.owner.trim().is_empty() {
                 return Err(format!(
                     "{path}: delta entry for {} needs reason and owner",

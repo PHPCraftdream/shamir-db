@@ -63,30 +63,22 @@ directory unless an explicit `--exceptions` path is given.
   a silent skip.
   Resolution of every `mod x;` / inline `mod x { }` follows Rust's
   contextual rules (`x.rs` vs `x/mod.rs` vs the non-mod-rs parent
-  directory, literal `#[path]`, `#[cfg_attr(pred, path = "...")]`);
-  an inline module needs no file of its own and appends its name to the
+  directory). It rejects any `#[cfg_attr(..., path = "...")]` (including
+  nested/multiple path attributes) as `UNSUPPORTED_CFG_ATTR_PATH` before
+  traversal. Such conditional paths are not modelled: replace them with an
+  unconditional `#[path = "..."]` or a plain `mod`. This gate does not
+  implement exception-based bypasses for unsupported syntax; a config entry
+  will not suppress this finding, and any exception mechanism needs separate
+  review.
+  An inline module needs no file of its own and appends its name to the
   resolution directory, so `mod a { mod b; }` resolves `b` at `a/b.rs`
   (and inline-in-inline composes); `#[path]` inside an inline module is
-  relative to that inline module's directory context. Every resolved
-  path is LEXICALLY NORMALISED (`.` and `..` collapsed against the repo
-  root); a path that escapes the repository root is a
-  `PATH_ESCAPES_REPO` finding and is never followed — nor does its
-  un-normalised spelling leak into the visited bookkeeping.
-  ALL
-  `#[cfg_attr]` path alternatives are kept: mutually exclusive branches
-  are not duplicate modules, and a file reached only via two provably
-  exclusive predicates (`not(X)` vs `X`) is not `DUPLICATE_FILE`. A
-  lone `#[cfg_attr(pred, path = "P")]` mod models BOTH branches:
-  `pred → P` and `not pred →` the default `x.rs`/`x/mod.rs` candidates —
-  each branch is resolved and accounted when it exists; a branch
-  resolving to nothing is not a finding on its own (only when NEITHER
-  branch resolves).
-  cfg predicates COMPOSE down the tree: the inherited predicate, the
-  module's own `#[cfg]` and the alternative's `cfg_attr` predicate are
-  AND-ed (`all(...)`) into the child's reaching predicate, and inline
-  traversal AND-s the parent cfg with the inline module's own cfg.
-  Mutual-exclusion duplicate tests run on the COMPOSED predicates, so
-  `all(unix, ...)` vs `all(not(unix), ...)` compares correctly.
+  relative to that inline module's directory context.
+  cfg predicates COMPOSE down the tree: inherited and module-own plain
+  `#[cfg]` predicates are AND-ed (`all(...)`) into the child's reaching
+  predicate, and inline traversal AND-s the parent cfg with the inline
+  module's own cfg. Mutual-exclusion duplicate tests run on the COMPOSED
+  predicates, so `all(unix, ...)` vs `all(not(unix), ...)` compares correctly.
   cfg predicates are evaluated on the parsed expression for the statically
   provable cases (`any()`, `not(all())`, unsatisfiable branches inside
   `all(...)`/`any(...)`); anything else is treated as satisfiable.
@@ -104,7 +96,8 @@ directory unless an explicit `--exceptions` path is given.
   `AMBIGUOUS_MOD`, `UNSATISFIABLE_CFG`, `DUPLICATE_FILE`,
   `STALE_EXCEPTION`, `UNRESOLVED_INCLUDE`, `UNRESOLVED_MACRO`,
   `PARSE_FAILED`, `BAD_MANIFEST`, `CARGO_METADATA_FAILED`,
-  `PATH_ESCAPES_REPO`.
+  `PATH_ESCAPES_REPO`, `UNSUPPORTED_CFG_ATTR_PATH` (conditional
+  `cfg_attr(path)` mounts are unsupported; not resolved).
 - `rust-guard structure [--paths <glob>...]... [--changed-since <rev>]
   [--base <rev>] [--delta <path>] [--exceptions <path>]
   [--warn-primary-export]` — AST rules over the selected files (at least
@@ -178,13 +171,19 @@ directory unless an explicit `--exceptions` path is given.
   The walk follows `mod x;` declarations — including ones INSIDE inline
   `mod x { }` blocks, resolved under the extended directory context —
   and literal `include!("file.rs")` edges; cfg predicates inherit down
-  the module tree (parent + child compose with `&&`). `#[path]` (and
-  `#[cfg_attr]`) attributes are read with the SAME shared extraction as
-  the `modules` gate (`modules_cmd::resolution::path_alternatives`) —
-  the inventory's former local `parse_args::<LitStr>()` could not read a
-  name-value attribute, so path-mounted modules silently fell back to
-  default resolution. An UNRESOLVED child module (missing, ambiguous or
-  generated) is an `INVENTORY_ERROR`, never a silent skip — its items
+  the module tree (parent + child compose with `&&`). `#[path]` is followed
+  as an explicit source edge. File-backed `mod` and literal `include!` edges
+  targeting an ancestor file emit `MOUNT_CYCLE` in the `modules` gate (the
+  conservation inventory visits every physical file once and reports no cycle
+  of its own). `cfg_attr(path)` (including
+  nested and multiple path-bearing attributes) is rejected as
+  `UNSUPPORTED_CFG_ATTR_PATH` in inventory, not conditionally resolved. There
+  is no generic bypass; supporting a specific case requires a deliberate
+  extension and explicit reviewed exception in `.rust-guard/`.
+  Replace it with unconditional `#[path]` or plain `mod`; this gate has no
+  exception bypass for unsupported syntax, and any future mechanism needs
+  separate review. An UNRESOLVED child module (missing,
+  ambiguous or generated) is an `INVENTORY_ERROR`, never a silent skip — its items
   would silently "vanish" between revisions otherwise. Every resolved
   path is lexically normalised; a path escaping the repo root is an
   `INVENTORY_ERROR`. Per item it
@@ -377,7 +376,7 @@ Fixture → finding map:
 
 | Fixture | Finding asserted |
 |---|---|
-| `modules_ok` | none (exit 0): `#[path]`, genuinely exclusive `cfg_attr` alternatives (`unix`/`not(unix)`, both reachable, no exception), BOTH branches of a lone `#[cfg_attr]` (attr target + default fallback), an inherited `#[cfg(unix)]` gating an inline child, a file shared across two TARGETS (`benches/common.rs` root AND mod-included — never a duplicate), `src/bin/x.rs` bin target, non-mod-rs parent, inline `mod` directory-context extension (`mod nested { mod leaf; }` → `nested/leaf.rs`, no wrapper file), `include!`, raw-string/comment `mod x;` negative |
+| `modules_ok` | none (exit 0): `#[path]`, plain inherited/own cfg propagation, shared-target helpers, `src/bin/x.rs` bin target, non-mod-rs parent, inline `mod` directory-context extension (`mod nested { mod leaf; }` → `nested/leaf.rs`, no wrapper file), `include!`, raw-string/comment `mod x;` negative |
 | `modules_ok/producer_declared` | none (exit 0): documented `[[producer]]` spelling accepted, package-scoped, plus `[[exception]]` for the generated file |
 | `modules_ok/generated_include_producer` | none (exit 0): `include!(concat!(env!("OUT_DIR"), ...))` with a scoped `include` `[[producer]]` |
 | `modules_bad/dropped_mod` | `UNACCOUNTED_FILE` |
@@ -386,11 +385,12 @@ Fixture → finding map:
 | `modules_bad/missing_path` | `MISSING_MOD_FILE` |
 | `modules_bad/ambiguous` | `AMBIGUOUS_MOD` |
 | `modules_bad/duplicate` | `DUPLICATE_FILE` (mounted twice in ONE target — cross-target sharing is clean, see `modules_ok`) |
-| `modules_bad/path_escapes` | `PATH_ESCAPES_REPO` (`#[path = "../../../outside.rs"]`) |
+| `modules_bad/path_escapes` | `PATH_ESCAPES_REPO` (`#[path = "../../../../outside.rs"]` from `crates/fix/src`: four parents, one more than the three that only reach the repo root) |
 | `modules_bad/generated_include` | `UNRESOLVED_INCLUDE` (non-literal include, no producer) |
-| `modules_bad/stale_exception` | `STALE_EXCEPTION` |
+| `modules_bad/mount_cycle` | `MOUNT_CYCLE` (file-backed module targets an ancestor file) |
 | `modules_bad/macro_mods` | `UNRESOLVED_MACRO` (module-level `macro_rules!` mentioning `mod` inside nested braces, no `[[producer]]`) |
-| `modules_bad/cfg_attr_neither_two` | `MISSING_MOD_FILE`, reported ONCE per `mod` (two `cfg_attr` alternatives, neither file nor the default exists) |
+| `modules_bad/cfg_attr_neither` | `UNSUPPORTED_CFG_ATTR_PATH` |
+| `modules_bad/cfg_attr_neither_two` | `UNSUPPORTED_CFG_ATTR_PATH` (multiple attributes) |
 | `modules_bad/producer_wrong_package` | `UNRESOLVED_MACRO` (producer scoped to another package must not apply) |
 | `modules_bad/bad_manifest` | `BAD_MANIFEST` (unparseable hand-scanned manifest fails closed) |
 | (no fixture — broken root member) | `CARGO_METADATA_FAILED` (finding + scan continues on hand-parsed manifests) |
@@ -420,7 +420,7 @@ Fixture → finding map:
 | `conservation/gone_pkg` | `ITEM_LOST` for every item of a base-only package the head deletes (per-revision manifest discovery) |
 | `conservation/target_deleted` | `TEST_LOST` for a test TARGET (`tests/x.rs`) deleted at head (per-revision auto-discovery + deletion-aware overlay) |
 | `conservation/path_test_deleted` | `TEST_LOST` for a `#[path]`-mounted test module deleted at head (shared attribute-path extraction) |
-| `conservation/fallback_changed` | `TEST_LOST` (cfg_attr DEFAULT branch is inventoried) |
+| `conservation/fallback_changed` | `UNSUPPORTED_CFG_ATTR_PATH` during inventory |
 | `conservation/broken_mod` | `INVENTORY_ERROR` (`mod ghost;` resolves at neither revision — fail closed) |
 | `conservation/unused_allowance` | `UNUSED_ALLOWANCE` (identical trees — exercises the `--allow-empty` head commit) |
 | `conservation/base_mismatch` | `BASE_MISMATCH` (head carries a real comment-only diff) |

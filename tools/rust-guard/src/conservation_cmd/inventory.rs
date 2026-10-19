@@ -183,6 +183,11 @@ fn process_items(
         match item {
             SynItem::Mod(m) => {
                 let name = m.ident.to_string();
+
+                if resolution::cfg_attr_has_path(&m.attrs) {
+                    inv.errors.push((ctx.file.clone(), format!("UNSUPPORTED_CFG_ATTR_PATH: mod `{name}` uses cfg_attr(path), which is unsupported; replace it with unconditional `#[path = \"...\"]` or plain `mod`, or add an explicit reviewed exception in `.rust-guard/`")));
+                    continue;
+                }
                 let cfg = combine_cfg(ctx.cfg.as_deref(), super::item::attr_cfg(&m.attrs));
                 match &m.content {
                     // Inline module: no file needed; it extends the
@@ -203,20 +208,6 @@ fn process_items(
                         process_items(fs, tree, inner, &inner_ctx, inv, visited);
                     }
                     None => {
-                        // Shared attribute-path extraction (the modules
-                        // walker's `path_alternatives`): the previous
-                        // local `parse_args::<LitStr>()` could not read a
-                        // NAME-VALUE `#[path = "..."]`, so every
-                        // path-mounted module silently fell back to
-                        // default resolution and its items vanished.
-                        let alts = resolution::path_alternatives(&m.attrs);
-                        // Handles one resolution outcome; true when a
-                        // file was walked. Non-Found resolutions are
-                        // INVENTORY_ERROR findings, never silent skips.
-                        // `child_cfg` carries the composed predicate of
-                        // the BRANCH being walked: inherited ctx cfg +
-                        // the module's own `#[cfg]` (+ the alternative's
-                        // `cfg_attr` predicate, if any).
                         let handle = |resolved: &Resolution,
                                       child_cfg: Option<String>,
                                       inv: &mut Inventory,
@@ -251,69 +242,16 @@ fn process_items(
                                 _ => false,
                             }
                         };
-                        let mut resolved_any = false;
-                        // Mirror the modules gate's `has_unconditional`
-                        // rule: an UNCONDITIONAL `#[path = "..."] mod m;`
-                        // REPLACES the default resolution — rustc never
-                        // compiles the phantom `m.rs` — so the default
-                        // branch must not be inventoried (it would
-                        // produce spurious ITEM_LOST/ITEM_ADDED when the
-                        // phantom file appears/disappears between
-                        // revisions). Only a purely CONDITIONAL alt set
-                        // leaves the default branch reachable.
-                        let has_unconditional = alts.iter().any(|a| a.pred.is_none());
-                        if alts.is_empty() {
-                            let resolved =
-                                resolution::resolve(fs, &name, &ctx.mod_dir, &ctx.attr_dir, None);
-                            resolved_any |= handle(&resolved, cfg.clone(), inv, visited);
-                        } else {
-                            for alt in alts {
-                                let resolved =
-                                    resolution::resolve_attr(fs, &ctx.attr_dir, &alt.path);
-                                // The alternative branch's child cfg adds
-                                // the `cfg_attr` predicate rendered to
-                                // text (an unconditional `#[path]` has
-                                // `pred: None` and inherits only).
-                                let alt_cfg = combine_cfg(
-                                    cfg.as_deref(),
-                                    alt.pred
-                                        .as_ref()
-                                        .map(|p| quote::ToTokens::to_token_stream(p).to_string()),
-                                );
-                                resolved_any |= handle(&resolved, alt_cfg, inv, visited);
-                            }
-                            // The DEFAULT branch (`x.rs` / `x/mod.rs`)
-                            // stays reachable alongside the attribute
-                            // alternatives: `cfg_attr` alternatives are
-                            // conditional mounts, not replacements, so
-                            // the unconditional default file is still a
-                            // real candidate and its items belong in the
-                            // inventory. Its child cfg is inherited +
-                            // the module's own `#[cfg]` only (no alt
-                            // predicate). Double-walk guard: if an alt
-                            // path normalizes to the same physical file
-                            // as the default, `walk_file`'s per-run
-                            // `visited` BTreeSet (keyed on the resolved
-                            // path) returns early on the second insert,
-                            // so the file is extracted once.
-                            // (comment moved above: skipped entirely when
-                            // any alt is unconditional)
-                            if !has_unconditional {
-                                let default_resolved = resolution::resolve(
-                                    fs,
-                                    &name,
-                                    &ctx.mod_dir,
-                                    &ctx.attr_dir,
-                                    None,
-                                );
-                                resolved_any |=
-                                    handle(&default_resolved, cfg.clone(), inv, visited);
-                            }
-                        }
+                        let path = resolution::path_attr(&m.attrs);
+                        let resolved = resolution::resolve(
+                            fs,
+                            &name,
+                            &ctx.mod_dir,
+                            &ctx.attr_dir,
+                            path.as_deref(),
+                        );
+                        let resolved_any = handle(&resolved, cfg.clone(), inv, visited);
                         if !resolved_any {
-                            // Fail closed: an unresolved child module
-                            // contributes no items, so its base items
-                            // would silently "vanish" — an explicit
                             // INVENTORY_ERROR keeps the comparison honest.
                             inv.errors.push((
                                 ctx.file.clone(),
