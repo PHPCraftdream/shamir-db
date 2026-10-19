@@ -12,7 +12,7 @@ use shamir_query_types::write::DeleteOp;
 use shamir_query_types::TableRef;
 use shamir_types::types::value::QueryValue;
 
-use crate::interner_cache_ops::batch_has_refs;
+use crate::interner_cache::ops::batch_has_refs;
 
 fn read_op(field: &str, value: FilterValue) -> BatchOp {
     use shamir_query_types::read::ReadQuery;
