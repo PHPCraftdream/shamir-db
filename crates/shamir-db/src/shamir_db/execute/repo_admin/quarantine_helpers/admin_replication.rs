@@ -80,6 +80,20 @@ impl ShamirDb {
 
     /// Persist an operational stop reason; `"resync_required"` additionally
     /// stamps the durable `quarantined` marker + receipt baseline.
+    ///
+    /// WHO MAY CALL THE GENERATION-LESS VARIANT (round 12 F3): only callers
+    /// that are NOT bound to a possibly-superseded binding generation —
+    /// admin/API operations, and supervisor START-admission paths that read
+    /// the row's current `binding_generation` synchronously under the
+    /// replication control lock immediately before marking (the generation
+    /// cannot go stale in between). Anything originating from a FOLLOWER
+    /// LOOP task (or its supervisor exit wrapper) MUST use
+    /// [`Self::mark_subscription_terminal_generation`] /
+    /// [`Self::mark_subscription_resync_required_generation`] with its own
+    /// lease/config generation: a stale task must never mark or clear a
+    /// replacement binding's row. Retriable, NON-terminal status reports
+    /// (stall visibility) must not use this writer at all — it quiesces the
+    /// lease — and use [`Self::set_subscription_status_message`] instead.
     pub async fn mark_subscription_terminal(
         &self,
         name: &str,
@@ -203,6 +217,73 @@ impl ShamirDb {
             self.resync_quarantine
                 .confirm_pending(&claim, published_keys.iter().cloned());
         }
+        Ok(())
+    }
+
+    /// Round 12 F2 — the non-terminal, non-quiescing, generation-fenced
+    /// status writer. Rewrites ONLY `status_message` on subscription
+    /// `name`'s row (clears it when `message` is empty) and persists the
+    /// catalogue. Deliberately does NOT touch `state`, `quarantined`,
+    /// `resync_from_receipt` or `last_terminal_reason`, does NOT touch the
+    /// quarantine cache, does NOT quiesce or invalidate the subscription's
+    /// lease, and never changes the row's liveness: a retryable status
+    /// report from a live follower must never invalidate the very lease
+    /// that keeps the loop running.
+    ///
+    /// Missing row or `binding_generation != expected_binding_generation` →
+    /// `Ok(())` as a logged no-op (a stale loop's stall report must never
+    /// land on a replacement binding's row). Takes the replication control
+    /// lock for the read-modify-write, like every other catalogue writer.
+    pub async fn set_subscription_status_message(
+        &self,
+        name: &str,
+        message: &str,
+        expected_binding_generation: u64,
+    ) -> DbResult<()> {
+        let _control = self.lock_replication_control().await;
+        let table = self.system_store().subscriptions_table().await?;
+        let refs = crate::types::common::new_map();
+        let ctx = table.info_store_read_view().filter_context(&refs).await?;
+        let lookup = crate::query::read::ReadQuery::new("subscriptions").filter(
+            crate::query::filter::Filter::Eq {
+                field: vec!["name".to_string()],
+                value: crate::query::filter::FilterValue::String(name.to_string()),
+            },
+        );
+        let existing = table.read(&lookup, &ctx).await?;
+        let Some(row) = existing.records.into_iter().next() else {
+            log::warn!(
+                "set_subscription_status_message: subscription '{name}' not found; \
+                 treating as a no-op (it may have been dropped concurrently)"
+            );
+            return Ok(());
+        };
+        let mut record = row.as_value().into_owned();
+        let row_generation = record.get("binding_generation").and_then(|v| v.as_u64());
+        if row_generation != Some(expected_binding_generation) {
+            log::warn!(
+                "set_subscription_status_message: subscription '{name}' binding generation \
+                 {row_generation:?} != expected {expected_binding_generation}; ignoring stale \
+                 status report (a replacement binding must never be marked by an old task)"
+            );
+            return Ok(());
+        }
+        if let QueryValue::Map(ref mut m) = record {
+            if message.is_empty() {
+                m.insert("status_message".into(), QueryValue::Null);
+            } else {
+                m.insert(
+                    "status_message".into(),
+                    QueryValue::Str(message.to_string()),
+                );
+            }
+        }
+        self.replace_subscription_row(&table, name.to_string(), record)
+            .await?;
+        self.system_store()
+            .persist_table_interner(&table, None)
+            .await?;
+        self.flush_seed_catalogue().await?;
         Ok(())
     }
 }

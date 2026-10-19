@@ -222,6 +222,17 @@ pub(crate) struct IdentityStoreOverride {
     pub(crate) startup_reflush: bool,
 }
 
+/// Round 12 F1: a stall/clear DECISION recorded while the apply-gate READ
+/// guard is held. Persistence (which takes the replication control lock
+/// inside `set_subscription_status_message`) happens only after the guard
+/// is dropped — see the loop's post-`drop(_apply_guard)` block.
+enum PendingStall {
+    /// Bookmark advanced: overwrite a reported stall with a progress note.
+    Clear(u64),
+    /// Another swallowed failure: report a stall at the current streak.
+    Note(String),
+}
+
 #[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct ApplyParkHook {
@@ -444,6 +455,10 @@ async fn run_follower_loop_internal(
 
     let mut backoff_ms = INITIAL_BACKOFF_MS;
     let mut iter = 0usize;
+    // Round 12 F2: the loop's OWN binding generation (from its lease); every
+    // row write below is fenced with it — a stale loop's status report on a
+    // replacement binding's row is a logged no-op inside `ShamirDb`.
+    let lease_generation = lease.as_ref().map_or(0, |l| l.generation);
     // PR6b-3 stall visibility: consecutive swallowed failures and the last
     // durable bookmark observed. Progress = the bookmark advancing beyond
     // the previous iteration's value; any progress resets the counter.
@@ -496,10 +511,14 @@ async fn run_follower_loop_internal(
                 };
                 warn!(node_id = %node_id, error = %e, "follower_loop: backing off");
                 consecutive_failures += 1;
+                // Round 12 F1 classification: GUARD-FREE arm (repo missing —
+                // `continue` before the apply guard exists), so the status
+                // writer's control lock may be taken directly.
                 note_swallowed_failure(
                     &db,
                     &node_id,
                     subscription,
+                    lease_generation,
                     consecutive_failures,
                     &e.to_string(),
                     &mut stall_reported,
@@ -527,7 +546,15 @@ async fn run_follower_loop_internal(
                 if prev_bookmark.is_some_and(|prev| v > prev) {
                     consecutive_failures = 0;
                     if stall_reported {
-                        clear_stall(&db, &node_id, subscription, v, &mut stall_reported).await;
+                        clear_stall(
+                            &db,
+                            &node_id,
+                            subscription,
+                            v,
+                            lease_generation,
+                            &mut stall_reported,
+                        )
+                        .await;
                     }
                 }
                 prev_bookmark = Some(v);
@@ -546,6 +573,7 @@ async fn run_follower_loop_internal(
                     &db,
                     &node_id,
                     subscription,
+                    lease_generation,
                     consecutive_failures,
                     &re.to_string(),
                     &mut stall_reported,
@@ -584,6 +612,7 @@ async fn run_follower_loop_internal(
                     &db,
                     &node_id,
                     subscription,
+                    lease_generation,
                     consecutive_failures,
                     &e.to_string(),
                     &mut stall_reported,
@@ -677,6 +706,7 @@ async fn run_follower_loop_internal(
                     &db,
                     &node_id,
                     subscription,
+                    lease_generation,
                     consecutive_failures,
                     &format!("leader error code {code}: {message}"),
                     &mut stall_reported,
@@ -731,6 +761,7 @@ async fn run_follower_loop_internal(
                     &db,
                     &node_id,
                     subscription,
+                    lease_generation,
                     consecutive_failures,
                     &re.to_string(),
                     &mut stall_reported,
@@ -755,8 +786,16 @@ async fn run_follower_loop_internal(
                 if prev_bookmark.is_some_and(|previous| bookmark > previous) {
                     consecutive_failures = 0;
                     if stall_reported {
-                        clear_stall(&db, &node_id, subscription, bookmark, &mut stall_reported)
-                            .await;
+                        // Guard-free arm (before the apply guard exists): direct call.
+                        clear_stall(
+                            &db,
+                            &node_id,
+                            subscription,
+                            bookmark,
+                            lease_generation,
+                            &mut stall_reported,
+                        )
+                        .await;
                     }
                 }
                 consecutive_failures += 1;
@@ -764,6 +803,7 @@ async fn run_follower_loop_internal(
                     &db,
                     &node_id,
                     subscription,
+                    lease_generation,
                     consecutive_failures,
                     &format!(
                         "leader advertises backlog through version {current_version} \
@@ -808,6 +848,13 @@ async fn run_follower_loop_internal(
                 return Ok(());
             }
         }
+        // Round 12 F1: guard-held stall/clear DECISIONS are recorded here and
+        // persisted only after `drop(_apply_guard)` below — the persistence
+        // takes the replication control lock, and awaiting it under the
+        // apply-gate read guard would invert the documented lock order
+        // (control lock → apply_gate.write()) and self-deadlock on the lease
+        // quiesce.
+        let mut pending_stall: Option<PendingStall> = None;
         match shamir_db::engine::tx::apply_replicated::apply_replicated_batch(
             &repo_instance,
             &events,
@@ -825,14 +872,7 @@ async fn run_follower_loop_internal(
                 if advanced {
                     consecutive_failures = 0;
                     if stall_reported {
-                        clear_stall(
-                            &db,
-                            &node_id,
-                            subscription,
-                            post_apply_bookmark,
-                            &mut stall_reported,
-                        )
-                        .await;
+                        pending_stall = Some(PendingStall::Clear(post_apply_bookmark));
                     }
                 }
                 if !advanced {
@@ -840,15 +880,7 @@ async fn run_follower_loop_internal(
                     let detail = format!(
                         "successful apply left durable bookmark at {post_apply_bookmark} (previously {bookmark})"
                     );
-                    note_swallowed_failure(
-                        &db,
-                        &node_id,
-                        subscription,
-                        consecutive_failures,
-                        &detail,
-                        &mut stall_reported,
-                    )
-                    .await;
+                    pending_stall = Some(PendingStall::Note(detail));
                 }
             }
             Ok(ApplyOutcome::Rejected { reason }) => {
@@ -902,19 +934,40 @@ async fn run_follower_loop_internal(
                 }
                 warn!(error = %e, "follower_loop: batch apply failed, backing off");
                 consecutive_failures += 1;
-                note_swallowed_failure(
-                    &db,
-                    &node_id,
-                    subscription,
-                    consecutive_failures,
-                    &e.to_string(),
-                    &mut stall_reported,
-                )
-                .await;
+                // Guard-held: DEFERRED — persisted after the guard drop below.
+                pending_stall = Some(PendingStall::Note(e.to_string()));
                 sleep_backoff(&cancel, &mut backoff_ms).await;
             }
         }
         drop(_apply_guard);
+        // Round 12 F1: the guard is gone — persistence may now safely take
+        // the replication control lock inside the status writer.
+        match pending_stall {
+            Some(PendingStall::Clear(progress_bookmark)) => {
+                clear_stall(
+                    &db,
+                    &node_id,
+                    subscription,
+                    progress_bookmark,
+                    lease_generation,
+                    &mut stall_reported,
+                )
+                .await;
+            }
+            Some(PendingStall::Note(detail)) => {
+                note_swallowed_failure(
+                    &db,
+                    &node_id,
+                    subscription,
+                    lease_generation,
+                    consecutive_failures,
+                    &detail,
+                    &mut stall_reported,
+                )
+                .await;
+            }
+            None => {}
+        }
         #[cfg(test)]
         if let Some(hook) = apply_park.as_deref() {
             if hook.after_apply && !apply_park_wait(&repo, Some(hook), &cancel).await {

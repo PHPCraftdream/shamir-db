@@ -22,6 +22,7 @@ use std::sync::Arc;
 use shamir_db::access::{principal64_from_username, Actor};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
+use shamir_db::repl_binding::{SubscriptionBinding, SUBSCRIPTION_BINDING_VERSION};
 use shamir_db::types::value::QueryValue;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
@@ -100,23 +101,39 @@ async fn execute_op(
         .await
 }
 
-/// Inject a legacy subscription row (`state` = "active" | "paused") through
-/// the REAL system-catalogue writer — the same `subscriptions_table()` +
-/// `set_via_implicit_tx` handle `handle_create_subscription` uses, no db name.
+/// Inject a pre-existing subscription row (`state` = "active" | "paused")
+/// through the REAL system-catalogue writer — the same `subscriptions_table()`
+/// plus `set_via_implicit_tx` — the same writer `handle_create_subscription`
+/// uses (no db name).
+///
+/// Round 12 F4: the row carries the SAME binding field set the
+/// production CREATE path stamps (`binding_version` =
+/// `SUBSCRIPTION_BINDING_VERSION`, `binding_generation` >= 1,
+/// `binding_destinations` with the concrete `app`/`main` destination), so
+/// `SubscriptionBinding::from_row` (the merged catalogue reader used by
+/// `read_subscriptions`) parses it and reconcile reaches the backend
+/// admission path these tests exist to exercise — while the destination
+/// stays MemBuffer/Hybrid so the refusal still fires.
 async fn inject_legacy_row(follower: &ShamirDb, name: &str, state: &str) {
+    let mut row: QueryValue = doc! {
+        "name" => name,
+        "upstream" => "tcp://leader:9000",
+        "publication" => "pub_ab",
+        "profile" => "prof_ab",
+        "state" => state,
+    }
+    .into();
+    let binding = SubscriptionBinding::new(
+        SUBSCRIPTION_BINDING_VERSION,
+        1,
+        vec![("app".to_string(), "main".to_string())],
+    )
+    .expect("fixture binding");
+    binding.write_to_row(&mut row);
     follower
-        .inject_subscription_row_for_test(
-            doc! {
-                "name" => name,
-                "upstream" => "tcp://leader:9000",
-                "publication" => "pub_ab",
-                "profile" => "prof_ab",
-                "state" => state,
-            }
-            .into(),
-        )
+        .inject_subscription_row_for_test(row)
         .await
-        .expect("inject pre-existing legacy subscription row");
+        .expect("inject pre-existing subscription row");
 }
 
 /// Every subscription row in the catalogue (owned maps, in storage order).

@@ -856,11 +856,13 @@ impl SubscriptionSupervisor {
                         // state is unsupported (no migration exists). Same
                         // quarantine family as the identity fence, WITHOUT
                         // the identity-fence test seam: always quarantined.
+                        // Round 12 F3: loop-originated -> generation-fenced.
                         if let Err(mark_err) = local
-                            .mark_subscription_terminal(
+                            .mark_subscription_terminal_generation(
                                 &sub_name,
                                 "resync_required",
                                 &e.to_string(),
+                                Some(generation),
                             )
                             .await
                         {
@@ -884,11 +886,13 @@ impl SubscriptionSupervisor {
                         // follower-state refusal: persist the typed terminal
                         // status ONCE with the remedy in the message; the loop
                         // never retries it.
+                        // Round 12 F3: loop-originated -> generation-fenced.
                         if let Err(mark_err) = local
-                            .mark_subscription_terminal(
+                            .mark_subscription_terminal_generation(
                                 &sub_name,
                                 "resync_required",
                                 &e.to_string(),
+                                Some(generation),
                             )
                             .await
                         {

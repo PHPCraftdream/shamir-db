@@ -188,21 +188,35 @@ pub(crate) async fn validate_target(
 /// a `status_message` on the subscription row so operators (and tests) can
 /// OBSERVE the stalled loop via the existing status/list admin surface.
 ///
-/// Mechanism choice: [`ShamirDb::mark_subscription_terminal`] with
-/// `state = "active"` is the lightest EXISTING persistent write (there is
-/// no status-only API in `shamir-db` and production changes outside
-/// `shamir-server` are out of scope). It writes `status_message` +
-/// `last_terminal_reason` but — because the state is not
-/// `resync_required` — installs NO quarantine, leaves the row `active` so
-/// `reconcile()` keeps (re)starting the loop, and the loop itself keeps
-/// retrying: the stall stays visible, not terminal.
+/// Mechanism (round 12 F2): [`ShamirDb::set_subscription_status_message`] —
+/// a status-ONLY writer. It rewrites the row's `status_message` and nothing
+/// else: no `state` change, no quarantine, no `last_terminal_reason`, and —
+/// critically — NO lease quiesce. The earlier mechanism
+/// (`mark_subscription_terminal(name, "active", …)`) self-invalidated the
+/// loop's own lease (the terminal writer quiesces first), so a retryable
+/// status report killed the loop at the next top-of-iteration check.
+/// With the status-only writer the row stays `active`, the lease stays
+/// valid and the loop keeps retrying: the stall stays visible, not terminal.
+///
+/// The write is generation-fenced with `generation` (the loop lease's
+/// binding generation): a stale loop's stall report on a replaced binding's
+/// row is a logged no-op inside `ShamirDb`. `subscription = None`
+/// (unsupervised loop) does nothing, as before.
 ///
 /// Fires once per stall streak (`stall_reported` guard); cleared by
 /// [`clear_stall`] on the next durable progress.
+///
+/// LOCK CONSTRAINT (round 12 F1): this writer takes the replication control
+/// lock internally, so it must NEVER be awaited while the loop holds its
+/// apply-gate READ guard (control lock → apply_gate.write() is the
+/// documented order; taking the control lock under the read guard inverts
+/// it and self-deadlocks on the quiesce barrier). Guard-held loop arms
+/// defer the call until after the guard is dropped.
 pub(crate) async fn note_swallowed_failure(
     db: &ShamirDb,
     node_id: &str,
     subscription: Option<&str>,
+    generation: u64,
     failures: usize,
     last_error: &str,
     stall_reported: &mut bool,
@@ -226,7 +240,7 @@ pub(crate) async fn note_swallowed_failure(
     // stays clear so the NEXT failure retries the write (a failed write must
     // never silence the stall permanently).
     match db
-        .mark_subscription_terminal(name, "active", &message)
+        .set_subscription_status_message(name, &message, generation)
         .await
     {
         Ok(()) => {
@@ -249,12 +263,16 @@ pub(crate) async fn note_swallowed_failure(
 
 /// PR6b-3: the bookmark advanced after a reported stall — overwrite the
 /// stall `status_message` with a progress note so a RECOVERED loop is as
-/// visible as a stalled one was.
+/// visible as a stalled one was. Uses the same generation-fenced,
+/// non-quiescing status-only writer as [`note_swallowed_failure`] (round 12
+/// F1/F2); the same lock constraint applies: never call while an apply-gate
+/// read guard is held.
 pub(crate) async fn clear_stall(
     db: &ShamirDb,
     node_id: &str,
     subscription: Option<&str>,
     bookmark: u64,
+    generation: u64,
     stall_reported: &mut bool,
 ) {
     *stall_reported = false;
@@ -263,7 +281,7 @@ pub(crate) async fn clear_stall(
     };
     let message = format!("replication progress restored; durable bookmark at {bookmark}");
     if let Err(e) = db
-        .mark_subscription_terminal(name, "active", &message)
+        .set_subscription_status_message(name, &message, generation)
         .await
     {
         warn!(

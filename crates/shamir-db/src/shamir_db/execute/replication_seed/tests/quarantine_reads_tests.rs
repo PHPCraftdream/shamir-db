@@ -786,7 +786,13 @@ async fn t14_bound_destination_stays_refused_after_profile_drop_and_reopen() {
         shamir
             .add_repo(
                 "testdb",
-                RepoConfig::new("main", BoxRepoFactory::fjall(repo_path.clone())),
+                // RAW fjall (no MemBuffer): this test binds a SUBSCRIPTION to
+                // this repo, and the CREATE/RESUME admission
+                // (validate_repo_wide_atomic_batch) refuses MemBuffer-wrapped
+                // destinations with `atomic_batch_unsupported`. Raw fjall is also
+                // the backend the seed writes through, so the durable directory
+                // survives the reopen below.
+                RepoConfig::new("main", BoxRepoFactory::fjall_raw(repo_path.clone())),
             )
             .await
             .unwrap();
@@ -851,7 +857,13 @@ async fn t15_replacement_rebind_survives_reopen_and_resume_requires_full_recover
         shamir
             .add_repo(
                 "testdb",
-                RepoConfig::new("main", BoxRepoFactory::fjall(repo_path.clone())),
+                // RAW fjall (no MemBuffer): this test binds a SUBSCRIPTION to
+                // this repo, and the CREATE/RESUME admission
+                // (validate_repo_wide_atomic_batch) refuses MemBuffer-wrapped
+                // destinations with `atomic_batch_unsupported`. Raw fjall is also
+                // the backend the seed writes through, so the durable directory
+                // survives the reopen below.
+                RepoConfig::new("main", BoxRepoFactory::fjall_raw(repo_path.clone())),
             )
             .await
             .unwrap();

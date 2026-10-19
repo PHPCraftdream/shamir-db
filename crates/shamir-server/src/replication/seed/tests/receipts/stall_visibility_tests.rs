@@ -9,6 +9,7 @@
 //! `receipt_io_pause_retry_convergence` scenario (3 failures, then
 //! convergence) can never trip it.
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -491,5 +492,246 @@ async fn progress_resets_counter_and_normal_convergence_is_never_blocked() {
     assert!(
         message.is_none(),
         "progress must reset the counter — no stall message may exist: {message:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Round 12 — F1/F2 regression tests (lease/status-writer interaction)
+// ---------------------------------------------------------------------------
+
+/// The single subscription row's durable `binding_generation`.
+async fn subscription_row_generation(follower: &ShamirDb) -> u64 {
+    let table = follower.system_store().subscriptions_table().await.unwrap();
+    let interner = table.interner_for_test().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+    let query = Query::from("subscriptions").build();
+    let rows = table.read(&query, &ctx).await.unwrap();
+    rows.records[0]
+        .as_value()
+        .get("binding_generation")
+        .and_then(|v| v.as_u64())
+        .expect("row carries binding_generation")
+}
+
+/// Round 12 F2: a LEASED follower that reaches the stall threshold must
+/// persist the stall `status_message` AND keep running — the status-only
+/// writer must never quiesce/invalidate the loop's own lease.
+///
+/// COUNTERFACTUAL: the pre-fix mechanism (`mark_subscription_terminal(name,
+/// "active", ...)`) quiesced the lease inside every stall report, so the
+/// loop exited at its next top-of-iteration validity check with the lease
+/// `valid == false` — the first failing assertion is the lease-liveness
+/// check below (the message itself was persisted either way).
+#[tokio::test(start_paused = true)]
+async fn leased_follower_stall_persists_message_and_keeps_lease_valid() {
+    let follower = build_db("follower").await;
+    create_subscription_row(&follower, "stall_sub").await;
+    let generation = subscription_row_generation(&follower).await;
+    let db = Arc::new(follower.clone());
+    // Take the lease exactly like the supervisor does: under the control
+    // lock, for the row's CURRENT generation.
+    let control = db.lock_replication_control().await;
+    let lease = db
+        .take_subscription_lease("stall_sub", generation, &control)
+        .await
+        .expect("a fresh lease is issued for the current generation");
+    drop(control);
+    assert!(lease.valid.load(Ordering::Acquire));
+
+    let cfg = FollowerLoopConfig::new("follower-1", "app", "main")
+        .with_poll_wait_ms(0)
+        .with_subscription("stall_sub")
+        .with_max_iterations(crate::replication::follower_loop::STALL_VISIBILITY_THRESHOLD + 2);
+    let mut cfg = cfg;
+    cfg.lease = Some(lease.clone());
+    run_follower_loop(
+        db,
+        Arc::new(AlwaysFailingSource),
+        cfg,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("swallowed transient errors must NOT terminate a LEASED loop");
+
+    let (state, message) = read_subscription_row(&follower).await;
+    assert_eq!(
+        state.as_deref(),
+        Some("active"),
+        "stall must stay retryable"
+    );
+    assert!(
+        message.is_some(),
+        "the stall must still be visible via status_message"
+    );
+    assert!(
+        lease.valid.load(Ordering::Acquire),
+        "round 12 F2: the stall report must NOT quiesce/invalidate the lease"
+    );
+}
+
+/// Round 12 F2/F3: the status writer is generation-fenced — a stale task's
+/// report on a replacement binding's row is a logged no-op (Ok), and the
+/// row is untouched; only the CURRENT generation's report lands. It also
+/// never touches `state` or `last_terminal_reason`.
+#[tokio::test(start_paused = true)]
+async fn stale_generation_status_report_is_a_no_op_on_the_row() {
+    let follower = build_db("follower").await;
+    create_subscription_row(&follower, "stall_sub").await;
+    let generation = subscription_row_generation(&follower).await;
+    let before = read_subscription_row(&follower).await;
+
+    follower
+        .set_subscription_status_message("stall_sub", "stale report", generation + 100)
+        .await
+        .expect("a stale generation is a logged no-op, not an error");
+    assert_eq!(
+        read_subscription_row(&follower).await,
+        before,
+        "the stale report must not touch the row"
+    );
+
+    follower
+        .set_subscription_status_message("stall_sub", "fresh report", generation)
+        .await
+        .expect("the current generation's report persists");
+    let (state, message) = read_subscription_row(&follower).await;
+    assert_eq!(message.as_deref(), Some("fresh report"));
+    assert_eq!(
+        state.as_deref(),
+        before.0.as_deref(),
+        "the status writer must never touch `state`"
+    );
+}
+
+/// Round 12 F1 — deterministic lock-order test: while the loop holds its
+/// apply-gate READ guard (parked inside the apply), a lifecycle mutation
+/// (control lock → apply_gate.write()) waits for the guard; the loop's own
+/// guard-held stall-clear persistence must NOT await the control lock until
+/// AFTER the guard is dropped, so both complete. NO sleeps, NO timeouts:
+/// synchronisation is the park's Notify pair plus plain `.await`s (a
+/// deadlock fails via the test harness, exactly like CI would).
+///
+/// COUNTERFACTUAL: the pre-fix loop called `clear_stall` (which takes the
+/// replication control lock) while still holding the read guard; with the
+/// mutation task holding the control lock and waiting on the write gate,
+/// that is a textbook lock-order inversion — the loop hangs forever inside
+/// the guarded clear.
+#[tokio::test(start_paused = true)]
+async fn guarded_stall_persistence_does_not_deadlock_against_write_gate() {
+    // Leader with one durable event.
+    let leader = build_db("alice").await;
+    let owner = Actor::User(principal64_from_username("alice"));
+    use shamir_query_builder::batch::Batch as B;
+    use shamir_query_builder::doc;
+    use shamir_query_builder::write::insert;
+    let mut batch = B::named("ins");
+    batch.id("ins");
+    batch.transactional();
+    batch.insert(
+        "i",
+        insert("items").rows([doc! {
+            "id" => "k0",
+            "v" => 0_i64,
+        }]),
+    );
+    leader
+        .execute_as(owner, "app", &batch.build())
+        .await
+        .expect("leader write");
+    for _ in 0..200 {
+        if leader
+            .read_changelog_from_journal("app", "main", 0, 10)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|jr| !jr.events.is_empty())
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let follower = build_db("follower").await;
+    create_subscription_row(&follower, "stall_sub").await;
+    let generation = subscription_row_generation(&follower).await;
+    let db = Arc::new(follower.clone());
+    let control = db.lock_replication_control().await;
+    let lease = db
+        .take_subscription_lease("stall_sub", generation, &control)
+        .await
+        .expect("a fresh lease is issued for the current generation");
+    drop(control);
+
+    // Park the loop INSIDE the apply (hook phase 1 = before apply, i.e.
+    // with the read guard held), after the 10-failure stall streak.
+    let arrived = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let hook = Arc::new(crate::replication::follower_loop::ApplyParkHook {
+        repo: Some("main".into()),
+        after_apply: false,
+        arrived: Arc::clone(&arrived),
+        release: Arc::clone(&release),
+        exited: Arc::new(tokio::sync::Notify::new()),
+    });
+    let cfg = FollowerLoopConfig::new("follower-1", "app", "main")
+        .with_poll_wait_ms(0)
+        .with_subscription("stall_sub")
+        .with_max_iterations(crate::replication::follower_loop::STALL_VISIBILITY_THRESHOLD + 3);
+    let mut cfg = cfg;
+    cfg.lease = Some(lease.clone());
+    cfg.apply_park = Some(hook);
+    let loop_task = tokio::spawn(run_follower_loop(
+        db.clone(),
+        Arc::new(FlakyThenHealthySource {
+            remaining_failures: Mutex::new(
+                crate::replication::follower_loop::STALL_VISIBILITY_THRESHOLD as u32,
+            ),
+            inner: InProcessReplSource::new(leader),
+        }),
+        cfg,
+        CancellationToken::new(),
+    ));
+
+    // Wait until the loop is parked holding the read guard (the healthy
+    // pull #11 returned an event and the guard was taken).
+    arrived.notified().await;
+
+    // Concurrent lifecycle mutation: control lock → apply_gate.write() —
+    // it must wait for the guard, never for the control lock held by the
+    // loop (the loop must not hold it under the guard).
+    let mark = {
+        let db = db.clone();
+        tokio::spawn(async move {
+            db.mark_subscription_terminal_generation(
+                "stall_sub",
+                "resync_required",
+                "round 12 lock-order probe",
+                Some(generation),
+            )
+            .await
+        })
+    };
+    release.notify_one();
+
+    // Both complete WITHOUT a deadlock (an inversion hangs this test).
+    mark.await
+        .expect("mark task")
+        .expect("the generation-fenced mark lands");
+    loop_task
+        .await
+        .expect("follower task")
+        .expect("the loop finishes its budget cleanly");
+
+    let (state, message) = read_subscription_row(&follower).await;
+    assert_eq!(
+        state.as_deref(),
+        Some("resync_required"),
+        "the lifecycle mutation landed"
+    );
+    assert_eq!(
+        message.as_deref(),
+        Some("replication progress restored; durable bookmark at 1"),
+        "the DEFERRED guard-held stall-clear landed after the guard dropped"
     );
 }
