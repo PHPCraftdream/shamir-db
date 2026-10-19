@@ -7,6 +7,7 @@ use crate::engine::db_instance::db_instance::DbInstance;
 use crate::engine::repo::durability_policy::{effective_wal_segment_bytes, resolve};
 use crate::engine::repo::RepoConfig;
 use crate::shamir_db::repo_durability::durability_from_record;
+use crate::shamir_db::shamir_db::ReplicationControlGuard;
 use crate::types::value::QueryValue;
 use crate::{DbError, DbResult};
 use shamir_query_types::durability::DurabilityOverride;
@@ -79,10 +80,30 @@ impl ShamirDb {
         db
     }
 
-    pub async fn remove_db(&self, name: &str) -> bool {
+    pub async fn remove_db(&self, name: &str) -> DbResult<bool> {
+        // Round 2 (A6) lifecycle interlock: ONE lock shared with the
+        // subscription catalogue writers, taken here so every existing
+        // caller keeps the interlock without changes.
+        let _control = self.lock_replication_control().await;
+        self.remove_db_locked(name, &_control).await
+    }
+
+    /// Lock-free variant of [`Self::remove_db`].
+    ///
+    /// The `_control` guard parameter ENFORCES that the caller holds the
+    /// replication control lock (non-reentrant — never acquired here).
+    pub(crate) async fn remove_db_locked(
+        &self,
+        name: &str,
+        _control: &ReplicationControlGuard<'_>,
+    ) -> DbResult<bool> {
         if name == SYSTEM_DB_NAME {
-            return false;
+            return Ok(false);
         }
+
+        // S5c-X PR8b-2: refuse DROP of a destination referenced by a durable
+        // subscription binding BEFORE any live or durable mutation.
+        self.ensure_destinations_unbound(name, None, "DROP").await?;
 
         let removed = self.dbs.remove(name).is_some();
 
@@ -96,7 +117,7 @@ impl ShamirDb {
             }
         }
 
-        removed
+        Ok(removed)
     }
 
     /// Thin System-actor wrapper around [`rename_db_as`].
@@ -138,6 +159,15 @@ impl ShamirDb {
     /// - The destination must NOT exist (in-memory AND persisted).
     pub async fn rename_db_as(&self, from: &str, to: &str, _actor: Actor) -> DbResult<()> {
         // ── Guards ────────────────────────────────────────────────────
+        // Round 2 (A6) lifecycle interlock: taken BEFORE the binding guard
+        // — ONE lock shared with the subscription catalogue writers, so the
+        // check-then-act below cannot race a concurrent catalogue write.
+        let _control = self.lock_replication_control().await;
+        // S5c-X PR8b-2: refuse RENAME of a destination referenced by a
+        // durable subscription binding BEFORE any live or durable mutation
+        // (repo: None — the whole database is the destination set).
+        self.ensure_destinations_unbound(from, None, "RENAME")
+            .await?;
         if from == SYSTEM_DB_NAME {
             return Err(DbError::Validation(format!(
                 "cannot rename the system database '{}'",
@@ -516,7 +546,28 @@ impl ShamirDb {
         Ok(())
     }
 
-    pub async fn remove_repo(&self, db_name: &str, repo_name: &str) -> bool {
+    pub async fn remove_repo(&self, db_name: &str, repo_name: &str) -> DbResult<bool> {
+        // Round 2 (A6) lifecycle interlock: ONE lock shared with the
+        // subscription catalogue writers, taken here so every existing
+        // caller keeps the interlock without changes.
+        let _control = self.lock_replication_control().await;
+        self.remove_repo_locked(db_name, repo_name, &_control).await
+    }
+
+    /// Lock-free variant of [`Self::remove_repo`].
+    ///
+    /// The `_control` guard parameter ENFORCES that the caller holds the
+    /// replication control lock (non-reentrant — never acquired here).
+    pub(crate) async fn remove_repo_locked(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        _control: &ReplicationControlGuard<'_>,
+    ) -> DbResult<bool> {
+        // S5c-X PR8b-2: refuse DROP of a referenced destination BEFORE any
+        // live or durable mutation.
+        self.ensure_destinations_unbound(db_name, Some(repo_name), "DROP")
+            .await?;
         if let Some(db) = self.get_db(db_name) {
             let removed = db.remove_repo(repo_name).await;
             if removed {
@@ -533,9 +584,9 @@ impl ShamirDb {
                     );
                 }
             }
-            removed
+            Ok(removed)
         } else {
-            false
+            Ok(false)
         }
     }
 
@@ -565,6 +616,14 @@ impl ShamirDb {
         to: &str,
         _actor: Actor,
     ) -> DbResult<()> {
+        // Round 2 (A6) lifecycle interlock: taken BEFORE the binding guard
+        // — ONE lock shared with the subscription catalogue writers, so the
+        // check-then-act below cannot race a concurrent catalogue write.
+        let _control = self.lock_replication_control().await;
+        // S5c-X PR8b-2: refuse RENAME of a destination referenced by a
+        // durable subscription binding BEFORE any live or durable mutation.
+        self.ensure_destinations_unbound(db_name, Some(from), "RENAME")
+            .await?;
         let db = self
             .get_db(db_name)
             .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;

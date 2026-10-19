@@ -178,15 +178,24 @@ async fn only_destination_pull_subscription_conflicts() {
             .set_via_implicit_tx(&profiles, &profile)
             .await
             .unwrap();
+        let mut subscription_fields = shamir_types::types::common::new_map();
+        subscription_fields.insert("name".into(), QueryValue::Str("subscription".into()));
+        subscription_fields.insert("profile".into(), QueryValue::Str("owner".into()));
+        subscription_fields.insert("state".into(), QueryValue::Str("paused".into()));
+        let mut subscription_row = QueryValue::Map(subscription_fields);
+        // S5c-X PR8b-2: every subscription row carries a valid durable
+        // binding (here over the raw row's scope — the row must parse).
+        crate::repl_binding::SubscriptionBinding::new(
+            crate::repl_binding::SUBSCRIPTION_BINDING_VERSION,
+            1,
+            vec![(db.to_string(), "main".to_string())],
+        )
+        .unwrap()
+        .write_to_row(&mut subscription_row);
         let subscription = SetOp {
             set: TableRef::new("subscriptions"),
             key: doc! { "name" => "subscription" }.into(),
-            value: doc! {
-                "name" => "subscription",
-                "profile" => "owner",
-                "state" => "paused",
-            }
-            .into(),
+            value: subscription_row,
         };
         home.system_store
             .set_via_implicit_tx(&subscriptions, &subscription)

@@ -2,6 +2,7 @@ use base64::Engine;
 
 use crate::access::Actor;
 use crate::engine::db_instance::db_instance::DbInstance;
+use crate::repl_binding::SubscriptionLease;
 use crate::{DbError, DbResult};
 use dashmap::DashMap;
 use shamir_collections::THasher;
@@ -34,25 +35,43 @@ pub enum FunctionSource<'a> {
     Source(&'a str),
 }
 
+/// The caller-holds-proof newtype for `replication_control_lock` (round 5,
+/// A3). The constructor is `pub(crate)`, so code outside `shamir-db` cannot
+/// fabricate a guard — the compiler enforces the caller-holds-lock contract
+/// as far as crate boundaries go (no compile-fail evidence is available in
+/// this repo's CI: a counterexample simply does not compile). Every API that
+/// must run under the interlock takes `&ReplicationControlGuard` instead of
+/// a raw `tokio::sync::MutexGuard<()>`.
+pub struct ReplicationControlGuard<'a> {
+    guard: tokio::sync::MutexGuard<'a, ()>,
+}
+
+impl<'a> ReplicationControlGuard<'a> {
+    pub(crate) fn new(guard: tokio::sync::MutexGuard<'a, ()>) -> Self {
+        Self { guard }
+    }
+
+    /// Monitoring seam: per-acquisition identity of the held interlock. The
+    /// guard's entire VALUE is its lifetime + Drop — dropping it releases
+    /// `replication_control_lock`.
+    pub fn interlock_id(&self) -> usize {
+        std::ptr::from_ref(&*self.guard).addr()
+    }
+}
+
 /// Top-level manager for multiple database instances.
 ///
-/// Hierarchy:
-/// ```text
-/// ShamirDb
-///   ├── SystemStore (persistent metadata: databases, repos, settings, users, roles)
-///   │
-///   ├── production (DbInstance)
-///   │   └── main (RepoInstance)
-///   │       └── users (TableManager)
-///   │
-///   └── analytics (DbInstance)
-///       └── archive (RepoInstance)
-///           └── logs (TableManager)
-/// ```
+/// Hierarchy: `ShamirDb` → `SystemStore` (persistent metadata) plus named
+/// `DbInstance`s (production, analytics, …), each holding `RepoInstance`s
+/// (e.g. main, archive), each holding `TableManager`s (e.g. users, logs).
 #[derive(Clone)]
 pub struct ShamirDb {
-    /// Serialises replication catalogue admin ops (admin-only, never a record hot path).
-    pub(crate) replication_control_lock: Arc<Mutex<()>>,
+    /// Serialises replication catalogue admin ops (admin-only, never a
+    /// record hot path). PRIVATE: the ONLY way to acquire it is
+    /// [`ShamirDb::lock_replication_control`], which returns the
+    /// [`ReplicationControlGuard`] newtype — raw mutex guards no longer
+    /// appear in any API signature.
+    replication_control_lock: Arc<Mutex<()>>,
     // Startup-only injected transport (written once at server construction, read per
     // Resume): contention is nil, no guard is held across an `.await`.
     pub(crate) replication_resume_probe:
@@ -96,60 +115,92 @@ pub struct ShamirDb {
     /// rare, so holding this across the (bounded) await sequence is fine.
     pub(super) group_id_lock: Arc<Mutex<()>>,
     /// Serialises the whole `handle_create_db` sequence (exists-check →
-    /// authorize → create) so two concurrent `CREATE DATABASE IF NOT
-    /// EXISTS` (or plain `CREATE DATABASE`) calls for the SAME name can't
-    /// both observe "does not exist" and both proceed to create — see
-    /// task #546 (create-DB/create-repo TOCTOU). DB creation is rare, so
-    /// holding this across the (bounded) await sequence mirrors
+    /// authorize → create) so two concurrent `CREATE DATABASE` calls for the
+    /// SAME name can't both observe "does not exist" and both proceed to
+    /// create — see task #546 (create-DB/create-repo TOCTOU). DB creation is
+    /// rare, so holding this across the (bounded) await sequence mirrors
     /// `group_id_lock`'s established pattern.
     pub(super) db_create_lock: Arc<Mutex<()>>,
     /// Per-database lock serialising `handle_create_repo`'s exists-check →
     /// authorize → create sequence, keyed by `db_name`. Mirrors
-    /// `admin_user_locks`'s per-key pattern: entries leak by design (each
-    /// unique db occupies a slot forever), which is fine since database
-    /// creation is rare and the map is bounded by the number of distinct
-    /// databases ever created.
+    /// `admin_user_locks`' per-key pattern: entries leak by design (each
+    /// unique db occupies a slot forever), fine since database creation is
+    /// rare and the map is bounded by the distinct databases ever created.
     pub(super) repo_create_locks: Arc<DashMap<String, Arc<Mutex<()>>, THasher>>,
     /// Live validator registry (compiled WASM validators loaded on open).
     pub(super) validators: Arc<ValidatorRegistry>,
-    /// Base directory for durable repos, derived from the system store
-    /// config. `Some(p)` when the system store is redb-backed (production),
-    /// `None` for in-memory (tests). Wire-created repos default to a
-    /// durable redb engine under this root; in-memory homes fall back to
-    /// in-memory repos — coherent with the home's durability class.
+    /// Base directory for durable repos (`None` for in-memory homes).
     pub(super) data_root: Option<std::path::PathBuf>,
-    /// Injected write-side user-administration port (task #559). `None`
-    /// for embedded/no-directory deployments and tests; `Some` when the
-    /// embedding layer (`shamir-server`) wires its directory-backed impl.
-    /// When `None`, the four re-targeted user-admin handlers return
-    /// `not_supported` (hard cutover off Store B).
+    /// Injected write-side user-administration port (task #559); `None`
+    /// until `shamir-server` wires its directory-backed impl.
     pub(super) user_admin_port: Option<Arc<dyn UserAdminPort>>,
     /// Injected read-only principal resolver (task #559). `None` for
-    /// embedded/no-directory deployments; `Some` lets `access_tree` /
-    /// `ListOp::Users` / owner-delegation scope lookup read real directory
-    /// state. When `None`, names resolve to `None` (degraded but safe).
+    /// embedded deployments; then names resolve to `None` (degraded but
+    /// safe).
     pub(super) principal_resolver: Option<Arc<dyn PrincipalResolver>>,
     /// Experimental-feature gate for the online storage-engine migration
-    /// API (`StartMigration` / `CommitMigration` / `RollbackMigration` /
-    /// `MigrationStatus`). Defaults to `false` — no client can begin a
-    /// migration until an operator explicitly calls
-    /// [`Self::enable_experimental_migration_api`]. `Relaxed` ordering is
-    /// sufficient: this is a coarse, rarely-toggled admin switch set
-    /// once at process startup, not a hot-path atomic. Shared via `Arc`
-    /// so all `ShamirDb` clones observe the toggle (matches the
-    /// established `Arc<...>` shared-state pattern on this struct).
+    /// API (defaults `false`; see `enable_experimental_migration_api`).
     pub(super) experimental_migration_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// Server-default policy, validated at initialization and each repository open.
     pub(super) durability_policy: DurabilityPolicy,
     /// S5c-X PR8b — lock-free cache of `(db, repo)` targets covered by a
-    /// subscription in `state = "resync_required"`. Shared by clone via `Arc`
-    /// (ONE instance per process — a deep copy would make refreshes invisible
-    /// to clones); rebuilt
-    /// wholesale by `refresh_resync_quarantine_cache` (see
-    /// `execute::admin_replication`). Ordinary READS of a covered repo fail
+    /// `resync_required` subscription; rebuilt wholesale by
+    /// `refresh_resync_quarantine_cache`. READS of a covered repo fail
     /// closed; one atomic load on the healthy path.
     pub(crate) resync_quarantine: Arc<ResyncQuarantineCache>,
     pub(crate) changelog_receivers: Arc<super::revocation::registry::ChangelogReceiverRegistry>,
+    /// Round-4 mechanism 2 — per-subscription generation lease registry
+    /// (`name -> Arc<SubscriptionLease>`); shared by clone via the inner `Arc`.
+    pub(crate) leases: Arc<DashMap<String, Arc<SubscriptionLease>, THasher>>,
+    /// S5c-X PR8b-2 (evidence row 6): per-instance test fault seam for
+    /// `flush_seed_catalogue` (the round-2 GLOBAL atomic made concurrent
+    /// tests interfere). Gated `any(test, "test-util")` like all seams here.
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) flush_fault_armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Armed fault parameters: successes before failure, then failures.
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) flush_fault_pass_first: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Fail-first count for `flush_seed_catalogue` (round-5 B3).
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) flush_fault_fail_first: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Round-7 counters track flush attempts, injected failures, and real
+    /// successes while armed; reset by the test guard.
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) flush_fault_attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) flush_fault_failures: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Real flush successes while this per-instance fault seam is armed.
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) flush_fault_successes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Round-6 item 5 seam: armed mark operation fails its row SET before the row changes;
+    /// pending quarantine remains while the durable row is untouched. Test-only.
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) row_set_fault_armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Round-4 T7 seam: when armed, `write_new_subscription` signals the Notify
+    /// immediately before the final-state row write, so the test can drop the
+    /// CREATE future exactly on the final-write boundary. Gated
+    /// `any(test, "test-util")`: shamir-server's tests drive it cross-crate.
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) final_write_pause: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Round-4 T7 seam: one-shot arrival signal for `final_write_pause`.
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) final_write_arrived: std::sync::Arc<tokio::sync::Notify>,
+    /// Round-4 T7 seam: while `final_write_pause` is armed, the CREATE
+    /// future parks on this Notify at the final-write boundary until released.
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) final_write_release: std::sync::Arc<tokio::sync::Notify>,
+    /// Round-5 T6 seam: when armed, `DROP … CASCADE` parks INSIDE the
+    /// interlock after the binding check, so the test holds the
+    /// replication-control lock mid-cascade (a moved lock acquisition turns
+    /// the T6 assertions red).
+    #[cfg(test)]
+    pub(crate) cascade_pause: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Round-5 T6 seam: arrival signal for `cascade_pause`.
+    #[cfg(test)]
+    pub(crate) cascade_arrived: std::sync::Arc<tokio::sync::Notify>,
+    /// Round-5 T6 seam: the parked cascade waits on this Notify.
+    #[cfg(test)]
+    pub(crate) cascade_release: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl ShamirDb {
@@ -243,6 +294,33 @@ impl ShamirDb {
             changelog_receivers: Arc::new(
                 super::revocation::registry::ChangelogReceiverRegistry::new(),
             ),
+            leases: Arc::new(DashMap::with_hasher(THasher::default())),
+            #[cfg(any(test, feature = "test-util"))]
+            flush_fault_armed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(any(test, feature = "test-util"))]
+            flush_fault_pass_first: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(any(test, feature = "test-util"))]
+            flush_fault_fail_first: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(any(test, feature = "test-util"))]
+            flush_fault_attempts: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(any(test, feature = "test-util"))]
+            flush_fault_failures: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(any(test, feature = "test-util"))]
+            flush_fault_successes: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(any(test, feature = "test-util"))]
+            row_set_fault_armed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(any(test, feature = "test-util"))]
+            final_write_pause: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(any(test, feature = "test-util"))]
+            final_write_arrived: std::sync::Arc::new(tokio::sync::Notify::new()),
+            #[cfg(any(test, feature = "test-util"))]
+            final_write_release: std::sync::Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            cascade_pause: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(test)]
+            cascade_arrived: std::sync::Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            cascade_release: std::sync::Arc::new(tokio::sync::Notify::new()),
         };
 
         if seed {
@@ -563,6 +641,20 @@ impl ShamirDb {
     /// authorize → create sequence (task #546 TOCTOU close).
     pub fn db_create_lock(&self) -> &Arc<Mutex<()>> {
         &self.db_create_lock
+    }
+
+    /// ONE lifecycle interlock shared by replication catalogue writers
+    /// (admin subscription/profile handlers, terminal marking, the pending
+    /// creation barrier, seed install, and the supervisor's reconcile read
+    /// phase) AND destination lifecycle ops (`remove_db`/`rename_db_as`/
+    /// `remove_repo`/`rename_repo_as`). Acquire it ONLY through this
+    /// function — never hold it across an unbounded await. The returned
+    /// [`ReplicationControlGuard`] newtype has a `pub(crate)` constructor,
+    /// so code outside `shamir-db` cannot fabricate a guard (the compiler
+    /// enforces the caller-holds-lock contract as far as crate boundaries
+    /// go; no compile-fail evidence is available in this repo's CI).
+    pub async fn lock_replication_control(&self) -> ReplicationControlGuard<'_> {
+        ReplicationControlGuard::new(self.replication_control_lock.lock().await)
     }
 
     /// Per-database lock serialising repo admin mutations, keyed by

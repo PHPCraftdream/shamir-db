@@ -31,7 +31,10 @@
 //! are logged + retried with backoff. Epoch/gap/rejection and reopen-required
 //! errors terminate the loop; a dead destination gate is never retried.
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+
+use shamir_db::repl_binding::SubscriptionLease;
 
 use shamir_db::engine::{
     tx::ReplicatedEvent,
@@ -67,7 +70,11 @@ const MAX_BACKOFF_MS: u64 = 30_000;
 /// Configuration for [`run_follower_loop`]: per-repo identity + tunables,
 /// grouped so the loop entry point stays under the argument-count lint and
 /// callers can build the config once and reuse it across restarts.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is implemented manually because the lease (an `Arc` over the
+/// db-side [`SubscriptionLease`], which carries a `tokio::sync::RwLock`) has
+/// no `Debug` impl of its own in `shamir-db`.
+#[derive(Clone)]
 pub struct FollowerLoopConfig {
     /// Stable identity advertised in `ReplHello`.
     pub node_id: String,
@@ -90,6 +97,44 @@ pub struct FollowerLoopConfig {
     /// callers pass `None`; tests pass a small cap to avoid relying on
     /// cancellation timing.
     pub max_iterations: Option<usize>,
+    /// S5c-X round 3: the subscription this loop serves. Empty means
+    /// "unsupervised loop" (direct/test callers) with no lease — the
+    /// lease gates below are skipped entirely.
+    pub subscription: String,
+    /// S5c-X round 4: the per-subscription generation lease — the loop
+    /// applies only while the lease is valid. `None` for unsupervised
+    /// loops (empty [`Self::subscription`]).
+    pub lease: Option<Arc<SubscriptionLease>>,
+    /// Test-only apply park for selected target loops.
+    #[cfg(test)]
+    pub(crate) apply_park: Option<Arc<ApplyParkHook>>,
+    /// Per-loop exit notification for test observability.
+    #[cfg(test)]
+    pub(crate) exit_hook: Option<Arc<ApplyParkHook>>,
+}
+
+impl std::fmt::Debug for FollowerLoopConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FollowerLoopConfig")
+            .field("node_id", &self.node_id)
+            .field("db", &self.db)
+            .field("repo", &self.repo)
+            .field("poll_wait_ms", &self.poll_wait_ms)
+            .field(
+                "validate_replicated_payload",
+                &self.validate_replicated_payload,
+            )
+            .field("max_iterations", &self.max_iterations)
+            .field("subscription", &self.subscription)
+            .field(
+                "lease",
+                &self
+                    .lease
+                    .as_ref()
+                    .map(|l| format!("generation={}", l.generation)),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl FollowerLoopConfig {
@@ -105,6 +150,12 @@ impl FollowerLoopConfig {
             #[cfg(test)]
             identity_fence: true,
             max_iterations: None,
+            subscription: String::new(),
+            lease: None,
+            #[cfg(test)]
+            apply_park: None,
+            #[cfg(test)]
+            exit_hook: None,
         }
     }
 
@@ -142,6 +193,38 @@ impl FollowerLoopConfig {
 pub(crate) struct IdentityStoreOverride {
     pub(crate) info: Arc<dyn shamir_db::storage::types::Store>,
     pub(crate) startup_reflush: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct ApplyParkHook {
+    pub(crate) repo: Option<String>,
+    pub(crate) after_apply: bool,
+    pub(crate) arrived: Arc<tokio::sync::Notify>,
+    pub(crate) release: Arc<tokio::sync::Notify>,
+    pub(crate) exited: Arc<tokio::sync::Notify>,
+}
+
+/// Test-only park at the configured phase; cancellation releases a parked loop.
+#[cfg(test)]
+async fn apply_park_wait(
+    repo: &str,
+    hook: Option<&ApplyParkHook>,
+    cancel: &CancellationToken,
+) -> bool {
+    if let Some(hook) = hook {
+        if hook.repo.as_deref() == Some(repo) {
+            hook.arrived.notify_one();
+            tokio::select! {
+                _ = hook.release.notified() => true,
+                _ = cancel.cancelled() => false,
+            }
+        } else {
+            true
+        }
+    } else {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -218,6 +301,12 @@ async fn run_follower_loop_internal(
         #[cfg(test)]
         identity_fence,
         max_iterations,
+        subscription,
+        lease,
+        #[cfg(test)]
+        apply_park,
+        #[cfg(test)]
+            exit_hook: _,
     } = cfg;
     #[cfg(not(test))]
     let identity_fence = true;
@@ -243,6 +332,22 @@ async fn run_follower_loop_internal(
             identity_store.as_ref().map(|store| &store.info),
         )
         .await?;
+    }
+    // S5c-X round 4: lease-based start gate. The loop holds the lease the
+    // supervisor took under the control lock; it never starts when the lease
+    // was already superseded (DROP / PAUSE / rebind ran their quiesce before
+    // the hand-off). Unsupervised loops (no lease) skip the check.
+    if let Some(l) = &lease {
+        if !l.valid.load(Ordering::Acquire) {
+            info!(
+                node_id = %node_id,
+                db = %db_name,
+                repo = %repo,
+                subscription = %subscription,
+                "follower_loop: binding lease already superseded; exiting"
+            );
+            return Ok(());
+        }
     }
     let mut max_seen_epoch = match source.hello(&node_id).await {
         Ok(resp) => {
@@ -325,6 +430,21 @@ async fn run_follower_loop_internal(
             }
         }
         iter += 1;
+
+        // S5c-X round 4: re-check the lease at the TOP of every iteration,
+        // BEFORE the bookmark read / pull / apply. A superseded lease means
+        // the binding was mutated (DROP / PAUSE / rebind); the loop exits
+        // cleanly and reconcile owns any restart.
+        if let Some(l) = &lease {
+            if !l.valid.load(Ordering::Acquire) {
+                info!(
+                    node_id = %node_id,
+                    subscription = %subscription,
+                    "follower_loop: binding lease superseded; exiting"
+                );
+                return Ok(());
+            }
+        }
 
         // 2. read the durable bookmark on the follower (R1-b).
         let repo_instance = match db.get_db(&db_name).and_then(|d| d.get_repo(&repo)) {
@@ -520,6 +640,31 @@ async fn run_follower_loop_internal(
             continue;
         }
 
+        // Round-4 lease: hold the READ guard across the engine apply. A
+        // concurrent lifecycle mutation (DROP/PAUSE/terminal/rebind) takes
+        // the WRITE gate under the control lock and waits for this apply to
+        // finish. The loop NEVER takes the control lock while holding this
+        // guard.
+        let _apply_guard = match &lease {
+            Some(l) => {
+                let g = l.apply_gate.read().await;
+                if !l.valid.load(Ordering::Acquire) {
+                    info!(node_id = %node_id, subscription = %subscription,
+                        "follower_loop: binding superseded before apply; exiting");
+                    return Ok(());
+                }
+                Some(g)
+            }
+            None => None,
+        };
+
+        #[cfg(test)]
+        if let Some(hook) = apply_park.as_deref() {
+            if !hook.after_apply && !apply_park_wait(&repo, Some(hook), &cancel).await {
+                return Ok(());
+            }
+        }
+
         // PR6b-2 activation: fresh repositories take the receipt path;
         // repositories with a stored legacy v1/v2 bookmark keep the legacy
         // path (activation.rs decides from the DURABLE bookmark record).
@@ -552,6 +697,13 @@ async fn run_follower_loop_internal(
                 }
                 warn!(error = %e, "follower_loop: batch apply failed, backing off");
                 sleep_backoff(&cancel, &mut backoff_ms).await;
+            }
+        }
+        drop(_apply_guard);
+        #[cfg(test)]
+        if let Some(hook) = apply_park.as_deref() {
+            if hook.after_apply && !apply_park_wait(&repo, Some(hook), &cancel).await {
+                return Ok(());
             }
         }
     }

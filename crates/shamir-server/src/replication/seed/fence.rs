@@ -23,6 +23,10 @@ impl ResumeProbe for ServerResumeProbe {
             publication: String::new(),
             profile: String::new(),
             state: "paused".into(),
+            // Probe-only: the factory only reads `upstream` to build the
+            // transport; no loop is started and no binding is consulted.
+            binding_generation: 1,
+            binding_destinations: Vec::new(),
         };
         (self.0)(&sub)
             .hello("seed-resume-validation")

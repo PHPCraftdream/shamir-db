@@ -138,26 +138,67 @@ async fn delivery_gate_is_panic_safe_when_closed() {
     assert!(gate.try_with_delivery(|| ()).is_none());
 }
 
+/// Round 6 item 5 ORACLE (updated round 7 item 5): a pending key leaves the
+/// cache ONLY through an explicit `confirm_pending` / `rollback_pending` by
+/// its OWN `name:generation` owner — `install` (a refresh) is NOT a
+/// persistence acknowledgement and must keep unmatched pending keys
+/// (entries included); and an owner's rollback never touches ANOTHER
+/// subscription's claim on the same key, including another claim from the
+/// same logical owner with a distinct token.
+/// COUNTERFACTUAL: reverting `install` to dropping unmatched pending keys
+/// turns the post-refresh `pending` assertions red; reverting owner-scoping
+/// or exact-token resolution makes the concurrent-claim assertions red.
 #[tokio::test]
 async fn quarantine_cache_replace_clears_persisted_removal_but_keeps_pending_failure() {
     let cache = crate::shamir_db::execute::ResyncQuarantineCache::new();
     let active = ("db".to_string(), "active".to_string());
     let pending = ("db".to_string(), "pending".to_string());
-    cache.publish([(pending.clone(), "prepublished".to_string())]);
+    let owner = cache.publish([(pending.clone(), "prepublished".to_string())], "a:1");
+    // A refresh that derives other rows must keep the pending key protected.
     cache.install([(active.clone(), "persisted".to_string())]);
     assert!(cache.reason_for("db", "active").is_some());
     assert!(cache.reason_for("db", "pending").is_some());
     cache.install([(pending.clone(), "persisted pending".to_string())]);
     assert!(cache.reason_for("db", "pending").is_some());
-    cache.install(Vec::<((String, String), String)>::new());
-    assert!(cache.reason_for("db", "pending").is_none());
-    cache.publish([(pending.clone(), "failed prepublish".to_string())]);
+    // Refresh is NOT an acknowledgement: even an install deriving NOTHING
+    // keeps the pending key (and its reason) until explicit confirmation.
     cache.install(Vec::<((String, String), String)>::new());
     assert!(cache.reason_for("db", "pending").is_some());
+    // A concurrent B mark claims the same key before A resolves.
+    let owner_b = cache.publish([(pending.clone(), "B prepublished".to_string())], "b:1");
+    // A stale token for A must not affect either pending claim.
+    cache.rollback_pending("a:1:999", [pending.clone()]);
+    assert!(cache.reason_for("db", "pending").is_some());
+    // Resolving A cannot clear the key while B's claim remains.
+    cache.confirm_pending(&owner, [pending.clone()]);
+    assert!(cache.reason_for("db", "pending").is_some());
+    cache.confirm_pending(&owner_b, [pending.clone()]);
+    assert!(cache.reason_for("db", "pending").is_none());
+
+    // The old A generation is resolved by the same-name Resume selector;
+    // a prefix-like but distinct subscription name remains untouched.
+    let owner_a = cache.publish([(pending.clone(), "A".to_string())], "alpha:1");
+    let distinct_name = cache.publish([(pending.clone(), "distinct".to_string())], "alphabeta:1");
+    let old_generation = cache.publish([(pending.clone(), "old A".to_string())], "alpha:2");
+    let selected = cache.owner_claims_for_subscription("alpha", std::slice::from_ref(&pending));
+    assert_eq!(selected, vec![owner_a.clone(), old_generation.clone()]);
+    cache.confirm_pending(&selected[0], [pending.clone()]);
+    assert!(cache.reason_for("db", "pending").is_some());
+    cache.confirm_pending(&selected[1], [pending.clone()]);
+    assert!(cache.reason_for("db", "pending").is_some());
+    cache.confirm_pending(&distinct_name, [pending.clone()]);
+    assert!(cache.reason_for("db", "pending").is_none());
+
+    // A later token for A is independent of the already-resolved old token.
+    let owner_a_new = cache.publish([(pending.clone(), "A new token".to_string())], "a:1");
+    cache.rollback_pending(&owner, [pending.clone()]);
+    assert!(cache.reason_for("db", "pending").is_some());
+    cache.rollback_pending(&owner_a_new, [pending.clone()]);
+    assert!(cache.reason_for("db", "pending").is_none());
 }
 
 #[tokio::test]
-async fn unresolvable_profile_marking_installs_global_sentinel_read_quarantine() {
+async fn marking_after_profile_removal_quarantines_exactly_bound_destination() {
     let db = ShamirDb::init(SystemStoreConfig::InMemory).await.unwrap();
     let instance = db.create_db("testdb").await;
     instance
@@ -186,8 +227,9 @@ async fn unresolvable_profile_marking_installs_global_sentinel_read_quarantine()
     db.execute("testdb", &batch.to_request_via_msgpack())
         .await
         .unwrap();
-    // Remove the profile: the subscription row records no db column, so
-    // profile resolution can no longer produce a per-row (db, repo) key.
+    // Remove the profile: S5c-X PR8b-2 — coverage comes from the row's
+    // durable binding, so profile resolution is never consulted and marking
+    // must still succeed.
     let mut drop_batch = shamir_query_builder::batch::Batch::new();
     drop_batch.id(2);
     drop_batch.op(
@@ -198,21 +240,19 @@ async fn unresolvable_profile_marking_installs_global_sentinel_read_quarantine()
         .await
         .unwrap();
 
-    // Marking must NOT error — it falls back to the global ("*", "*")
-    // sentinel instead (widest safe scope with no recorded db).
     db.mark_subscription_resync_required("sub", 7, 3)
         .await
         .unwrap();
 
-    // Reads on testdb/main are refused fail-closed, resolved via the
-    // sentinel in `reason_for` (after the (db, repo) and (db, "*") checks).
+    // The bound destination is quarantined with the row's status reason.
     let reason = db
         .read_quarantine_reason("testdb", "main")
-        .expect("reads must be quarantined via the global sentinel");
+        .expect("bound destination must be quarantined");
     assert!(
-        reason.contains("unresolvable replication profile 'prof'"),
-        "reason must name the unresolvable profile, got: {reason}"
+        reason.contains("journal gap at 7"),
+        "reason must come from the marking message, got: {reason}"
     );
-    // And the quarantine covers every other (db, repo) too — global scope.
-    assert!(db.read_quarantine_reason("otherdb", "other").is_some());
+    // And nothing outside the bound destination set is quarantined — no
+    // global sentinel exists anymore.
+    assert!(db.read_quarantine_reason("otherdb", "other").is_none());
 }

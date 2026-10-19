@@ -7,7 +7,7 @@ use super::ShamirDb;
 // so the raw `Interner` type never crosses the crate boundary.
 use crate::shamir_db::execute::skip_read_quarantine_for_test;
 use crate::shamir_db::ChangelogReceiver;
-use shamir_storage::error::DbError;
+use shamir_storage::error::{DbError, DbResult};
 use shamir_types::types::value::{InnerValue, QueryValue};
 
 use crate::engine::table::InternerReadView;
@@ -134,7 +134,7 @@ impl ShamirDb {
         let Some(repo_instance) = self.get_db(db).and_then(|d| d.get_repo(repo)) else {
             return Ok(None);
         };
-        let _control = self.replication_control_lock.lock().await;
+        let _control = self.lock_replication_control().await;
         let receiver = repo_instance.subscribe_changelog().await.ok();
         let wrapped = receiver.map(|receiver| {
             super::revocation::receiver::ChangelogReceiver::new(
@@ -330,5 +330,18 @@ impl ShamirDb {
             .read_changelog_from(from_version, limit)
             .await
             .map(Some)
+    }
+
+    /// Test-only: stop and drain the SYSTEM repo's changefeed journal writer so a
+    /// Fjall-backed system store can be dropped and reopened deterministically
+    /// (the writer owns the `__changelog__` partition store until its channel
+    /// closes; the explicit shutdown removes that scheduler-tick dependency).
+    /// Mirrors `RepoInstance::stop_journal_writer_for_test`.
+    #[doc(hidden)]
+    pub async fn stop_system_journal_writer_for_test(&self) -> DbResult<()> {
+        self.system_store
+            .system_repo()?
+            .stop_journal_writer_for_test()
+            .await
     }
 }

@@ -12,7 +12,7 @@ use super::admin_dispatch::ShamirAdminExecutor;
 use super::ambient_interner::attach_interner_delta;
 use super::db_tx::tx_read_quarantine_refusal_for_request;
 use super::function_invoker::ShamirFunctionInvoker;
-use super::quarantine_cache::ResyncQuarantineCache;
+use super::quarantine_cache::QuarantineSnapshot;
 use super::table_resolver::DbTableResolver;
 
 impl ShamirDb {
@@ -138,15 +138,19 @@ impl ShamirDb {
 pub(crate) fn quarantined_read_hit(
     db_name: &str,
     request: &BatchRequest,
-    cache: &ResyncQuarantineCache,
+    snapshot: &QuarantineSnapshot,
 ) -> Option<(String, String, String)> {
     for visit in BatchTreeVisitor::new(&request.queries) {
         let BatchOp::Read(query) = &visit.entry.op else {
             continue;
         };
         let repo = &query.from.repo;
-        if let Some(reason) = cache.reason_for(db_name, repo) {
-            return Some((visit.alias.to_string(), repo.clone(), reason));
+        if let Some(reason) = snapshot
+            .entries
+            .get(db_name)
+            .and_then(|repos| repos.get(repo))
+        {
+            return Some((visit.alias.to_string(), repo.clone(), reason.to_string()));
         }
     }
     None
