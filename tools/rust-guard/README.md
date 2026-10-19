@@ -301,6 +301,49 @@ directory unless an explicit `--exceptions` path is given.
   are referenced from the campaign entries
 in `.rust-guard/stages.toml` (written by the CI wiring chunk).
 
+## `rust-guard discovery` — compiled test-inventory diff (CI-03b)
+
+`rust-guard discovery --base-list base.json --head-list head.json
+[--delta <delta.toml>] [--kind lib|loom|doc]` compares two
+`cargo nextest list --message-format json` outputs (JSON-lines) that
+must be taken under identical toolchain, OS, features, profile and
+target selection. A test's IDENTITY is the pair (binary id, test
+name); the parser is tolerant about where the binary id sits in the
+JSON (`binary` string, `binary-id`, or nested `binary` object) but an
+unparseable line fails the whole list.
+
+Findings (fail closed, `path:line: CODE: message`):
+
+- `BLOCKED_COMPARISON` — a base or head list file is missing,
+  unreadable or unparseable; never an empty baseline.
+- `EMPTY_LIST` — a list with zero tests is a failure, not a pass.
+- `TEST_DUPLICATE` — the same (binary id, test name) identity appears
+  twice in one list.
+- `TEST_LOST` — a base test with no head counterpart and no
+  `[[moved]]`/`[[renamed]]` declaration. NEVER excusable by any other
+  delta entry kind.
+- `TARGET_LOST` — a binary/target id whose remaining base tests are
+  lost and which carries no head tests (a declared move of its last
+  test to another binary does not double-report).
+- `UNUSED_ALLOWANCE` — a delta entry that matched no pairing.
+
+Delta mapping: the conservation delta parser is reused unchanged; for
+`[[moved]]`/`[[renamed]]` entries `path` + `item` are read as the BASE
+(binary id, test name) and `to_path` + `to_item` as the HEAD identity
+(the `to_path::to_item` head-side semantics, absent fields defaulting
+to `path`/`item`). The delta's `base` SHA is required by the loader
+but cannot be verified here — this subcommand sees two list files, no
+revision; the CI job pins the base list to the merge base instead.
+
+Known limitation — newly-ignored tests are NOT detected:
+`cargo nextest list --message-format json` does not carry `#[ignore]`
+status, so ignore-state drift is invisible to this gate by
+construction. It is deliberately not faked; detecting ignore-status
+changes stays with `conservation`'s `TEST_IGNORED`/`TEST_UNIGNORED`.
+
+`--kind` (default `lib`) is a label echoed into the finding paths and
+messages so doctest and loom lists can be diffed in separate runs.
+
 ## When the gates run
 
 On pull requests, `modules` scans the whole repository. `structure` and

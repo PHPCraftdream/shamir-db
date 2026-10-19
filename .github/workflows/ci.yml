@@ -128,6 +128,24 @@ jobs:
               *) echo "shamir-engine not affected; skipping doctests" ;;
             esac
           fi
+      # CI-03b: the full-tier rustdoc gate, mirrored cheaply for drafts.
+      # Same two cargo doc invocations as the `rustdoc` job (default and
+      # --no-default-features), gated on shamir-engine being affected —
+      # same case-guard style as the doctests step above.
+      - name: rustdoc gate (shamir-engine, draft tier)
+        if: steps.affected.outputs.args != ''
+        env:
+          AFFECTED: ${{ steps.affected.outputs.args }}
+          RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
+        shell: bash
+        run: |
+          case "$AFFECTED" in
+            *shamir-engine*|*--workspace*)
+              cargo doc -p shamir-engine --no-deps --document-private-items --locked
+              cargo doc -p shamir-engine --no-deps --document-private-items --locked --no-default-features
+              ;;
+            *) echo "shamir-engine not affected; skipping rustdoc gate" ;;
+          esac
 
   fmt:
     name: cargo fmt
@@ -167,6 +185,106 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  # CI-03b: rustdoc gate. Docs are code: a broken intra-doc link or an
+  # accidentally-private documented item fails CI like any other compile
+  # error (`-D` promotes both lints to errors via RUSTDOCFLAGS). Only
+  # shamir-engine is documented in this stage (its `[lib]` doctest gate is
+  # the compile-fail boundary); shamir-db / shamir-server rustdoc is a
+  # known limitation for a later round. Runs once with default features
+  # and once with none, so doc comments under feature-gated items resolve
+  # in both configurations. ubuntu-only: rustdoc output is OS-independent.
+  rustdoc:
+    name: cargo doc (shamir-engine)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - env:
+          RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
+        run: cargo doc -p shamir-engine --no-deps --document-private-items --locked
+      - env:
+          RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
+        run: cargo doc -p shamir-engine --no-deps --document-private-items --locked --no-default-features
+
+  # CI-03b: engine feature matrix. Each cell compiles shamir-engine in
+  # ISOLATION (`-p`, never a workspace invocation that could unify feature
+  # defaults back in) with check + clippy, then asserts — via the pure-
+  # manifest script scripts/ci/gates/features_matrix_check.py (unit-tested in
+  # scripts/ci/tests/test_features_matrix_check.py) — that the ENABLED
+  # feature set matches the cell exactly, so "no defaults" is proven, not
+  # just labelled. Reduced-feature cells catch missing `cfg` guards that
+  # the workspace-wide jobs unify away.
+  engine-features:
+    name: engine features (${{ matrix.cell.id }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        cell:
+          - { id: no-default, flags: "--no-default-features" }
+          - { id: fjall, flags: "--no-default-features --features fjall" }
+          - { id: test-util, flags: "--no-default-features --features test-util" }
+          - { id: fjall-test-util, flags: "--no-default-features --features fjall,test-util" }
+          - { id: default-plus, flags: "--features test-util,fts_indexed_long" }
+          - { id: loom, flags: "--features loom" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - name: feature-resolution assertion
+        run: python3 -I scripts/ci/gates/features_matrix_check.py --expected ${{ matrix.cell.id }} --flags="${{ matrix.cell.flags }}"
+      - run: cargo check -p shamir-engine --all-targets --locked ${{ matrix.cell.flags }}
+      - run: cargo clippy -p shamir-engine --all-targets --locked ${{ matrix.cell.flags }} -- -D warnings
+
+  # CI-03b: fast-tier shadow of `engine-features` — cells 1 and 5 on
+  # ubuntu, only while the PR is a draft AND shamir-engine is affected
+  # (same affected-crates detection as the `fast` job). Cheap early
+  # signal; the full matrix above is the merge gate.
+  engine-features-fast:
+    name: engine features fast (draft PRs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - name: Determine affected crates
+        id: affected
+        run: |
+          set -euo pipefail
+          args="$(python3 scripts/ci/affected_crates.py --base origin/master)"
+          echo "args=$args" >> "$GITHUB_OUTPUT"
+      - name: engine feature cells 1 and 5
+        if: steps.affected.outputs.args != ''
+        env:
+          AFFECTED: ${{ steps.affected.outputs.args }}
+        shell: bash
+        run: |
+          case "$AFFECTED" in
+            *shamir-engine*|*--workspace*)
+              python3 -I scripts/ci/gates/features_matrix_check.py --expected no-default --flags=--no-default-features
+              python3 -I scripts/ci/gates/features_matrix_check.py --expected default-plus --flags='--features test-util,fts_indexed_long'
+              cargo check -p shamir-engine --all-targets --locked --no-default-features
+              cargo clippy -p shamir-engine --all-targets --locked --no-default-features -- -D warnings
+              cargo check -p shamir-engine --all-targets --locked --features test-util,fts_indexed_long
+              cargo clippy -p shamir-engine --all-targets --locked --features test-util,fts_indexed_long -- -D warnings
+              ;;
+            *) echo "shamir-engine not affected; skipping engine feature cells" ;;
+          esac
 
   # Fast primary signal: the ~2700 library unit tests, on every OS. Matches
   # the project's stated pre-commit gate in CLAUDE.md ("Code quality
@@ -407,7 +525,23 @@ jobs:
       # crate only (not globally), so dependencies aren't dragged into
       # incompatible loom code paths. The `-E 'test(loom_model)'` filter
       # runs just the model-checker test (excluded from test.sh by design).
-      - run: cargo nextest run -p shamir-engine --features loom --lib -E 'test(loom_model)' --nocapture
+      # Discovery gate (CI-03b): fail BEFORE running when the filterset
+      # matches zero tests — a renamed/moved/gated-away model must not
+      # silently turn this job into a vacuous pass. nextest's own
+      # `--no-tests=fail` (supported since 0.9.x, and by the pinned
+      # 0.9.137) backs the same rule at run time.
+      - name: discover loom model tests (must be non-empty)
+        run: |
+          set -euo pipefail
+          cargo nextest list -p shamir-engine --features loom --lib -E 'test(loom_model)' --message-format json > loom_list.json
+          count="$(python3 -c 'import json,sys; print(sum(1 for line in open(sys.argv[1], encoding="utf-8") if line.strip() and json.loads(line).get("type") == "test"))' loom_list.json)"
+          echo "loom model tests discovered: $count"
+          rm -f loom_list.json
+          if [ "$count" -eq 0 ]; then
+            echo "::error::loom discovery found ZERO tests for -E 'test(loom_model)'; the model-checker gate is vacuous" >&2
+            exit 1
+          fi
+      - run: cargo nextest run -p shamir-engine --features loom --lib -E 'test(loom_model)' --nocapture --no-tests=fail
 
   # rust-guard source-integrity gates (CI-03a). Runs the workspace-excluded
   # `tools/rust-guard` binary against the whole repo: `modules` (every
@@ -496,6 +630,118 @@ jobs:
       - run: cargo fmt --manifest-path tools/rust-guard/Cargo.toml -- --check
       - run: cargo clippy --manifest-path tools/rust-guard/Cargo.toml --all-targets --locked -- -D warnings
 
+  # CI-03b: compiled test-discovery diff (`rust-guard discovery`).
+  # Compares `cargo nextest list --message-format json` inventories of
+  # shamir-engine at the merge base (built in a throwaway git worktree
+  # under a DIFFERENT CARGO_TARGET_DIR, then cached by base SHA + OS +
+  # config — never across configurations) against the current tree, for
+  # the default configuration and the test-util,fts_indexed_long one.
+  # Runs only when .rust-guard/stages.toml has an active campaign whose
+  # packages the diff touches (scripts/ci/rust_guard_select.py); with
+  # `campaigns = []` the selection step prints a notice and the job
+  # passes (no-op). Full tier on ubuntu + windows + macos; the merge-gate
+  # wiring arrives with the aggregate-gate chunk.
+  test-discovery:
+    name: test discovery (${{ matrix.os }}, ${{ matrix.config.id }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        config:
+          - { id: default, flags: "" }
+          - { id: test-util-fts, flags: "--features test-util,fts_indexed_long" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # full history: merge-base computation and the base worktree
+          # both need real git objects.
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
+      # Pinned to the cargo-nextest version documented as the perimeter-guard
+      # baseline in .config/nextest.toml (0.9.137) — same pin as every
+      # other nextest job in this file. Both lists MUST come from the
+      # same nextest version for the comparison to be meaningful.
+      - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af  # v2.87.11
+        with:
+          tool: nextest@0.9.137
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      # On master pushes there is no merge base (HEAD *is* master); the
+      # discovery diff is a PR-shaped gate and is skipped there.
+      - name: compute merge base
+        if: github.event_name == 'pull_request'
+        run: echo "MERGE_BASE=$(git merge-base origin/master HEAD)" >> "$GITHUB_ENV"
+      # Same selection as the source-integrity job: rows are
+      # name<TAB>delta<TAB>packages<TAB>dirs for touched campaign
+      # packages; an empty file means no-op (notice + pass).
+      - name: campaign selection
+        id: select
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo metadata --no-deps --format-version 1 > metadata.json
+          git diff --name-only "$MERGE_BASE"...HEAD \
+            | python3 -I scripts/ci/rust_guard_select.py \
+                --stages .rust-guard/stages.toml \
+                --metadata metadata.json --root . > campaigns.tsv
+          rm -f metadata.json
+          if [ -s campaigns.tsv ]; then
+            echo "campaigns=yes" >> "$GITHUB_OUTPUT"
+            while IFS=$'\t' read -r name delta pkgs dirs; do
+              echo "::notice::test-discovery campaign '$name' (packages: $pkgs)"
+            done < campaigns.tsv
+          else
+            echo "::notice::no active campaign package touched by this diff; test discovery skipped"
+          fi
+          rm -f campaigns.tsv
+      - name: build rust-guard
+        if: steps.select.outputs.campaigns != ''
+        run: cargo build --manifest-path tools/rust-guard/Cargo.toml --locked
+      # Base list cache, keyed by base SHA + OS + config — NEVER shared
+      # across configurations. OPEN ITEM: actions/cache is not used
+      # anywhere else in this workflow, so there is no SHA to copy;
+      # `@v4` is left here with a TODO until the owner pins it.
+      - uses: actions/cache@v4  # TODO(pin-by-SHA)
+        id: base_list_cache
+        if: steps.select.outputs.campaigns != ''
+        with:
+          path: base-list.json
+          key: test-discovery-base-${{ matrix.os }}-${{ env.MERGE_BASE }}-${{ matrix.config.id }}
+      # The base list is produced in a worktree of the merge base with a
+      # separate CARGO_TARGET_DIR, so base and head never share build
+      # artifacts and the toolchain/features stay identical (same
+      # nextest pin, same ${{ matrix.config.flags }}). bash + $RUNNER_TEMP
+      # on every runner (Git Bash on windows-latest).
+      - name: base list (worktree at merge base)
+        if: steps.select.outputs.campaigns != '' && steps.base_list_cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git worktree add .scratch-ci-base "$MERGE_BASE"
+          (
+            cd .scratch-ci-base
+            CARGO_TARGET_DIR="$RUNNER_TEMP/base-target" \
+              cargo nextest list -p shamir-engine ${{ matrix.config.flags }} --message-format json
+          ) > "$GITHUB_WORKSPACE/base-list.json"
+          git worktree remove --force .scratch-ci-base
+      - name: head list
+        if: steps.select.outputs.campaigns != ''
+        shell: bash
+        run: cargo nextest list -p shamir-engine ${{ matrix.config.flags }} --message-format json > head-list.json
+      # Findings (lost test, duplicate, lost target, empty list, blocked
+      # comparison) fail the step — the gate is fail-closed.
+      - name: discovery diff (fails on findings)
+        if: steps.select.outputs.campaigns != ''
+        shell: bash
+        run: |
+          tools/rust-guard/target/debug/rust-guard discovery \
+            --base-list base-list.json \
+            --head-list head-list.json \
+            --kind lib
+
   # The tool's own test suite (`tools/rust-guard/tests/`). Runs in CI ONLY —
   # CLAUDE.md bans local builds/tests. The crate is workspace-excluded, so
   # the `test` job above never runs these. Same perimeter-guard constraint
@@ -524,3 +770,28 @@ jobs:
         run: cargo nextest run --locked --no-fail-fast
       - run: cargo fmt --manifest-path tools/rust-guard/Cargo.toml -- --check
       - run: cargo clippy --manifest-path tools/rust-guard/Cargo.toml --all-targets --locked -- -D warnings
+
+# CI-03b deliverable 4: the aggregate merge gate — the ONE required check.
+# `if: always()` + full `needs:` so it evaluates even when jobs were
+# skipped, and the stdlib script scripts/ci/gates/merge_gate_check.py
+# (unit tests: scripts/ci/tests/test_merge_gate_check.py) decides from
+# toJSON(needs): failure/cancelled anywhere fails; skipped fails unless
+# by design for the tier (draft PR: full tier skipped, fast must pass;
+# ready/master/dispatch: fast skipped by design). A DRAFT PR always
+# fails this gate with "draft PR: full matrix not run, not merge-ready"
+# — draft fast-tier success never authorises a merge. needs comes in via
+# the NEEDS_JSON env var (never string-interpolated into the shell line)
+# to avoid quoting/injection breakage. Read-only, stdlib-only python:
+# no permissions beyond the workflow default, no toolchain.
+  merge-gate:
+    name: merge gate (required)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs: [fast, fmt, clippy, test, integration, ts-unit, cooldown, loom-model, source-integrity, rust-guard-selftest, rustdoc, engine-features, test-discovery]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS_JSON" | python3 -I scripts/ci/gates/merge_gate_check.py --event ${{ github.event_name }} --draft ${{ github.event.pull_request.draft == true }}

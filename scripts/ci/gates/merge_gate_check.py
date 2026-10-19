@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Aggregate merge gate: decide from the workflow's needs JSON if a run is merge-ready.
+
+Why
+    CI-03b deliverable 4. The ``merge-gate`` job (``if: always()``,
+    ``needs:`` every gating job) pipes ``toJSON(needs)`` — the object
+    ``{<jobname>: {result, outcome}, ...}`` — into this script together
+    with the event name and the draft flag.  The script is the ONLY thing
+    that decides the gate, so its semantics are the branch-protection
+    semantics and are unit-tested for every transition.
+
+Semantics (implemented exactly)
+    * ``result`` ``failure`` or ``cancelled``  -> FAIL, naming the job.
+    * ``skipped`` -> FAIL ("unexpectedly skipped") UNLESS skipped by design
+      for the tier:
+      - DRAFT PR (``--event pull_request --draft true``): every
+        ``REQUIRED_JOBS`` entry except ``fast`` is skipped by design.
+        Even in the only-passing shape (``fast`` == success, everything
+        else skipped) the gate still FAILS with
+        "draft PR: full matrix not run, not merge-ready" — draft success
+        never authorises a merge.
+      - non-draft (ready PR / master push / workflow_dispatch): ``fast``
+        is skipped by design; every other required job must be ``success``.
+    * unknown job name in needs (not in ``REQUIRED_JOBS``) -> FAIL
+      ("unknown job", naming it).
+    * a required job missing from needs -> FAIL.
+
+Exit codes: 0 merge-ready, 1 gate failure (reasons on stderr).
+Python 3 standard library only; ``python3 -I`` compatible.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+
+REQUIRED_JOBS = [
+    "fast",
+    "fmt",
+    "clippy",
+    "test",
+    "integration",
+    "ts-unit",
+    "cooldown",
+    "loom-model",
+    "source-integrity",
+    "rust-guard-selftest",
+    "rustdoc",
+    "engine-features",
+    "test-discovery",
+]
+
+DRAFT_MESSAGE = "draft PR: full matrix not run, not merge-ready"
+
+
+def evaluate(
+    needs: dict[str, dict],
+    *,
+    event: str,
+    draft: bool,
+) -> list[str]:
+    """Pure gate logic: return the list of failure reasons (empty = pass)."""
+    reasons: list[str] = []
+    is_draft_pr = event == "pull_request" and draft
+
+    for job, info in needs.items():
+        if job not in REQUIRED_JOBS:
+            reasons.append("unknown job in needs: %s" % job)
+            continue
+        result = info.get("result") if isinstance(info, dict) else None
+        if result in ("failure", "cancelled"):
+            reasons.append("job %s: %s" % (job, result))
+        elif result == "skipped":
+            by_design = (job == "fast") != is_draft_pr
+            if not by_design:
+                reasons.append("job %s unexpectedly skipped" % job)
+
+    for job in REQUIRED_JOBS:
+        if job not in needs:
+            reasons.append("missing required job: %s" % job)
+
+    if is_draft_pr:
+        reasons.append(DRAFT_MESSAGE)
+    return reasons
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    needs_text: str | None = None,
+) -> int:
+    """Entry point; ``needs_text`` injects stdin in tests."""
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--event", required=True, help="github.event_name")
+    parser.add_argument(
+        "--draft",
+        required=True,
+        choices=["true", "false"],
+        help="github.event.pull_request.draft == true",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        if needs_text is None:
+            needs_text = sys.stdin.read()
+        needs = json.loads(needs_text)
+        if not isinstance(needs, dict):
+            raise ValueError("needs JSON must be an object")
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print("merge_gate_check.py: unreadable needs JSON: %s" % exc, file=sys.stderr)
+        return 1
+
+    reasons = evaluate(
+        needs,
+        event=args.event,
+        draft=args.draft == "true",
+    )
+    if reasons:
+        for reason in reasons:
+            print("merge gate FAILED: %s" % reason, file=sys.stderr)
+        return 1
+    print("merge gate PASSED: all %d required jobs green" % len(REQUIRED_JOBS))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

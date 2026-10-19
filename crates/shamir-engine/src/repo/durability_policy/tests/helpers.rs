@@ -1,20 +1,36 @@
 //! Shared fixtures for the durability_policy tests.
 
+#[cfg(feature = "fjall")]
 use std::path::PathBuf;
+#[cfg(feature = "fjall")]
 use std::sync::Arc;
 
+#[cfg(feature = "fjall")]
 use shamir_storage::error::DbResult;
+#[cfg(feature = "fjall")]
 use shamir_storage::storage_in_memory::InMemoryRepo;
+#[cfg(feature = "fjall")]
 use shamir_storage::types::Repo;
+#[cfg(feature = "fjall")]
 use shamir_tx::{ChangeOp, ChangelogEvent, CompletionState, RecordChange};
+#[cfg(feature = "fjall")]
 use shamir_types::access::Actor;
+#[cfg(feature = "fjall")]
 use shamir_types::types::record_id::RecordId;
+#[cfg(feature = "fjall")]
 use tempfile::TempDir;
 
-use crate::repo::{BoxRepo, BoxRepoFactory, RepoInstance};
+#[cfg(feature = "fjall")]
+use crate::repo::BoxRepo;
+#[cfg(feature = "fjall")]
+use crate::repo::BoxRepoFactory;
+#[cfg(feature = "fjall")]
+use crate::repo::RepoInstance;
+#[cfg(feature = "fjall")]
 use crate::table::TableConfig;
 
 /// In-memory repo with one `items` table (Mem WAL sink: `R == W`).
+#[cfg(feature = "fjall")]
 pub(crate) fn mem_repo(name: &str) -> RepoInstance {
     RepoInstance::new(
         name.into(),
@@ -23,6 +39,8 @@ pub(crate) fn mem_repo(name: &str) -> RepoInstance {
     )
 }
 
+// Disk-backed (fjall_raw) fixture — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 pub(crate) struct DiskFixture {
     pub(crate) repo: RepoInstance,
     /// Sibling-of-backing layout keeps the WAL directory
@@ -33,6 +51,7 @@ pub(crate) struct DiskFixture {
 
 /// Disk (fjall_raw) repo over `<tmp>/data`, one `items` table — its
 /// `repo_wal()` builds a `File`-sink `WalGroupCommit` at `<tmp>/data.shamirwal`.
+#[cfg(feature = "fjall")]
 pub(crate) async fn disk_repo(name: &str) -> DiskFixture {
     let dir = TempDir::new().unwrap();
     let backing = dir.path().join("data");
@@ -51,6 +70,7 @@ pub(crate) async fn disk_repo(name: &str) -> DiskFixture {
     }
 }
 
+#[cfg(feature = "fjall")]
 impl DiskFixture {
     /// Active (first) WAL segment file of this fixture's repo.
     pub(crate) fn wal_file(&self) -> PathBuf {
@@ -60,6 +80,7 @@ impl DiskFixture {
     }
 }
 
+#[cfg(feature = "fjall")]
 fn journal_event(repo: &str, commit_version: u64) -> ChangelogEvent {
     ChangelogEvent {
         repo: repo.into(),
@@ -79,6 +100,7 @@ fn journal_event(repo: &str, commit_version: u64) -> ChangelogEvent {
 /// Seed journal rows for `versions` and settle their completion watermark,
 /// so the completion/journal bound computed by
 /// `read_changelog_bounded_impl` covers exactly `versions`.
+#[cfg(feature = "fjall")]
 pub(crate) async fn seed_journal(repo: &RepoInstance, versions: &[u64]) {
     let store = repo.repo.store_get("__changelog__").await.unwrap();
     for &v in versions {
@@ -98,6 +120,7 @@ pub(crate) async fn seed_journal(repo: &RepoInstance, versions: &[u64]) {
 }
 
 /// Append one (empty-ops) WAL entry at `version` through the repo's group.
+#[cfg(feature = "fjall")]
 pub(crate) async fn append_wal(
     repo: &RepoInstance,
     version: u64,
@@ -111,6 +134,7 @@ pub(crate) async fn append_wal(
 }
 
 /// Highest commit_version recovered from the repo's WAL.
+#[cfg(feature = "fjall")]
 pub(crate) async fn recovered_horizon(repo: &RepoInstance) -> u64 {
     repo.repo_wal()
         .await

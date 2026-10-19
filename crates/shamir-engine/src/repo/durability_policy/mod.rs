@@ -32,7 +32,7 @@ mod resolve;
 
 pub use durability_metrics::{DurabilityMetrics, DurabilityMetricsSnapshot};
 pub use durability_policy::effective_wal_segment_bytes;
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 pub(crate) use durability_policy::RecoverabilityCoverage;
 pub(crate) use durability_policy::{
     certify_recovered_open, checkpoint_allocation_floor, install_empty_coverage,

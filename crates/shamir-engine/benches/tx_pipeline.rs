@@ -34,7 +34,9 @@ use shamir_engine::query::batch::{
     execute_batch as execute_batch_raw, AccessGate, AdminExecutor, Authorized, BatchError, BatchOp,
     BatchRequest, BatchResponse, FunctionInvoker, QueryEntry, ResultEncoding, TableResolver,
 };
-use shamir_engine::repo::{BoxRepo, BoxRepoFactory, RepoInstance};
+#[cfg(feature = "fjall")]
+use shamir_engine::repo::BoxRepoFactory;
+use shamir_engine::repo::{BoxRepo, RepoInstance};
 use shamir_engine::table::{TableConfig, TableManager};
 use shamir_query_builder::query::Query;
 use shamir_query_builder::write::doc;
@@ -558,6 +560,7 @@ fn main() {
     // both calibrate to ~1 iter at 0.05s), so reducing N further does not
     // proportionally reduce measured time — left at n=100 as the smallest
     // meaningful write batch.
+    #[cfg(feature = "fjall")]
     for &n in &[100usize] {
         h.bench_batched_async(
             &format!("commit_tx/phase5c_indexed_fjall/{n}"),
@@ -700,6 +703,7 @@ fn main() {
             }
 
             // Fjall backend.
+            #[cfg(feature = "fjall")]
             for visibility in [CommitVisibility::Synchronous, CommitVisibility::AsyncIndex] {
                 let label = match visibility {
                     CommitVisibility::Synchronous => "sync",

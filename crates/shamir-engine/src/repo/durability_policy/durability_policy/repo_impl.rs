@@ -4,11 +4,11 @@ use super::*;
 use crate::repo::durability_policy::{resolve, DurabilityMetricsSnapshot};
 use shamir_query_types::{DurabilityOverride, ReplicationServe};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 use crate::tx::clean_horizon::tests::test_journal_seam;
 
 impl RepoInstance {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "fjall"))]
     pub(crate) async fn from_factory_with_test_segment_bytes(
         name: String,
         factory: BoxRepoFactory,

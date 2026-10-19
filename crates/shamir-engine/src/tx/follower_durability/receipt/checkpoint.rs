@@ -41,7 +41,7 @@ fn fail_final_flushes() -> &'static Mutex<TFxMap<String, bool>> {
     FAIL_FINAL_FLUSH.get_or_init(|| Mutex::new(TFxMap::default()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 pub(crate) fn set_fail_final_flush(repo_name: &str, fail: bool) {
     let mut failures = fail_final_flushes().lock().unwrap();
     if fail {

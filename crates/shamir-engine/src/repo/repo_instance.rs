@@ -422,7 +422,7 @@ impl RepoInstance {
 
     /// Unrecovered disk handle solely for tests that explicitly exercise replay
     /// or must install a fault before recovery. Not available in production.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "fjall"))]
     pub(crate) async fn from_factory_for_recovery_test(
         name: String,
         factory: BoxRepoFactory,

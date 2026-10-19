@@ -10,12 +10,15 @@
 //! observe — an in-memory repo loses its stores on drop, so it cannot
 //! prove durability.
 
+#[cfg(feature = "fjall")]
 use std::path::PathBuf;
 
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use std::sync::Arc;
 
-use crate::repo::{BoxRepo, BoxRepoFactory, RepoInstance};
+#[cfg(feature = "fjall")]
+use crate::repo::BoxRepoFactory;
+use crate::repo::{BoxRepo, RepoInstance};
 use crate::table::TableConfig;
 
 /// Build an in-memory follower repo with one configured table `items`.
