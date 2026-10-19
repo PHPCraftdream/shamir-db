@@ -151,10 +151,10 @@ class SelectTest(unittest.TestCase):
             campaigns, self.pkg_dirs(), ["crates/shamir-db/src/lib.rs"]
         )
         self.assertEqual(
-            [(n, d, p) for n, d, p in fixed],
+            [(n, d, p, dirs) for n, d, p, dirs in fixed],
             [("split-repo-instance",
               ".rust-guard/stages/split-repo-instance.toml",
-              ["shamir-db"])],
+              ["shamir-db"], ["crates/shamir-db"])],
         )
 
     def test_backslash_separators_in_metadata_capture(self):
@@ -165,10 +165,10 @@ class SelectTest(unittest.TestCase):
         campaigns = [{"name": "c", "packages": ["shamir-db"], "delta": "d.toml"}]
         dirs = {"shamir-db": "crates\\shamir-db"}
         self.assertEqual(
-            [(n, d, p) for n, d, p in
+            [(n, d, p, dirs) for n, d, p, dirs in
              rgs.select(campaigns, {k: rgs.norm(v) for k, v in dirs.items()},
                         ["crates/shamir-db/src/lib.rs"])],
-            [("c", "d.toml", ["shamir-db"])],
+            [("c", "d.toml", ["shamir-db"], ["crates/shamir-db"])],
         )
         # Counterfactual: unnormalised, nothing matches.
         self.assertEqual(rgs.select(campaigns, dirs, ["crates/shamir-db/s.rs"]), [])
@@ -182,9 +182,9 @@ class SelectTest(unittest.TestCase):
             ["crates/shamir-engine/src/a.rs", "crates/shamir-db/src/b.rs"],
         )
         self.assertEqual(
-            [(n, p) for n, _, p in out],
-            [("split-repo-instance", ["shamir-db"]),
-             ("extract-engine", ["shamir-engine"])],
+            [(n, p, dirs) for n, _, p, dirs in out],
+            [("split-repo-instance", ["shamir-db"], ["crates/shamir-db"]),
+             ("extract-engine", ["shamir-engine"], ["crates/shamir-engine"])],
         )
 
     def test_campaign_with_only_unknown_packages_never_matches(self):
@@ -213,8 +213,31 @@ class MainTest(unittest.TestCase):
         self.assertEqual(
             out.splitlines(),
             ["split-repo-instance\t"
-             ".rust-guard/stages/split-repo-instance.toml\tshamir-db"],
+             ".rust-guard/stages/split-repo-instance.toml\tshamir-db\tcrates/shamir-db"],
         )
+
+    def test_main_from_temp_cwd_with_root_dot_and_real_stdin(self):
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "stages.toml").write_bytes(STAGES)
+            (root / "metadata.json").write_bytes(_metadata(rgs.norm(str(root.resolve()))))
+            try:
+                os.chdir(tmp)
+                old_stdin = sys.stdin
+                sys.stdin = io.StringIO("crates/shamir-db/src/lib.rs\n")
+                out = io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(out):
+                        code = rgs.main(["--stages", "stages.toml", "--metadata", "metadata.json", "--root", "."])
+                finally:
+                    sys.stdin = old_stdin
+            finally:
+                os.chdir(cwd)
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue().splitlines(), [
+            "split-repo-instance\t.rust-guard/stages/split-repo-instance.toml\tshamir-db\tcrates/shamir-db"
+        ])
 
     def test_empty_diff_prints_nothing_exit_0(self):
         code, out, _err = run_main(changed=[])

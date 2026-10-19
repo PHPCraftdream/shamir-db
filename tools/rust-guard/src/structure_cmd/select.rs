@@ -13,6 +13,7 @@ pub struct StructureArgs {
     /// Repository root (the `--repo` flag).
     pub repo: std::path::PathBuf,
     pub paths: Vec<String>,
+    pub scopes: Vec<String>,
     pub changed_since: Option<String>,
     pub base: Option<String>,
     pub delta: Option<String>,
@@ -162,6 +163,11 @@ fn execute(args: StructureArgs) -> Result<u8, String> {
 /// Selected repo-relative `.rs` files from `--paths` globs and/or
 /// `--changed-since <rev>` (files changed since that revision).
 fn select_files(fs: &GitFs, args: &StructureArgs) -> Result<Vec<String>, String> {
+    let scopes = args
+        .scopes
+        .iter()
+        .map(|scope| normalize_scope(scope))
+        .collect::<Result<Vec<_>, _>>()?;
     let tracked = fs.tracked_files()?;
     let mut out: Vec<String> = Vec::new();
     for f in &tracked {
@@ -182,7 +188,33 @@ fn select_files(fs: &GitFs, args: &StructureArgs) -> Result<Vec<String>, String>
             }
         }
     }
+    if !scopes.is_empty() {
+        out.retain(|file| {
+            scopes.iter().any(|scope| {
+                file == scope
+                    || file
+                        .strip_prefix(scope)
+                        .is_some_and(|tail| tail.starts_with('/'))
+            })
+        });
+    }
     Ok(out)
+}
+
+fn normalize_scope(scope: &str) -> Result<String, String> {
+    let scope = scope.replace('\\', "/");
+    let trimmed = scope.trim_end_matches('/');
+    let normalized = trimmed.strip_prefix("./").unwrap_or(trimmed);
+    if normalized.is_empty()
+        || normalized.starts_with('/')
+        || normalized.contains(':')
+        || normalized
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(format!("invalid --scope directory prefix: {scope}"));
+    }
+    Ok(normalized.to_owned())
 }
 
 /// Base revision for the widening rules: `--base`, else the merge base

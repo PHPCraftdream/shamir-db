@@ -360,6 +360,7 @@ fn cfg_attr_path_is_rejected_during_conservation_inventory() {
         2,
         "expected one structured finding per revision: {stderr}"
     );
+    assert_finding(&output, "UNSUPPORTED_CFG_ATTR_PATH");
     assert!(stderr.contains("UNSUPPORTED_CFG_ATTR_PATH"));
     assert!(!stderr.contains("INVENTORY_ERROR"));
 }

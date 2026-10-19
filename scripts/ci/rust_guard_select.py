@@ -20,7 +20,7 @@ CLI
     whose packages (restricted to those known to the metadata) are
     touched by the diff, one line is printed::
 
-        <name>\t<delta>\t<comma-separated package names>
+        <name>\t<delta>\t<comma-separated package names>\t<comma-separated package dirs>
 
     Nothing is printed (exit 0) when nothing matches.
 
@@ -96,16 +96,16 @@ def select(
     campaigns: list[dict],
     pkg_dirs: dict[str, str],
     changed: list[str],
-) -> list[tuple[str, str, list[str]]]:
+) -> list[tuple[str, str, list[str], list[str]]]:
     """Pure selection: campaigns whose existing packages' dirs are touched.
 
-    Returns ``(name, delta, [package names known to metadata])`` tuples.
+    Returns ``(name, delta, [package names], [package directories])`` tuples.
     A changed file (repo-relative posix) matches a campaign iff it starts
     with ``<pkg-dir>/`` for one of the campaign's packages present in
     ``pkg_dirs``.
     """
     changed_norm = [norm(f) for f in changed]
-    out: list[tuple[str, str, list[str]]] = []
+    out: list[tuple[str, str, list[str], list[str]]] = []
     for c in campaigns:
         known = [name for name in c["packages"] if name in pkg_dirs]
         dirs = [pkg_dirs[name] for name in known]
@@ -113,7 +113,7 @@ def select(
             f.startswith(d + "/") for f in changed_norm for d in dirs
         )
         if touched:
-            out.append((c["name"], c["delta"], known))
+            out.append((c["name"], c["delta"], known, dirs))
     return out
 
 
@@ -162,8 +162,8 @@ def main(
         pkg_dirs = load_pkg_dirs(metadata_text, resolve_root(args.root))
         if changed is None:
             changed = sys.stdin.read().splitlines()
-        for name, delta, pkgs in select(campaigns, pkg_dirs, changed):
-            print("%s\t%s\t%s" % (name, delta, ",".join(pkgs)))
+        for name, delta, pkgs, dirs in select(campaigns, pkg_dirs, changed):
+            print("%s\t%s\t%s\t%s" % (name, delta, ",".join(pkgs), ",".join(dirs)))
     except (OSError, ValueError, KeyError, tomllib.TOMLDecodeError) as exc:
         print("rust_guard_select.py: %s" % exc, file=sys.stderr)
         return 2

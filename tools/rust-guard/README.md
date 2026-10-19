@@ -99,10 +99,13 @@ directory unless an explicit `--exceptions` path is given.
   `PATH_ESCAPES_REPO`, `UNSUPPORTED_CFG_ATTR_PATH` (conditional
   `cfg_attr(path)` mounts are unsupported; not resolved).
 - `rust-guard structure [--paths <glob>...]... [--changed-since <rev>]
-  [--base <rev>] [--delta <path>] [--exceptions <path>]
-  [--warn-primary-export]` — AST rules over the selected files (at least
-  one of `--paths` / `--changed-since` required; globs match
-  git-tracked paths). Finding codes:
+  [--scope <repo-relative-dir-prefix>...] [--base <rev>] [--delta <path>]
+  [--exceptions <path>] [--warn-primary-export]` — AST rules over selected
+  Rust files (at least one selector is required; globs match git-tracked
+  paths). `--paths` and `--changed-since` selections are unioned; repeatable
+  `--scope` directory prefixes intersect that union on path-component
+  boundaries. Omitting scopes preserves existing selection behavior.
+  Finding codes:
   - `UNREADABLE_FILE` — a selected file exists but could not be read
     (I/O error); reported instead of silently skipped. Missing files are
     not reported here (the `modules` gate owns them).
@@ -174,8 +177,8 @@ directory unless an explicit `--exceptions` path is given.
   the module tree (parent + child compose with `&&`). `#[path]` is followed
   as an explicit source edge. File-backed `mod` and literal `include!` edges
   targeting an ancestor file emit `MOUNT_CYCLE` in the `modules` gate (the
-  conservation inventory visits every physical file once and reports no cycle
-  of its own). `cfg_attr(path)` (including
+  inventory visits each physical file once in its per-revision visited set
+  and reports no cycle of its own). `cfg_attr(path)` (including
   nested and multiple path-bearing attributes) is rejected as
   `UNSUPPORTED_CFG_ATTR_PATH` in inventory, not conditionally resolved. There
   is no generic bypass; supporting a specific case requires a deliberate
@@ -298,9 +301,17 @@ directory unless an explicit `--exceptions` path is given.
   are referenced from the campaign entries
 in `.rust-guard/stages.toml` (written by the CI wiring chunk).
 
-## Exceptions: `.rust-guard/exceptions.toml`
+## When the gates run
 
-The default exceptions file (override with `--exceptions`) holds two
+On pull requests, `modules` scans the whole repository. `structure` and
+`conservation` run only for packages in active `.rust-guard/stages.toml`
+campaigns touched by the diff. With `campaigns = []`, neither diff gate is
+invoked and CI emits a notice. Master pushes skip both diff gates. Manual
+`structure` runs may use repeatable `--scope` prefixes, which intersect the
+union of `--paths` and `--changed-since`; omitting scopes preserves legacy
+selection behavior.
+
+## Exceptions: `.rust-guard/exceptions.toml`
 record kinds, documented inline in the file itself:
 
 - `[[exception]]` — one exact tracked path (`path`, no wildcards) plus

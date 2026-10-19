@@ -47,6 +47,9 @@ enum Command {
         /// Glob(s) matched against git-tracked paths (repeatable).
         #[arg(long = "paths")]
         paths: Vec<String>,
+        /// Repo-relative directory prefix scope (repeatable, intersects selectors).
+        #[arg(long = "scope")]
+        scopes: Vec<String>,
         /// Select files changed since this revision (its merge base with
         /// HEAD becomes the implicit --base).
         #[arg(long)]
@@ -93,6 +96,7 @@ fn main() -> ExitCode {
         }
         Command::Structure {
             paths,
+            scopes,
             changed_since,
             base,
             delta,
@@ -101,6 +105,7 @@ fn main() -> ExitCode {
         } => ExitCode::from(structure_cmd::run(structure_cmd::StructureArgs {
             repo,
             paths,
+            scopes,
             changed_since,
             base,
             delta,

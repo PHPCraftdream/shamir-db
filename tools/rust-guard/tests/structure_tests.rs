@@ -149,6 +149,128 @@ fn widened_item_in_inline_module_is_vis_widening() {
 }
 
 #[test]
+fn scope_excludes_new_public_file_but_in_scope_widening_remains() {
+    let out_repo = DiffRepo::two_commit("structure/new_file_widen");
+    let base = out_repo.base_sha.clone();
+    let outside = out_repo.repo.run_guard(&[
+        "structure",
+        "--paths",
+        "**/*.rs",
+        "--scope",
+        "crates/other",
+        "--base",
+        &base,
+    ]);
+    assert_clean(&outside);
+
+    let in_repo = DiffRepo::two_commit("structure/new_file_widen");
+    let base = in_repo.base_sha.clone();
+    let inside = in_repo.repo.run_guard(&[
+        "structure",
+        "--paths",
+        "**/*.rs",
+        "--scope",
+        "crates/fix/src",
+        "--base",
+        &base,
+    ]);
+    assert_finding(&inside, "VIS_WIDENING");
+
+    let unscoped = DiffRepo::two_commit("structure/new_file_widen");
+    assert_finding(&unscoped.scan(), "VIS_WIDENING");
+}
+
+#[test]
+fn scope_union_intersects_paths_and_changed_since() {
+    // Reuses the existing new_file_widen fixture; the extra public files
+    // (one in a second scope dir, one sibling-prefix that must stay OUT)
+    // are written in-process and committed via the test-only git helpers
+    // BEFORE the guard runs — no new fixture directory.
+    let repo = DiffRepo::two_commit("structure/new_file_widen");
+    let base = repo.base_sha.clone();
+    let in_scope = repo.repo.root.join("crates/fix-other/src/mod.rs");
+    std::fs::create_dir_all(in_scope.parent().expect("parent")).expect("mkdir fix-other");
+    std::fs::write(
+        &in_scope,
+        "// MODRS_LOGIC bait: paths-only selection must stay selected even\n\
+         // though it is unchanged at HEAD.\n\
+         pub fn helper() -> u32 { 1 }\n",
+    )
+    .expect("write in-scope public file");
+    let sibling = repo.repo.root.join("crates/fix-other-sibling/src/lib.rs");
+    std::fs::create_dir_all(sibling.parent().expect("parent")).expect("mkdir sibling");
+    std::fs::write(&sibling, "pub(crate) fn hidden() -> u32 { 3 }\n")
+        .expect("write sibling-prefix public file");
+    repo.repo.commit_all("head-extra");
+
+    // Selectors: --paths covers the unchanged fix-other file (the union
+    // must keep it even though --changed-since drops it as unchanged),
+    // --changed-since covers the diff-selected extra.rs widening. Scopes
+    // admit fix/src and fix-other/src; the sibling fix-other-sibling
+    // prefix must be excluded by the component boundary.
+    let out = repo.repo.run_guard(&[
+        "structure",
+        "--paths",
+        "crates/fix-other/src/mod.rs",
+        "--changed-since",
+        &base,
+        "--scope",
+        "crates/fix/src",
+        "--scope",
+        "crates/fix-other/src",
+        "--base",
+        &base,
+    ]);
+    let err = stderr(&out);
+    assert_finding(&out, "VIS_WIDENING");
+    assert!(
+        err.contains("crates/fix/src/extra.rs"),
+        "changed-since-selected widening missing: {err}"
+    );
+    assert!(
+        !err.contains("crates/fix-other-sibling/"),
+        "sibling-prefix file must be scoped out: {err}"
+    );
+    assert!(
+        !err.contains("rust-guard: error"),
+        "no infra errors expected: {err}"
+    );
+    // The paths-selected file is unchanged at HEAD, so only a run that
+    // actually scans it (paths honored) would report its MODRS_LOGIC.
+    assert_finding(&out, "MODRS_LOGIC");
+}
+
+#[test]
+fn changed_since_selector_is_intersected_with_scope() {
+    // Only --changed-since drives selection; the scope keeps the diff's
+    // extra.rs widening while a narrow scope on the untouched other crate
+    // proves the intersection actually drops it.
+    let repo = DiffRepo::two_commit("structure/new_file_widen");
+    let base = repo.base_sha.clone();
+    let wide = repo.repo.run_guard(&[
+        "structure",
+        "--changed-since",
+        &base,
+        "--scope",
+        "crates/fix/src",
+        "--base",
+        &base,
+    ]);
+    assert_finding(&wide, "VIS_WIDENING");
+
+    let narrow = repo.repo.run_guard(&[
+        "structure",
+        "--changed-since",
+        &base,
+        "--scope",
+        "crates/fix-other/src",
+        "--base",
+        &base,
+    ]);
+    assert_clean(&narrow);
+}
+
+#[test]
 fn new_file_with_pub_crate_is_vis_widening() {
     // 10c: a brand-new file introducing `pub(crate)` items widens the
     // crate's surface.

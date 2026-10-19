@@ -413,11 +413,10 @@ jobs:
   # `tools/rust-guard` binary against the whole repo: `modules` (every
   # tracked `.rs` reachable from a target root or excepted), `structure`
   # (AST rules over the PR's changed files only — the VIS_WIDENING /
-  # ALLOW_ADDED rules are diff-shaped by nature, and a full-repo run would
-  # just re-flag the grandfathered baseline repo, so on master pushes only
-  # the whole-repo `modules` scan runs), and `conservation` (source
-  # inventory diff per active campaign in `.rust-guard/stages.toml` — a
-  # no-op while that list is empty). Also re-runs the baseline-monotonic
+  # ALLOW_ADDED rules are diff-shaped by nature; on master pushes only
+  # the whole-repo `modules` scan runs), and both `structure` and
+  # `conservation` run only for touched packages in active campaigns in
+  # `.rust-guard/stages.toml` (a no-op while that list is empty). Also re-runs the baseline-monotonic
   # and layout checks next to the tool whose findings they ratchet.
   #
   # Runs on draft AND ready PRs and master pushes (no draft-only `if:`):
@@ -454,21 +453,12 @@ jobs:
         run: cargo build --manifest-path tools/rust-guard/Cargo.toml --locked
       - name: rust-guard modules (whole repo)
         run: tools/rust-guard/target/debug/rust-guard modules --repo .
-      - name: rust-guard structure (changed files)
-        if: github.event_name == 'pull_request'
-        run: tools/rust-guard/target/debug/rust-guard structure --repo . --changed-since "$MERGE_BASE"
-      # Conservation runs only when the PR touches Rust files of a package
-      # named in an active campaign (`.rust-guard/stages.toml`). With
-      # `campaigns = []` (the normal state) this is a documented no-op.
       # Selection lives in scripts/ci/rust_guard_select.py (unit-tested in
       # scripts/ci/tests/test_rust_guard_select.py): it reads the changed
       # files on stdin, captures `cargo metadata` to a file ONCE, strips the
-      # repo root so absolute manifest paths become repo-relative like the
-      # `git diff --name-only` paths (the round-1 bug: absolute vs relative
-      # never matched and every campaign was silently skipped), and emits
-      # one `<name>\t<delta>\t<pkgs>` line per campaign to run. Any parse /
-      # usage error exits 2 — the step fails closed.
-      - name: rust-guard conservation (per active campaign)
+      # repo root from absolute manifest paths and emits package directories.
+      # Any parse / usage error exits 2 — the step fails closed.
+      - name: rust-guard campaign gates
         if: github.event_name == 'pull_request'
         run: |
           set -euo pipefail
@@ -479,9 +469,13 @@ jobs:
                 --metadata metadata.json --root . > campaigns.tsv
           guard="tools/rust-guard/target/debug/rust-guard"
           ran=0
-          while IFS=$'\t' read -r name delta pkgs; do
+          while IFS=$'\t' read -r name delta pkgs dirs; do
             [ -n "$name" ] || continue
-            echo "::notice::conservation campaign '$name' (packages: $pkgs)"
+            echo "::notice::structure+conservation campaign '$name' (packages: $pkgs)"
+            scope_args=()
+            IFS=',' read -ra scope_dirs <<< "$dirs"
+            for dir in "${scope_dirs[@]}"; do scope_args+=(--scope "$dir"); done
+            "$guard" structure --repo . --changed-since "$MERGE_BASE" "${scope_args[@]}"
             "$guard" conservation --repo . \
               --base "$MERGE_BASE" --head HEAD \
               --packages "$pkgs" --delta "$delta"
@@ -489,7 +483,7 @@ jobs:
           done < campaigns.tsv
           rm -f metadata.json campaigns.tsv
           if [ "$ran" -eq 0 ]; then
-            echo "::notice::no campaign package touched by this diff; conservation skipped"
+            echo "::notice::no active campaign package touched by this diff; structure and conservation skipped"
           fi
       # Same ratchet the fmt job runs; repeated here so the source-integrity
       # job is self-contained (cheap, stdlib-only).

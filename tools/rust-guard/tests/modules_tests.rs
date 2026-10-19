@@ -77,25 +77,50 @@ fn cfg_attr_path_is_rejected() {
     let repo = TempRepo::with_fixture("modules_bad/cfg_attr_neither");
     let output = repo.run_guard(&["modules"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_finding(&output, "UNSUPPORTED_CFG_ATTR_PATH");
     assert_eq!(
         stderr.matches("UNSUPPORTED_CFG_ATTR_PATH").count(),
         1,
         "expected one structured rejection: {stderr}"
     );
+    assert!(!stderr.contains("MISSING_MOD_FILE"), "{stderr}");
 }
 
 #[test]
 fn multiple_cfg_attr_paths_are_rejected() {
-    // Counterfactual: without checking the later attribute this reports no
-    // unsupported-path finding. The assertion requires exactly one code.
+    // First-only detectors miss the second path-bearing attribute.
     let repo = TempRepo::with_fixture("modules_bad/cfg_attr_neither_two");
     let output = repo.run_guard(&["modules"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_finding(&output, "UNSUPPORTED_CFG_ATTR_PATH");
     assert_eq!(
         stderr.matches("UNSUPPORTED_CFG_ATTR_PATH").count(),
         1,
-        "expected one structured rejection: {stderr}"
+        "{stderr}"
     );
+    assert!(!stderr.contains("MISSING_MOD_FILE"), "{stderr}");
+}
+
+#[test]
+fn nested_cfg_attr_path_is_rejected() {
+    // A nonrecursive detector misses the inner path argument. The nested
+    // variant is written over the fixture lib.rs in-process (no extra
+    // fixture tree), then rejected end-to-end.
+    let repo = TempRepo::with_fixture("modules_bad/cfg_attr_neither");
+    std::fs::write(
+        repo.root.join("crates/fix/src/lib.rs"),
+        "#[cfg_attr(feature = \"a\", cfg_attr(feature = \"b\", path = \"gen.rs\"))]\nmod m;\n",
+    )
+    .expect("rewrite fixture lib.rs");
+    let output = repo.run_guard(&["modules"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_finding(&output, "UNSUPPORTED_CFG_ATTR_PATH");
+    assert_eq!(
+        stderr.matches("UNSUPPORTED_CFG_ATTR_PATH").count(),
+        1,
+        "expected exactly one structured rejection: {stderr}"
+    );
+    assert!(!stderr.contains("MISSING_MOD_FILE"), "{stderr}");
 }
 
 #[test]
