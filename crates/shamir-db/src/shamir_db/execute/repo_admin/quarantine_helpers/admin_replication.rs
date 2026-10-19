@@ -41,10 +41,12 @@ impl ShamirDb {
         self.quarantined_read_reason(db_name, repo_name)
     }
 
-    /// Persist `state = "resync_required"` on subscription `name`'s row (supervisor
-    /// seam, terminal journal-gap error). Recovery = replacement seed install +
-    /// `Resume`; durable `quarantined` survives Pause/SetProfile, other admin
-    /// action refused. Missing name → logged no-op.
+    /// ADMIN/TEST-SEAM ONLY (round 13 G1, see
+    /// [`Self::mark_subscription_terminal`]): unfenced terminal
+    /// `resync_required` marking. No follower- or supervisor-originated
+    /// caller; task-originated callers must use
+    /// [`Self::mark_subscription_resync_required_generation`]. Missing name
+    /// → logged no-op.
     pub async fn mark_subscription_resync_required(
         &self,
         name: &str,
@@ -81,19 +83,22 @@ impl ShamirDb {
     /// Persist an operational stop reason; `"resync_required"` additionally
     /// stamps the durable `quarantined` marker + receipt baseline.
     ///
-    /// WHO MAY CALL THE GENERATION-LESS VARIANT (round 12 F3): only callers
-    /// that are NOT bound to a possibly-superseded binding generation —
-    /// admin/API operations, and supervisor START-admission paths that read
-    /// the row's current `binding_generation` synchronously under the
-    /// replication control lock immediately before marking (the generation
-    /// cannot go stale in between). Anything originating from a FOLLOWER
-    /// LOOP task (or its supervisor exit wrapper) MUST use
+    /// ADMIN/TEST-SEAM ONLY (round 13 G1): the generation-less variant has
+    /// NO follower- or supervisor-originated caller left. Every mark made by
+    /// a follower loop task, its supervisor exit wrapper, or a supervisor
+    /// START attempt carries the task's binding-generation snapshot through
     /// [`Self::mark_subscription_terminal_generation`] /
-    /// [`Self::mark_subscription_resync_required_generation`] with its own
-    /// lease/config generation: a stale task must never mark or clear a
-    /// replacement binding's row. Retriable, NON-terminal status reports
-    /// (stall visibility) must not use this writer at all — it quiesces the
-    /// lease — and use [`Self::set_subscription_status_message`] instead.
+    /// [`Self::mark_subscription_resync_required_generation`] / the
+    /// generation-aware start-admission marks in `shamir-server`'s
+    /// supervisor: the generation passed to the call IS the fence — if the
+    /// row was concurrently replaced (DROP/re-CREATE or rebind), the
+    /// generation check turns the mark into a logged no-op, so an old task
+    /// can never mark or clear a replacement binding's row. Only genuinely
+    /// admin- or test-initiated callers (which act on the row they just read
+    /// themselves, outside any possibly-superseded task context) may use
+    /// this unfenced variant. Retriable, NON-terminal status reports (stall
+    /// visibility) must not use this writer at all — it quiesces the lease —
+    /// and use [`Self::set_subscription_status_message`] instead.
     pub async fn mark_subscription_terminal(
         &self,
         name: &str,
@@ -358,5 +363,18 @@ impl ShamirDb {
         .await
         .map_err(|e| DbError::Storage(e.to_string()))?;
         Ok(())
+    }
+
+    /// Cross-crate test handle (`test-util`) onto the crate-private
+    /// production row-write path, so regressions build replacement
+    /// bindings through the real write instead of re-implementing it.
+    #[cfg(any(test, feature = "test-util"))]
+    pub async fn replace_subscription_row_for_test(
+        &self,
+        table: &crate::engine::table::TableManager,
+        name: String,
+        record: QueryValue,
+    ) -> DbResult<()> {
+        self.replace_subscription_row(table, name, record).await
     }
 }

@@ -266,9 +266,14 @@ impl SubscriptionSupervisor {
     /// itself refuses legacy/malformed bytes
     /// (durability_policy/repo_impl.rs:64-65), so the supervisor always
     /// sees the cached gate.
+    /// `generation` is the start attempt's binding-generation snapshot — the
+    /// fence for the mark below: a start whose row was concurrently replaced
+    /// can never mark or quiesce the replacement (stale mark = a logged
+    /// no-op inside `ShamirDb`).
     pub(super) async fn refuse_gate_init(
         &self,
         sub_name: &str,
+        generation: u64,
         error: shamir_db::storage::error::DbError,
     ) -> ReplError {
         match error {
@@ -276,7 +281,12 @@ impl SubscriptionSupervisor {
                 let error = ReplError::FollowerStateRefused { reason };
                 if let Err(persist) = self
                     .local
-                    .mark_subscription_terminal(sub_name, "resync_required", &error.to_string())
+                    .mark_subscription_terminal_generation(
+                        sub_name,
+                        "resync_required",
+                        &error.to_string(),
+                        Some(generation),
+                    )
                     .await
                 {
                     return ReplError::Start(persist.to_string());
@@ -514,6 +524,7 @@ impl SubscriptionSupervisor {
             }
         }
         let pull_targets = sub.binding_destinations.clone();
+        let generation = sub.binding_generation;
         for (index, (db, repo)) in pull_targets.iter().enumerate() {
             // Interior-window check: an invalidated lease marks nothing in
             // this iteration and never admits a destination.
@@ -543,10 +554,8 @@ impl SubscriptionSupervisor {
                     repo: repo.clone(),
                     owner,
                 };
-                // Generation-aware: this runs synchronously inside a start
-                // whose snapshot was just re-validated against the current
-                // row under the control lock, so the generation passed here
-                // is the row's CURRENT generation.
+                // Fenced by the start's generation snapshot: a concurrently replaced
+                // row turns the mark into a logged no-op inside `ShamirDb`.
                 self.local
                     .mark_subscription_terminal_generation(
                         &sub.name,
@@ -568,10 +577,11 @@ impl SubscriptionSupervisor {
                         repo: repo.clone(),
                     };
                     self.local
-                        .mark_subscription_terminal(
+                        .mark_subscription_terminal_generation(
                             &sub.name,
                             "resync_required",
                             &format!("{error}: {storage_error}"),
+                            Some(sub.binding_generation),
                         )
                         .await
                         .map_err(|error| ReplError::Start(error.to_string()))?;
@@ -582,7 +592,9 @@ impl SubscriptionSupervisor {
                 // `resync_required`; anything else → retryable `Start`).
                 let gate = match destination.tx_gate().await {
                     Ok(gate) => gate,
-                    Err(error) => return Err(self.refuse_gate_init(&sub.name, error).await),
+                    Err(error) => {
+                        return Err(self.refuse_gate_init(&sub.name, generation, error).await)
+                    }
                 };
                 if gate.requires_reopen() {
                     let error = ReplError::ReopenRequired {
@@ -590,10 +602,7 @@ impl SubscriptionSupervisor {
                         repo: repo.clone(),
                         detail: "Resume refused until destination is reopened".into(),
                     };
-                    // Generation-aware: this runs synchronously inside a
-                    // start whose snapshot was just re-validated against the
-                    // current row under the control lock, so the generation
-                    // passed here is the row's CURRENT generation.
+                    // Fenced by the same generation snapshot as every mark above.
                     self.local
                         .mark_subscription_terminal_generation(
                             &sub.name,
@@ -617,10 +626,11 @@ impl SubscriptionSupervisor {
                     Err(shamir_db::storage::error::DbError::FollowerStateRefused { reason }) => {
                         let error = ReplError::FollowerStateRefused { reason };
                         self.local
-                            .mark_subscription_terminal(
+                            .mark_subscription_terminal_generation(
                                 &sub.name,
                                 "resync_required",
                                 &error.to_string(),
+                                Some(sub.binding_generation),
                             )
                             .await
                             .map_err(|error| ReplError::Start(error.to_string()))?;
@@ -647,10 +657,11 @@ impl SubscriptionSupervisor {
                                             .into(),
                                 };
                                 self.local
-                                    .mark_subscription_terminal(
+                                    .mark_subscription_terminal_generation(
                                         &sub.name,
                                         "reopen_required",
                                         &error.to_string(),
+                                        Some(sub.binding_generation),
                                     )
                                     .await
                                     .map_err(|error| ReplError::Start(error.to_string()))?;

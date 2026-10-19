@@ -455,9 +455,7 @@ async fn run_follower_loop_internal(
 
     let mut backoff_ms = INITIAL_BACKOFF_MS;
     let mut iter = 0usize;
-    // Round 12 F2: the loop's OWN binding generation (from its lease); every
-    // row write below is fenced with it — a stale loop's status report on a
-    // replacement binding's row is a logged no-op inside `ShamirDb`.
+    // Rule (round 13 G2): unsupervised loop (lease: None) = never writes; supervised loop = writes with its lease generation; tests driving a supervised loop must attach the row's REAL binding_generation (no 0 special-case in production — 0 is fenced out as stale).
     let lease_generation = lease.as_ref().map_or(0, |l| l.generation);
     // PR6b-3 stall visibility: consecutive swallowed failures and the last
     // durable bookmark observed. Progress = the bookmark advancing beyond

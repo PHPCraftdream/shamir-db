@@ -461,6 +461,9 @@ async fn gate_init_error_legacy_refusal_is_typed_and_marks_terminal() {
     let error = sup
         .refuse_gate_init(
             "sub_a",
+            sub_binding_generation(&follower, "sub_a")
+                .await
+                .expect("row carries binding_generation"),
             DbError::FollowerStateRefused {
                 reason: FollowerRefusalReason::LegacyBookmarkFormat,
             },
@@ -501,6 +504,9 @@ async fn gate_init_error_malformed_refusal_is_typed_and_marks_terminal() {
     let error = sup
         .refuse_gate_init(
             "sub_a",
+            sub_binding_generation(&follower, "sub_a")
+                .await
+                .expect("row carries binding_generation"),
             DbError::FollowerStateRefused {
                 reason: FollowerRefusalReason::MalformedBookmark,
             },
@@ -538,7 +544,13 @@ async fn gate_init_error_other_error_keeps_start_and_marks_nothing() {
         .with_poll_wait_ms(20)
         .with_max_iterations(2);
     let error = sup
-        .refuse_gate_init("sub_a", DbError::Storage("gate init i/o".into()))
+        .refuse_gate_init(
+            "sub_a",
+            sub_binding_generation(&follower, "sub_a")
+                .await
+                .expect("row carries binding_generation"),
+            DbError::Storage("gate init i/o".into()),
+        )
         .await;
     assert!(
         matches!(error, ReplError::Start(_)),

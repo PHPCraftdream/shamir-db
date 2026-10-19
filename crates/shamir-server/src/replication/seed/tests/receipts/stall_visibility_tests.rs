@@ -19,7 +19,9 @@ use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
 use shamir_db::engine::tx::ReplicatedEvent;
 use shamir_db::query::filter::FilterContext;
+use shamir_db::repl_binding::SubscriptionLease;
 use shamir_db::types::common::new_map;
+use shamir_db::types::value::QueryValue;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl::{repl_scope, replication_profile, subscription};
@@ -86,6 +88,64 @@ async fn read_subscription_row(follower: &ShamirDb) -> (Option<String>, Option<S
     )
 }
 
+/// Round 13 G2: take the row's lease EXACTLY like the supervisor does —
+/// under the control lock, for the row's REAL `binding_generation` — so a
+/// supervised test loop writes with the row's actual generation (never 0:
+/// the fenced status writer rejects 0 as a stale no-op).
+async fn take_row_lease(follower: &ShamirDb, name: &str) -> Arc<SubscriptionLease> {
+    let db = Arc::new(follower.clone());
+    let generation = subscription_row_generation(follower).await;
+    let control = db.lock_replication_control().await;
+    let lease = db
+        .take_subscription_lease(name, generation, &control)
+        .await
+        .expect("a fresh lease is issued for the current generation");
+    drop(control);
+    lease
+}
+
+/// Read the single subscription row as the COMPLETE `QueryValue` (round 13
+/// G3b: the stale-report test compares the whole row, not a field tuple).
+async fn read_whole_subscription_row(follower: &ShamirDb) -> QueryValue {
+    let table = follower.system_store().subscriptions_table().await.unwrap();
+    let interner = table.interner_for_test().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+    let query = Query::from("subscriptions").build();
+    let rows = table.read(&query, &ctx).await.unwrap();
+    rows.records[0].as_value().into_owned()
+}
+
+/// Round 13 G3b: write a REAL REPLACEMENT binding through the production
+/// row-write path (implicit-tx SET on `system/subscriptions`, exactly like
+/// the admin/catalogue writers): generation `gen + 1`, DIFFERENT
+/// destinations.
+async fn write_replacement_binding(follower: &ShamirDb, name: &str, old: &QueryValue, gen: u64) {
+    let mut record = old.clone();
+    if let QueryValue::Map(ref mut m) = record {
+        m.insert(
+            "binding_generation".to_string(),
+            QueryValue::Int(gen as i64),
+        );
+        m.insert(
+            "binding_destinations".to_string(),
+            QueryValue::List(vec![QueryValue::Map({
+                let mut dest = new_map();
+                dest.insert("db".to_string(), QueryValue::Str("other".to_string()));
+                dest.insert("repo".to_string(), QueryValue::Str("replica".to_string()));
+                dest
+            })]),
+        );
+    } else {
+        panic!("subscription row is not a map");
+    }
+    let table = follower.system_store().subscriptions_table().await.unwrap();
+    follower
+        .replace_subscription_row_for_test(&table, name.to_string(), record)
+        .await
+        .expect("replacement binding row SET");
+}
+
 /// A source whose `pull` (and initial `hello`) always fails transiently —
 /// the exact silent-retry shape that motivated PR6b-3.
 struct AlwaysFailingSource;
@@ -150,6 +210,10 @@ async fn repeated_failures_without_progress_surface_status_message() {
         .with_poll_wait_ms(0)
         .with_subscription("stall_sub")
         .with_max_iterations(crate::replication::follower_loop::STALL_VISIBILITY_THRESHOLD + 2);
+    // Round 13 G2: supervised loop ⇒ the row's REAL generation (0 would be
+    // fenced out and the stall message would never land).
+    let mut cfg = cfg;
+    cfg.lease = Some(take_row_lease(&follower, "stall_sub").await);
     run_follower_loop(
         Arc::new(follower.clone()),
         Arc::new(AlwaysFailingSource),
@@ -323,6 +387,9 @@ async fn progress_overwrites_stall_message_and_counter_restarts() {
         .with_poll_wait_ms(0)
         .with_subscription("stall_sub")
         .with_max_iterations(25);
+    // Round 13 G2: supervised loop ⇒ the row's REAL generation.
+    let mut cfg = cfg;
+    cfg.lease = Some(take_row_lease(&follower, "stall_sub").await);
     let run = tokio::spawn(run_follower_loop(
         Arc::new(follower.clone()),
         Arc::new(source),
@@ -410,6 +477,10 @@ async fn empty_pull_with_advertised_backlog_feeds_stall_measure() {
         .with_poll_wait_ms(0)
         .with_subscription("stall_sub")
         .with_max_iterations(crate::replication::follower_loop::STALL_VISIBILITY_THRESHOLD + 2);
+    // Round 13 G2: supervised loop ⇒ the row's REAL generation (0 would be
+    // fenced out and the backlog stall message would never land).
+    let mut cfg = cfg;
+    cfg.lease = Some(take_row_lease(&follower, "stall_sub").await);
     run_follower_loop(
         Arc::new(follower.clone()),
         Arc::new(EmptyBacklogSource),
@@ -477,6 +548,11 @@ async fn progress_resets_counter_and_normal_convergence_is_never_blocked() {
         .with_poll_wait_ms(0)
         .with_subscription("stall_sub")
         .with_max_iterations(10);
+    // Round 13 G2: supervised loop ⇒ the row's REAL generation — the three
+    // swallowed failures and the progress reset now run through the REAL
+    // fenced writer (previously generation 0 silently no-op'd every write).
+    let mut cfg = cfg;
+    cfg.lease = Some(take_row_lease(&follower, "stall_sub").await);
     run_follower_loop(
         Arc::new(follower.clone()),
         Arc::new(source),
@@ -527,16 +603,8 @@ async fn subscription_row_generation(follower: &ShamirDb) -> u64 {
 async fn leased_follower_stall_persists_message_and_keeps_lease_valid() {
     let follower = build_db("follower").await;
     create_subscription_row(&follower, "stall_sub").await;
-    let generation = subscription_row_generation(&follower).await;
     let db = Arc::new(follower.clone());
-    // Take the lease exactly like the supervisor does: under the control
-    // lock, for the row's CURRENT generation.
-    let control = db.lock_replication_control().await;
-    let lease = db
-        .take_subscription_lease("stall_sub", generation, &control)
-        .await
-        .expect("a fresh lease is issued for the current generation");
-    drop(control);
+    let lease = take_row_lease(&follower, "stall_sub").await;
     assert!(lease.valid.load(Ordering::Acquire));
 
     let cfg = FollowerLoopConfig::new("follower-1", "app", "main")
@@ -579,28 +647,49 @@ async fn stale_generation_status_report_is_a_no_op_on_the_row() {
     let follower = build_db("follower").await;
     create_subscription_row(&follower, "stall_sub").await;
     let generation = subscription_row_generation(&follower).await;
-    let before = read_subscription_row(&follower).await;
+    let before = read_whole_subscription_row(&follower).await;
 
-    follower
-        .set_subscription_status_message("stall_sub", "stale report", generation + 100)
-        .await
-        .expect("a stale generation is a logged no-op, not an error");
-    assert_eq!(
-        read_subscription_row(&follower).await,
-        before,
-        "the stale report must not touch the row"
+    // Round 13 G3b: make the row a REAL replacement binding (generation + 1,
+    // different destinations) through the production write path, so the
+    // stale report below targets a row that genuinely moved on.
+    write_replacement_binding(&follower, "stall_sub", &before, generation + 1).await;
+    let replaced = read_whole_subscription_row(&follower).await;
+    assert_ne!(
+        replaced, before,
+        "the replacement binding must differ from the original row"
     );
 
     follower
-        .set_subscription_status_message("stall_sub", "fresh report", generation)
+        .set_subscription_status_message("stall_sub", "stale report", generation)
+        .await
+        .expect("a stale generation is a logged no-op, not an error");
+    assert_eq!(
+        read_whole_subscription_row(&follower).await,
+        replaced,
+        "the stale report must not touch ANY field of the replacement row"
+    );
+
+    // The FRESH generation's report on the replacement row still lands.
+    follower
+        .set_subscription_status_message("stall_sub", "fresh report", generation + 1)
         .await
         .expect("the current generation's report persists");
-    let (state, message) = read_subscription_row(&follower).await;
-    assert_eq!(message.as_deref(), Some("fresh report"));
+    let after = read_whole_subscription_row(&follower).await;
     assert_eq!(
-        state.as_deref(),
-        before.0.as_deref(),
-        "the status writer must never touch `state`"
+        after.get("status_message").and_then(|v| v.as_str()),
+        Some("fresh report"),
+        "the fresh generation's report landed on the replacement row"
+    );
+    let mut expected = replaced.clone();
+    if let QueryValue::Map(ref mut m) = expected {
+        m.insert(
+            "status_message".to_string(),
+            QueryValue::Str("fresh report".to_string()),
+        );
+    }
+    assert_eq!(
+        after, expected,
+        "the status writer must touch ONLY status_message"
     );
 }
 
@@ -712,6 +801,25 @@ async fn guarded_stall_persistence_does_not_deadlock_against_write_gate() {
             .await
         })
     };
+    // Round 13 G3a: deterministic ACKNOWLEDGEMENT, not an assumption. The
+    // parked loop's READ guard alone never blocks another reader, but a
+    // QUEUED writer does (tokio's RwLock is write-preferring), so a failing
+    // `try_read()` proves the mutation owns the control lock and is parked on
+    // `apply_gate.write()` BEFORE the follower is released. The mutation does
+    // real I/O first, so the wait polls with a virtual-time sleep (the
+    // suite's paused-clock idiom), not a count of scheduler yields.
+    let mut parked = false;
+    for _ in 0..20_000 {
+        if lease.apply_gate.try_read().is_err() {
+            parked = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    assert!(
+        parked,
+        "the lifecycle mutation must be queued on the apply_gate write lock          before the follower is released"
+    );
     release.notify_one();
 
     // Both complete WITHOUT a deadlock (an inversion hangs this test).
