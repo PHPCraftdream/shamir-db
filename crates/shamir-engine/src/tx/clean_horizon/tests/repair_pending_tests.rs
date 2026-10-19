@@ -228,6 +228,24 @@ async fn drain_until_empty(repo: &RepoInstance, feed: &RepoChangefeed) {
     );
 }
 
+/// Direct repair passes (NO truncation, unlike `drain_all`) until every
+/// repair-pending version is retired. One pass admits only as many versions
+/// as the journal channel has room for; the rest stay pending for the next
+/// pass, so a test that expects several versions must loop.
+async fn repair_until_empty(repo: &RepoInstance, feed: &RepoChangefeed) {
+    for _ in 0..100 {
+        drain_repair_pending(repo).await.unwrap();
+        if feed.repair_pending_depth() == 0 {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!(
+        "repair-pending set never emptied (depth {})",
+        feed.repair_pending_depth()
+    );
+}
+
 // (a) Channel-full commits are deferred WITHOUT a gap and the repair drainer
 // lands them in ascending version order; a follower pull sees every event
 // exactly once, contiguous, `gap == None`.
@@ -713,12 +731,15 @@ async fn persistent_retention_gate_holds_until_checkpointed_reopens() {
         );
         assert_eq!(feed.first_gap_version(), 0);
 
-        // Release: the channel drains, the direct repair pass admits ALL
-        // five pending versions (v + 4 seals) through the now-empty
-        // channel — exactly one put each.
+        // Release: the channel drains and the direct repair passes admit ALL
+        // five pending versions (v + 4 seals) — exactly one put each. A
+        // single pass is not enough: `wait_persisted` returns as soon as the
+        // first filler is persisted, while most of the backlog is still
+        // queued, so a pass only admits as many versions as there are free
+        // channel slots at that moment.
         store.release_filler.notify_one();
         wait_persisted(&feed, BACKLOG_KEY).await;
-        drain_repair_pending(&repo).await.unwrap();
+        repair_until_empty(&repo, &feed).await;
         assert_eq!(feed.repair_pending_depth(), 0);
         wait_event_stored(&store, v).await;
         assert_eq!(
