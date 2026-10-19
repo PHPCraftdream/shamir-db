@@ -22,7 +22,9 @@ fn doc(suites: &[(&str, &[(&str, bool)])]) -> String {
             if j > 0 {
                 s.push(',');
             }
-            s.push_str(&format!("\"{test}\":{{\"ignored\":{ignored}}}",));
+            s.push_str(&format!(
+                "\"{test}\":{{\"ignored\":{ignored},\"filter-match\":{{\"status\":\"matches\"}}}}"
+            ));
         }
         s.push_str("}}");
     }
@@ -101,16 +103,6 @@ fn lost_test_is_a_finding() {
         None,
     );
     assert_finding(&out, "TEST_LOST");
-}
-
-#[test]
-fn duplicate_identity_is_a_finding() {
-    let dup = doc(&[(
-        "shamir-engine",
-        &[("dup", false), ("dup", false), ("ok", false)],
-    )]);
-    let out = run(Some(&lines("shamir-engine", &["ok"])), Some(&dup), None);
-    assert_finding(&out, "TEST_DUPLICATE");
 }
 
 #[test]
@@ -207,6 +199,7 @@ fn declared_rename_is_accepted() {
         &[
             ("path", "shamir-engine"),
             ("item", "old_name"),
+            ("to_path", "shamir-engine"),
             ("to_item", "new_name"),
             ("reason", "clearer name"),
             ("owner", "@rust-guard"),
@@ -377,4 +370,61 @@ fn kind_label_is_echoed_into_findings() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success());
     assert!(err.contains("kind doc"), "--kind label missing:\n{err}");
+}
+
+#[test]
+fn declaration_cannot_reuse_a_directly_matched_head_identity() {
+    // `b` survives under its own name; renaming `a` onto it must not
+    // hide the loss of `a` behind an identity that is already matched.
+    let d = delta(
+        "renamed",
+        &[
+            ("path", "bin"),
+            ("item", "a"),
+            ("to_path", "bin"),
+            ("to_item", "b"),
+            (
+                "reason",
+                "claims a survivor that is already matched by name",
+            ),
+            ("owner", "@rust-guard"),
+        ],
+    );
+    let out = run(
+        Some(&lines("bin", &["a", "b"])),
+        Some(&lines("bin", &["b"])),
+        Some(&d),
+    );
+    assert_finding(&out, "TEST_LOST");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("UNUSED_ALLOWANCE"),
+        "the refused declaration must surface:
+{err}"
+    );
+}
+
+#[test]
+fn testcase_without_ignored_blocks_the_comparison() {
+    // A producer regression that drops `ignored` must not silently turn
+    // ignore-drift detection off.
+    let broken = "{\"rust-suites\":{\"b\":{\"testcases\":{\"t\":                  {\"filter-match\":{\"status\":\"matches\"}}}}}}";
+    let out = run(Some(broken), Some(&lines("b", &["t"])), None);
+    assert_finding(&out, "BLOCKED_COMPARISON");
+}
+
+#[test]
+fn testcase_without_filter_match_blocks_the_comparison() {
+    let broken = "{\"rust-suites\":{\"b\":{\"testcases\":{\"t\":{\"ignored\":false}}}}}";
+    let out = run(Some(broken), Some(&lines("b", &["t"])), None);
+    assert_finding(&out, "BLOCKED_COMPARISON");
+}
+
+#[test]
+fn filter_rejected_testcases_are_not_inventory() {
+    // A list taken with `-E` names the rejected tests too; they must not
+    // count as tests, so their absence at head is not a loss.
+    let base = "{\"rust-suites\":{\"b\":{\"testcases\":{                \"kept\":{\"ignored\":false,\"filter-match\":{\"status\":\"matches\"}},                \"other\":{\"ignored\":false,\"filter-match\":{\"status\":\"mismatches\"}}}}}}";
+    let out = run(Some(base), Some(&lines("b", &["kept"])), None);
+    assert_clean(&out);
 }

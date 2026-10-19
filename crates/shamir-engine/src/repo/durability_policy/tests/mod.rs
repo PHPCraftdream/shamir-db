@@ -1,5 +1,6 @@
 #[cfg(feature = "fjall")]
 mod batch_synced_tests;
+mod commit_policy_tests;
 mod helpers;
 mod mem;
 #[cfg(feature = "fjall")]

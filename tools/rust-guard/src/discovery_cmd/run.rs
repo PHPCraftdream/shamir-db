@@ -66,28 +66,6 @@ fn execute(args: DiscoveryArgs) -> Result<u8, String> {
             format!("head list (kind {}) holds zero tests", args.kind),
         );
     }
-    for identity in base.duplicates() {
-        report.add(
-            &args.base_list,
-            1,
-            "TEST_DUPLICATE",
-            format!(
-                "identity {}::{} appears more than once in the base list",
-                identity.0, identity.1
-            ),
-        );
-    }
-    for identity in head.duplicates() {
-        report.add(
-            &args.head_list,
-            1,
-            "TEST_DUPLICATE",
-            format!(
-                "identity {}::{} appears more than once in the head list",
-                identity.0, identity.1
-            ),
-        );
-    }
 
     let mut d = delta::load(args.delta.as_deref())?;
 
@@ -119,79 +97,71 @@ fn execute(args: DiscoveryArgs) -> Result<u8, String> {
 
     // Pass 2 — declared moves/renames for every base identity ABSENT
     // from head. The declaration must name a head identity
-    // (to_path/to_item) that actually exists; each head identity may be
-    // consumed by at most ONE declaration.
+    // (to_path/to_item) that exists and is not yet accounted for: every
+    // direct match already claims its head identity, and each head
+    // identity may be consumed by at most ONE declaration. An entry that
+    // cannot be honoured stays in the delta (reported as an unused
+    // allowance below) and the base test is lost.
     let mut lost: Vec<(String, String)> = Vec::new();
-    let mut claimed_heads: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut unexplained: Vec<(String, String)> = Vec::new();
+    let mut claimed_heads: BTreeSet<(String, String)> = base
+        .counts
+        .keys()
+        .filter(|identity| head.counts.contains_key(*identity))
+        .cloned()
+        .collect();
     for (base_bin, base_test) in &moved_out {
-        let entry = take_declaration(&mut d, base_bin, base_test);
-        let Some(entry) = entry else {
+        let Some((kind, pos)) = find_declaration(&mut d, base_bin, base_test) else {
             lost.push((base_bin.clone(), base_test.clone()));
+            unexplained.push((base_bin.clone(), base_test.clone()));
             continue;
         };
-        let Some((head_bin, head_test)) = &entry.to_path.clone().zip(entry.to_item.clone()) else {
-            // Malformed entry: no head side declared at all. The base
-            // test is lost AND the entry itself is reported as an
-            // unused allowance below (it stays unconsumed).
-            report.add(
-                &args.base_list,
-                1,
-                "TEST_LOST",
-                format!(
-                    "test {base_bin}::{base_test} (kind {}) has a {} declaration for \
-                     {}:{} without to_path/to_item and no head counterpart",
-                    args.kind, entry.kind, entry.path, entry.item,
-                ),
-            );
-            lost.push((base_bin.clone(), base_test.clone()));
-            continue;
+        let entry = d.list_mut(kind)[pos].clone();
+        let problem = match (&entry.to_path, &entry.to_item) {
+            (Some(to_path), Some(to_item)) => {
+                let head_identity = (to_path.clone(), to_item.clone());
+                if !head.counts.contains_key(&head_identity) {
+                    Some(format!(
+                        "declares a move/rename to {to_path}::{to_item}, which does not exist in the head list"
+                    ))
+                } else if !claimed_heads.insert(head_identity) {
+                    Some(format!(
+                        "declares a move/rename to {to_path}::{to_item}, which is already claimed by a direct match or another declaration"
+                    ))
+                } else {
+                    None
+                }
+            }
+            _ => Some(format!(
+                "has a {kind} declaration for {}:{} without to_path/to_item and no head counterpart",
+                entry.path, entry.item
+            )),
         };
-        if !head
-            .counts
-            .contains_key(&(head_bin.clone(), head_test.clone()))
-        {
-            // Declared target does not exist at head: the base test is
-            // lost and the entry stays unconsumed (unused allowance).
-            report.add(
+        lost.push((base_bin.clone(), base_test.clone()));
+        match problem {
+            None => {
+                // Consumed: the leftover sweep below must not report it.
+                d.list_mut(kind).remove(pos);
+                lost.pop();
+            }
+            Some(message) => report.add(
                 &args.base_list,
                 1,
                 "TEST_LOST",
                 format!(
-                    "test {base_bin}::{base_test} (kind {}) declares a move/rename to \
-                     {head_bin}::{head_test}, which does not exist in the head list",
-                    args.kind,
+                    "test {base_bin}::{base_test} (kind {}) {message}",
+                    args.kind
                 ),
-            );
-            lost.push((base_bin.clone(), base_test.clone()));
-            continue;
+            ),
         }
-        let head_identity = (head_bin.clone(), head_test.clone());
-        if !claimed_heads.insert(head_identity) {
-            report.add(
-                &args.base_list,
-                1,
-                "TEST_LOST",
-                format!(
-                    "test {base_bin}::{base_test} (kind {}) declares a move/rename to \
-                     {head_bin}::{head_test}, which is already claimed by another base test",
-                    args.kind,
-                ),
-            );
-            lost.push((base_bin.clone(), base_test.clone()));
-            continue;
-        }
-        // The entry was already removed from the delta by
-        // `take_declaration`; dropping it here consumes it, so the
-        // leftover sweep below never reports it as an unused allowance.
     }
-    for (bin, test) in &lost {
+    for (bin, test) in &unexplained {
         report.add(
             &args.base_list,
             1,
             "TEST_LOST",
             format!(
-                "test {bin}::{test} (kind {}) has no head counterpart and \
-                 no [[moved]]/[[renamed]] declaration",
+                "test {bin}::{test} (kind {}) has no head counterpart and no [[moved]]/[[renamed]] declaration",
                 args.kind
             ),
         );
@@ -233,33 +203,20 @@ fn execute(args: DiscoveryArgs) -> Result<u8, String> {
     Ok(exit_code(&report))
 }
 
-/// Removes and returns the first `[[moved]]`/`[[renamed]]` entry whose
-/// base side (`path` + `item`) matches, tagging it with its kind.
-fn take_declaration(d: &mut delta::Delta, bin: &str, test: &str) -> Option<ClaimedEntry> {
+/// Locates the first `[[moved]]`/`[[renamed]]` entry whose base side
+/// (`path` + `item`) matches; the entry stays in the delta until the
+/// caller has validated and consumed it.
+fn find_declaration(d: &mut delta::Delta, bin: &str, test: &str) -> Option<(&'static str, usize)> {
     for kind in ["moved", "renamed"] {
-        let list = d.list_mut(kind);
-        if let Some(pos) = list.iter().position(|e| e.path == bin && e.item == test) {
-            let entry = list.remove(pos);
-            return Some(ClaimedEntry {
-                kind: kind.to_owned(),
-                path: entry.path,
-                item: entry.item,
-                to_path: entry.to_path,
-                to_item: entry.to_item,
-            });
+        if let Some(pos) = d
+            .list_mut(kind)
+            .iter()
+            .position(|e| e.path == bin && e.item == test)
+        {
+            return Some((kind, pos));
         }
     }
     None
-}
-
-/// A `[[moved]]`/`[[renamed]]` declaration taken out of the delta,
-/// pending validation of its head side.
-struct ClaimedEntry {
-    kind: String,
-    path: String,
-    item: String,
-    to_path: Option<String>,
-    to_item: Option<String>,
 }
 
 /// Reads and parses one list file; a failure is a `BLOCKED_COMPARISON`

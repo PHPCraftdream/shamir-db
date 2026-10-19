@@ -30,9 +30,11 @@
 //! through a declared move/rename). The reverse flip (un-ignoring) is
 //! allowed.
 //!
-//! Finding codes: `TEST_LOST`, `TEST_DUPLICATE`, `TEST_IGNORED`,
+//! Finding codes: `TEST_LOST`, `TEST_IGNORED`,
 //! `TARGET_LOST`, `EMPTY_LIST`, `UNUSED_ALLOWANCE`,
-//! `BLOCKED_COMPARISON`.
+//! `BLOCKED_COMPARISON`. Duplicates cannot occur through the document
+//! parser (JSON object keys are unique; nextest lists each testcase
+//! once), so no duplicate finding exists.
 //!
 //! Re-exports only; logic lives in the sibling files.
 

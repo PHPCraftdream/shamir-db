@@ -322,8 +322,6 @@ Findings (fail closed, `path:line: CODE: message`):
   unreadable, or is not one JSON document with a `rust-suites` object;
   never an empty baseline.
 - `EMPTY_LIST` — a list with zero tests is a failure, not a pass.
-- `TEST_DUPLICATE` — the same (binary id, test name) identity appears
-  twice in one list.
 - `TEST_LOST` — a base test with no head counterpart and no
   `[[moved]]`/`[[renamed]]` declaration, or whose declaration is
   unusable (missing `to_path`/`to_item`, target identity absent from
@@ -337,6 +335,10 @@ Findings (fail closed, `path:line: CODE: message`):
   lost and which carries no head tests (a declared move of its last
   test to another binary does not double-report).
 - `UNUSED_ALLOWANCE` — a delta entry that matched no pairing.
+
+Duplicates cannot occur through the document parser (JSON object keys
+are unique; nextest lists each testcase once), so no duplicate finding
+exists.
 
 Delta mapping: the conservation delta parser is reused; for
 `[[moved]]`/`[[renamed]]` entries `path` + `item` are read as the BASE

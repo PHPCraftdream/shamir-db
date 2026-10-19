@@ -6,12 +6,14 @@
 //! ```json
 //! {"rust-build-meta": {...}, "test-count": 2,
 //!  "rust-suites": {"<binary-id>": {"binary-id": "<binary-id>",
-//!    "testcases": {"<test name>": {"ignored": false}}}}}
+//!    "testcases": {"<test name>": {"ignored": false,
+//!      "filter-match": {"status": "matches"}}}}}}
 //! ```
 //!
-//! Unknown fields are tolerated; a document without `rust-suites` (or
-//! text that is not one JSON document at all) is a parse ERROR — the
-//! caller reports it as a `BLOCKED_COMPARISON` finding instead of
+//! Unknown fields are tolerated; a document without `rust-suites`, a
+//! testcase without a boolean `ignored` or a `filter-match.status`
+//! string, or text that is not one JSON document at all, is a parse
+//! ERROR — the caller reports it as a `BLOCKED_COMPARISON` finding instead of
 //! silently truncating the baseline (fail closed). The legacy
 //! JSON-lines shape is NOT parsed: it only ever existed in this
 //! parser's imagination, and accepting it would let a mis-generated
@@ -52,13 +54,30 @@ impl TestList {
                 .as_object()
                 .ok_or_else(|| format!("suite `{binary}`: `testcases` is not a JSON object"))?;
             for (test, case) in cases {
+                let case = case.as_object().ok_or_else(|| {
+                    format!("suite `{binary}`: testcase `{test}` is not a JSON object")
+                })?;
+                let ignored = case
+                    .get("ignored")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| {
+                        format!("suite `{binary}`: testcase `{test}` has no boolean `ignored`")
+                    })?;
+                let status = case
+                    .get("filter-match")
+                    .and_then(|filter| filter.get("status"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        format!("suite `{binary}`: testcase `{test}` has no `filter-match.status`")
+                    })?;
+                // A list taken with a filter expression also names the
+                // tests the filter rejected; they are not inventory.
+                if status != "matches" {
+                    continue;
+                }
                 let identity = (binary.clone(), test.clone());
                 *list.counts.entry(identity.clone()).or_default() += 1;
-                list.ignored.entry(identity).or_insert_with(|| {
-                    case.get("ignored")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
-                });
+                list.ignored.insert(identity, ignored);
             }
         }
         Ok(list)
@@ -67,13 +86,5 @@ impl TestList {
     /// The distinct binary/target ids carrying at least one test.
     pub fn binaries(&self) -> BTreeSet<String> {
         self.counts.keys().map(|(b, _)| b.clone()).collect()
-    }
-
-    /// Identities that occur more than once in the list.
-    pub fn duplicates(&self) -> impl Iterator<Item = &(String, String)> {
-        self.counts
-            .iter()
-            .filter(|(_, count)| **count > 1)
-            .map(|(identity, _)| identity)
     }
 }

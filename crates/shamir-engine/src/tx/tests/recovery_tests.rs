@@ -1,21 +1,18 @@
 //! V2 recovery tests (Stage 7.1.a skeleton + 7.1.c–d apply logic).
-
 #[cfg(feature = "fjall")]
 use std::path::PathBuf;
 use std::sync::Arc;
-
-use shamir_query_builder::write::{self, doc};
-use shamir_storage::storage_in_memory::InMemoryRepo;
-use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::InnerValue;
-use shamir_wal::{WalDurability, WalEntryV2, WalOpV2};
 
 #[cfg(feature = "fjall")]
 use crate::repo::BoxRepoFactory;
 use crate::repo::{repo_token, BoxRepo, RepoInstance};
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
-
+use shamir_query_builder::write::{self, doc};
+use shamir_storage::storage_in_memory::InMemoryRepo;
+use shamir_types::types::record_id::RecordId;
+use shamir_types::types::value::InnerValue;
+use shamir_wal::{WalDurability, WalEntryV2, WalOpV2};
 /// Retry helper for reopening a disk-backed repo on Windows, where the
 /// file lock is released lazily after `drop`. On non-Windows platforms this
 /// almost always succeeds on the first attempt.
@@ -43,24 +40,20 @@ async fn reopen_disk_repo(name: &str, path: PathBuf, tables: Vec<TableConfig>) -
         last_err
     );
 }
-
 fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());
     RepoInstance::new("test".into(), BoxRepo::InMemory(repo), Vec::new())
 }
-
 #[tokio::test]
 async fn recover_v2_inflight_clean_repo_is_zero() {
     let repo = make_repo();
     let count = repo.recover_v2_inflight().await.unwrap();
     assert_eq!(count, 0, "clean repo has no inflight entries");
 }
-
 #[tokio::test]
 async fn recover_v2_inflight_replays_and_removes_entries() {
     let repo = make_repo();
     let wal = repo.repo_wal().await.unwrap();
-
     let mut rid_bytes = [0u8; 16];
     rid_bytes[15] = 42;
     let entry = WalEntryV2::new(
@@ -75,10 +68,8 @@ async fn recover_v2_inflight_replays_and_removes_entries() {
     wal.begin_grouped(&entry, WalDurability::Buffered)
         .await
         .unwrap();
-
     let inflight = wal.recover().await.unwrap();
     assert_eq!(inflight.len(), 1);
-
     let count = repo.recover_v2_inflight().await.unwrap();
     assert_eq!(count, 1);
 }
@@ -87,7 +78,6 @@ async fn recover_v2_inflight_replays_and_removes_entries() {
 async fn recover_v2_inflight_handles_multiple_entries() {
     let repo = make_repo();
     let wal = repo.repo_wal().await.unwrap();
-
     for i in 0..3u64 {
         let entry = WalEntryV2::new(
             wal.fresh_txn_id(),
@@ -101,7 +91,6 @@ async fn recover_v2_inflight_handles_multiple_entries() {
             .await
             .unwrap();
     }
-
     let count = repo.recover_v2_inflight().await.unwrap();
     assert_eq!(count, 3);
 }
@@ -111,7 +100,6 @@ async fn recover_v2_inflight_replays_put_applies_to_data_store() {
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
-
     let wal = repo.repo_wal().await.unwrap();
     let mut rid_bytes = [0u8; 16];
     rid_bytes[15] = 42;
@@ -120,7 +108,6 @@ async fn recover_v2_inflight_replays_put_applies_to_data_store() {
 
     let value = InnerValue::Str("recovered".into());
     let body = value.to_bytes().unwrap();
-
     let entry = WalEntryV2::new(
         wal.fresh_txn_id(),
         0,
@@ -358,36 +345,33 @@ async fn recover_v2_inflight_replays_index_del() {
 
 // Renamed from `crash_simulation_inflight_recovery_replays_full_state`.
 //
-// NOTE: this test does NOT simulate a real crash at the storage/fsync
-// layer. It constructs the on-disk state a *real* crash *would* leave
-// behind — an inflight WAL entry written to the file segment but never
-// followed by the data_store update — by appending the entry directly to
-// the file WAL, then drops the original `RepoInstance` and reopens a fresh
-// one over the SAME tempdir (so it re-reads the same `*.shamirwal/repo.wal`
-// segment). That exercises the recovery replay logic — the useful coverage
-// here — but it does not validate crash atomicity at the storage layer;
-// that requires a subprocess-kill harness (TODO Stage 7.rest).
+// NOTE: this test does NOT simulate a real crash at the storage/fsync layer. It
+// constructs the on-disk state a *real* crash *would* leave behind — an inflight
+// WAL entry written to the file segment but never followed by the data_store
+// update — by appending the entry directly to the file WAL, then drops the
+// original `RepoInstance` and reopens a fresh one over the SAME tempdir (so it
+// re-reads the same `*.shamirwal/repo.wal` segment). That exercises the recovery
+// replay logic — the useful coverage here — but it does not validate crash
+// atomicity at the storage layer; that requires a subprocess-kill harness (TODO
+// Stage 7.rest).
 //
-// F5e: this test is disk-backed (sled tempdir). Under the single
-// WAL write path the `Mem` sink is per-instance, so an injected entry
-// would not survive reopen of an in-memory repo; the file segment is the
-// medium that genuinely persists across a simulated restart.
+// F5e: this test is disk-backed (sled tempdir). Under the single WAL write path
+// the `Mem` sink is per-instance, so an injected entry would not survive reopen
+// of an in-memory repo; the file segment is the medium that genuinely persists
+// across a simulated restart.
 /// Disk-backed (fjall_raw) crash-matrix test — requires the `fjall` feature.
 #[cfg(feature = "fjall")]
 #[tokio::test]
 async fn replay_inflight_v2_from_simulated_partial_commit_state() {
     use crate::repo::repo_token;
-
     let tempdir = tempfile::TempDir::new().expect("tempdir");
     let path = tempdir.path().to_path_buf();
-
     let mut rid_a_bytes = [0u8; 16];
     rid_a_bytes[15] = 1;
     let rid_a = RecordId(rid_a_bytes);
     let mut rid_b_bytes = [0u8; 16];
     rid_b_bytes[15] = 2;
     let rid_b = RecordId(rid_b_bytes);
-
     // === Phase A+B: open a disk repo, append an inflight V2 entry (two
     //     Puts + a counter delta) directly to the file WAL WITHOUT applying
     //     it to the data_store — exactly the on-disk shape a crash

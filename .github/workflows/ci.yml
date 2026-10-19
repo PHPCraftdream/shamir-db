@@ -211,13 +211,20 @@ jobs:
         run: cargo doc -p shamir-engine --no-deps --document-private-items --locked --no-default-features
 
   # CI-03b: engine feature matrix. Each cell compiles shamir-engine in
-  # ISOLATION (`-p`, never a workspace invocation that could unify feature
-  # defaults back in) with check + clippy, then asserts — via the pure-
-  # manifest script scripts/ci/gates/features_matrix_check.py (unit-tested in
-  # scripts/ci/tests/test_features_matrix_check.py) — that the ENABLED
-  # feature set matches the cell exactly, so "no defaults" is proven, not
-  # just labelled. Reduced-feature cells catch missing `cfg` guards that
-  # the workspace-wide jobs unify away.
+  # ISOLATION (`-p shamir-engine --lib`, never a workspace invocation that
+  # could unify feature defaults back in) with check + clippy, then asserts
+  # — via scripts/ci/gates/features_matrix_check.py, which resolves the cell
+  # with a dev-free `cargo tree -e normal,build,features` invocation — that
+  # the ENABLED feature set matches the cell exactly, so "no defaults" is
+  # proven, not just labelled.  WHY --lib ONLY in the cells: `--all-targets`
+  # activates dev-dependencies and workspace feature unification, so the
+  # cell is NOT isolated — CI evidence (round of 2026-10-19): the cell
+  # labelled `--no-default-features` still resolved
+  # {default, all-backends, fjall, test-util}.  The lib-only cells are the
+  # isolated proof; the single --all-targets pair lives only in the
+  # default-plus cell, where defaults are on anyway and the unified
+  # resolution legitimately equals the label.  Reduced-feature cells catch
+  # missing `cfg` guards that the workspace-wide jobs unify away.
   engine-features:
     name: engine features (${{ matrix.cell.id }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -242,8 +249,15 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - name: feature-resolution assertion
         run: python3 -I scripts/ci/gates/features_matrix_check.py --expected ${{ matrix.cell.id }} --flags="${{ matrix.cell.flags }}"
+      - run: cargo check -p shamir-engine --lib --locked ${{ matrix.cell.flags }}
+      - run: cargo clippy -p shamir-engine --lib --locked ${{ matrix.cell.flags }} -- -D warnings
+      # --all-targets ONLY here: under dev-dependency/workspace unification
+      # it would falsely enable features in the reduced cells (see CI
+      # evidence above); in default-plus the resolution equals the label.
       - run: cargo check -p shamir-engine --all-targets --locked ${{ matrix.cell.flags }}
+        if: matrix.cell.id == 'default-plus'
       - run: cargo clippy -p shamir-engine --all-targets --locked ${{ matrix.cell.flags }} -- -D warnings
+        if: matrix.cell.id == 'default-plus'
 
   # CI-03b: fast-tier shadow of `engine-features` — cells 1 and 5 on
   # ubuntu, only while the PR is a draft AND shamir-engine is affected
@@ -278,8 +292,14 @@ jobs:
             *shamir-engine*|*--workspace*)
               python3 -I scripts/ci/gates/features_matrix_check.py --expected no-default --flags=--no-default-features
               python3 -I scripts/ci/gates/features_matrix_check.py --expected default-plus --flags='--features test-util,fts_indexed_long'
-              cargo check -p shamir-engine --all-targets --locked --no-default-features
-              cargo clippy -p shamir-engine --all-targets --locked --no-default-features -- -D warnings
+              # lib-only cells: the isolated proof (--all-targets would
+              # unify dev-dep/workspace features into reduced cells)
+              cargo check -p shamir-engine --lib --locked --no-default-features
+              cargo clippy -p shamir-engine --lib --locked --no-default-features -- -D warnings
+              cargo check -p shamir-engine --lib --locked --features test-util,fts_indexed_long
+              cargo clippy -p shamir-engine --lib --locked --features test-util,fts_indexed_long -- -D warnings
+              # default-plus only: unified --all-targets legitimately
+              # equals the label when defaults are on
               cargo check -p shamir-engine --all-targets --locked --features test-util,fts_indexed_long
               cargo clippy -p shamir-engine --all-targets --locked --features test-util,fts_indexed_long -- -D warnings
               ;;
@@ -618,7 +638,12 @@ jobs:
       # Same ratchet the fmt job runs; repeated here so the source-integrity
       # job is self-contained (cheap, stdlib-only).
       - name: baseline monotonic check
-        run: python3 -I scripts/ci/check_baseline_monotonic.py --base "origin/master" --head HEAD
+        # Diff against the PR's merge base, not origin/master: the merge ref
+        # is fixed when the PR syncs, so after another PR lowers the baseline
+        # on master, origin/master-vs-HEAD would fail on NEW dirs master no
+        # longer has. MERGE_BASE is set above (PRs only); master pushes fall
+        # back to origin/master (HEAD == master, empty diff, passes).
+        run: python3 -I scripts/ci/check_baseline_monotonic.py --base "${MERGE_BASE:-origin/master}" --head HEAD
       - name: layout check
         run: python3 -I scripts/ci/check_layout.py
       # The tool is workspace-excluded: the main fmt/clippy jobs never see
