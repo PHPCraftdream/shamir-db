@@ -416,8 +416,8 @@ async fn start_barrier_failure_defers_start_until_retry() {
 /// Round-6 item 7(c): the applied-oracle is the FOLLOWER's bookmark covering
 /// the captured leader version (bounded wait), and deregistration is awaited
 /// SYSTEM-driven (loop's own exit + item-4 teardown) — no manual handle
-/// removal via `wait_for_subscription`. The long-poll budget is small so the
-/// parked pull returns promptly after the lease goes invalid.
+/// removal via `wait_for_subscription`. Round 9: DETERMINISTIC after-apply
+/// park — the long-poll's residual timer waits starve the yield budget.
 #[tokio::test]
 async fn pause_flush_failure_stops_live_follower_and_never_restarts() {
     let leader = build_db().await;
@@ -427,18 +427,23 @@ async fn pause_flush_failure_stops_live_follower_and_never_restarts() {
     let follower = build_db().await;
     create_profile_and_subscription(&follower).await;
 
-    // Run-forever supervisor: the loop stays LIVE, long-polling.
-    let sup = supervisor(follower.clone(), leader.clone()).with_poll_wait_ms(100);
+    // Round 9: run-forever loop parked deterministically after its apply.
+    let arrived = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let hook = Arc::new(crate::replication::follower_loop::ApplyParkHook {
+        repo: Some("main".into()),
+        after_apply: true,
+        arrived: Arc::clone(&arrived),
+        release: Arc::clone(&release),
+        exited: Arc::new(Notify::new()),
+    });
+    let sup = supervisor(follower.clone(), leader.clone()).with_apply_park(hook);
     sup.reconcile().await;
     assert!(sup.is_running("sub_a"), "the loop must be live");
-
-    // The follower APPLIED the captured leader version (real applied-oracle,
-    // bounded wait — not a leader-side readiness claim).
-    wait_until_bookmark_covers(&follower, "main", version).await;
-
-    // Arm the REAL seam, then execute the PAUSE batch: quiesce → row flip →
-    // flush FAILS → the batch errors, but the row is already `paused` and
-    // the lease already invalid.
+    arrived.notified().await; // parked after apply, no apply guard held
+    wait_until_bookmark_covers(&follower, "main", version).await; // real applied-oracle
+                                                                  // Arm the REAL seam, then PAUSE: quiesce → row flip → flush FAILS → the
+                                                                  // batch errors, but the row is already `paused` and the lease invalid.
     let fault = SeedCatalogueFlushFaultForTest::arm(&follower);
     let pause = pause_op_future(follower.clone());
     assert!(
@@ -458,14 +463,13 @@ async fn pause_flush_failure_stops_live_follower_and_never_restarts() {
         "the pause's quiesce must have invalidated the lease"
     );
 
-    // The loop is stopped BY THE SYSTEM: bounded wait for the loop's own
-    // exit + the exit-path teardown to deregister the handle (round-6 item
-    // 7(c) — never the manual-removal helper).
+    // Release the park: the loop exits at its lease check; SYSTEM-driven
+    // bounded wait for exit + teardown (item 7(c)).
+    release.notify_one();
     wait_until_deregistered(&sup, "sub_a").await;
     assert!(!sup.is_running("sub_a"));
-
     drop(fault);
-    sup.reconcile().await; // a paused row is never restarted
+    sup.reconcile().await; // a paused row is never restarted (see doc above)
     assert_eq!(sup.active_count(), 0);
     assert_eq!(
         sub_state(&follower, "sub_a").await.as_deref(),

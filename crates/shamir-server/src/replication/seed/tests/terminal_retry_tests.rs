@@ -218,6 +218,30 @@ async fn persistent_follower(meta: std::path::PathBuf) -> Arc<ShamirDb> {
     follower
 }
 
+/// Reopen the persistent follower, retrying the fjall DIRECTORY lock: the
+/// lock is held until the LAST `Arc<ShamirDb>`/store clone drops and is
+/// released LAZILY; the `stop_all` calls + drops above release the clones,
+/// and the bounded retry absorbs the lazy release. Only the lock error is
+/// retried (fjall itself already waits between its own lock attempts); any
+/// other initialisation failure fails the test at once. (Same precedent as
+/// `shamir-engine`'s `reopen_disk_repo` and `open_retry` test helpers.)
+#[cfg(unix)]
+async fn reopen_follower_with_lock_retry(meta: std::path::PathBuf) -> ShamirDb {
+    let mut last_lock_error = None;
+    for _ in 0..10 {
+        match ShamirDb::init(SystemStoreConfig::Fjall(meta.clone())).await {
+            Ok(db) => return db,
+            Err(err) if err.to_string().contains("Locked") => last_lock_error = Some(err),
+            Err(err) => panic!("reopen persistent follower: {err:?}"),
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!(
+        "reopen persistent follower: lock never released: {:?}",
+        last_lock_error.expect("at least one attempt")
+    );
+}
+
 /// COUNTERFACTUAL: a single-attempt terminal mark produces exactly one
 /// failed flush (1 attempt, 1 failure, 0 successes), not the 3/2/1 record.
 #[cfg(unix)]
@@ -349,6 +373,12 @@ async fn terminal_marking_retries_until_success() {
     // Release the seam only after the assertions (drop the RAII fault guard).
     *fault_slot.lock().expect("fault slot") = None;
 
+    // Documented stop path before the reopen: `stop_all` joins any live
+    // handles (the loops already exited via max_iterations). The
+    // `with_start_race_hook` closure's `hook_follower` clone drops with
+    // `sup2`, i.e. after `stop_all`.
+    sup2.stop_all().await;
+    sup.stop_all().await;
     drop(sup2);
     drop(sup);
     drop(fault_slot);
@@ -370,11 +400,7 @@ async fn terminal_marking_retries_until_success() {
     assert!(bookmark(&follower, "main").await >= version);
 
     drop(follower);
-    let reopened = Arc::new(
-        ShamirDb::init(SystemStoreConfig::Fjall(follower_meta))
-            .await
-            .expect("reopen persistent follower"),
-    );
+    let reopened = Arc::new(reopen_follower_with_lock_retry(follower_meta).await);
     assert_eq!(
         sub_state(&reopened, "sub_a").await.as_deref(),
         Some("resync_required"),
