@@ -34,15 +34,15 @@ use crate::server::ticket::TicketPlain;
 // --- shared deserialization helpers ---
 
 const KDF_CANON_TOML: &str =
-    include_str!("../../../test-vectors/kdf_canonical_string_default.toml");
-const ARGON2_TOML: &str = include_str!("../../../test-vectors/argon2id_default.toml");
-const SCRAM_TOML: &str = include_str!("../../../test-vectors/scram_flow_default.toml");
-const IDENTITY_TOML: &str = include_str!("../../../test-vectors/identity_sig_default.toml");
-const FAKE_BLOB_TOML: &str = include_str!("../../../test-vectors/fake_blob_default.toml");
-const TICKET_TOML: &str = include_str!("../../../test-vectors/resumption_ticket_roundtrip.toml");
+    include_str!("../../../../test-vectors/kdf_canonical_string_default.toml");
+const ARGON2_TOML: &str = include_str!("../../../../test-vectors/argon2id_default.toml");
+const SCRAM_TOML: &str = include_str!("../../../../test-vectors/scram_flow_default.toml");
+const IDENTITY_TOML: &str = include_str!("../../../../test-vectors/identity_sig_default.toml");
+const FAKE_BLOB_TOML: &str = include_str!("../../../../test-vectors/fake_blob_default.toml");
+const TICKET_TOML: &str = include_str!("../../../../test-vectors/resumption_ticket_roundtrip.toml");
 const ROTATION_TOML: &str =
-    include_str!("../../../test-vectors/identity_rotation_signed_by_old.toml");
-const AUTH_MSG_TOML: &str = include_str!("../../../test-vectors/auth_message_default.toml");
+    include_str!("../../../../test-vectors/identity_rotation_signed_by_old.toml");
+const AUTH_MSG_TOML: &str = include_str!("../../../../test-vectors/auth_message_default.toml");
 
 #[derive(serde::Deserialize)]
 struct VecKdfParams {
