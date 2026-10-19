@@ -57,10 +57,6 @@ dir crates/shamir-tx/src 25
 dir crates/shamir-tx/src/mvcc_store 9
 dir crates/shamir-tx/src/tests 23
 dir crates/shamir-tx/src/tests/mvcc_store_tests 32
-dir crates/shamir-types/src 10
-dir crates/shamir-types/src/codecs/interned/tests 8
-dir crates/shamir-types/src/record_view/tests 9
-dir crates/shamir-types/src/types 9
 dir crates/shamir-wal/src 13
 dir crates/shamir-wal/src/tests 10
 dir crates/shamir-wasm-host/src 16
@@ -122,6 +118,3 @@ file crates/shamir-storage/src/tests/stores/storage_mirrored_tests.rs 1364
 file crates/shamir-tx/src/changefeed.rs 1078
 file crates/shamir-tx/src/mvcc_store/mod.rs 1655
 file crates/shamir-tx/src/repo_tx_gate.rs 1406
-file crates/shamir-types/src/core/interner/tests/interner_tests.rs 1086
-file crates/shamir-types/src/record_view/lens.rs 1169
-file crates/shamir-types/src/record_view/tests/record_ref_tests.rs 1016
