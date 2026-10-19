@@ -65,7 +65,7 @@ fn tx_read_quarantine_refusal(
 /// pre-quarantine tx.
 ///
 /// Deliberately SYNCHRONOUS (no `.await`) and fully self-contained (skip
-/// seam + `is_empty` fast path live here, not at the call sites): the async
+/// seam + ONE snapshot load live here, not at the call sites): the async
 /// callers keep only a one-line `if let Some(err) = ...` in their bodies,
 /// so the tree-walk's locals (visitor, per-op bindings) never become fields
 /// of the callers' generated `Future` state machines. Inlining the walk
@@ -80,19 +80,22 @@ pub(crate) fn tx_read_quarantine_refusal_for_request(
     db_name: &str,
     request: &BatchRequest,
 ) -> Option<BatchError> {
-    if skip_read_quarantine_for_test() || shamir.resync_quarantine.is_empty() {
+    if skip_read_quarantine_for_test() {
         return None;
     }
-    quarantined_read_hit(db_name, request, &shamir.resync_quarantine).map(
-        |(alias, repo, reason)| BatchError::ResyncRequired {
+    // ONE snapshot load per lookup; the whole-tree walk runs against the
+    // loaded snapshot (never re-loads between ops).
+    let snapshot = shamir.resync_quarantine.snapshot();
+    quarantined_read_hit(db_name, request, &snapshot).map(|(alias, repo, reason)| {
+        BatchError::ResyncRequired {
             alias,
             detail: Box::new(ResyncRequiredDetail {
                 db: db_name.to_string(),
                 repo,
                 reason,
             }),
-        },
-    )
+        }
+    })
 }
 
 impl ShamirDb {

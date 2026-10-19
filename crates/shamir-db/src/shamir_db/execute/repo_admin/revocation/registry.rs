@@ -9,9 +9,9 @@ impl ShamirDb {
     pub(crate) async fn revoke_quarantined_receivers(&self) {
         let mut pending = Vec::new();
         for ((db, repo), gates) in self.changelog_receivers.snapshot() {
-            if self.resync_quarantine.reason_for(&db, &repo).is_some()
-                || self.resync_quarantine.reason_for(&db, "*").is_some()
-            {
+            // S5c-X PR8b-2: exact `(db, repo)` coverage only — the cache has
+            // no wildcard/global arms anymore.
+            if self.resync_quarantine.reason_for(&db, &repo).is_some() {
                 for gate in gates {
                     gate.close();
                     pending.push(gate);
@@ -23,9 +23,14 @@ impl ShamirDb {
         }
     }
 
-    /// Recompute and install the cache. Resolution failures propagate; an
-    /// existing cache remains installed and therefore fail-closed.
+    /// S5c-X PR8b-2: validate the subscription catalogue FIRST — a
+    /// legacy/malformed row returns the typed `subscription_catalogue`
+    /// error, so `init` fails at open and a runtime refresh keeps the last
+    /// safe snapshot installed (fail-closed, never clears protection). On
+    /// success the cache is rebuilt from the rows' durable bindings and the
+    /// live receivers are re-checked.
     pub(crate) async fn refresh_resync_quarantine_cache(&self) -> DbResult<()> {
+        crate::repl_binding::validate::validate_subscription_catalogue(self).await?;
         let entries = self.resync_quarantine_entries().await?;
         self.resync_quarantine.install(entries);
         self.revoke_quarantined_receivers().await;

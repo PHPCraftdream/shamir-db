@@ -1,6 +1,6 @@
 //! Exact replay snapshot for the detached durability worker.
 
-use super::*;
+use super::set::*;
 use std::fs::File;
 use std::io::Read;
 

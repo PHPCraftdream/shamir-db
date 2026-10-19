@@ -67,20 +67,20 @@
 //! the aggregate instruction count across the whole fan-out is bounded by
 //! one shared budget, same as wall-clock + epoch already bound total time.
 
-use super::super::context::{BatchContext, FnBatch, FnCtx, GlobalVars};
-use super::super::contract::ShamirFunction;
-use super::super::db_gateway::DbGateway;
-use super::super::error::{FnResult, FunctionError};
-use super::super::net_gateway::NetGateway;
-use super::super::params::Params;
-use super::super::registry::FunctionRegistry;
-use super::host_batch::{host_batch_get, host_batch_put};
-use super::host_call::host_call;
-use super::host_db::{host_db_execute, host_db_get, host_db_insert, host_db_query};
-use super::host_globals::{host_global_get, host_global_set};
-use super::host_http::host_http_fetch;
+use super::bindings::batch::{host_batch_get, host_batch_put};
+use super::bindings::call::host_call;
+use super::bindings::db::{host_db_execute, host_db_get, host_db_insert, host_db_query};
+use super::bindings::globals::{host_global_get, host_global_set};
+use super::bindings::http::host_http_fetch;
 use super::wasm_engine::{WasmEngine, WasmLimits};
 use super::wasm_sanitizer::verify_wasm_module;
+use crate::gateway::db_gateway::DbGateway;
+use crate::gateway::net_gateway::NetGateway;
+use crate::runtime::context::{BatchContext, FnBatch, FnCtx, GlobalVars};
+use crate::runtime::contract::ShamirFunction;
+use crate::runtime::error::{FnResult, FunctionError};
+use crate::runtime::params::Params;
+use crate::runtime::registry::FunctionRegistry;
 use async_trait::async_trait;
 use shamir_collections::TFxSet;
 use shamir_types::access::Actor;
@@ -294,7 +294,7 @@ impl WasmFunction {
 /// Read `len` bytes from the memory data slice starting at `ptr`.
 ///
 /// Returns a wasm trap on out-of-bounds.
-pub(super) fn read_guest_mem(
+pub(in crate::wasm) fn read_guest_mem(
     mem_data: &[u8],
     ptr: i32,
     len: i32,
@@ -318,7 +318,7 @@ pub(super) fn read_guest_mem(
 ///
 /// Uses explicit reborrows (`&mut *caller`) because `Caller` is `&mut` and
 /// method calls consume it.
-pub(super) async fn write_value_to_guest(
+pub(in crate::wasm) async fn write_value_to_guest(
     caller: &mut wasmtime::Caller<'_, HostState>,
     value: Option<QueryValue>,
 ) -> Result<i64, wasmtime::Error> {
@@ -366,7 +366,7 @@ pub(super) async fn write_value_to_guest(
 /// Write raw bytes into guest memory via `shamir_alloc`, returning the
 /// packed `(ptr, len)` i64. The byte-slice form of `write_value_to_guest`
 /// (the payload is already-encoded msgpack, e.g. a `BatchResponse`).
-pub(super) async fn write_bytes_to_guest(
+pub(in crate::wasm) async fn write_bytes_to_guest(
     caller: &mut wasmtime::Caller<'_, HostState>,
     bytes: &[u8],
 ) -> Result<i64, wasmtime::Error> {
