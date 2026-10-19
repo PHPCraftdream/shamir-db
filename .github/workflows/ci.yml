@@ -531,16 +531,12 @@ jobs:
       # `--no-tests=fail` (supported since 0.9.x, and by the pinned
       # 0.9.137) backs the same rule at run time.
       - name: discover loom model tests (must be non-empty)
+        shell: bash
         run: |
           set -euo pipefail
           cargo nextest list -p shamir-engine --features loom --lib -E 'test(loom_model)' --message-format json > loom_list.json
-          count="$(python3 -c 'import json,sys; print(sum(1 for line in open(sys.argv[1], encoding="utf-8") if line.strip() and json.loads(line).get("type") == "test"))' loom_list.json)"
-          echo "loom model tests discovered: $count"
+          python3 -I scripts/ci/gates/loom_preflight_check.py --list-file loom_list.json --name-filter loom_model
           rm -f loom_list.json
-          if [ "$count" -eq 0 ]; then
-            echo "::error::loom discovery found ZERO tests for -E 'test(loom_model)'; the model-checker gate is vacuous" >&2
-            exit 1
-          fi
       - run: cargo nextest run -p shamir-engine --features loom --lib -E 'test(loom_model)' --nocapture --no-tests=fail
 
   # rust-guard source-integrity gates (CI-03a). Runs the workspace-excluded
@@ -670,9 +666,48 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       # On master pushes there is no merge base (HEAD *is* master); the
       # discovery diff is a PR-shaped gate and is skipped there.
+      # shell: bash — windows-latest defaults to PowerShell, where the
+      # `>> "$GITHUB_ENV"` append syntax is wrong.
       - name: compute merge base
         if: github.event_name == 'pull_request'
+        shell: bash
         run: echo "MERGE_BASE=$(git merge-base origin/master HEAD)" >> "$GITHUB_ENV"
+      # Always built (un-gated): the campaign-gated steps below need it only
+      # when a campaign is active, but the format smoke below always needs
+      # the binary — one cargo build serves both.
+      - name: build rust-guard
+        run: cargo build --manifest-path tools/rust-guard/Cargo.toml --locked
+      # FORMAT SMOKE — runs BEFORE and independent of the campaign gate:
+      # proves the discovery tool round-trips REAL `cargo nextest list`
+      # output on the default config (ubuntu only). shamir-collections has
+      # no lib tests; shamir-types is the smallest crate that clearly does
+      # (#[test] modules under crates/shamir-types/src/**/tests/).
+      - name: format smoke (real nextest output must round-trip)
+        if: matrix.os == 'ubuntu-latest' && matrix.config.id == 'default'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .scratch
+          cargo nextest list -p shamir-types --lib --message-format json > .scratch/smoke.json
+          printf 'base = "smoke"\n' > .scratch/empty-delta.toml
+          tools/rust-guard/target/debug/rust-guard discovery \
+            --base-list .scratch/smoke.json \
+            --head-list .scratch/smoke.json \
+            --delta .scratch/empty-delta.toml \
+            --kind lib
+          printf '{"rust-suites":{},"test-count":0}' > .scratch/empty.json
+          if tools/rust-guard/target/debug/rust-guard discovery \
+            --base-list .scratch/empty.json \
+            --head-list .scratch/empty.json \
+            --delta .scratch/empty-delta.toml \
+            --kind lib; then
+            echo "::error::empty list passed vacuously"
+            exit 1
+          else
+            echo "empty list correctly rejected"
+          fi
+          python3 -I scripts/ci/gates/loom_preflight_check.py --list-file .scratch/smoke.json
+          rm -rf .scratch
       # Same selection as the source-integrity job: rows are
       # name<TAB>delta<TAB>packages<TAB>dirs for touched campaign
       # packages; an empty file means no-op (notice + pass).
@@ -697,14 +732,9 @@ jobs:
             echo "::notice::no active campaign package touched by this diff; test discovery skipped"
           fi
           rm -f campaigns.tsv
-      - name: build rust-guard
-        if: steps.select.outputs.campaigns != ''
-        run: cargo build --manifest-path tools/rust-guard/Cargo.toml --locked
       # Base list cache, keyed by base SHA + OS + config — NEVER shared
-      # across configurations. OPEN ITEM: actions/cache is not used
-      # anywhere else in this workflow, so there is no SHA to copy;
-      # `@v4` is left here with a TODO until the owner pins it.
-      - uses: actions/cache@v4  # TODO(pin-by-SHA)
+      # across configurations.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         id: base_list_cache
         if: steps.select.outputs.campaigns != ''
         with:

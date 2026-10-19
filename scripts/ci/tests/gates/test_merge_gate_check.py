@@ -16,7 +16,7 @@ import unittest
 sys.path.insert(
     0,
     os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
         "gates",
     ),
 )
@@ -154,6 +154,38 @@ class EvaluateTests(unittest.TestCase):
         reasons = mgc.evaluate(data, **DRAFT)
         self.assertIn("job fast unexpectedly skipped", reasons)
         self.assertIn(mgc.DRAFT_MESSAGE, reasons)
+
+    def test_invalid_result_value_fails(self):
+        data = dict(FULL_OK)
+        data["rustdoc"] = {"result": "weird", "outcome": "weird"}
+        reasons = mgc.evaluate(data, **READY)
+        self.assertIn(
+            "job rustdoc: invalid result 'weird' (must be one of "
+            "cancelled, failure, skipped, success)",
+            reasons,
+        )
+
+    def test_missing_result_key_fails(self):
+        data = dict(FULL_OK)
+        data["test"] = {"outcome": "success"}
+        reasons = mgc.evaluate(data, **READY)
+        self.assertIn(
+            "job test: invalid result None (must be one of "
+            "cancelled, failure, skipped, success)",
+            reasons,
+        )
+
+    def test_null_result_fails(self):
+        data = dict(FULL_OK)
+        data["clippy"] = {"result": None, "outcome": None}
+        reasons = mgc.evaluate(data, **READY)
+        self.assertIn("job clippy: invalid result None", reasons[0])
+
+    def test_non_dict_job_info_fails(self):
+        data = dict(FULL_OK)
+        data["fmt"] = "success"
+        reasons = mgc.evaluate(data, **READY)
+        self.assertTrue(r.startswith("job fmt: invalid result") for r in reasons)
 
     def test_required_jobs_list_excludes_fast_tier_only_job(self):
         self.assertNotIn("engine-features-fast", mgc.REQUIRED_JOBS)

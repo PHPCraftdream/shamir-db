@@ -10,7 +10,7 @@
 //! module = "crate::repo::instance::repo_instance"
 //! ```
 
-use crate::finding::Report;
+use crate::common::finding::Report;
 use serde::Deserialize;
 use syn::{File, Item, Type};
 

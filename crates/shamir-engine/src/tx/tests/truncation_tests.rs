@@ -29,15 +29,19 @@
 //! assert the engine WIRING — that `drain_step` calls truncate at the right
 //! moment and recovery survives it.
 
+#[cfg(feature = "fjall")]
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[cfg(feature = "fjall")]
 use serial_test::serial;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_tx::IsolationLevel;
 use shamir_types::types::value::InnerValue;
 
-use crate::repo::{BoxRepo, BoxRepoFactory, RepoInstance};
+#[cfg(feature = "fjall")]
+use crate::repo::BoxRepoFactory;
+use crate::repo::{BoxRepo, RepoInstance};
 use crate::table::TableConfig;
 use crate::tx::drainer::Drainer;
 
@@ -48,6 +52,8 @@ fn make_mem_repo() -> RepoInstance {
 
 /// Retry-reopen a disk-backed repo (Windows releases file locks lazily
 /// after `drop`). Mirrors the helper in `recovery_tests.rs`.
+/// Disk-backed (fjall_raw) — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 pub(crate) async fn reopen_disk_repo(
     name: &str,
     path: PathBuf,
@@ -186,6 +192,8 @@ async fn truncate_only_when_truncatable_not_per_commit() {
 }
 
 /// Count `*.wal` segment files in a repo's `<name>.shamirwal/` directory.
+/// Only consumed by fjall-gated tests — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 pub(crate) fn shamirwal_seg_count(repo_dir: &std::path::Path) -> usize {
     // `repo_instance::repo_wal` builds the WAL dir as a SIBLING of the backing
     // dir: `<file_name>.shamirwal`. For a `sled_raw(<dir>)` repo the backing
@@ -221,6 +229,8 @@ pub(crate) fn shamirwal_seg_count(repo_dir: &std::path::Path) -> usize {
 /// default, so a concurrent sibling reading this env at WAL bring-up
 /// would see a stale value and race the `remove_var` here. `#[serial]`
 /// serialises every test that touches process-global env vars.
+/// Disk-backed (fjall_raw) growth-limit test — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 #[tokio::test(flavor = "current_thread")]
 #[serial]
 async fn wal_segment_count_bounded_under_drain() {
@@ -288,6 +298,8 @@ async fn wal_segment_count_bounded_under_drain() {
 /// Disk repo: commit, drain (truncating the WAL), reopen → every value intact.
 /// The data is durable in `history`; the truncated WAL segments are not needed
 /// for recovery (I1).
+/// Disk-backed (fjall_raw) reopen test — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn reopen_after_truncation_recovers_all() {
     const N: usize = 10;
@@ -368,6 +380,8 @@ async fn reopen_after_truncation_recovers_all() {
 /// what `durable_watermark`-gated truncation (the pre-fix behavior) would do.
 /// Disarming the fault and draining again then truncates normally, proving
 /// the ceiling is a genuine gate, not a permanent stall.
+/// Disk-backed (fjall_raw) CRIT-2 test — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 #[tokio::test(flavor = "current_thread")]
 #[serial]
 async fn truncation_ceiling_blocks_segment_removal_when_a5_gate_unsafe() {

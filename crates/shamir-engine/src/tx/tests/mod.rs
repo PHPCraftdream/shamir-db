@@ -15,7 +15,6 @@ pub mod commit_phase5_tests;
 pub mod commit_tests;
 #[cfg(feature = "fjall")]
 pub mod commit_wal_init_failure_lock_release_tests;
-#[cfg(feature = "fjall")]
 pub mod cutover_tests;
 pub mod drainer_tests;
 pub mod durable_watermark_tests;
@@ -30,7 +29,6 @@ pub mod journal_order_tests;
 pub mod journal_publish_order_tests;
 pub mod materialized_means_visible_tests;
 pub mod non_tx_mvcc_routing_tests;
-#[cfg(feature = "fjall")]
 pub mod oracle_stress_tests;
 pub mod p1096_tx_aware_unique_check_tests;
 pub mod p1097_remove_posting_owner_tests;
@@ -47,7 +45,6 @@ pub mod read_your_own_writes_tests;
 #[cfg(feature = "fjall")]
 pub mod recovery_gate_tests;
 #[cfg(debug_assertions)]
-#[cfg(feature = "fjall")]
 pub mod recovery_tests;
 pub mod rederive_stale_value_dedup_cache_tests;
 #[cfg(feature = "fjall")]
@@ -63,7 +60,6 @@ pub mod ssi_phantom_tests;
 pub mod ssi_stress_tests;
 pub mod ssi_unique_serialization_tests;
 #[cfg(debug_assertions)]
-#[cfg(feature = "fjall")]
 pub mod truncation_tests;
 pub mod tx_commit_writer_drain_tests;
 pub mod tx_vector_delete_tests;

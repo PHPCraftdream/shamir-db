@@ -24,9 +24,14 @@ use tokio::sync::Notify;
 
 use crate::repo::changelog_store::StoreChangelog;
 use crate::repo::repo_instance::ChangefeedHandle;
-use crate::repo::{BoxRepo, BoxRepoFactory, DurabilityPolicy, RepoInstance};
+use crate::repo::{BoxRepo, RepoInstance};
+#[cfg(feature = "fjall")]
+use crate::repo::{BoxRepoFactory, DurabilityPolicy};
 use crate::table::TableConfig;
-use crate::tx::clean_horizon::checkpoint::{checkpoint_before_truncate, test_seam};
+#[cfg(feature = "fjall")]
+use crate::tx::clean_horizon::checkpoint::checkpoint_before_truncate;
+#[cfg(feature = "fjall")]
+use crate::tx::clean_horizon::checkpoint::test_seam;
 use crate::tx::clean_horizon::repair_pending_drain::drain_repair_pending;
 
 const MAX_KEY: u64 = u64::MAX;
@@ -122,7 +127,9 @@ async fn fixture(name: &str) -> (RepoInstance, Arc<RepoChangefeed>, Arc<ParkStor
 }
 
 /// Disk (fjall) fixture with a small segment cap so commits seal segments
-/// deterministically; background drainer disabled.
+/// deterministically; background drainer disabled. Requires the `fjall`
+/// feature.
+#[cfg(feature = "fjall")]
 async fn open_disk(
     name: &str,
     path: &std::path::Path,
@@ -141,6 +148,7 @@ async fn open_disk(
 
 /// Bounded-retry hard reopen (Windows releases the fjall file lock lazily
 /// after `drop`); mirrors `tx/tests/recovery_tests.rs::reopen_disk_repo`.
+#[cfg(feature = "fjall")]
 async fn open_retry(name: &str, path: &std::path::Path) -> RepoInstance {
     let mut last_err = None;
     for _attempt in 0..10 {
@@ -232,6 +240,7 @@ async fn drain_until_empty(repo: &RepoInstance, feed: &RepoChangefeed) {
 /// repair-pending version is retired. One pass admits only as many versions
 /// as the journal channel has room for; the rest stay pending for the next
 /// pass, so a test that expects several versions must loop.
+#[cfg(feature = "fjall")]
 async fn repair_until_empty(repo: &RepoInstance, feed: &RepoChangefeed) {
     for _ in 0..100 {
         drain_repair_pending(repo).await.unwrap();
@@ -388,6 +397,8 @@ async fn retention_gate_holds_segment_until_checkpointed() {
 // entry retained, version marked repair-pending — is rebuilt across a
 // restart: the cold reconciliation at open re-derives the event from the
 // retained WAL; no gap, fresh (empty) in-memory pending set.
+/// Disk-backed (fjall_raw) — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unclean_restart_rebuilds_lost_deferred_event() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -662,6 +673,8 @@ async fn interleaved_normal_commits_keep_order() {
 // ParkStore's backing journal is IN-MEMORY BY DESIGN: J / event artifacts
 // written through it are ephemeral, so the reopen rounds below exercise the
 // cold WAL→journal rebuild against the repo's REAL changelog store.
+/// Disk-backed (fjall_raw) — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn persistent_retention_gate_holds_until_checkpointed_reopens() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -801,6 +814,8 @@ async fn persistent_retention_gate_holds_until_checkpointed_reopens() {
 // the only guard — the clamp-isolation negative control remains the
 // in-memory test (b). This persistent control proves the END-TO-END LOSS
 // outcome the brief demands: evidence destroyed + durable gap after restart.
+/// Disk-backed (fjall_raw) — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn persistent_negative_control_unclamped_truncation_yields_gap() {
     let temp = tempfile::TempDir::new().unwrap();

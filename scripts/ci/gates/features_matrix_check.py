@@ -4,125 +4,169 @@
 Why
     The ``engine-features`` CI job compiles one isolated cell per feature
     combination, but ``cargo check`` passing does not PROVE which features
-    were enabled ("no defaults" could silently hide a default that crept
-    back in).  This script recomputes the enabled feature set the same way
-    cargo resolves it — pure ``tomllib`` parsing of the manifest's
-    ``[features]`` table, no ``cargo`` call, fully deterministic — and
-    fails when it differs from the cell's expected set.
+    were enabled.  Static manifest parsing re-implements cargo's feature
+    resolver and can drift from it (dep-qualified refs, weak deps,
+    default activation).  This script instead asks cargo itself:
+    ``cargo metadata --format-version 1 <cell flags>`` and reads the
+    engine's node in ``resolve.nodes[]`` whose ``features`` array is the
+    ACTUALLY enabled set (including the ``default`` pseudo-entry where
+    defaults are on).  No drift is possible: the same resolver, the same
+    invocation the CI cell uses.
 
 CLI
     ``features_matrix_check.py --expected <cell-id>
     [--manifest-path crates/shamir-engine/Cargo.toml] [--flags "<flags>"]``
 
     ``--flags`` takes the same feature flags the CI cell passes to cargo
-    (``--no-default-features``, ``--features a,b``); the resolution is
-    derived from them, so the CI job and this assertion cannot drift.
+    (``--no-default-features``, ``--features a,b``); they are forwarded
+    verbatim to ``cargo metadata``.
 
-Cells and their expected sets (the ``default`` name itself is the
-activation label, not a resolved feature; dep-qualified references like
-``shamir-storage/fjall`` are not engine features):
+Cells and their expected sets (``default`` INCLUDED — cargo's resolved
+``features`` list names it explicitly when defaults are on):
 
     no-default      {}
     fjall           {fjall}
     test-util       {test-util}
     fjall-test-util {fjall, test-util}
-    default-plus    {all-backends, fjall, test-util, fts_indexed_long}
-    loom            {all-backends, fjall, loom}
+    default-plus    {default, all-backends, fjall, test-util, fts_indexed_long}
+    loom            {default, all-backends, fjall, loom}
 
 Exit codes: 0 resolved set matches, 1 mismatch (resolved vs expected
-printed to stderr), 2 usage/parse error (unknown cell id, unreadable or
-malformed manifest, missing arguments) — the CI step fails closed on 2.
+printed to stderr), 2 usage/cargo failure (unknown cell id, missing
+``resolve`` graph, engine package absent from it, malformed metadata,
+cargo subprocess failure — cargo's stderr excerpt is included) — the CI
+step fails closed on 2.
 Python 3 standard library only; ``python3 -I`` compatible.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import subprocess
 import sys
-import tomllib
-from pathlib import Path
 
 PACKAGE_NAME = "shamir-engine"
+METADATA_FLAGS = (
+    "--format-version",
+    "1",
+    "--manifest-path",
+)
 
 EXPECTED: dict[str, set[str]] = {
     "no-default": set(),
     "fjall": {"fjall"},
     "test-util": {"test-util"},
     "fjall-test-util": {"fjall", "test-util"},
-    "default-plus": {"all-backends", "fjall", "test-util", "fts_indexed_long"},
-    "loom": {"all-backends", "fjall", "loom"},
+    "default-plus": {
+        "default",
+        "all-backends",
+        "fjall",
+        "test-util",
+        "fts_indexed_long",
+    },
+    "loom": {"default", "all-backends", "fjall", "loom"},
 }
 
+DEFAULT_RUNNER = subprocess.run  # replaced by tests
 
-def parse_flags(flags: str) -> tuple[bool, list[str]]:
-    """Split CI feature flags into (no_default, [requested feature lists]).
 
-    Understands ``--no-default-features`` and ``--features <list>`` /
-    ``--features=<list>`` (lists comma-separated, possibly repeated, like
-    cargo).  Any other token is ignored — this only resolves features.
+def parse_flags(flags: str) -> list[str]:
+    """Split the CI cell's flags into tokens ``cargo metadata`` accepts.
+
+    ``--no-default-features`` and ``--features <list>`` /
+    ``--features=<list>`` pass through verbatim (lists stay comma
+    joined — cargo parses them).  Any other token is ignored: this only
+    resolves features.
     """
-    no_default = False
-    requested: list[str] = []
+    out: list[str] = []
     tokens = flags.split()
     i = 0
     while i < len(tokens):
         tok = tokens[i]
         if tok == "--no-default-features":
-            no_default = True
-        elif tok == "--features" or tok.startswith("--features="):
-            if tok == "--features":
-                i += 1
-                if i >= len(tokens):
-                    raise ValueError("--features given without a value")
-                value = tokens[i]
-            else:
-                value = tok.split("=", 1)[1]
-            requested.extend(f.strip() for f in value.split(",") if f.strip())
+            out.append(tok)
+        elif tok == "--features":
+            i += 1
+            if i >= len(tokens):
+                raise ValueError("--features given without a value")
+            out.extend([tok, tokens[i]])
+        elif tok.startswith("--features="):
+            out.extend(["--features", tok.split("=", 1)[1]])
         i += 1
-    return no_default, requested
+    return out
 
 
-def resolve_features(manifest: dict, no_default: bool, requested: list[str]) -> set[str]:
-    """Compute the engine's enabled feature set like cargo resolves flags.
+def resolved_engine_features(
+    metadata: dict, manifest_path: str
+) -> set[str]:
+    """Extract the engine's enabled feature set from cargo metadata JSON.
 
-    Starts from the ``default`` list (unless ``--no-default-features``),
-    unions the requested features, then transitively expands every enabled
-    feature's own list from ``[features]``.  Dep-qualified references
-    (``some-crate/some-feature``) are forwarded to dependencies, not
-    engine features, and are excluded from the result.
+    Uses ``resolve.nodes[].features`` — the set cargo actually enabled
+    (including the ``default`` pseudo-entry when defaults are on).  Fails
+    closed (raises ``ValueError``) when the resolve graph is absent, the
+    engine package is not in it, or the node carries no features list.
     """
-    table = manifest.get("features")
-    if not isinstance(table, dict):
-        raise ValueError("manifest has no [features] table")
-    local = {name for name, deps in table.items() if isinstance(deps, list)}
+    resolve = metadata.get("resolve")
+    if not isinstance(resolve, dict) or not isinstance(
+        resolve.get("nodes"), list
+    ):
+        raise ValueError(
+            "cargo metadata has no resolve graph (cargo too old?)"
+        )
+    package_ids = {
+        pkg.get("id"): pkg.get("name")
+        for pkg in metadata.get("packages", [])
+        if isinstance(pkg, dict)
+    }
+    engine_ids = {
+        pid for pid, name in package_ids.items() if name == PACKAGE_NAME
+    }
+    if not engine_ids:
+        raise ValueError(
+            "package %r not found in cargo metadata for %s"
+            % (PACKAGE_NAME, manifest_path)
+        )
+    for node in resolve["nodes"]:
+        if not isinstance(node, dict):
+            continue
+        if node.get("id") in engine_ids:
+            features = node.get("features")
+            if not isinstance(features, list):
+                raise ValueError(
+                    "resolve node for %s has no features list" % PACKAGE_NAME
+                )
+            return set(features)
+    raise ValueError(
+        "resolve graph has no node for package %r" % PACKAGE_NAME
+    )
 
-    def expand(name: str, seen: set[str]) -> set[str]:
-        """Names activated by `name`, transitively, cycles tolerated."""
-        if name in seen or "/" in name or name not in local:
-            return set()
-        seen.add(name)
-        out = {name}
-        for dep in table[name]:
-            out |= expand(dep, seen)
-        return out
 
-    enabled: set[str] = set()
-    if not no_default:
-        enabled |= expand("default", set())
-    for feat in requested:
-        enabled |= expand(feat, set())
-    # `default` is the activation label, not a resolved feature — cargo's
-    # own feature lists show the expanded set without it.
-    enabled.discard("default")
-    return enabled
+def run_cargo_metadata(
+    manifest_path: str, flags: list[str], runner
+) -> str:
+    """Run ``cargo metadata`` with the cell flags; return stdout text."""
+    cmd = ["cargo", "metadata", *METADATA_FLAGS, manifest_path, *flags]
+    try:
+        proc = runner(cmd, capture_output=True, text=True)
+    except OSError as exc:
+        raise ValueError("cannot run cargo: %s" % exc) from exc
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip().splitlines()
+        excerpt = " | ".join(stderr[-3:]) or "(no stderr)"
+        raise ValueError(
+            "cargo metadata failed (exit %d): %s" % (proc.returncode, excerpt)
+        )
+    return proc.stdout
 
 
 def main(
     argv: list[str] | None = None,
     *,
-    manifest_text: bytes | None = None,
+    metadata_text: str | None = None,
+    runner=DEFAULT_RUNNER,
 ) -> int:
-    """Entry point; ``manifest_text`` injects file content in tests."""
+    """Entry point; ``metadata_text`` and ``runner`` inject cargo output in tests."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--expected",
@@ -148,25 +192,19 @@ def main(
                 "unknown cell id %r (expected one of: %s)"
                 % (args.expected, ", ".join(sorted(EXPECTED)))
             )
-        no_default, requested = parse_flags(args.flags)
-        if manifest_text is None:
-            manifest_text = Path(args.manifest_path).read_bytes()
-        manifest = tomllib.loads(manifest_text.decode("utf-8"))
-        name = manifest.get("package", {}).get("name")
-        if name != PACKAGE_NAME:
-            raise ValueError(
-                "manifest %s is package %r, expected %r"
-                % (args.manifest_path, name, PACKAGE_NAME)
+        flags = parse_flags(args.flags)
+        if metadata_text is None:
+            metadata_text = run_cargo_metadata(
+                args.manifest_path, flags, runner
             )
-        resolved = resolve_features(manifest, no_default, requested)
-    except (
-        OSError,
-        ValueError,
-        KeyError,
-        AttributeError,
-        tomllib.TOMLDecodeError,
-        UnicodeDecodeError,
-    ) as exc:
+        try:
+            metadata = json.loads(metadata_text)
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as exc:
+            raise ValueError("malformed cargo metadata JSON: %s" % exc) from exc
+        if not isinstance(metadata, dict):
+            raise ValueError("cargo metadata JSON is not an object")
+        resolved = resolved_engine_features(metadata, args.manifest_path)
+    except (OSError, ValueError) as exc:
         print("features_matrix_check.py: %s" % exc, file=sys.stderr)
         return 2
 

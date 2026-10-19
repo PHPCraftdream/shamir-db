@@ -1,5 +1,4 @@
 pub mod bounded_journal_read_tests;
-#[cfg(feature = "fjall")]
 pub mod box_repo_tests;
 pub mod changelog_gap_marker_tests;
 pub mod changelog_store_tests;

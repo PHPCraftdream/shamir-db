@@ -1,41 +1,65 @@
-//! Parsing of `cargo nextest list --message-format json` outputs
-//! (JSON-lines) into test inventories keyed by (binary id, test name).
+//! Parsing of `cargo nextest list --message-format json` outputs into
+//! test inventories keyed by (binary id, test name).
+//!
+//! nextest emits ONE JSON document (not JSON lines):
+//!
+//! ```json
+//! {"rust-build-meta": {...}, "test-count": 2,
+//!  "rust-suites": {"<binary-id>": {"binary-id": "<binary-id>",
+//!    "testcases": {"<test name>": {"ignored": false}}}}}
+//! ```
+//!
+//! Unknown fields are tolerated; a document without `rust-suites` (or
+//! text that is not one JSON document at all) is a parse ERROR — the
+//! caller reports it as a `BLOCKED_COMPARISON` finding instead of
+//! silently truncating the baseline (fail closed). The legacy
+//! JSON-lines shape is NOT parsed: it only ever existed in this
+//! parser's imagination, and accepting it would let a mis-generated
+//! list pass vacuously.
 
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// One parsed list: occurrence counts per (binary id, test name)
-/// identity. `BTreeMap` keeps the iteration order deterministic, which
-/// makes the pairing pass (and therefore the findings) reproducible.
+/// One parsed list: occurrence counts and `#[ignore]` status per
+/// (binary id, test name) identity. `BTreeMap` keeps the iteration
+/// order deterministic, which makes the pairing pass (and therefore
+/// the findings) reproducible.
 #[derive(Default)]
 pub struct TestList {
     pub counts: BTreeMap<(String, String), u32>,
+    /// Whether each identity is `ignored` in the list (`false` when
+    /// absent from the JSON).
+    pub ignored: BTreeMap<(String, String), bool>,
 }
 
 impl TestList {
-    /// Parses JSON-lines text. Only lines with `"type": "test"` count;
-    /// every other line (e.g. `"binary"` description lines) is skipped.
-    /// An unparseable line is an error — the caller reports it as a
-    /// `BLOCKED_COMPARISON` finding instead of silently truncating the
-    /// baseline (fail closed).
+    /// Parses one JSON document. Requires the top-level `rust-suites`
+    /// object; its keys are the binary ids and each suite's
+    /// `testcases` object maps test names to testcase entries.
     pub fn parse(text: &str) -> Result<TestList, String> {
+        let doc: Value =
+            serde_json::from_str(text).map_err(|e| format!("not one valid JSON document: {e}"))?;
+        let suites = doc
+            .get("rust-suites")
+            .ok_or("JSON document has no `rust-suites` field")?
+            .as_object()
+            .ok_or("`rust-suites` is not a JSON object")?;
         let mut list = TestList::default();
-        for (idx, line) in text.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
+        for (binary, suite) in suites {
+            let cases = suite
+                .get("testcases")
+                .ok_or_else(|| format!("suite `{binary}` has no `testcases` object"))?
+                .as_object()
+                .ok_or_else(|| format!("suite `{binary}`: `testcases` is not a JSON object"))?;
+            for (test, case) in cases {
+                let identity = (binary.clone(), test.clone());
+                *list.counts.entry(identity.clone()).or_default() += 1;
+                list.ignored.entry(identity).or_insert_with(|| {
+                    case.get("ignored")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                });
             }
-            let v: Value = serde_json::from_str(line)
-                .map_err(|e| format!("line {}: not valid JSON: {e}", idx + 1))?;
-            if v.get("type").and_then(Value::as_str) != Some("test") {
-                continue;
-            }
-            let Some(test) = v.get("test").and_then(Value::as_str) else {
-                continue;
-            };
-            let binary = binary_id(&v)
-                .ok_or_else(|| format!("line {}: test entry without a binary id", idx + 1))?;
-            *list.counts.entry((binary, test.to_owned())).or_default() += 1;
         }
         Ok(list)
     }
@@ -52,20 +76,4 @@ impl TestList {
             .filter(|(_, count)| **count > 1)
             .map(|(identity, _)| identity)
     }
-}
-
-/// Tolerant binary-id extraction: nextest emits the binary id either as
-/// a plain string under `binary`, under `binary-id`, or nested inside a
-/// `binary` object as its `binary-id` field — accept all three shapes.
-fn binary_id(v: &Value) -> Option<String> {
-    if let Some(s) = v.get("binary").and_then(Value::as_str) {
-        return Some(s.to_owned());
-    }
-    if let Some(s) = v.get("binary-id").and_then(Value::as_str) {
-        return Some(s.to_owned());
-    }
-    v.get("binary")
-        .and_then(|b| b.get("binary-id"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
 }

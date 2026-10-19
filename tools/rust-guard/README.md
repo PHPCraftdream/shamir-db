@@ -305,41 +305,50 @@ in `.rust-guard/stages.toml` (written by the CI wiring chunk).
 
 `rust-guard discovery --base-list base.json --head-list head.json
 [--delta <delta.toml>] [--kind lib|loom|doc]` compares two
-`cargo nextest list --message-format json` outputs (JSON-lines) that
-must be taken under identical toolchain, OS, features, profile and
-target selection. A test's IDENTITY is the pair (binary id, test
-name); the parser is tolerant about where the binary id sits in the
-JSON (`binary` string, `binary-id`, or nested `binary` object) but an
-unparseable line fails the whole list.
+`cargo nextest list --message-format json` outputs that must be taken
+under identical toolchain, OS, features, profile and target selection.
+A test's IDENTITY is the pair (binary id, test name). The parser
+accepts ONLY the real nextest shape: ONE JSON document with a
+top-level `rust-suites` object whose keys are the binary ids and whose
+suites carry a `testcases` object keyed by test name (unknown fields
+are ignored). Legacy/JSON-lines shapes, documents without
+`rust-suites`, or non-JSON text fail the whole list — no tolerant
+fallback parsing exists, by design: a mis-generated list must block
+the comparison, never pass vacuously.
 
 Findings (fail closed, `path:line: CODE: message`):
 
 - `BLOCKED_COMPARISON` — a base or head list file is missing,
-  unreadable or unparseable; never an empty baseline.
+  unreadable, or is not one JSON document with a `rust-suites` object;
+  never an empty baseline.
 - `EMPTY_LIST` — a list with zero tests is a failure, not a pass.
 - `TEST_DUPLICATE` — the same (binary id, test name) identity appears
   twice in one list.
 - `TEST_LOST` — a base test with no head counterpart and no
-  `[[moved]]`/`[[renamed]]` declaration. NEVER excusable by any other
-  delta entry kind.
+  `[[moved]]`/`[[renamed]]` declaration, or whose declaration is
+  unusable (missing `to_path`/`to_item`, target identity absent from
+  head, or already claimed by another declaration). NEVER excusable by
+  any other delta entry kind.
+- `TEST_IGNORED` — a base test whose `ignored` is false while its
+  DIRECTLY matched head counterpart's `ignored` is true (a newly
+  ignored test; compared only on direct matches, never through a
+  declared move/rename). The reverse flip (un-ignoring) is allowed.
 - `TARGET_LOST` — a binary/target id whose remaining base tests are
   lost and which carries no head tests (a declared move of its last
   test to another binary does not double-report).
 - `UNUSED_ALLOWANCE` — a delta entry that matched no pairing.
 
-Delta mapping: the conservation delta parser is reused unchanged; for
+Delta mapping: the conservation delta parser is reused; for
 `[[moved]]`/`[[renamed]]` entries `path` + `item` are read as the BASE
-(binary id, test name) and `to_path` + `to_item` as the HEAD identity
-(the `to_path::to_item` head-side semantics, absent fields defaulting
-to `path`/`item`). The delta's `base` SHA is required by the loader
+(binary id, test name) and `to_path` + `to_item` as the HEAD identity.
+Unlike `conservation`, the head side does NOT default to the base
+side: a declaration without explicit `to_path`/`to_item` is a finding
+(`TEST_LOST` + `UNUSED_ALLOWANCE`), and each head identity may be
+claimed by at most one declaration. Identities present in BOTH lists
+match directly, no delta needed; head-only identities are additions
+and never findings. The delta's `base` SHA is required by the loader
 but cannot be verified here — this subcommand sees two list files, no
 revision; the CI job pins the base list to the merge base instead.
-
-Known limitation — newly-ignored tests are NOT detected:
-`cargo nextest list --message-format json` does not carry `#[ignore]`
-status, so ignore-state drift is invisible to this gate by
-construction. It is deliberately not faked; detecting ignore-status
-changes stays with `conservation`'s `TEST_IGNORED`/`TEST_UNIGNORED`.
 
 `--kind` (default `lib`) is a label echoed into the finding paths and
 messages so doctest and loom lists can be diffed in separate runs.
@@ -355,7 +364,12 @@ union of `--paths` and `--changed-since`; omitting scopes preserves legacy
 selection behavior.
 
 ## Exceptions: `.rust-guard/exceptions.toml`
-record kinds, documented inline in the file itself:
+
+`exceptions.toml` is the repository's reviewed bypass ledger for the
+`modules` gate: it declares, with an owner and a reason, the tracked
+files and module-producing constructs that legitimately cannot satisfy
+the reachability rules. Record kinds, documented inline in the file
+itself:
 
 - `[[exception]]` — one exact tracked path (`path`, no wildcards) plus
   `package`, `reason`, `owner`; used for files that legitimately cannot

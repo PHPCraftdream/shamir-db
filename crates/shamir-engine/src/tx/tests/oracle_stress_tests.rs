@@ -26,13 +26,17 @@ use bytes::Bytes;
 use shamir_storage::storage_in_memory::{InMemoryRepo, InMemoryStore};
 use shamir_storage::types::Store;
 use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId, VersionProvider};
+#[cfg(feature = "fjall")]
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
+#[cfg(feature = "fjall")]
 use shamir_wal::{WalDurability, WalEntryV2, WalOpV2};
 
 use crate::repo::repo_instance::RepoInstance;
+#[cfg(feature = "fjall")]
 use crate::repo::repo_token;
 use crate::repo::repo_types::BoxRepo;
+#[cfg(feature = "fjall")]
 use crate::repo::BoxRepoFactory;
 use crate::repo::RepoVersionProvider;
 use crate::table::table_manager::table_token_for;
@@ -325,14 +329,16 @@ async fn oracle_stress_same_table_serializable_posthoc_readset_staleness() {
 // Test 3 — recovery after crash (WAL durable, materialize not yet run)
 // =========================================================================
 
+/// Disk-backed (fjall_raw) helpers/tests below — require the `fjall` feature.
+#[cfg(feature = "fjall")]
 fn rid(n: u8) -> RecordId {
     let mut a = [0u8; 16];
     a[15] = n;
     RecordId(a)
 }
-
 /// Open (or reopen) a disk-backed repo, retrying on Windows where
 /// the backend releases its file lock lazily after `drop`.
+#[cfg(feature = "fjall")]
 async fn open_disk(path: &std::path::Path, tables: Vec<TableConfig>) -> RepoInstance {
     let mut last_err = None;
     for _attempt in 0..10 {
@@ -356,7 +362,8 @@ async fn open_disk(path: &std::path::Path, tables: Vec<TableConfig>) -> RepoInst
 /// Append a durable inflight V2 `Put` to the file WAL (F5e: the file
 /// segment is the medium that survives a simulated restart — the `Mem`
 /// sink is per-instance), modelling a crash after WAL fsync but before the
-/// data_store update.
+/// data_store update. Disk-backed (fjall_raw) — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 async fn seed_inflight_put(
     path: &std::path::Path,
     table: &str,
@@ -384,6 +391,8 @@ async fn seed_inflight_put(
 
 /// Crash point (b): WAL durable, materialize not yet run. Recovery must
 /// replay all durable entries, restore data, advance watermark.
+/// Disk-backed (fjall_raw) — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn oracle_stress_recovery_after_wal_durable_no_materialize() {
     const N: u64 = 10;
@@ -464,6 +473,8 @@ async fn oracle_stress_recovery_after_wal_durable_no_materialize() {
 ///
 /// NOT 2 — the naively expected "contiguous-prefix stall" value. The gate
 /// pre-seeds from `max_inflight`, resolving the gap implicitly.
+/// Disk-backed (fjall_raw) — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn oracle_stress_recovery_gap_in_versions() {
     let tempdir = tempfile::TempDir::new().expect("tempdir");

@@ -8,11 +8,9 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+mod common;
 mod conservation_cmd;
 mod discovery_cmd;
-mod exceptions;
-mod finding;
-mod gitfs;
 mod modules_cmd;
 mod structure_cmd;
 

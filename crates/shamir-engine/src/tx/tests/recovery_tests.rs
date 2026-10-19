@@ -1,5 +1,6 @@
 //! V2 recovery tests (Stage 7.1.a skeleton + 7.1.c–d apply logic).
 
+#[cfg(feature = "fjall")]
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -9,13 +10,17 @@ use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use shamir_wal::{WalDurability, WalEntryV2, WalOpV2};
 
-use crate::repo::{repo_token, BoxRepo, BoxRepoFactory, RepoInstance};
+#[cfg(feature = "fjall")]
+use crate::repo::BoxRepoFactory;
+use crate::repo::{repo_token, BoxRepo, RepoInstance};
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
 
 /// Retry helper for reopening a disk-backed repo on Windows, where the
 /// file lock is released lazily after `drop`. On non-Windows platforms this
 /// almost always succeeds on the first attempt.
+/// Disk-backed (fjall_raw) — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 async fn reopen_disk_repo(name: &str, path: PathBuf, tables: Vec<TableConfig>) -> RepoInstance {
     let mut last_err = None;
     for _attempt in 0..10 {
@@ -367,6 +372,8 @@ async fn recover_v2_inflight_replays_index_del() {
 // WAL write path the `Mem` sink is per-instance, so an injected entry
 // would not survive reopen of an in-memory repo; the file segment is the
 // medium that genuinely persists across a simulated restart.
+/// Disk-backed (fjall_raw) crash-matrix test — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn replay_inflight_v2_from_simulated_partial_commit_state() {
     use crate::repo::repo_token;
@@ -631,6 +638,8 @@ async fn recover_v2_inflight_replays_in_commit_version_order() {
 /// NOTE: this is NOT a power-loss (level-3) test. A true power-loss test
 /// would require fsync-then-kill-then-truncate-page-cache, which demands a
 /// subprocess harness and is out of scope here.
+/// Disk-backed (fjall_raw) crash test — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn f3_file_wal_process_crash_recovery_replays_committed_tx() {
     use shamir_tx::IsolationLevel;
@@ -705,6 +714,8 @@ async fn f3_file_wal_process_crash_recovery_replays_committed_tx() {
 /// WITHOUT clean shutdown (process-crash model, level-2 Buffered contract),
 /// reopen over the SAME tempdir, run recovery, and assert the record reads
 /// back — recovered purely by replaying the file WAL.
+/// Disk-backed (fjall_raw) crash test — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn f4b_nontx_insert_crash_recovery() {
     use shamir_tx::IsolationLevel;
@@ -802,6 +813,8 @@ async fn f4b_nontx_insert_crash_recovery() {
 /// implicit path must NOT skip the interner-delta WAL emission. We assert the
 /// recovered interner maps the new field to the SAME id it had pre-crash
 /// (id-preserving recovery), proving the delta carried the exact base id.
+/// Disk-backed (fjall_raw) crash test — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn c5_implicit_insert_new_field_recovers_with_preserved_id() {
     use shamir_tx::IsolationLevel;
@@ -929,6 +942,8 @@ async fn c5_implicit_insert_new_field_recovers_with_preserved_id() {
 ///    has no per-entry truncation until F6) — both calls will return >= 1.
 /// 4. Assert the record reads back as the single correct value after both runs
 ///    (no duplication, no corruption).
+/// Disk-backed (fjall_raw) idempotence test — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn f3_file_wal_replay_is_idempotent() {
     use shamir_tx::IsolationLevel;

@@ -9,7 +9,7 @@
 
 use super::json;
 use super::scan_cfg::ScanCfg;
-use crate::gitfs::GitFs;
+use crate::common::gitfs::GitFs;
 
 /// Kind of a target root file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

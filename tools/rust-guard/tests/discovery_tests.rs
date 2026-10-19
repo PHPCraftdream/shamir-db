@@ -1,22 +1,39 @@
 //! Self-tests for the `discovery` gate (CI-only): the inputs are
-//! JSON-lines text, so the fixtures are inline strings written into a
-//! throwaway repo — no fixture tree is needed for list pairs.
+//! single JSON documents, so the fixtures are inline strings written
+//! into a throwaway repo — no fixture tree is needed for list pairs.
 
 mod harness;
 
 use crate::harness::{assert_clean, assert_finding, TempRepo};
 use std::process::Output;
 
-/// Builds a `cargo nextest list --message-format json` shape: one
-/// `binary` line then one `test` line per test (binary id inline).
-fn lines(bin: &str, tests: &[&str]) -> String {
-    let mut s = format!("{{\"type\":\"binary\",\"binary-id\":\"{bin}\"}}\n");
-    for t in tests {
+/// Builds one `cargo nextest list --message-format json` document from
+/// (binary id, [(test name, ignored)]) suites.
+fn doc(suites: &[(&str, &[(&str, bool)])]) -> String {
+    let mut s = String::from("{\"rust-build-meta\":{},\"test-count\":0,\"rust-suites\":{");
+    for (i, (bin, tests)) in suites.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
         s.push_str(&format!(
-            "{{\"type\":\"test\",\"test\":\"{t}\",\"binary\":\"{bin}\"}}\n"
+            "\"{bin}\":{{\"binary-id\":\"{bin}\",\"testcases\":{{"
         ));
+        for (j, (test, ignored)) in tests.iter().enumerate() {
+            if j > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!("\"{test}\":{{\"ignored\":{ignored}}}",));
+        }
+        s.push_str("}}");
     }
+    s.push_str("}}");
     s
+}
+
+/// Single-binary convenience wrapper over `doc`.
+fn lines(bin: &str, tests: &[&str]) -> String {
+    let owned: Vec<(&str, bool)> = tests.iter().map(|t| (*t, false)).collect();
+    doc(&[(bin, &owned)])
 }
 
 fn write(repo: &TempRepo, rel: &str, contents: &str) {
@@ -57,6 +74,26 @@ fn delta(kind: &str, fields: &[(&str, &str)]) -> String {
 }
 
 #[test]
+fn identical_lists_are_clean() {
+    let out = run(
+        Some(&lines("shamir-engine", &["a", "b"])),
+        Some(&lines("shamir-engine", &["a", "b"])),
+        None,
+    );
+    assert_clean(&out);
+}
+
+#[test]
+fn head_only_addition_is_clean() {
+    let out = run(
+        Some(&lines("shamir-engine", &["a"])),
+        Some(&lines("shamir-engine", &["a", "added"])),
+        None,
+    );
+    assert_clean(&out);
+}
+
+#[test]
 fn lost_test_is_a_finding() {
     let out = run(
         Some(&lines("shamir-engine", &["kept", "dropped"])),
@@ -68,13 +105,11 @@ fn lost_test_is_a_finding() {
 
 #[test]
 fn duplicate_identity_is_a_finding() {
-    let dup = "{\"type\":\"test\",\"test\":\"dup\",\"binary\":\"shamir-engine\"}\n\
-               {\"type\":\"test\",\"test\":\"dup\",\"binary\":\"shamir-engine\"}\n";
-    let out = run(
-        Some(&format!("{}{}", lines("shamir-engine", &["ok"]), dup)),
-        Some(dup),
-        None,
-    );
+    let dup = doc(&[(
+        "shamir-engine",
+        &[("dup", false), ("dup", false), ("ok", false)],
+    )]);
+    let out = run(Some(&lines("shamir-engine", &["ok"])), Some(&dup), None);
     assert_finding(&out, "TEST_DUPLICATE");
 }
 
@@ -94,8 +129,8 @@ fn lost_binary_is_a_finding() {
 
 #[test]
 fn empty_head_list_is_a_failure() {
-    // A binary line with zero test lines: an empty inventory is a
-    // failure, never a vacuous pass.
+    // A suite with zero testcases: an empty inventory is a failure,
+    // never a vacuous pass.
     let out = run(
         Some(&lines("shamir-engine", &["t"])),
         Some(&lines("shamir-engine", &[])),
@@ -129,7 +164,18 @@ fn missing_base_file_blocks_the_comparison() {
 
 #[test]
 fn unparseable_base_file_blocks_the_comparison() {
-    let out = run(Some("this is not json\n"), Some("{}\n"), None);
+    let out = run(Some("this is not json\n"), Some(&doc(&[])), None);
+    assert_finding(&out, "BLOCKED_COMPARISON");
+}
+
+#[test]
+fn base_json_without_rust_suites_blocks_the_comparison() {
+    // Valid JSON, wrong shape (legacy JSON-lines object): fail closed.
+    let out = run(
+        Some("{\"type\":\"test\",\"test\":\"t\",\"binary\":\"b\"}"),
+        Some(&lines("b", &["t"])),
+        None,
+    );
     assert_finding(&out, "BLOCKED_COMPARISON");
 }
 
@@ -187,6 +233,97 @@ fn undeclared_move_is_a_loss() {
 }
 
 #[test]
+fn move_without_to_fields_is_a_finding() {
+    // A declaration with no head side at all: the base test is lost
+    // AND the malformed entry is an unused allowance — never silence.
+    let d = delta(
+        "moved",
+        &[
+            ("path", "bin_a"),
+            ("item", "t"),
+            ("reason", "entry forgot its head side"),
+            ("owner", "@rust-guard"),
+        ],
+    );
+    let out = run(
+        Some(&lines("bin_a", &["t"])),
+        Some(&lines("bin_b", &["t"])),
+        Some(&d),
+    );
+    assert_finding(&out, "TEST_LOST");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("UNUSED_ALLOWANCE"),
+        "malformed entry must surface:\n{err}"
+    );
+}
+
+#[test]
+fn move_to_absent_target_is_a_finding() {
+    let d = delta(
+        "moved",
+        &[
+            ("path", "bin_a"),
+            ("item", "t"),
+            ("to_path", "bin_b"),
+            ("to_item", "t"),
+            ("reason", "declared but the target vanished"),
+            ("owner", "@rust-guard"),
+        ],
+    );
+    let out = run(
+        Some(&lines("bin_a", &["t"])),
+        Some(&lines("bin_c", &["t"])),
+        Some(&d),
+    );
+    assert_finding(&out, "TEST_LOST");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("UNUSED_ALLOWANCE"),
+        "unconsumable entry must surface:\n{err}"
+    );
+}
+
+#[test]
+fn second_claimant_on_one_head_identity_is_a_finding() {
+    // Two base tests declare a move onto the SAME head identity; the
+    // first pairing consumes it, the second is a finding.
+    let d = format!(
+        "{}\n{}",
+        delta(
+            "moved",
+            &[
+                ("path", "bin_a"),
+                ("item", "t1"),
+                ("to_path", "bin_h"),
+                ("to_item", "t"),
+                ("reason", "first claim"),
+                ("owner", "@rust-guard"),
+            ],
+        ),
+        delta(
+            "moved",
+            &[
+                ("path", "bin_b"),
+                ("item", "t2"),
+                ("to_path", "bin_h"),
+                ("to_item", "t"),
+                ("reason", "second claim"),
+                ("owner", "@rust-guard"),
+            ],
+        )
+    );
+    let base = doc(&[("bin_a", &[("t1", false)]), ("bin_b", &[("t2", false)])]);
+    let out = run(Some(&base), Some(&lines("bin_h", &["t"])), Some(&d));
+    assert_finding(&out, "TEST_LOST");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("already claimed"),
+        "second claimant must be named:\n{err}"
+    );
+}
+
+#[test]
 fn leftover_delta_entry_is_unused_allowance() {
     let d = delta(
         "moved",
@@ -206,12 +343,18 @@ fn leftover_delta_entry_is_unused_allowance() {
 }
 
 #[test]
-fn identical_lists_are_clean() {
-    let out = run(
-        Some(&lines("shamir-engine", &["a", "b"])),
-        Some(&lines("shamir-engine", &["a", "b"])),
-        None,
-    );
+fn newly_ignored_test_is_a_finding() {
+    let base = lines("shamir-engine", &["t"]);
+    let head = doc(&[("shamir-engine", &[("t", true)])]);
+    let out = run(Some(&base), Some(&head), None);
+    assert_finding(&out, "TEST_IGNORED");
+}
+
+#[test]
+fn unignored_flip_is_not_a_finding() {
+    let base = doc(&[("shamir-engine", &[("t", true)])]);
+    let head = doc(&[("shamir-engine", &[("t", false)])]);
+    let out = run(Some(&base), Some(&head), None);
     assert_clean(&out);
 }
 

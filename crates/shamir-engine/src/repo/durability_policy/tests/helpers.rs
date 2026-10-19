@@ -2,12 +2,10 @@
 
 #[cfg(feature = "fjall")]
 use std::path::PathBuf;
-#[cfg(feature = "fjall")]
 use std::sync::Arc;
 
 #[cfg(feature = "fjall")]
 use shamir_storage::error::DbResult;
-#[cfg(feature = "fjall")]
 use shamir_storage::storage_in_memory::InMemoryRepo;
 #[cfg(feature = "fjall")]
 use shamir_storage::types::Repo;
@@ -20,17 +18,13 @@ use shamir_types::types::record_id::RecordId;
 #[cfg(feature = "fjall")]
 use tempfile::TempDir;
 
-#[cfg(feature = "fjall")]
 use crate::repo::BoxRepo;
 #[cfg(feature = "fjall")]
 use crate::repo::BoxRepoFactory;
-#[cfg(feature = "fjall")]
 use crate::repo::RepoInstance;
-#[cfg(feature = "fjall")]
 use crate::table::TableConfig;
 
 /// In-memory repo with one `items` table (Mem WAL sink: `R == W`).
-#[cfg(feature = "fjall")]
 pub(crate) fn mem_repo(name: &str) -> RepoInstance {
     RepoInstance::new(
         name.into(),

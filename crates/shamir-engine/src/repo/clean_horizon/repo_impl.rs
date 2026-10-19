@@ -1,5 +1,6 @@
 use shamir_storage::error::DbResult;
-#[cfg(all(test, feature = "fjall"))]
+#[cfg(test)]
+#[cfg(feature = "fjall")]
 use shamir_storage::types::Repo;
 use shamir_storage::types::Store;
 use std::sync::Arc;
@@ -19,7 +20,7 @@ impl RepoInstance {
         self.wal_segment_bytes = bytes;
     }
 
-    #[cfg(all(test, feature = "fjall"))]
+    #[cfg(test)]
     pub(crate) fn disable_background_drainer_for_test(&self) {
         self.background_drainer_disabled
             .store(true, std::sync::atomic::Ordering::Release);

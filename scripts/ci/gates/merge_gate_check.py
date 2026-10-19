@@ -21,11 +21,16 @@ Semantics (implemented exactly)
         never authorises a merge.
       - non-draft (ready PR / master push / workflow_dispatch): ``fast``
         is skipped by design; every other required job must be ``success``.
+    * any ``result`` that is not EXACTLY one of ``success`` / ``failure``
+      / ``cancelled`` / ``skipped`` -> FAIL ("invalid result", naming the
+      job and the bad value; a MISSING ``result`` key counts as invalid),
+      so a workflow-file regression can never silently widen the gate.
     * unknown job name in needs (not in ``REQUIRED_JOBS``) -> FAIL
       ("unknown job", naming it).
     * a required job missing from needs -> FAIL.
 
-Exit codes: 0 merge-ready, 1 gate failure (reasons on stderr).
+Exit codes: 0 merge-ready, 1 gate failure (reasons on stderr); exit 1 is
+fail-closed for unreadable needs JSON too.
 Python 3 standard library only; ``python3 -I`` compatible.
 """
 
@@ -54,6 +59,9 @@ REQUIRED_JOBS = [
 DRAFT_MESSAGE = "draft PR: full matrix not run, not merge-ready"
 
 
+VALID_RESULTS = frozenset(("success", "failure", "cancelled", "skipped"))
+
+
 def evaluate(
     needs: dict[str, dict],
     *,
@@ -68,8 +76,16 @@ def evaluate(
         if job not in REQUIRED_JOBS:
             reasons.append("unknown job in needs: %s" % job)
             continue
-        result = info.get("result") if isinstance(info, dict) else None
-        if result in ("failure", "cancelled"):
+        if isinstance(info, dict):
+            result = info.get("result")
+        else:
+            result = None
+        if result not in VALID_RESULTS:
+            reasons.append(
+                "job %s: invalid result %r (must be one of %s)"
+                % (job, result, ", ".join(sorted(VALID_RESULTS)))
+            )
+        elif result in ("failure", "cancelled"):
             reasons.append("job %s: %s" % (job, result))
         elif result == "skipped":
             by_design = (job == "fast") != is_draft_pr
