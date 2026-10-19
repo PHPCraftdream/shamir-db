@@ -978,12 +978,13 @@ impl ShamirDb {
         })?;
         drop(stream);
         let repo = self.system_store().system_repo()?;
+        let permit = repo.write_domain().admit().await;
+        let permit = permit.map_err(|e| DbError::Internal(e.to_string()))?;
+        let inner = table.intern_query_value_admitted(&permit, &record).await?;
+        drop(permit); // the tx commit admits again (non-reentrant domain)
         let owned_table = table.clone();
         repo.run_implicit_batch_tx(Actor::System, "", move |tx| {
             Box::pin(async move {
-                let interner = owned_table.interner_for_test().get().await?;
-                let inner = shamir_types::codecs::interned::query_value_to_inner(&record, interner)
-                    .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
                 let updated = owned_table.set_tx(id, &inner, Some(&mut *tx)).await?;
                 Ok(crate::query::write::WriteResult {
                     affected: u64::from(updated),
