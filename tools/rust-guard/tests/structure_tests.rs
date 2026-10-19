@@ -223,8 +223,6 @@ fn scope_union_intersects_paths_and_changed_since() {
     // nothing at all — proving the bait is not change-set selectable.
     let changed_only = repo.run_guard(&[
         "structure",
-        "--paths",
-        "**/*.rs",
         "--changed-since",
         &base,
         "--scope",

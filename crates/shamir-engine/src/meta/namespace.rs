@@ -67,7 +67,7 @@ pub enum MetaKey {
     /// Stored in the per-repo `__tx__` info-store via the same envelope
     /// mechanism as `LastCommittedVersion` / `NextTxId`. R1-b's
     /// [`crate::meta::repl_bookmark`] reads/writes it; the follower feeds it
-    /// back into [`crate::tx::apply_replicated`] as `applied_watermark` for
+    /// back into [`crate::tx::apply_replicated()`] as `applied_watermark` for
     /// O(1) idempotent re-delivery gating.
     ReplicationBookmark,
 

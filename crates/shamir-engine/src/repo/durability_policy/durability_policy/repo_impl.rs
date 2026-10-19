@@ -165,7 +165,7 @@ impl RepoInstance {
     /// One replication journal page. `durable` (default) bounds it by
     /// `min(confirm_through, W, R)`; `completed_reseed` bounds it by
     /// `min(confirm_through, W)` with NO `R` clamp (see
-    /// [`read_replication_page`]).
+    /// `read_replication_page`).
     ///
     /// Smallest-correct mechanism: the completion-watermark bound lives
     /// inside [`read_changelog_bounded_impl`](Self::read_changelog_bounded_impl)

@@ -123,7 +123,7 @@ pub(crate) static TEST_SEEK_LOOP_PRE_ITER_HOOK: std::sync::OnceLock<
     std::sync::Arc<SeekLoopPreIterHook>,
 > = std::sync::OnceLock::new();
 
-/// Parks on [`TEST_SEEK_LOOP_PRE_ITER_HOOK`] if a test installed one;
+/// Parks on `TEST_SEEK_LOOP_PRE_ITER_HOOK` if a test installed one;
 /// a true no-op otherwise.
 async fn fire_seek_loop_pre_iter_test_hook() {
     #[cfg(test)]

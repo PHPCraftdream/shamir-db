@@ -520,7 +520,7 @@ pub async fn recover_inflight_v2(repo: &RepoInstance, permit: &RepoWritePermit) 
 /// `MvccStore::version_cache` with this entry's `commit_version`. Replay
 /// writes go straight to `data_store()` (bypassing `apply_committed_ops`),
 /// so without this the version cache would report `0` for recovered keys.
-/// See [`seed_version_cache_for_entry`] for why this matters.
+/// See `seed_version_cache_for_entry` for why this matters.
 pub async fn replay_v2_entry(entry: &shamir_wal::WalEntryV2, repo: &RepoInstance) -> DbResult<()> {
     let permit = repo
         .write_domain()

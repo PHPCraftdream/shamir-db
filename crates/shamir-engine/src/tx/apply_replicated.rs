@@ -25,7 +25,7 @@
 //!
 //! Per the R1-a task brief (which refines §4.1's "version = source"), the
 //! follower allocates a LOCAL commit version via its own
-//! [`RepoTxGate::assign_next_version_guarded`] (the RAII `VersionGuard`
+//! `RepoTxGate::assign_next_version_guarded` (the RAII `VersionGuard`
 //! variant). The leader's `commit_version` is carried in the event only for
 //! IDEMPOTENCY (R1-b stores the high-water mark of applied leader versions
 //! durably and feeds it back as `applied_watermark`). Local-version
@@ -46,7 +46,7 @@
 //!
 //! ## Raw-apply primitive
 //!
-//! Each [`RecordChange`] carries the RAW storage key (16-byte `RecordId`
+//! Each `RecordChange` carries the RAW storage key (16-byte `RecordId`
 //! for data tables — the leader already projected high-level Set/Delete
 //! ops + interner derivation into raw bytes) and the FULL new record bytes
 //! (Put) or `None` (Delete). The follower reuses the SAME low-level
@@ -60,10 +60,10 @@
 //!
 //! ## finalize-tail reuse
 //!
-//! The full [`finalize_sync_post_publish`](crate::tx::finalize::finalize_sync_post_publish)
+//! The full `finalize_sync_post_publish`
 //! tail is NOT reusable verbatim: it requires a `&TxContext` (for
 //! `promote_vectors` — HNSW graph promote) and a `PostPublishState`
-//! (produced by [`materialize`](crate::tx::materialize::materialize),
+//! (produced by `materialize`,
 //! carrying the A5 interner-delta max-id used to gate WAL truncation). A
 //! replicated raw-apply has NEITHER: there is no `TxContext` (no client tx
 //! — the event is already committed on the leader), no WAL entry to
@@ -73,15 +73,15 @@
 //! on the follower). We therefore reuse the tail's three reusable halves
 //! directly and skip the two that do not apply:
 //!
-//!  - [`RepoInstance::prepare_journal_event`] + `publish_journaled` — resolve
+//!  - `RepoInstance::prepare_journal_event` + `publish_journaled` — resolve
 //!    the follower's downstream event after all table applies succeed, then
 //!    enqueue it (or record a gap) immediately before publishing the local
 //!    version, with no await or fallible step between enqueue and commit.
-//!    [`RepoInstance::broadcast_changefeed_event`] broadcasts the same Arc
+//!    `RepoInstance::broadcast_changefeed_event` broadcasts the same Arc
 //!    after publication and recovery markers. The event is re-projected with
 //!    the follower-local version so downstream idempotency keys on this
 //!    follower's monotonic sequence, not the (different) leader version.
-//!  - [`RepoTxGate::mark_durable`] — advance the durable watermark so the
+//!  - `RepoTxGate::mark_durable` — advance the durable watermark so the
 //!    freshly-written history entry is reported as durable (matches the
 //!    post-cutover drainer contract).
 //!  - A flushed allocation upper bound BEFORE history writes. Even writes

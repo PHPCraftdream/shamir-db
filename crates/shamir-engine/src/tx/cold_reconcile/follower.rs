@@ -3,7 +3,7 @@
 //! PR6 stores the follower's journal horizon `J` in the bookmark record's
 //! `clean_through` field. At cold start a record with a known `J` certifies
 //! every journal event through `J` as complete, so the uncertain GAP narrows
-//! to [`in_flight_range`]'s single in-flight batch instead of the whole
+//! to `in_flight_range`'s single in-flight batch instead of the whole
 //! interval after the clean horizon. An old record without a known `J`
 //! keeps the conservative behaviour unchanged.
 

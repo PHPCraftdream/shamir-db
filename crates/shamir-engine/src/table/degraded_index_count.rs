@@ -2,7 +2,7 @@
 //!
 //! [`TableManager::degraded_index_count`] walks the in-memory index
 //! registries and returns how many indexes are NOT in `Ready` state. Unlike
-//! [`verify`](super::doctor::TableManager::verify) (which streams the entire
+//! `verify` (which streams the entire
 //! data store to compare expected-vs-actual entry counts), this method is
 //! O(number of indexes on this table) and performs **zero store reads** —
 //! it inspects only the `IndexDefinition.state` /
@@ -23,7 +23,7 @@
 //! that would page an operator to run `doctor::repair()` against an index
 //! that is not stuck at all. `degraded_index_count()` now skips a
 //! non-`Ready` definition whose `name_interned` is currently in the
-//! process-local [`in_flight_creates`](super::table_manager::TableManager::in_flight_creates)
+//! process-local `in_flight_creates`
 //! identity set (see [`in_flight_create_guard`](super::in_flight_create_guard)
 //! for why this is a per-identity check, not a scalar subtraction — an
 //! earlier scalar-counter version of this fix could mask an UNRELATED

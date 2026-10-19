@@ -198,7 +198,7 @@ pub struct TableManager {
     ///
     /// Every bit-set/clear is `SeqCst` (F-56's total-order argument, now
     /// covering the full barrier predicate — see
-    /// [`writer_drain_barrier`]'s module doc, updated by this task).
+    /// `writer_drain_barrier`'s module doc, updated by this task).
     ///
     /// Note: `REGULAR_INDEX_EXISTS` (owned by `IndexManager`) is excluded from
     /// the barrier predicate via `BARRIER_BITS` — a table with ONLY a regular
@@ -251,7 +251,7 @@ pub struct TableManager {
     /// any in-flight fast-path writer that read `false` before the flag went
     /// up — the check-then-act gap `unique_write_lock` + the flag alone
     /// cannot close. Shared across clones via `Arc` (same rationale as the
-    /// sibling barrier flags). See [`writer_drain_barrier`] for the full
+    /// sibling barrier flags). See `writer_drain_barrier` for the full
     /// memory-model + reusability rationale.
     pub(super) writer_drain: super::writer_drain_barrier::WriterDrainBarrier,
     /// #1003 (follow-up to #984) — process-local set of index-name ids
@@ -261,7 +261,7 @@ pub struct TableManager {
     /// OWN name is in this set — a per-identity check, not a scalar
     /// subtraction (an earlier scalar-counter version of this fix could
     /// mask an unrelated genuinely-stuck index; see
-    /// [`in_flight_create_guard`]'s module doc for the full writeup). A
+    /// `in_flight_create_guard`'s module doc for the full writeup). A
     /// healthy, currently-in-progress backfill (which sets
     /// `IndexState::Building` BEFORE the backfill even starts, per
     /// F-72/#899) therefore does not read as "degraded" for its OWN index,
@@ -835,7 +835,7 @@ impl TableManager {
 
     /// S5c-X read-only view over the info store for PRODUCTION cross-crate
     /// callers (`shamir-db` catalogue / DDL-status readers). The raw
-    /// [`info_store`](Self::info_store) handle stays `pub(crate)`; the view
+    /// `info_store` handle stays `pub(crate)`; the view
     /// exposes exactly the read/durability methods those callers use (see
     /// `write_receipt/admission/read_only_views.rs`).
     pub fn info_store_read_view(&self) -> TableInfoStoreReadView<'_> {
@@ -844,7 +844,7 @@ impl TableManager {
 
     /// S5c-X read-only view over the data store for PRODUCTION cross-crate
     /// callers (`shamir-db` migration seeding, `SystemStore` durability
-    /// flushes). The raw [`data_store`](Self::data_store) handle stays
+    /// flushes). The raw `data_store` handle stays
     /// `pub(crate)`.
     pub fn data_store_read_view(&self) -> TableDataStoreReadView<'_> {
         TableDataStoreReadView { manager: self }
@@ -1067,7 +1067,7 @@ impl TableManager {
 
     /// F-70 (#897, P0) — THE canonical acquisition path for a DDL-side write
     /// barrier: raise `bit`, [`drain_writers`](Self::drain_writers), THEN
-    /// acquire [`unique_write_lock`](Self::unique_write_lock) — in that order,
+    /// acquire `unique_write_lock` — in that order,
     /// and no other. See [`writer_drain_barrier`](super::writer_drain_barrier)'s
     /// module doc ("F-70 — THE canonical lock-order hierarchy") for the full
     /// derivation of why this order (not lock-then-drain, which F-57, #883,
@@ -1145,18 +1145,18 @@ impl TableManager {
     /// F-37 (#845) — drive the schema-activation write barrier from outside
     /// the engine crate (the shamir-db schema DDL handler in
     /// `admin_schema.rs`). When `on == true`, every writer consulting
-    /// [`needs_write_barrier`](Self::needs_write_barrier) returns `true` and
-    /// serializes on [`unique_write_lock`](Self::unique_write_lock) — closing
+    /// `needs_write_barrier` returns `true` and
+    /// serializes on `unique_write_lock` — closing
     /// the `keyset_safe` count-proof race (a concurrent INSERT/UPDATE can no
     /// longer land between the `count() == 0` read and the schema's persist +
     /// activate).
     ///
     /// `SeqCst`-ordered (F-56): the store must participate in the SAME single
     /// SeqCst total order as the writer's `SeqCst` flag load in
-    /// [`needs_write_barrier`](Self::needs_write_barrier) and the writer's
+    /// `needs_write_barrier` and the writer's
     /// `SeqCst` `active`-counter `fetch_add` — the cross-atomic dependency the
     /// drain proof relies on cannot be carried by `Release`/`Acquire` alone
-    /// (see [`writer_drain_barrier`]).
+    /// (see `writer_drain_barrier`).
     ///
     /// **This is a raw, test-facing flag setter, NOT the production entry
     /// point.** It does NOT need to be (and in production is NOT) called
@@ -1213,22 +1213,22 @@ impl TableManager {
         self.writer_drain.drain().await;
     }
 
-    /// F-48b (#867) — the writer-side twin of [`drain_writers`]: bump the
+    /// F-48b (#867) — the writer-side twin of `drain_writers`: bump the
     /// drain-set counter and return an RAII guard that decrements on drop.
     ///
     /// Called by the tx-commit pipeline's Phase 2.5 prelock
     /// (`tx::pre_commit::pre_commit_prelock`) for EVERY table in `tx.write_set`
     /// BEFORE reading [`needs_write_barrier`](Self::needs_write_barrier) — the
-    /// ordering is load-bearing (see [`writer_drain_barrier`] for the
+    /// ordering is load-bearing (see `writer_drain_barrier` for the
     /// happens-before chain). If the flag is `true` (slow path), the caller
-    /// drops the returned guard BEFORE taking [`unique_write_lock`] (the lock
+    /// drops the returned guard BEFORE taking `unique_write_lock` (the lock
     /// serializes the slow path; staying in the drain set while blocking on
     /// the lock would deadlock against a DDL holding the lock and waiting on
-    /// [`drain_writers`]). If the flag is `false`, the caller keeps the guard
+    /// `drain_writers`). If the flag is `false`, the caller keeps the guard
     /// alive until its Phase 5c materialize write has landed — so a DDL that
     /// raises the barrier AFTER the flag read genuinely waits for this tx.
     ///
-    /// Visibility mirrors [`needs_write_barrier`] (`pub(crate)`): the only
+    /// Visibility mirrors `needs_write_barrier` (`pub(crate)`): the only
     /// caller is the engine's own tx-commit prelock. The non-tx writer methods
     /// in `table_manager_crud.rs` access `self.writer_drain` directly (same
     /// module); this accessor exists for the cross-module prelock call site.
@@ -1293,7 +1293,7 @@ impl TableManager {
     /// (also `SeqCst`) be observable by the drainer's `active.load` (also
     /// `SeqCst`). Only a single `SeqCst` total order across both atomics can
     /// carry that edge — `Release`/`Acquire` alone cannot (see
-    /// [`writer_drain_barrier`]'s memory-model proof, which this task
+    /// `writer_drain_barrier`'s memory-model proof, which this task
     /// extends to state it now covers the full predicate).
     ///
     /// Consulted by the non-tx writer methods in `table_manager_crud.rs`
@@ -1337,7 +1337,7 @@ impl TableManager {
     ///
     /// `InternerManager::clone` Arc-shares the live `Interner` (the
     /// `OnceCell<Interner>`, the chunk-persist atomics, and the persist
-    /// mutex), so the per-table handle returned by [`interner`](Self::interner)
+    /// mutex), so the per-table handle returned by `interner`
     /// is the SAME manager the repo owns — a write through any table's
     /// interner is visible to every other table's reads. The
     /// [`PersistRegistry`] keeps a separate clone of the per-table manager it
@@ -1445,7 +1445,7 @@ impl TableManager {
 /// F-70 inversion). This guard is constructed BEFORE the lock is taken (see
 /// [`begin_write_barrier`](TableManager::begin_write_barrier)); the bit is
 /// still `SeqCst`-ordered (F-56, extended by F-69 to the whole word), which
-/// is what the [`writer_drain_barrier`] proof requires regardless of when
+/// is what the `writer_drain_barrier` proof requires regardless of when
 /// the lock is acquired relative to the drain.
 #[must_use]
 pub struct WriteBarrierGuard {

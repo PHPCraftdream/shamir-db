@@ -62,7 +62,7 @@ pub struct CachedRepoComposite {
 
 /// F-33 Step 2 (#836): composes an ephemeral in-memory repo (table DATA)
 /// with a durable fjall repo (table CONFIGURATION mirror). `store_get`
-/// routes by STORE NAME — see [`HybridRepoComposite::build_store`] for the
+/// routes by STORE NAME — see `HybridRepoComposite::build_store` for the
 /// full per-name routing table and rationale.
 ///
 /// **Critical coupling**: `__interner__` is mirrored with an ALLOW-ALL
@@ -547,7 +547,7 @@ impl BoxRepoFactory {
     /// Disk backends return their `path`; `InMemory` returns `None`; the
     /// `MemBuffer`/`Cached` wrappers delegate to their inner factory so the
     /// real disk path at the bottom of the stack surfaces. Used by
-    /// [`RepoInstance::repo_wal`] to decide whether to construct a
+    /// `RepoInstance::repo_wal` to decide whether to construct a
     /// file-backed WAL group (disk) or fall back to the KV-marker WAL
     /// (in-memory).
     pub fn backing_dir(&self) -> Option<PathBuf> {
