@@ -1,81 +1,44 @@
-# 131c — PR8b-3 destination lifecycle: open design defects (after review round 3)
+# 131c — PR8b-3 destination lifecycle: defect resolution log (round 4 — ALL DEFECTS CLOSED)
 
-STATUS: the design in `131`, `131a`, `131b` passed two consistency/code-fact
-auditors (round 3: both `CLEAN`) but an independent reviewer found the
-defects below. They MUST be resolved (round 4) before any PR8b-3x
-implementation starts. Each defect names the lines of the documents it
-touches. This file is deleted when they are resolved.
+STATUS: all six defects D1-D6 found in review round 3 are resolved (round 4) in
+`131-s5cx-destination-lifecycle.md` (M), `131b-s5cx-destination-lifecycle-surface.md` (S)
+and `131a-s5cx-destination-lifecycle-evidence.md` (E), kept mutually consistent.
+This file remains as the resolution log only; it no longer lists open work.
 
-## D1 (P1) The database-gate reacquisition admits a deadlock
-
-`131:272` releases the shared database gate and reacquires it exclusively
-WHILE keeping the repository admission mutexes; `131b:85` acquires the
-database gate first and then the repository mutex. Cycle: destruction A keeps
-repository mutex R and released the shared gate; publisher B takes the gate
-shared and waits for R; A requests the gate exclusive and waits for B. The
-per-operation token does not break it (B is another operation). This
-contradicts "single global order, never crossed in reverse" (`131:256`).
-Needed: a coherent strategy — e.g. a destruction that may touch a database
-gate takes it EXCLUSIVE up front (never upgrades), or the repository mutexes
-are released before the exclusive request and revalidated afterwards; prove
-the chosen order by listing every acquisition site.
-
-## D2 (P1) Audit reconciliation uses in-memory presence as durable evidence
-
-`131:171` prescribes scanning `AuditChain::snapshot` after an ambiguous append
-and adopting the matching entry's sequence. The chain stores the entry in
-memory BEFORE the appender call (`audit_chain.rs:212-215`, `:417-427`),
-`snapshot` is a test helper (`:226-228`), `verify_against_checkpoint` reads no
-durable log (`:267-291`) and a restart starts with an empty entry vector
-(`:170-177`). A memory match may exist although persistence failed, and after a
-restart the previous tail is not in memory. Needed: reconciliation by reading
-the DURABLE log tail (or a durable acknowledgement record) and a required
-fsync on the found-entry branch.
-
-## D3 (P1) Stage-2 R1 can re-reserve an already destroyed destination
-
-`131:234` upserts an Unresolved incident for EVERY bound destination ALWAYS,
-including absent ones, and `131:237` keeps incident-derived reservations while
-incidents are unresolved; destruction completion (`131:199`) defines no
-incident-resolution transition; `131b:154` needs no reservation for
-absent-target install, `131b:123-128` forbids publication of a new incarnation
-under a reserved name, and the clear predicate (`131b:209`) needs an already
-installed replacement incarnation. So destroy -> R1 -> fresh install can
-re-create unresolved protection AFTER destruction and then refuse the install.
-Needed: an explicit `Resolved(by destruction)` transition at destruction
-completion, R1 never upserting an incident for a destination that is absent
-with a completed destruction operation, and consistency with evidence case 15
-(names released after R1).
-
-## D4 (P1) The frozen-target confirmation has no client/server exchange
-
-`131b:47-55` makes the HMAC cover the frozen `{db, repo, storage_object_id}`
-list from the Prepared operation, but the wire modifier only carries reason,
-operation id and nonce (`131b:17`, A.6 `:234`) and the builder supplies no
-targets; the server verification seam (`admin.rs:636-659`) has no Prepared
-operation. Needed: a preview/challenge exchange (server returns the frozen
-target set and a challenge; the client signs it) or sign the logical targets
-and have the executor verify the frozen set against a server-side resolved
-digest recorded in the operation; specify ordering, canonical form, and
-failure.
-
-## D5 (P2) The stage-1 R1 failure guarantee repeats the commit/flush mistake
-
-`131:230` says any failure before the deletion flush leaves the anchor intact,
-but the catalogue deletion path commits an implicit transaction before the
-later flush (`admin_replication.rs:688-702`; `repo_instance.rs:1295-1297`), as
-`131:198` itself acknowledges. A flush failure can therefore leave the row
-already deleted, and retries that require the row are wrong. Needed:
-idempotent retry that tolerates the row being already gone.
-
-## D6 (P2) A live-process retry after a Prepared-barrier failure is undefined
-
-A barrier failure leaves the operation `Prepared` and the caller is told to
-retry the same id (`131:168`, `131b:75`), but the executor is spawned only after
-Prepare (`131:297`), a same-id submission returns status (`131:209,299`) and
-`destruction_retry` resumes `Blocked`, not `Prepared` (`131b:245`). The
-documented remedy can return a stranded Prepared status forever until a
-restart. Needed: same-id submission of a `Prepared` operation re-runs the
-barrier and spawns the executor (or `destruction_retry` accepts `Prepared`);
-define the ownership handoff when the future is cancelled between Prepare and
-the spawn.
+- D1 (P1) — resolved (round 4): db gate taken ONCE up front in its final mode (exclusive for
+  kind-`Database` destructions / create-or-replace-under-db; shared for repo-scope, incl. a
+  single-repo destruction, for the operation's whole lifetime), held to the end, never upgraded
+  or released/reacquired; the round-3 release-before-step-5/reacquire-exclusive language removed;
+  pair-by-pair deadlock-freedom proof added (M §4e order + both lock tables + acquisition-site
+  inventory; S §7a; M I13/§3c).
+- D2 (P1) — resolved (round 4): ambiguous-append reconciliation reads the DURABLE log tail
+  (forced-fsync `flush_buffer`/`sync_all`/`read_durable_tail` read, or `checkpoint_durable`'s
+  durable ack record) — never `AuditChain::snapshot`; a found entry counts only after a
+  confirmed durability operation (fsync confirmed or seq ≤ durable ack watermark); restart case
+  (empty in-memory vector) defined (M §3e item 6; S A.7a; E risk 8).
+- D3 (P1) — resolved (round 4): destruction completion writes `Resolved(by destruction)` —
+  incidents flip to `Cleared` with `cleared_by = ByDestruction { operation_id }` in the SAME
+  durable write as `Destroyed`; stage-2 R1 upserts incidents ONLY for destinations still live
+  or catalogued; an absent destination with a completed destruction operation records NOTHING
+  and its reservation is released (M §4a step 6, §4c (a)/(d), §3d schema + predicate; S §7c,
+  §8c flow 1, A.3; E case 15).
+- D4 (P1) — resolved (round 4): two-step confirmation exchange — new admin wire op
+  `destruction_preview(targets, cascade)` returning the sorted frozen target list, its SHA-256
+  digest, a single-use ≤60 s challenge and `expires_at_ns`; the DDL modifier and the v2 canonical
+  encoding bind digest (tag 0x0B) + challenge (tag 0x0C), HMAC over the digest, verified at the
+  admin.rs:636-659 seam without a Prepared operation; executor re-resolves the live/catalogued
+  set at Prepare and fails closed with the NEW eleventh typed wire code
+  `destruction_target_changed` (all "ten" counts updated to eleven; TS `.destructionPreview` +
+  builder changes; Rust analogue) (M §1, I2, §4a preflight/step 1; S §6a, §6b, §6c, A.2, A.6,
+  Appendix B; E case 12, §10).
+- D5 (P2) — resolved (round 4): R1-stage-1 deletion is commit-before-flush (as §4a step 5
+  documents), so a flush failure leaves the row UNKNOWN; retry tolerates the row already gone,
+  re-verifies destination absence, and reconciles by re-reading the subscriptions table after a
+  flush error (absent ⇒ step 4 complete, continue at step 5) (M §4c stage 1).
+- D6 (P2) — resolved (round 4): same-id submission of a `Prepared` operation re-runs the audit
+  barrier (idempotent by event id) and spawns the executor; `destruction_retry` accepts
+  `Prepared` as well as `Blocked`; the executor is spawned BEFORE the handler returns the
+  operation id; a failed barrier spawns nothing — the stranded `Prepared` row is claimed by
+  same-id submission, `destruction_retry`, or the periodic recovery pass (claims `Prepared`
+  rows older than 5 minutes); callers see operation id + state and `destruction_audit_unavailable`
+  while the barrier keeps failing (M §3e item 3, §4b, §4d step 5, §4f; S §6c row, Appendix B).
