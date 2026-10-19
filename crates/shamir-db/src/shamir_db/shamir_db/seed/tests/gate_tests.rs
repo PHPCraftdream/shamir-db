@@ -12,7 +12,7 @@ use shamir_engine::table::table_manager::table_token_for;
 use shamir_engine::tx::{apply_replicated_batch, ApplyOutcome, ApplyPolicy, ReplicatedEvent};
 use shamir_query_builder::doc;
 use shamir_storage::storage_in_memory::InMemoryStore;
-use shamir_storage::types::Store;
+use shamir_storage::types::{Repo, Store};
 use shamir_tx::{project_event, IsolationLevel, TxContext, TxId};
 use shamir_types::access::Actor as WireActor;
 use shamir_types::types::record_id::RecordId;
