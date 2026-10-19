@@ -1,26 +1,22 @@
 //! Shared types and primitives used by both client and server.
+//!
+//! The modules are grouped into topical subfolders; every module is
+//! re-exported here so its public path stays `crate::common::<module>`.
 
-pub mod auth_message;
-pub mod bootstrap_message;
-pub mod changepw;
-pub mod crypto;
-pub mod domain_tags;
-pub mod envelope;
-pub mod error;
-pub mod fake_blob;
-pub mod identity;
-pub mod kdf_params;
-pub mod latency;
-pub mod password;
-pub mod push_envelope;
-pub mod rotation;
-pub mod scram;
-pub mod time;
-pub mod types;
-pub mod username;
+mod messages;
+mod model;
+mod primitives;
+mod runtime;
+mod user;
 
 #[cfg(test)]
 mod tests;
+
+pub use messages::{auth_message, bootstrap_message, changepw, envelope, push_envelope};
+pub use model::{error, types};
+pub use primitives::{crypto, domain_tags, kdf_params, password, scram};
+pub use runtime::{fake_blob, latency, rotation, time};
+pub use user::{identity, username};
 
 pub use auth_message::AuthMessage;
 pub use error::{Error, Result};

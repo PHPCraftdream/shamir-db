@@ -186,4 +186,4 @@ impl ConsumedCounterStore for FjallConsumedCounters {
     }
 }
 
-// Tests live in crate::server::tests::durable_counters_tests.
+// Tests live in crate::server::tests::infra_tests::durable_counters_tests.

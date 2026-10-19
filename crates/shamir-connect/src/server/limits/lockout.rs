@@ -476,4 +476,4 @@ impl LockoutStore for InMemoryLockoutStore {
     }
 }
 
-// Tests live in crate::server::tests::lockout_tests.
+// Tests live in crate::server::tests::security::lockout_tests.
