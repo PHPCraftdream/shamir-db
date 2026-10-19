@@ -147,6 +147,39 @@ pub enum DbError {
         .0.reason
     )]
     ResyncRequired(Box<ResyncRequiredInfo>),
+
+    /// S5c-X PR8b-2: a `system/subscriptions` catalogue row is missing
+    /// required fields or carries an invalid/unsupported durable binding.
+    /// Open fails with this typed error (the operator replaces/reseeds the
+    /// row); at runtime the last safe quarantine snapshot is retained.
+    ///
+    /// Boxed: two inline `String`s, same ratchet as [`DbError::ResyncRequired`].
+    #[error("subscription catalogue row '{}' is invalid: {}", .0.subscription, .0.reason)]
+    SubscriptionCatalogue(Box<SubscriptionCatalogueError>),
+
+    /// S5c-X PR8b-2 round 5 (B4): a destination lifecycle op (DROP/RENAME of
+    /// a database or repo, DROP DATABASE … CASCADE) hit a destination that is
+    /// referenced by a durable subscription binding — including a destination
+    /// whose quarantine key was only PREPUBLISHED in the quarantine cache.
+    /// The detail names the operation, the destination and EVERY blocking
+    /// subscription with its binding generation.
+    #[error("{detail}")]
+    ReplicationDestinationBound { detail: String },
+
+    /// S5c-X PR8b-2 round 5 (B4): DROP SUBSCRIPTION of a quarantined
+    /// subscription (durably marked or prepublished in the quarantine cache)
+    /// is refused: dropping is not evidence of consistency, and in-place
+    /// abandonment is not supported in this version. Distinct from the
+    /// read-path `resync_required`.
+    #[error("{detail}")]
+    ReplicationDestinationQuarantined { detail: String },
+}
+
+/// Heap payload of [`DbError::SubscriptionCatalogue`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscriptionCatalogueError {
+    pub subscription: String,
+    pub reason: String,
 }
 
 /// Heap payload of [`DbError::ResyncRequired`].
@@ -176,6 +209,15 @@ impl DbError {
         }))
     }
 
+    /// Build [`DbError::SubscriptionCatalogue`] for an invalid subscription
+    /// row, naming the subscription and the reason.
+    pub fn subscription_catalogue(subscription: &str, reason: impl Into<String>) -> Self {
+        DbError::SubscriptionCatalogue(Box::new(SubscriptionCatalogueError {
+            subscription: subscription.to_string(),
+            reason: reason.into(),
+        }))
+    }
+
     /// Return the machine-readable wire code for this error variant, if any.
     /// Used by the engine to populate `BatchError::QueryError.code` (and
     /// `DbResponse::Error.code` on the wire) so clients can branch on typed
@@ -196,6 +238,11 @@ impl DbError {
             DbError::Conflict(_) => Some("tx_conflict"),
             DbError::IndexDrainInProgress(_) => Some("index_drain_in_progress"),
             DbError::ResyncRequired { .. } => Some("resync_required"),
+            DbError::SubscriptionCatalogue(_) => Some("subscription_catalogue_invalid"),
+            DbError::ReplicationDestinationBound { .. } => Some("replication_destination_bound"),
+            DbError::ReplicationDestinationQuarantined { .. } => {
+                Some("replication_destination_quarantined")
+            }
             _ => None,
         }
     }
