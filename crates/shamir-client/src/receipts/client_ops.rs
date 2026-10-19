@@ -64,7 +64,7 @@ impl Client {
 /// point minus the transport call. With `interner = Some(..)` it performs
 /// the same interner-epoch advertisement `Client::execute` does before
 /// building the wire request and merges the response's `interner_delta`
-/// afterwards (mirroring [`crate::interner_cache_ops`] `merge_interner_delta`
+/// afterwards (mirroring [`crate::interner_cache::ops`] `merge_interner_delta`
 /// call for call). It sets the visibility wait, sends the exact
 /// `DbRequest::Execute` through `send` exactly once (the transport owns
 /// deadlines; a transport failure is never retried or replayed), and
