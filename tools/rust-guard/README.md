@@ -48,6 +48,17 @@ directory unless an explicit `--exceptions` path is given.
   the immediate-child form `<dir>/<name>/main.rs` ONLY — any deeper
   nested `main.rs` (helper data such as `tests/case/crash_matrix.rs`
   mounted by `tests/crash_recovery.rs`) is not a root.
+  Per-revision discovery: the file listing that drives auto-discovery
+  comes from `git ls-tree -r --name-only <rev>` when `--rev` is pinned
+  (falling back to `git ls-files` only without a revision) — a target
+  deleted at the pinned revision is never resurrected from the current
+  index.
+  A failing `cargo metadata` (one broken member manifest fails the whole
+  command) is a `CARGO_METADATA_FAILED` finding and the scan CONTINUES
+  on hand-parsed manifests (root `[workspace]` members, glob-expanded
+  against the pinned listing, plus `tools/*`), so hand-scanned manifests
+  still yield their `BAD_MANIFEST` findings instead of the run dying as
+  an infra error before them.
   An unreadable or unparseable manifest is a `BAD_MANIFEST` finding, not
   a silent skip.
   Resolution of every `mod x;` / inline `mod x { }` follows Rust's
@@ -56,19 +67,44 @@ directory unless an explicit `--exceptions` path is given.
   an inline module needs no file of its own and appends its name to the
   resolution directory, so `mod a { mod b; }` resolves `b` at `a/b.rs`
   (and inline-in-inline composes); `#[path]` inside an inline module is
-  relative to that inline module's directory context. ALL
+  relative to that inline module's directory context. Every resolved
+  path is LEXICALLY NORMALISED (`.` and `..` collapsed against the repo
+  root); a path that escapes the repository root is a
+  `PATH_ESCAPES_REPO` finding and is never followed — nor does its
+  un-normalised spelling leak into the visited bookkeeping.
+  ALL
   `#[cfg_attr]` path alternatives are kept: mutually exclusive branches
   are not duplicate modules, and a file reached only via two provably
-  exclusive predicates (`not(X)` vs `X`) is not `DUPLICATE_FILE`.
+  exclusive predicates (`not(X)` vs `X`) is not `DUPLICATE_FILE`. A
+  lone `#[cfg_attr(pred, path = "P")]` mod models BOTH branches:
+  `pred → P` and `not pred →` the default `x.rs`/`x/mod.rs` candidates —
+  each branch is resolved and accounted when it exists; a branch
+  resolving to nothing is not a finding on its own (only when NEITHER
+  branch resolves).
+  cfg predicates COMPOSE down the tree: the inherited predicate, the
+  module's own `#[cfg]` and the alternative's `cfg_attr` predicate are
+  AND-ed (`all(...)`) into the child's reaching predicate, and inline
+  traversal AND-s the parent cfg with the inline module's own cfg.
+  Mutual-exclusion duplicate tests run on the COMPOSED predicates, so
+  `all(unix, ...)` vs `all(not(unix), ...)` compares correctly.
   cfg predicates are evaluated on the parsed expression for the statically
   provable cases (`any()`, `not(all())`, unsatisfiable branches inside
   `all(...)`/`any(...)`); anything else is treated as satisfiable.
+  `DUPLICATE_FILE` fires only when one file is mounted under conflicting
+  logical paths WITHIN ONE target's module tree (without mutually
+  exclusive cfg) — reaching a file from SEVERAL targets (a shared bench
+  helper auto-discovered as a bench root AND `mod`-included by another
+  bench, `tests/harness.rs` auto-discovered AND `mod harness;` from each
+  test binary) is normal cargo behaviour and never a duplicate;
+  auto-discovered `tests/*.rs`/`benches/*.rs` that are also
+  mod-included are accounted by being reachable.
   Findings:
   `UNACCOUNTED_FILE` (a tracked `.rs` under `crates/*/` or `tools/*/`
   reachable from no root — the lost-test case), `MISSING_MOD_FILE`,
   `AMBIGUOUS_MOD`, `UNSATISFIABLE_CFG`, `DUPLICATE_FILE`,
   `STALE_EXCEPTION`, `UNRESOLVED_INCLUDE`, `UNRESOLVED_MACRO`,
-  `PARSE_FAILED`, `BAD_MANIFEST`.
+  `PARSE_FAILED`, `BAD_MANIFEST`, `CARGO_METADATA_FAILED`,
+  `PATH_ESCAPES_REPO`.
 - `rust-guard structure [--paths <glob>...]... [--changed-since <rev>]
   [--base <rev>] [--delta <path>] [--exceptions <path>]
   [--warn-primary-export]` — AST rules over the selected files (at least
@@ -128,13 +164,25 @@ directory unless an explicit `--exceptions` path is given.
   revision's OWN ROOT `Cargo.toml` (`[workspace]` members/exclude, with
   `*`-globs expanded segment-wise against the pinned tree listing) plus
   every member manifest ON THE SAME PINNED VIEW (`vendor/*` skipped),
-  optionally narrowed with `--packages`. Discovery is per-revision:
-  a target that exists only at base (a deleted package) still yields its
-  items, which then surface as `ITEM_LOST` losses instead of silence.
+  optionally narrowed with `--packages`. Discovery is per-revision —
+  BOTH the manifests AND the auto-discovered target listing
+  (`tests/*.rs`, `benches/*.rs`, ...) come from the pinned revision, so
+  a target that exists only at base (a deleted package or a deleted
+  test file) still yields its items, which then surface as
+  `ITEM_LOST`/`TEST_LOST` losses instead of silence.
   The walk follows `mod x;` declarations — including ones INSIDE inline
   `mod x { }` blocks, resolved under the extended directory context —
   and literal `include!("file.rs")` edges; cfg predicates inherit down
-  the module tree (parent + child compose with `&&`). Per item it
+  the module tree (parent + child compose with `&&`). `#[path]` (and
+  `#[cfg_attr]`) attributes are read with the SAME shared extraction as
+  the `modules` gate (`modules_cmd::resolution::path_alternatives`) —
+  the inventory's former local `parse_args::<LitStr>()` could not read a
+  name-value attribute, so path-mounted modules silently fell back to
+  default resolution. An UNRESOLVED child module (missing, ambiguous or
+  generated) is an `INVENTORY_ERROR`, never a silent skip — its items
+  would silently "vanish" between revisions otherwise. Every resolved
+  path is lexically normalised; a path escaping the repo root is an
+  `INVENTORY_ERROR`. Per item it
   records: package, kind (`fn`, `struct`, `enum`, `union`, `trait`,
   `impl-member`, `static`, `const`, `type`, `mod`, `macro`), name, full
   logical module path, enclosing type/trait, normalised `impl` head,
@@ -160,8 +208,9 @@ directory unless an explicit `--exceptions` path is given.
   - `BASE_MISMATCH` — the delta's `base` does not match the resolved
     base SHA.
   - `INVENTORY_ERROR` — a source or manifest could not be read or
-    parsed at one of the two revisions (fail closed: the items it would
-    contribute are UNKNOWN, never silently skipped).
+    parsed at one of the two revisions, a child `mod` did not resolve,
+    or a resolved path escapes the repository root (fail closed: the
+    items it would contribute are UNKNOWN, never silently skipped).
   - `MALFORMED_DELTA` — the delta file does not parse, lacks the
     required `base` SHA, or an entry is missing/empty
     `path`/`item`/`reason`/`owner`.
@@ -274,8 +323,20 @@ or a file now reachable without it, is a `STALE_EXCEPTION` finding.
 ## Scope and layout
 
 Scan scope is `crates/*/` and `tools/*/` (vendored `vendor/*` excluded).
-Any tracked `.rs` file under a path segment named `fixtures` is skipped
-by the `modules` scope and the `conservation` inventory — the self-test
+`.rust-guard/scan.toml` (repo root) is the EXPLICIT scan configuration:
+
+```toml
+exclude_paths = ["tools/rust-guard/tests/fixtures"]  # exact repo-relative prefixes
+```
+
+Files under any `exclude_paths` prefix are skipped by the target-root
+discovery, the module walk and the conservation inventory (the tool's
+own self-test fixture trees are excluded this way on the real repo —
+an explicit repo setting, never a hard-coded path). Self-tests still
+scan fixture trees because they are materialised into throwaway temp
+repos that carry no `scan.toml`. Any tracked `.rs` file under a path
+segment named `fixtures` is additionally skipped by the `modules` scope
+and the `conservation` inventory — the self-test
 fixture trees are mounted by the test harness, never the build (same
 treatment as `check_layout.py`'s `EXCLUDED_DIR_NAMES`).
 The crate follows the repo layout rules: ≤ 7 entries per folder, ≤ 1000
@@ -295,10 +356,15 @@ its output (exit != 0) or a clean zero-finding exit. Conservation
 fixtures carry a `base/` and a `head/` tree committed as two commits;
 the test compares them with `--base <sha1> --head HEAD`, optionally
 with a generated delta file. `modules` fixtures get a minimal
-`[workspace]` + `crates/fix` scaffold so `cargo metadata --no-deps`
-succeeds inside the temp repo; a fixture that ships its own root or
-package manifest keeps it. Conservation needs no cargo at all — its
+`[workspace]` + `crates/fix` scaffold (including `crates/fix/src/lib.rs`,
+so `cargo metadata --no-deps` succeeds inside the temp repo even for
+fixtures whose own manifests are deliberately broken; a fixture that
+ships its own root, package manifest or sources keeps it). Conservation
+needs no cargo at all — its
 discovery parses manifests from git objects at each revision.
+Conservation fixtures' head overlay DELETES every base-fixture file the
+head fixture does not contain (a deleted test target must really be
+absent at head).
 Head commits use `--allow-empty`, so fixture pairs with identical
 trees still yield a two-commit history.
 
@@ -306,17 +372,22 @@ Fixture → finding map:
 
 | Fixture | Finding asserted |
 |---|---|
-| `modules_ok` | none (exit 0): `#[path]`, mutually exclusive `cfg_attr` alternatives (both reachable, no exception), non-mod-rs parent, inline `mod` directory-context extension (`mod nested { mod leaf; }` → `nested/leaf.rs`, no wrapper file), `include!`, raw-string/comment `mod x;` negative |
+| `modules_ok` | none (exit 0): `#[path]`, genuinely exclusive `cfg_attr` alternatives (`unix`/`not(unix)`, both reachable, no exception), BOTH branches of a lone `#[cfg_attr]` (attr target + default fallback), an inherited `#[cfg(unix)]` gating an inline child, a file shared across two TARGETS (`benches/common.rs` root AND mod-included — never a duplicate), `src/bin/x.rs` bin target, non-mod-rs parent, inline `mod` directory-context extension (`mod nested { mod leaf; }` → `nested/leaf.rs`, no wrapper file), `include!`, raw-string/comment `mod x;` negative |
 | `modules_ok/producer_declared` | none (exit 0): documented `[[producer]]` spelling accepted, package-scoped, plus `[[exception]]` for the generated file |
+| `modules_ok/generated_include_producer` | none (exit 0): `include!(concat!(env!("OUT_DIR"), ...))` with a scoped `include` `[[producer]]` |
 | `modules_bad/dropped_mod` | `UNACCOUNTED_FILE` |
+| `modules_bad/unaccounted_extra` | `UNACCOUNTED_FILE` (clean when a `scan.toml` excludes `extra.rs`) |
 | `modules_bad/unsat_cfg` | `UNSATISFIABLE_CFG` |
 | `modules_bad/missing_path` | `MISSING_MOD_FILE` |
 | `modules_bad/ambiguous` | `AMBIGUOUS_MOD` |
-| `modules_bad/duplicate` | `DUPLICATE_FILE` |
+| `modules_bad/duplicate` | `DUPLICATE_FILE` (mounted twice in ONE target — cross-target sharing is clean, see `modules_ok`) |
+| `modules_bad/path_escapes` | `PATH_ESCAPES_REPO` (`#[path = "../../../outside.rs"]`) |
+| `modules_bad/generated_include` | `UNRESOLVED_INCLUDE` (non-literal include, no producer) |
 | `modules_bad/stale_exception` | `STALE_EXCEPTION` |
 | `modules_bad/macro_mods` | `UNRESOLVED_MACRO` (module-level `macro_rules!` mentioning `mod` inside nested braces, no `[[producer]]`) |
 | `modules_bad/producer_wrong_package` | `UNRESOLVED_MACRO` (producer scoped to another package must not apply) |
 | `modules_bad/bad_manifest` | `BAD_MANIFEST` (unparseable hand-scanned manifest fails closed) |
+| (no fixture — broken root member) | `CARGO_METADATA_FAILED` (finding + scan continues on hand-parsed manifests) |
 | `structure/modrs_logic` | `MODRS_LOGIC` |
 | `structure/tests_manifest` | `TESTS_MANIFEST` |
 | `structure/inline_test_mod` | `INLINE_TEST_MOD` |
@@ -337,6 +408,9 @@ Fixture → finding map:
 | `conservation/body_changed` | `BODY_CHANGED` |
 | `conservation/signature_changed` | `SIGNATURE_CHANGED` (param/return type change, identical body) |
 | `conservation/gone_pkg` | `ITEM_LOST` for every item of a base-only package the head deletes (per-revision manifest discovery) |
+| `conservation/target_deleted` | `TEST_LOST` for a test TARGET (`tests/x.rs`) deleted at head (per-revision auto-discovery + deletion-aware overlay) |
+| `conservation/path_test_deleted` | `TEST_LOST` for a `#[path]`-mounted test module deleted at head (shared attribute-path extraction) |
+| `conservation/broken_mod` | `INVENTORY_ERROR` (`mod ghost;` resolves at neither revision — fail closed) |
 | `conservation/unused_allowance` | `UNUSED_ALLOWANCE` (identical trees — exercises the `--allow-empty` head commit) |
 | `conservation/base_mismatch` | `BASE_MISMATCH` (head carries a real comment-only diff) |
 | `conservation/unpairable_duplicate` | `UNPAIRABLE_DUPLICATE` (one base item, two same-key head candidates) |

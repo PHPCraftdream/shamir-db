@@ -1,0 +1,2 @@
+type = "RepoInstance"
+module = "crate::repo::instance::repo_instance"

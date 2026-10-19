@@ -23,6 +23,7 @@ use super::item::{combine_cfg, Extractor, Item};
 use crate::gitfs::GitFs;
 use crate::modules_cmd::resolution::{self, Resolution};
 use crate::modules_cmd::roots::{self, RootKind};
+use crate::modules_cmd::scan_cfg::ScanCfg;
 use syn::Item as SynItem;
 
 /// Everything extracted from one revision: the items plus the fail-closed
@@ -56,6 +57,10 @@ pub fn build(rev: &str, packages: &[String], repo: &std::path::Path) -> Result<I
     if fs.commit_sha(rev).is_none() {
         return Err(format!("BLOCKED_COMPARISON: `{rev}` is not a commit"));
     }
+    // Repo-level scan configuration (working-tree state): excluded
+    // prefixes are out of the inventory's scope, exactly as in the
+    // `modules` gate.
+    let scan = ScanCfg::load(repo)?;
     let tree: Vec<String> = fs
         .list_tree()?
         .into_iter()
@@ -65,6 +70,7 @@ pub fn build(rev: &str, packages: &[String], repo: &std::path::Path) -> Result<I
                 // Self-test fixtures are mounted by the test harness, not
                 // part of the build — skip them (mirrors check_layout.py).
                 && !crate::modules_cmd::has_excluded_dir(p)
+                && !scan.excluded(p)
         })
         .collect();
     let (all_roots, problems) = roots::discover_from_manifests(&fs)?;
@@ -197,29 +203,71 @@ fn process_items(
                         process_items(fs, tree, inner, &inner_ctx, inv, visited);
                     }
                     None => {
-                        let path_attr = mod_path_attr(&m.attrs);
-                        let resolved = if let Some(attr) = path_attr {
-                            resolution::resolve_attr(fs, &ctx.attr_dir, &attr)
-                        } else {
-                            resolution::resolve(fs, &name, &ctx.mod_dir, &ctx.attr_dir, None)
+                        // Shared attribute-path extraction (the modules
+                        // walker's `path_alternatives`): the previous
+                        // local `parse_args::<LitStr>()` could not read a
+                        // NAME-VALUE `#[path = "..."]`, so every
+                        // path-mounted module silently fell back to
+                        // default resolution and its items vanished.
+                        let alts = resolution::path_alternatives(&m.attrs);
+                        // Handles one resolution outcome; true when a
+                        // file was walked. Non-Found resolutions are
+                        // INVENTORY_ERROR findings, never silent skips.
+                        let handle = |resolved: &Resolution,
+                                      inv: &mut Inventory,
+                                      visited: &mut std::collections::BTreeSet<String>|
+                         -> bool {
+                            match resolved {
+                                Resolution::Found(child) => {
+                                    if !tree.contains(child) {
+                                        return false;
+                                    }
+                                    let child_ctx = Ctx {
+                                        file: child.clone(),
+                                        is_root: false,
+                                        package: ctx.package.clone(),
+                                        logical: format!("{}::{name}", ctx.logical),
+                                        mod_dir: resolution::mod_dir_for(child, false),
+                                        attr_dir: resolution::dir_of(child),
+                                        cfg: cfg.clone(),
+                                    };
+                                    walk_file(fs, tree, &child_ctx, inv, visited);
+                                    true
+                                }
+                                Resolution::Escapes(attr) => {
+                                    inv.errors.push((
+                                        ctx.file.clone(),
+                                        format!(
+                                            "mod `{name}` path `{attr}` resolves outside the repository root"
+                                        ),
+                                    ));
+                                    false
+                                }
+                                _ => false,
+                            }
                         };
-                        if let Resolution::Found(child) = resolved {
-                            if tree.contains(&child) {
-                                let child_ctx = Ctx {
-                                    file: child.clone(),
-                                    is_root: false,
-                                    package: ctx.package.clone(),
-                                    logical: format!("{}::{name}", ctx.logical),
-                                    mod_dir: resolution::mod_dir_for(&child, false),
-                                    attr_dir: resolution::dir_of(&child),
-                                    cfg,
-                                };
-                                walk_file(fs, tree, &child_ctx, inv, visited);
+                        let mut resolved_any = false;
+                        if alts.is_empty() {
+                            let resolved =
+                                resolution::resolve(fs, &name, &ctx.mod_dir, &ctx.attr_dir, None);
+                            resolved_any |= handle(&resolved, inv, visited);
+                        } else {
+                            for alt in alts {
+                                let resolved =
+                                    resolution::resolve_attr(fs, &ctx.attr_dir, &alt.path);
+                                resolved_any |= handle(&resolved, inv, visited);
                             }
                         }
-                        // Missing/ambiguous/generated child modules are
-                        // the `modules` gate's findings; here the child
-                        // simply contributes no items.
+                        if !resolved_any {
+                            // Fail closed: an unresolved child module
+                            // contributes no items, so its base items
+                            // would silently "vanish" — an explicit
+                            // INVENTORY_ERROR keeps the comparison honest.
+                            inv.errors.push((
+                                ctx.file.clone(),
+                                format!("child module `{name}` did not resolve at this revision"),
+                            ));
+                        }
                     }
                 }
             }
@@ -246,6 +294,10 @@ fn process_items(
                                 "include! target not found at this revision (tried {})",
                                 tried.join(", ")
                             ),
+                        )),
+                        Resolution::Escapes(raw) => inv.errors.push((
+                            ctx.file.clone(),
+                            format!("include path `{raw}` resolves outside the repository root"),
                         )),
                         // Generated includes are the `modules` gate's
                         // UNRESOLVED_INCLUDE finding; nothing static to
@@ -275,14 +327,4 @@ fn macro_name(im: &syn::ItemMacro) -> String {
         .last()
         .map(|s| s.ident.to_string())
         .unwrap_or_default()
-}
-
-/// Literal `#[path = "..."]` (cfg_attr variants are handled by the
-/// `modules` gate; conservation keeps to the literal form).
-fn mod_path_attr(attrs: &[syn::Attribute]) -> Option<String> {
-    attrs
-        .iter()
-        .find(|a| a.path().is_ident("path"))
-        .and_then(|a| a.parse_args::<syn::LitStr>().ok())
-        .map(|l| l.value())
 }

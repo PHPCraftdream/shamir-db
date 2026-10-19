@@ -8,6 +8,7 @@
 
 use super::resolution::{self, Resolution};
 use super::roots::{self, RootKind};
+use super::scan_cfg::ScanCfg;
 use crate::exceptions::Exceptions;
 use crate::finding::{exit_code, Report};
 use crate::gitfs::GitFs;
@@ -15,11 +16,8 @@ use proc_macro2::Span;
 use proc_macro2::TokenTree;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use syn::parse::Parse;
-use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
-use syn::Token;
-use syn::{Expr, File, Item, ItemMacro, ItemMod, Lit, Meta};
+use syn::{Expr, File, Item, ItemMacro, ItemMod};
 
 const DEFAULT_EXCEPTIONS: &str = ".rust-guard/exceptions.toml";
 const SCOPE_PREFIXES: [&str; 2] = ["crates/", "tools/"];
@@ -43,6 +41,9 @@ struct Ctx {
     file: String,
     is_root: bool,
     logical: String,
+    /// Index of the target root whose tree (transitively) brought this
+    /// file in — DUPLICATE_FILE is decided WITHIN one target only.
+    target: usize,
     /// Package whose target root (transitively) brought this file in;
     /// producers are matched against it.
     package: String,
@@ -56,9 +57,11 @@ struct Ctx {
     cfg: Option<Expr>,
 }
 
-/// One reaching edge of a physical file: the logical module path and the
-/// predicate it was reached under (for mutual-exclusion duplicate tests).
+/// One reaching edge of a physical file: the owning target, the logical
+/// module path and the predicate it was reached under (for
+/// mutual-exclusion duplicate tests).
 struct Visit {
+    target: usize,
     logical: String,
     pred: Option<Expr>,
 }
@@ -74,6 +77,8 @@ struct Walker<'a> {
     used: BTreeSet<String>,
     /// Producer names that actually suppressed a finding.
     used_producers: BTreeSet<String>,
+    /// Repo-level scan configuration (`.rust-guard/scan.toml`).
+    scan: ScanCfg,
 }
 
 /// Runs the `modules` gate; returns the process exit code.
@@ -92,10 +97,15 @@ fn execute(rev: Option<&str>, exceptions_path: Option<&str>, repo: &Path) -> Res
     let fs = GitFs::open(rev, repo)?;
     let exc_path = exceptions_path.unwrap_or(DEFAULT_EXCEPTIONS);
     let exceptions = Exceptions::load(exc_path)?;
+    // Repo-level scan configuration: `exclude_paths` prefixes are skipped
+    // by roots, walk and inventory (the tool's own test fixtures on the
+    // real repo are excluded this way — an EXPLICIT repo setting, never a
+    // hard-coded path).
+    let scan = ScanCfg::load(repo)?;
     let tracked = fs.tracked_files()?;
     let scope: Vec<String> = tracked
         .iter()
-        .filter(|f| in_scope(f) && f.ends_with(".rs"))
+        .filter(|f| in_scope(f) && f.ends_with(".rs") && !scan.excluded(f))
         .cloned()
         .collect();
     let mut walker = Walker {
@@ -105,17 +115,23 @@ fn execute(rev: Option<&str>, exceptions_path: Option<&str>, repo: &Path) -> Res
         visited: BTreeMap::new(),
         used: BTreeSet::new(),
         used_producers: BTreeSet::new(),
+        scan,
     };
 
     // Fail closed on manifest problems: an unreadable/unparseable
     // manifest, or one naming undeclared `required-features`, becomes a
-    // BAD_MANIFEST finding instead of silently dropping its targets.
+    // BAD_MANIFEST finding instead of silently dropping its targets. A
+    // failing `cargo metadata` becomes CARGO_METADATA_FAILED and the
+    // scan CONTINUES on hand-parsed manifests.
     let (roots, problems) = roots::discover_with_problems(&fs)?;
     for p in problems {
-        walker.report.add(&p.manifest, 1, "BAD_MANIFEST", p.message);
+        walker.report.add(&p.manifest, 1, p.code, p.message);
     }
 
-    for root in &roots {
+    for (idx, root) in roots.iter().enumerate() {
+        if walker.scan.excluded(&root.path) {
+            continue;
+        }
         if !walker.fs.exists(&root.path) {
             // Register the path so `check_unaccounted` does not report
             // the already-reported missing root a second time.
@@ -132,6 +148,7 @@ fn execute(rev: Option<&str>, exceptions_path: Option<&str>, repo: &Path) -> Res
             file: root.path.clone(),
             is_root: true,
             logical: format!("{}::{}", root.package, kind_name(root.kind)),
+            target: idx,
             package: root.package.clone(),
             mod_dir: resolution::mod_dir_for(&root.path, true),
             attr_dir: resolution::dir_of(&root.path),
@@ -169,11 +186,15 @@ fn kind_name(kind: RootKind) -> &'static str {
 impl Walker<'_> {
     /// Parses one file and processes its top-level items.
     fn walk_file(&mut self, ctx: &Ctx) {
+        if self.scan.excluded(&ctx.file) {
+            return; // excluded prefix: out of scope, never walked
+        }
         let first_visit = !self.visited.contains_key(&ctx.file);
         self.visited
             .entry(ctx.file.clone())
             .or_default()
             .push(Visit {
+                target: ctx.target,
                 logical: ctx.logical.clone(),
                 pred: ctx.cfg.clone(),
             });
@@ -227,29 +248,64 @@ impl Walker<'_> {
             return;
         }
         if let Some((_, content)) = &m.content {
-            self.walk_inline(ctx, &name, content);
+            self.walk_inline(ctx, &name, content, cfg);
             return;
         }
         // File-backed: build the candidate list. cfg_attr alternatives
         // are kept ALL together (mutually exclusive alternatives are not
         // duplicate modules); statically unsatisfiable alternatives are
-        // dropped before resolution.
-        let mut candidates: Vec<(Option<Expr>, Candidate)> = Vec::new();
-        let alts = path_alternatives(&m.attrs);
+        // dropped before resolution. Every candidate carries the AND of
+        // the inherited cfg, the module's own cfg and the alternative's
+        // cfg_attr predicate (composed predicates drive both the child
+        // context and the mutual-exclusion duplicate test).
+        let mut candidates: Vec<(Option<Expr>, Candidate, bool)> = Vec::new();
+        let alts = resolution::path_alternatives(&m.attrs);
         if alts.is_empty() {
-            candidates.push((None, Candidate::Default));
+            candidates.push((cfg.clone(), Candidate::Default, false));
         } else {
-            candidates.extend(alts.into_iter().map(|a| (a.pred, Candidate::Attr(a.path))));
+            let has_unconditional = alts.iter().any(|a| a.pred.is_none());
+            let mut attr_preds: Vec<&Expr> = Vec::new();
+            for a in &alts {
+                if let Some(p) = &a.pred {
+                    if !attr_preds
+                        .iter()
+                        .any(|q| resolution::pred_key(q) == resolution::pred_key(p))
+                    {
+                        attr_preds.push(p);
+                    }
+                }
+                candidates.push((
+                    resolution::compose_cfg(&[ctx.cfg.as_ref(), cfg.as_ref(), a.pred.as_ref()]),
+                    Candidate::Attr(a.path.clone()),
+                    false,
+                ));
+            }
+            if !has_unconditional {
+                // `#[cfg_attr(pred, path = P)]` models BOTH branches:
+                // (pred → P) above, and (not pred → the default x.rs /
+                // x/mod.rs candidates) here. A branch that resolves to
+                // nothing is not a finding on its own — only when NEITHER
+                // branch resolves (the fallback Missing is silent).
+                for p in attr_preds {
+                    candidates.push((
+                        resolution::compose_cfg(&[
+                            ctx.cfg.as_ref(),
+                            cfg.as_ref(),
+                            Some(&resolution::negated(p)),
+                        ]),
+                        Candidate::Default,
+                        true,
+                    ));
+                }
+            }
         }
-        candidates.retain(|(pred, _)| {
+        candidates.retain(|(pred, _, _)| {
             !pred
                 .as_ref()
                 .map(resolution::cfg_unsatisfiable)
                 .unwrap_or(false)
         });
-        for (pred, cand) in candidates {
-            // Inherited predicates compose down the tree.
-            let eff = pred.or_else(|| ctx.cfg.clone());
+        for (pred, cand, fallback) in candidates {
             let res = match &cand {
                 Candidate::Default => {
                     resolution::resolve(self.fs, &name, &ctx.mod_dir, &ctx.attr_dir, None)
@@ -264,19 +320,31 @@ impl Walker<'_> {
                         file: child,
                         is_root: false,
                         logical: format!("{}::{name}", ctx.logical),
+                        target: ctx.target,
                         package: ctx.package.clone(),
                         mod_dir,
                         attr_dir,
-                        cfg: eff,
+                        cfg: pred,
                     };
                     self.walk_file(&child_ctx);
                 }
+                Resolution::Escapes(attr) => self.report.add(
+                    &ctx.file,
+                    line,
+                    "PATH_ESCAPES_REPO",
+                    format!("mod `{name}` path `{attr}` resolves outside the repository root"),
+                ),
                 Resolution::Ambiguous { a, b } => self.report.add(
                     &ctx.file,
                     line,
                     "AMBIGUOUS_MOD",
                     format!("mod `{name}` resolves ambiguously: both `{a}` and `{b}` exist"),
                 ),
+                // The cfg_attr fallback branch resolving to nothing is
+                // expected (the default file simply does not exist when
+                // the pred is false); its attr twin already reported a
+                // Missing when NEITHER branch resolves.
+                Resolution::Missing { .. } if fallback => {}
                 Resolution::Missing { tried } => self.report.add(
                     &ctx.file,
                     line,
@@ -297,7 +365,7 @@ impl Walker<'_> {
     /// and the module name APPENDED to both resolution contexts
     /// (edition-2018+ rule: `mod a { mod b; }` in `src/lib.rs` resolves
     /// `b` at `src/a/b.rs`; inline-in-inline composes: `a/b/c.rs`).
-    fn walk_inline(&mut self, ctx: &Ctx, name: &str, content: &Vec<Item>) {
+    fn walk_inline(&mut self, ctx: &Ctx, name: &str, content: &Vec<Item>, own_cfg: Option<Expr>) {
         let mod_dir = if ctx.mod_dir.is_empty() {
             name.to_owned()
         } else {
@@ -307,10 +375,13 @@ impl Walker<'_> {
             file: ctx.file.clone(),
             is_root: ctx.is_root,
             logical: format!("{}::{name}", ctx.logical),
+            target: ctx.target,
             package: ctx.package.clone(),
             mod_dir: mod_dir.clone(),
             attr_dir: mod_dir,
-            cfg: ctx.cfg.clone(),
+            // The inline module's OWN cfg AND-s into the inherited one:
+            // everything declared inside is guarded by both.
+            cfg: resolution::compose_cfg(&[ctx.cfg.as_ref(), own_cfg.as_ref()]),
         };
         for item in content {
             match item {
@@ -358,7 +429,20 @@ impl Walker<'_> {
     /// an `include` [[producer]] covers this package (code chosen over
     /// UNRESOLVED_MACRO: the unresolved thing is an include edge).
     fn handle_include(&mut self, ctx: &Ctx, mac: &ItemMacro, line: usize) {
-        let Some(lit) = first_string_literal(&mac.mac.tokens) else {
+        // Only a macro invocation whose ENTIRE token stream is one string
+        // literal is a static include edge. A non-literal form
+        // (`concat!(env!("OUT_DIR"), "/g.rs")`, any computed path) would
+        // otherwise have its inner `"/g.rs"` literal mistaken for the
+        // whole path and "resolved" against the wrong location.
+        let lit = match mac.mac.tokens.clone().into_iter().next() {
+            Some(TokenTree::Literal(l)) if l.to_string().starts_with('"') => {
+                syn::parse_str::<syn::LitStr>(&l.to_string())
+                    .ok()
+                    .map(|ls| ls.value())
+            }
+            _ => None,
+        };
+        let Some(lit) = lit else {
             if self.exc.has_producer("include", &ctx.package) {
                 self.used_producers.insert("include".to_owned());
             } else {
@@ -382,6 +466,7 @@ impl Walker<'_> {
                         file: target,
                         is_root: false,
                         logical,
+                        target: ctx.target,
                         package: ctx.package.clone(),
                         mod_dir,
                         attr_dir,
@@ -402,6 +487,12 @@ impl Walker<'_> {
                     );
                 }
             }
+            Resolution::Escapes(raw) => self.report.add(
+                &ctx.file,
+                line,
+                "PATH_ESCAPES_REPO",
+                format!("include path `{raw}` resolves outside the repository root"),
+            ),
             Resolution::Missing { tried } => self.report.add(
                 &ctx.file,
                 line,
@@ -412,50 +503,61 @@ impl Walker<'_> {
         }
     }
 
-    /// A physical file reached by more than one logical path is a
-    /// duplicate unless an exception covers it — or every differing pair
-    /// of reaching edges is provably mutually exclusive (alternative
-    /// cfg_attr branches: `feature = "a"` vs `feature = "b"`).
+    /// A physical file reached by more than one logical path WITHIN ONE
+    /// target's module tree is a duplicate — unless an exception covers
+    /// it, or every differing pair of reaching edges is provably mutually
+    /// exclusive (alternative cfg_attr branches such as `unix` vs
+    /// `not(unix)`, compared on the COMPOSED predicates).
+    ///
+    /// Reaching a file from SEVERAL targets (a shared helper bench root
+    /// also `mod`-included elsewhere, `tests/harness.rs` auto-discovered
+    /// AND `mod harness;` from each test binary) is normal cargo
+    /// behaviour and never a duplicate — finding 1 of the real-repo CI
+    /// run, where shared bench helpers were flagged four times.
     fn check_duplicates(&mut self) {
         let mut findings: Vec<(String, usize, String)> = Vec::new();
         for (path, visits) in &self.visited {
-            let mut entries: Vec<(&String, Option<&Expr>)> = visits
-                .iter()
-                .map(|v| (&v.logical, v.pred.as_ref()))
-                .collect();
-            entries.sort_by(|a, b| a.0.cmp(b.0));
-            entries.dedup_by(|a, b| a.0 == b.0);
-            if entries.len() <= 1 {
-                continue;
+            // Distinct logical entries per target.
+            let mut per_target: BTreeMap<usize, Vec<(&String, Option<&Expr>)>> = BTreeMap::new();
+            for v in visits {
+                let entries = per_target.entry(v.target).or_default();
+                if !entries.iter().any(|(l, _)| *l == &v.logical) {
+                    entries.push((&v.logical, v.pred.as_ref()));
+                }
             }
             if self.exc.by_path(path).is_some() {
                 self.used.insert(path.clone());
                 continue;
             }
             let mut duplicate = false;
-            for i in 0..entries.len() {
-                for j in (i + 1)..entries.len() {
-                    let exclusive = match (entries[i].1, entries[j].1) {
-                        (Some(a), Some(b)) => resolution::mutually_exclusive(a, b),
-                        _ => false,
-                    };
-                    if !exclusive {
-                        duplicate = true;
+            let mut all_paths: Vec<&str> = Vec::new();
+            for entries in per_target.values() {
+                if entries.len() <= 1 {
+                    continue;
+                }
+                for (l, _) in entries {
+                    all_paths.push(l);
+                }
+                for i in 0..entries.len() {
+                    for j in (i + 1)..entries.len() {
+                        let exclusive = match (entries[i].1, entries[j].1) {
+                            (Some(a), Some(b)) => resolution::mutually_exclusive(a, b),
+                            _ => false,
+                        };
+                        if !exclusive {
+                            duplicate = true;
+                        }
                     }
                 }
             }
             if duplicate {
+                all_paths.sort_unstable();
                 findings.push((
                     path.clone(),
                     1,
                     format!(
-                        "reached by {} logical paths: {}",
-                        entries.len(),
-                        entries
-                            .iter()
-                            .map(|(l, _)| l.as_str())
-                            .collect::<Vec<_>>()
-                            .join(" | ")
+                        "mounted under conflicting logical paths in one target: {}",
+                        all_paths.join(" | ")
                     ),
                 ));
             }
@@ -523,21 +625,6 @@ impl Walker<'_> {
 
 // ---------- attribute / token helpers ----------
 
-/// Extracts a parsed `#[cfg(...)]` predicate, if present.
-fn attr_cfg(attrs: &[syn::Attribute]) -> Option<Expr> {
-    attrs
-        .iter()
-        .find(|a| a.path().is_ident("cfg"))
-        .and_then(|a| a.parse_args::<Expr>().ok())
-}
-
-/// One candidate file path for a `mod`, tagged with the predicate that
-/// guards it (`None` for an unconditional `#[path]`).
-struct PathAlt {
-    pred: Option<Expr>,
-    path: String,
-}
-
 /// Which resolution strategy a candidate uses.
 enum Candidate {
     /// Default `x.rs` / `x/mod.rs` rules.
@@ -546,82 +633,12 @@ enum Candidate {
     Attr(String),
 }
 
-/// Collects every candidate path of a `mod` from its attributes:
-/// literal `#[path = "..."]` (a NAME-VALUE attribute, read via
-/// `require_name_value`) and ALL `#[cfg_attr(pred, path = "...")]`
-/// alternatives — mutually exclusive branches must all stay reachable,
-/// dropping all but the first wrongly hides whole modules.
-fn path_alternatives(attrs: &[syn::Attribute]) -> Vec<PathAlt> {
-    let mut out = Vec::new();
-    for a in attrs {
-        if a.path().is_ident("path") {
-            if let Ok(nv) = a.meta.require_name_value() {
-                if let Some(s) = lit_str_of(&nv.value) {
-                    out.push(PathAlt {
-                        pred: None,
-                        path: s,
-                    });
-                }
-            }
-        } else if a.path().is_ident("cfg_attr") {
-            if let Ok(args) = a.parse_args::<CfgAttrArgs>() {
-                for meta in args.attrs {
-                    if let Meta::NameValue(nv) = meta {
-                        if nv.path.is_ident("path") {
-                            if let Some(s) = lit_str_of(&nv.value) {
-                                out.push(PathAlt {
-                                    pred: Some(args.pred.clone()),
-                                    path: s,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-/// String value of a literal expression (`"a.rs"`), if it is one.
-fn lit_str_of(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Lit(lit) => match &lit.lit {
-            Lit::Str(s) => Some(s.value()),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-/// Parsed contents of `#[cfg_attr(pred, attr, attr, ...)]`.
-struct CfgAttrArgs {
-    pred: Expr,
-    attrs: Punctuated<Meta, Token![,]>,
-}
-
-impl Parse for CfgAttrArgs {
-    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let pred: Expr = input.parse()?;
-        input.parse::<Token![,]>()?;
-        let attrs = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
-        Ok(Self { pred, attrs })
-    }
-}
-
-/// First string literal in a token stream, unquoted.
-fn first_string_literal(tokens: &proc_macro2::TokenStream) -> Option<String> {
-    tokens.clone().into_iter().find_map(|t| match t {
-        proc_macro2::TokenTree::Literal(l) => {
-            let s = l.to_string();
-            if s.starts_with('"') {
-                syn::parse_str::<syn::LitStr>(&s).ok().map(|ls| ls.value())
-            } else {
-                None
-            }
-        }
-        _ => None,
-    })
+/// Extracts a parsed `#[cfg(...)]` predicate, if present.
+fn attr_cfg(attrs: &[syn::Attribute]) -> Option<Expr> {
+    attrs
+        .iter()
+        .find(|a| a.path().is_ident("cfg"))
+        .and_then(|a| a.parse_args::<Expr>().ok())
 }
 
 /// True when the token stream mentions the `mod` keyword anywhere —

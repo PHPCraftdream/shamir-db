@@ -5,6 +5,7 @@
 pub mod json;
 pub mod resolution;
 pub mod roots;
+pub mod scan_cfg;
 pub mod walk;
 
 pub use walk::has_excluded_dir;

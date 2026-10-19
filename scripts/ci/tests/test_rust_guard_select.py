@@ -2,15 +2,18 @@
 
 Pure-function tests over `select` / `strip_root` / `load_campaigns`, plus
 `main(argv)` runs with the stages TOML, the cargo metadata JSON and the
-changed-file list injected as keyword arguments — no filesystem fixtures
-beyond what `main` needs, no git, no cargo, no stdin.
+changed-file list injected as keyword arguments — the only filesystem
+fixture is one throwaway temp directory that plays the repo root; no
+git, no cargo, no stdin.
 """
 
 import contextlib
 import io
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 sys.path.insert(
     0,
@@ -31,39 +34,85 @@ packages = ["shamir-engine", "ghost-crate"]
 delta = ".rust-guard/stages/extract-engine.toml"
 """
 
-# Absolute manifest paths as a Linux CI runner's `cargo metadata` emits them.
-METADATA = """{
+# Absolute manifest paths as a `cargo metadata` run emits them: rooted
+# under a real temp directory, RESOLVED on the running machine.  A
+# hardcoded "/home/runner/work/repo" went through Path.resolve() in
+# resolve_root, which rewrites foreign paths to the local drive (e.g.
+# "C:/home/runner/work/repo" on Windows), so the absolute-metadata
+# fixtures never matched and the TSV assertions failed off Linux.
+# tempfile.mkdtemp() always exists, so resolve() is stable here.
+ROOT = rgs.norm(str(Path(tempfile.mkdtemp()).resolve()))
+
+
+def _metadata(root: str) -> bytes:
+    """Cargo-metadata JSON with absolute manifest paths under `root`."""
+    return ("""{
   "packages": [
     {"name": "shamir-db",
-     "manifest_path": "/home/runner/work/repo/crates/shamir-db/Cargo.toml"},
+     "manifest_path": "%s/crates/shamir-db/Cargo.toml"},
     {"name": "shamir-engine",
-     "manifest_path": "/home/runner/work/repo/crates/shamir-engine/Cargo.toml"}
+     "manifest_path": "%s/crates/shamir-engine/Cargo.toml"}
   ]
 }
-"""
-ROOT = "/home/runner/work/repo"
+""" % (root, root)).encode()
+
+
+METADATA = _metadata(ROOT)
 
 
 def run_main(stages=STAGES, metadata=METADATA, root=ROOT, changed=(), extra=()):
-    """Run rgs.main with injected content; return (exit_code, stdout)."""
+    """Run rgs.main with injected content; return (exit_code, stdout, stderr).
+
+    Both streams are captured: ``main`` prints errors to STDERR, so a test
+    asserting on the error message must look at the third element (the
+    round-2 bug: only stdout was captured and the malformed-TOML assertion
+    compared against an empty string).
+    """
     argv = [
         "--stages", "s.toml",
         "--metadata", "m.json",
         "--root", root,
     ] + list(extra)
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         code = rgs.main(
             argv, stages_text=stages, metadata_text=metadata,
             changed=list(changed),
         )
-    return code, buf.getvalue()
+    return code, out.getvalue(), err.getvalue()
 
 
 class StripRootTest(unittest.TestCase):
     def test_strips_root_prefix(self):
         self.assertEqual(
             rgs.strip_root(ROOT + "/crates/x/Cargo.toml", ROOT),
+            "crates/x/Cargo.toml",
+        )
+
+    def test_resolve_root_makes_relative_root_absolute(self):
+        # THE round-2 bug: the workflow calls the script with `--root .`
+        # while metadata manifest paths are absolute.  With the literal
+        # ".", PurePosixPath(".") was never a prefix of an absolute path,
+        # strip_root stripped nothing and every campaign was skipped.
+        # resolve_root turns "." into a comparable absolute posix root.
+        cwd = os.getcwd()
+        tmp = tempfile.mkdtemp()
+        try:
+            os.chdir(tmp)
+            resolved = rgs.resolve_root(".")
+        finally:
+            os.chdir(cwd)
+        os.rmdir(tmp)
+        self.assertEqual(resolved, rgs.norm(str(Path(tmp).resolve())))
+        # And stripping against the resolved root yields the repo-relative
+        # path the diff side uses; with the literal "." this kept the full
+        # absolute path and matched nothing (counterfactual).
+        self.assertEqual(
+            rgs.strip_root(resolved + "/crates/x/Cargo.toml", resolved),
+            "crates/x/Cargo.toml",
+        )
+        self.assertNotEqual(
+            rgs.strip_root(resolved + "/crates/x/Cargo.toml", "."),
             "crates/x/Cargo.toml",
         )
 
@@ -159,7 +208,7 @@ class SelectTest(unittest.TestCase):
 
 class MainTest(unittest.TestCase):
     def test_matching_diff_prints_tsv_line(self):
-        code, out = run_main(changed=["crates/shamir-db/src/lib.rs", "README.md"])
+        code, out, _err = run_main(changed=["crates/shamir-db/src/lib.rs", "README.md"])
         self.assertEqual(code, 0)
         self.assertEqual(
             out.splitlines(),
@@ -168,17 +217,17 @@ class MainTest(unittest.TestCase):
         )
 
     def test_empty_diff_prints_nothing_exit_0(self):
-        code, out = run_main(changed=[])
+        code, out, _err = run_main(changed=[])
         self.assertEqual(code, 0)
         self.assertEqual(out, "")
 
     def test_no_match_prints_nothing_exit_0(self):
-        code, out = run_main(changed=["docs/x.md"])
+        code, out, _err = run_main(changed=["docs/x.md"])
         self.assertEqual(code, 0)
         self.assertEqual(out, "")
 
     def test_empty_campaigns_list_prints_nothing_exit_0(self):
-        code, out = run_main(
+        code, out, _err = run_main(
             stages=b"campaigns = []\n",
             changed=["crates/shamir-db/src/lib.rs"],
         )
@@ -187,13 +236,19 @@ class MainTest(unittest.TestCase):
 
     def test_malformed_stages_toml_exit_2(self):
         # Fail closed: a broken stages file must abort (exit 2), not
-        # silently select zero campaigns.
-        code, out = run_main(stages=b"campaigns = [", changed=["crates/shamir-db/s.rs"])
+        # silently select zero campaigns.  The error goes to STDERR;
+        # round-2 bug: the assertion ran against stdout only, which is
+        # empty here, so assertIn FAILED (the test errored, it did not
+        # pass vacuously).
+        code, out, err = run_main(
+            stages=b"campaigns = [", changed=["crates/shamir-db/s.rs"]
+        )
         self.assertEqual(code, 2)
-        self.assertIn("rust_guard_select.py:", out)
+        self.assertEqual(out, "")
+        self.assertIn("rust_guard_select.py:", err)
 
     def test_campaign_missing_fields_exit_2(self):
-        code, _ = run_main(
+        code, _out, _err = run_main(
             stages=b'[[campaigns]]\nname = "c"\ndelta = "d.toml"\n',
             changed=["crates/shamir-db/s.rs"],
         )

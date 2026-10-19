@@ -1,5 +1,6 @@
-//! Rule 5 — `OWNED_IMPL`: an inherent `impl` of a configured type must
-//! live in the type's defining module or a descendant of it.
+//! Rule 5 — `OWNED_IMPL`: an `impl` (inherent or trait) of a
+//! configured type must live in the type's defining module or a
+//! descendant of it.
 //!
 //! Configuration in `.rust-guard/owned_impl.toml`:
 //!
@@ -48,8 +49,9 @@ impl OwnedImplConfig {
     }
 }
 
-/// Rule 5 over one file: every inherent `impl` whose self type is
-/// configured must sit in the defining module or its descendants.
+/// Rule 5 over one file: every `impl` (inherent or trait) whose self
+/// type is configured must sit in the defining module or its
+/// descendants.
 pub fn check_file(path: &str, file: &File, cfg: &OwnedImplConfig, report: &mut Report) {
     let Some(logical) = logical_module_path(path) else {
         return;
@@ -69,9 +71,11 @@ fn walk_impls(
     for item in items {
         match item {
             Item::Impl(imp) => {
-                if imp.trait_.is_some() {
-                    continue; // trait impls are not governed
-                }
+                // BOTH inherent and trait impls are governed (R7a):
+                // `impl Trait for RepoInstance` outside the owner
+                // module extends RepoInstance's behaviour just like an
+                // inherent impl would. Logical ownership is unchanged;
+                // only the `trait_.is_some()` skip was dropped.
                 let Some(name) = self_type_name(&imp.self_ty) else {
                     continue;
                 };
@@ -86,7 +90,7 @@ fn walk_impls(
                         imp.impl_token.span.start().line,
                         "OWNED_IMPL",
                         format!(
-                            "inherent impl of `{name}` must live in `{}` or its descendants (here: `{logical}`)",
+                            "impl of `{name}` (inherent or trait) must live in `{}` or its descendants (here: `{logical}`)",
                             entry.module
                         ),
                     );

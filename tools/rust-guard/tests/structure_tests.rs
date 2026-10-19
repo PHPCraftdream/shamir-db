@@ -6,6 +6,10 @@ mod harness;
 use crate::harness::{assert_clean, assert_finding, copy_fixture, TempRepo};
 use std::process::Output;
 
+fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
 fn scan(repo: &TempRepo) -> Output {
     repo.run_guard(&["structure", "--paths", "**/*.rs"])
 }
@@ -137,20 +141,86 @@ fn new_file_with_pub_crate_is_vis_widening() {
 }
 
 #[test]
-fn new_file_widening_is_accepted_by_delta() {
-    // 10c: the same repo with `[[allow_widen]]` covering the path is
-    // clean.
-    // Counterfactual: fails without the fix because there was no
-    // new-file check at all — the delta entry matched nothing and, more
-    // importantly, the ungoverned widening slipped through silently in
-    // the pre-fix guard.
-    let repo = DiffRepo::two_commit("structure/new_file_widen");
+fn new_file_with_one_allowance_per_item_is_clean() {
+    // 10c + R5: delta matching is per (path, item); EVERY crate-visible
+    // item of a new file needs its own consumed entry (an empty `item`
+    // acts as a documented wildcard).
+    // Counterfactual (old path-only matching): ONE entry silenced the
+    // whole file - two pub(crate) items passed with a single allowance
+    // and nothing was ever reported unused.
+    let repo = DiffRepo::two_commit("structure/new_file_widen_two");
     let delta = "[[allow_widen]]\n\
                  path = \"crates/fix/src/extra.rs\"\n\
-                 item = \"added\"\n\
+                 item = \"alpha\"\n\
                  reason = \"new internal helper\"\n\
-                 owner = \"team-a\"\n";
+                 owner = \"team-a\"\n\
+                 [[allow_widen]]\n\
+                 path = \"crates/fix/src/extra.rs\"\n\
+                 item = \"beta\"\n\
+                 reason = \"new internal helper 2\"\n\
+                 owner = \"team-a\"\n\
+";
     assert_clean(&repo.scan_with_delta(delta));
+}
+
+#[test]
+fn new_file_second_widening_without_allowance_is_reported() {
+    // R5: with ONE allowance for `alpha`, the `beta` widening still
+    // fires and the allowance itself is consumed (no UNUSED_ALLOWANCE).
+    // Counterfactual: fails against the old behaviour because the
+    // path-only allowance suppressed BOTH items - the run was clean and
+    // `beta` widened silently.
+    let repo = DiffRepo::two_commit("structure/new_file_widen_two");
+    let delta = "[[allow_widen]]\n\
+                 path = \"crates/fix/src/extra.rs\"\n\
+                 item = \"alpha\"\n\
+                 reason = \"new internal helper\"\n\
+                 owner = \"team-a\"\n\
+";
+    let out = repo.scan_with_delta(delta);
+    assert_finding(&out, "VIS_WIDENING");
+    let err = stderr(&out);
+    assert!(
+        err.contains("beta"),
+        "expected the uncovered item `beta`:\n{err}"
+    );
+    assert!(
+        !err.contains("UNUSED_ALLOWANCE"),
+        "the `alpha` entry WAS consumed; no leftover expected:\n{err}"
+    );
+}
+
+#[test]
+fn unused_allowance_is_reported() {
+    // R5: an entry that matches nothing is itself a finding.
+    // Counterfactual: fails without the fix because stale entries were
+    // silently ignored forever.
+    let repo = DiffRepo::two_commit("structure/new_file_widen_two");
+    let delta = "[[allow_widen]]\n\
+                 path = \"crates/fix/src/extra.rs\"\n\
+                 item = \"gamma\"\n\
+                 reason = \"stale entry\"\n\
+                 owner = \"team-a\"\n\
+";
+    assert_finding(&repo.scan_with_delta(delta), "UNUSED_ALLOWANCE");
+}
+#[test]
+fn allow_added_with_wrong_item_still_reports() {
+    // R5: an entry whose `item` does not equal the normalised attribute
+    // text neither suppresses the finding NOR disappears silently.
+    // Counterfactual: fails without the fix because matching was by
+    // path only - the mis-keyed entry suppressed ALLOW_ADDED and no
+    // UNUSED_ALLOWANCE ever surfaced.
+    let repo = DiffRepo::two_commit("structure/allow_added");
+    let delta = "[[allow]]\n\
+                 path = \"crates/fix/src/lib.rs\"\n\
+                 item = \"helper\"\n\
+                 reason = \"mis-keyed item\"\n\
+                 owner = \"team-a\"\n\
+";
+    let out = repo.scan_with_delta(delta);
+    assert_finding(&out, "ALLOW_ADDED");
+    assert!(stderr(&out).contains("UNUSED_ALLOWANCE"));
 }
 
 #[test]
@@ -188,7 +258,7 @@ fn new_allow_is_reported_and_accepted_by_delta() {
 
     let delta = "[[allow]]\n\
                  path = \"crates/fix/src/lib.rs\"\n\
-                 item = \"helper\"\n\
+                 item = \"#[allow(dead_code)]\"\n\
                  reason = \"intentionally dead helper\"\n\
                  owner = \"team-a\"\n";
     assert_clean(&repo.scan_with_delta(delta));
@@ -202,4 +272,102 @@ fn logic_in_inline_module_of_mod_rs_is_reported() {
     // hid logic and the run was clean.
     let repo = TempRepo::with_fixture("structure/modrs_inline");
     assert_finding(&scan(&repo), "MODRS_LOGIC");
+}
+
+// ---------- round 3 (R5/R7/R9) ----------
+
+#[test]
+fn moved_file_that_adds_allow_is_allow_added() {
+    // R7d: a file MOVED from old.rs to new.rs (identical bodies) is
+    // paired with its base counterpart, so a newly added `#[allow]` is
+    // still an ALLOW_ADDED finding.
+    // Counterfactual: fails without attribute-insensitive fingerprints
+    // because syn prints the added `#[allow(dead_code)]` into the item's
+    // token stream, so new.rs's fingerprint multiset matches no base
+    // file; the moved-file pairing never fires and the new-file check
+    // reports VIS_WIDENING for the pub fn instead of ALLOW_ADDED.
+    let repo = DiffRepo::two_commit("structure/moved_adds_allow");
+    assert_finding(&repo.scan(), "ALLOW_ADDED");
+}
+
+#[test]
+fn moved_file_that_widens_is_vis_widening() {
+    // R7d: the moved file widened `hidden` to `pub(crate)`. Even with
+    // attribute-insensitive fingerprints the widened item's fingerprint
+    // differs (visibility IS hashed), so the signature multiset can't
+    // match anyway; pairing additionally requires head vis <= base vis
+    // per item. The file falls back to the new-file check, which still
+    // reports VIS_WIDENING.
+    // Counterfactual: fails without moved-file pairing at all because
+    // the file was absent from base - pre-R7d code reported nothing for
+    // it (new files were skipped rather than item-checked).
+    let repo = DiffRepo::two_commit("structure/moved_widen");
+    assert_finding(&repo.scan(), "VIS_WIDENING");
+}
+
+#[test]
+fn moved_file_with_unchanged_content_is_clean() {
+    // Negative control: a move whose only delta is an added `#[allow]`
+    // must still pair (fingerprints are attribute-insensitive) and so
+    // must produce zero VIS_WIDENING (the ALLOW_ADDED finding is
+    // covered by the dedicated test above).
+    let repo = DiffRepo::two_commit("structure/moved_adds_allow");
+    let out = repo.scan();
+    assert!(
+        !stderr(&out).contains("VIS_WIDENING"),
+        "pure move must not widen:\n{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn trait_impl_outside_owner_is_owned_impl() {
+    // R7a: `impl Trait for RepoInstance` is governed like an inherent
+    // impl; the self type's LAST segment decides.
+    // Counterfactual: fails without the fix because trait impls were
+    // skipped entirely (`imp.trait_.is_some()`), so the trait impl
+    // outside the owner module escaped the rule silently.
+    let repo = TempRepo::with_fixture("structure/owned_impl_trait");
+    assert_finding(&scan(&repo), "OWNED_IMPL");
+}
+
+#[test]
+fn widened_tuple_field_is_vis_widening() {
+    // R7b: tuple-struct fields are indexed by position (`S::0`).
+    // Counterfactual: fails without the fix because tuple fields have
+    // no `ident` and were skipped, so widening `S.0` was silent.
+    let repo = DiffRepo::two_commit("structure/widen_tuple_field");
+    let out = repo.scan();
+    assert_finding(&out, "VIS_WIDENING");
+    assert!(
+        stderr(&out).contains("S::0"),
+        "expected key S::0:\n{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn same_named_impls_in_two_inline_modules_do_not_collapse() {
+    // R7c: impl-member keys carry the inline-module prefix, so widening
+    // `a::S::f` does not shadow `b::S::f` - exactly one finding.
+    // Counterfactual: fails without the fix because both impls keyed to
+    // `S::f`; the head index overwrote one entry, and (with only one of
+    // the two widened) the widened module's finding was lost.
+    let repo = DiffRepo::two_commit("structure/impl_two_inline_modules");
+    let out = repo.scan();
+    assert_finding(&out, "VIS_WIDENING");
+    let err = stderr(&out);
+    assert!(err.contains("a::S::f"), "expected a::S::f:\n{err}");
+    assert!(!err.contains("b::S::f"), "b must be untouched:\n{err}");
+}
+
+#[test]
+fn new_file_allow_is_allow_added() {
+    // R7d: brand-new files also run the ALLOW_ADDED check (against an
+    // empty base), not only the visibility check.
+    // Counterfactual: fails without the fix because new files were only
+    // checked for `pub(crate)`+ items; a private fn hidden behind a
+    // fresh `#[allow(dead_code)]` entered silently.
+    let repo = DiffRepo::two_commit("structure/new_file_allow");
+    assert_finding(&repo.scan(), "ALLOW_ADDED");
 }

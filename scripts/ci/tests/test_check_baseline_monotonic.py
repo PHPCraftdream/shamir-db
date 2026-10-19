@@ -2,13 +2,17 @@
 
 Pure-function tests over `cbm.compare` and `cbm.parse_baseline_text`, plus
 `main(argv)` runs with git content injected via ``base_text``/``head_text``
-— git is never invoked, no network, no filesystem fixtures beyond tempfiles.
+— git is normally never invoked; RealGitTest builds a throwaway temp repo
+(repo-local identity only) to exercise the real ``git_show`` path.
 """
 
 import contextlib
 import io
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -201,6 +205,81 @@ class MainTest(unittest.TestCase):
             extra=["--head", "HEAD"],
         )
         self.assertEqual(code, 0)
+
+
+def _git(repo, *args):
+    """Run git with repo-local identity (never global config); return output."""
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t"]
+        + list(args),
+        check=True,
+        capture_output=True,
+    )
+
+
+def _init_repo_with_baseline():
+    """Temp repo: commit1 (no baseline), commit2 (baseline added).
+
+    Returns ``(repo, commit1, commit2)``.  Goes through the REAL
+    ``git_show`` path (both texts are ``None``), which pre-fix crashed
+    with TypeError when the baseline was absent at a revision.
+    """
+    repo = Path(tempfile.mkdtemp())
+    _git(repo, "init", "-q")
+    (repo / "README.md").write_text("x\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-q", "-m", "c1")
+    c1 = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    baseline = repo / "scripts" / "ci" / "layout_baseline.txt"
+    baseline.parent.mkdir(parents=True, exist_ok=True)
+    baseline.write_text("dir d 1\n", encoding="utf-8")
+    _git(repo, "add", "scripts/ci/layout_baseline.txt")
+    _git(repo, "commit", "-q", "-m", "c2")
+    c2 = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    return repo, c1, c2
+
+
+class RealGitTest(unittest.TestCase):
+    """End-to-end through the real git_show path (no injected text)."""
+
+    def test_baseline_missing_at_head_exit_0_note(self):
+        # --baseline at a nonexistent path: git_show returns None at both
+        # revs.  Round-2 bug: that real None reached parse_baseline_text
+        # and crashed with TypeError (fh.write expects str); the fix
+        # normalises it to MISSING like the injected sentinel path.
+        repo, c1, _c2 = _init_repo_with_baseline()
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cbm.main(
+                    ["--base", c1, "--baseline", "no/such/baseline.txt"],
+                    root=repo,
+                )
+            self.assertEqual(code, 0)
+            self.assertIn("nothing to protect", out.getvalue())
+        finally:
+            shutil.rmtree(repo, ignore_errors=True)
+
+    def test_baseline_new_at_head_exit_1(self):
+        # Baseline exists at head (commit2) but not at base (commit1):
+        # real git_show None at base must mean "empty baseline", so the
+        # HEAD entry is NEW -> exit 1.  Pre-fix this also hit the
+        # TypeError crash instead of reporting NEW.
+        repo, c1, c2 = _init_repo_with_baseline()
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cbm.main(["--base", c1], root=repo)
+            self.assertEqual(code, 1)
+            self.assertIn("NEW dir d 1", out.getvalue())
+        finally:
+            shutil.rmtree(repo, ignore_errors=True)
 
 
 if __name__ == "__main__":

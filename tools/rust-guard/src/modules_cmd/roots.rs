@@ -30,13 +30,15 @@ pub struct TargetRoot {
 }
 
 /// A manifest-level problem discovered while scanning roots. Callers
-/// turn these into `BAD_MANIFEST` findings (fail closed): a manifest
-/// that is unreadable, unparseable, or names undeclared
-/// `required-features` must never be silently skipped, or every target
-/// under it disappears from the scan.
+/// turn these into findings (fail closed): a manifest that is
+/// unreadable, unparseable, or names undeclared `required-features` is
+/// `BAD_MANIFEST`; a failing `cargo metadata` is `CARGO_METADATA_FAILED`
+/// and the scan CONTINUES on hand-parsed manifests — neither is ever a
+/// silent skip or an infra abort.
 #[derive(Debug, Clone)]
 pub struct RootProblem {
     pub manifest: String,
+    pub code: &'static str,
     pub message: String,
 }
 
@@ -44,8 +46,13 @@ pub struct RootProblem {
 pub fn discover_with_problems(fs: &GitFs) -> Result<(Vec<TargetRoot>, Vec<RootProblem>), String> {
     let mut roots = Vec::new();
     let mut problems = Vec::new();
-    for manifest in manifest_paths(fs)? {
-        add_targets(fs, &manifest, &mut roots, &mut problems);
+    // Per-revision discovery: the file listing MUST come from the pinned
+    // revision (`git ls-tree -r --name-only <rev>`); falling back to the
+    // current index (`git ls-files`) wrongly resurrected targets that the
+    // pinned revision had already deleted.
+    let listing = pinned_files(fs)?;
+    for manifest in manifest_paths(fs, &listing, &mut problems)? {
+        add_targets(fs, &listing, &manifest, &mut roots, &mut problems);
     }
     Ok((roots, problems))
 }
@@ -65,6 +72,7 @@ pub fn discover_from_manifests(fs: &GitFs) -> Result<(Vec<TargetRoot>, Vec<RootP
     let mut problem = |message: String| {
         problems.push(RootProblem {
             manifest: manifest.to_owned(),
+            code: "BAD_MANIFEST",
             message,
         });
     };
@@ -106,12 +114,18 @@ pub fn discover_from_manifests(fs: &GitFs) -> Result<(Vec<TargetRoot>, Vec<RootP
                 if dir.starts_with("vendor/") || exclude.iter().any(|e| glob_matches(e, &dir)) {
                     continue;
                 }
-                add_targets(fs, &format!("{dir}/Cargo.toml"), &mut roots, &mut problems);
+                add_targets(
+                    fs,
+                    &listing,
+                    &format!("{dir}/Cargo.toml"),
+                    &mut roots,
+                    &mut problems,
+                );
             }
         }
     } else if doc.get("package").is_some() {
         // Single-package repository: the root manifest is the package.
-        add_targets(fs, manifest, &mut roots, &mut problems);
+        add_targets(fs, &listing, manifest, &mut roots, &mut problems);
     } else {
         problem("root manifest has neither [workspace] nor [package]".into());
     }
@@ -161,7 +175,18 @@ fn glob_matches(pattern: &str, candidate: &str) -> bool {
 /// Every package manifest to consider: workspace members from cargo
 /// metadata plus workspace-excluded packages. `vendor/*` packages are
 /// explicitly dropped from the scan scope.
-fn manifest_paths(fs: &GitFs) -> Result<Vec<String>, String> {
+///
+/// When `cargo metadata` fails (any broken member manifest fails the
+/// WHOLE command), the error is reported as a `CARGO_METADATA_FAILED`
+/// problem and the member list is hand-parsed from the root manifest on
+/// the SAME pinned listing — so hand-scanned manifests (e.g. `tools/*`)
+/// still yield their `BAD_MANIFEST` findings instead of the run dying as
+/// an infra error before them.
+fn manifest_paths(
+    fs: &GitFs,
+    listing: &[String],
+    problems: &mut Vec<RootProblem>,
+) -> Result<Vec<String>, String> {
     let mut manifests: Vec<String> = Vec::new();
     let mut push = |m: String| {
         if !m.starts_with("vendor/") && !manifests.contains(&m) {
@@ -169,23 +194,69 @@ fn manifest_paths(fs: &GitFs) -> Result<Vec<String>, String> {
         }
     };
 
-    let meta = run_cargo_metadata(fs)?;
-    // `workspace_members` holds package IDs; `members` in the manifest is
-    // a different (path-ish) shape. Membership is decided by matching
-    // `packages[].id` against this set.
-    let members = meta
-        .get("workspace_members")
-        .map(|m| m.str_set())
-        .unwrap_or_default();
-    if let Some(packages) = meta.get("packages").and_then(|p| p.as_arr()) {
-        for pkg in packages {
-            let id = pkg.get("id").and_then(|i| i.as_str()).unwrap_or("");
-            let path = pkg
-                .get("manifest_path")
-                .and_then(|p| p.as_str())
-                .unwrap_or("");
-            if members.contains(id) && !path.is_empty() {
-                push(rel_from_abs(fs, path));
+    match run_cargo_metadata(fs) {
+        Ok(meta) => {
+            // `workspace_members` holds package IDs; `members` in the
+            // manifest is a different (path-ish) shape. Membership is
+            // decided by matching `packages[].id` against this set.
+            let members = meta
+                .get("workspace_members")
+                .map(|m| m.str_set())
+                .unwrap_or_default();
+            if let Some(packages) = meta.get("packages").and_then(|p| p.as_arr()) {
+                for pkg in packages {
+                    let id = pkg.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                    let path = pkg
+                        .get("manifest_path")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("");
+                    if members.contains(id) && !path.is_empty() {
+                        push(rel_from_abs(fs, path));
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            problems.push(RootProblem {
+                manifest: "Cargo.toml".to_owned(),
+                code: "CARGO_METADATA_FAILED",
+                message: e,
+            });
+            // Hand-scan fallback: [workspace] members of the root
+            // manifest, glob-expanded against the pinned listing.
+            if let Some(text) = fs.read("Cargo.toml") {
+                if let Ok(doc) = text.parse::<toml::Table>() {
+                    if let Some(ws) = doc.get("workspace").and_then(|w| w.as_table()) {
+                        let exclude: Vec<String> = ws
+                            .get("exclude")
+                            .and_then(|e| e.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(str::to_owned))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        for pat in ws
+                            .get("members")
+                            .and_then(|m| m.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(str::to_owned))
+                                    .collect::<Vec<String>>()
+                            })
+                            .unwrap_or_default()
+                        {
+                            for dir in expand_member_glob(&pat, listing) {
+                                if dir.starts_with("vendor/")
+                                    || exclude.iter().any(|e| glob_matches(e, &dir))
+                                {
+                                    continue;
+                                }
+                                push(format!("{dir}/Cargo.toml"));
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -196,9 +267,9 @@ fn manifest_paths(fs: &GitFs) -> Result<Vec<String>, String> {
             push(candidate.to_owned());
         }
     }
-    for f in fs.tracked_files()? {
+    for f in listing {
         if f.starts_with("tools/") && f.ends_with("/Cargo.toml") && f != "tools/Cargo.toml" {
-            push(f);
+            push(f.clone());
         }
     }
     Ok(manifests)
@@ -234,6 +305,7 @@ fn rel_from_abs(fs: &GitFs, abs: &str) -> String {
 /// or interpret the manifest is a structured problem, never a silent skip.
 fn add_targets(
     fs: &GitFs,
+    listing: &[String],
     manifest: &str,
     roots: &mut Vec<TargetRoot>,
     problems: &mut Vec<RootProblem>,
@@ -241,6 +313,7 @@ fn add_targets(
     let mut problem = |message: String| {
         problems.push(RootProblem {
             manifest: manifest.to_owned(),
+            code: "BAD_MANIFEST",
             message,
         });
     };
@@ -324,6 +397,7 @@ fn add_targets(
                 dir: &dir,
                 package: &package,
                 manifest,
+                listing,
             },
             doc.get(key),
             &features,
@@ -369,6 +443,10 @@ struct PkgCtx<'a> {
     dir: &'a str,
     package: &'a str,
     manifest: &'a str,
+    /// Per-revision file listing: auto-discovery MUST iterate THIS, not
+    /// the current index — a `tests/x.rs` deleted at the pinned revision
+    /// must not be re-discovered from `git ls-files`.
+    listing: &'a [String],
 }
 
 /// Adds targets from one explicit table array, falling back to auto-
@@ -410,6 +488,7 @@ fn add_explicit(
             if !undeclared.is_empty() {
                 problems.push(RootProblem {
                     manifest: pkg.manifest.to_owned(),
+                    code: "BAD_MANIFEST",
                     message: format!(
                         "target kind `{kind:?}` requires undeclared features: {}",
                         undeclared.join(", ")
@@ -437,8 +516,8 @@ fn add_explicit(
     // path ending in `/main.rs` (e.g. `tests/case/crash_matrix.rs`
     // mounted by `tests/crash_recovery.rs` is helper data, not a root).
     let prefix = format!("{dir}/{}/", spec.conv_dir);
-    for f in pkg.fs.tracked_files().unwrap_or_default() {
-        if !f.starts_with(&prefix) || !f.ends_with(".rs") || seen.contains(&f) {
+    for f in pkg.listing {
+        if !f.starts_with(&prefix) || !f.ends_with(".rs") || seen.contains(f) {
             continue;
         }
         let rest = &f[prefix.len()..];
@@ -447,7 +526,7 @@ fn add_explicit(
         if is_root && !seen.contains(&f.to_owned()) {
             seen.push(f.clone());
             roots.push(TargetRoot {
-                path: f,
+                path: f.clone(),
                 kind,
                 package: pkg.package.to_owned(),
             });

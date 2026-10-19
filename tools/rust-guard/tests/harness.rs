@@ -131,24 +131,30 @@ fn unique_root() -> PathBuf {
     std::env::temp_dir().join(format!("rust-guard-selftest-{}-{n}", std::process::id()))
 }
 
-/// Copies `fixtures/<fixture>` over the repo (no-op when absent).
-pub(crate) fn copy_fixture(dst: &Path, fixture: &str) {
+/// Copies `fixtures/<fixture>` over the repo (no-op when absent) and
+/// returns the copied repo-relative paths (`/` separators).
+pub(crate) fn copy_fixture(dst: &Path, fixture: &str) -> Vec<String> {
     let src = fixtures_dir().join(fixture);
+    let mut copied = Vec::new();
     if src.is_dir() {
-        copy_tree(&src, dst);
+        copy_tree(&src, dst, &mut copied);
     }
+    copied
 }
 
-/// Small recursive copy (no `fs_extra` dependency).
-fn copy_tree(src: &Path, dst: &Path) {
+/// Small recursive copy (no `fs_extra` dependency). `copied` collects
+/// the absolute path of every file written (callers compare two copies
+/// of the SAME repo, so absolute paths are directly comparable).
+fn copy_tree(src: &Path, dst: &Path, copied: &mut Vec<String>) {
     for entry in fs::read_dir(src).expect("read fixture dir") {
         let entry = entry.expect("dir entry");
         let target = dst.join(entry.file_name());
         if entry.file_type().expect("file type").is_dir() {
             fs::create_dir_all(&target).expect("create dir");
-            copy_tree(&entry.path(), &target);
+            copy_tree(&entry.path(), &target, copied);
         } else {
             fs::copy(entry.path(), &target).expect("copy file");
+            copied.push(target.to_string_lossy().replace('\\', "/"));
         }
     }
 }
@@ -162,6 +168,12 @@ pub(crate) fn write_scaffold(root: &Path) {
     for (rel, contents) in [
         ("Cargo.toml", ROOT_MANIFEST),
         ("crates/fix/Cargo.toml", PKG_MANIFEST),
+        // A package manifest without a source target makes `cargo
+        // metadata` fail BEFORE the tool ever reaches the fixture's own
+        // (often deliberately broken) hand-scanned manifests — the
+        // scaffold therefore always provides `crates/fix/src/lib.rs`
+        // unless the fixture ships its own.
+        ("crates/fix/src/lib.rs", "pub fn existing() -> u32 { 1 }\n"),
     ] {
         let path = root.join(rel);
         if path.exists() {

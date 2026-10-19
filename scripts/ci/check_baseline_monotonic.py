@@ -183,6 +183,15 @@ def main(
             base_text = git_show(args.base, rel, root_path)
         if head_text is None:
             head_text = git_show(args.head, rel, root_path)
+        # Normalise the REAL git read to the same sentinel the injected
+        # path uses: ``git_show`` returns None when the file is absent at
+        # that revision.  Round-2 bug: a real None fell through to
+        # ``parse_baseline_text``, whose temp-file write expects str and
+        # raised TypeError instead of applying the missing-file rules.
+        if base_text is None:
+            base_text = MISSING
+        if head_text is None:
+            head_text = MISSING
         if base_text is MISSING:
             # Missing at base -> empty baseline (bootstrap): every HEAD
             # entry becomes NEW.

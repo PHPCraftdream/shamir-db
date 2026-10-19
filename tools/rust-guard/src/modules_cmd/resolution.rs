@@ -62,15 +62,88 @@ pub fn pred_key(expr: &syn::Expr) -> String {
     quote::ToTokens::to_token_stream(expr).to_string()
 }
 
-/// True when two predicates can provably never hold together. Only one
-/// structural family is provable without full evaluation: one side is
-/// `not(X)` and the other is `X` (modulo parenthesisation/spacing).
+/// True when two predicates can provably never hold together. Only two
+/// structural families are provable without full evaluation:
+///
+/// * one side is `not(X)` and the other is `X` (modulo
+///   parenthesisation/spacing);
+/// * both sides are `all(...)` conjunctions (single expressions count as
+///   one-element conjunctions) and ANY cross pair of conjuncts is
+///   exclusive by the first rule — composed predicates such as
+///   `all(unix, feature = "a")` vs `all(not(unix), feature = "b")`
+///   therefore compare correctly even though neither top-level form is
+///   a bare negation.
 pub fn mutually_exclusive(a: &syn::Expr, b: &syn::Expr) -> bool {
+    conjuncts(a)
+        .iter()
+        .any(|x| conjuncts(b).iter().any(|y| exclusive_pair(x, y)))
+}
+
+/// Conjuncts of a predicate: the arguments of an `all(...)` call, or the
+/// expression itself (a one-element conjunction).
+fn conjuncts(expr: &syn::Expr) -> Vec<&syn::Expr> {
+    match expr {
+        syn::Expr::Call(c) if func_name(&c.func) == "all" => c.args.iter().collect(),
+        other => vec![other],
+    }
+}
+
+/// True when the two single conjuncts are a `not(X)` / `X` pair.
+fn exclusive_pair(a: &syn::Expr, b: &syn::Expr) -> bool {
     let (ka, kb) = (pred_key(a), pred_key(b));
     if ka == kb {
         return false;
     }
     negation_of(b, &ka) || negation_of(a, &kb)
+}
+
+/// Composes the predicates that guard one reaching edge: the inherited
+/// cfg chain, the module's own `#[cfg]` and an alternative's
+/// `cfg_attr` predicate. All present parts are AND-ed (`all(a, b)`); a
+/// missing part drops out; an empty composition is `None`
+/// (unconditional).
+pub fn compose_cfg(parts: &[Option<&syn::Expr>]) -> Option<syn::Expr> {
+    let present: Vec<&syn::Expr> = parts.iter().filter_map(|p| *p).collect();
+    match present.as_slice() {
+        [] => None,
+        [one] => Some((*one).clone()),
+        [first, rest @ ..] => {
+            let mut acc: syn::Expr = syn::parse_quote!(#first);
+            for next in rest {
+                let next = *next;
+                acc = syn::parse_quote!(all(#acc, #next));
+            }
+            Some(acc)
+        }
+    }
+}
+
+/// Negation of a predicate (`not(p)`), for the implicit default branch
+/// of a `#[cfg_attr(pred, path = "...")]` module.
+pub fn negated(pred: &syn::Expr) -> syn::Expr {
+    syn::parse_quote!(not(#pred))
+}
+
+/// Lexically normalises a repo-relative `/` path: `.` segments are
+/// dropped and `..` pop the preceding segment. `Err(())` when the path
+/// escapes the repo root — the caller must report that, never follow the
+/// escape (finding 2 of the real-repo CI run: `#[path =
+/// "../x/mod.rs"]` mounts kept their un-normalised spelling as the
+/// visited key and were reported as lost/unaccounted).
+pub fn normalize_rel(rel: &str) -> Result<String, ()> {
+    let mut out: Vec<&str> = Vec::new();
+    for seg in rel.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                if out.pop().is_none() {
+                    return Err(());
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    Ok(out.join("/"))
 }
 
 /// True when `expr` is `not(inner)` and `inner` renders to `key`.
@@ -98,6 +171,9 @@ pub enum Resolution {
     Missing { tried: Vec<String> },
     /// The path attr is not statically resolvable (OUT_DIR, env vars).
     Generated(String),
+    /// The resolved path escapes the repository root (`..` beyond the
+    /// top): never followed, always reported.
+    Escapes(String),
 }
 
 /// Directory used for non-`#[path]` resolution of `mod` declarations in
@@ -166,6 +242,10 @@ pub fn resolve_attr(fs: &GitFs, base_dir: &str, attr: &str) -> Resolution {
     } else {
         format!("{base_dir}/{}", attr.replace('\\', "/"))
     };
+    let rel = match normalize_rel(&rel) {
+        Ok(r) => r,
+        Err(()) => return Resolution::Escapes(attr.to_owned()),
+    };
     if fs.exists(&rel) {
         return Resolution::Found(rel);
     }
@@ -190,6 +270,10 @@ pub fn resolve_include(fs: &GitFs, file: &str, raw: &str) -> Resolution {
     } else {
         format!("{dir}/{}", raw.replace('\\', "/"))
     };
+    let rel = match normalize_rel(&rel) {
+        Ok(r) => r,
+        Err(()) => return Resolution::Escapes(raw.to_owned()),
+    };
     if fs.exists(&rel) {
         Resolution::Found(rel)
     } else {
@@ -202,5 +286,84 @@ pub fn dir_of(path: &str) -> String {
     match path.rfind('/') {
         Some(i) => path[..i].to_owned(),
         None => String::new(),
+    }
+}
+
+// ---------- attribute-path extraction (shared by modules + conservation) ----------
+
+/// One candidate file path for a `mod`, tagged with the predicate that
+/// guards it (`None` for an unconditional `#[path]`).
+pub struct PathAlt {
+    pub pred: Option<syn::Expr>,
+    pub path: String,
+}
+
+/// Collects every candidate path of a `mod` from its attributes:
+/// literal `#[path = "..."]` (a NAME-VALUE attribute, read via
+/// `require_name_value`) and ALL `#[cfg_attr(pred, path = "...")]`
+/// alternatives — mutually exclusive branches must all stay reachable,
+/// dropping all but the first wrongly hides whole modules.
+///
+/// Shared by the `modules` walker and the `conservation` inventory: the
+/// inventory previously re-parsed `#[path]` with
+/// `parse_args::<LitStr>()`, which cannot read a name-value attribute,
+/// so every path-mounted module silently fell back to default
+/// resolution (finding R4).
+pub fn path_alternatives(attrs: &[syn::Attribute]) -> Vec<PathAlt> {
+    let mut out = Vec::new();
+    for a in attrs {
+        if a.path().is_ident("path") {
+            if let Ok(nv) = a.meta.require_name_value() {
+                if let Some(s) = lit_str_of(&nv.value) {
+                    out.push(PathAlt {
+                        pred: None,
+                        path: s,
+                    });
+                }
+            }
+        } else if a.path().is_ident("cfg_attr") {
+            if let Ok(args) = a.parse_args::<CfgAttrArgs>() {
+                for meta in args.attrs {
+                    if let syn::Meta::NameValue(nv) = meta {
+                        if nv.path.is_ident("path") {
+                            if let Some(s) = lit_str_of(&nv.value) {
+                                out.push(PathAlt {
+                                    pred: Some(args.pred.clone()),
+                                    path: s,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// String value of a literal expression (`"a.rs"`), if it is one.
+fn lit_str_of(expr: &syn::Expr) -> Option<String> {
+    match expr {
+        syn::Expr::Lit(lit) => match &lit.lit {
+            syn::Lit::Str(s) => Some(s.value()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Parsed contents of `#[cfg_attr(pred, attr, attr, ...)]`.
+struct CfgAttrArgs {
+    pred: syn::Expr,
+    attrs: syn::punctuated::Punctuated<syn::Meta, syn::Token![,]>,
+}
+
+impl syn::parse::Parse for CfgAttrArgs {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let pred: syn::Expr = input.parse()?;
+        input.parse::<syn::Token![,]>()?;
+        let attrs =
+            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated(input)?;
+        Ok(Self { pred, attrs })
     }
 }

@@ -5,7 +5,22 @@
 mod harness;
 
 use crate::harness::{assert_clean, assert_finding, copy_fixture, TempRepo};
+use std::path::Path;
 use std::process::Output;
+
+/// Copies `fixtures/<fixture>` over the repo AND DELETES every file of
+/// `previous` (the base fixture's copied set) that the new fixture does
+/// not contain — the head overlay of a two-commit fixture may REMOVE
+/// files (a deleted test target), and a pure copy-over would silently
+/// keep them in the head commit.
+fn overlay_fixture(dst: &Path, fixture: &str, previous: &[String]) {
+    let copied = copy_fixture(dst, fixture);
+    for rel in previous {
+        if !copied.contains(rel) {
+            let _ = std::fs::remove_file(dst.join(rel));
+        }
+    }
+}
 
 /// A two-commit repo plus the first commit's SHA (`--base` argument).
 struct ConsRepo {
@@ -18,10 +33,19 @@ impl ConsRepo {
     /// Two-commit repo: `fixtures/<fixture>/base` is committed first,
     /// then `fixtures/<fixture>/head` is copied over and committed (the
     /// commit is `--allow-empty`, so identical trees still work).
+    ///
+    /// The head overlay DELETES every base-fixture file the head fixture
+    /// does not contain — a head revision may remove a file (a deleted
+    /// test target), and a pure copy-over would silently keep it in the
+    /// head commit, hiding exactly the deletions the gate must catch.
+    /// Fixtures whose head contains every base file are unaffected.
     fn two_commit(fixture: &str) -> Self {
         let repo = TempRepo::with_fixture(&format!("{fixture}/base"));
         let base_sha = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
-        copy_fixture(&repo.root, &format!("{fixture}/head"));
+        // Idempotent re-copy: yields the base fixture's copied file set
+        // for the deletion-aware overlay below.
+        let base_files = copy_fixture(&repo.root, &format!("{fixture}/base"));
+        overlay_fixture(&repo.root, &format!("{fixture}/head"), &base_files);
         repo.commit_all("head");
         Self { repo, base_sha }
     }
@@ -271,4 +295,42 @@ fn delta_without_base_sha_is_malformed() {
         err.contains("MALFORMED_DELTA"),
         "expected MALFORMED_DELTA:\n{err}"
     );
+}
+
+#[test]
+fn deleted_test_target_is_a_loss() {
+    // Base has a test TARGET (`crates/fix/tests/x.rs`); head DELETES the
+    // file (the harness overlay removes base files the head fixture does
+    // not contain). Its items must surface as TEST_LOST.
+    // Counterfactual: fails without per-revision discovery because
+    // auto-discovery iterated the CURRENT index (`git ls-files`); in the
+    // head commit the file is already gone from the index, so the base
+    // inventory never saw the target and the run was clean.
+    let repo = ConsRepo::two_commit("conservation/target_deleted");
+    assert_finding(&repo.compare(), "TEST_LOST");
+}
+
+#[test]
+fn path_mounted_test_deletion_is_a_loss() {
+    // The test module is mounted via a NAME-VALUE `#[path]` attribute and
+    // deleted at head (declaration AND file).
+    // Counterfactual: fails without the shared attribute-path extraction
+    // because conservation's local `parse_args::<LitStr>()` cannot read
+    // `#[path = "..."]`, the module silently fell back to default
+    // resolution (which finds nothing), its base items vanished without
+    // a word and the run was clean.
+    let repo = ConsRepo::two_commit("conservation/path_test_deleted");
+    assert_finding(&repo.compare(), "TEST_LOST");
+}
+
+#[test]
+fn unresolved_child_module_is_an_inventory_error() {
+    // `mod ghost;` resolves to nothing at BOTH revisions: fail closed
+    // with INVENTORY_ERROR instead of silently skipping the child (its
+    // items would silently "vanish" between revisions).
+    // Counterfactual: fails without the unresolved-child reporting
+    // because the Missing resolution only meant "contributes no items"
+    // and the run was clean.
+    let repo = ConsRepo::two_commit("conservation/broken_mod");
+    assert_finding(&repo.compare(), "INVENTORY_ERROR");
 }

@@ -21,7 +21,7 @@ pub struct StructureArgs {
 }
 
 /// Delta-file record: an accepted visibility widening or new `#[allow]`.
-/// Matching is on `path` only; `item`, `reason` and `owner` document it.
+/// Matching is on (path, item); `reason` and `owner` document it.
 #[derive(Debug, Deserialize)]
 pub struct DeltaEntry {
     pub path: String,
@@ -60,14 +60,35 @@ impl Delta {
         Ok(delta)
     }
 
-    /// The delta entry (if any) covering `path` under the finding
-    /// code; matching is on `path` only.
-    pub fn covers(&self, code: &str, path: &str) -> Option<&DeltaEntry> {
+    /// Consumes the delta entry (if any) covering `(code, path, item)`
+    /// and reports whether one matched. An entry matches when its `path`
+    /// equals `path` AND its `item` equals `item` (an EMPTY `item` field
+    /// is a wildcard matching any item, for path-scoped entries). Each
+    /// entry is consumed exactly once: a second identical finding is NOT
+    /// covered. Leftover entries are reported as `UNUSED_ALLOWANCE` at
+    /// the end of the run, so stale entries cannot accumulate.
+    ///
+    /// Item keys (documented contract):
+    /// * `VIS_WIDENING` — the qualified item name exactly as printed in
+    ///   the finding message (e.g. `m::helper`, `S::a`, `S::0` for tuple
+    ///   field 0, `m::S::f` for an impl method inside inline module `m`).
+    /// * `ALLOW_ADDED` — the normalised attribute text, e.g.
+    ///   `#[allow(dead_code)]` (see `diff::normalise_attr`).
+    pub fn consume(&mut self, code: &str, path: &str, item: &str) -> bool {
         let list = match code {
-            "VIS_WIDENING" => &self.allow_widen,
-            _ => &self.allow,
+            "VIS_WIDENING" => &mut self.allow_widen,
+            _ => &mut self.allow,
         };
-        list.iter().find(|e| e.path == path)
+        let pos = list
+            .iter()
+            .position(|e| e.path == path && (e.item.is_empty() || e.item == item));
+        match pos {
+            Some(i) => {
+                list.remove(i);
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -98,7 +119,7 @@ fn execute(args: StructureArgs) -> Result<u8, String> {
     // Base revision: explicit --base, else the merge base of
     // --changed-since. Missing either skips the diff rules.
     let base = resolve_base(&fs, &args)?;
-    let delta = Delta::load(args.delta.as_deref())?;
+    let mut delta = Delta::load(args.delta.as_deref())?;
     let exceptions = crate::exceptions::Exceptions::load(
         args.exceptions
             .as_deref()
@@ -109,7 +130,7 @@ fn execute(args: StructureArgs) -> Result<u8, String> {
     let mut report = Report::new();
     rules::check_files(&fs, &selected, &exceptions, &owned, &mut report);
     if let Some(base_rev) = &base {
-        diff::check_files(&fs, base_rev, &selected, &delta, &mut report);
+        diff::check_files(&fs, base_rev, &selected, &mut delta, &mut report);
     }
     if args.warn_primary_export {
         warn_primary_export(&fs, &selected);

@@ -49,10 +49,24 @@ def norm(rel: str) -> str:
     return rel.replace("\\", "/")
 
 
+def resolve_root(root: str) -> str:
+    """Absolute, separator-normalised repo root from a possibly relative one.
+
+    The workflow passes ``--root .`` (relative), while ``cargo metadata``
+    manifest paths are ABSOLUTE.  Resolving once here makes ``strip_root``
+    a pure string operation on comparable absolute posix paths; with the
+    literal ``"."`` the ``PurePosixPath(".")`` prefix never matched and no
+    path was ever stripped (the round-2 regression this fixes).
+    """
+    return norm(str(Path(root).resolve()))
+
+
 def strip_root(path: str, root: str) -> str:
     """Repo-relative posix form of ``path`` given repo root ``root``.
 
-    Both inputs may use any separator mix; ``root`` may be ``.``.
+    Both inputs may use any separator mix; ``root`` should already be
+    RESOLVED (absolute) via :func:`resolve_root` — ``strip_root`` itself
+    stays pure and does no filesystem access.
     """
     p = PurePosixPath(norm(path))
     r = PurePosixPath(norm(root))
@@ -145,7 +159,7 @@ def main(
         campaigns = load_campaigns(stages_text)
         if metadata_text is None:
             metadata_text = Path(args.metadata).read_text(encoding="utf-8")
-        pkg_dirs = load_pkg_dirs(metadata_text, args.root)
+        pkg_dirs = load_pkg_dirs(metadata_text, resolve_root(args.root))
         if changed is None:
             changed = sys.stdin.read().splitlines()
         for name, delta, pkgs in select(campaigns, pkg_dirs, changed):
