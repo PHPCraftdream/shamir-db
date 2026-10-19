@@ -164,8 +164,189 @@ async fn repeated_failures_without_progress_surface_status_message() {
         "stall must stay retryable"
     );
     let message = message.expect("stall must be visible via status_message");
-    assert!(
-        message.contains("without progress") && message.contains("leader unreachable"),
+    // R7-4: the assertion matches the production message in
+    // follower_loop.rs::note_swallowed_failure EXACTLY — any wording drift
+    // here must fail this test, not silently pass on a substring.
+    assert_eq!(
+        message,
+        "follower stalled: 10 consecutive failures without progress; \
+         last error: leader unreachable",
+        "unexpected status_message: {message}"
+    );
+}
+
+/// Fails the first 10 pulls ("streak one"), then delegates twice to the
+/// healthy inner source (durable progress), then fails every further pull
+/// ("streak two") — stall → recovery → fresh stall in ONE loop run.
+struct StreakySource {
+    inner: InProcessReplSource,
+    pulls: Mutex<u32>,
+}
+
+#[async_trait]
+impl ReplSource for StreakySource {
+    async fn hello(&self, node_id: &str) -> Result<ReplResponse, ReplError> {
+        self.inner.hello(node_id).await
+    }
+
+    async fn pull(
+        &self,
+        db: &str,
+        repo: &str,
+        from_version: u64,
+        limit: u32,
+        wait_ms: Option<u32>,
+    ) -> Result<ReplResponse, ReplError> {
+        let n = {
+            let mut pulls = self.pulls.lock().await;
+            *pulls += 1;
+            *pulls
+        };
+        if n <= 10 {
+            return Err(ReplError::Transport("streak one".into()));
+        }
+        if n <= 12 {
+            return self
+                .inner
+                .pull(db, repo, from_version, limit, wait_ms)
+                .await;
+        }
+        Err(ReplError::Transport("streak two".into()))
+    }
+}
+
+/// R7-5: durable progress must OVERWRITE a reported stall message with the
+/// progress note AND restart the failure counter, so a later fresh
+/// 10-failure streak reports again with the fresh count.
+///
+/// COUNTERFACTUAL: if the counter were NOT restarted on progress, the
+/// post-progress streak continues at 11 (counts 11..20 ≥ threshold 10 with
+/// the latch cleared by `clear_stall`) and the message would read "…11
+/// consecutive failures…" — the first failing assertion is the
+/// exact-match `assert_eq!` on `10 consecutive failures` below. Without the
+/// progress overwrite, the message could never have been the progress note
+/// between the two streaks at all.
+#[tokio::test(start_paused = true)]
+async fn progress_overwrites_stall_message_and_counter_restarts() {
+    let leader = build_db("alice").await;
+    let owner = Actor::User(principal64_from_username("alice"));
+    use shamir_query_builder::batch::Batch as B;
+    use shamir_query_builder::doc;
+    use shamir_query_builder::write::insert;
+    let mut batch = B::named("ins");
+    batch.id("ins");
+    batch.transactional();
+    batch.insert(
+        "i",
+        insert("items").rows([doc! {
+            "id" => "k0",
+            "v" => 0_i64,
+        }]),
+    );
+    leader
+        .execute_as(owner, "app", &batch.build())
+        .await
+        .expect("leader write");
+
+    let follower = build_db("follower").await;
+    create_subscription_row(&follower, "stall_sub").await;
+    // 10 failures + 2 healthy pulls (one applied + one idle) + 10 failures.
+    let source = StreakySource {
+        inner: InProcessReplSource::new(leader),
+        pulls: Mutex::new(0),
+    };
+    let cfg = FollowerLoopConfig::new("follower-1", "app", "main")
+        .with_poll_wait_ms(0)
+        .with_subscription("stall_sub")
+        .with_max_iterations(25);
+    run_follower_loop(
+        Arc::new(follower.clone()),
+        Arc::new(source),
+        cfg,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("stall/recovery/stall must never terminate the loop");
+    // The healthy window durably applied the leader's event.
+    let repo = follower.get_db("app").unwrap().get_repo("main").unwrap();
+    assert_eq!(repo.replication_bookmark().await.unwrap(), 1, "converged");
+    let (_, message) = read_subscription_row(&follower).await;
+    // Fresh streak of exactly 10 → fresh count in the message.
+    assert_eq!(
+        message.as_deref(),
+        Some(
+            "follower stalled: 10 consecutive failures without progress; \
+             last error: streak two"
+        ),
+        "the second streak must report with a RESTARTED counter: {message:?}"
+    );
+}
+
+/// A source whose `pull` SUCCEEDS but returns an EMPTY batch while its
+/// `current_version` advertises a backlog past the follower's bookmark —
+/// the leader says "I have version 5" and hands over nothing, forever.
+struct EmptyBacklogSource;
+
+#[async_trait]
+impl ReplSource for EmptyBacklogSource {
+    async fn hello(&self, _node_id: &str) -> Result<ReplResponse, ReplError> {
+        // Transient hello: the loop seeds epoch 0 and proceeds to pulls.
+        Err(ReplError::Transport("no hello".into()))
+    }
+
+    async fn pull(
+        &self,
+        _db: &str,
+        _repo: &str,
+        _from_version: u64,
+        _limit: u32,
+        _wait_ms: Option<u32>,
+    ) -> Result<ReplResponse, ReplError> {
+        Ok(ReplResponse::Pull {
+            leader_epoch: 1,
+            events: Vec::new(),
+            gap_at: None,
+            current_version: 5,
+            repo_lineage_id: Some([2; 16]),
+            history_epoch: Some(0),
+            gap_first: None,
+            gap_through: None,
+            schema_digest: None,
+        })
+    }
+}
+
+/// R7-5: successful empty pulls where the leader ADVERTISES a backlog
+/// (`current_version` > durable bookmark) must feed the stall measure.
+///
+/// COUNTERFACTUAL: before this change a successful pull NEVER fed the stall
+/// measure, so this loop ran forever with `state = active` and
+/// `status_message = null` — the exact silent-green stall round 6 exposed in
+/// CI. The first failing assertion is `message.expect(...)` below.
+#[tokio::test(start_paused = true)]
+async fn empty_pull_with_advertised_backlog_feeds_stall_measure() {
+    let follower = build_db("follower").await;
+    create_subscription_row(&follower, "stall_sub").await;
+    let cfg = FollowerLoopConfig::new("follower-1", "app", "main")
+        .with_poll_wait_ms(0)
+        .with_subscription("stall_sub")
+        .with_max_iterations(crate::replication::follower_loop::STALL_VISIBILITY_THRESHOLD + 2);
+    run_follower_loop(
+        Arc::new(follower.clone()),
+        Arc::new(EmptyBacklogSource),
+        cfg,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("successful-but-empty pulls must NOT terminate the loop");
+    let (state, message) = read_subscription_row(&follower).await;
+    assert_eq!(state.as_deref(), Some("active"), "stall stays retryable");
+    let message = message.expect("backlog stall must be visible via status_message");
+    assert_eq!(
+        message,
+        "follower stalled: 10 consecutive failures without progress; \
+         last error: leader advertises backlog through version 5 but \
+         returned no events from 1",
         "unexpected status_message: {message}"
     );
 }

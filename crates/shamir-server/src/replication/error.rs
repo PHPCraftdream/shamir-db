@@ -156,4 +156,20 @@ pub enum ReplError {
     FollowerStateRefused {
         reason: shamir_db::storage::error::FollowerRefusalReason,
     },
+
+    /// S5c-X PR6b-3 R7 — the destination repository's storage backend does
+    /// not support repository-wide atomic batches (a MemBuffer/Cached-wrapped
+    /// backend). **Terminal**: the receipt pipeline can never activate on it,
+    /// so the loop MUST stop instead of warn+backoff+retrying forever; the
+    /// operator re-creates the destination as a raw/replica repository.
+    #[error(
+        "destination repository {db}/{repo} uses a MemBuffer-wrapped backend; \
+         re-create it as a raw/replica repository (atomic batches unsupported)"
+    )]
+    AtomicBatchUnsupported {
+        /// Destination database name.
+        db: String,
+        /// Destination repository name.
+        repo: String,
+    },
 }

@@ -758,25 +758,43 @@ impl ShamirDb {
             #[cfg(feature = "fjall")]
             "fjall" => path.map(BoxRepoFactory::fjall),
             #[cfg(feature = "fjall")]
+            "fjall_raw" => path.map(BoxRepoFactory::fjall_raw),
+            #[cfg(feature = "fjall")]
             "hybrid" => path.map(BoxRepoFactory::hybrid),
             _ => None,
         }
     }
 
     pub(super) fn extract_storage_type(factory: &BoxRepoFactory) -> String {
+        Self::storage_type_inner(factory, true).to_string()
+    }
+
+    /// `top == true` labels the factory the catalogue will record: a RAW
+    /// `Fjall` variant at the top of the stack is an unbuffered repo and
+    /// must be recorded as `"fjall_raw"` so the boot path re-attaches it
+    /// raw (`supports_atomic_batch() == true`). A `Fjall` reached THROUGH
+    /// a wrapper is part of a buffered stack and must keep reporting the
+    /// wrapped kind `"fjall"` — relabeling it raw would make the boot path
+    /// drop the buffer layer on reopen.
+    fn storage_type_inner(factory: &BoxRepoFactory, top: bool) -> &'static str {
         match factory {
             BoxRepoFactory::InMemory(_) => "in_memory",
             #[cfg(feature = "fjall")]
-            BoxRepoFactory::Fjall(_) => "fjall",
+            BoxRepoFactory::Fjall(_) => {
+                if top {
+                    "fjall_raw"
+                } else {
+                    "fjall"
+                }
+            }
             #[cfg(feature = "fjall")]
             BoxRepoFactory::Hybrid(_) => "hybrid",
-            // The buffer layer doesn't have an identity of its own
-            // — recurse to the underlying backend so reflection
-            // sees the real engine.
-            BoxRepoFactory::MemBuffer(f) => return Self::extract_storage_type(&f.inner),
-            BoxRepoFactory::Cached(f) => return Self::extract_storage_type(&f.inner),
+            // The buffer/cache layers don't have an identity of their own
+            // — recurse to the underlying backend so reflection sees the
+            // real engine, but as a WRAPPED (non-top) backend.
+            BoxRepoFactory::MemBuffer(f) => Self::storage_type_inner(&f.inner, false),
+            BoxRepoFactory::Cached(f) => Self::storage_type_inner(&f.inner, false),
         }
-        .to_string()
     }
 
     pub(super) fn extract_path(factory: &BoxRepoFactory) -> Option<String> {

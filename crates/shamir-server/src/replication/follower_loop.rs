@@ -524,8 +524,13 @@ async fn run_follower_loop_internal(
         backoff_ms = INITIAL_BACKOFF_MS;
 
         // 5. dispatch on the reply payload.
-        let (events_bytes, gap_at) = match resp {
-            ReplResponse::Pull { events, gap_at, .. } => (events, gap_at),
+        let (events_bytes, gap_at, current_version) = match resp {
+            ReplResponse::Pull {
+                events,
+                gap_at,
+                current_version,
+                ..
+            } => (events, gap_at, current_version),
             ReplResponse::Error { code, message, .. } => {
                 // S5c-X 2c: the leader refuses to serve a completed_reseed
                 // repo to a legacy follower. New enough to understand the
@@ -619,6 +624,27 @@ async fn run_follower_loop_internal(
             if max_iterations.is_some_and(|cap| iter >= cap) {
                 return Ok(());
             }
+            // R7-5: a SUCCESSFUL pull can still be a NO-PROGRESS iteration —
+            // the leader advertises a backlog (`current_version` past our
+            // durable bookmark) yet returned nothing. Feed the stall measure
+            // so an indefinitely stuck-but-GREEN loop is visible too. A
+            // genuinely caught-up leader (`current_version == bookmark`) is
+            // healthy idle and must NOT count.
+            if current_version > bookmark {
+                consecutive_failures += 1;
+                note_swallowed_failure(
+                    &db,
+                    &node_id,
+                    subscription,
+                    consecutive_failures,
+                    &format!(
+                        "leader advertises backlog through version {current_version} \
+                         but returned no events from {from_version}"
+                    ),
+                    &mut stall_reported,
+                )
+                .await;
+            }
             // The leader already long-polled `poll_wait_ms`; a tiny extra
             // backoff keeps us polite but is not required.
             tokio::select! {
@@ -638,7 +664,40 @@ async fn run_follower_loop_internal(
         )
         .await
         {
-            Ok(ApplyOutcome::Applied { .. } | ApplyOutcome::Skipped) => {}
+            Ok(outcome @ (ApplyOutcome::Applied { .. } | ApplyOutcome::Skipped)) => {
+                // R7-5: a SUCCESSFUL apply that did NOT advance the durable
+                // bookmark (`Skipped`, or an `Applied` local version at/below
+                // the bookmark) is a NO-PROGRESS iteration — feed the stall
+                // measure so a spinning-but-successful loop stays visible.
+                let advanced = match &outcome {
+                    ApplyOutcome::Applied { local_version } => *local_version > bookmark,
+                    // `Rejected` is matched separately below; treating it as
+                    // non-advancing here keeps this inner match total.
+                    ApplyOutcome::Skipped | ApplyOutcome::Rejected { .. } => false,
+                };
+                if !advanced {
+                    consecutive_failures += 1;
+                    let detail = match &outcome {
+                        ApplyOutcome::Applied { local_version } => format!(
+                            "applied batch allocated local version {local_version} but the \
+                             durable bookmark stayed at {bookmark}"
+                        ),
+                        ApplyOutcome::Skipped | ApplyOutcome::Rejected { .. } => format!(
+                            "applied batch was skipped (already at/below watermark {bookmark}); \
+                             no version spent"
+                        ),
+                    };
+                    note_swallowed_failure(
+                        &db,
+                        &node_id,
+                        subscription,
+                        consecutive_failures,
+                        &detail,
+                        &mut stall_reported,
+                    )
+                    .await;
+                }
+            }
             Ok(ApplyOutcome::Rejected { reason }) => {
                 return Err(ReplError::ApplyRejected {
                     leader_version: events[0].event.commit_version,
@@ -646,6 +705,16 @@ async fn run_follower_loop_internal(
                 });
             }
             Err(e) => {
+                // PR6b-3 R7-2(ii): an unsupported backend (MemBuffer-wrapped
+                // destination) is TERMINAL — the receipt pipeline can never
+                // activate, so retrying is an infinite spin. Check BEFORE any
+                // backoff classification.
+                if let shamir_db::storage::error::DbError::AtomicBatchUnsupported(_) = &e {
+                    return Err(ReplError::AtomicBatchUnsupported {
+                        db: db_name.clone(),
+                        repo: repo.clone(),
+                    });
+                }
                 // PR6b-3: a refused durable follower state is TERMINAL —
                 // check BEFORE the requires_reopen probe and never back off.
                 if let shamir_db::storage::error::DbError::FollowerStateRefused { reason } = &e {
@@ -722,7 +791,6 @@ async fn note_swallowed_failure(
     if failures < STALL_VISIBILITY_THRESHOLD || *stall_reported {
         return;
     }
-    *stall_reported = true;
     let message = format!(
         "follower stalled: {failures} consecutive failures without progress; \
          last error: {last_error}"
@@ -735,21 +803,27 @@ async fn note_swallowed_failure(
         );
         return;
     };
+    // R7-5: the latch is set ONLY after a SUCCESSFUL persistence — on Err it
+    // stays clear so the NEXT failure retries the write (a failed write must
+    // never silence the stall permanently).
     match db
         .mark_subscription_terminal(name, "active", &message)
         .await
     {
-        Ok(()) => warn!(
-            node_id = %node_id,
-            subscription = %name,
-            failures,
-            "follower_loop: stall persisted to subscription status_message"
-        ),
+        Ok(()) => {
+            *stall_reported = true;
+            warn!(
+                node_id = %node_id,
+                subscription = %name,
+                failures,
+                "follower_loop: stall persisted to subscription status_message"
+            );
+        }
         Err(e) => warn!(
             node_id = %node_id,
             subscription = %name,
             error = %e,
-            "follower_loop: failed to persist stall status_message"
+            "follower_loop: failed to persist stall status_message (will retry on next failure)"
         ),
     }
 }

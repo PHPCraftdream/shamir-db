@@ -374,6 +374,37 @@ impl SubscriptionSupervisor {
                 return Err(error);
             }
             if let Some(destination) = self.local.get_db(db).and_then(|db| db.get_repo(repo)) {
+                // R7-2(i) — UP-FRONT capability refusal. The destination repo
+                // handle (RepoInstance) does NOT expose BoxRepo's
+                // `supports_atomic_batch` publicly, but its info store does:
+                // `Store::supports_atomic_batch` is `true` only on raw
+                // backends (raw fjall / raw in-memory) and keeps the default
+                // `false` on wrapper stores (MemBufferStore/CachedStore) —
+                // exactly the stacks whose receipt admission later fails with
+                // `DbError::AtomicBatchUnsupported`. Refuse BEFORE spawning so
+                // a seeded follower with a MemBuffer-wrapped destination can
+                // never enter the warn+backoff+retry-forever loop. RESUME goes
+                // through this same `start_subscription` path (reconcile →
+                // start), so it is covered too.
+                let info = destination
+                    .tx_info_store()
+                    .await
+                    .map_err(|error| ReplError::Start(error.to_string()))?;
+                if !info.supports_atomic_batch() {
+                    let error = ReplError::AtomicBatchUnsupported {
+                        db: db.clone(),
+                        repo: repo.clone(),
+                    };
+                    self.local
+                        .mark_subscription_terminal(
+                            &sub.name,
+                            "resync_required",
+                            &error.to_string(),
+                        )
+                        .await
+                        .map_err(|error| ReplError::Start(error.to_string()))?;
+                    return Err(error);
+                }
                 // Gate-init failures map by KIND, not by string — see
                 // `refuse_gate_init` below (typed refusal → terminal
                 // `resync_required`; anything else → retryable `Start`).
@@ -401,10 +432,6 @@ impl SubscriptionSupervisor {
                 // state this version does not support (legacy bookmark,
                 // malformed record, floor-without-bookmark evidence). A
                 // refused repo can never be resumed — the operator reseeds.
-                let info = destination
-                    .tx_info_store()
-                    .await
-                    .map_err(|error| ReplError::Start(error.to_string()))?;
                 match bookmark_v3::classify_follower_bookmark(&info).await {
                     Err(shamir_db::storage::error::DbError::FollowerStateRefused { reason }) => {
                         let error = ReplError::FollowerStateRefused { reason };
@@ -590,6 +617,34 @@ impl SubscriptionSupervisor {
                             subscription = %sub_name,
                             error = %e,
                             "follower state refused; subscription marked resync_required (reseed required)"
+                        );
+                    }
+                    Err(e @ ReplError::AtomicBatchUnsupported { .. }) => {
+                        // S5c-X PR6b-3 R7-2(ii) — TERMINAL: the destination
+                        // backend cannot host the receipt pipeline (no atomic
+                        // batches). Same quarantine family as the
+                        // follower-state refusal: persist the typed terminal
+                        // status ONCE with the remedy in the message; the loop
+                        // never retries it.
+                        if let Err(mark_err) = local
+                            .mark_subscription_terminal(
+                                &sub_name,
+                                "resync_required",
+                                &e.to_string(),
+                            )
+                            .await
+                        {
+                            warn!(
+                                subscription = %sub_name,
+                                error = %mark_err,
+                                "supervisor: failed to persist resync_required after atomic-batch refusal"
+                            );
+                        }
+                        metrics::counter!("shamir_repl_resync_required_total").increment(1);
+                        warn!(
+                            subscription = %sub_name,
+                            error = %e,
+                            "atomic batches unsupported on destination; subscription marked resync_required (re-create the repo raw)"
                         );
                     }
                     Err(e @ ReplError::ReopenRequired { .. }) => {
