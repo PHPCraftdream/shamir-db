@@ -56,6 +56,8 @@ pub mod p02c_retain_filter_key_collision_tests;
 pub mod p03b_index2_drop_durability_tests;
 pub mod p1008_instance_provenance_tests;
 pub mod p1011_reader_drain_tests;
+pub mod p1037_sorted_reader_drain_tests;
+pub mod p1038_index2_reader_drain_tests;
 pub mod p1048_hash_drop_durability_tests;
 pub mod p1048_index2_drop_durability_tests;
 pub mod p1051_op_id_uniqueness_tests;

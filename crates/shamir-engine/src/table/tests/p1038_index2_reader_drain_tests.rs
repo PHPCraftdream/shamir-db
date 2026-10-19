@@ -18,14 +18,13 @@ use crate::index2::descriptor::IndexDescriptor;
 use crate::index2::expr::IndexExpr;
 use crate::index2::functional_backend::FunctionalBackend;
 use crate::index2::kind::{FunctionalConfig, IndexKind};
-use crate::index2::state::IndexState;
 use crate::index2::IndexRegistry;
 use crate::table::index2_backfill_hook::BackfillPauseHook;
 use crate::table::TableManager;
-use shamir_storage::storage_in_memory::InMemoryStore;
-use shamir_storage::storage_in_memory::InMemoryRepo;
-use shamir_storage::types::Store;
 use shamir_storage::error::DbError;
+use shamir_storage::storage_in_memory::InMemoryRepo;
+use shamir_storage::storage_in_memory::InMemoryStore;
+use shamir_storage::types::Store;
 
 use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_types::BoxRepo;
@@ -109,17 +108,13 @@ async fn p1038_index2_lease_holds_blocks_drop_until_released() {
 
     // Three pre-existing rows.
     for name in ["Alice", "Bob", "Charlie"] {
-        tbl.insert(&record_with_str(name_key, name))
-            .await
-            .unwrap();
+        tbl.insert(&record_with_str(name_key, name)).await.unwrap();
     }
 
     // Build a functional index.
-    tbl.create_index_v2(functional_lower_op("lower_name", "people", "name"))
+    tbl.create_index_v2(&functional_lower_op("lower_name", "people", "name"))
         .await
         .unwrap();
-
-    let index_name_id = key_id(&tbl, "lower_name").await;
 
     // Verify the index is usable.
     let registry = tbl.index2_registry();
@@ -131,10 +126,10 @@ async fn p1038_index2_lease_holds_blocks_drop_until_released() {
     let backend = lease.backend;
     let lookup_result = backend
         .lookup(crate::index2::backend::IndexQuery::Point {
-            keys: smallvec::smallvec![
-                FunctionalBackend::hash_value(&InnerValue::Str("alice".into()))
-                    .to_vec()
-            ],
+            keys: smallvec::smallvec![FunctionalBackend::hash_value(&InnerValue::Str(
+                "alice".into()
+            ))
+            .to_vec()],
         })
         .await
         .unwrap();
@@ -215,17 +210,13 @@ async fn p1038_index2_lease_returns_drain_error_not_none() {
 
     // Three pre-existing rows.
     for name in ["Alice", "Bob", "Charlie"] {
-        tbl.insert(&record_with_str(name_key, name))
-            .await
-            .unwrap();
+        tbl.insert(&record_with_str(name_key, name)).await.unwrap();
     }
 
     // Build a functional index.
-    tbl.create_index_v2(functional_lower_op("lower_name", "people", "name"))
+    tbl.create_index_v2(&functional_lower_op("lower_name", "people", "name"))
         .await
         .unwrap();
-
-    let index_name_id = key_id(&tbl, "lower_name").await;
 
     // Verify the index is usable before DROP starts.
     let registry = tbl.index2_registry();
@@ -251,12 +242,17 @@ async fn p1038_index2_lease_returns_drain_error_not_none() {
 
     // Now try to acquire a lease — must get IndexDrainInProgress error.
     let registry = tbl.index2_registry();
-    let lease_result = registry.lease_by_field_and_kind(&[name_key], "functional").await;
+    let lease_result = registry
+        .lease_by_field_and_kind(&[name_key], "functional")
+        .await;
 
     match lease_result {
         Err(DbError::IndexDrainInProgress(msg)) => {
             // Good — we got the distinguishable error signal.
-            assert!(msg.contains("functional"), "error message should mention the kind");
+            assert!(
+                msg.contains("functional"),
+                "error message should mention the kind"
+            );
         }
         Ok(None) => {
             panic!(
@@ -300,17 +296,14 @@ async fn p1038_index2_backoff_pairing_contended_and_uncontended() {
 
     // Three pre-existing rows.
     for name in ["Alice", "Bob", "Charlie"] {
-        tbl.insert(&record_with_str(name_key, name))
-            .await
-            .unwrap();
+        tbl.insert(&record_with_str(name_key, name)).await.unwrap();
     }
 
     // Build a functional index.
-    tbl.create_index_v2(functional_lower_op("lower_name", "people", "name"))
+    tbl.create_index_v2(&functional_lower_op("lower_name", "people", "name"))
         .await
         .unwrap();
 
-    let index_name_id = key_id(&tbl, "lower_name").await;
     let gate = tbl.index2_registry().reader_gate();
 
     // -----------------------------------------------------------------
@@ -326,14 +319,13 @@ async fn p1038_index2_backoff_pairing_contended_and_uncontended() {
     );
 
     // Re-create the index for the contended test.
-    tbl.create_index_v2(functional_lower_op("lower_name2", "people", "name"))
+    tbl.create_index_v2(&functional_lower_op("lower_name2", "people", "name"))
         .await
         .unwrap();
 
     // -----------------------------------------------------------------
     // 3b. Contended DROP — drain_waits() == 1
     // -----------------------------------------------------------------
-    let index_name_id2 = key_id(&tbl, "lower_name2").await;
 
     // Install the DROP pause hook.
     let drop_hook = Arc::new(BackfillPauseHook::new());
@@ -387,7 +379,7 @@ async fn p1038_index2_backoff_pairing_contended_and_uncontended() {
 /// to zero).
 #[tokio::test]
 async fn p1038_index2_guard_releases_on_error() {
-    let (data_store, info_store) = (
+    let (_data_store, info_store) = (
         Arc::new(InMemoryStore::new()) as Arc<dyn Store>,
         Arc::new(InMemoryStore::new()) as Arc<dyn Store>,
     );
@@ -396,20 +388,15 @@ async fn p1038_index2_guard_releases_on_error() {
 
     // Build a functional backend directly.
     let name_key = 1u64; // Mock interned id
-    let backend = build_ready_functional_backend(
-        1,
-        "lower_name",
-        name_key,
-        vec![name_key],
-        &info_store,
-    );
+    let backend =
+        build_ready_functional_backend(1, "lower_name", name_key, vec![name_key], &info_store);
     registry.insert(backend).await.unwrap();
 
     let gate = registry.reader_gate();
 
     // Acquire a lease and then immediately return (simulating early exit).
     {
-        let lease = registry
+        let _lease = registry
             .lease_by_field_and_kind(&[name_key], "functional")
             .await
             .unwrap()
