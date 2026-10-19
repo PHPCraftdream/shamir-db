@@ -2,7 +2,7 @@
 
 ## Hard constraints
 
-- Worktree: `D:/dev/rust/shamir-db/worktrees/s5cx-quarantine-reads`.
+- Worktree: `worktrees/s5cx-quarantine-reads`.
 - Read `CLAUDE.md`, `AGENTS.md`, the Rust-intel skill, and relevant skill modules before Rust edits.
 - Do not run builds, tests, clippy, rustc, nextest, or any Cargo command. The orchestrator formats as the final step.
 - No git writes or commits. Read-only git inspection only. Never run reset, checkout, clean, stash, restore, rm, or other mutating git commands.

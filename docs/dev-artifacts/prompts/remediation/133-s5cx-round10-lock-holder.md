@@ -1,6 +1,6 @@
 # Round 10 — TEST-ONLY CI failure: durable reopen of the follower's Fjall system store never gets the lock
 
-Worktree: `D:/dev/rust/shamir-db/worktrees/s5cx-scoped-quarantine`, branch `feat/s5cx-scoped-quarantine` @ a1d1d839.
+Worktree: `worktrees/s5cx-scoped-quarantine`, branch `feat/s5cx-scoped-quarantine` @ a1d1d839.
 
 REAL CI EVIDENCE (fast tier, ubuntu): everything passes (7372/7373) except
 `shamir-server ...::terminal_retry_tests::terminal_marking_retries_until_success`:
