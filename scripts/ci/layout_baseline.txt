@@ -52,11 +52,6 @@ dir crates/shamir-tx/src 25
 dir crates/shamir-tx/src/mvcc_store 9
 dir crates/shamir-tx/src/tests 23
 dir crates/shamir-tx/src/tests/mvcc_store_tests 32
-dir crates/shamir-wal/src 13
-dir crates/shamir-wal/src/tests 10
-dir crates/shamir-wasm-host/src 16
-dir crates/shamir-wasm-host/src/tests 11
-dir crates/shamir-wasm-host/src/wasm 9
 dir scripts 15
 file crates/shamir-client/src/client.rs 1318
 file crates/shamir-db/benches/engine_perf.rs 1365

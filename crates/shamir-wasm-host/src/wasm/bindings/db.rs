@@ -1,4 +1,6 @@
-use super::wasm_function::{read_guest_mem, write_bytes_to_guest, write_value_to_guest, HostState};
+use super::super::wasm_function::{
+    read_guest_mem, write_bytes_to_guest, write_value_to_guest, HostState,
+};
 use shamir_types::types::value::QueryValue;
 
 // ── Async host imports: db_get / db_insert / db_query (slice 8b) ───────
@@ -13,7 +15,7 @@ use shamir_types::types::value::QueryValue;
 ///
 /// Reads a record from `repo.table` by the given key (msgpack `QueryValue`).
 /// Returns 0 if not found, or the packed pointer to the record's msgpack.
-pub(super) fn host_db_get(
+pub(in crate::wasm) fn host_db_get(
     mut caller: wasmtime::Caller<'_, HostState>,
     (table_ptr, table_len, key_ptr, key_len): (i32, i32, i32, i32),
 ) -> Box<dyn std::future::Future<Output = Result<i64, wasmtime::Error>> + Send + '_> {
@@ -61,7 +63,7 @@ pub(super) fn host_db_get(
 ///
 /// Inserts a document into `repo.table`. Returns the stored record as
 /// packed msgpack.
-pub(super) fn host_db_insert(
+pub(in crate::wasm) fn host_db_insert(
     mut caller: wasmtime::Caller<'_, HostState>,
     (table_ptr, table_len, doc_ptr, doc_len): (i32, i32, i32, i32),
 ) -> Box<dyn std::future::Future<Output = Result<i64, wasmtime::Error>> + Send + '_> {
@@ -107,7 +109,7 @@ pub(super) fn host_db_insert(
 /// Queries `repo.table` with an optional filter. The filter is a msgpack
 /// `QueryValue`; zero-length bytes means `None` (no filter / return all).
 /// Returns a msgpack `Value::List` of matching records, packed.
-pub(super) fn host_db_query(
+pub(in crate::wasm) fn host_db_query(
     mut caller: wasmtime::Caller<'_, HostState>,
     (table_ptr, table_len, filter_ptr, filter_len): (i32, i32, i32, i32),
 ) -> Box<dyn std::future::Future<Output = Result<i64, wasmtime::Error>> + Send + '_> {
@@ -163,7 +165,7 @@ pub(super) fn host_db_query(
 /// gateway (same executor a wire client uses, as the function's effective
 /// actor) and writes the msgpack `BatchResponse` back. The general form of
 /// db_get/db_insert/db_query. Mirrors the host_db_query 3-phase dance.
-pub(super) fn host_db_execute(
+pub(in crate::wasm) fn host_db_execute(
     mut caller: wasmtime::Caller<'_, HostState>,
     (req_ptr, req_len): (i32, i32),
 ) -> Box<dyn std::future::Future<Output = Result<i64, wasmtime::Error>> + Send + '_> {
