@@ -9,16 +9,14 @@
 use std::sync::Arc;
 
 use shamir_types::core::interner::TouchInd;
-use shamir_types::types::common::new_map;
 use shamir_types::types::value::InnerValue;
 
 use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_types::BoxRepo;
 use crate::table::TableConfig;
 use crate::table::TableManager;
-use shamir_index::base_index::sorted_index_manager::SortedIndexManager;
-use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_storage::error::DbError;
+use shamir_storage::storage_in_memory::InMemoryRepo;
 
 fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());
@@ -69,7 +67,7 @@ async fn p1037_sorted_reader_blocks_drop_until_released() {
     }
 
     // Build the sorted index.
-    tbl.create_sorted_index("salary_idx", &["salary"], false)
+    tbl.create_sorted_index("salary_idx", &["salary"])
         .await
         .unwrap();
 
@@ -81,7 +79,8 @@ async fn p1037_sorted_reader_blocks_drop_until_released() {
     assert!(!_lookup.is_empty(), "sanity: index must be usable");
 
     // Install the DROP pause hook.
-    let drop_hook = Arc::new(shamir_index::base_index::backfill_pause_hook::BackfillPauseHook::new());
+    let drop_hook =
+        Arc::new(shamir_index::base_index::backfill_pause_hook::BackfillPauseHook::new());
     tbl.sorted_indexes()
         .set_drop_index_pause_hook(Some(Arc::clone(&drop_hook)));
 
@@ -104,15 +103,7 @@ async fn p1037_sorted_reader_blocks_drop_until_released() {
     // Rendezvous: the DROP is parked.
     drop_hook.wait_until_parked().await;
 
-    // Verify the gate is counting in-flight readers (the read may have finished
-    // already, so we check > 0 not == 1).
     let gate = tbl.sorted_indexes().reader_gate();
-    let in_flight = gate.in_flight_count();
-    assert!(
-        in_flight >= 0,
-        "gate in_flight_count() must be readable: {}",
-        in_flight
-    );
 
     // Release the DROP.
     drop_hook.release();
@@ -121,12 +112,11 @@ async fn p1037_sorted_reader_blocks_drop_until_released() {
     drop_task.await.unwrap().unwrap();
     read_task.await.unwrap();
 
-    // Verify the drain wait was counted (may be 0 if the read finished early).
-    let waits = gate.drain_waits();
-    assert!(
-        waits >= 0,
-        "gate drain_waits() must be readable: {}",
-        waits
+    // Every read guard is released once both tasks are done.
+    assert_eq!(
+        gate.in_flight_count(),
+        0,
+        "no reader may stay registered after the read and the DROP completed"
     );
 }
 
@@ -154,7 +144,7 @@ async fn p1037_sorted_reader_backs_off_while_drop_parked() {
     }
 
     // Build the sorted index.
-    tbl.create_sorted_index("salary_idx", &["salary"], false)
+    tbl.create_sorted_index("salary_idx", &["salary"])
         .await
         .unwrap();
 
@@ -166,7 +156,8 @@ async fn p1037_sorted_reader_backs_off_while_drop_parked() {
     assert_eq!(pre_drop.len(), 3, "pre-drop must have 3 entries");
 
     // Install the DROP pause hook.
-    let drop_hook = Arc::new(shamir_index::base_index::backfill_pause_hook::BackfillPauseHook::new());
+    let drop_hook =
+        Arc::new(shamir_index::base_index::backfill_pause_hook::BackfillPauseHook::new());
     mgr.set_drop_index_pause_hook(Some(Arc::clone(&drop_hook)));
 
     // Spawn the DROP — it will park after definition retire, before drain.
@@ -238,7 +229,7 @@ async fn p1037_sorted_uncontended_drop_counts_zero_waits() {
         .unwrap();
 
     // Build the sorted index.
-    tbl.create_sorted_index("salary_idx", &["salary"], false)
+    tbl.create_sorted_index("salary_idx", &["salary"])
         .await
         .unwrap();
 
@@ -278,7 +269,7 @@ async fn p1037_sorted_guard_released_on_normal_path() {
         .unwrap();
 
     // Build the sorted index.
-    tbl.create_sorted_index("salary_idx", &["salary"], false)
+    tbl.create_sorted_index("salary_idx", &["salary"])
         .await
         .unwrap();
 
@@ -325,7 +316,7 @@ async fn p1037_sorted_entry_count_backs_off_during_drop() {
     }
 
     // Build the sorted index.
-    tbl.create_sorted_index("salary_idx", &["salary"], false)
+    tbl.create_sorted_index("salary_idx", &["salary"])
         .await
         .unwrap();
 
@@ -337,7 +328,8 @@ async fn p1037_sorted_entry_count_backs_off_during_drop() {
     assert_eq!(pre_drop, 3, "pre-drop must have 3 entries");
 
     // Install the DROP pause hook.
-    let drop_hook = Arc::new(shamir_index::base_index::backfill_pause_hook::BackfillPauseHook::new());
+    let drop_hook =
+        Arc::new(shamir_index::base_index::backfill_pause_hook::BackfillPauseHook::new());
     mgr.set_drop_index_pause_hook(Some(Arc::clone(&drop_hook)));
 
     // Spawn the DROP — it will park after definition retire, before drain.
@@ -406,7 +398,10 @@ async fn p1037_sorted_guard_released_on_nonexistent_rollback() {
     // the happy path, but we verify the gate state anyway).
     let result = tbl.drop_sorted_index("salary_idx", None).await.unwrap();
 
-    assert!(!result, "drop_sorted_index must return false for non-existent index");
+    assert!(
+        !result,
+        "drop_sorted_index must return false for non-existent index"
+    );
 
     // THE PROOF: the in-flight counter must be 0 (no guard was held).
     assert_eq!(
