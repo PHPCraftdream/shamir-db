@@ -3,7 +3,7 @@
 //! These tests exercise only serialisation/deserialisation of
 //! [`WireResumeInit`] and [`WireResumeOk`] — no server required.
 
-use crate::wire_frames::{WireResumeInit, WireResumeOk};
+use crate::client::transport::{WireResumeInit, WireResumeOk};
 
 /// A mirror of WireResumeInit with Deserialize added, so we can round-trip
 /// through msgpack in these tests without publishing Deserialize on the
