@@ -30,7 +30,7 @@ async fn test_remove_db_removes_from_system_store() {
     let shamir = ShamirDb::init_memory().await.unwrap();
 
     shamir.create_db("temp").await;
-    shamir.remove_db("temp").await;
+    shamir.remove_db("temp").await.unwrap();
 
     let dbs = shamir.system_store().load_databases().await.unwrap();
     assert!(!dbs.iter().any(|d| d["name"] == "temp"));
@@ -58,7 +58,7 @@ async fn test_remove_repo_removes_from_system_store() {
 
     let config = RepoConfig::new("temp_repo", BoxRepoFactory::in_memory());
     shamir.add_repo("production", config).await.unwrap();
-    shamir.remove_repo("production", "temp_repo").await;
+    shamir.remove_repo("production", "temp_repo").await.unwrap();
 
     let repos = shamir.system_store().load_repositories().await.unwrap();
     assert!(!repos.iter().any(|r| r["repo_name"] == "temp_repo"));

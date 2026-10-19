@@ -24,6 +24,7 @@ pub use shamir_storage as storage;
 pub use shamir_storage::error::{DbError, DbResult};
 
 pub mod api;
+pub mod repl_binding;
 pub mod shamir_db;
 
 // Top-level convenience re-exports — `shamir_db::ShamirDb` etc. resolve
@@ -37,3 +38,7 @@ pub use crate::shamir_db::{
 pub use crate::shamir_db::{ShamirDb, SystemStoreConfig};
 
 pub use crate::shamir_db::shamir_db::ShutdownReport;
+
+// S5c-X PR8b-2: durable subscription binding (shamir-server stage W2 needs
+// the type and the version constant).
+pub use crate::repl_binding::{SubscriptionBinding, SUBSCRIPTION_BINDING_VERSION};
