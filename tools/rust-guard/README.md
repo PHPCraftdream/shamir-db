@@ -133,8 +133,8 @@ directory unless an explicit `--exceptions` path is given.
     (macro-generated / cfg-gated body); a line comment on its own line
     directly above the `use` containing the word "collision". These are
     deliberately simple heuristics, kept conservative.
-  - `OWNED_IMPL` — an inherent `impl` of a configured type outside the
-    type's defining module or its descendants. Configured in
+  - `OWNED_IMPL` — an `impl` (inherent OR trait) of a configured type
+    outside the type's defining module or its descendants. Configured in
     `.rust-guard/owned_impl.toml` as
     `[[owned_impl]] type = "RepoInstance" module = "crate::repo::instance::repo_instance"`
     (the shipped entry is the template). Logical module paths are
@@ -151,8 +151,13 @@ directory unless an explicit `--exceptions` path is given.
     introducing `pub(crate)`+ items is also a widening. `ALLOW_ADDED`
     fires on a new `#[allow]`/`#![allow]` attribute not present in the
     base file. Either is suppressed when the `--delta` TOML file lists
-    the path (`[[allow_widen]]` / `[[allow]]` with `path`, optional
-    `item`, `reason`, `owner`; matching is on `path` only).
+    an entry with `path`, `item`, `reason`, `owner` (`[[allow_widen]]` /
+    `[[allow]]`). Matching is EXACT on `(path, item)` and consumed on
+    first use — `item` is REQUIRED (an entry without one fails to
+    parse), the old path-only/empty-item wildcard is gone. Leftover
+    entries are `UNUSED_ALLOWANCE` findings — including runs with no
+    base revision or no selected files, where no finding could ever
+    have consumed them.
   `--warn-primary-export` prints a WARNING line (never a finding) for
   each non-`mod.rs` file declaring more than one public item.
 - `rust-guard conservation --base <rev> --head <rev> [--packages p,q]
@@ -385,6 +390,7 @@ Fixture → finding map:
 | `modules_bad/generated_include` | `UNRESOLVED_INCLUDE` (non-literal include, no producer) |
 | `modules_bad/stale_exception` | `STALE_EXCEPTION` |
 | `modules_bad/macro_mods` | `UNRESOLVED_MACRO` (module-level `macro_rules!` mentioning `mod` inside nested braces, no `[[producer]]`) |
+| `modules_bad/cfg_attr_neither_two` | `MISSING_MOD_FILE`, reported ONCE per `mod` (two `cfg_attr` alternatives, neither file nor the default exists) |
 | `modules_bad/producer_wrong_package` | `UNRESOLVED_MACRO` (producer scoped to another package must not apply) |
 | `modules_bad/bad_manifest` | `BAD_MANIFEST` (unparseable hand-scanned manifest fails closed) |
 | (no fixture — broken root member) | `CARGO_METADATA_FAILED` (finding + scan continues on hand-parsed manifests) |
@@ -395,14 +401,18 @@ Fixture → finding map:
 | `structure/local_use_in_impl` | `LOCAL_USE` (inside an impl method body) |
 | `structure/owned_impl` | `OWNED_IMPL` (fixture-local `.rust-guard/owned_impl.toml`) |
 | `structure/owned_impl_qualified` | `OWNED_IMPL` (qualified self type; the LAST segment is matched) |
+| `structure/owned_impl_trait` | `OWNED_IMPL` (trait impl; logical module `crate::other` is outside the owner module) |
 | `structure/modrs_inline` | `MODRS_LOGIC` (logic in an inline module of a mod.rs) |
 | `structure/widen_super_crate` | `VIS_WIDENING` (`pub(super)` → `pub(crate)` distinct tiers) |
 | `structure/widen_field` | `VIS_WIDENING` (struct field, keyed `S::a`) |
 | `structure/new_file_widen` | `VIS_WIDENING` (brand-new file with a `pub(crate)` item); clean with `[[allow_widen]]` |
 | `structure/allow_added` | `ALLOW_ADDED` (file gains `#[allow(dead_code)]`); clean with `[[allow]]` |
+| `structure/moved_plain` | none (exit 0) — a TRUE move (old.rs deleted at head) with byte-identical content pairs and stays clean |
+| `structure/copy_of_base_file` | `VIS_WIDENING` — a COPY (base file still present at head) never pairs as a move; the added file is new-file-checked |
 | `conservation/test_lost` | `TEST_LOST` |
 | `conservation/test_ignored` | `TEST_IGNORED` |
-| `conservation/test_cfg_changed` | `TEST_ATTR_CHANGED` (a `#[test]` fn gains a `#[cfg(...)]` predicate) |
+| `conservation/test_cfg_changed` | `TEST_ATTR_CHANGED` (INHERITED module cfg drift: the inline test module's `#[cfg]` changes v1 → v2) |
+| `conservation/assoc_type_changed` | `SIGNATURE_CHANGED` (an impl-type member's VALUE `type A = u8;` → `type A = u16;`) |
 | `conservation/renamed_ok` | none (exit 0) with a `[[renamed]]` delta; without one ITEM_LOST + ITEM_ADDED |
 | `conservation/renamed_test` | none (exit 0) with a `[[renamed]]` delta on a `#[test]` fn; without one TEST_LOST only (never ITEM_ADDED) |
 | `conservation/body_changed` | `BODY_CHANGED` |
@@ -410,9 +420,11 @@ Fixture → finding map:
 | `conservation/gone_pkg` | `ITEM_LOST` for every item of a base-only package the head deletes (per-revision manifest discovery) |
 | `conservation/target_deleted` | `TEST_LOST` for a test TARGET (`tests/x.rs`) deleted at head (per-revision auto-discovery + deletion-aware overlay) |
 | `conservation/path_test_deleted` | `TEST_LOST` for a `#[path]`-mounted test module deleted at head (shared attribute-path extraction) |
+| `conservation/fallback_changed` | `TEST_LOST` (cfg_attr DEFAULT branch is inventoried) |
 | `conservation/broken_mod` | `INVENTORY_ERROR` (`mod ghost;` resolves at neither revision — fail closed) |
 | `conservation/unused_allowance` | `UNUSED_ALLOWANCE` (identical trees — exercises the `--allow-empty` head commit) |
 | `conservation/base_mismatch` | `BASE_MISMATCH` (head carries a real comment-only diff) |
 | `conservation/unpairable_duplicate` | `UNPAIRABLE_DUPLICATE` (one base item, two same-key head candidates) |
+| `conservation/uncond_path_default_ignored` | none (exit 0) — an UNCONDITIONAL `#[path]` mod never inventories the phantom default file |
 | (no fixture — bad rev argument) | `BLOCKED_COMPARISON` |
 | (no fixture — delta without `base`) | `MALFORMED_DELTA` |

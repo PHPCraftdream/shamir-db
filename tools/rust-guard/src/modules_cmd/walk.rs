@@ -79,6 +79,14 @@ struct Walker<'a> {
     used_producers: BTreeSet<String>,
     /// Repo-level scan configuration (`.rust-guard/scan.toml`).
     scan: ScanCfg,
+    /// (target, physical file) pairs already traversed (children walked).
+    /// `visited` records EVERY edge for duplicate accounting, but the
+    /// children of a shared file must be walked once PER TARGET
+    /// (finding 6): keyed only by physical path, a helper traversed
+    /// under an earlier target skipped its child edges for later
+    /// targets, so a real same-target double mount of a child went
+    /// undetected.
+    traversed: BTreeSet<(usize, String)>,
 }
 
 /// Runs the `modules` gate; returns the process exit code.
@@ -116,6 +124,7 @@ fn execute(rev: Option<&str>, exceptions_path: Option<&str>, repo: &Path) -> Res
         used: BTreeSet::new(),
         used_producers: BTreeSet::new(),
         scan,
+        traversed: BTreeSet::new(),
     };
 
     // Fail closed on manifest problems: an unreadable/unparseable
@@ -123,8 +132,14 @@ fn execute(rev: Option<&str>, exceptions_path: Option<&str>, repo: &Path) -> Res
     // BAD_MANIFEST finding instead of silently dropping its targets. A
     // failing `cargo metadata` becomes CARGO_METADATA_FAILED and the
     // scan CONTINUES on hand-parsed manifests.
-    let (roots, problems) = roots::discover_with_problems(&fs)?;
+    let (roots, problems) = roots::discover_with_problems(&fs, &walker.scan)?;
     for p in problems {
+        // Belt-and-braces: discovery already skips excluded manifests,
+        // but a problem carrying an excluded manifest path (from any
+        // code path) must never reach the report.
+        if walker.scan.excluded(&p.manifest) {
+            continue;
+        }
         walker.report.add(&p.manifest, 1, p.code, p.message);
     }
 
@@ -198,19 +213,31 @@ impl Walker<'_> {
                 logical: ctx.logical.clone(),
                 pred: ctx.cfg.clone(),
             });
-        if !first_visit {
-            return; // duplicate edge; check_duplicates reports if undesired
+        // Children are walked once per (target, file): a file shared
+        // across targets is walked under EACH target that reaches it
+        // (finding 6), while a second same-target edge only records its
+        // Visit. Termination: a crate's module tree is a finite tree —
+        // `mod` include cycles are a compile error rustc rejects — so
+        // per-target traversal of every (target, file) pair is finite.
+        if !self.traversed.insert((ctx.target, ctx.file.clone())) {
+            return; // already walked for this target; edge recorded above
         }
         let Some(source) = self.fs.read(&ctx.file) else {
-            self.report
-                .add(&ctx.file, 1, "MISSING_MOD_FILE", "unreadable file".into());
+            // Report only on the first physical visit: a re-walk under a
+            // later target must not duplicate the same finding.
+            if first_visit {
+                self.report
+                    .add(&ctx.file, 1, "MISSING_MOD_FILE", "unreadable file".into());
+            }
             return;
         };
         let file: File = match syn::parse_file(&source) {
             Ok(f) => f,
             Err(e) => {
-                self.report
-                    .add(&ctx.file, 1, "PARSE_FAILED", format!("{e}"));
+                if first_visit {
+                    self.report
+                        .add(&ctx.file, 1, "PARSE_FAILED", format!("{e}"));
+                }
                 return;
             }
         };
@@ -261,7 +288,16 @@ impl Walker<'_> {
         let mut candidates: Vec<(Option<Expr>, Candidate, bool)> = Vec::new();
         let alts = resolution::path_alternatives(&m.attrs);
         if alts.is_empty() {
-            candidates.push((cfg.clone(), Candidate::Default, false));
+            // Default children must compose the INHERITED cfg in too
+            // (finding 5a): the bare `cfg.clone()` dropped ctx.cfg, so
+            // the child edge carried no predicate and mutual-exclusion
+            // tests against sibling edges wrongly saw both as
+            // unconditional.
+            candidates.push((
+                resolution::compose_cfg(&[ctx.cfg.as_ref(), cfg.as_ref()]),
+                Candidate::Default,
+                false,
+            ));
         } else {
             let has_unconditional = alts.iter().any(|a| a.pred.is_none());
             let mut attr_preds: Vec<&Expr> = Vec::new();
@@ -282,21 +318,24 @@ impl Walker<'_> {
             }
             if !has_unconditional {
                 // `#[cfg_attr(pred, path = P)]` models BOTH branches:
-                // (pred → P) above, and (not pred → the default x.rs /
-                // x/mod.rs candidates) here. A branch that resolves to
-                // nothing is not a finding on its own — only when NEITHER
-                // branch resolves (the fallback Missing is silent).
-                for p in attr_preds {
-                    candidates.push((
-                        resolution::compose_cfg(&[
-                            ctx.cfg.as_ref(),
-                            cfg.as_ref(),
-                            Some(&resolution::negated(p)),
-                        ]),
-                        Candidate::Default,
-                        true,
-                    ));
-                }
+                // (pred → P) above, and (not(pred) → the default x.rs /
+                // x/mod.rs candidates) here — ONE fallback candidate,
+                // because the default branch is reachable only when ALL
+                // attr predicates are false (finding 5b: one negated
+                // candidate per predicate wrongly allowed the default
+                // file to be "inactive" while a single pred was false).
+                // For several distinct predicates the honest model is
+                // `not(all(p1, ..., pn))`.
+                let negated_all: Expr = if attr_preds.len() == 1 {
+                    resolution::negated(attr_preds[0])
+                } else {
+                    syn::parse_quote!(not(all(#(#attr_preds),*)))
+                };
+                candidates.push((
+                    resolution::compose_cfg(&[ctx.cfg.as_ref(), cfg.as_ref(), Some(&negated_all)]),
+                    Candidate::Default,
+                    true,
+                ));
             }
         }
         candidates.retain(|(pred, _, _)| {
@@ -305,6 +344,12 @@ impl Walker<'_> {
                 .map(resolution::cfg_unsatisfiable)
                 .unwrap_or(false)
         });
+        // Resolve every candidate first (finding 5c): a MISSING explicit
+        // attr alternative is NOT a finding when any OTHER candidate of
+        // the same `mod` resolved (the fallback or another branch) — the
+        // missing branch is simply inactive under its cfg.
+        let mut any_resolved = false;
+        let mut missing: Vec<(bool, Vec<String>)> = Vec::new();
         for (pred, cand, fallback) in candidates {
             let res = match &cand {
                 Candidate::Default => {
@@ -314,6 +359,7 @@ impl Walker<'_> {
             };
             match res {
                 Resolution::Found(child) => {
+                    any_resolved = true;
                     let mod_dir = resolution::mod_dir_for(&child, false);
                     let attr_dir = resolution::dir_of(&child);
                     let child_ctx = Ctx {
@@ -328,6 +374,7 @@ impl Walker<'_> {
                     };
                     self.walk_file(&child_ctx);
                 }
+                Resolution::Missing { tried } => missing.push((fallback, tried)),
                 Resolution::Escapes(attr) => self.report.add(
                     &ctx.file,
                     line,
@@ -340,23 +387,46 @@ impl Walker<'_> {
                     "AMBIGUOUS_MOD",
                     format!("mod `{name}` resolves ambiguously: both `{a}` and `{b}` exist"),
                 ),
-                // The cfg_attr fallback branch resolving to nothing is
-                // expected (the default file simply does not exist when
-                // the pred is false); its attr twin already reported a
-                // Missing when NEITHER branch resolves.
-                Resolution::Missing { .. } if fallback => {}
-                Resolution::Missing { tried } => self.report.add(
-                    &ctx.file,
-                    line,
-                    "MISSING_MOD_FILE",
-                    format!("mod `{name}` file not found (tried {})", tried.join(", ")),
-                ),
                 Resolution::Generated(attr) => self.report.add(
                     &ctx.file,
                     line,
                     "UNRESOLVED_INCLUDE",
                     format!("mod `{name}` path `{attr}` is generated; declare a [[producer]]"),
                 ),
+            }
+        }
+        if !any_resolved {
+            // ONE finding per `mod`: previously a MISSING_MOD_FILE was
+            // emitted per missing non-fallback candidate, duplicating the
+            // same mod/line once per attr alternative. Aggregate all
+            // tried-path lists into a single report. The fallback branch
+            // contributes its paths too (when NOTHING resolves — only
+            // then do we report — the fallback's absence is part of the
+            // same failure, so one finding covers it, not zero-plus-one).
+            let mut all_tried: Vec<String> = Vec::new();
+            for (fallback, tried) in missing {
+                if fallback && !all_tried.is_empty() {
+                    // The cfg_attr fallback branch resolving to nothing is
+                    // expected when an attr twin already reported; skip if
+                    // any non-fallback candidate was missing.
+                    continue;
+                }
+                for t in tried {
+                    if !all_tried.contains(&t) {
+                        all_tried.push(t);
+                    }
+                }
+            }
+            if !all_tried.is_empty() {
+                self.report.add(
+                    &ctx.file,
+                    line,
+                    "MISSING_MOD_FILE",
+                    format!(
+                        "mod `{name}` file not found (tried {})",
+                        all_tried.join(", ")
+                    ),
+                );
             }
         }
     }
@@ -525,10 +595,10 @@ impl Walker<'_> {
                     entries.push((&v.logical, v.pred.as_ref()));
                 }
             }
-            if self.exc.by_path(path).is_some() {
-                self.used.insert(path.clone());
-                continue;
-            }
+            // An exception is consumed ONLY when there is an actual
+            // duplicate to suppress (finding 10): marking it used for a
+            // merely-visited path hid stale exceptions for files that
+            // are reachable exactly once (no conflict at all).
             let mut duplicate = false;
             let mut all_paths: Vec<&str> = Vec::new();
             for entries in per_target.values() {
@@ -551,6 +621,10 @@ impl Walker<'_> {
                 }
             }
             if duplicate {
+                if self.exc.by_path(path).is_some() {
+                    self.used.insert(path.clone());
+                    continue;
+                }
                 all_paths.sort_unstable();
                 findings.push((
                     path.clone(),

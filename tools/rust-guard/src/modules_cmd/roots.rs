@@ -8,6 +8,7 @@
 //! are never roots.
 
 use super::json;
+use super::scan_cfg::ScanCfg;
 use crate::gitfs::GitFs;
 
 /// Kind of a target root file.
@@ -43,7 +44,14 @@ pub struct RootProblem {
 }
 
 /// Discovers all target roots plus the manifest problems encountered.
-pub fn discover_with_problems(fs: &GitFs) -> Result<(Vec<TargetRoot>, Vec<RootProblem>), String> {
+/// `scan` carries the repo-level exclusion configuration: manifests
+/// under an excluded prefix are NOT enumerated and NOT parsed at all
+/// (finding 1 of round 4: excluded fixture manifests were hand-scanned
+/// and their parse failures reported as BAD_MANIFEST findings).
+pub fn discover_with_problems(
+    fs: &GitFs,
+    scan: &ScanCfg,
+) -> Result<(Vec<TargetRoot>, Vec<RootProblem>), String> {
     let mut roots = Vec::new();
     let mut problems = Vec::new();
     // Per-revision discovery: the file listing MUST come from the pinned
@@ -51,7 +59,7 @@ pub fn discover_with_problems(fs: &GitFs) -> Result<(Vec<TargetRoot>, Vec<RootPr
     // current index (`git ls-files`) wrongly resurrected targets that the
     // pinned revision had already deleted.
     let listing = pinned_files(fs)?;
-    for manifest in manifest_paths(fs, &listing, &mut problems)? {
+    for manifest in manifest_paths(fs, &listing, scan, &mut problems)? {
         add_targets(fs, &listing, &manifest, &mut roots, &mut problems);
     }
     Ok((roots, problems))
@@ -185,11 +193,14 @@ fn glob_matches(pattern: &str, candidate: &str) -> bool {
 fn manifest_paths(
     fs: &GitFs,
     listing: &[String],
+    scan: &ScanCfg,
     problems: &mut Vec<RootProblem>,
 ) -> Result<Vec<String>, String> {
     let mut manifests: Vec<String> = Vec::new();
     let mut push = |m: String| {
-        if !m.starts_with("vendor/") && !manifests.contains(&m) {
+        // Excluded prefixes are out of scan scope entirely: their
+        // manifests are never enumerated and never parsed (finding 1).
+        if !m.starts_with("vendor/") && !scan.excluded(&m) && !manifests.contains(&m) {
             manifests.push(m);
         }
     };
@@ -268,7 +279,14 @@ fn manifest_paths(
         }
     }
     for f in listing {
-        if f.starts_with("tools/") && f.ends_with("/Cargo.toml") && f != "tools/Cargo.toml" {
+        if f.starts_with("tools/")
+            && f.ends_with("/Cargo.toml")
+            && f != "tools/Cargo.toml"
+            // Excluded manifests are not even enumerated (finding 1):
+            // without this the excluded fixture manifests were parsed
+            // and their parse failures reported as BAD_MANIFEST.
+            && !scan.excluded(f)
+        {
             push(f.clone());
         }
     }

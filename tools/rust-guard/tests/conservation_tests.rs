@@ -177,13 +177,38 @@ fn undeclared_test_rename_is_a_lost_test() {
 
 #[test]
 fn test_cfg_change_is_reported() {
+    // INHERITED module cfg (round 4): the whole inline test module `m`
+    // carries a `#[cfg]` that differs between the revisions; the fn has
+    // no cfg of its own, so its composed (inherited) cfg text drifts
+    // v1 -> v2.
     // Counterfactual: fails without the cfg comparison in
     // report_test_change because an identity pair was compared on kind,
-    // ignore status and fingerprint only — a test that gains (or changes)
-    // a `#[cfg(...)]` predicate between revisions paired silently and the
-    // run was clean.
+    // ignore status and fingerprint only — a test whose inherited
+    // module cfg changed between revisions paired silently and the run
+    // was clean.
     let repo = ConsRepo::two_commit("conservation/test_cfg_changed");
     assert_finding(&repo.compare(), "TEST_ATTR_CHANGED");
+}
+
+#[test]
+fn assoc_type_value_change_is_signature_changed() {
+    // The impl-type member's VALUE (`type A = u8;` -> `type A = u16;`)
+    // is extracted with the whole item as its signature tokens and the
+    // type expression as its body — so the drift is reported as
+    // SIGNATURE_CHANGED (the signature text `type A = u8 ;` differs);
+    // the body-only code would be wrong here because the whole item
+    // token stream IS the signature for type members.
+    // Counterfactual: fails if ImplItem::Type members were dropped by
+    // `impl_member` (item.rs) — the member never entered the inventory,
+    // the pair could not drift and the run was clean.
+    let repo = ConsRepo::two_commit("conservation/assoc_type_changed");
+    let out = repo.compare();
+    let err = stderr(&out);
+    assert!(!out.status.success(), "expected exit != 0:\n{err}");
+    assert!(
+        err.contains("SIGNATURE_CHANGED"),
+        "expected SIGNATURE_CHANGED:\n{err}"
+    );
 }
 
 #[test]
@@ -324,6 +349,23 @@ fn path_mounted_test_deletion_is_a_loss() {
 }
 
 #[test]
+fn fallback_branch_test_change_is_a_loss() {
+    // The module carries a `cfg_attr(feature = "x", path = "gen.rs")`
+    // alternative AND a default `m.rs` file; the test lives in the
+    // DEFAULT branch (m.rs) and its CONTENT changes (the test is
+    // removed, the file stays) between base and head.
+    // Counterfactual: pre-fix, conservation followed only the attr path
+    // `gen.rs` and never inventoried the default `m.rs`, so deleting
+    // the fallback-branch test was silent — the comparison passed clean
+    // while a test vanished. The fix also walks the default branch when
+    // attribute alternatives exist (and tags each branch with its own
+    // composed cfg), so base inventories `t_fb` and head does not =>
+    // TEST_LOST.
+    let repo = ConsRepo::two_commit("conservation/fallback_changed");
+    assert_finding(&repo.compare(), "TEST_LOST");
+}
+
+#[test]
 fn unresolved_child_module_is_an_inventory_error() {
     // `mod ghost;` resolves to nothing at BOTH revisions: fail closed
     // with INVENTORY_ERROR instead of silently skipping the child (its
@@ -333,4 +375,20 @@ fn unresolved_child_module_is_an_inventory_error() {
     // and the run was clean.
     let repo = ConsRepo::two_commit("conservation/broken_mod");
     assert_finding(&repo.compare(), "INVENTORY_ERROR");
+}
+
+#[test]
+fn phantom_default_branch_is_not_inventoried() {
+    // `#[path = "gen.rs"] mod m;` is an UNCONDITIONAL path attribute:
+    // rustc compiles ONLY `gen.rs`, never the default `m.rs` (a phantom
+    // file). The fixture keeps a `m.rs` at base and deletes it at head;
+    // it must not influence the inventory either way.
+    // Counterfactual: pre-fix, the file-backed mod arm walked the alt
+    // AND unconditionally resolved+walked the default branch, so base
+    // inventoried `t_phantom` from the phantom `m.rs` while head (m.rs
+    // deleted) did not — a spurious TEST_LOST for a file rustc never
+    // compiles. Post-fix the default branch is skipped when any alt has
+    // `pred: None`, and the run is CLEAN.
+    let repo = ConsRepo::two_commit("conservation/uncond_path_default_ignored");
+    assert_clean(&repo.compare());
 }

@@ -24,11 +24,29 @@ struct DiffRepo {
 
 impl DiffRepo {
     /// `fixtures/<fixture>/base` is committed first, then
-    /// `fixtures/<fixture>/head` is copied over and committed.
+    /// `fixtures/<fixture>/head` is copied over and committed. The head
+    /// overlay is DELETION-AWARE (same pattern as conservation_tests'
+    /// `overlay_fixture`): every base-fixture file the head fixture does
+    /// not contain is removed before the head commit, so a head tree
+    /// that omits a base file really deletes it (e.g. the `moved_*`
+    /// fixtures: `old.rs` is gone at head). Without this, a pure
+    /// copy-over kept deleted files alive at head and the moved-file
+    /// pairing could never exercise the absent-at-head rule.
     fn two_commit(fixture: &str) -> Self {
         let repo = TempRepo::with_fixture(&format!("{fixture}/base"));
         let base_sha = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
-        copy_fixture(&repo.root, &format!("{fixture}/head"));
+        // Idempotent re-copy: yields the base fixture's copied file set
+        // for the deletion-aware overlay below.
+        let base_files = copy_fixture(&repo.root, &format!("{fixture}/base"));
+        let head_files = copy_fixture(&repo.root, &format!("{fixture}/head"));
+        // A base file survives at head only when the head fixture tree
+        // contains a file at the same repo-relative path; everything
+        // else is removed before the head commit.
+        for rel in &base_files {
+            if !head_files.contains(rel) {
+                let _ = std::fs::remove_file(repo.root.join(rel));
+            }
+        }
         repo.commit_all("head");
         Self { repo, base_sha }
     }
@@ -142,9 +160,9 @@ fn new_file_with_pub_crate_is_vis_widening() {
 
 #[test]
 fn new_file_with_one_allowance_per_item_is_clean() {
-    // 10c + R5: delta matching is per (path, item); EVERY crate-visible
-    // item of a new file needs its own consumed entry (an empty `item`
-    // acts as a documented wildcard).
+    // 10c + R5: delta matching is EXACT per (path, item); EVERY
+    // crate-visible item of a new file needs its own consumed entry
+    // (there is no path-only wildcard form — `item` is required).
     // Counterfactual (old path-only matching): ONE entry silenced the
     // whole file - two pub(crate) items passed with a single allowance
     // and nothing was ever reported unused.
@@ -191,6 +209,27 @@ fn new_file_second_widening_without_allowance_is_reported() {
 }
 
 #[test]
+fn mis_keyed_item_is_vis_widening_and_unused_allowance() {
+    // Finding 9: matching is EXACT on (path, item). An entry keyed to a
+    // DIFFERENT item (`other` instead of `alpha`) neither suppresses the
+    // widening NOR disappears silently.
+    // Counterfactual: with the old empty-item wildcard this exact
+    // mis-keyed entry (a non-empty `item`) already failed to match — the
+    // new part is the UNUSED_ALLOWANCE assertion through the same
+    // leftover path; and without the exact-match fix an item-less
+    // variant would have consumed the finding instead.
+    let repo = DiffRepo::two_commit("structure/new_file_widen_two");
+    let delta = "[[allow_widen]]\n\
+                 path = \"crates/fix/src/extra.rs\"\n\
+                 item = \"other\"\n\
+                 reason = \"mis-keyed item\"\n\
+                 owner = \"team-a\"\n";
+    let out = repo.scan_with_delta(delta);
+    assert_finding(&out, "VIS_WIDENING");
+    assert!(stderr(&out).contains("UNUSED_ALLOWANCE"));
+}
+
+#[test]
 fn unused_allowance_is_reported() {
     // R5: an entry that matches nothing is itself a finding.
     // Counterfactual: fails without the fix because stale entries were
@@ -203,6 +242,48 @@ fn unused_allowance_is_reported() {
                  owner = \"team-a\"\n\
 ";
     assert_finding(&repo.scan_with_delta(delta), "UNUSED_ALLOWANCE");
+}
+
+#[test]
+fn delta_with_no_selected_files_is_unused_allowance() {
+    // Finding 9: a run whose `--paths` glob selects NOTHING previously
+    // returned Ok(0) BEFORE the delta was even loaded, silently ignoring
+    // a non-empty delta.
+    // Counterfactual: fails pre-fix because `execute` bailed out with
+    // `no matching files` before `Delta::load` — the run was clean.
+    let repo = TempRepo::with_fixture("structure/new_file_widen");
+    let delta = "[[allow_widen]]\n\
+                 path = \"crates/fix/src/extra.rs\"\n\
+                 item = \"alpha\"\n\
+                 reason = \"stale entry, nothing selected\"\n\
+                 owner = \"team-a\"\n";
+    std::fs::write(repo.root.join("delta.toml"), delta).expect("write delta");
+    let out = repo.run_guard(&[
+        "structure",
+        "--paths",
+        "src/nonexistent/**",
+        "--delta",
+        "delta.toml",
+    ]);
+    assert_finding(&out, "UNUSED_ALLOWANCE");
+}
+
+#[test]
+fn delta_without_base_is_unused_allowance() {
+    // Finding 9: without `--base`/`--changed-since` the diff (the only
+    // consumer of delta entries) never runs; a non-empty delta was
+    // silently ignored.
+    // Counterfactual: fails pre-fix because the no-base path never
+    // reported leftovers — the run was clean.
+    let repo = TempRepo::with_fixture("structure/new_file_widen");
+    let delta = "[[allow_widen]]\n\
+                 path = \"crates/fix/src/extra.rs\"\n\
+                 item = \"alpha\"\n\
+                 reason = \"stale entry, no base\"\n\
+                 owner = \"team-a\"\n";
+    std::fs::write(repo.root.join("delta.toml"), delta).expect("write delta");
+    let out = repo.run_guard(&["structure", "--paths", "**/*.rs", "--delta", "delta.toml"]);
+    assert_finding(&out, "UNUSED_ALLOWANCE");
 }
 #[test]
 fn allow_added_with_wrong_item_still_reports() {
@@ -286,8 +367,17 @@ fn moved_file_that_adds_allow_is_allow_added() {
     // token stream, so new.rs's fingerprint multiset matches no base
     // file; the moved-file pairing never fires and the new-file check
     // reports VIS_WIDENING for the pub fn instead of ALLOW_ADDED.
+    // The pairing INFO line additionally proves the moved path ran: with
+    // a non-deletion-aware harness (a COPY scenario, old.rs still present
+    // at head) the absent-at-head candidate rule could not pair at all.
     let repo = DiffRepo::two_commit("structure/moved_adds_allow");
-    assert_finding(&repo.scan(), "ALLOW_ADDED");
+    let out = repo.scan();
+    assert_finding(&out, "ALLOW_ADDED");
+    assert!(
+        stderr(&out).contains("paired with base `crates/fix/src/old.rs` as a moved file"),
+        "expected the moved-file pairing INFO line:\n{}",
+        stderr(&out)
+    );
 }
 
 #[test]
@@ -307,26 +397,79 @@ fn moved_file_that_widens_is_vis_widening() {
 
 #[test]
 fn moved_file_with_unchanged_content_is_clean() {
-    // Negative control: a move whose only delta is an added `#[allow]`
-    // must still pair (fingerprints are attribute-insensitive) and so
-    // must produce zero VIS_WIDENING (the ALLOW_ADDED finding is
-    // covered by the dedicated test above).
-    let repo = DiffRepo::two_commit("structure/moved_adds_allow");
+    // Negative control (finding 11): a TRUE move (old.rs deleted at head
+    // via the deletion-aware harness) whose content is byte-identical
+    // must pair as moved and produce a fully CLEAN run (exit 0, "0
+    // finding") — not merely an absence of VIS_WIDENING, which an infra
+    // failure would also satisfy vacuously.
+    // Counterfactual: fails pre-fix on BOTH counts — the copy-over
+    // harness kept old.rs alive at head (no absent-at-head candidate),
+    // and the old assertion only checked for missing VIS_WIDENING.
+    let repo = DiffRepo::two_commit("structure/moved_plain");
+    assert_clean(&repo.scan());
+}
+
+#[test]
+fn copy_is_not_moved_is_vis_widening() {
+    // Finding 8: a COPY of a base file (lib.rs kept at head, extra.rs
+    // added with IDENTICAL content) must not pair as a move — a base
+    // file still present at head is a copy source, never a move source.
+    // Counterfactual: fails pre-fix because `find_moved` scanned ALL
+    // base .rs files without requiring the paired base file to be absent
+    // at head, so extra.rs paired with lib.rs (signature multiset and
+    // vis equal), no new-file check ran and the run was clean instead of
+    // reporting VIS_WIDENING for extra.rs's `pub(crate) fn hidden`.
+    let repo = DiffRepo::two_commit("structure/copy_of_base_file");
     let out = repo.scan();
+    assert_finding(&out, "VIS_WIDENING");
+    let err = stderr(&out);
     assert!(
-        !stderr(&out).contains("VIS_WIDENING"),
-        "pure move must not widen:\n{}",
-        stderr(&out)
+        err.contains("extra.rs"),
+        "expected the finding on the COPY extra.rs:\n{err}"
     );
+    assert!(
+        !err.contains("paired with base"),
+        "a copy must not pair as a moved file:\n{err}"
+    );
+}
+
+#[test]
+fn deleted_selected_file_is_skipped() {
+    // Finding 11 (UNREADABLE_FILE): the `ReadError::Io` arm of
+    // rules::check_files stays contract-pinned — no fixture in this
+    // layout can make git-tracked content unreadable through `git
+    // show`/fs read — but the `Missing` skip is exercised here: a file
+    // deleted between base and head must not panic or produce a
+    // PARSE/IO finding. (Selection walks the HEAD tree, so the deleted
+    // file is normally never selected; this run pins that benign
+    // outcome end-to-end.)
+    // Counterfactual: any panic/IO finding on the missing path would
+    // fail this assert_clean.
+    let repo = DiffRepo::two_commit("structure/moved_adds_allow");
+    let base = repo.base_sha.clone();
+    let out = repo.repo.run_guard(&[
+        "structure",
+        "--paths",
+        "crates/fix/src/old.rs",
+        "--base",
+        &base,
+    ]);
+    assert_clean(&out);
 }
 
 #[test]
 fn trait_impl_outside_owner_is_owned_impl() {
     // R7a: `impl Trait for RepoInstance` is governed like an inherent
-    // impl; the self type's LAST segment decides.
-    // Counterfactual: fails without the fix because trait impls were
-    // skipped entirely (`imp.trait_.is_some()`), so the trait impl
-    // outside the owner module escaped the rule silently.
+    // impl; the self type's LAST segment decides. `src/other.rs` maps
+    // to logical module `crate::other`, which is NOT under the owner
+    // module `crate::repo::instance::repo_instance`, so OWNED_IMPL
+    // fires.
+    // Counterfactual (both halves): fails without the trait-impl fix
+    // because trait impls were skipped entirely (`imp.trait_.is_some()`);
+    // AND it failed again after that fix while the FIXTURE config was
+    // wrong — root-level `type`/`module` keys (no `[[owned_impl]]`
+    // table) were loaded by serde into an empty vector (unknown keys
+    // ignored), so no type was governed and the run was clean.
     let repo = TempRepo::with_fixture("structure/owned_impl_trait");
     assert_finding(&scan(&repo), "OWNED_IMPL");
 }

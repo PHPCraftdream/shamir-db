@@ -40,12 +40,21 @@ pub fn check_files(
         }
     };
     // Lazily built index of the base tree's `.rs` files, used only to
-    // pair moved files (see `find_moved`).
+    // pair moved files (see `find_moved`). A base file that STILL
+    // exists at head is a COPY SOURCE, never a move source — it is
+    // filtered out here, before the cache is even built.
     let base_tree = base_fs.list_tree().unwrap_or_default();
     let base_rs: Vec<String> = {
         let mut v: Vec<String> = base_tree
             .iter()
-            .filter(|p| p.ends_with(".rs"))
+            .filter(|p| {
+                p.ends_with(".rs")
+                    // `head_fs` is `GitFs::open(None)`, so `exists` reads
+                    // the real working tree — exactly what this gate
+                    // scans. A base file still present at head stays out
+                    // of the candidate list.
+                    && !head_fs.exists(p)
+            })
             .cloned()
             .collect();
         v.sort();
@@ -93,7 +102,9 @@ pub fn check_files(
 }
 
 /// Reports every delta entry that matched nothing as `UNUSED_ALLOWANCE`.
-fn report_unused(delta: &Delta, report: &mut Report) {
+/// Also used by `select::execute` when the diff never runs (no base, or
+/// no files selected), so a non-empty delta can never pass silently.
+pub(crate) fn report_unused(delta: &Delta, report: &mut Report) {
     for (code, e) in delta
         .allow_widen
         .iter()
@@ -420,13 +431,19 @@ struct BaseFile {
 /// a
 /// widened-then-moved file simply gets the slightly blunter new-file
 /// report. The first base candidate in sorted order wins.
-fn find_moved<'a>(
+///
+/// A candidate is CONSUMED on pairing: the returned `BaseFile` is
+/// removed from the cached list, so one base file can never be paired
+/// as the move source of two different head files (and every candidate
+/// is already absent at head — see the `base_rs` filter in
+/// `check_files` — so a COPY of a base file never pairs).
+fn find_moved(
     head: &File,
-    cache: &'a mut Option<Vec<BaseFile>>,
+    cache: &mut Option<Vec<BaseFile>>,
     base_fs: &GitFs,
     base_rs: &[String],
-) -> Option<&'a BaseFile> {
-    let list: &'a Vec<BaseFile> = cache.get_or_insert_with(|| {
+) -> Option<BaseFile> {
+    let list = cache.get_or_insert_with(|| {
         let mut v = Vec::new();
         for path in base_rs {
             let Some(src) = base_fs.read(path) else {
@@ -448,23 +465,34 @@ fn find_moved<'a>(
         .iter()
         .map(|(k, e)| (k.kind, &k.name, e.fp))
         .collect();
-    list.iter()
-        .filter(|b| {
-            let b_sigs: BTreeSet<(&str, &String, u64)> = b
-                .index
-                .iter()
-                .map(|(k, e)| (k.kind, &k.name, e.fp))
-                .collect();
-            if b_sigs != head_sigs || b_sigs.is_empty() {
-                return false;
-            }
-            // Every head visibility equal-or-narrower than base.
-            head_idx
-                .iter()
-                .all(|(k, he)| b.index.get(k).map(|be| he.rank <= be.rank).unwrap_or(false))
-        })
-        .inspect(|b| eprintln!("INFO: paired with base `{}` as a moved file", b.path))
-        .next()
+    let mut best: Option<usize> = None;
+    for (i, b) in list.iter().enumerate() {
+        let b_sigs: BTreeSet<(&str, &String, u64)> = b
+            .index
+            .iter()
+            .map(|(k, e)| (k.kind, &k.name, e.fp))
+            .collect();
+        if b_sigs != head_sigs || b_sigs.is_empty() {
+            continue;
+        }
+        // Every head visibility equal-or-narrower than base.
+        if !head_idx
+            .iter()
+            .all(|(k, he)| b.index.get(k).map(|be| he.rank <= be.rank).unwrap_or(false))
+        {
+            continue;
+        }
+        best = Some(i);
+        break;
+    }
+    best.map(|i| {
+        // Consume the paired candidate (swap_remove keeps the cache
+        // compact; candidate order is irrelevant — the first match wins
+        // and is taken immediately).
+        let b = list.swap_remove(i);
+        eprintln!("INFO: paired with base `{}` as a moved file", b.path);
+        b
+    })
 }
 
 /// Rule 6a: report visibility growth between base and head.

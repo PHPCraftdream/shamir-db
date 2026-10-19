@@ -26,6 +26,24 @@ mod maybe;
 mod foo;
 mod bar;
 
+// Leading `./` and an interior `..` that lexically normalise to
+// `sub/positive.rs`: resolution must normalise instead of using the
+// un-normalised spelling as a literal path/visited key.
+// Counterfactual: fails without lexical normalisation — the raw
+// spelling was used as the lookup/visited key, `positive` was reported
+// MISSING_MOD_FILE and the run was not clean.
+#[path = "./sub/../sub/positive.rs"]
+mod positive;
+
+// A cfg_attr whose attr branch is MISSING but whose DEFAULT branch
+// resolves: the missing attr alternative is an inactive branch, NOT a
+// finding (fallback_ok.rs accounts the module).
+// Counterfactual: pre-fix code reported MISSING_MOD_FILE for the
+// inactive attr branch even though fallback_ok.rs resolved — this clean
+// test failed.
+#[cfg_attr(feature = "never_on", path = "missing_branch.rs")]
+mod fallback_ok;
+
 // Inline module: extends the resolution directory context, so `leaf`
 // resolves at `src/nested/leaf.rs`.
 mod nested {
@@ -33,12 +51,22 @@ mod nested {
 }
 
 // An INHERITED cfg gates the child: `leaf2` resolves at
-// `src/gated/leaf2.rs` and carries the composed predicate `unix` — the
-// inline module's own cfg must AND into everything declared inside it.
+// `src/gated/leaf2.rs` and carries the composed predicate `all(unix)` —
+// the inline module's own cfg must AND into the file-backed child
+// (finding 5a). The SAME physical file is reached a second time under
+// `not(unix)`; the two edges are mutually exclusive ONLY when the first
+// edge carries the composed inherited predicate, so `gated/leaf2.rs` is
+// accounted exactly once with NO duplicate.
+// Counterfactual: pre-fix the inline child's edge predicate was None
+// (inherited cfg dropped), the two edges were not exclusive and the
+// run reported DUPLICATE_FILE — this clean test failed.
 #[cfg(unix)]
 mod gated {
     pub mod leaf2;
 }
+#[cfg(not(unix))]
+#[path = "gated/leaf2.rs"]
+pub mod l2b;
 
 include!("included.rs");
 

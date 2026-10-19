@@ -21,11 +21,12 @@ pub struct StructureArgs {
 }
 
 /// Delta-file record: an accepted visibility widening or new `#[allow]`.
-/// Matching is on (path, item); `reason` and `owner` document it.
+/// Matching is EXACT on (path, item); `reason` and `owner` document it.
+/// `item` is REQUIRED — an entry without one fails to parse (fail
+/// closed), there is no path-only wildcard form.
 #[derive(Debug, Deserialize)]
 pub struct DeltaEntry {
     pub path: String,
-    #[serde(default)]
     pub item: String,
     pub reason: String,
     pub owner: String,
@@ -61,12 +62,15 @@ impl Delta {
     }
 
     /// Consumes the delta entry (if any) covering `(code, path, item)`
-    /// and reports whether one matched. An entry matches when its `path`
-    /// equals `path` AND its `item` equals `item` (an EMPTY `item` field
-    /// is a wildcard matching any item, for path-scoped entries). Each
-    /// entry is consumed exactly once: a second identical finding is NOT
-    /// covered. Leftover entries are reported as `UNUSED_ALLOWANCE` at
-    /// the end of the run, so stale entries cannot accumulate.
+    /// and reports whether one matched. Matching is EXACT: an entry
+    /// matches when its `path` equals `path` AND its `item` equals
+    /// `item` — there is NO wildcard form (an entry without an `item`
+    /// field fails to parse outright). Each entry is consumed exactly
+    /// once: a second identical finding is NOT covered. Leftover entries
+    /// are reported as `UNUSED_ALLOWANCE` at the end of the run, so
+    /// stale entries cannot accumulate — including runs with no base
+    /// revision or no selected files, where no finding could ever have
+    /// consumed them.
     ///
     /// Item keys (documented contract):
     /// * `VIS_WIDENING` — the qualified item name exactly as printed in
@@ -79,9 +83,7 @@ impl Delta {
             "VIS_WIDENING" => &mut self.allow_widen,
             _ => &mut self.allow,
         };
-        let pos = list
-            .iter()
-            .position(|e| e.path == path && (e.item.is_empty() || e.item == item));
+        let pos = list.iter().position(|e| e.path == path && e.item == item);
         match pos {
             Some(i) => {
                 list.remove(i);
@@ -108,18 +110,26 @@ fn execute(args: StructureArgs) -> Result<u8, String> {
         return Err("structure: at least one of --paths / --changed-since is required".into());
     }
     let fs = GitFs::open(None, &args.repo)?;
+    // The delta is ALWAYS loaded, even when nothing is selected: a
+    // non-empty delta in a run that can never consume its entries must
+    // surface as UNUSED_ALLOWANCE, not pass silently (finding 9).
+    let mut delta = Delta::load(args.delta.as_deref())?;
     let mut selected = select_files(&fs, &args)?;
     selected.sort();
     selected.dedup();
     if selected.is_empty() {
         eprintln!("rust-guard structure: no matching files");
-        return Ok(0);
+        // No file was scanned, so no entry could have been consumed:
+        // every delta entry is a leftover.
+        let mut report = Report::new();
+        diff::report_unused(&delta, &mut report);
+        report.print();
+        return Ok(exit_code(&report));
     }
 
     // Base revision: explicit --base, else the merge base of
     // --changed-since. Missing either skips the diff rules.
     let base = resolve_base(&fs, &args)?;
-    let mut delta = Delta::load(args.delta.as_deref())?;
     let exceptions = crate::exceptions::Exceptions::load(
         args.exceptions
             .as_deref()
@@ -131,6 +141,10 @@ fn execute(args: StructureArgs) -> Result<u8, String> {
     rules::check_files(&fs, &selected, &exceptions, &owned, &mut report);
     if let Some(base_rev) = &base {
         diff::check_files(&fs, base_rev, &selected, &mut delta, &mut report);
+    } else {
+        // No base: the diff (the only consumer of delta entries) never
+        // ran, so every entry is a leftover (finding 9).
+        diff::report_unused(&delta, &mut report);
     }
     if args.warn_primary_export {
         warn_primary_export(&fs, &selected);

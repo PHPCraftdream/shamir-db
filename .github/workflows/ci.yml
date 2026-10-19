@@ -527,6 +527,6 @@ jobs:
         with:
           workspaces: tools/rust-guard
       - working-directory: tools/rust-guard
-        run: cargo nextest run --locked
+        run: cargo nextest run --locked --no-fail-fast
       - run: cargo fmt --manifest-path tools/rust-guard/Cargo.toml -- --check
       - run: cargo clippy --manifest-path tools/rust-guard/Cargo.toml --all-targets --locked -- -D warnings

@@ -39,8 +39,16 @@ fn compiler_accepted_resolution_is_clean() {
     //   cannot extract a name-value attribute, so `aliased` missed;
     // - the default fallback branch of the lone `#[cfg_attr]` mod was
     //   never modelled, leaving `maybe.rs` unaccounted;
+    // - `#[path = "./sub/../sub/positive.rs"]` was used un-normalised as
+    //   a lookup/visited key, so `positive` was MISSING_MOD_FILE;
+    // - the cfg_attr default branch was modelled as one negated
+    //   candidate PER attr predicate, so `fallback_ok.rs`'s default
+    //   branch went inactive while the (missing) attr branch was
+    //   reported MISSING_MOD_FILE even though the default resolved;
     // - the inherited `#[cfg(unix)]` was not AND-ed into the inline
-    //   child, so `gated/leaf2.rs` carried no predicate;
+    //   module's file-backed child, so `gated/leaf2.rs`'s two edges
+    //   (`all(unix)` vs `not(unix)`) were not mutually exclusive and
+    //   the run reported DUPLICATE_FILE;
     // - `benches/common.rs` was flagged DUPLICATE_FILE (duplicates are
     //   now decided WITHIN one target only);
     // - `src/bin/x.rs` was never discovered as a bin target.
@@ -169,20 +177,28 @@ fn real_layout_mini_is_fully_accounted() {
     // with members = ["crates/a"], a package with plain + #[path]-mounted
     // modules, src/bin/x.rs, tests/t.rs with a #[path] helper dir,
     // benches/b.rs (harness = false) and build.rs. The fixture carries
-    // its OWN root and package manifests (the harness scaffold keeps
-    // existing files, so they are not clobbered).
-    // Counterfactual: fails without the fix because the first CI run
-    // reported every file of this layout UNACCOUNTED_FILE when root
-    // manifest discovery failed.
+    // its OWN root and package manifests, so the harness scaffold adds
+    // NOTHING (a fixture shipping a root manifest owns its whole member
+    // list — finding 4).
+    // Counterfactuals this test pins (fails without the fixes because):
+    // - the first CI run reported every file of this layout
+    //   UNACCOUNTED_FILE when root manifest discovery failed;
+    // - the scaffold injected an undeclared `crates/fix` package that
+    //   `cargo metadata` excluded from the workspace members while its
+    //   lib.rs stayed in the accounting scope — UNACCOUNTED_FILE for
+    //   crates/fix/src/lib.rs.
     let repo = TempRepo::with_fixture("modules_ok/real_layout_mini");
     assert_clean(&repo.run_guard(&["modules"]));
 }
 
 #[test]
 fn path_escaping_the_repo_is_reported() {
-    // `#[path = "../../../outside.rs"]` climbs out of the repository.
+    // `#[path = "../../../../outside.rs"]` pops PAST the repo root:
+    // from crates/fix/src, THREE `..` reach exactly the repo root (a
+    // repo-root-level `outside.rs`, which would resolve — as Missing —
+    // and is NOT an escape); only FOUR pop beyond the top.
     // Counterfactual: fails without lexical path normalisation because
-    // the un-normalised spelling (`crates/fix/src/../../../outside.rs`)
+    // the un-normalised spelling (`crates/fix/src/../../../../outside.rs`)
     // was used as-is, the file was never found nor flagged, and the run
     // was clean apart from the missing module (or worse: the escaped
     // spelling silently became a visited key).
@@ -211,6 +227,51 @@ fn generated_include_with_scoped_producer_is_clean() {
     // literal was "resolved" and reported MISSING instead).
     let repo = TempRepo::with_fixture("modules_ok/generated_include_producer");
     assert_clean(&repo.run_guard(&["modules"]));
+}
+
+#[test]
+fn scan_toml_exclusion_covers_manifest_discovery() {
+    // Finding 1: an excluded prefix must remove a manifest from
+    // DISCOVERY, not just from the walk/inventory scope. The fixture's
+    // `tools/gadget/Cargo.toml` is deliberately unparseable and lives
+    // under the excluded `tools/gadget` prefix; the run must be CLEAN.
+    // Counterfactual: without discovery-side exclusion the manifest was
+    // still enumerated and parsed, and the run reported BAD_MANIFEST
+    // for tools/gadget/Cargo.toml.
+    let repo = TempRepo::with_fixture("modules_bad/bad_manifest");
+    write(
+        &repo,
+        ".rust-guard/scan.toml",
+        "exclude_paths = [\"tools/gadget\"]\n",
+    );
+    assert_clean(&repo.run_guard(&["modules"]));
+}
+
+#[test]
+fn shared_child_double_mount_within_one_target_is_reported() {
+    // Finding 6: children of a shared file must be traversed once per
+    // (target, file), not once per physical file globally. bench_b
+    // mounts common/helper.rs AND common/helper/child.rs directly, so
+    // within TARGET bench_b child.rs has two conflicting logical paths.
+    // Counterfactual: pre-fix bench_a traversed helper.rs first (target
+    // bench_a), so bench_b only recorded the helper edge without
+    // traversing it — the `helper::child` edge never existed for target
+    // bench_b, only `c2` did, and no duplicate was reported.
+    let repo = TempRepo::with_fixture("modules_bad/shared_child_dup");
+    assert_finding(&repo.run_guard(&["modules"]), "DUPLICATE_FILE");
+}
+
+#[test]
+fn stale_exception_for_single_reachability_is_reported() {
+    // Finding 10: an exception is consumed only when it actually
+    // suppresses a duplicate. `once.rs` is mounted exactly once (no
+    // conflict anywhere), so its exception is stale.
+    // Counterfactual: pre-fix check_duplicates marked ANY visited
+    // path's exception used, so the reachable-without-conflict file's
+    // exception was consumed, the run was CLEAN and the stale entry
+    // hid forever.
+    let repo = TempRepo::with_fixture("modules_bad/stale_exception_single");
+    assert_finding(&repo.run_guard(&["modules"]), "STALE_EXCEPTION");
 }
 
 #[test]
@@ -255,4 +316,32 @@ fn cargo_metadata_failure_is_a_finding_and_scan_continues() {
         "[workspace]\nmembers = [\"crates/nope\"]\nresolver = \"2\"\n",
     );
     assert_finding(&repo.run_guard(&["modules"]), "CARGO_METADATA_FAILED");
+}
+
+#[test]
+fn missing_cfg_attr_candidates_reported_once() {
+    // Two `cfg_attr` path alternatives (`a.rs`, `b.rs`) on one `mod m;`,
+    // with NEITHER alternative NOR the default `m.rs` on disk.
+    // Counterfactual: pre-fix, the deferred Missing reporting emitted
+    // one MISSING_MOD_FILE PER missing candidate — two findings for the
+    // same mod/line (one per attr candidate). Post-fix the missing
+    // candidates' tried-path lists are aggregated into ONE finding per
+    // `mod`.
+    let repo = TempRepo::with_fixture("modules_bad/cfg_attr_neither_two");
+    let out = repo.run_guard(&["modules"]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success(),
+        "expected exit != 0, got success\n{err}"
+    );
+    assert!(
+        !err.contains("rust-guard: error"),
+        "infra error, not findings:\n{err}"
+    );
+    // assert_finding only does `contains`; here we need the COUNT.
+    assert_eq!(
+        err.matches("MISSING_MOD_FILE").count(),
+        1,
+        "expected exactly one MISSING_MOD_FILE for the mod:\n{err}"
+    );
 }

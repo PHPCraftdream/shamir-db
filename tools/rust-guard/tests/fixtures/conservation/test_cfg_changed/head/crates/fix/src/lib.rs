@@ -6,10 +6,12 @@ pub fn helper(x: u32) -> u32 {
     x + 1
 }
 
-// The test gains a cfg predicate between the revisions: the item pairs
-// by identity, but its cfg text (None -> `feature = "verbose"`) drifts.
-#[cfg(feature = "verbose")]
-#[test]
-fn t_cfg() {
-    assert_eq!(1 + 1, 2);
+// The whole inline test module's cfg differs between the revisions; the
+// fn has no cfg of its own, so its INHERITED cfg text drifts v1 -> v2.
+#[cfg(feature = "v2")]
+mod m {
+    #[test]
+    fn t_cfg() {
+        assert_eq!(1 + 1, 2);
+    }
 }

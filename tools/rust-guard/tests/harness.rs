@@ -165,6 +165,15 @@ fn copy_tree(src: &Path, dst: &Path, copied: &mut Vec<String>) {
 /// happens first and existing files are never overwritten (finding 7:
 /// conservation fixtures carry custom `[workspace]` members).
 pub(crate) fn write_scaffold(root: &Path) {
+    // A fixture that ships its OWN root manifest owns its whole member
+    // list (finding 4): injecting a `crates/fix` package it never
+    // declared left the package outside `cargo metadata`'s workspace
+    // members while its sources stayed in the accounting scope —
+    // UNACCOUNTED_FILE for the injected lib.rs. If such a fixture wants
+    // a `fix` package it must ship it.
+    if root.join("Cargo.toml").exists() {
+        return;
+    }
     for (rel, contents) in [
         ("Cargo.toml", ROOT_MANIFEST),
         ("crates/fix/Cargo.toml", PKG_MANIFEST),

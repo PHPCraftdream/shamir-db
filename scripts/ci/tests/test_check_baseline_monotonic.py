@@ -269,8 +269,12 @@ class RealGitTest(unittest.TestCase):
     def test_baseline_new_at_head_exit_1(self):
         # Baseline exists at head (commit2) but not at base (commit1):
         # real git_show None at base must mean "empty baseline", so the
-        # HEAD entry is NEW -> exit 1.  Pre-fix this also hit the
-        # TypeError crash instead of reporting NEW.
+        # HEAD entry is NEW -> exit 1.  Accurate counterfactual: the
+        # round-2 TypeError crash was a real None at HEAD, never at
+        # base — main already normalised a missing base text via
+        # `base_text or ""`.  This test pins the base-missing bootstrap
+        # rule through the real git path, which was previously never
+        # exercised end-to-end.
         repo, c1, c2 = _init_repo_with_baseline()
         try:
             out = io.StringIO()
