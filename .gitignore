@@ -1,4 +1,5 @@
 /target
+tools/rust-guard/target/
 .idea
 .flamegraphs
 /test_data/
