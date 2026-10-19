@@ -74,14 +74,9 @@ use std::time::Duration;
 use shamir_storage::error::{DbError, DbResult};
 use tokio::sync::{Mutex, Notify};
 
+use super::recoverable_through::SyncCoordinator;
 use crate::wal_sink::WalSink;
 use crate::wal_ticket::{WalAppendError, WalTicket, WalTicketState};
-
-mod history_coverage;
-mod recoverable_through;
-mod wal_coverage;
-pub use recoverable_through::SyncCoordinator;
-pub use wal_coverage::WalCoverage;
 
 /// Durability tier for a single WAL append.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -104,7 +99,7 @@ type Pending = (
 /// correctness argument (L1/L2/L3 — the structure originally proved in the
 /// now-removed `group_fsync.rs`, preserved at `f62fe18`).
 pub struct WalGroupCommit {
-    sink: Arc<WalSink>,
+    pub(super) sink: Arc<WalSink>,
     // Sanctioned tokio::sync::Mutex (CLAUDE.md "Banned in hot paths"):
     // guards a tiny O(1) push / mem::take critical section, NEVER held
     // across `append_batch`/`sync` .await. Contention model: one push per
@@ -138,7 +133,7 @@ pub struct WalGroupCommit {
     // logic in `wal_group_commit/recoverable_through.rs` (lock-free:
     // atomics + Notify). R advances only over contiguous covered runs —
     // never skips a hole (amendment B3 point 1).
-    sync: Arc<SyncCoordinator>,
+    pub(super) sync: Arc<SyncCoordinator>,
 }
 
 impl WalGroupCommit {
@@ -397,7 +392,7 @@ impl WalGroupCommit {
     /// count reclaimed. The caller (drainer) is responsible for flushing
     /// history before this (I2).
     pub async fn truncate_below(&self, durable: u64) -> DbResult<usize> {
-        history_coverage::truncate(self, durable).await
+        super::history_coverage::truncate(self, durable).await
     }
 
     /// F6b: cheap probe gating the drainer's history-flush + truncate so it

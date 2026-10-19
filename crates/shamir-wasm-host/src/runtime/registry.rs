@@ -7,11 +7,11 @@
 //! invocations hold their own `Arc` and finish on the version they captured
 //! (RCU).
 
-use super::builtin::Argon2idFunction;
 use super::context::{FnBatch, FnCtx};
 use super::contract::ShamirFunction;
 use super::error::{FnResult, FunctionError};
 use super::params::Params;
+use crate::builtin::Argon2idFunction;
 use shamir_collections::THasher;
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
