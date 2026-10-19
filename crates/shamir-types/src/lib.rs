@@ -11,14 +11,11 @@
 //! `crate::types::...` / `crate::codecs::...` / `crate::core::interner::...`
 //! paths in `shamir-db` continue to resolve via re-exports.
 
-pub mod access;
 pub mod codecs;
 pub mod core;
+mod entries;
 pub mod macros;
 pub mod record_view;
-pub mod secret;
-pub mod time;
 pub mod types;
 
-#[cfg(test)]
-mod tests;
+pub use entries::{access, secret, time};
