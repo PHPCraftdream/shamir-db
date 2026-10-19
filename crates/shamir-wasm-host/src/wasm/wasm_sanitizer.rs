@@ -69,7 +69,7 @@
 //! itself, so the sanitizer's own `Ok(())` never silently no-ops on an
 //! encoding it wasn't designed to scan.
 
-use super::super::error::{FnResult, FunctionError};
+use crate::runtime::error::{FnResult, FunctionError};
 use wasmparser::{Encoding, Parser, Payload, TypeRef};
 
 /// The host-import ABI a compiled guest module is permitted to use.
