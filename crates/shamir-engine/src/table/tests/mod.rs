@@ -104,6 +104,7 @@ pub mod tx_scan_overlay_tests;
 pub mod update_byte_merge_parity_tests;
 pub mod update_validator_gate_tests;
 pub mod validator_binding_serialization_tests;
+pub mod verify_panic_safety_tests;
 pub mod version_cas_tests;
 pub mod with_version_order_by_tests;
 pub mod write_exec_tests;
