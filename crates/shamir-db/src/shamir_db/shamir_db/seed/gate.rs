@@ -12,7 +12,7 @@ impl ShamirDb {
     pub(crate) async fn seed_boot_gate(&self, engine: &str, path: Option<&str>) -> DbResult<()> {
         let designated = path.is_some_and(|p| Path::new(p).join(".seed-install").exists());
         #[cfg(feature = "fjall")]
-        let factory = if engine == "fjall" {
+        let factory = if engine == "fjall" || engine == "fjall_raw" {
             path.map(BoxRepoFactory::fjall_raw)
         } else {
             Self::factory_from_meta(engine, path)

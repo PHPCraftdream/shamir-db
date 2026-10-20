@@ -10,7 +10,6 @@
 //! receipts in this PR; PR6b-2 activates the writer/reader.
 
 use crate::meta::{MetaEnvelope, MetaKey, ENVELOPE_MAGIC, ENVELOPE_VERSION};
-use bytes::Bytes;
 use rustc_hash::FxHasher;
 use serde::{Deserialize, Serialize};
 use shamir_storage::error::{DbError, DbResult};
@@ -262,22 +261,8 @@ pub(crate) fn receipt_key() -> RecordKey {
     RecordKey::from_slice(MetaKey::ReplicationReceipt.as_record_id().as_bytes())
 }
 
-/// Encode and write the receipt WITHOUT flushing — callers flush or ride an
-/// atomic batch.
-#[allow(dead_code)] // wired by the PR6b-2 receipt-apply chunk (W3+)
-pub(crate) async fn put_receipt(
-    info: &Arc<dyn Store>,
-    receipt: &ReplicationReceipt,
-) -> DbResult<()> {
-    let bytes = encode_receipt(receipt)?;
-    info.set(receipt_key(), Bytes::from(bytes))
-        .await
-        .map(|_| ())
-}
-
 /// Strictly decode the receipt stored under `receipt_key()` and bound to
 /// `id`. `Ok(None)` when no receipt is stored.
-#[allow(dead_code)] // wired by the PR6b-2 resume pipeline (W3+)
 pub(crate) async fn load_outstanding_receipt(
     info: &Arc<dyn Store>,
     id: &[u8; 16],
@@ -288,10 +273,4 @@ pub(crate) async fn load_outstanding_receipt(
         Err(error) => return Err(error),
     };
     decode_receipt(id, &bytes).map(Some)
-}
-
-/// Remove the stored receipt (callers flush or ride an atomic batch).
-#[allow(dead_code)] // direct-retire variant; the atomic path deletes in-batch
-pub(crate) async fn delete_receipt(info: &Arc<dyn Store>) -> DbResult<()> {
-    info.remove(receipt_key()).await.map(|_| ())
 }

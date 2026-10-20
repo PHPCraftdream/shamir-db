@@ -70,7 +70,7 @@ fn repo_name(tag: &str, path: &Path) -> String {
     format!("{tag}-{}", path.display().to_string().replace('\\', "_"))
 }
 
-// While the pipeline is parked at ReceiptPrepared it HOLDS the write-domain
+// While the pipeline is parked at Phase::Prepared it HOLDS the write-domain
 // permit; a concurrently spawned DDL (`rename_table_stores`) must not
 // complete until the pipeline is released. The contended-admission Notify
 // fires exactly when the DDL's `admit()` is POLLED while the domain mutex is
@@ -88,7 +88,7 @@ async fn parked_apply_blocks_ddl_via_the_write_domain() {
     let repo = open(temp.path(), &name, &["items", "plain"]).await;
 
     let hook = Arc::new(test_seam::Hook::default());
-    *hook.park_at.lock().unwrap() = Some(Phase::ReceiptPrepared);
+    *hook.park_at.lock().unwrap() = Some(Phase::Prepared);
     test_seam::install(&name, Arc::clone(&hook));
     let events = [event(1, 1)];
     let mut apply = Box::pin(apply_replicated_batch(
@@ -105,7 +105,7 @@ async fn parked_apply_blocks_ddl_via_the_write_domain() {
     tokio::select! {
         _ = &mut reached => {}
         result = &mut apply => {
-            panic!("apply completed before ReceiptPrepared: {result:?}")
+            panic!("apply completed before Phase::Prepared: {result:?}")
         }
     }
     // Dropping the caller future drops only the JoinHandle await; the
@@ -177,10 +177,10 @@ async fn paused_reservation_rejects_ordinary_admission_resume_uses_it() {
     let name = repo_name("ddl-reservation", temp.path());
     let repo = open(temp.path(), &name, &["items"]).await;
 
-    // STICKY fail_after = ReceiptPrepared: all 3 Storage retries fail, the
+    // STICKY fail_after = Phase::Prepared: all 3 Storage retries fail, the
     // worker parks the guards and places the paused reservation.
     let hook = Arc::new(test_seam::Hook::default());
-    *hook.fail_after.lock().unwrap() = Some(Phase::ReceiptPrepared);
+    *hook.fail_after.lock().unwrap() = Some(Phase::Prepared);
     hook.fail_after_sticky.store(true, Ordering::Release);
     test_seam::install(&name, Arc::clone(&hook));
     let error = apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)

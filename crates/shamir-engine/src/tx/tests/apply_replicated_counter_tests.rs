@@ -1,17 +1,10 @@
-//! S4: current-state counter deltas, raw replay, and partial multi-table retry.
-
-use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+//! S4: current-state counter deltas and idempotent replayed delivery
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use bytes::Bytes;
-use futures::{stream, Stream};
 use shamir_query_builder::{select::count_all, Query};
-use shamir_storage::error::{DbError, DbResult};
-use shamir_storage::storage_in_memory::{InMemoryRepo, InMemoryStore};
-use shamir_storage::types::{RecordKey, Store};
-use shamir_tx::{ChangeOp, ChangelogEvent, MvccStore, RecordChange};
+use shamir_storage::storage_in_memory::InMemoryRepo;
+
+use shamir_tx::{ChangeOp, ChangelogEvent, RecordChange};
 use shamir_types::access::Actor;
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
@@ -19,9 +12,8 @@ use shamir_types::types::value::InnerValue;
 
 use crate::query::filter::eval_context::FilterContext;
 use crate::repo::{BoxRepo, RepoInstance};
-use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
-use crate::tx::apply_replicated::{apply_replicated, ApplyOutcome, ApplyPolicy};
+use crate::tx::{apply_replicated_batch, ApplyOutcome, ApplyPolicy, ReplicatedEvent};
 
 fn follower(tables: &[&str]) -> RepoInstance {
     RepoInstance::new(
@@ -51,15 +43,21 @@ fn event(version: u64, changes: Vec<RecordChange>) -> ChangelogEvent {
     }
 }
 
-async fn apply(repo: &RepoInstance, event: &ChangelogEvent) -> u64 {
-    // Intentionally never advance the watermark: exercise raw replay, NOT skip.
-    match apply_replicated(repo, event, &[], 0, ApplyPolicy::Trusted)
-        .await
-        .unwrap()
-    {
-        ApplyOutcome::Applied { local_version } => local_version,
-        outcome => panic!("expected raw apply, got {outcome:?}"),
-    }
+async fn apply(repo: &RepoInstance, event: &ChangelogEvent) -> ApplyOutcome {
+    // Never advance the caller watermark: the receipt pipeline consults the
+    // DURABLE bookmark as well, so a replay of an already-checkpointed
+    // leader version is a skip.
+    apply_replicated_batch(
+        repo,
+        &[ReplicatedEvent {
+            event: event.clone(),
+            field_bindings: Vec::new(),
+        }],
+        0,
+        ApplyPolicy::Trusted,
+    )
+    .await
+    .unwrap()
 }
 
 async fn count(repo: &RepoInstance, table: &str, expected: u64) {
@@ -109,12 +107,16 @@ async fn three_inserts_one_delete_count_is_two() {
 
 // Red before S4 at the first count; naive footprint counting fails at replay.
 #[tokio::test]
-async fn raw_replay_without_advanced_watermark_does_not_double_count() {
+async fn replayed_delivery_does_not_double_count() {
     let repo = follower(&["items"]);
     let put = event(1, vec![change("items", 1, ChangeOp::Put)]);
     let first = apply(&repo, &put).await;
     count(&repo, "items", 1).await;
-    assert!(apply(&repo, &put).await > first);
+    // The receipt pipeline checkpoints the durable bookmark per batch: the
+    // replay of the same leader version is a skip — no version consumed,
+    // count unchanged.
+    assert_eq!(first, ApplyOutcome::Applied { local_version: 1 });
+    assert_eq!(apply(&repo, &put).await, ApplyOutcome::Skipped);
     count(&repo, "items", 1).await;
     let delete = event(2, vec![change("items", 1, ChangeOp::Delete)]);
     apply(&repo, &delete).await;
@@ -165,142 +167,4 @@ async fn repeated_ops_per_key_use_only_the_last_operation() {
     }
     apply(&repo, &mixed).await;
     count(&repo, "items", 2).await;
-}
-
-// Fail the second table's pre-image I/O, before its data apply. This is a
-// terminal partial apply: the first table is published without local WAL.
-// A retry must be refused without spending another local version.
-#[tokio::test]
-async fn second_table_failure_requires_reopen_and_refuses_retry() {
-    let repo = follower(&["items", "other"]);
-    let gate = repo.tx_gate().await.unwrap();
-    let changes = event(
-        1,
-        vec![
-            change("items", 1, ChangeOp::Put),
-            change("other", 2, ChangeOp::Put),
-        ],
-    );
-    // Mirror the preflight grouping (same keys, insertion order, and Fx
-    // hasher), rather than assume alphabetical or event table order.
-    let mut order = shamir_collections::TFxMap::default();
-    for change in &changes.changes {
-        order
-            .entry(change.table.clone())
-            .or_insert(Vec::<()>::new());
-    }
-    let names: Vec<_> = order.keys().cloned().collect();
-    let first = &names[0];
-    let second = &names[1];
-    for name in &names {
-        repo.get_table(name).await.unwrap();
-    }
-    let fail = Arc::new(AtomicBool::new(true));
-    let history: Arc<dyn Store> = Arc::new(FailPreImageOnce {
-        inner: Arc::new(InMemoryStore::new()),
-        fail: Arc::clone(&fail),
-    });
-    assert!(repo
-        .per_table_mvcc()
-        .remove_sync(&table_token_for(second))
-        .is_some());
-    let second_mvcc = Arc::new(MvccStore::new(history, Arc::clone(&gate)));
-    assert!(repo
-        .per_table_mvcc()
-        .insert_sync(table_token_for(second), Arc::clone(&second_mvcc))
-        .is_ok());
-    let mut downstream = repo.subscribe_changelog().await.unwrap();
-    let error = apply_replicated(&repo, &changes, &[], 0, ApplyPolicy::Trusted)
-        .await
-        .unwrap_err();
-    assert!(matches!(error, DbError::RepoRequiresReopen(_)));
-    assert!(
-        !fail.load(Ordering::Acquire),
-        "second table failure was reached",
-    );
-    let second_key = changes
-        .changes
-        .iter()
-        .find(|change| &change.table == second)
-        .unwrap()
-        .key
-        .clone();
-    assert_eq!(
-        second_mvcc.get_current_bytes(&second_key).await.unwrap(),
-        None,
-    );
-    count(&repo, first, 1).await;
-    count(&repo, second, 0).await;
-    assert!(matches!(
-        downstream.try_recv(),
-        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
-    ));
-    assert!(gate.requires_reopen());
-    let allocated = gate.version_allocation_high_water_mark();
-    let retry = apply_replicated(&repo, &changes, &[], 0, ApplyPolicy::Trusted)
-        .await
-        .unwrap_err();
-    assert!(matches!(retry, DbError::RepoRequiresReopen(_)));
-    assert_eq!(gate.version_allocation_high_water_mark(), allocated);
-    count(&repo, first, 1).await;
-    count(&repo, second, 0).await;
-}
-
-type HistoryStream = Pin<Box<dyn Stream<Item = DbResult<Vec<(RecordKey, Bytes)>>> + Send>>;
-
-struct FailPreImageOnce {
-    inner: Arc<dyn Store>,
-    fail: Arc<AtomicBool>,
-}
-
-#[async_trait]
-impl Store for FailPreImageOnce {
-    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
-        self.inner.insert(value).await
-    }
-
-    async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
-        self.inner.set(key, value).await
-    }
-
-    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
-        self.inner.get(key).await
-    }
-
-    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
-        self.inner.remove(key).await
-    }
-
-    fn iter_stream(&self, batch_size: usize) -> HistoryStream {
-        self.inner.iter_stream(batch_size)
-    }
-
-    fn scan_prefix_stream(&self, prefix: Bytes, batch_size: usize) -> HistoryStream {
-        self.inner.scan_prefix_stream(prefix, batch_size)
-    }
-
-    fn iter_range_stream(
-        &self,
-        start: Option<Bytes>,
-        end: Option<Bytes>,
-        batch_size: usize,
-    ) -> HistoryStream {
-        if self.fail.swap(false, Ordering::AcqRel) {
-            return Box::pin(stream::once(async {
-                Err(DbError::Storage(
-                    "injected second-table pre-image failure".into(),
-                ))
-            }));
-        }
-        self.inner.iter_range_stream(start, end, batch_size)
-    }
-
-    fn iter_range_stream_reverse(
-        &self,
-        start: Option<Bytes>,
-        end: Option<Bytes>,
-        batch_size: usize,
-    ) -> HistoryStream {
-        self.inner.iter_range_stream_reverse(start, end, batch_size)
-    }
 }

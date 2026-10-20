@@ -442,7 +442,6 @@ impl RepoInstance {
     /// Idle count of parked guards, for tests and diagnostics. `None` when
     /// the worker was never installed.
     #[cfg(test)]
-    #[allow(dead_code)] // driven by the PR6b-2 test chunk (W5)
     pub(crate) async fn receipt_worker_parked_guards(&self) -> Option<usize> {
         self.receipt_worker.get().map(|lease| lease.parked_count())
     }
@@ -450,7 +449,6 @@ impl RepoInstance {
     /// Deterministic test wait: no receipt job is in flight on this repo's
     /// worker.
     #[cfg(test)]
-    #[allow(dead_code)] // driven by the PR6b-2 test chunk (W5)
     pub(crate) async fn receipt_worker_wait_idle(&self) {
         self.receipt_worker_installed()
             .await
