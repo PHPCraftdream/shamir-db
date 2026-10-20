@@ -15,16 +15,18 @@
 //! The macro hides the WASM ABI entirely. This crate also works on the host
 //! target for testing.
 
-pub mod __rt;
-mod context;
-mod db;
+mod api;
 mod error;
-mod host_imports;
-mod http;
-mod params;
 pub mod prelude;
-pub mod validation;
-mod value;
+mod runtime;
+
+// Module-path aliases so that every pre-existing `shamir_sdk::<module>::…`
+// and in-crate `crate::<module>::…` path keeps resolving after the move into
+// `api/` and `runtime/`.
+pub(crate) use api::{context, db, http, value};
+pub use runtime::__rt;
+pub use runtime::validation;
+pub(crate) use runtime::{host_imports, params};
 
 // Re-export the proc-macro at the crate root so that `#[shamir_sdk::function]`
 // resolves, and with `use shamir_sdk as shamir;` so does `#[shamir::function]`.

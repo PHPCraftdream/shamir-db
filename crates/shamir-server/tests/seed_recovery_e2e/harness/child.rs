@@ -371,30 +371,48 @@ pub async fn cli_install(
 
 /// Like [`cli_install`] but asserting the install CLI REFUSES (non-zero
 /// exit) and returning its output for code assertions.
+///
+/// A parent that has just dropped an in-process home releases the fjall file
+/// lock lazily (background workers exit after the drop), so the child can
+/// observe `FjallError: Locked` on its first attempt. That is a transient
+/// release race, not the refusal under test: retry a bounded number of times
+/// and fail loudly if the lock is never released.
 pub async fn cli_install_refused(config_path: &Path, artifact: &Path, digest: &str) -> String {
-    let (ok, text) = run_cli(
-        config_path,
-        &[
-            "replication-seed-install",
-            "--db",
-            "app",
-            "--repo",
-            "main",
-            "--artifact",
-            artifact.to_str().expect("utf8 artifact path"),
-            "--manifest-digest",
-            digest,
-            "--subscription",
-            "sub",
-            "--upstream",
-            "tcp://127.0.0.1:1",
-            "--publication",
-            "pub",
-            "--profile",
-            "seedprof",
-        ],
-    )
-    .await;
-    assert!(!ok, "install should refuse, but succeeded:\n{text}");
-    text
+    const LOCK_RELEASE_ATTEMPTS: usize = 30;
+    const LOCK_RELEASE_POLL: Duration = Duration::from_millis(100);
+    for attempt in 1..=LOCK_RELEASE_ATTEMPTS {
+        let (ok, text) = run_cli(
+            config_path,
+            &[
+                "replication-seed-install",
+                "--db",
+                "app",
+                "--repo",
+                "main",
+                "--artifact",
+                artifact.to_str().expect("utf8 artifact path"),
+                "--manifest-digest",
+                digest,
+                "--subscription",
+                "sub",
+                "--upstream",
+                "tcp://127.0.0.1:1",
+                "--publication",
+                "pub",
+                "--profile",
+                "seedprof",
+            ],
+        )
+        .await;
+        assert!(!ok, "install should refuse, but succeeded:\n{text}");
+        if !text.contains("FjallError: Locked") {
+            return text;
+        }
+        assert!(
+            attempt < LOCK_RELEASE_ATTEMPTS,
+            "fjall lock still held after {LOCK_RELEASE_ATTEMPTS} attempts:\n{text}",
+        );
+        tokio::time::sleep(LOCK_RELEASE_POLL).await;
+    }
+    unreachable!("the last attempt returns or panics")
 }

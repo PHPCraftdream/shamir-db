@@ -482,7 +482,7 @@ Verified at:
   instantiation will pick up CurrentOnly (the `MvccStore::new` default)".
 * Behavioural test: `crates/shamir-tx/src/tests/mvcc_store_tests/retention_tests.rs:536-537`
   — "Default is CurrentOnly (max_count: Some(0))".
-* E2E test: `crates/shamir-db/tests/retention_ddl.rs:91-106` —
+* E2E test: `crates/shamir-db/tests/schema_ddl/retention_ddl.rs:91-106` —
   `create_table_without_retention_is_current_only` asserts `max_count ==
   Some(0)` after a `CreateTable` with no `retention` field.
 

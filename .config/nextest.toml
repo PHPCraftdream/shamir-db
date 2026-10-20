@@ -129,15 +129,15 @@ slow-timeout = { period = "60s", terminate-after = 4 }  # ~90 s legit, kill at 2
 filter = "package(shamir-connect) and test(/.*scram.*/)"
 slow-timeout = { period = "10s", terminate-after = 6 }   # Argon2-bound; kill at 60 s.
 
-# Whole functions_lifecycle binary compiles WASM (cranelift, CPU-bound) in
+# Whole functions binary (tests/functions/lifecycle) compiles WASM (cranelift, CPU-bound) in
 # nearly every test — throttle its parallelism via the wasm-heavy group
 # instead of masking CPU starvation with a bigger global slow-timeout.
 [[profile.default.overrides]]
-filter = "package(shamir-db) and binary(functions_lifecycle)"
+filter = "package(shamir-db) and binary(functions)"
 test-group = "wasm-heavy"
 
 [[profile.ci.overrides]]
-filter = "package(shamir-db) and binary(functions_lifecycle)"
+filter = "package(shamir-db) and binary(functions)"
 test-group = "wasm-heavy"
 
 # ============================================================================
