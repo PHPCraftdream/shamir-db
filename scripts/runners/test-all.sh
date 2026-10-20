@@ -4,16 +4,16 @@
 # Why a script instead of `cargo test --workspace`:
 #   * Friendly summary (PASSED/FAILED totals) instead of scrolling
 #     through 36+ "test result: ok" lines.
-#   * Optional filtering by crate / test name (`scripts/test-all.sh shamir-server`).
+#   * Optional filtering by crate / test name (`scripts/runners/test-all.sh shamir-server`).
 #   * Honest about exit code: $? == 0 only if every test passes.
 #   * Captures the full log to `target/test-all.log` so you can grep
 #     a failure detail without re-running.
 #
 # Usage:
-#   scripts/test-all.sh                 # everything
-#   scripts/test-all.sh shamir-server   # one crate
-#   scripts/test-all.sh -- --nocapture  # forward flags to cargo test
-#   scripts/test-all.sh shamir-engine -- --test-threads=1
+#   scripts/runners/test-all.sh                 # everything
+#   scripts/runners/test-all.sh shamir-server   # one crate
+#   scripts/runners/test-all.sh -- --nocapture  # forward flags to cargo test
+#   scripts/runners/test-all.sh shamir-engine -- --test-threads=1
 #
 # Notes for Windows developers:
 #   * Run from Git Bash / MSYS2. Cargo + rustc are picked up from PATH.
@@ -23,7 +23,7 @@
 
 set -uo pipefail
 
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 LOG="target/test-all.log"
 mkdir -p target

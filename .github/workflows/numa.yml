@@ -64,7 +64,7 @@ jobs:
   # Tier 3 — QEMU NUMA emulation (smoke level, opt-in). Boots a 2-node QEMU
   # guest and confirms the kernel sees both NUMA nodes via serial-console
   # discovery messages. Full cargo-test-inside-guest is gated by KVM
-  # availability — see scripts/ci-qemu-numa-test.sh header for the path to
+  # availability — see scripts/runners/ci-qemu-numa-test.sh header for the path to
   # full integration. Opt-in via `[numa-qemu]` flag in commit message so it
   # never runs (and never reddens) by default.
   tier3-qemu:
@@ -77,4 +77,4 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 qemu-utils numactl
       - name: Boot 2-node QEMU and run Linux integration tests
         timeout-minutes: 30
-        run: bash scripts/ci-qemu-numa-test.sh
+        run: bash scripts/runners/ci-qemu-numa-test.sh

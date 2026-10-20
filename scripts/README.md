@@ -12,18 +12,18 @@ actually failed (or cargo couldn't build at all).
 
 ```bash
 # Linux / macOS / Git-Bash on Windows
-scripts/test-all.sh                      # whole workspace
-scripts/test-all.sh shamir-server        # one crate
-scripts/test-all.sh shamir-engine shamir-storage    # several
-scripts/test-all.sh -- --nocapture       # forward flags to `cargo test`
-scripts/test-all.sh shamir-server -- --test-threads=1
+scripts/runners/test-all.sh                      # whole workspace
+scripts/runners/test-all.sh shamir-server        # one crate
+scripts/runners/test-all.sh shamir-engine shamir-storage    # several
+scripts/runners/test-all.sh -- --nocapture       # forward flags to `cargo test`
+scripts/runners/test-all.sh shamir-server -- --test-threads=1
 ```
 
 ```powershell
 # Native PowerShell
-.\scripts\test-all.ps1
-.\scripts\test-all.ps1 shamir-server
-.\scripts\test-all.ps1 -- --nocapture
+.\scripts\runners\test-all.ps1
+.\scripts\runners\test-all.ps1 shamir-server
+.\scripts\runners\test-all.ps1 -- --nocapture
 ```
 
 Output ends with a summary block:

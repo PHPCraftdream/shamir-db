@@ -44,12 +44,12 @@ name: release
 # `shamir-client-node` binding excluded from this workspace.
 #
 # F-62 (#888) added a release-blocking `perf-gate` job here (self-hosted
-# `shamir-bench` runner, `./scripts/bench_gate.sh`) — REVERSED by explicit
+# `shamir-bench` runner, `./scripts/bench/bench_gate.sh`) — REVERSED by explicit
 # operator decision (#1020, 2026-08-07): no benchmark ever runs
 # automatically, on any trigger, anywhere. Performance gating is a manual,
 # operator-run action via `.github/workflows/perf-gate.yml`
 # (`workflow_dispatch` only — a human explicitly clicks "Run workflow") or
-# locally via `./scripts/bench_gate.sh` — never wired into an automatic
+# locally via `./scripts/bench/bench_gate.sh` — never wired into an automatic
 # push/tag trigger. Do NOT re-add a `perf-gate` job to this workflow's
 # automatic `on: push: tags:` trigger without a fresh, explicit operator
 # decision reversing this one.
@@ -410,13 +410,13 @@ jobs:
   # --------------------------------------------------------------------------
   # PERFORMANCE GATE — REMOVED (#1020, 2026-08-07, explicit operator
   # decision). F-62 (#888) had wired a release-blocking `perf-gate` job here
-  # (self-hosted `shamir-bench` runner, `./scripts/bench_gate.sh`); that
+  # (self-hosted `shamir-bench` runner, `./scripts/bench/bench_gate.sh`); that
   # decision is reversed. No benchmark runs automatically, on any trigger
   # (push, tag, PR), anywhere — a `v*` tag push must not queue forever (or
   # ever) waiting on a self-hosted runner that doesn't exist. Performance
   # gating remains available as a manual, operator-run action via
   # `.github/workflows/perf-gate.yml` (`workflow_dispatch` only) or locally
-  # via `./scripts/bench_gate.sh` — it is simply no longer part of the
+  # via `./scripts/bench/bench_gate.sh` — it is simply no longer part of the
   # automatic release DAG. Do NOT re-add a `perf-gate` job to this
   # workflow's `needs:` chains without a fresh, explicit operator decision.
   #

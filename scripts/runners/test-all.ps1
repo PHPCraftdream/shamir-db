@@ -1,17 +1,17 @@
 # PowerShell sibling of test-all.sh — same behaviour, native on Windows.
 #
 # Usage:
-#   .\scripts\test-all.ps1                 # everything
-#   .\scripts\test-all.ps1 shamir-server   # one crate
-#   .\scripts\test-all.ps1 -- --nocapture  # forward flags to cargo test
-#   .\scripts\test-all.ps1 shamir-engine -- --test-threads=1
+#   .\scripts\runners\test-all.ps1                 # everything
+#   .\scripts\runners\test-all.ps1 shamir-server   # one crate
+#   .\scripts\runners\test-all.ps1 -- --nocapture  # forward flags to cargo test
+#   .\scripts\runners\test-all.ps1 shamir-engine -- --test-threads=1
 #
 # Output mirrors test-all.sh: summary block + exit code 0 iff all green.
 
 $ErrorActionPreference = 'Stop'
 
 # Locate repo root relative to this script.
-Set-Location (Join-Path $PSScriptRoot '..')
+Set-Location (Join-Path $PSScriptRoot '..\..')
 
 $logDir = 'target'
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }

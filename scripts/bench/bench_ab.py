@@ -17,7 +17,7 @@ import time
 import tomllib
 
 BASELINE = "e11064772960e06c24b97379ea637335a286382e"
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 
 
@@ -193,7 +193,7 @@ def prepare(args):
             raise ValueError("Revision is not an exact commit identity")
         subprocess.run(["git", "-C", str(ROOT), "merge-base", "--is-ancestor",
                         revision, master], check=True)
-    manifest_path = ROOT / "scripts/bench_ab.toml"
+    manifest_path = ROOT / "scripts/bench/bench_ab.toml"
     manifest = load_manifest(manifest_path)
     counts_path = ROOT / "bench-iters.txt"
     counts = load_counts(counts_path)

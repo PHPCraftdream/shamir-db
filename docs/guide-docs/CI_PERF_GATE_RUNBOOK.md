@@ -174,7 +174,7 @@ performance gate. **The gate is a manual, operator-run action, never an
 automatic one.** `.github/workflows/perf-gate.yml` is `workflow_dispatch`
 only — it does not trigger on `push`/`pull_request`, so it never queues on
 a PR or blocks anything by itself; a maintainer must explicitly click "Run
-workflow" (or run `./scripts/bench_gate.sh` locally). It targets
+workflow" (or run `./scripts/bench/bench_gate.sh` locally). It targets
 `runs-on: [self-hosted, shamir-bench]`, a runner label with no machine
 registered against it as of this writing — until one is registered, a
 manually-triggered run will sit in "Queued". That is expected, not a bug.
@@ -182,7 +182,7 @@ manually-triggered run will sit in "Queued". That is expected, not a bug.
 > **F-62 (#888) — REVERSED (#1020, 2026-08-07, explicit operator
 > decision).** F-62 had wired a release-blocking inline `perf-gate` job
 > into `.github/workflows/release.yml`'s tag-triggered pipeline (same
-> `./scripts/bench_gate.sh` recipe, same `[self-hosted, shamir-bench]`
+> `./scripts/bench/bench_gate.sh` recipe, same `[self-hosted, shamir-bench]`
 > runner), so every downstream release job depended on it and a `v*` tag
 > push would queue the entire release pipeline until a runner was
 > registered. **That job has been removed.** No benchmark runs
@@ -260,11 +260,11 @@ in a GitHub Actions job — the baseline must reflect the same physical
 machine the gate itself runs on):
 
 ```
-./scripts/bench_gate.sh --capture-baseline
+./scripts/bench/bench_gate.sh --capture-baseline
 ```
 
 This runs the 9 representative bench cells (one per named workload
-category — see the comment block at the top of `scripts/bench_gate.sh` for
+category — see the comment block at the top of `scripts/bench/bench_gate.sh` for
 the exact list: point get, point set, scans, indexed lookup, ORDER BY
 LIMIT K, commit-path proxy, FK cascade workload, cursor pages, WAL
 startup/recovery) and writes `bench-baseline.json` at the repo root.
@@ -291,8 +291,8 @@ is public; see the workflow's own header comment for why an unattended
 Trigger it manually instead: GitHub's Actions tab → "perf-gate" → "Run
 workflow" (or `gh workflow run perf-gate.yml` from a checkout with a
 registered runner). It should pick up on your registered runner, run
-`./scripts/bench_gate.sh` (gate mode — no flags), and report pass/fail based
-on the 25% regression threshold (see `scripts/bench_gate.sh`'s header
+`./scripts/bench/bench_gate.sh` (gate mode — no flags), and report pass/fail based
+on the 25% regression threshold (see `scripts/bench/bench_gate.sh`'s header
 comment for why 25% and how to override it via
 `BENCH_GATE_THRESHOLD_PCT`). A green run confirms the runner, the label, and
 the baseline are all correctly wired together.
@@ -311,21 +311,21 @@ the baseline are all correctly wired together.
   "regressed" relative to stale numbers.
 - **Introducing a new workload cell** (F-60, #886): the gate is now
   fail-closed. When you add a new entry to the `WORKLOADS` list in
-  `scripts/bench_gate.sh`, the next gate run will FAIL because the new cell
+  `scripts/bench/bench_gate.sh`, the next gate run will FAIL because the new cell
   has no baseline entry yet — the gate does NOT silently skip cells it
   doesn't recognize. Capture a fresh baseline first
-  (`./scripts/bench_gate.sh --capture-baseline`), or pass
+  (`./scripts/bench/bench_gate.sh --capture-baseline`), or pass
   `--allow-new-cells` for a transitional run where the new workload is
   deliberately introduced before its baseline is committed:
   ```
-  ./scripts/bench_gate.sh --allow-new-cells
+  ./scripts/bench/bench_gate.sh --allow-new-cells
   ```
   The same fail-closed principle applies to parser output: if a bench
   binary's stdout format drifts so the parser matches zero lines for a
   cell, or a cell appears more than once, the gate fails hard rather than
   silently dropping that cell from the comparison.
 - **Threshold tuning**: the shipped 25% threshold is a conservative first
-  cut (see `scripts/bench_gate.sh`'s header). Once the self-hosted machine
+  cut (see `scripts/bench/bench_gate.sh`'s header). Once the self-hosted machine
   has run the gate enough times to characterize its own run-to-run noise
   floor, tighten `BENCH_GATE_THRESHOLD_PCT` (set as a workflow `env:` or
   repo/org Actions variable) to whatever margin comfortably clears that
