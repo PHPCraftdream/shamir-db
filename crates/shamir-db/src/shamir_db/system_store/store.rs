@@ -1,0 +1,239 @@
+//! Persistent system store for ShamirDB metadata.
+//!
+//! Stores databases, repositories, settings, users, roles.
+//! Uses a TableManager backed by any storage engine (fjall for production,
+//! in_memory for tests).
+
+use std::time::Duration;
+
+use shamir_types::access::Actor;
+use shamir_types::types::common::new_map;
+use shamir_types::types::value::QueryValue;
+
+use crate::engine::db_instance::db_instance::DbInstance;
+use crate::engine::repo::repo_types::BoxRepoFactory;
+use crate::engine::repo::{DurabilityPolicy, RepoConfig, RepoInstance};
+use crate::engine::table::{TableConfig, TableManager};
+use crate::{DbError, DbResult};
+
+pub(super) const SYSTEM_REPO: &str = "system";
+
+/// System store tables
+pub(super) const TABLE_DATABASES: &str = "databases";
+pub(super) const TABLE_REPOSITORIES: &str = "repositories";
+/// Per-repo table catalogue: one record per user table so the table
+/// list survives a restart and crash-recovery can resolve `table_by_token`
+/// for disk-backed repos (I.2).
+pub(super) const TABLE_TABLES: &str = "tables";
+pub(super) const TABLE_SETTINGS: &str = "settings";
+pub(super) const TABLE_USERS: &str = "users";
+pub(super) const TABLE_ROLES: &str = "roles";
+/// Function catalogue: one record per user-defined WASM function so the
+/// function survives a restart (slice 4).
+pub(super) const TABLE_FUNCTIONS: &str = "functions";
+/// Groups catalogue: group_id → (name, members).
+/// Group ids are allocated monotonically starting from 1 (stored in
+/// the `settings` table under the key `"next_group_id"`). Id 0 is
+/// reserved / unused.
+pub(super) const TABLE_GROUPS: &str = "groups";
+/// Validator catalogue: one record per user-defined WASM validator so
+/// the validator survives a restart (S1).
+pub(super) const TABLE_VALIDATORS: &str = "validators";
+/// Function folder catalogue: one record per explicitly created folder
+/// (e.g. `"reports/daily"`). Key is the slash-joined path. Persists
+/// ResourceMeta (owner/group/mode) so folder ACLs survive a restart (#118).
+pub(super) const TABLE_FUNCTION_FOLDERS: &str = "function_folders";
+/// Replication profile catalogue: one record per named profile. Keyed by
+/// `name`; carries the profile's `streams` bundle (386-a).
+pub(super) const TABLE_REPLICATION_PROFILES: &str = "replication_profiles";
+/// Publication catalogue: one record per publication. Keyed by `name`;
+/// carries the published `scopes` (386-a).
+pub(super) const TABLE_PUBLICATIONS: &str = "publications";
+/// Subscription catalogue: one record per subscription. Keyed by `name`;
+/// carries `upstream`/`publication`/`profile`/`state` (386-a). The follower
+/// pull-loop that consumes these is 386-b.
+pub(super) const TABLE_SUBSCRIPTIONS: &str = "subscriptions";
+
+/// Configuration for the system store.
+#[derive(Clone)]
+pub enum SystemStoreConfig {
+    /// In-memory (for tests). Data lost on restart.
+    InMemory,
+    /// Persistent fjall at the given path.
+    Fjall(std::path::PathBuf),
+}
+
+/// Persistent system store.
+#[derive(Clone)]
+pub struct SystemStore {
+    db: DbInstance,
+}
+
+/// Build a `QueryValue::Map` with a single string-keyed entry (for simple
+/// primary-key records).
+pub(super) fn qv_map1(k1: &str, v1: QueryValue) -> QueryValue {
+    let mut m = new_map();
+    m.insert(k1.to_string(), v1);
+    QueryValue::Map(m)
+}
+
+/// Build a `QueryValue::Map` with two string-keyed entries.
+pub(super) fn qv_map2(k1: &str, v1: QueryValue, k2: &str, v2: QueryValue) -> QueryValue {
+    let mut m = new_map();
+    m.insert(k1.to_string(), v1);
+    m.insert(k2.to_string(), v2);
+    QueryValue::Map(m)
+}
+
+impl SystemStore {
+    /// Initialize system store with the given config.
+    pub async fn init(config: SystemStoreConfig) -> DbResult<Self> {
+        Self::init_with_durability(config, DurabilityPolicy::default()).await
+    }
+
+    /// Open the metadata repository with the same policy as user repositories.
+    pub(crate) async fn init_with_durability(
+        config: SystemStoreConfig,
+        policy: DurabilityPolicy,
+    ) -> DbResult<Self> {
+        let db = DbInstance::new();
+
+        let factory = match config {
+            SystemStoreConfig::InMemory => BoxRepoFactory::in_memory(),
+            SystemStoreConfig::Fjall(path) => BoxRepoFactory::fjall(path),
+        };
+
+        let repo_config = RepoConfig::new(SYSTEM_REPO, factory)
+            .add_table(TableConfig::new(TABLE_DATABASES))
+            .add_table(TableConfig::new(TABLE_REPOSITORIES))
+            .add_table(TableConfig::new(TABLE_TABLES))
+            .add_table(TableConfig::new(TABLE_SETTINGS))
+            .add_table(TableConfig::new(TABLE_USERS))
+            .add_table(TableConfig::new(TABLE_ROLES))
+            .add_table(TableConfig::new(TABLE_FUNCTIONS))
+            .add_table(TableConfig::new(TABLE_GROUPS))
+            .add_table(TableConfig::new(TABLE_VALIDATORS))
+            .add_table(TableConfig::new(TABLE_FUNCTION_FOLDERS))
+            .add_table(TableConfig::new(TABLE_REPLICATION_PROFILES))
+            .add_table(TableConfig::new(TABLE_PUBLICATIONS))
+            .add_table(TableConfig::new(TABLE_SUBSCRIPTIONS));
+
+        // DbInstance recovers/certifies before exposing the system repo.
+        db.add_repo_with_durability(repo_config, policy).await?;
+
+        Ok(Self { db })
+    }
+
+    /// Drain the system repo's inflight WAL tail into `history` and flush its
+    /// buffers (graceful-stop counterpart of the per-repo flush in
+    /// [`ShamirDb::flush_all`](crate::ShamirDb::flush_all)).
+    /// cancel-safe: NO — delegates to bounded repo shutdown; a checkpoint
+    /// already in backend I/O can finish without acknowledging this caller.
+    pub(crate) async fn flush_buffers_with_quiesce_timeout(
+        &self,
+        timeout: Duration,
+    ) -> DbResult<()> {
+        let repo = self.system_repo()?;
+        repo.shutdown_clean(timeout).await
+    }
+
+    /// Get the table manager for a system table.
+    pub(super) async fn table(&self, name: &str) -> DbResult<TableManager> {
+        self.db.get_table(SYSTEM_REPO, name).await
+    }
+
+    /// Resolve the SYSTEM_REPO [`RepoInstance`].
+    ///
+    /// F5a: system-store DELETEs route through the repo's implicit-tx
+    /// file-WAL path (`run_implicit_batch_tx` + `execute_delete_tx`) instead
+    /// of the direct V1-marker `execute_delete`, so the V1 DELETE marker
+    /// becomes dead.
+    pub(crate) fn system_repo(&self) -> DbResult<RepoInstance> {
+        self.db
+            .get_repo(SYSTEM_REPO)
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", SYSTEM_REPO)))
+    }
+
+    /// Admitted system-catalogue durability tail (F1/R6; merged with the
+    /// R7-L3 interning twin in Round 8): ONE admission on the SYSTEM repo's
+    /// write domain (the tokio write-domain mutex is non-reentrant),
+    /// optional `intern_query_value_admitted` interning of `intern`
+    /// (replaces the old read-view `to_inner` WRITE-prep interning step),
+    /// then `persist_interner_admitted` of the dictionary delta.
+    /// `None` = persist-only call sites.
+    pub(crate) async fn persist_table_interner(
+        &self,
+        table: &TableManager,
+        intern: Option<&QueryValue>,
+    ) -> DbResult<()> {
+        let repo = self.system_repo()?;
+        let permit = repo
+            .write_domain()
+            .admit()
+            .await
+            .map_err(|e| DbError::Internal(e.to_string()))?;
+        // Round-12 (stack layout): the admitted tail (optional interning +
+        // dictionary persist) is pinned so its await state stays on the heap
+        // instead of widening this fn's future — `persist_table_interner` is
+        // awaited inline in every admin-catalogue writer, including
+        // `handle_alter_subscription`'s RESUME arm on the main thread.
+        Box::pin(async move {
+            if let Some(record) = intern {
+                table.intern_query_value_admitted(&permit, record).await?;
+            }
+            table.persist_interner_admitted(&permit).await
+        })
+        .await
+    }
+
+    /// Route a single non-tx DELETE through the implicit-tx file-WAL path
+    /// (mirrors the `query_runner` non-tx Delete branch). Maps the
+    /// [`BatchError`] surfaced by the implicit tx onto a [`DbError`].
+    pub(super) async fn delete_via_implicit_tx(
+        &self,
+        table: &TableManager,
+        op: &crate::query::write::DeleteOp,
+    ) -> DbResult<crate::query::write::WriteResult> {
+        let repo = self.system_repo()?;
+        let owned_op = op.clone();
+        let owned_table = table.clone();
+        repo.run_implicit_batch_tx(Actor::System, "", move |tx| {
+            Box::pin(async move {
+                let refs = crate::types::common::new_map();
+                let ctx = owned_table
+                    .info_store_read_view()
+                    .filter_context(&refs)
+                    .await?;
+                owned_table
+                    .execute_delete_tx(&owned_op, &ctx, tx, None, &Actor::System)
+                    .await
+            })
+        })
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))
+    }
+
+    /// Route a single non-tx SET (upsert) through the implicit-tx file-WAL
+    /// path (mirrors the `query_runner` non-tx Set branch, W3d-2). Maps the
+    /// [`BatchError`] surfaced by the implicit tx onto a [`DbError`].
+    pub(crate) async fn set_via_implicit_tx(
+        &self,
+        table: &TableManager,
+        op: &crate::query::write::SetOp,
+    ) -> DbResult<crate::query::write::WriteResult> {
+        let repo = self.system_repo()?;
+        let owned_op = op.clone();
+        let owned_table = table.clone();
+        repo.run_implicit_batch_tx(Actor::System, "", move |tx| {
+            Box::pin(async move {
+                owned_table
+                    .execute_set_tx(&owned_op, tx, None, &Actor::System)
+                    .await
+            })
+        })
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))
+    }
+
+    // Database metadata
+}

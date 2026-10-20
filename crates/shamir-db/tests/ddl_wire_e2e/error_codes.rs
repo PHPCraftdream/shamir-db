@@ -5,7 +5,7 @@ use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_types::access::Actor;
 
-use super::helpers::*;
+use crate::helpers::*;
 
 // =====================================================================
 // DDL S5: structured error codes

@@ -313,7 +313,7 @@ artifact).
 - **Renaming a table with a bound declarative schema is rejected.** The
   auto-bound schema validator is registered under a name that embeds the
   table path, so a rename would orphan it; the guard refuses up-front. See
-  `crates/shamir-db/tests/rename_table_e2e.rs:139-144`.
+  `crates/shamir-db/tests/rename_migration/renames/rename_table_e2e.rs:139-144`.
 - **A failed schema activation no longer leaks an in-memory validator —
   CLOSED (F-24, #817).** `ShamirDb::compile_table_schema`
   (`crates/shamir-db/src/shamir_db/shamir_db/schema_management.rs`)

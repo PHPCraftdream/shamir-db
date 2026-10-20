@@ -17,6 +17,8 @@ use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+pub(in crate::shamir_db) const SYSTEM_DB_NAME: &str = "__system__";
+
 use crate::engine::migration::MigrationCoordinator;
 use crate::engine::repo::{BoxRepoFactory, DurabilityPolicy, RepoConfig};
 use crate::engine::table::TableConfig;
@@ -25,7 +27,6 @@ use crate::shamir_db::execute::ResyncQuarantineCache;
 use super::super::ports::{PrincipalResolver, UserAdminPort};
 use super::super::repo_durability::durability_from_record;
 use super::super::system_store::{SystemStore, SystemStoreConfig};
-use super::SYSTEM_DB_NAME;
 
 /// Input source for [`ShamirDb::create_function_with_opts`].
 pub enum FunctionSource<'a> {

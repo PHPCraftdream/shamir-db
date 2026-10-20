@@ -2,12 +2,6 @@
 # format: dir <path> <n> | file <path> <n>; maintained by check_layout.py
 dir crates/shamir-client-node 10
 dir crates/shamir-client-ts 8
-dir crates/shamir-db/src/shamir_db 9
-dir crates/shamir-db/src/shamir_db/execute 25
-dir crates/shamir-db/src/shamir_db/shamir_db 15
-dir crates/shamir-db/src/shamir_db/tests 29
-dir crates/shamir-db/tests 46
-dir crates/shamir-db/tests/ddl_wire_e2e 13
 dir crates/shamir-engine/benches 39
 dir crates/shamir-engine/src 12
 dir crates/shamir-engine/src/query 8
@@ -35,11 +29,6 @@ dir crates/shamir-sdk/src 12
 dir crates/shamir-storage/src 13
 dir crates/shamir-storage/src/key_bytes/tests 8
 dir scripts 15
-file crates/shamir-db/benches/engine_perf.rs 1365
-file crates/shamir-db/src/shamir_db/execute/admin_schema.rs 1395
-file crates/shamir-db/src/shamir_db/shamir_db/access_control.rs 1255
-file crates/shamir-db/src/shamir_db/system_store.rs 1170
-file crates/shamir-db/tests/functions_lifecycle.rs 1327
 file crates/shamir-engine/benches/tx_concurrent.rs 1013
 file crates/shamir-engine/src/query/batch/fk_actions.rs 1438
 file crates/shamir-engine/src/query/batch/fk_on_update.rs 1353

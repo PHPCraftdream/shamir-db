@@ -34,7 +34,7 @@
   writes. A follower can advance past a late event and silently miss it.
 * Gap markers (`gap_at`) and a persistence watermark exist, but gap
   detection is incomplete; see the replication limitations below.
-* E2E-тесты: `shamir-db/tests/changefeed_e2e.rs`.
+* E2E-тесты: `shamir-db/tests/query_dml/changefeeds/changefeed_e2e.rs`.
 * **Журнальное событие выводится из WAL-записи (S5c-X, инвариант I1).**
   WAL-запись формата версии 3 несёт заголовок события
   (`shamir_wal::WalEventHeader`: repo, actor, публичный tx_id — 0 для

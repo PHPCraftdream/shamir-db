@@ -1,0 +1,6 @@
+mod hybrid_repo_ddl_tests;
+mod p1065_ddl_status_contract_tests;
+mod p1067_ddl_family_classification_tests;
+mod p1_2_ddl_result_contract_tests;
+mod r0c_cross_family_drop_rename_tests;
+mod replication_ddl_tests;

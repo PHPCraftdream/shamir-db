@@ -314,7 +314,7 @@ bob нет прямого read на `secrets`.
 | bob вызывает обычную функцию | effective actor = bob |
 | Валидация внутри setuid | ctx.db() работает от имени владельца |
 
-<!-- TODO: verify setuid bit position in mode integer — see ACCESS_FABRIC.md P5 and getter_only_e2e.rs -->
+<!-- TODO: verify setuid bit position in mode integer — see ACCESS_FABRIC.md P5 and tests/functions/facade/getter_only_e2e.rs -->
 
 ## 7. Папки функций
 
