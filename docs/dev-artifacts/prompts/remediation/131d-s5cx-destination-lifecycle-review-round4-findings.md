@@ -18,8 +18,11 @@ STATUS: ALL items below are closed in `131-s5cx-destination-lifecycle.md` (M),
 - D4 — resolved (round 5): tag 0x0A dropped (digest 0x0B commits); `destruction_challenges`
   delete-if-matches single use; actor server-recomputed; preview authorized + session-keyed;
   v2 scope = drop confirmations only (S §6a/§6b, A.2a/A.6; M §4a step 0).
-- D5 — resolved (round 5): post-flush-error re-read happens after a forced successful
-  flush; resume keyed by the binding via R1's revalidate-then-delete (M §4c stage 1, §4a step 5).
+- D5 — resolved (rounds 5-6): post-flush-error re-read happens after a forced successful
+  flush; **round 6 (K3): resume keyed by the `SubscriptionRemoval` OPERATION RECORD —
+  lookup key `(subscription name, binding generation)`, NEVER the row; merged
+  `handle_drop_subscription`'s `existed:false` silent no-op is fixed by routing through
+  the record** (M §4c stage 1 + crash table, §4f; S A.2d, Appendix B; E crash points).
 - D6 — resolved (round 5): epoch CAS claims, single writer, ack posted to executor;
   claims enumerated (M §3b/§3e item 3/§4f; S Appendix B; E cases 2/5).
 
@@ -99,3 +102,40 @@ STATUS: ALL items below are closed in `131-s5cx-destination-lifecycle.md` (M),
 - P3 Blocked(Prepare) — resolved (round 5): unsupported backends refused at preflight;
   `Blocked(Phase::Prepare)` unreachable; `UnsupportedBackend` kept for schema stability
   (M §3b; E §10 8b-3a).
+
+## Round 6 (adversarial review of round 5, K1-K3)
+
+- K1 — resolved (round 6): seed-install boundary (i) — 8b-3e wrapper takes gates+control
+  before the installer body, `install_seed_subscription` gains guard parameters (M §4e
+  item 8/Class B; S §7b row 8; E case 14, §10); mechanical merged lock-site inventory
+  added as E Appendix 13 (29 rows) and the M §4e proof redone over the complete table.
+- K2 — resolved (round 6): closed durability-proof rule replaces the adopt-after-fsync
+  branch everywhere (M §3e item 6; S A.7a/A.7b; E risk 8, case 3).
+- K3 — resolved (round 6): D5's binding-keyed resume specified — `SubscriptionRemoval`
+  record (S A.2d), `(name, generation)` lookup-first retry endpoint, R1-stage-1 crash
+  table, merged-handler fix (M §4c/§4f; S Appendix B; C D5).
+
+## Round 6 pass 1 (adversarial review C1-C9) — resolved (round 6)
+
+- C1 — resolved (round 6): generation-fenced R1 delete predicate
+  `(name, binding_generation == record.binding_generation)`; resumed generation
+  mismatch fails closed (record `Completed` WITHOUT deleting) (M §4c/§4e row 4;
+  S A.2d/Appendix B; E case 9).
+- C2 — resolved (round 6): `Rejected` rows never enter `audit_pending`; boot
+  loading/publication excludes them (M §4d/§3b/§3e item 2; S A.2/A.5; E case 3).
+- C3 — resolved (round 6): single-app-class unpoison path (reconciliation RE-WRITE
+  of the failed event id only; unpoison on its own successful write+sync) (M §3e
+  item 0b; S A.7a/A.7b; E risk 8/case 3).
+- C4 — resolved (round 6): Prepare (i) put-if-absent; initial spawn through the
+  epoch CAS (M §4a/§4f/§3b; S Appendix B).
+- C5 — resolved (round 6): Appendix 13 row 30 admits inventory + honest scope
+  statement (E §13; M §4e Class F).
+- C6 — resolved (round 6): challenge failure at (iii) keeps `Prepared`; same-id
+  resubmission remedy; challenge gates first submission only (M §4a step 1;
+  S §6a/§6c).
+- C7 — resolved (round 6): minimal seed-install reservation check in 8b-3c's
+  existing control section; 8b-3a residual gap stated (M §1/I4; E §10).
+- C8 — resolved (round 6): archival of final-`Blocked` + fully-acked with explicit
+  reservation release (S Appendix B; M §3e item 7; E risk 7).
+- C9 — resolved (round 6): 8b-3a structural boot hook + synthetic-view unit-test
+  acceptance criterion (M §3a; E §10 8b-3a).
