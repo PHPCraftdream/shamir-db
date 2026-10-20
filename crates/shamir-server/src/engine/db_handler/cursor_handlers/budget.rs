@@ -2,9 +2,8 @@
 
 use shamir_db::query::batch::BatchError;
 
-use crate::db_handler::handler::{DbResponse, ShamirDbHandler};
 use crate::byte_budget::{stash_guard, ByteBudgetGuard};
-
+use crate::db_handler::handler::{DbResponse, ShamirDbHandler};
 
 /// Wrap an engine [`shamir_storage::error::DbError`] (or any `Display`
 /// error) in the same `BatchError::QueryError` shape every other cursor
@@ -53,7 +52,9 @@ pub(in crate::engine::db_handler) fn error_response(e: &BatchError) -> DbRespons
 /// precedent for not fabricating bounds that don't exist). Callers fall
 /// back to [`enforce_page_budget`]'s existing post-hoc-only acquire in that
 /// case.
-pub(super) async fn reserve_page_budget_upfront(handler: &ShamirDbHandler) -> Option<ByteBudgetGuard> {
+pub(super) async fn reserve_page_budget_upfront(
+    handler: &ShamirDbHandler,
+) -> Option<ByteBudgetGuard> {
     let budget_active = handler.byte_budget.cap().is_some();
     let cap_active = handler.query_limits.max_result_size_bytes < usize::MAX;
     if !budget_active || !cap_active {

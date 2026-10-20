@@ -2,7 +2,6 @@
 //! builder, wire-request constructors, row/score seeding helpers and the
 //! pinned-mode peek helper.
 
-
 use std::sync::Arc;
 
 use shamir_connect::common::time::UnixNanos;
@@ -17,13 +16,11 @@ use shamir_db::engine::table::TableConfig;
 use shamir_db::ShamirDb;
 
 use shamir_query_builder::batch::Batch;
-use shamir_query_builder::ddl::{chmod};
+use shamir_query_builder::ddl::chmod;
 use shamir_query_builder::doc;
 use shamir_query_builder::write::insert;
 use shamir_query_types::admin::ResourceRef;
-use shamir_query_types::read::{
-    ReadQuery,
-};
+use shamir_query_types::read::ReadQuery;
 use shamir_query_types::wire::{CursorId, DbRequest, DbResponse};
 
 use crate::cursor_registry::PaginationMode;
@@ -73,7 +70,10 @@ pub(super) fn other_session() -> Session {
 /// Build a handler over an in-memory `ShamirDb` with `app.main.items`,
 /// owned by alice (mirrors `node_mode_tests::build_handler`), with
 /// `n` rows pre-inserted (`{ id: "kNN", v: NN }`).
-pub(super) async fn build_handler_with_rows(n: usize, cursor_limits: CursorLimitsCap) -> ShamirDbHandler {
+pub(super) async fn build_handler_with_rows(
+    n: usize,
+    cursor_limits: CursorLimitsCap,
+) -> ShamirDbHandler {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64([0xAB; 16]));
     shamir.create_db_as("app", owner.clone()).await;
@@ -102,7 +102,11 @@ pub(super) async fn build_handler_with_rows(n: usize, cursor_limits: CursorLimit
     ShamirDbHandler::new(Arc::new(shamir)).with_cursor_limits(cursor_limits)
 }
 
-pub(super) async fn send(handler: &ShamirDbHandler, session: &Session, req: DbRequest) -> DbResponse {
+pub(super) async fn send(
+    handler: &ShamirDbHandler,
+    session: &Session,
+    req: DbRequest,
+) -> DbResponse {
     let bytes = rmp_serde::to_vec_named(&req).expect("encode request");
     let conn = ConnectionServices::without_push(0);
     let resp_bytes = handler
@@ -143,7 +147,7 @@ pub(super) fn fetch_next_default_req(cursor_id: CursorId) -> DbRequest {
 /// Open `app.main.items` to `mode` at all three ancestor levels (database,
 /// store, table) — `authorize_access`'s ancestor-walk requires `Execute` on
 /// EVERY ancestor, not just the target, so a non-owner needs all three
-/// chmod'd (mirrors `permission_e2e.rs`'s
+/// chmod'd (mirrors `permission_e2e/main.rs`'s
 /// `permission_open_default_allows_any_user` "chmod db + repo + table to
 /// OPEN" sequence).
 pub(super) async fn open_app_main_items(handler: &ShamirDbHandler, mode: u16) {
@@ -336,7 +340,6 @@ pub(super) async fn drain_seqs(
     }
 }
 
-
 /// Peek a live cursor's pinned `PaginationMode` directly off the registry --
 /// the test-visible signal the brief asks for (mirrors
 /// `keyset_pagination_mode_pinned_at_creation_stays_stable`'s doc comment,
@@ -345,7 +348,11 @@ pub(super) async fn drain_seqs(
 /// nothing else is concurrently touching this cursor mid-assertion in these
 /// single-threaded-per-cursor tests, so a non-blocking `try_lock` is safe
 /// and avoids making this helper `async` for no reason.
-pub(super) fn pinned_mode(handler: &ShamirDbHandler, cursor_id: CursorId, sid: &[u8; 32]) -> PaginationMode {
+pub(super) fn pinned_mode(
+    handler: &ShamirDbHandler,
+    cursor_id: CursorId,
+    sid: &[u8; 32],
+) -> PaginationMode {
     let cursor = handler
         .cursor_registry
         .get_owned(cursor_id.0, sid)

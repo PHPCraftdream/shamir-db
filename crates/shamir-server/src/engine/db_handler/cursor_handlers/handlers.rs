@@ -9,15 +9,17 @@ use shamir_types::types::common::{new_map, TMap};
 use crate::byte_budget::stash_serialized_response;
 use crate::cursor_registry::{Cursor, CursorRegistryError, PaginationMode};
 
-use super::budget::{enforce_page_budget, error_response, reserve_page_budget_upfront, wrap_engine_err};
+use super::budget::{
+    enforce_page_budget, error_response, reserve_page_budget_upfront, wrap_engine_err,
+};
+use super::keyset::{
+    build_filter_context, order_by_column_contains_null, order_by_column_is_schema_typed_scalar,
+    order_by_field_value, pagination_mode_for_query, probe_index_seek_eligible, row_record_id,
+    safe_seek_key, same_boundary_value,
+};
 use crate::db_handler::cursor_support::{authorize_cursor_read, resolve_repo};
 use crate::db_handler::handler::{session_actor, DbResponse, ShamirDbHandler};
 use crate::db_handler::visibility_handlers::quarantine_cursor_error;
-use super::keyset::{
-    build_filter_context, order_by_column_contains_null,
-    order_by_column_is_schema_typed_scalar, order_by_field_value, pagination_mode_for_query,
-    probe_index_seek_eligible, row_record_id, safe_seek_key, same_boundary_value,
-};
 
 impl ShamirDbHandler {
     /// FG-5b CREATE — resolve the query's table, open an MVCC snapshot

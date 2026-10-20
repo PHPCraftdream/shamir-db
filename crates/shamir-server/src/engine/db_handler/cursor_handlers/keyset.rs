@@ -188,7 +188,10 @@ pub(super) async fn probe_index_seek_eligible(
 /// disagreeing types across validators, an excluded `TypeTag` (including
 /// `Bin`, see above), or a matched rule whose `keyset_safe` proof is
 /// `false`.
-pub(super) fn order_by_column_is_schema_typed_scalar(table: &TableManager, field: &[String]) -> bool {
+pub(super) fn order_by_column_is_schema_typed_scalar(
+    table: &TableManager,
+    field: &[String],
+) -> bool {
     // S5c-X F2 (Round 6): read-only view — no `&Arc<ValidatorRegistry>`
     // (with its register/replace/rename/remove mutators) escapes.
     let Some(registry) = table.validator_registry_read_view() else {
@@ -749,4 +752,3 @@ pub(super) fn finish_keyset_page(
         has_more,
     }
 }
-

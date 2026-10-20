@@ -15,10 +15,12 @@ use crate::cursor_registry::{CursorRegistryError, PaginationMode};
 use super::budget::{
     enforce_page_budget, error_response, reserve_page_budget_upfront, wrap_engine_err,
 };
+use super::keyset::{
+    build_filter_context, fetch_keyset_page, order_by_field_value, row_record_id, KeysetOutcome,
+};
 use crate::db_handler::cursor_support::{authorize_cursor_read, resolve_repo};
 use crate::db_handler::handler::{session_actor, DbResponse, ShamirDbHandler};
 use crate::db_handler::visibility_handlers::quarantine_cursor_error;
-use super::keyset::{build_filter_context, fetch_keyset_page, order_by_field_value, row_record_id, KeysetOutcome};
 
 /// Outcome of [`fetch_offset_page`]: the up-to-`effective_page_size` rows
 /// for this call, whether more remain, and the advanced row-count bookmark.
@@ -604,7 +606,11 @@ impl ShamirDbHandler {
 
     /// FG-5b CANCEL — idempotent close. Canceling an unknown/already-closed
     /// cursor is NOT an error (CURSORS.md) — reply `CursorClosed` either way.
-    pub(in crate::engine::db_handler) async fn cancel_cursor(&self, session: &Session, cursor_id: CursorId) -> DbResponse {
+    pub(in crate::engine::db_handler) async fn cancel_cursor(
+        &self,
+        session: &Session,
+        cursor_id: CursorId,
+    ) -> DbResponse {
         // Only remove when it's actually ours; a cross-session cancel
         // attempt is silently treated the same as "already closed" (no
         // information leak about another session's cursor existing).
@@ -619,8 +625,10 @@ impl ShamirDbHandler {
     }
 }
 
-
-pub(super) fn cursor_registry_error_response(cursor_id: CursorId, e: CursorRegistryError) -> DbResponse {
+pub(super) fn cursor_registry_error_response(
+    cursor_id: CursorId,
+    e: CursorRegistryError,
+) -> DbResponse {
     match e {
         CursorRegistryError::CursorExpired => {
             error_response(&BatchError::CursorExpired { cursor_id })

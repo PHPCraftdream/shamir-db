@@ -17,7 +17,7 @@
 //!      returns promptly (does not hang).
 //!
 //! Access path: admin `chmod`s db + repo + table to `0o777` (the explicit
-//! OPEN pattern proven by `permission_e2e.rs` Scenario 3) so the
+//! OPEN pattern proven by `permission_e2e/main.rs` Scenario 3) so the
 //! `replicator`-role user gains per-repo `Read` via the normal Shomer DAC
 //! path — NOT a superuser-bypass fallback. Per-repo authz (the
 //! `denied_repo` branch in `repl_handler`) is covered by the R0-b unit
@@ -55,7 +55,7 @@ mod common;
 // Wire-frame mirrors of the auth_init / challenge / client_proof / auth_ok
 // envelopes. Cargo gives every `tests/*.rs` its own crate, so each file
 // keeps a local copy of these structs (mirrors `mvp_e2e.rs` /
-// `permission_e2e.rs`).
+// `permission_e2e/main.rs`).
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize)]
@@ -475,7 +475,7 @@ async fn repl_hello_and_pull_with_events() {
     // --- Admin: OPEN db + repo + table (0o777) so the `replicator`-role
     //     session (created below) can read via the normal Shomer DAC path.
     //     This is NOT a superuser-bypass — it is the explicit OPEN pattern
-    //     proven by `permission_e2e.rs` Scenario 3. ---
+    //     proven by `permission_e2e/main.rs` Scenario 3. ---
     for (r, t) in [(None, None), (Some(repo), None), (Some(repo), Some(table))] {
         let resp = roundtrip(
             &chmod_req(admin_sid, db, r, t, 0o777),

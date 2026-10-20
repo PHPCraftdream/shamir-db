@@ -1,37 +1,17 @@
 //! Offset-bookmark pagination tests (CR-C2) and pinned-snapshot
 //! stability tests (rows deleted/updated mid-scroll).
 
-use ;
-use ;
-
-use ;
-use ;
-use ;
-
 use shamir_db::access::{principal64, Actor};
-use ;
-use ;
+use shamir_query_types::read::{OrderBy, ReadQuery};
 
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::doc;
-use ;
-use ;
-use ;
-use ;
-use ;
-use ;
-use shamir_query_types::read::{
-    OrderByReadQuery, Select,
-};
-use shamir_query_types::wire::{DbResponse};
-use ;
+use shamir_query_types::read::Select;
+use shamir_query_types::wire::DbResponse;
 
-use ;
 use crate::db_handler::config::CursorLimitsCap;
-use ;
-use ;
 
-use super::common::*;
+use super::super::common::*;
 
 // ---------------------------------------------------------------------------
 // CR-C2 (#777) — cursor test-coverage gaps.
