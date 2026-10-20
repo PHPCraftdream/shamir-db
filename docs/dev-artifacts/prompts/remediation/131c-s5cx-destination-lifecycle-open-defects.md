@@ -100,3 +100,33 @@ Round-6 pass-1 resolutions (adversarial review C1-C9) — **DECIDED (round 6)**:
   hook (empty reservation-view consult, inert until 8b-3b wires the view); acceptance
   = hook exists + a unit test drives it with a synthetic non-empty view (M §3a; E §10
   8b-3a).
+
+Round-7 resolutions (verifiers A/B/C) — **DECIDED (round 7)**:
+
+- C-1 (P2) — resolved (round 7): the minimal 8b-3c seed-install check is the §7c
+  rebind exemption AND §7c item 4's reservation lookup — a destination reserved by a
+  NON-TERMINAL destruction operation is refused with `destruction_in_progress` even
+  for the rebind flow (one journal lookup; the destroyed-then-reinstall path is
+  unaffected because its operation is `Destroyed`) (M §1/I4; E §9 case 15 + §10
+  8b-3c; S §7b row 8).
+- C-2 (P2) — resolved (round 7): the CREATE-path control section spans the
+  reservation check, the mirror write AND the registry/catalogue publication (the
+  insert runs inside the section — check-to-publish window closed by holding the
+  section through publication); CREATE SUBSCRIPTION NEWLY acquires the design's
+  admission gates (db gate + sorted repo mutexes for its bound destinations) BEFORE
+  its merged control acquisition, outside control per the total order (M I13 + §4e
+  item 12; S §7b rows 1-2/7/12).
+- A-1 (SHOULD-FIX) — resolved (round 7): a `repo_create_locks` holder waits only
+  DOWNWARD for control; no control holder ever takes a create mutex (cycle-free; the
+  earlier "never waits for either" was mis-stated) (M §4e Class F; E §13 row 29).
+- A-2/A-3 (NIT) — resolved (round 7): M §3e item 7 adds the F1b archival form;
+  M I4's operation clause is kind-scoped to `kind: Repo | Database`.
+- B-1..B-11 — resolved (round 7): no occurrences of the stale claims exist in M/E/S/
+  C/R for B-1 (uncoded Validation), B-2 (public `_locked`), B-5 (deleted tx files),
+  B-6 (monolith admin_replication cites), B-7 (flush_seed_catalogue), B-9
+  (supervisor :519-538), B-10 (confirmed.rs/may_start_follower), B-11 (old paths) —
+  those occur only in the `.scratch/panel/` docs, which are outside this file set.
+  Fixed where present: B-3 (#1370 already fixed at admin_db_repo.rs:174/:482 on this
+  tree — M §4a step 4 + E fact sheet), B-4 (quarantine_cache publish :71-96 is
+  owner-scoped claims — M §3f + E fact sheet), B-8 (follower_loop local-lookup cite
+  E §12 → :501/:362/:593).
