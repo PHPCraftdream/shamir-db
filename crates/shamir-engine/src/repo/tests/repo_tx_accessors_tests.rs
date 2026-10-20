@@ -42,6 +42,8 @@ async fn repo_wal_initializes_lazy() {
 /// snapshot may not yet cover. After a "restart" the freshly-seeded
 /// `RepoWalManager` must hand out an id strictly greater than that inflight
 /// txn_id, never reusing it.
+// Disk-backed (file WAL segment) — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn repo_wal_seeds_txn_id_floor_above_inflight() {
     use crate::repo::BoxRepoFactory;

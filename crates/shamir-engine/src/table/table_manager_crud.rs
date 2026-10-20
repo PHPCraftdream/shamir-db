@@ -62,7 +62,7 @@ pub(crate) static TEST_POST_BARRIER_PRE_WRITE_HOOK: std::sync::OnceLock<
     std::sync::Arc<PostBarrierPreWriteHook>,
 > = std::sync::OnceLock::new();
 
-/// Parks on [`TEST_POST_BARRIER_PRE_WRITE_HOOK`] if a test installed one;
+/// Parks on `TEST_POST_BARRIER_PRE_WRITE_HOOK` if a test installed one;
 /// a true no-op otherwise.
 async fn fire_post_barrier_pre_write_test_hook() {
     #[cfg(test)]
@@ -739,7 +739,7 @@ impl TableManager {
 
     /// Byte-level single-record read — returns the raw storage bytes WITHOUT
     /// decoding to `InnerValue`. Callers wrap in `RecordView::new(&bytes)` for
-    /// zero-copy field access. The `InnerValue`-decoding [`get`] is kept for
+    /// zero-copy field access. The `InnerValue`-decoding `get` is kept for
     /// the aggregate pipeline and other callers that need the full tree.
     pub async fn get_bytes(&self, id: RecordId) -> DbResult<Option<Bytes>> {
         self.ensure_repo_readable()?;
@@ -762,7 +762,7 @@ impl TableManager {
     /// Vectored byte-level read — returns raw storage bytes for each id
     /// WITHOUT decoding to `InnerValue`. Returns `None` for missing/tombstoned
     /// keys. Callers wrap each `Bytes` in `RecordView::new(&bytes)` for
-    /// zero-copy field access. The `InnerValue`-decoding [`get_many`] is kept
+    /// zero-copy field access. The `InnerValue`-decoding `get_many` is kept
     /// for the aggregate pipeline.
     pub async fn get_many_bytes(&self, ids: &[RecordId]) -> DbResult<Vec<Option<Bytes>>> {
         self.ensure_repo_readable()?;
@@ -784,7 +784,7 @@ impl TableManager {
 
     /// tx-aware vectored byte-level read for the filtered-ANN path (V3.1).
     ///
-    /// Falls through to [`get_many_bytes`] when `tx` is `None`. When `tx` is
+    /// Falls through to `get_many_bytes` when `tx` is `None`. When `tx` is
     /// `Some`, resolves each id against the tx's staging store FIRST (so
     /// staged inserts are visible as bytes), then the committed snapshot for
     /// Snapshot/Serializable or latest committed state for Pessimistic.

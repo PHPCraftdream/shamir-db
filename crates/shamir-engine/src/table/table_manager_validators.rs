@@ -133,7 +133,7 @@ impl TableManager {
     /// All write paths feed `QueryValue` directly: INSERT passes `resolved_values`
     /// from `write_exec.rs`; UPDATE/UPSERT merge at the `QueryValue` level in
     /// `write_exec.rs` before calling here. DELETE goes through
-    /// [`run_validators_view`](Self::run_validators_view) (RecordView lens).
+    /// `run_validators_view` (RecordView lens).
     ///
     /// Algorithm (per the VALIDATORS.md spec):
     /// 1. If no registry is set, return `Ok(())` (validators disabled).
@@ -316,7 +316,7 @@ impl TableManager {
             .await
     }
 
-    /// Per-validator invocation loop shared by [`run_validators_qv`] and
+    /// Per-validator invocation loop shared by `run_validators_qv` and
     /// [`run_validators_view`](Self::run_validators_view).
     ///
     /// Resolves each binding to a `RecordValidator`, calls `.validate(...)`,

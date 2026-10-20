@@ -9,6 +9,7 @@
 //! observe — an in-memory repo loses its stores on drop, so it cannot
 //! prove durability.
 
+#[cfg(feature = "fjall")]
 use std::path::PathBuf;
 use std::sync::Arc;
 

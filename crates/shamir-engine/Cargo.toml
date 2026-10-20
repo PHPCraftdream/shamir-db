@@ -232,6 +232,7 @@ harness = false
 [[bench]]
 name = "durable_concurrent_commit"
 harness = false
+required-features = ["fjall"]
 
 [[bench]]
 name = "drain_throughput"

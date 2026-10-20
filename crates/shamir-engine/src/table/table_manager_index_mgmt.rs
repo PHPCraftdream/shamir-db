@@ -203,7 +203,7 @@ impl TableManager {
     ///
     /// Holds `unique_write_lock` across the ENTIRE snapshot→backfill→register
     /// sequence and raises the `REGULAR_INDEX_CREATE` bit so
-    /// [`needs_write_barrier`](Self::needs_write_barrier) returns `true` for
+    /// `needs_write_barrier` returns `true` for
     /// every writer path — closing the lost-write race where a row written
     /// between the backfill snapshot and registration is seen by NEITHER the
     /// backfill NOR the live `index_manager` write hook. Pre-F-57 this path had
@@ -311,7 +311,7 @@ impl TableManager {
     ///      reduced metadata is now durable, so the tombstone is no longer
     ///      needed.
     ///
-    /// On restart, [`recover_index2_drops`](Self::recover_index2_drops) in
+    /// On restart, `recover_index2_drops` in
     /// `TableManager::create` sees any tombstone left by an interrupted drop
     /// and finishes it idempotently (remove backend, sweep postings, persist,
     /// clear tombstone). See that method's crash-state matrix for the full

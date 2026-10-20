@@ -1,4 +1,5 @@
 use crate::repo::repo_types::BoxRepo;
+#[cfg(feature = "fjall")]
 use shamir_storage::storage_fjall::FjallRepo;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_storage::types::Repo;
@@ -26,6 +27,8 @@ fn test_box_repo_from_in_memory() {
 // Fjall tests
 // ============================================================================
 
+/// Disk-backed (fjall) backend wiring — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn test_box_repo_fjall() {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -37,6 +40,8 @@ async fn test_box_repo_fjall() {
     assert!(stores.contains(&"test_table".to_string()));
 }
 
+/// Disk-backed (fjall) `From` conversion — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 #[test]
 fn test_box_repo_from_fjall() {
     let temp_dir = tempfile::tempdir().unwrap();

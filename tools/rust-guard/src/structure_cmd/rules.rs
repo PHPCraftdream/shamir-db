@@ -8,9 +8,9 @@
 //! * `LOCAL_USE` — a function- or block-local `use`, outside the
 //!   documented exceptions.
 
-use crate::exceptions::Exceptions;
-use crate::finding::Report;
-use crate::gitfs::GitFs;
+use crate::common::exceptions::Exceptions;
+use crate::common::finding::Report;
+use crate::common::gitfs::GitFs;
 use proc_macro2::Span;
 use quote::ToTokens;
 use syn::spanned::Spanned;
@@ -32,8 +32,8 @@ pub fn check_files(
         // from the working tree; `ReadError::Io` (including invalid UTF-8)
         // must surface as UNREADABLE_FILE rather than disappearing from every rule.
         let src = match fs.read_checked(path) {
-            Err(crate::gitfs::ReadError::Missing) => continue,
-            Err(e @ crate::gitfs::ReadError::Io(_)) => {
+            Err(crate::common::gitfs::ReadError::Missing) => continue,
+            Err(e @ crate::common::gitfs::ReadError::Io(_)) => {
                 report.add(
                     path,
                     1,

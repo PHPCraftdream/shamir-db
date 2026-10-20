@@ -14,8 +14,8 @@
 //! item on exactly one path and is consumed on first use.
 
 use super::select::Delta;
-use crate::finding::Report;
-use crate::gitfs::GitFs;
+use crate::common::finding::Report;
+use crate::common::gitfs::GitFs;
 use proc_macro2::Span;
 use quote::ToTokens;
 use std::collections::{BTreeMap, BTreeSet};

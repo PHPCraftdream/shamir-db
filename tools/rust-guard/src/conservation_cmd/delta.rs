@@ -179,7 +179,7 @@ impl Delta {
         false
     }
 
-    fn list_mut(&mut self, kind: &str) -> &mut Vec<Entry> {
+    pub(crate) fn list_mut(&mut self, kind: &str) -> &mut Vec<Entry> {
         match kind {
             "moved" => &mut self.moved,
             "renamed" => &mut self.renamed,
