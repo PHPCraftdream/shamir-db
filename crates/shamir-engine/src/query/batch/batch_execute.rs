@@ -53,7 +53,7 @@ fn warn_if_op_slow(alias: &str, elapsed: std::time::Duration) {
 ///
 /// `actor` is threaded from the facade (R2) and carried into every
 /// resource-touch point via [`QueryRunner`]. `db_name` provides the
-/// database scope for [`ResourcePath`] construction.
+/// database scope for `ResourcePath` construction.
 ///
 /// **#666 (redesigned): wall-clock enforcement of
 /// `BatchLimits.max_execution_time_secs` via COOPERATIVE deadline
@@ -133,7 +133,7 @@ pub(crate) async fn execute_batch_unchecked(
     execute_batch(auth, resolver, admin, invoker).await
 }
 
-/// Plan + validate a batch body's queries — [`BatchPlanner::plan`] plus the
+/// Plan + validate a batch body's queries — `BatchPlanner::plan` plus the
 /// `validate_tables`/`validate_filter_depth` preamble every
 /// [`execute_batch_impl`] call used to run inline.
 ///
@@ -626,7 +626,7 @@ pub(super) async fn execute_plan_impl(
     Ok(all_results)
 }
 
-/// tx-aware variant of [`execute_plan_impl`].
+/// tx-aware variant of `execute_plan_impl`.
 ///
 /// Uses `QueryRunner` with `Some(&mut tx)` so each mutation routes
 /// through `execute_*_tx`. Reads route through `TableManager::read_tx`

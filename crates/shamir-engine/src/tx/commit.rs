@@ -114,7 +114,7 @@ pub(crate) static TEST_POST_VALIDATE_PRE_PUBLISH_HOOK: std::sync::OnceLock<
     std::sync::Arc<PostValidatePrePublishHook>,
 > = std::sync::OnceLock::new();
 
-/// Parks on [`TEST_POST_VALIDATE_PRE_PUBLISH_HOOK`] if a test installed one;
+/// Parks on `TEST_POST_VALIDATE_PRE_PUBLISH_HOOK` if a test installed one;
 /// a true no-op otherwise. See that static's doc for the exact program point
 /// and rationale.
 async fn fire_post_validate_pre_publish_test_hook() {
@@ -551,7 +551,7 @@ pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
 /// AsyncIndex retains its separately spawned materialization tail, counted
 /// through completion by the same quiescence barrier.
 ///
-/// Thin metrics-only wrapper around [`commit_tx_inner`]: it records the
+/// Thin metrics-only wrapper around `commit_tx_inner`: it records the
 /// `on_tx_aborted_storage` metric on a PRE-commit storage abort and is
 /// otherwise transparent.
 ///
@@ -577,7 +577,7 @@ pub async fn commit_tx(tx: TxContext, repo: &RepoInstance) -> Result<TxOutcome, 
 
 /// Orchestrates the commit pipeline around the WAL commit point.
 ///
-/// The boundary is explicit: [`pre_commit`] runs Phases 1–4 and may
+/// The boundary is explicit: `pre_commit` runs Phases 1–4 and may
 /// return a real abort `Err` (nothing durable yet). A *successful*
 /// `pre_commit` means Phase 4 `wal.begin` landed — that durable WAL
 /// entry IS the commit. From there [`materialize`] runs Phases 5–7

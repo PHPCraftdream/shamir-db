@@ -76,7 +76,7 @@ impl MigrationState {
     }
 }
 
-/// Outcome of a bounded [`MigrationCoordinator::drain_until_caught_up`] run.
+/// Outcome of a bounded `MigrationCoordinator::drain_until_caught_up` run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DrainCatchUpResult {
     /// Total shadow-log entries applied across every pass.
@@ -215,7 +215,7 @@ impl MigrationCoordinator {
             .take()
     }
 
-    /// Admitted twin of [`Self::take_migration_freeze`] (S5c-X F3): the
+    /// Admitted twin of `Self::take_migration_freeze` (S5c-X F3): the
     /// caller holds both repositories' write permits; they are
     /// identity-checked against the domains captured at factory time.
     pub fn take_migration_freeze_admitted(
@@ -312,7 +312,7 @@ impl MigrationCoordinator {
         self.state.lock().await.id.clone()
     }
 
-    /// Admitted twin of [`Self::run_snapshot`] (S5c-X F3).
+    /// Admitted twin of `Self::run_snapshot` (S5c-X F3).
     pub async fn run_snapshot_admitted(
         &self,
         src_permit: &RepoWritePermit,
@@ -457,7 +457,7 @@ impl MigrationCoordinator {
         current.saturating_sub(last_applied.max(snapshot_lsn))
     }
 
-    /// Admitted twin of [`Self::drain_until_caught_up`] (S5c-X F3).
+    /// Admitted twin of `Self::drain_until_caught_up` (S5c-X F3).
     pub async fn drain_until_caught_up_admitted(
         &self,
         src_permit: &RepoWritePermit,
@@ -489,7 +489,7 @@ impl MigrationCoordinator {
         })
     }
 
-    /// Admitted twin of [`Self::mark_cutover_ready`] (S5c-X F3).
+    /// Admitted twin of `Self::mark_cutover_ready` (S5c-X F3).
     pub async fn mark_cutover_ready_admitted(
         &self,
         src_permit: &RepoWritePermit,
@@ -638,7 +638,7 @@ impl MigrationCoordinator {
         Ok((src_count, dst_count))
     }
 
-    /// Admitted twin of [`Self::persist_state`] (S5c-X F3).
+    /// Admitted twin of `Self::persist_state` (S5c-X F3).
     pub async fn persist_state_admitted(
         &self,
         src_permit: &RepoWritePermit,
@@ -648,7 +648,7 @@ impl MigrationCoordinator {
         self.persist_state().await
     }
 
-    /// Admitted twin of [`Self::final_drain_and_commit`] (S5c-X F3).
+    /// Admitted twin of `Self::final_drain_and_commit` (S5c-X F3).
     pub async fn final_drain_and_commit_admitted(
         &self,
         src_permit: &RepoWritePermit,
@@ -658,7 +658,7 @@ impl MigrationCoordinator {
         self.final_drain_and_commit().await
     }
 
-    /// Admitted twin of [`Self::rollback`] (S5c-X F3). The destination
+    /// Admitted twin of `Self::rollback` (S5c-X F3). The destination
     /// permit is `None` when the destination repository was already removed
     /// (crash-recovery rollback); the destination check is skipped then.
     pub async fn rollback_admitted(
@@ -670,7 +670,7 @@ impl MigrationCoordinator {
         self.rollback().await
     }
 
-    /// Admitted twin of [`Self::complete_finalisation_step`] (S5c-X F3).
+    /// Admitted twin of `Self::complete_finalisation_step` (S5c-X F3).
     pub async fn complete_finalisation_step_admitted(
         &self,
         src_permit: &RepoWritePermit,

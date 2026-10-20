@@ -9,7 +9,7 @@
 //! mirrors that mechanism.
 //!
 //! This module provides an opt-in cache keyed by the *content* of the
-//! `FieldRef` node itself (see [`field_ref_key`]). Callers that build a
+//! `FieldRef` node itself (see `field_ref_key`). Callers that build a
 //! `FieldPathCache` once (e.g. `SelectProjection::new`) and thread it
 //! through `FilterContext::field_path_cache` get pre-interned
 //! `SmallVec<InternerKey>` paths for every `FieldRef` in the tree; callers

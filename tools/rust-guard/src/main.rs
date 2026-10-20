@@ -8,10 +8,9 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+mod common;
 mod conservation_cmd;
-mod exceptions;
-mod finding;
-mod gitfs;
+mod discovery_cmd;
 mod modules_cmd;
 mod structure_cmd;
 
@@ -84,6 +83,26 @@ enum Command {
         #[arg(long)]
         delta: Option<String>,
     },
+
+    /// Compiled test-inventory diff between two `cargo nextest list
+    /// --message-format json` outputs (CI-03b). Identity = (binary id,
+    /// test name); `[[moved]]`/`[[renamed]]` delta entries pair base
+    /// tests with head tests.
+    Discovery {
+        /// Base side list file (JSON-lines from the merge base).
+        #[arg(long = "base-list")]
+        base_list: String,
+        /// Head side list file (JSON-lines from the current tree).
+        #[arg(long = "head-list")]
+        head_list: String,
+        /// TOML delta file of declared test moves/renames.
+        #[arg(long)]
+        delta: Option<String>,
+        /// Label echoed into findings so doctest/loom lists can be
+        /// diffed separately (default: lib).
+        #[arg(long, default_value = "lib")]
+        kind: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -123,6 +142,17 @@ fn main() -> ExitCode {
             head,
             packages,
             delta,
+        })),
+        Command::Discovery {
+            base_list,
+            head_list,
+            delta,
+            kind,
+        } => ExitCode::from(discovery_cmd::run(discovery_cmd::DiscoveryArgs {
+            base_list,
+            head_list,
+            delta,
+            kind,
         })),
     }
 }

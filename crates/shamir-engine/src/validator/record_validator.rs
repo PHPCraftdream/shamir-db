@@ -160,7 +160,7 @@ pub trait RecordValidator: Send + Sync {
     /// Return all foreign-key references declared by this validator.
     ///
     /// Each entry is `(field_path, fk_ref)`. The default implementation
-    /// returns an empty vec — only [`SchemaValidator`] overrides this to
+    /// returns an empty vec — only `SchemaValidator` overrides this to
     /// expose its declarative FK rules (Phase D reverse-FK discovery).
     fn fk_refs(&self) -> Vec<(Vec<String>, super::schema::ForeignKeyRef)> {
         Vec::new()
@@ -169,7 +169,7 @@ pub trait RecordValidator: Send + Sync {
     /// Whether the validator declares `field` as nullable.
     ///
     /// Returns `None` if this validator has no rule for `field`; the caller
-    /// continues searching other validators.  Only [`SchemaValidator`]
+    /// continues searching other validators.  Only `SchemaValidator`
     /// overrides this (Phase D.2 — SET NULL nullable enforcement).  The
     /// default returns `None` (no opinion → caller fails closed).
     fn nullable_for_field(&self, _field: &str) -> Option<bool> {
@@ -179,7 +179,7 @@ pub trait RecordValidator: Send + Sync {
     /// Return all literal-default rules declared by this validator.
     ///
     /// Each entry is `(field_path, default_value)` for every rule whose
-    /// `constraints.default = Some(...)`.  Only [`SchemaValidator`] overrides
+    /// `constraints.default = Some(...)`.  Only `SchemaValidator` overrides
     /// this (Phase ②.4c — the pre-encode INSERT stamp uses the aggregated
     /// list to fill absent fields before validation + storage).  The default
     /// returns an empty vec — native/WASM validators carry no defaults.
@@ -190,7 +190,7 @@ pub trait RecordValidator: Send + Sync {
     /// Return all declarative transform rules declared by this validator.
     ///
     /// Each entry is `(field_path, transform_spec)`.  Only
-    /// [`SchemaValidator`] overrides this (③.2b framework — the pre-encode
+    /// `SchemaValidator` overrides this (③.2b framework — the pre-encode
     /// INSERT pass applies computed-defaults and server-side timestamps).
     /// The default returns an empty vec — native/WASM validators carry no
     /// transforms.  Zеркало `defaults()`.

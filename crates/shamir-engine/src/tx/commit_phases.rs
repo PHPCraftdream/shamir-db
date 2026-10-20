@@ -127,7 +127,7 @@ pub(crate) static TEST_INDEX_BATCH_BUMP_APPLY_HOOK: std::sync::OnceLock<
     std::sync::Arc<IndexBatchBumpApplyHook>,
 > = std::sync::OnceLock::new();
 
-/// Parks on [`TEST_INDEX_BATCH_BUMP_APPLY_HOOK`] if a test installed one; a
+/// Parks on `TEST_INDEX_BATCH_BUMP_APPLY_HOOK` if a test installed one; a
 /// true no-op otherwise. Fires strictly between the bump and apply calls in
 /// [`apply_index_batch`], regardless of which of the two orderings
 /// (`TEST_LEGACY_APPLY_THEN_BUMP_ORDER`) is active — i.e. always at the exact
@@ -155,7 +155,7 @@ async fn fire_index_batch_bump_apply_test_hook() {
 
 /// Async-mode helper: run Phase 5a (data) inline on the client path.
 ///
-/// Mirrors the per-table loop in [`crate::tx::commit::materialize`] (drain → bounded retry →
+/// Mirrors the per-table loop in `crate::tx::commit::materialize` (drain → bounded retry →
 /// log warn on persistent failure) but writes outcomes into a shared
 /// `Arc<AtomicBool>` so the background tail can flip its final state to
 /// `Deferred` if a data write actually failed. The DATA write must finish

@@ -6,7 +6,7 @@
 //! `record`, `old_record`, and the function context — and returns a
 //! [`Validation`]. The adapter encodes that to [`QueryValue`] via
 //! [`validation_to_query_value`], producing the Map form that
-//! [`decode_validation_result`] consumes. No call-site change is needed in
+//! `decode_validation_result` consumes. No call-site change is needed in
 //! `table_manager_validators.rs`.
 
 use async_trait::async_trait;

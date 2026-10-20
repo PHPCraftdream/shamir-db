@@ -1,15 +1,22 @@
+#[cfg(feature = "fjall")]
 use shamir_query_types::{ReplicationServe, RetentionOverflow, WalCommitTier};
+#[cfg(feature = "fjall")]
 use shamir_storage::error::DbResult;
-use shamir_storage::storage_in_memory::InMemoryRepo;
-use std::sync::Arc;
 
-use crate::repo::{BoxRepo, BoxRepoFactory, DurabilityPolicy, RepoInstance};
+#[cfg(feature = "fjall")]
+use crate::repo::{BoxRepoFactory, DurabilityPolicy, RepoInstance};
+#[cfg(feature = "fjall")]
 use crate::table::TableConfig;
+#[cfg(feature = "fjall")]
 use crate::tx::clean_horizon::checkpoint::test_seam;
+#[cfg(feature = "fjall")]
 use crate::tx::clean_horizon::retention::{enforce_retention, RetentionAction};
+#[cfg(feature = "fjall")]
 use crate::tx::drainer::Drainer;
+#[cfg(feature = "fjall")]
 use futures::{pin_mut, StreamExt};
 
+#[cfg(feature = "fjall")]
 async fn count_rows(table: &crate::table::TableManager) -> usize {
     let stream = table.list_stream(256);
     pin_mut!(stream);
@@ -20,6 +27,8 @@ async fn count_rows(table: &crate::table::TableManager) -> usize {
     count
 }
 
+/// Disk-backed (fjall_raw) fixture — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 fn policy(cap: u64, action: RetentionOverflow) -> DurabilityPolicy {
     DurabilityPolicy::new(
         WalCommitTier::Buffered,
@@ -29,6 +38,8 @@ fn policy(cap: u64, action: RetentionOverflow) -> DurabilityPolicy {
     )
 }
 
+/// Disk-backed (fjall_raw) fixture — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 async fn open_disk(
     name: &str,
     path: &std::path::Path,
@@ -44,6 +55,8 @@ async fn open_disk(
     .await
 }
 
+/// Disk-backed (fjall_raw) fixture — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 async fn seed(repo: &RepoInstance, count: usize) {
     let table = repo.get_table("t").await.unwrap();
     for index in 0..count {
@@ -65,6 +78,8 @@ async fn seed(repo: &RepoInstance, count: usize) {
     }
 }
 
+/// Disk-backed (fjall_raw) fixture — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 fn wal_file_count(path: &std::path::Path) -> usize {
     let mut dir = path.file_name().unwrap().to_os_string();
     dir.push(".shamirwal");
@@ -75,6 +90,8 @@ fn wal_file_count(path: &std::path::Path) -> usize {
         .count()
 }
 
+/// Disk-backed (fjall_raw) — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn declare_gap_never_unlinks_history_unsafe_segments() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -96,6 +113,8 @@ async fn declare_gap_never_unlinks_history_unsafe_segments() {
     assert_eq!(wal_file_count(&path), before);
 }
 
+/// Disk-backed (fjall_raw) — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn declare_gap_persists_floor_and_unlinks_safe_retained_wal() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -145,6 +164,8 @@ async fn declare_gap_persists_floor_and_unlinks_safe_retained_wal() {
     assert!(wal_file_count(&path) < before);
 }
 
+/// Disk-backed (fjall_raw) — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn refuse_writes_gate_clears_after_safe_drain() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -171,6 +192,8 @@ async fn refuse_writes_gate_clears_after_safe_drain() {
     assert!(!repo.wal_retention_refuse_writes());
 }
 
+/// Disk-backed (fjall_raw) — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn dead_writer_declare_gap_refuses_without_unlinking() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -195,6 +218,8 @@ async fn dead_writer_declare_gap_refuses_without_unlinking() {
     assert_eq!(wal_file_count(&path), before);
 }
 
+/// Disk-backed (fjall_raw) — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn refused_admission_does_not_publish_and_drain_allows_retry() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -250,20 +275,9 @@ async fn refused_admission_does_not_publish_and_drain_allows_retry() {
     assert_eq!(count_rows(&table).await, 81);
 }
 
-#[tokio::test]
-async fn memory_wal_bypasses_retention_gate() {
-    let repo = RepoInstance::new(
-        "memory".into(),
-        BoxRepo::InMemory(Arc::new(InMemoryRepo::new())),
-        vec![TableConfig::new("t")],
-    );
-    assert_eq!(
-        enforce_retention(&repo, 0).await.unwrap(),
-        RetentionAction::NoOverflow
-    );
-    assert!(!repo.wal_retention_refuse_writes());
-}
-
+/// Hybrid backend (Mem WAL sink over a persisted identity) — requires the
+/// `fjall` feature via `BoxRepoFactory::hybrid`.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn hybrid_wal_bypasses_retention_gate_and_checkpoint() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -289,6 +303,8 @@ async fn hybrid_wal_bypasses_retention_gate_and_checkpoint() {
     assert!(test_seam::take_order(&repo).is_empty());
 }
 
+/// Disk-backed (fjall_raw) — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn successful_truncate_remeasures_retention_and_clears_gate() {
     let temp = tempfile::TempDir::new().unwrap();

@@ -4,7 +4,7 @@
 //! (`shamir_sdk::validation::Validation`) but operates on [`QueryValue`]
 //! rather than the SDK's msgpack-wire `Value`. The encoder output is the
 //! Map form `{ "errors": List<err>, "stop": Bool }` that
-//! [`decode_validation_result`] round-trips (see Seam 2.2 of the Phase 0
+//! `decode_validation_result` round-trips (see Seam 2.2 of the Phase 0
 //! findings for the exact contract).
 //!
 //! Native validators built via [`crate::validator`] return this type; the
@@ -75,7 +75,7 @@ impl Validation {
 }
 
 /// Encode a [`Validation`] to the [`QueryValue`] Map form consumed by
-/// [`decode_validation_result`].
+/// `decode_validation_result`.
 ///
 /// Produces `{ "errors": List<err>, "stop": Bool }` where each `<err>` is
 /// either `Map { "code": Str, "field": List<Str> }` (when `field` is `Some`)

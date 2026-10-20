@@ -9,9 +9,9 @@
 use super::resolution::{self, Resolution};
 use super::roots::{self, RootKind};
 use super::scan_cfg::ScanCfg;
-use crate::exceptions::Exceptions;
-use crate::finding::{exit_code, Report};
-use crate::gitfs::GitFs;
+use crate::common::exceptions::Exceptions;
+use crate::common::finding::{exit_code, Report};
+use crate::common::gitfs::GitFs;
 use proc_macro2::Span;
 use proc_macro2::TokenTree;
 use std::collections::{BTreeMap, BTreeSet};

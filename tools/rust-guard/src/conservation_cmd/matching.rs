@@ -23,7 +23,7 @@
 
 use super::delta::Delta;
 use super::item::{identity, weak_key, Item, TestKind};
-use crate::finding::Report;
+use crate::common::finding::Report;
 use std::collections::BTreeMap;
 
 /// One accepted pairing and what drifted between the two sides.

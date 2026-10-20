@@ -83,6 +83,7 @@ pub fn release() {
 /// Blocking park — runs on the `spawn_blocking` thread, so a blocking
 /// primitive (Condvar, NOT tokio Notify) is required. Sets `reached`,
 /// then blocks until [`release`].
+#[cfg(feature = "fjall")]
 pub(crate) fn park() {
     REACHED.store(true, Ordering::Release);
     NOTIFY.notify_waiters();

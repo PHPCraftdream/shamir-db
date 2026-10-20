@@ -66,7 +66,7 @@ pub(crate) static TEST_POST_PRELOCK_PRE_MATERIALIZE_HOOK: std::sync::OnceLock<
     std::sync::Arc<PostPrelockPreMaterializeHook>,
 > = std::sync::OnceLock::new();
 
-/// Parks on [`TEST_POST_PRELOCK_PRE_MATERIALIZE_HOOK`] if a test installed
+/// Parks on `TEST_POST_PRELOCK_PRE_MATERIALIZE_HOOK` if a test installed
 /// one; a true no-op otherwise.
 async fn fire_post_prelock_pre_materialize_test_hook() {
     #[cfg(test)]
@@ -105,7 +105,7 @@ async fn fire_post_prelock_pre_materialize_test_hook() {
 pub(crate) const REPO_INTERNER_SCOPE: u64 = 0;
 
 /// SSI fix S2 — atomically CLAIM every data write-set key of `tx` on its
-/// per-table [`MvccStore`] cell, BEFORE the version is assigned and the WAL
+/// per-table `MvccStore` cell, BEFORE the version is assigned and the WAL
 /// entry is written (Phase 4). This moves the "who won the write-write race"
 /// decision OUT of the post-WAL publish (Phase 5a) and INTO an atomic
 /// pre-WAL claim, so a loser aborts with `SsiConflict` having never touched
@@ -201,16 +201,16 @@ async fn claim_write_set(
     Ok(guards)
 }
 
-/// Outcome of [`pre_commit`]: the assigned MVCC commit version plus the
+/// Outcome of `pre_commit`: the assigned MVCC commit version plus the
 /// per-table `unique_write_lock` guards that must stay held through
-/// Phase 5c (released inside [`materialize`]).
+/// Phase 5c (released inside `materialize`).
 pub(super) struct PreCommit {
     pub(super) commit_version: u64,
     pub(super) uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
     /// F-48b (#867): kept-alive writer-drain guards (one per fast-path table
     /// in `tx.write_set` whose `needs_write_barrier()` read `false` in Phase
     /// 2.5). Threaded alongside `uwl_guards` through Phase 5c, dropped inside
-    /// [`materialize`] after the data/index writes have landed.
+    /// `materialize` after the data/index writes have landed.
     pub(super) drain_guards: Vec<crate::table::writer_drain_barrier::WriterDrainGuard>,
     /// RAII owner of the version's terminal-mark obligation (P0a). Survives
     /// to the caller's success path (consumed via `materialize` →
@@ -234,9 +234,9 @@ pub(super) struct PreCommit {
 
 /// Outcome of [`pre_commit_prelock`]: per-table uwl_guards acquired in
 /// sorted token order OUTSIDE the commit_lock. These are passed into
-/// [`pre_commit_locked`] and then through to [`materialize`].
+/// [`pre_commit_locked`] and then through to `materialize`.
 ///
-/// F-48b (#867): `drain_guards` carries one [`WriterDrainGuard`] per table in
+/// F-48b (#867): `drain_guards` carries one `WriterDrainGuard` per table in
 /// `tx.write_set` whose Phase 2.5 `needs_write_barrier()` read `false` (the
 /// fast path). These stay alive through Phase 5c materialize — the exact
 /// window a schema-activation / index2-create DDL raising the barrier AFTER

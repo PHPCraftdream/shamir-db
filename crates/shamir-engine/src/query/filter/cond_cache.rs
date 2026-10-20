@@ -8,12 +8,12 @@
 //! compiled once outside the per-row loop).
 //!
 //! This module provides an opt-in cache keyed by the *content* of the
-//! boxed `Filter` AST (see [`cond_key`]). Callers that build a `CondCache`
+//! boxed `Filter` AST (see `cond_key`). Callers that build a `CondCache`
 //! once (e.g. `SelectProjection::new`) and thread it through
 //! `FilterContext::cond_cache` get pre-compiled `FilterNode`s for every
 //! `$cond` in the tree; callers that never populate `cond_cache` fall back
 //! to `FilterContext`'s own lazily-populated `local_cond_cache` (see
-//! `resolve.rs`'s `Cond` arm and [`compile_cond_cached`]), which covers
+//! `resolve.rs`'s `Cond` arm and `compile_cond_cached`), which covers
 //! WHERE, `when`, `for_each`'s `over`, and write-value resolution without
 //! requiring any of those callers to pre-scan a tree up front.
 

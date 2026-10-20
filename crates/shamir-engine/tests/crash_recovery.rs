@@ -1,7 +1,7 @@
+#![cfg(feature = "fjall")]
 //! Real crash-recovery harness — kill mid-commit at each phase, prove
-//! atomicity around the Phase-4 WAL commit point (Vector II.1).
-//!
-//! Unlike the in-process `drop(Arc<InMemoryRepo>)` "crash" tests, this
+//! atomicity around the Phase-4 WAL commit point (Vector II.1). Unlike
+//! the in-process `drop(Arc<InMemoryRepo>)` "crash" tests, this
 //! harness performs a GENUINE process death over a DISK-backed (redb,
 //! unbuffered) store:
 //!

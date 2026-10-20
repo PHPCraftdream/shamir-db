@@ -14,7 +14,7 @@
 //! lifecycle's `LifecycleJob` envelope. The worker holds NO sender and NO
 //! owner handle: repository drop drops the foreground token → `close()` →
 //! the worker drains and the supervisor joins → the lease is dropped after
-//! join, so [`ReceiptLease::quarantine_parked_if_any`] runs exactly once,
+//! join, so `ReceiptLease::quarantine_parked_if_any` runs exactly once,
 //! through the owner's supervisor.
 //!
 //! Admission = the repository permit: `run_receipt_pipeline` admits through

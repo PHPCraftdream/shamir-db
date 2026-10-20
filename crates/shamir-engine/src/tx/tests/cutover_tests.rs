@@ -17,6 +17,7 @@
 //! cannot sneak a pass in between a commit and a synchronous watermark read
 //! (it only progresses at `.await` points), making the lag deterministic.
 
+#[cfg(feature = "fjall")]
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -25,7 +26,9 @@ use shamir_tx::version_codec::encode_version_key;
 use shamir_tx::{CommitVisibility, IsolationLevel};
 use shamir_types::types::value::InnerValue;
 
-use crate::repo::{BoxRepo, BoxRepoFactory, RepoInstance};
+#[cfg(feature = "fjall")]
+use crate::repo::BoxRepoFactory;
+use crate::repo::{BoxRepo, RepoInstance};
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
 
@@ -35,6 +38,8 @@ fn make_repo() -> RepoInstance {
 }
 
 /// Reopen a disk-backed repo, tolerating Windows' lazy file-lock release.
+/// Disk-backed (fjall_raw) — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 async fn reopen_disk_repo(name: &str, path: PathBuf, tables: Vec<TableConfig>) -> RepoInstance {
     let mut last_err = None;
     for _ in 0..10 {
@@ -173,6 +178,8 @@ async fn commit_then_drain_all_makes_value_durable_in_history() {
 /// is reconstructed in `history` from the WAL and reads back. Proves the
 /// cutover keeps the WAL the source of truth: nothing is lost even though the
 /// ack-path never wrote `history` and the tail was never drained.
+/// Disk-backed (fjall_raw) crash-safety test — requires the `fjall` feature.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn reopen_recovery_without_drain_reconstructs_history() {
     let tempdir = tempfile::TempDir::new().expect("tempdir");

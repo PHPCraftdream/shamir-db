@@ -44,7 +44,7 @@ pub(crate) static TEST_POST_GEN_CAPTURE_PRE_UNIQUE_CHECK_HOOK: std::sync::OnceLo
     std::sync::Arc<PostGenCapturePreUniqueCheckHook>,
 > = std::sync::OnceLock::new();
 
-/// Parks on [`TEST_POST_GEN_CAPTURE_PRE_UNIQUE_CHECK_HOOK`] if a test
+/// Parks on `TEST_POST_GEN_CAPTURE_PRE_UNIQUE_CHECK_HOOK` if a test
 /// installed one; a true no-op otherwise. One-shot (CAS true→false) so
 /// only the FIRST caller to reach this seam actually parks.
 async fn fire_post_gen_capture_pre_unique_check_test_hook() {
@@ -279,7 +279,7 @@ impl TableManager {
 
     /// HIGH-6 / gap#1: route any HNSW vector delete carried by `rec` into
     /// the tx's own `staged_vector_deletes` buffer instead of the live
-    /// graph. Mirrors [`stage_vectors`] for the delete side: each vector
+    /// graph. Mirrors `stage_vectors` for the delete side: each vector
     /// backend checks whether `rec` carries a vector at its field path
     /// (`IndexBackend::staged_vector`); if so, the rid lands under this
     /// table's token. Promoted into the graph (adapter tombstone) + the
@@ -336,7 +336,7 @@ impl TableManager {
     /// Collect index ops from all index2 backends for an update.
     /// Does NOT apply — ops go into tx.index_write_set for deferred apply.
     ///
-    /// See [`plan_insert_ops`] for the `tx_id` parameter.
+    /// See `plan_insert_ops` for the `tx_id` parameter.
     pub(super) async fn plan_update_ops(
         &self,
         rid: RecordId,
@@ -356,7 +356,7 @@ impl TableManager {
         Ok(all_ops)
     }
 
-    /// RecordRef-generic variant of [`plan_update_ops`].
+    /// RecordRef-generic variant of `plan_update_ops`.
     ///
     /// Accepts any `RecordRef` (`InnerValue` or `RecordView`) so the update
     /// path can feed zero-copy lenses instead of decoded trees.
@@ -385,7 +385,7 @@ impl TableManager {
     /// Collect index ops from all index2 backends for a delete.
     /// Does NOT apply — ops go into tx.index_write_set for deferred apply.
     ///
-    /// See [`plan_insert_ops`] for the `tx_id` parameter.
+    /// See `plan_insert_ops` for the `tx_id` parameter.
     ///
     /// Accepts any `RecordRef` (`InnerValue` or `RecordView`) so the delete
     /// path can feed a zero-copy lens instead of a decoded tree.
@@ -452,7 +452,7 @@ impl TableManager {
         Ok(ops)
     }
 
-    /// RecordRef-generic variant of [`plan_base_index_update_ops`].
+    /// RecordRef-generic variant of `plan_base_index_update_ops`.
     ///
     /// Accepts any `RecordRef` (`InnerValue` or `RecordView`) so the update
     /// path can feed zero-copy lenses instead of decoded trees.
@@ -502,13 +502,13 @@ impl TableManager {
 
     /// tx-aware insert.
     ///
-    /// - `tx == None` → delegates to existing [`insert`].
+    /// - `tx == None` → delegates to existing `insert`.
     /// - `tx == Some` → stages data + index ops + counter delta in
     ///   TxContext. No physical writes. commit_tx Phase 5 applies.
     ///
     /// HIGH-6: base_index `IndexManager` (regular + unique) and
     /// `SortedIndexManager` posting writes ARE now staged into
-    /// `tx.index_write_set` via [`plan_base_index_insert_ops`]. The planners
+    /// `tx.index_write_set` via `plan_base_index_insert_ops`. The planners
     /// emit `IndexWriteOp`s carrying the exact physical key layout the
     /// non-tx readers expect, so the commit pipeline applies them
     /// atomically and a dropped tx leaves no ghost postings. Unique-index
@@ -526,7 +526,7 @@ impl TableManager {
     ///
     /// HIGH-6: stateful HNSW vectors are routed tx-locally — the index2
     /// `plan_insert_tx` is a no-op on the live graph for a tx, and
-    /// [`stage_vectors`] buffers the embedding in `tx.staged_vectors`.
+    /// `stage_vectors` buffers the embedding in `tx.staged_vectors`.
     /// Stateless peers (FTS / functional / btree) emit `IndexWriteOp`s
     /// accumulated in `tx.index_write_set`. A successful commit applies
     /// both (`commit_tx` Phase 5c for postings, Phase 5d for vectors); a
@@ -662,19 +662,19 @@ impl TableManager {
         Ok(rid)
     }
 
-    /// Batched tx-aware insert — mirrors [`insert_many`] for the tx
+    /// Batched tx-aware insert — mirrors `insert_many` for the tx
     /// staging path. Stages N records' data + index ops + counter
     /// delta into `tx` in one pass, lifting the per-row overhead
     /// (`validate_unique_for_create`, `unique_keys_for`,
     /// `all_backends().await` snapshots, `plan_base_index_insert_ops`)
     /// out of the row loop.
     ///
-    /// Semantics MUST match calling [`insert_tx`] N times:
+    /// Semantics MUST match calling `insert_tx` N times:
     ///   * each row gets a fresh `RecordId` (returned in input order);
     ///   * `UniqueGuard`s are recorded one-per-claim-per-row (the
     ///     `owner` is the row's rid — commit_tx Phase 2.6 needs that
     ///     to settle ownership);
-    ///   * HNSW vectors are staged tx-locally via [`stage_vector`];
+    ///   * HNSW vectors are staged tx-locally via `stage_vector`;
     ///   * stateless index2 backends emit ops via `plan_insert_tx`;
     ///   * base_index / unique / sorted indexes emit ops via the existing
     ///     batch planners (`plan_records_created_batch`,
@@ -883,7 +883,7 @@ impl TableManager {
     }
 
     /// W2d — lens-driven batched tx insert. Structurally identical to
-    /// [`insert_tx_many`] but takes already-encoded storage `Bytes` (produced
+    /// `insert_tx_many` but takes already-encoded storage `Bytes` (produced
     /// by `query_value_to_storage_bytes` in `execute_insert_tx`) instead of
     /// `InnerValue` trees. Index extraction, unique validation, vector
     /// staging, and all posting planners run through `RecordView` (zero-copy
@@ -1239,7 +1239,7 @@ impl TableManager {
         Ok(old.is_some())
     }
 
-    /// Byte-level tx-aware update — the W3 counterpart of [`update_tx`].
+    /// Byte-level tx-aware update — the W3 counterpart of `update_tx`.
     ///
     /// Called by `execute_update_tx` after `merge_storage_bytes` has already
     /// produced `new_bytes` from `old_bytes + set_map`. Skips the
@@ -1449,7 +1449,7 @@ impl TableManager {
     ///
     /// HIGH-6 / gap#1: any vector the deleted row carries is routed
     /// tx-locally into `tx.staged_vector_deletes` (via
-    /// [`stage_vector_delete`](Self::stage_vector_delete), the delete
+    /// `stage_vector_delete`, the delete
     /// mirror of the insert path's `stage_vectors`). The tx-aware
     /// `plan_delete_tx` is a no-op on the live graph for a tx, so a
     /// dropped/aborted tx leaves no ghost. At commit (Phase 5d) the staged
@@ -1539,7 +1539,7 @@ impl TableManager {
         Ok(true)
     }
 
-    /// tx-aware insert-or-update by RecordId. Alias of [`update_tx`]
+    /// tx-aware insert-or-update by RecordId. Alias of `update_tx`
     /// — same semantics in tx mode.
     pub async fn set_tx(
         &self,

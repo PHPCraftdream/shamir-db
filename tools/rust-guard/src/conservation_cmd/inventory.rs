@@ -20,7 +20,7 @@
 //! down into every extracted item.
 
 use super::item::{combine_cfg, Extractor, Item};
-use crate::gitfs::GitFs;
+use crate::common::gitfs::GitFs;
 use crate::modules_cmd::resolution::{self, Resolution};
 use crate::modules_cmd::roots::{self, RootKind};
 use crate::modules_cmd::scan_cfg::ScanCfg;

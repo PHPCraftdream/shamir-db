@@ -466,7 +466,11 @@ impl Drop for WriterDrainGuard {
 // fences needed to make loom actually enforce the ordering the real code
 // relies on).
 // ============================================================================
-#[cfg(loom)]
+// The `loom` crate is a DEV-dependency, so only the lib *test* target can
+// resolve it; gate on `test` too, or `cargo check --features loom` of the
+// non-test lib target cannot name `loom`. The loom CI job runs nextest on
+// the `--lib` test target, where `cfg(test)` holds, so the job is unaffected.
+#[cfg(all(loom, test))]
 mod loom_model {
     use loom::sync::atomic::{fence, AtomicBool, AtomicUsize, Ordering};
     use loom::sync::Arc;

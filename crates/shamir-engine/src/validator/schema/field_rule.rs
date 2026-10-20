@@ -1,9 +1,9 @@
 //! A single field rule and its check logic.
 //!
 //! [`FieldRule`] combines a field path, a [`TypeTag`], and [`Constraints`].
-//! The [`FieldRule::check`] method runs the type assertion and constraint
+//! The `FieldRule::check` method runs the type assertion and constraint
 //! checks against a live `&dyn RecordFields`, accumulating errors into a
-//! [`Validation`].  Phase B adds [`FieldRule::check_extended`] which layers
+//! [`Validation`].  Phase B adds `FieldRule::check_extended` which layers
 //! scalar-bridge / format / cross-field checks on top.
 
 use shamir_types::record_view::{Kind, ScalarRef};
@@ -42,7 +42,7 @@ pub struct FieldRule {
     /// (tests, rule_builder).  Set to `true` only by the DDL handlers
     /// (`handle_add_schema_rule`/`handle_set_table_schema`) when
     /// `table.count() == 0` at bind time — see
-    /// [`crate::admin::types::schema_ops::FieldRuleDto::keyset_safe`].
+    /// `crate::admin::types::schema_ops::FieldRuleDto::keyset_safe`.
     pub keyset_safe: bool,
 }
 
@@ -73,7 +73,7 @@ impl FieldRule {
     /// Production consumers use `SchemaValidator::validate` via the
     /// `RecordValidator` trait; a downstream crate's test harness that needs
     /// to call this directly (bypassing the async `validate` boundary) must
-    /// go through [`check_for_test`](Self::check_for_test) instead, which
+    /// go through `check_for_test` instead, which
     /// keeps `OneOfSet` out of the public surface.
     pub(crate) fn check(
         &self,
@@ -391,7 +391,7 @@ impl FieldRule {
     /// Run Phase A pure checks ([`check`](Self::check)) **plus** the Phase B
     /// checks: scalar-bridge, format, and cross-field comparison.
     ///
-    /// `ctx` carries the optional [`ScalarResolver`] — when `None`,
+    /// `ctx` carries the optional `ScalarResolver` — when `None`,
     /// scalar-bridge rules are silently skipped (they do not panic).  Format
     /// and cross-field checks are pure and always run when configured.
     ///

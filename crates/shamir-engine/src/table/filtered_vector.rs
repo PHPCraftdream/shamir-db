@@ -5,7 +5,7 @@
 //! that carries the vector half plus the residual predicate tree. This does
 //! NOT modify the public [`Filter`] enum; it is a planner-internal rewrite
 //! that feeds the post-filter + adaptive-oversample execution path in
-//! [`read_exec`].
+//! `read_exec`.
 //!
 //! Only the exact shape `And` with exactly ONE `VectorSimilarity` conjunct is
 //! recognised. A bare `VectorSimilarity` (no `And`) is left untouched so the

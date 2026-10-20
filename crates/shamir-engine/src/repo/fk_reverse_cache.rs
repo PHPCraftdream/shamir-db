@@ -93,7 +93,7 @@ pub(crate) static TEST_POST_GENCHECK_PRE_PUBLISH_HOOK: std::sync::OnceLock<
     std::sync::Arc<PostGenCheckPrePublishHook>,
 > = std::sync::OnceLock::new();
 
-/// Parks on [`TEST_POST_GENCHECK_PRE_PUBLISH_HOOK`] if a test installed one;
+/// Parks on `TEST_POST_GENCHECK_PRE_PUBLISH_HOOK` if a test installed one;
 /// a true no-op otherwise. See that static's doc for the exact program point
 /// and rationale.
 async fn fire_post_gencheck_pre_publish_test_hook() {

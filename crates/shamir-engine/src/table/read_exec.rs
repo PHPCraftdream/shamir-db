@@ -234,7 +234,7 @@ impl TableManager {
         self.read_impl(query, ctx, None, ResultEncoding::Name).await
     }
 
-    /// Like [`read`] but honours a client-requested [`ResultEncoding`].
+    /// Like `read` but honours a client-requested [`ResultEncoding`].
     ///
     /// When `encoding == Id` and the query is "simple" (SELECT * or plain
     /// field projection, no GROUP BY / aggregates / aliases / computed), rows
@@ -250,7 +250,7 @@ impl TableManager {
         self.read_impl(query, ctx, None, encoding).await
     }
 
-    /// tx-aware variant of [`read`] used by [`read_tx`] to fuse the SSI
+    /// tx-aware variant of `read` used by `read_tx` to fuse the SSI
     /// read-set recording pass into the single scan that emits rows.
     /// For the full-scan fallback the three sub-methods use tx-aware streams
     /// so no second scan is needed. For index/shortcut paths, predicate-level
@@ -265,7 +265,7 @@ impl TableManager {
         self.read_impl(query, ctx, tx, ResultEncoding::Name).await
     }
 
-    /// Like [`read_for_tx`] but honours a client-requested [`ResultEncoding`].
+    /// Like `read_for_tx` but honours a client-requested [`ResultEncoding`].
     pub(super) async fn read_for_tx_with_encoding(
         &self,
         query: &ReadQuery,
@@ -2037,7 +2037,7 @@ impl TableManager {
     ///
     /// Recognised shape: `And([VectorSimilarity{field,query,k,ef,oversample},
     /// ...residual-predicates])`. The planner compiled it into a
-    /// [`FilteredVectorQuery`] (vector half + residual filter).
+    /// `FilteredVectorQuery` (vector half + residual filter).
     ///
     /// Algorithm (post-filter with adaptive oversample-retry):
     /// 1. Resolve the oversample multiplier (`None` → 2× default, clamped ≥1×).

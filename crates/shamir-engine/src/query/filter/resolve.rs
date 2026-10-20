@@ -715,7 +715,7 @@ pub fn resolve_filter_value(
     .ok()
 }
 
-/// Extract a value from a QueryResult by a simple path like "[0].id".
+/// Extract a value from a QueryResult by a simple path like "\[0\].id".
 ///
 /// **Phase 2 — Call-aware**: when the `QueryResult` carries a
 /// `value` (a stored-procedure / `BatchOp::Call` return — object /

@@ -13,12 +13,12 @@
 //! `shamir_query_types::durability`; they are re-exported here so
 //! engine-internal paths (and tests) keep a stable import site.
 //!
-//! [`resolve`] folds a server-default policy plus an optional
+//! [`resolve()`] folds a server-default policy plus an optional
 //! `DurabilityOverride` into the effective policy, accepting
 //! `completed_reseed` (PR8 chunk 1) and enforcing the retention-vs-
 //! segment-size minimum.
 //!
-//! The replication-bound helper [`replication_bound`] implements the I3
+//! The replication-bound helper [`replication_bound()`] implements the I3
 //! invariant: a replication pull may never serve a version outside `R`, the
 //! WAL's contiguous recoverability prefix, because versions above `R` do
 //! not survive a power loss while the follower's bookmark does. Serve bound
@@ -32,7 +32,7 @@ mod resolve;
 
 pub use durability_metrics::{DurabilityMetrics, DurabilityMetricsSnapshot};
 pub use durability_policy::effective_wal_segment_bytes;
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 pub(crate) use durability_policy::RecoverabilityCoverage;
 pub(crate) use durability_policy::{
     certify_recovered_open, checkpoint_allocation_floor, install_empty_coverage,

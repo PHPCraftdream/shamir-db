@@ -1,7 +1,7 @@
 //! Type-level authorization seam — [`Authorized`] + [`AccessGate`] (#1199).
 //!
-//! **Problem this closes.** Before this module existed, [`execute_batch`]
-//! and [`execute_in_open_tx`] took a raw `&BatchRequest` + `Actor` pair —
+//! **Problem this closes.** Before this module existed, `execute_batch`
+//! and `execute_in_open_tx` took a raw `&BatchRequest` + `Actor` pair —
 //! plain data, with nothing stopping a caller from invoking them WITHOUT
 //! ever having run an access-control check. The real check
 //! (`ShamirDb::authorize_access` against the live ACL tree) lived entirely
@@ -66,8 +66,8 @@ pub trait AccessGate: Send + Sync {
 
 /// A [`BatchRequest`] that has already cleared authorization.
 ///
-/// See the module doc for the full rationale. [`execute_batch`] and
-/// [`execute_in_open_tx`] take this type BY VALUE (it is not `Clone`) in
+/// See the module doc for the full rationale. `execute_batch` and
+/// `execute_in_open_tx` take this type BY VALUE (it is not `Clone`) in
 /// place of a raw `&BatchRequest` + `Actor` — one mint authorizes exactly
 /// one execution.
 #[derive(Debug)]

@@ -86,7 +86,7 @@ fn record_field_matches(
     Ok(false)
 }
 
-/// Check whether a decoded record's field (by pre-resolved [`InternerKey`])
+/// Check whether a decoded record's field (by pre-resolved `InternerKey`)
 /// matches `value`.
 ///
 /// Factored out of [`record_field_matches`] so the staged-probe path can

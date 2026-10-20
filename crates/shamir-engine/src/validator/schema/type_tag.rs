@@ -1,7 +1,7 @@
 //! Type tags for declarative schema field rules.
 //!
-//! Each [`TypeTag`] corresponds to a [`Value`] variant (or the wildcard `Any`).
-//! The tag is used by [`FieldRule::check`] to assert the runtime type of a
+//! Each [`TypeTag`] corresponds to a `Value` variant (or the wildcard `Any`).
+//! The tag is used by `FieldRule::check` to assert the runtime type of a
 //! field value.
 
 use std::fmt;

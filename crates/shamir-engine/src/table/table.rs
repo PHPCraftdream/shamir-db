@@ -222,7 +222,7 @@ impl Table {
         }
     }
 
-    /// Like [`list_stream`], but applies a bytes-level pre-filter before
+    /// Like `list_stream`, but applies a bytes-level pre-filter before
     /// decoding each record to `InnerValue`.  Rows that the pre-filter
     /// definitively rejects (`Some(false)`) are skipped without allocation.
     ///
@@ -264,7 +264,7 @@ impl Table {
     /// via checksums; re-validating here is redundant.
     ///
     /// Shared by [`Table::list_stream`] (unattached tables) and the
-    /// `MvccStore`-attached branch of [`TableManager::list_stream`] so there is
+    /// `MvccStore`-attached branch of `TableManager::list_stream` so there is
     /// ONE decode implementation (no copy-paste drift).
     pub(super) fn decode_raw_batch(
         batch_bytes: Vec<(bytes::Bytes, bytes::Bytes)>,
@@ -290,7 +290,7 @@ impl Table {
         out.into_iter()
     }
 
-    /// Like [`decode_raw_batch`], but applies a bytes-level pre-filter before
+    /// Like `decode_raw_batch`, but applies a bytes-level pre-filter before
     /// passing through each record.
     ///
     /// For each row:
@@ -299,7 +299,7 @@ impl Table {
     ///   `RecordCow::Borrowed(value_bytes)`; the compiled filter re-runs on
     ///   the `RecordView` in the consumer.
     ///
-    /// Error semantics: RELAXED (same as [`decode_raw_batch`]).
+    /// Error semantics: RELAXED (same as `decode_raw_batch`).
     pub(super) fn decode_raw_batch_filtered(
         batch_bytes: Vec<(bytes::Bytes, bytes::Bytes)>,
         pre_filter: &crate::query::filter::FilterNode,

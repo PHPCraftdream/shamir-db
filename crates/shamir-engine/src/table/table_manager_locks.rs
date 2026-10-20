@@ -36,7 +36,7 @@ impl TableManager {
     }
 
     /// Acquire a Level-3 `Exclusive` (write) lock on `key` for a Pessimistic
-    /// tx. Same contract as [`acquire_pessimistic_read_lock`] but exclusive.
+    /// tx. Same contract as `acquire_pessimistic_read_lock` but exclusive.
     pub async fn acquire_pessimistic_write_lock(
         &self,
         key: RecordKey,
