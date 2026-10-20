@@ -457,9 +457,15 @@ fn run_suggest(
     (repo, out)
 }
 
+fn contains_sub(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
 /// P3 parity: `--suggest-delta` must not change the gate's output apart
 /// from the note line(s) — same exit code, identical stdout, and a
-/// stderr that is the plain stderr plus note line(s) only.
+/// stderr that is the plain stderr plus note line(s) only. All three
+/// comparisons are byte-exact (no lossy UTF-8, no line-ending
+/// normalisation); the note line(s) are stripped as raw bytes.
 fn assert_flagless_output_unchanged(flagged: &Output, plain: &Output, note_marker: &str) {
     assert_eq!(
         flagged.status.code(),
@@ -467,18 +473,21 @@ fn assert_flagless_output_unchanged(flagged: &Output, plain: &Output, note_marke
         "exit code changed by --suggest-delta"
     );
     assert_eq!(
-        String::from_utf8_lossy(&flagged.stdout),
-        String::from_utf8_lossy(&plain.stdout),
+        flagged.stdout, plain.stdout,
         "stdout changed by --suggest-delta"
     );
-    let stripped: String = String::from_utf8_lossy(&flagged.stderr)
-        .lines()
-        .filter(|line| !line.contains(note_marker))
-        .map(|line| format!("{line}\n"))
+    // Remove exactly the note line(s) from the flagged stderr, as raw
+    // bytes (no lossy UTF-8, no line-ending normalisation).
+    let marker = note_marker.as_bytes();
+    let stripped: Vec<u8> = flagged
+        .stderr
+        .split_inclusive(|&b| b == b'\n')
+        .filter(|line| !contains_sub(line, marker))
+        .flatten()
+        .copied()
         .collect();
     assert_eq!(
-        stripped,
-        String::from_utf8_lossy(&plain.stderr),
+        stripped, plain.stderr,
         "stderr changed by --suggest-delta beyond the note line(s)"
     );
 }
@@ -642,12 +651,15 @@ fn discovery_suggestion_escapes_special_characters() {
     // backslash and a control byte; the suggestion file must escape them
     // (Rust's `{:?}` renders `\u{7}` which is INVALID TOML), and feeding
     // the file back as `--delta` must round-trip the identity exactly.
-    // In the JSON builder string the name is JSON-escaped:
+    // The pinned `--base-sha` carries a quote too, proving the `base =`
+    // line is escaped as well. In the JSON builder string the name is
+    // JSON-escaped:
     // we"ird\test<U+0007>x -> we\"ird\\test\u0007x
     let weird = "we\\\"ird\\\\test\\u0007x";
     let base = lines("bin_a", &[weird]);
     let head = lines("bin_b", &[weird]);
-    let (repo, out) = run_suggest(&base, &head, "deadbeef", Some("suggested-esc.toml"));
+    let pinned = "dead\"beef";
+    let (repo, out) = run_suggest(&base, &head, pinned, Some("suggested-esc.toml"));
     let err = stderr_text(&out);
     assert!(!out.status.success(), "expected exit != 0:\n{err}");
     assert!(err.contains("TEST_LOST"), "expected TEST_LOST:\n{err}");
@@ -664,6 +676,10 @@ fn discovery_suggestion_escapes_special_characters() {
     assert!(
         !text.contains('\u{7}'),
         "the raw control byte must not appear:\n{text}"
+    );
+    assert!(
+        text.contains("base = \"dead\\\"beef\""),
+        "the pinned base sha must be escaped (raw quote would break TOML):\n{text}"
     );
     // Feed the suggestion back: it must parse (no MALFORMED_DELTA) and
     // the escaped strings must round-trip exactly (the [[moved]] entry

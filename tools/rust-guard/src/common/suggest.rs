@@ -54,7 +54,7 @@ pub(crate) fn write(out_path: &str, base: &str, moves: &[MoveSuggestion]) -> Res
         .collect();
     let mut text = String::new();
     text.push_str("base = \"");
-    text.push_str(base);
+    text.push_str(&escape_toml_string(base));
     text.push_str("\"\n");
     for (path, item, to_path, to_item) in &sorted {
         text.push_str(&format!(

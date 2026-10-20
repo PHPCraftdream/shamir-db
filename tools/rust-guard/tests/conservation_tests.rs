@@ -127,9 +127,15 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
+fn contains_sub(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
 /// P3 parity: `--suggest-delta` must not change the gate's output apart
 /// from the note line(s) — same exit code, identical stdout, and a
-/// stderr that is the plain stderr plus note line(s) only.
+/// stderr that is the plain stderr plus note line(s) only. All three
+/// comparisons are byte-exact (no lossy UTF-8, no line-ending
+/// normalisation); the note line(s) are stripped as raw bytes.
 fn assert_flagless_output_unchanged(flagged: &Output, plain: &Output, note_marker: &str) {
     assert_eq!(
         flagged.status.code(),
@@ -137,18 +143,21 @@ fn assert_flagless_output_unchanged(flagged: &Output, plain: &Output, note_marke
         "exit code changed by --suggest-delta"
     );
     assert_eq!(
-        String::from_utf8_lossy(&flagged.stdout),
-        String::from_utf8_lossy(&plain.stdout),
+        flagged.stdout, plain.stdout,
         "stdout changed by --suggest-delta"
     );
-    let stripped: String = String::from_utf8_lossy(&flagged.stderr)
-        .lines()
-        .filter(|line| !line.contains(note_marker))
-        .map(|line| format!("{line}\n"))
+    // Remove exactly the note line(s) from the flagged stderr, as raw
+    // bytes (no lossy UTF-8, no line-ending normalisation).
+    let marker = note_marker.as_bytes();
+    let stripped: Vec<u8> = flagged
+        .stderr
+        .split_inclusive(|&b| b == b'\n')
+        .filter(|line| !contains_sub(line, marker))
+        .flatten()
+        .copied()
         .collect();
     assert_eq!(
-        stripped,
-        String::from_utf8_lossy(&plain.stderr),
+        stripped, plain.stderr,
         "stderr changed by --suggest-delta beyond the note line(s)"
     );
 }
@@ -478,9 +487,9 @@ fn suggest_flag_writes_undeclared_moves() {
         "path = \"crates/fix/src/lib.rs\"",
         "item = \"fix::lib::helper\"",
         "to_path = \"crates/fix/src/m.rs\"",
-        "to_item = \"fix::m::helper\"",
+        "to_item = \"fix::lib::m::helper\"",
         "item = \"fix::lib::t_ok\"",
-        "to_item = \"fix::m::t_ok\"",
+        "to_item = \"fix::lib::m::t_ok\"",
     ] {
         assert!(text.contains(expected), "missing `{expected}`:\n{text}");
     }
@@ -552,10 +561,13 @@ fn without_suggest_flag_no_file_no_note() {
 
 #[test]
 fn signature_changed_move_is_not_suggested() {
-    // P2-1: `helper` moved file AND changed signature (u32 -> i64, body
-    // tokens identical). A drifted move must never be suggested: the
-    // flagless findings (ITEM_LOST + ITEM_ADDED) are unchanged and the
-    // suggestion file carries no `helper` entry.
+    // P2-1: `helper` moved FILE only (via `#[path]`) while changing its
+    // signature (u32 -> i64, body tokens identical). The logical path
+    // `fix::lib::m::helper` is UNCHANGED, so the pair lands in the pass-1
+    // exact-identity branch at matching.rs:111-124 (ITEM_MOVED). This
+    // test FAILS if the `b.signature == h.signature` term is removed
+    // from the suggestion predicate — `helper` (pass-1 file move) would
+    // then be suggested and the file would exist.
     let repo = ConsRepo::two_commit("conservation/suggest_sig_changed");
     let plain = repo.compare();
     let plain_err = stderr(&plain);
@@ -564,20 +576,17 @@ fn signature_changed_move_is_not_suggested() {
         "expected flagless exit != 0:\n{plain_err}"
     );
     assert!(
-        plain_err.contains("ITEM_LOST") && plain_err.contains("ITEM_ADDED"),
-        "expected ITEM_LOST + ITEM_ADDED:\n{plain_err}"
+        plain_err.contains("ITEM_MOVED"),
+        "expected ITEM_MOVED for the file-moved item:\n{plain_err}"
     );
     let out = repo.compare_with_suggest("suggested.toml");
     let err = stderr(&out);
     assert!(!out.status.success(), "expected exit != 0:\n{err}");
     assert_flagless_output_unchanged(&out, &plain, "rust-guard: note:");
-    if repo.read_ok("suggested.toml") {
-        let text = repo.read("suggested.toml");
-        assert!(
-            !text.contains("helper"),
-            "a signature-drifted move must never be suggested:\n{text}"
-        );
-    }
+    assert!(
+        !repo.read_ok("suggested.toml"),
+        "a signature-drifted file move must never be suggested (no file at all):\n{err}"
+    );
 }
 
 #[test]
@@ -595,8 +604,16 @@ fn body_changed_moved_test_regression() {
         "expected flagless exit != 0:\n{plain_err}"
     );
     assert!(
-        plain_err.contains("TEST_LOST"),
-        "expected TEST_LOST:\n{plain_err}"
+        plain_err
+            .lines()
+            .any(|l| l.contains("TEST_LOST") && l.contains("fix::lib::t_mut")),
+        "expected TEST_LOST naming fix::lib::t_mut:\n{plain_err}"
+    );
+    assert!(
+        plain_err
+            .lines()
+            .any(|l| l.contains("TEST_LOST") && l.contains("fix::lib::t_ok")),
+        "expected TEST_LOST naming fix::lib::t_ok:\n{plain_err}"
     );
     let out = repo.compare_with_suggest("suggested.toml");
     assert!(!out.status.success(), "expected exit != 0");
@@ -616,7 +633,7 @@ fn body_changed_moved_test_regression() {
          path = \"{LIB}\"\n\
          item = \"fix::lib::t_mut\"\n\
          to_path = \"crates/fix/src/m.rs\"\n\
-         to_item = \"fix::m::t_mut\"\n\
+         to_item = \"fix::lib::m::t_mut\"\n\
          reason = \"hand-declared move of the drifted test\"\n\
          owner = \"@rust-guard\"\n",
         repo.base_sha
