@@ -22,7 +22,7 @@
   "scripts": {
     "build": "tsc -p configs/tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run --config configs/vitest.config.ts"
   },
   "dependencies": {
     "@msgpack/msgpack": "^3.0.0",

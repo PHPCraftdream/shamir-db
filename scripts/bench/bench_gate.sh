@@ -22,10 +22,10 @@
 # when deliberately introducing a new workload before its baseline exists.
 #
 # Usage:
-#   ./scripts/bench_gate.sh                    # gate: compare vs bench-baseline.json, exit non-zero on regression
-#   ./scripts/bench_gate.sh --capture-baseline # (re)write bench-baseline.json from a fresh run, exit 0
-#   ./scripts/bench_gate.sh --json-only        # just emit the per-cell JSON lines, no baseline comparison
-#   ./scripts/bench_gate.sh --allow-new-cells  # gate mode: permit cells that have no baseline entry yet (do not fail on them)
+#   ./scripts/bench/bench_gate.sh                    # gate: compare vs bench-baseline.json, exit non-zero on regression
+#   ./scripts/bench/bench_gate.sh --capture-baseline # (re)write bench-baseline.json from a fresh run, exit 0
+#   ./scripts/bench/bench_gate.sh --json-only        # just emit the per-cell JSON lines, no baseline comparison
+#   ./scripts/bench/bench_gate.sh --allow-new-cells  # gate mode: permit cells that have no baseline entry yet (do not fail on them)
 #
 # Env:
 #   BENCH_GATE_THRESHOLD_PCT   override the regression threshold (default 25 — see the
@@ -45,7 +45,7 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BASELINE_FILE="$REPO_ROOT/bench-baseline.json"
 THRESHOLD_PCT="${BENCH_GATE_THRESHOLD_PCT:-25}"
 
@@ -231,7 +231,7 @@ gate_check_cell() {
 
 # ===========================================================================
 # Main flow — skipped when this file is sourced by the parser test
-# (scripts/tests/bench_gate_parser_test.sh), so only the functions above load.
+# (scripts/bench/bench_gate_parser_test.sh), so only the functions above load.
 # ===========================================================================
 if [ "${BASH_SOURCE[0]:-$0}" != "$0" ]; then
     return 0 2>/dev/null || true
