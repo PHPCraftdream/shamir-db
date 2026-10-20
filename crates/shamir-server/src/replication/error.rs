@@ -121,7 +121,8 @@ pub enum ReplError {
 
     /// Applying a replicated event to the follower store failed. Transient
     /// by default — a re-delivery after backoff may succeed, and
-    /// `apply_replicated` is idempotent so retries are safe.
+    /// `apply_replicated_batch` (the receipt-only path) is idempotent so
+    /// retries are safe.
     #[error("applying replicated event (leader commit_version {leader_version}) failed: {source}")]
     Apply {
         /// The leader `commit_version` of the event that failed to apply.
@@ -146,4 +147,25 @@ pub enum ReplError {
     /// after backoff.
     #[error("failed to read replication bookmark: {0}")]
     Bookmark(String),
+
+    /// S5c-X PR6b-3 — the follower repo's durable state is unsupported by
+    /// this version (legacy bookmark format, malformed record, or
+    /// floor-without-bookmark evidence). **Terminal**: no migration exists;
+    /// the operator reseeds the affected subscription.
+    #[error("follower state refused ({reason:?}); no migration exists — reseed required")]
+    FollowerStateRefused {
+        reason: shamir_db::storage::error::FollowerRefusalReason,
+    },
+
+    /// S5c-X PR6b-3 R7 — the destination repository's storage backend does
+    /// does not support repository-wide atomic batches. **Terminal**: the
+    /// receipt pipeline can never activate on it, so the loop stops instead of
+    /// retrying; use a raw in-memory or raw fjall destination.
+    #[error("destination repository {db}/{repo} does not support repository-wide atomic batches; use a raw in-memory or raw fjall repository")]
+    AtomicBatchUnsupported {
+        /// Destination database name.
+        db: String,
+        /// Destination repository name.
+        repo: String,
+    },
 }

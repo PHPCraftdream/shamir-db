@@ -46,6 +46,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::error::ReplError;
+use super::source::seed::terminal::{clear_stall, note_swallowed_failure};
 use super::source::{leader_epoch_of, ReplSource};
 
 /// Default pull batch size (REPLICATION §6.1 `pull_limit`). Each pull returns
@@ -66,6 +67,19 @@ const INITIAL_BACKOFF_MS: u64 = 200;
 /// Cap for the transient-error exponential backoff. Matches the
 /// `reconnect_backoff_ms.max` tunable in REPLICATION §6.1.
 const MAX_BACKOFF_MS: u64 = 30_000;
+
+/// PR6b-3 stall visibility: after this many consecutive swallowed failures
+/// WITHOUT durable-bookmark progress, persist a `status_message` on the
+/// subscription row so the stall is observable via status/list (a stalled
+/// follower must never be silent again — CI showed `state=active`,
+/// `status_message=null` while a loop retried forever).
+///
+/// Bound justification: it is strictly greater than the engine's inline
+/// retry budget of 3, so the `receipt_io_pause_retry_convergence` scenario
+/// (3 failures, then convergence) can NEVER trip it by construction. 10 is
+/// also small enough that, under the capped exponential backoff (200 ms →
+/// 30 s), a genuinely stuck loop surfaces within minutes.
+pub(crate) const STALL_VISIBILITY_THRESHOLD: usize = 10;
 
 /// Configuration for [`run_follower_loop`]: per-repo identity + tunables,
 /// grouped so the loop entry point stays under the argument-count lint and
@@ -99,7 +113,11 @@ pub struct FollowerLoopConfig {
     pub max_iterations: Option<usize>,
     /// S5c-X round 3: the subscription this loop serves. Empty means
     /// "unsupervised loop" (direct/test callers) with no lease — the
-    /// lease gates below are skipped entirely.
+    /// lease gates below are skipped entirely — and stall visibility is
+    /// disabled. A non-empty name enables PR6b-3 stall visibility: when the
+    /// loop swallows [`STALL_VISIBILITY_THRESHOLD`] consecutive failures
+    /// without bookmark progress, that subscription row is marked with a
+    /// persistent `status_message` (the supervisor always sets it).
     pub subscription: String,
     /// S5c-X round 4: the per-subscription generation lease — the loop
     /// applies only while the lease is valid. `None` for unsupervised
@@ -186,6 +204,15 @@ impl FollowerLoopConfig {
         self.max_iterations = Some(n);
         self
     }
+
+    /// Set the subscription row to mark on a no-progress stall
+    /// ([`STALL_VISIBILITY_THRESHOLD`] swallowed failures without bookmark
+    /// progress). The supervisor wires this; direct callers may omit it.
+    #[must_use]
+    pub fn with_subscription(mut self, name: impl Into<String>) -> Self {
+        self.subscription = name.into();
+        self
+    }
 }
 
 /// Overrides only identity persistence for full-loop durability regressions.
@@ -193,6 +220,17 @@ impl FollowerLoopConfig {
 pub(crate) struct IdentityStoreOverride {
     pub(crate) info: Arc<dyn shamir_db::storage::types::Store>,
     pub(crate) startup_reflush: bool,
+}
+
+/// Round 12 F1: a stall/clear DECISION recorded while the apply-gate READ
+/// guard is held. Persistence (which takes the replication control lock
+/// inside `set_subscription_status_message`) happens only after the guard
+/// is dropped — see the loop's post-`drop(_apply_guard)` block.
+enum PendingStall {
+    /// Bookmark advanced: overwrite a reported stall with a progress note.
+    Clear(u64),
+    /// Another swallowed failure: report a stall at the current streak.
+    Note(String),
 }
 
 #[cfg(test)]
@@ -308,6 +346,11 @@ async fn run_follower_loop_internal(
         #[cfg(test)]
             exit_hook: _,
     } = cfg;
+    let subscription = if subscription.is_empty() {
+        None
+    } else {
+        Some(subscription.as_str())
+    };
     #[cfg(not(test))]
     let identity_fence = true;
     let apply_policy = if validate_replicated_payload {
@@ -343,7 +386,7 @@ async fn run_follower_loop_internal(
                 node_id = %node_id,
                 db = %db_name,
                 repo = %repo,
-                subscription = %subscription,
+                subscription = %subscription.unwrap_or(""),
                 "follower_loop: binding lease already superseded; exiting"
             );
             return Ok(());
@@ -412,6 +455,14 @@ async fn run_follower_loop_internal(
 
     let mut backoff_ms = INITIAL_BACKOFF_MS;
     let mut iter = 0usize;
+    // Rule (round 13 G2): unsupervised loop (lease: None) = never writes; supervised loop = writes with its lease generation; tests driving a supervised loop must attach the row's REAL binding_generation (no 0 special-case in production — 0 is fenced out as stale).
+    let lease_generation = lease.as_ref().map_or(0, |l| l.generation);
+    // PR6b-3 stall visibility: consecutive swallowed failures and the last
+    // durable bookmark observed. Progress = the bookmark advancing beyond
+    // the previous iteration's value; any progress resets the counter.
+    let mut consecutive_failures: usize = 0;
+    let mut prev_bookmark: Option<u64> = None;
+    let mut stall_reported = false;
 
     loop {
         // Cancellation check — cheap and race-free (CancellationToken).
@@ -439,7 +490,7 @@ async fn run_follower_loop_internal(
             if !l.valid.load(Ordering::Acquire) {
                 info!(
                     node_id = %node_id,
-                    subscription = %subscription,
+                    subscription = %subscription.unwrap_or(""),
                     "follower_loop: binding lease superseded; exiting"
                 );
                 return Ok(());
@@ -457,6 +508,20 @@ async fn run_follower_loop_internal(
                     repo: repo.clone(),
                 };
                 warn!(node_id = %node_id, error = %e, "follower_loop: backing off");
+                consecutive_failures += 1;
+                // Round 12 F1 classification: GUARD-FREE arm (repo missing —
+                // `continue` before the apply guard exists), so the status
+                // writer's control lock may be taken directly.
+                note_swallowed_failure(
+                    &db,
+                    &node_id,
+                    subscription,
+                    lease_generation,
+                    consecutive_failures,
+                    &e.to_string(),
+                    &mut stall_reported,
+                )
+                .await;
                 sleep_backoff(&cancel, &mut backoff_ms).await;
                 continue;
             }
@@ -473,10 +538,45 @@ async fn run_follower_loop_internal(
             });
         }
         let bookmark = match repo_instance.replication_bookmark().await {
-            Ok(v) => v,
+            Ok(v) => {
+                // PR6b-3: durable progress resets the stall counter (and
+                // clears a previously reported stall message).
+                if prev_bookmark.is_some_and(|prev| v > prev) {
+                    consecutive_failures = 0;
+                    if stall_reported {
+                        clear_stall(
+                            &db,
+                            &node_id,
+                            subscription,
+                            v,
+                            lease_generation,
+                            &mut stall_reported,
+                        )
+                        .await;
+                    }
+                }
+                prev_bookmark = Some(v);
+                v
+            }
             Err(e) => {
+                // PR6b-3: a refused durable follower state is TERMINAL — no
+                // migration exists, the operator reseeds. Never retry it.
+                if let shamir_db::storage::error::DbError::FollowerStateRefused { reason } = &e {
+                    return Err(ReplError::FollowerStateRefused { reason: *reason });
+                }
                 let re = ReplError::Bookmark(e.to_string());
                 warn!(node_id = %node_id, error = %re, "follower_loop: bookmark read failed");
+                consecutive_failures += 1;
+                note_swallowed_failure(
+                    &db,
+                    &node_id,
+                    subscription,
+                    lease_generation,
+                    consecutive_failures,
+                    &re.to_string(),
+                    &mut stall_reported,
+                )
+                .await;
                 sleep_backoff(&cancel, &mut backoff_ms).await;
                 continue;
             }
@@ -505,6 +605,17 @@ async fn run_follower_loop_internal(
             | Err(e @ ReplError::Seed(_)) => return Err(e),
             Err(e) => {
                 warn!(node_id = %node_id, error = %e, "follower_loop: pull failed, backing off");
+                consecutive_failures += 1;
+                note_swallowed_failure(
+                    &db,
+                    &node_id,
+                    subscription,
+                    lease_generation,
+                    consecutive_failures,
+                    &e.to_string(),
+                    &mut stall_reported,
+                )
+                .await;
                 sleep_backoff(&cancel, &mut backoff_ms).await;
                 continue;
             }
@@ -527,8 +638,13 @@ async fn run_follower_loop_internal(
                 .tx_info_store()
                 .await
                 .map_err(|error| ReplError::Bookmark(error.to_string()))?;
-            super::identity_fence::checks::fence_pull_identity(&info, &resp, seed_receipt.as_ref())
-                .await?;
+            super::identity_fence::checks::fence_pull_identity(
+                &info,
+                &resp,
+                seed_receipt.as_ref(),
+                Some(&repo_instance),
+            )
+            .await?;
         } else {
             super::source::seed::fence::fence_pull(seed_receipt.as_ref(), &resp)?;
         }
@@ -556,8 +672,13 @@ async fn run_follower_loop_internal(
         backoff_ms = INITIAL_BACKOFF_MS;
 
         // 5. dispatch on the reply payload.
-        let (events_bytes, gap_at) = match resp {
-            ReplResponse::Pull { events, gap_at, .. } => (events, gap_at),
+        let (events_bytes, gap_at, current_version) = match resp {
+            ReplResponse::Pull {
+                events,
+                gap_at,
+                current_version,
+                ..
+            } => (events, gap_at, current_version),
             ReplResponse::Error { code, message, .. } => {
                 // S5c-X 2c: the leader refuses to serve a completed_reseed
                 // repo to a legacy follower. New enough to understand the
@@ -578,6 +699,17 @@ async fn run_follower_loop_internal(
                     code = %code,
                     "follower_loop: leader returned error: {message}"
                 );
+                consecutive_failures += 1;
+                note_swallowed_failure(
+                    &db,
+                    &node_id,
+                    subscription,
+                    lease_generation,
+                    consecutive_failures,
+                    &format!("leader error code {code}: {message}"),
+                    &mut stall_reported,
+                )
+                .await;
                 sleep_backoff(&cancel, &mut backoff_ms).await;
                 continue;
             }
@@ -622,6 +754,17 @@ async fn run_follower_loop_internal(
             Err(e) => {
                 let re = ReplError::Decode(e.to_string());
                 warn!(node_id = %node_id, error = %re, "follower_loop: decode failed, backing off");
+                consecutive_failures += 1;
+                note_swallowed_failure(
+                    &db,
+                    &node_id,
+                    subscription,
+                    lease_generation,
+                    consecutive_failures,
+                    &re.to_string(),
+                    &mut stall_reported,
+                )
+                .await;
                 sleep_backoff(&cancel, &mut backoff_ms).await;
                 continue;
             }
@@ -630,6 +773,43 @@ async fn run_follower_loop_internal(
         if events.is_empty() {
             if max_iterations.is_some_and(|cap| iter >= cap) {
                 return Ok(());
+            }
+            // R7-5: a SUCCESSFUL pull can still be a NO-PROGRESS iteration —
+            // the leader advertises a backlog (`current_version` past our
+            // durable bookmark) yet returned nothing. Feed the stall measure
+            // so an indefinitely stuck-but-GREEN loop is visible too. A
+            // genuinely caught-up leader (`current_version == bookmark`) is
+            // healthy idle and must NOT count.
+            if current_version > bookmark {
+                if prev_bookmark.is_some_and(|previous| bookmark > previous) {
+                    consecutive_failures = 0;
+                    if stall_reported {
+                        // Guard-free arm (before the apply guard exists): direct call.
+                        clear_stall(
+                            &db,
+                            &node_id,
+                            subscription,
+                            bookmark,
+                            lease_generation,
+                            &mut stall_reported,
+                        )
+                        .await;
+                    }
+                }
+                consecutive_failures += 1;
+                note_swallowed_failure(
+                    &db,
+                    &node_id,
+                    subscription,
+                    lease_generation,
+                    consecutive_failures,
+                    &format!(
+                        "leader advertises backlog through version {current_version} \
+                         but returned no events from {from_version}"
+                    ),
+                    &mut stall_reported,
+                )
+                .await;
             }
             // The leader already long-polled `poll_wait_ms`; a tiny extra
             // backoff keeps us polite but is not required.
@@ -640,6 +820,8 @@ async fn run_follower_loop_internal(
             continue;
         }
 
+        // PR6b-3: the receipt pipeline is the ONLY apply path; admission
+        // refuses unsupported durable follower states with a typed error.
         // Round-4 lease: hold the READ guard across the engine apply. A
         // concurrent lifecycle mutation (DROP/PAUSE/terminal/rebind) takes
         // the WRITE gate under the control lock and waits for this apply to
@@ -649,7 +831,7 @@ async fn run_follower_loop_internal(
             Some(l) => {
                 let g = l.apply_gate.read().await;
                 if !l.valid.load(Ordering::Acquire) {
-                    info!(node_id = %node_id, subscription = %subscription,
+                    info!(node_id = %node_id, subscription = %subscription.unwrap_or(""),
                         "follower_loop: binding superseded before apply; exiting");
                     return Ok(());
                 }
@@ -664,10 +846,13 @@ async fn run_follower_loop_internal(
                 return Ok(());
             }
         }
-
-        // PR6b-2 activation: fresh repositories take the receipt path;
-        // repositories with a stored legacy v1/v2 bookmark keep the legacy
-        // path (activation.rs decides from the DURABLE bookmark record).
+        // Round 12 F1: guard-held stall/clear DECISIONS are recorded here and
+        // persisted only after `drop(_apply_guard)` below — the persistence
+        // takes the replication control lock, and awaiting it under the
+        // apply-gate read guard would invert the documented lock order
+        // (control lock → apply_gate.write()) and self-deadlock on the lease
+        // quiesce.
+        let mut pending_stall: Option<PendingStall> = None;
         match shamir_db::engine::tx::apply_replicated::apply_replicated_batch(
             &repo_instance,
             &events,
@@ -676,7 +861,26 @@ async fn run_follower_loop_internal(
         )
         .await
         {
-            Ok(ApplyOutcome::Applied { .. } | ApplyOutcome::Skipped) => {}
+            Ok(_outcome @ (ApplyOutcome::Applied { .. } | ApplyOutcome::Skipped)) => {
+                let post_apply_bookmark = repo_instance
+                    .replication_bookmark()
+                    .await
+                    .map_err(|error| ReplError::Bookmark(error.to_string()))?;
+                let advanced = post_apply_bookmark > bookmark;
+                if advanced {
+                    consecutive_failures = 0;
+                    if stall_reported {
+                        pending_stall = Some(PendingStall::Clear(post_apply_bookmark));
+                    }
+                }
+                if !advanced {
+                    consecutive_failures += 1;
+                    let detail = format!(
+                        "successful apply left durable bookmark at {post_apply_bookmark} (previously {bookmark})"
+                    );
+                    pending_stall = Some(PendingStall::Note(detail));
+                }
+            }
             Ok(ApplyOutcome::Rejected { reason }) => {
                 return Err(ReplError::ApplyRejected {
                     leader_version: events[0].event.commit_version,
@@ -684,6 +888,37 @@ async fn run_follower_loop_internal(
                 });
             }
             Err(e) => {
+                // PR6b-3 R7-2(ii): an unsupported backend (MemBuffer-wrapped
+                // destination) is TERMINAL — the receipt pipeline can never
+                // activate, so retrying is an infinite spin. Check BEFORE any
+                // backoff classification.
+                if let shamir_db::storage::error::DbError::AtomicBatchUnsupported(_) = &e {
+                    return Err(ReplError::AtomicBatchUnsupported {
+                        db: db_name.clone(),
+                        repo: repo.clone(),
+                    });
+                }
+                // PR6b-3: a refused durable follower state is TERMINAL —
+                // check BEFORE the requires_reopen probe and never back off.
+                if let shamir_db::storage::error::DbError::FollowerStateRefused { reason } = &e {
+                    return Err(ReplError::FollowerStateRefused { reason: *reason });
+                }
+                // PR6b-3 (W5): the receipt pipeline's `RepoRequiresReopen`
+                // error kind IS the producer's explicit terminal
+                // classification (corrupt receipt pointer, vanished
+                // bookmark, double-Uncertain). The engine deliberately keeps
+                // the RAM gate flag clean on these failures — the parked
+                // guards keep the repo serving — so the loop must trust the
+                // error KIND, not only the flag: retrying it in-process
+                // would contradict its meaning and the design's
+                // machine-readable-terminal requirement.
+                if let shamir_db::storage::error::DbError::RepoRequiresReopen(detail) = &e {
+                    return Err(ReplError::ReopenRequired {
+                        db: db_name.clone(),
+                        repo: repo.clone(),
+                        detail: detail.clone(),
+                    });
+                }
                 let gate = repo_instance
                     .tx_gate()
                     .await
@@ -696,10 +931,41 @@ async fn run_follower_loop_internal(
                     });
                 }
                 warn!(error = %e, "follower_loop: batch apply failed, backing off");
+                consecutive_failures += 1;
+                // Guard-held: DEFERRED — persisted after the guard drop below.
+                pending_stall = Some(PendingStall::Note(e.to_string()));
                 sleep_backoff(&cancel, &mut backoff_ms).await;
             }
         }
         drop(_apply_guard);
+        // Round 12 F1: the guard is gone — persistence may now safely take
+        // the replication control lock inside the status writer.
+        match pending_stall {
+            Some(PendingStall::Clear(progress_bookmark)) => {
+                clear_stall(
+                    &db,
+                    &node_id,
+                    subscription,
+                    progress_bookmark,
+                    lease_generation,
+                    &mut stall_reported,
+                )
+                .await;
+            }
+            Some(PendingStall::Note(detail)) => {
+                note_swallowed_failure(
+                    &db,
+                    &node_id,
+                    subscription,
+                    lease_generation,
+                    consecutive_failures,
+                    &detail,
+                    &mut stall_reported,
+                )
+                .await;
+            }
+            None => {}
+        }
         #[cfg(test)]
         if let Some(hook) = apply_park.as_deref() {
             if hook.after_apply && !apply_park_wait(&repo, Some(hook), &cancel).await {
@@ -708,7 +974,6 @@ async fn run_follower_loop_internal(
         }
     }
 }
-
 /// Exponential backoff sleep that is cancellation-aware. Doubles
 /// `backoff_ms` on each call (capped at `MAX_BACKOFF_MS`); leaves it
 /// untouched on cancellation (the loop is about to return anyway).

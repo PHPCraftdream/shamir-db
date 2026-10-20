@@ -343,7 +343,7 @@ async fn rename_db_survives_durable_reopen() {
     );
     assert_eq!(
         newdb_repo.get("engine").and_then(|v| v.as_str()),
-        Some("fjall"),
+        Some("fjall_raw"), // raw DDL repos reboot raw (atomic-batch capable)
         "engine must be preserved across rename + reopen"
     );
 

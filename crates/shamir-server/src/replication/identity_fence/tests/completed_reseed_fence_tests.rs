@@ -269,7 +269,7 @@ async fn legacy_peer_without_identity_is_refused() {
     };
     let info = repo(&follower).tx_info_store().await.unwrap();
     assert!(matches!(
-        checks::fence_pull_identity(&info, &pull, None).await,
+        checks::fence_pull_identity(&info, &pull, None, None).await,
         Err(ReplError::Seed(SeedRefusal::MissingIdentity))
     ));
     // Fail-closed: a None identity never adopts a record.
