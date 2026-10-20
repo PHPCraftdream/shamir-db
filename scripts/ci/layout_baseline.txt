@@ -45,10 +45,6 @@ dir crates/shamir-server/src/tests 28
 dir crates/shamir-server/tests 47
 dir crates/shamir-storage/src 13
 dir crates/shamir-storage/src/key_bytes/tests 8
-dir crates/shamir-tx/src 25
-dir crates/shamir-tx/src/mvcc_store 9
-dir crates/shamir-tx/src/tests 23
-dir crates/shamir-tx/src/tests/mvcc_store_tests 32
 dir scripts 15
 file crates/shamir-db/benches/engine_perf.rs 1365
 file crates/shamir-db/src/shamir_db/execute/admin_schema.rs 1395
@@ -100,6 +96,3 @@ file crates/shamir-storage/src/storage_membuffer.rs 1156
 file crates/shamir-storage/src/tests/stores/storage_cached_tests.rs 1212
 file crates/shamir-storage/src/tests/stores/storage_membuffer_tests.rs 1075
 file crates/shamir-storage/src/tests/stores/storage_mirrored_tests.rs 1364
-file crates/shamir-tx/src/changefeed.rs 1078
-file crates/shamir-tx/src/mvcc_store/mod.rs 1655
-file crates/shamir-tx/src/repo_tx_gate.rs 1406

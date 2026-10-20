@@ -50,7 +50,7 @@ impl MvccStore {
         log::debug!("drain_to_history: enter");
         // #1032: exclude the background Drainer's `write_committed_batch_to_history`
         // from this table for the ENTIRE duration of this force-drain — see
-        // `drain_exclusive`'s field doc (`mvcc_store/mod.rs`) for why two
+        // `drain_exclusive`'s field doc (`mvcc_store/store.rs`) for why two
         // concurrent history-store writers can hang, not just race on data.
         let _drain_guard = self.drain_exclusive.lock().await;
         log::debug!("drain_to_history: acquired drain_exclusive");
@@ -151,5 +151,24 @@ impl MvccStore {
         self.gc_overlay_to(visibility);
 
         Ok(())
+    }
+}
+
+impl MvccStore {
+    /// F6b (I2): force the durable `history` version-log to disk.
+    ///
+    /// Narrow durability seam for the truncation fsync-gate: before the
+    /// drainer deletes a sealed WAL segment, every record in that segment
+    /// must be `fsync`'d into `history` (not merely written to the page
+    /// cache), else a power-loss after the unlink but before the page-cache
+    /// flush would lose data (I2, power-loss / level-3). `mark_durable` only
+    /// means "written to history"; this makes that write physically durable.
+    ///
+    /// Flushes ONLY this store's `history` — it does NOT drain the WAL
+    /// (calling `drain_all` from the drainer would recurse). The drainer
+    /// gates this on `wal.has_truncatable(durable)`, so it fires only on a
+    /// segment boundary, never per-commit (no `fsync`-on-commit regression).
+    pub async fn flush_history(&self) -> DbResult<()> {
+        self.history.flush().await
     }
 }

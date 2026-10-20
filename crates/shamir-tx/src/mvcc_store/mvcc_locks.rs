@@ -6,6 +6,7 @@ use shamir_storage::types::RecordKey;
 
 use super::key_lock::{Holder, KeyLock, LockMode};
 use super::MvccStore;
+use super::RecordCell;
 
 impl MvccStore {
     /// Acquire a Level-3 pessimistic lock on `key` for tx `tx_version` in
@@ -236,5 +237,206 @@ impl MvccStore {
                 lock.notify.notify_waiters();
             }
         }
+    }
+}
+
+impl MvccStore {
+    /// Publish `version` into the key's cell. Atomic modify-or-insert;
+    /// advances the cell's version to `version` on every write path.
+    /// (Bump-first ordering is the CALLER's job — this only performs the
+    /// cell mutation.)
+    ///
+    /// A2 — max-monotonic: on the OCCUPIED branch the cell's `version` is
+    /// advanced ONLY when `version` is strictly greater than the cell's
+    /// current value. This prevents a slow drainer / recovery replay (which
+    /// seeds the cell from a durable write that may be older than an
+    /// in-memory commit that raced ahead during the drainer's `.await`
+    /// suspension) from regressing the cell backward and causing stale reads
+    /// / masked SSI conflicts. The VACANT branch is untouched (a brand-new
+    /// cell always seeds at the offered version). The NORMAL non-racing
+    /// drain path always offers `<=` the current version, so this guard is a
+    /// no-op there.
+    ///
+    /// DEADLOCK FIX (#589 root cause): `entry_sync`, NOT `entry_async`. The
+    /// cells map is read on every hot read path via the SYNCHRONOUS
+    /// `read_sync` (`current_version` / `version_of` / `live_version`), which
+    /// PARKS the calling OS thread while the bucket is exclusively locked
+    /// (scc's `Reader::lock_sync` → saa `share_sync`). `entry_async`'s wait
+    /// path is lock-HANDOFF: on release, saa GRANTS the exclusive lock to the
+    /// suspended waiter task, which then holds it while sitting in tokio's
+    /// run queue until next polled. If, in that window, every runtime worker
+    /// thread enters `read_sync` on the same (hot-key) bucket, all workers
+    /// park, the lock-owning task can never be polled again, and the whole
+    /// runtime deadlocks — reproduced deterministically by the D2
+    /// overlay-ordering history-arm test under CPU contention (CI timeout;
+    /// see `tests/mvcc_store_tests/overlay_ordering_tests.rs`). With
+    /// `entry_sync` the exclusive lock is only ever held by a RUNNING thread
+    /// for a few instructions (same contract as `finalize_reservation` /
+    /// `try_reserve` on this same map), so every `read_sync` wait is bounded.
+    /// The fn stays `async` to keep its many call sites / public shape
+    /// unchanged; it no longer suspends.
+    ///
+    /// The body lives in `write_receipt::cell_publish`.
+    pub(crate) async fn publish_cell(&self, key: RecordKey, version: u64) {
+        self.publish_cell_sync(key, version);
+    }
+
+    /// A10 vacuum anchor deferral: atomically set the cell's `vacuum_anchor`
+    /// to `new_anchor` and return the PREVIOUS value. Uses the sync `entry`
+    /// API (per-entry exclusive lock) so the read-and-swap is race-free
+    /// against concurrent vacuum calls on the same key. If the cell is
+    /// absent (cold-start or evicted), returns `None` and does nothing —
+    /// the deferred-anchor optimisation only applies when the cell is
+    /// resident.
+    pub(crate) fn swap_vacuum_anchor(&self, key: &[u8], new_anchor: u64) -> Option<u64> {
+        // Inline-cheap for the 16-byte `RecordId` shape; builds the cell map's
+        // `RecordKey` entry key without the prior `Bytes` heap copy.
+        match self.cells.entry_sync(RecordKey::from_slice(key)) {
+            scc::hash_map::Entry::Occupied(mut e) => {
+                let cell = e.get_mut();
+                let prev = cell.vacuum_anchor;
+                cell.vacuum_anchor = new_anchor;
+                Some(prev)
+            }
+            scc::hash_map::Entry::Vacant(_) => None,
+        }
+    }
+
+    // ========================================================================
+    // SSI fix S1 — cell-reservation primitive (additive; NOT yet wired).
+    //
+    // Three atomic acts on the per-key `RecordCell`, all via `cells.entry(key)`
+    // (scc per-entry exclusive — the same check-and-update primitive
+    // `publish_cell_sync` already relies on). They turn "publish decides who
+    // won" (after the WAL commit point) into "claim decides who won" (BEFORE
+    // it): a single committer claims the cell, losers see the claim and abort
+    // with `SsiConflict` having never touched the WAL.
+    //
+    // S1 only BUILDS these — `try_reserve` is never called on the live commit
+    // path yet, so `reserved_by` stays `0` everywhere and behaviour is
+    // byte-identical. S2 invokes `try_reserve` in `pre_commit` (after
+    // read-validate, before WAL), `finalize_reservation` in the publish path,
+    // and `release_reservation` from the abort-path RAII guard.
+    //
+    // Sync (`entry`, not `entry_async`) because every call site is the
+    // synchronous commit hot path — same rationale as `publish_cell_sync`:
+    // the cell map is lock-free / sharded, so `entry` is a bounded CAS, not a
+    // contended lock.
+    // ========================================================================
+
+    /// SSI fix S1 — atomically CLAIM this key's cell for `txn_id`, the explicit
+    /// serialization point for a write-write conflict.
+    ///
+    /// Returns `true` iff the claim WON (this committer may proceed to WAL /
+    /// publish); `false` on CONFLICT (another committer holds the claim, or the
+    /// cell has already advanced past this committer's snapshot — a stale
+    /// write). A conflict NEVER blocks — the caller aborts with `SsiConflict`.
+    ///
+    /// Cases, all inside one atomic `entry`:
+    /// - **Vacant** → the key has never published a version, so it is free.
+    ///   Insert `RecordCell { version: 0, reserved_by: txn_id }` and WIN. The
+    ///   `version: 0` sentinel matches `current_version`'s "no version tracked"
+    ///   convention; `finalize_reservation` later overwrites it with the real
+    ///   commit version.
+    /// - **Occupied** → WIN iff `version <= snapshot_version && reserved_by == 0`:
+    ///   the cell is unclaimed AND has not advanced past our snapshot. Set
+    ///   `reserved_by = txn_id`. Otherwise CONFLICT (`false`): either the cell
+    ///   moved past the snapshot (someone published — stale-write detection) or
+    ///   it is already claimed by another committer.
+    ///
+    /// S2 wires this into the engine's `pre_commit` (after read-validate,
+    /// before WAL): `pub` (not `pub(crate)`) so the cross-crate `shamir-engine`
+    /// commit path can call it to claim each write-set key. The claim is the
+    /// explicit serialization point that makes "exactly one committer wins" hold
+    /// for non-unique tables under true parallelism.
+    pub fn try_reserve(&self, key: RecordKey, snapshot_version: u64, txn_id: u64) -> bool {
+        match self.cells.entry_sync(key) {
+            scc::hash_map::Entry::Occupied(mut e) => {
+                let cell = e.get_mut();
+                if cell.version <= snapshot_version && cell.reserved_by == 0 {
+                    cell.reserved_by = txn_id;
+                    true
+                } else {
+                    false
+                }
+            }
+            scc::hash_map::Entry::Vacant(e) => {
+                e.insert_entry(RecordCell {
+                    version: 0,
+                    vacuum_anchor: 0,
+                    reserved_by: txn_id,
+                });
+                true
+            }
+        }
+    }
+
+    /// SSI fix S1 — atomically convert a held claim into the published
+    /// `version` and CLEAR the reservation, in one `entry`.
+    ///
+    /// Called on the publish path (S2: Phase 5a) AFTER the committer has won
+    /// its claim and the write is becoming visible. Sets
+    /// `version = max(current_version, version)` and `reserved_by = 0`.
+    /// Invariant: finalizing a lower or equal version must never regress the
+    /// cell's version, even when materialization completes out of order;
+    /// reservation clearing still happens unconditionally under `entry_sync`.
+    /// If the cell is somehow Vacant (defensive — a claim should have inserted
+    /// it), insert `RecordCell { version,
+    /// reserved_by: 0 }` so the published version is never lost.
+    ///
+    /// S2 wires this into the publish path (`apply_committed_visible`,
+    /// Phase 5a) in place of the prior `publish_cell_sync` — it is a strict
+    /// superset (sets `version` AND clears `reserved_by`).
+    pub(crate) fn finalize_reservation(&self, key: RecordKey, version: u64) {
+        match self.cells.entry_sync(key) {
+            scc::hash_map::Entry::Occupied(mut e) => {
+                if version > e.get().version {
+                    e.get_mut().version = version;
+                }
+                e.get_mut().reserved_by = 0;
+            }
+            scc::hash_map::Entry::Vacant(e) => {
+                e.insert_entry(RecordCell {
+                    version,
+                    vacuum_anchor: 0,
+                    reserved_by: 0,
+                });
+            }
+        }
+    }
+
+    /// SSI fix S1 — release a claim held by `txn_id` (abort path), in one
+    /// `entry`. Idempotent and ownership-checked: only clears `reserved_by`
+    /// when it still equals `txn_id`.
+    ///
+    /// A no-op when the cell is Vacant, or when `reserved_by != txn_id` — the
+    /// latter covers both "another committer now owns the claim" (we must not
+    /// steal it) and "our claim was already finalized" (`reserved_by` is
+    /// already `0`). This makes the RAII guard's `Drop` safe to fire after a
+    /// successful `finalize_reservation`.
+    pub(crate) fn release_reservation(&self, key: RecordKey, txn_id: u64) {
+        if let scc::hash_map::Entry::Occupied(mut e) = self.cells.entry_sync(key) {
+            let cell = e.get_mut();
+            if cell.reserved_by == txn_id {
+                cell.reserved_by = 0;
+            }
+        }
+    }
+
+    // ========================================================================
+    // Level-3 pessimistic locking (wound-wait, deadlock-free).
+    //
+    // These methods are ONLY called from `IsolationLevel::Pessimistic` code
+    // paths (see `table_manager` / `write_exec`). The snapshot / serializable
+    // read/write paths never touch `locks`, so when no Level-3 tx runs the
+    // registry stays empty and there is zero overhead on the hot paths.
+    // ========================================================================
+
+    /// Number of keys currently holding a Level-3 lock entry. Used by tests
+    /// to assert the zero-overhead invariant (snapshot/serializable txs never
+    /// populate `locks`).
+    #[allow(clippy::disallowed_methods)] // O(N) ack: telemetry/test accessor, off hot path
+    pub fn locks_len(&self) -> usize {
+        self.locks.len()
     }
 }
