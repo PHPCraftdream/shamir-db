@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-SCRIPT = Path(__file__).resolve().parents[1] / "bench_ab.py"
+SCRIPT = Path(__file__).resolve().parent / "bench_ab.py"
 SPEC = importlib.util.spec_from_file_location("bench_ab", SCRIPT)
 ab = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ab)

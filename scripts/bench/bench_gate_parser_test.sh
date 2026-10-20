@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Parser-hardening tests for scripts/bench_gate.sh (F-60, #886).
+# Parser-hardening tests for scripts/bench/bench_gate.sh (F-60, #886).
 #
 # These tests do NOT run cargo bench. They source bench_gate.sh (which exposes
 # its validation functions via a BASH_SOURCE sourcing guard) and exercise the
@@ -11,14 +11,14 @@
 #   gate_check_cell       — ok / regression / unbacked-fail / unbacked-ok
 #
 # Usage:
-#   ./scripts/tests/bench_gate_parser_test.sh
+#   ./scripts/bench/bench_gate_parser_test.sh
 #
 # Exits 0 if every assertion passes, 1 otherwise.
 
 set -u
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GATE_SCRIPT="$(cd "$TEST_DIR/.." && pwd)/bench_gate.sh"
+GATE_SCRIPT="$TEST_DIR/bench_gate.sh"
 
 if [ ! -f "$GATE_SCRIPT" ]; then
     echo "FAIL: cannot find $GATE_SCRIPT" >&2
