@@ -42,20 +42,21 @@ const TX_STORE: &str = "__tx__";
 const CHANGELOG_STORE: &str = "__changelog__";
 
 #[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 type MaterializationFailureQueues = TFxMap<String, Vec<MaterializationBatchFailure>>;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 static MATERIALIZATION_BATCH_FAILURES: Mutex<Option<MaterializationFailureQueues>> =
     Mutex::new(None);
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 #[derive(Clone, Copy)]
 pub(crate) enum MaterializationBatchFailure {
     BeforeCommit,
     AfterCommitUncertain,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 pub(crate) fn inject_materialization_batch_failures(
     repo_name: &str,
     failures: &[MaterializationBatchFailure],
@@ -65,7 +66,7 @@ pub(crate) fn inject_materialization_batch_failures(
         .insert(repo_name.to_owned(), failures.to_vec());
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 pub(crate) fn clear_materialization_batch_failures(repo_name: &str) {
     if let Some(queues) = MATERIALIZATION_BATCH_FAILURES.lock().unwrap().as_mut() {
         queues.remove(repo_name);
@@ -77,7 +78,7 @@ pub(crate) fn clear_materialization_batch_failures(repo_name: &str) {
         .and_then(|map| map.remove(repo_name));
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 fn wrap_materialization_batch(
     batch: Box<dyn AtomicBatch>,
     repo_name: &str,
@@ -88,13 +89,13 @@ fn wrap_materialization_batch(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 struct InjectedMaterializationBatch {
     inner: Box<dyn AtomicBatch>,
     repo_name: String,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 #[async_trait::async_trait]
 impl AtomicBatch for InjectedMaterializationBatch {
     fn set(&mut self, store: &str, key: RecordKey, value: Bytes) -> DbResult<()> {
@@ -134,7 +135,7 @@ impl AtomicBatch for InjectedMaterializationBatch {
 #[cfg(test)]
 static MATERIALIZATION_READBACK_UNAVAILABLE: Mutex<Option<TFxMap<String, bool>>> = Mutex::new(None);
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 pub(crate) fn set_materialization_readback_unavailable(repo_name: &str, on: bool) {
     MATERIALIZATION_READBACK_UNAVAILABLE
         .lock()
@@ -156,7 +157,7 @@ fn take_materialization_readback_failure(repo_name: &str) -> bool {
 #[cfg(test)]
 static MATERIALIZATION_COMMITS: Mutex<Option<TFxMap<String, usize>>> = Mutex::new(None);
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 pub(crate) fn materialization_commit_count(repo_name: &str) -> usize {
     MATERIALIZATION_COMMITS
         .lock()
@@ -714,7 +715,7 @@ async fn stage_materialized_batch(
     old: &BookmarkV3,
 ) -> DbResult<Box<dyn AtomicBatch>> {
     let batch = repo.begin_repo_atomic_batch(permit).await?;
-    #[cfg(test)]
+    #[cfg(all(test, feature = "fjall"))]
     let batch = wrap_materialization_batch(batch, repo.name());
     let mut batch = batch;
     for (table, history, info_store, count_after) in table_rows(work)? {

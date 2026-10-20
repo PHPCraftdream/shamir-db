@@ -11,6 +11,7 @@
 //! the Stage 0 verdict reads these numbers from the test run.
 
 use shamir_collections::TMap;
+#[cfg(feature = "fjall")]
 use shamir_engine::repo::repo_types::BoxRepoFactory;
 use shamir_engine::repo::{BoxRepo, RepoInstance};
 use shamir_engine::table::table_manager::table_token_for;
@@ -34,6 +35,7 @@ async fn make_repo() -> RepoInstance {
     r
 }
 
+#[cfg(feature = "fjall")]
 async fn make_fjall_repo(tempdir: &tempfile::TempDir) -> RepoInstance {
     let factory = BoxRepoFactory::fjall_raw(tempdir.path().join("probe.fjall"));
     RepoInstance::from_factory("probe".into(), factory, vec![TableConfig::new(TABLE)])
@@ -200,6 +202,7 @@ async fn probe_pinned_snapshot_overlay_depth() {
 /// batch, so under sustained writes the overlay window can actually
 /// grow. This is the measurement that decides whether the O(total) cliff
 /// in `gc_upto` bites in production.
+#[cfg(feature = "fjall")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn probe_drain_lag_overlay_depth_fjall() {
     let tempdir = tempfile::tempdir().expect("tempdir");

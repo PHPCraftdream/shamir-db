@@ -370,8 +370,8 @@ impl RepoInstance {
     ///
     /// First call lazily creates the [`Drainer`](crate::tx::drainer::Drainer)
     /// and starts its background loop (a leak-free task owning a
-    /// [`clone_for_background`](Self::clone_for_background) of this repo plus a
-    /// `Weak<()>` of [`live`](Self::live)). Subsequent calls (from any
+    /// `clone_for_background` of this repo plus a
+    /// `Weak<()>` of `live`). Subsequent calls (from any
     /// foreground clone) return the same `Arc<Drainer>` via the shared
     /// `OnceCell`. The commit path calls `repo.drainer().wake()` after
     /// publishing a version to nudge the loop.
@@ -423,7 +423,7 @@ impl RepoInstance {
 
     /// Unrecovered disk handle solely for tests that explicitly exercise replay
     /// or must install a fault before recovery. Not available in production.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "fjall"))]
     pub(crate) async fn from_factory_for_recovery_test(
         name: String,
         factory: BoxRepoFactory,
@@ -458,7 +458,7 @@ impl RepoInstance {
     }
 
     /// Return a clone of this `RepoInstance` with its `name` field replaced
-    /// by `new_name`. Used by [`DbInstance::rename_repo`] (Phase F.3) to
+    /// by `new_name`. Used by `DbInstance::rename_repo` (Phase F.3) to
     /// re-key a repository under a new logical name without touching any of
     /// its physical table stores — the tables travel "for free" because they
     /// are keyed by table name *inside* the repo, not by the repo name.
@@ -932,7 +932,7 @@ impl RepoInstance {
     /// and the next caller retries. Returned Arc clone is in-memory.
     ///
     /// Returns the per-repo WAL manager, lazily initialising it on first
-    /// call. Shares the `"__tx__"` info store with [`tx_gate`].
+    /// call. Shares the `"__tx__"` info store with `tx_gate`.
     ///
     /// The `next_txn_id` counter is seeded from
     /// `max(persisted_NextTxId, max_inflight_txn_id + 1)`. The floor is
@@ -1170,7 +1170,7 @@ impl RepoInstance {
     ///
     /// F4b-1 keystone of "everything is a transaction": instead of taking the
     /// direct V1 write path (which emits `begin_with_delta`/`commit` WAL
-    /// markers), a non-tx write opens a [`IsolationLevel::Snapshot`] tx on
+    /// markers), a non-tx write opens a `IsolationLevel::Snapshot` tx on
     /// this repo, stages the write via the `_tx` execute path (`stage`), and
     /// commits — folding the data, index postings, and counter into ONE
     /// `WalEntryV2` and consuming ONE commit version.
@@ -1249,7 +1249,7 @@ impl RepoInstance {
     ///
     /// The returned `TxContext` / `SnapshotGuard` are plain local variables:
     /// both drop cleanly (RAII abort) on any early return/error the caller
-    /// hits between this call and [`commit_implicit_batch_tx`], exactly as
+    /// hits between this call and `commit_implicit_batch_tx`, exactly as
     /// `run_implicit_batch_tx`'s internal `tx`/`_guard` did.
     pub async fn begin_implicit_batch_tx(
         &self,

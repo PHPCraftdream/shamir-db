@@ -13,7 +13,7 @@
 //! structurally DIFFERENT from F1: see [`QueryRefCache`]'s doc comment.
 //!
 //! This module provides an opt-in cache keyed by the *content* of the
-//! `QueryRef` node itself (see [`query_ref_key`]). Callers that build a
+//! `QueryRef` node itself (see `query_ref_key`). Callers that build a
 //! `QueryRefCache` once (e.g. `SelectProjection::new`) and thread it through
 //! `FilterContext::query_ref_cache` skip the per-row path re-parse + target
 //! re-walk on every record after the first; callers that never populate
@@ -30,7 +30,7 @@ use shamir_types::types::value::QueryValue;
 use crate::query::filter::{Filter, FilterValue};
 
 /// Content-keyed cache mapping a `QueryRef` node (by its full `Debug`
-/// representation, i.e. its `alias`/`path`, via [`query_ref_key`]) to a
+/// representation, i.e. its `alias`/`path`, via `query_ref_key`) to a
 /// lazily-populated cell holding the resolved `Option<QueryValue>` for the
 /// CURRENT scan.
 ///

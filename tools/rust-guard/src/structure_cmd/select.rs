@@ -1,8 +1,8 @@
 //! File selection, glob matching, base-revision resolution and the
 //! delta file for the `structure` gate.
 
-use crate::finding::{exit_code, Report};
-use crate::gitfs::GitFs;
+use crate::common::finding::{exit_code, Report};
+use crate::common::gitfs::GitFs;
 use serde::Deserialize;
 use syn::Item;
 
@@ -137,7 +137,7 @@ fn execute(args: StructureArgs) -> Result<u8, String> {
     // Base revision: explicit --base, else the merge base of
     // --changed-since. Missing either skips the diff rules.
     let base = resolve_base(&fs, &args)?;
-    let exceptions = crate::exceptions::Exceptions::load(
+    let exceptions = crate::common::exceptions::Exceptions::load(
         args.exceptions
             .as_deref()
             .unwrap_or(".rust-guard/exceptions.toml"),
