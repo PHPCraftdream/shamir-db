@@ -20,6 +20,7 @@ pub enum SeedRefusal {
     CompetingOwner,
     UpstreamUnavailable,
     ReopenRequired,
+    AtomicBatchUnsupported,
     ConflictingBinding,
 }
 
@@ -40,6 +41,7 @@ impl SeedRefusal {
             Self::CompetingOwner => "seed_competing_owner",
             Self::UpstreamUnavailable => "seed_upstream_unavailable",
             Self::ReopenRequired => "reopen_required",
+            Self::AtomicBatchUnsupported => "atomic_batch_unsupported",
             Self::ConflictingBinding => "seed_conflicting_binding",
         }
     }

@@ -10,6 +10,13 @@ use crate::ShamirDb;
 use super::catalogue::{binding, matches_scope, receipt, rows, streams};
 use super::SeedRefusal;
 
+/// The refusal code is stable; the typed error text (it names the remedy) is
+/// logged because `SeedRefusal` stays a plain `Copy` code.
+pub(crate) fn atomic_batch_refusal(error: shamir_storage::error::DbError) -> SeedRefusal {
+    log::warn!("replication seed admission refused: {error}");
+    SeedRefusal::AtomicBatchUnsupported
+}
+
 pub(crate) fn batch_error(reason: SeedRefusal) -> BatchError {
     BatchError::QueryError {
         alias: String::new(),
@@ -122,6 +129,30 @@ pub(super) async fn check_owners(
                 && (stream.scope.repo.is_none()
                     || stream.scope.repo.as_deref() == Some(receipt.source_repo.as_str()))
             {
+                // P1-D.1 (round-3 verdict): identical replacement receipt on
+                // a QUARANTINED sibling = two views of one recovery, not
+                // two competing owners. A HEALTHY sibling with the same
+                // receipt is a competing owner — a durable-state property
+                // that must not depend on the network probe.
+                //
+                // Round 6 item 6 — the OVERLAP RULE: a healthy same-receipt
+                // sibling on a shared destination is a competing ACTIVE
+                // writer (refused, as coded above). Two QUARANTINED
+                // subscriptions overlapping one destination are NOT
+                // simultaneous active writers: the destination's protection
+                // is COVERAGE AGGREGATION — every covering quarantined row
+                // must be resolved before the destination serves again
+                // (clearing one never clears the other's protection).
+                // COUNTERFACTUAL: treating overlap as active-writer
+                // competition (or clearing protection once one sibling is
+                // resolved) turns the still-refused shared-destination
+                // assertions in `binding_scope_overlap_clearing_through_
+                // real_reseed_resume` and `t15` red.
+                if crate::repl_binding::row_is_quarantined(&row)
+                    && row.get("seed_receipt") == Some(&super::super::helpers::to_qv(receipt))
+                {
+                    continue;
+                }
                 return Err(SeedRefusal::CompetingOwner);
             }
         }
@@ -184,11 +215,13 @@ impl ShamirDb {
         op: &CreateSubscriptionOp,
         record: &mut QueryValue,
     ) -> Result<(), SeedRefusal> {
-        // Unresolved legacy profiles retain their ordinary behaviour. Seed targets,
-        // however, are always derived from repository metadata, never row evidence.
-        let Ok(scope) = streams(self, &op.profile).await else {
-            return Ok(());
-        };
+        // S5c-X PR8b-2: an unresolvable profile is a REFUSAL, and the
+        // executable destination set must bind (a wildcard/db-wide Pull
+        // scope is refused) — the binding is the durable quarantine
+        // authority, so it must be knowable at creation.
+        let scope = streams(self, &op.profile).await?;
+        crate::repl_binding::SubscriptionBinding::from_streams(&op.create_subscription, &scope)
+            .map_err(|_| SeedRefusal::WrongScope)?;
         for stream in &scope {
             let Some(database) = self.get_db(&stream.scope.db) else {
                 continue;
@@ -200,6 +233,10 @@ impl ShamirDb {
                 let Some(repo) = database.get_repo(&name) else {
                     continue;
                 };
+                if stream.direction == ReplDirection::Pull {
+                    repo.validate_repo_wide_atomic_batch(&format!("{}/{name}", stream.scope.db))
+                        .map_err(atomic_batch_refusal)?;
+                }
                 if let Some(receipt) = receipt(&repo).await? {
                     if !matches_scope(&scope, &receipt) {
                         return Err(SeedRefusal::WrongScope);
@@ -220,12 +257,10 @@ impl ShamirDb {
         record: &QueryValue,
     ) -> Result<(), SeedRefusal> {
         let profile = record["profile"].as_str().ok_or(SeedRefusal::WrongScope)?;
-        let scope = match streams(self, profile).await {
-            Ok(scope) => scope,
-            // An unresolved profile of an unbound legacy row keeps its ordinary behaviour.
-            Err(_) if record.get("seed_receipt").is_none() => return Ok(()),
-            Err(reason) => return Err(reason),
-        };
+        // S5c-X PR8b-2: every row carries a valid binding now, so an
+        // unresolvable profile is a refusal — no "unbound legacy row"
+        // branch remains.
+        let scope = streams(self, profile).await?;
         if let Some(bound) = record.get("seed_receipt") {
             let bytes =
                 rmp_serde::to_vec_named(bound).map_err(|_| SeedRefusal::ConflictingBinding)?;
@@ -234,11 +269,17 @@ impl ShamirDb {
             if !matches_scope(&scope, &bound) {
                 return Err(SeedRefusal::WrongScope);
             }
-            let repo = self
+            let bound_repo = self
                 .get_db(&bound.source_db)
                 .and_then(|db| db.get_repo(&bound.source_repo))
                 .ok_or(SeedRefusal::IncompleteInstall)?;
-            if receipt(&repo).await?.as_ref() != Some(&bound) {
+            bound_repo
+                .validate_repo_wide_atomic_batch(&format!(
+                    "{}/{}",
+                    bound.source_db, bound.source_repo
+                ))
+                .map_err(atomic_batch_refusal)?;
+            if receipt(&bound_repo).await?.as_ref() != Some(&bound) {
                 return Err(SeedRefusal::ConflictingBinding);
             }
         }
@@ -253,6 +294,10 @@ impl ShamirDb {
                 let Some(repo) = database.get_repo(&name) else {
                     continue;
                 };
+                if stream.direction == ReplDirection::Pull {
+                    repo.validate_repo_wide_atomic_batch(&format!("{}/{name}", stream.scope.db))
+                        .map_err(atomic_batch_refusal)?;
+                }
                 let Some(receipt) = receipt(&repo).await? else {
                     continue;
                 };

@@ -1,12 +1,15 @@
-//! Replication redo receipt + bookmark v3 codecs (S5c-X PR6b-1).
+//! Replication redo receipt + bookmark v3 codecs (S5c-X PR6b-1/PR6b-3).
 //!
-//! INACTIVE: no production path writes receipts or bookmark v3 in this PR.
-//! PR6b-2 wires the receipt into follower apply/resume; PR6b-3 migration.
+//! Bookmark records are strict v3-only: anything else is refused (see
+//! `bookmark_v3` and `bookmark`).
 pub mod bookmark;
 pub mod bookmark_v3;
+pub mod fence_record;
+pub mod gate_provenance;
 pub mod receipt;
 pub use bookmark_v3::{
-    decode_bookmark_v3, encode_bookmark_v3, load_bookmark_v3, save_bookmark_v3, BookmarkV3,
+    classify_follower_bookmark, decode_bookmark_v3, encode_bookmark_v3, load_bookmark_v3,
+    save_bookmark_v3, BookmarkV3, FollowerBookmarkState,
 };
 pub use receipt::{
     decode_receipt, encode_receipt, receipt_id, ReceiptBinding, ReceiptCounterDelta, ReceiptOp,

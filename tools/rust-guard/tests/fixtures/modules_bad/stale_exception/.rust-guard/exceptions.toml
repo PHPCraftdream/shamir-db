@@ -1,0 +1,5 @@
+[[exception]]
+path = "crates/fix/src/gone.rs"
+package = "fix"
+reason = "left over from a deleted module"
+owner = "@rust-guard"

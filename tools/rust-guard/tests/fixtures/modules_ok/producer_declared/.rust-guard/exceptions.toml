@@ -1,0 +1,15 @@
+# The generated file is declared by the macro, which the parser cannot
+# see — it must be excepted as well, or it shows up as UNACCOUNTED_FILE.
+[[exception]]
+path = "crates/fix/src/generated.rs"
+package = "fix"
+reason = "emitted by declare_mods! (codegen stand-in), not on disk-visible mod tree"
+owner = "@rust-guard"
+
+# Package-scoped: `packages = ["fix"]` must match the declaring package
+# (lookup enforces membership; empty lists are rejected by validate()).
+[[producer]]
+name = "macro_rules"
+packages = ["fix"]
+owner = "@rust-guard"
+reason = "macro_rules bodies in this crate emit module declarations"

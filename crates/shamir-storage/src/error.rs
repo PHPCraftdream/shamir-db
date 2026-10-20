@@ -147,6 +147,45 @@ pub enum DbError {
         .0.reason
     )]
     ResyncRequired(Box<ResyncRequiredInfo>),
+
+    /// Durable follower state this version refuses (S5c-X PR6b-3). No in-place
+    /// migration exists; the operator reseeds the affected subscription.
+    #[error(
+        "follower repository state refused ({reason:?}); no migration exists — reseed required"
+    )]
+    FollowerStateRefused { reason: FollowerRefusalReason },
+    /// S5c-X PR8b-2: a `system/subscriptions` catalogue row is missing
+    /// required fields or carries an invalid/unsupported durable binding.
+    /// Open fails with this typed error (the operator replaces/reseeds the
+    /// row); at runtime the last safe quarantine snapshot is retained.
+    ///
+    /// Boxed: two inline `String`s, same ratchet as [`DbError::ResyncRequired`].
+    #[error("subscription catalogue row '{}' is invalid: {}", .0.subscription, .0.reason)]
+    SubscriptionCatalogue(Box<SubscriptionCatalogueError>),
+
+    /// S5c-X PR8b-2 round 5 (B4): a destination lifecycle op (DROP/RENAME of
+    /// a database or repo, DROP DATABASE … CASCADE) hit a destination that is
+    /// referenced by a durable subscription binding — including a destination
+    /// whose quarantine key was only PREPUBLISHED in the quarantine cache.
+    /// The detail names the operation, the destination and EVERY blocking
+    /// subscription with its binding generation.
+    #[error("{detail}")]
+    ReplicationDestinationBound { detail: String },
+
+    /// S5c-X PR8b-2 round 5 (B4): DROP SUBSCRIPTION of a quarantined
+    /// subscription (durably marked or prepublished in the quarantine cache)
+    /// is refused: dropping is not evidence of consistency, and in-place
+    /// abandonment is not supported in this version. Distinct from the
+    /// read-path `resync_required`.
+    #[error("{detail}")]
+    ReplicationDestinationQuarantined { detail: String },
+}
+
+/// Heap payload of [`DbError::SubscriptionCatalogue`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscriptionCatalogueError {
+    pub subscription: String,
+    pub reason: String,
 }
 
 /// Heap payload of [`DbError::ResyncRequired`].
@@ -155,6 +194,19 @@ pub struct ResyncRequiredInfo {
     pub db: String,
     pub repo: String,
     pub reason: String,
+}
+
+/// Why durable follower state was refused. The receipt protocol is the only
+/// follower apply protocol; unsupported states are refused, never migrated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FollowerRefusalReason {
+    /// A legacy fixed-width/u64, v1 or v2 bookmark record is present.
+    LegacyBookmarkFormat,
+    /// The bookmark record is malformed, truncated, or of an unknown version.
+    MalformedBookmark,
+    /// A nonzero allocation floor (or other pre-receipt installation state)
+    /// exists without a v3 bookmark record; reseeding is required.
+    LegacyFollowerState,
 }
 
 // Ratchet: a new inline-heavy variant must be boxed, not widen every `DbResult`.
@@ -173,6 +225,15 @@ impl DbError {
             db: db.to_string(),
             repo: repo.to_string(),
             reason,
+        }))
+    }
+
+    /// Build [`DbError::SubscriptionCatalogue`] for an invalid subscription
+    /// row, naming the subscription and the reason.
+    pub fn subscription_catalogue(subscription: &str, reason: impl Into<String>) -> Self {
+        DbError::SubscriptionCatalogue(Box::new(SubscriptionCatalogueError {
+            subscription: subscription.to_string(),
+            reason: reason.into(),
         }))
     }
 
@@ -196,6 +257,11 @@ impl DbError {
             DbError::Conflict(_) => Some("tx_conflict"),
             DbError::IndexDrainInProgress(_) => Some("index_drain_in_progress"),
             DbError::ResyncRequired { .. } => Some("resync_required"),
+            DbError::SubscriptionCatalogue(_) => Some("subscription_catalogue_invalid"),
+            DbError::ReplicationDestinationBound { .. } => Some("replication_destination_bound"),
+            DbError::ReplicationDestinationQuarantined { .. } => {
+                Some("replication_destination_quarantined")
+            }
             _ => None,
         }
     }

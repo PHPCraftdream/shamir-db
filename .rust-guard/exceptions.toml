@@ -1,0 +1,19 @@
+# rust-guard exceptions (CI-03a).
+#
+# Everything in this file is fail-closed: each entry must name an exact
+# tracked path (no wildcards) and carry a reason and owner. Stale
+# entries — paths no longer tracked, or files reachable without the
+# exception — are findings and fail the `rust-guard modules` gate.
+#
+# [[exception]] — one exact file that must not have to be reachable.
+#   path    = "crates/shamir-x/src/foo/generated_mount.rs"  # exact path
+#   package = "shamir-x"
+#   reason  = "why this file cannot be reached from a target root"
+#   owner   = "@team-handle"
+#
+# [[producer]] — a macro or generated (OUT_DIR) include that emits
+# modules/includes the parser cannot resolve.
+#   name     = "include"        # macro name, or "include" for OUT_DIR includes
+#   packages = ["shamir-x"]
+#   owner    = "@team-handle"
+#   reason   = "what the macro generates and why it is safe"

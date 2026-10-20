@@ -10,6 +10,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use shamir_storage::storage_in_memory::{InMemoryRepo, InMemoryStore};
@@ -184,39 +185,70 @@ async fn commit_row(repo: &RepoInstance, table: &crate::table::TableManager, tag
     repo.commit_tx(tx).await.unwrap().commit_version
 }
 
-/// Bounded condition wait (no wall-clock sleeps): spin yields until the
-/// journal writer has persisted at least `through`.
+/// Hang guard for the condition waits below; never the expected path.
+const WAIT_GUARD: Duration = Duration::from_secs(60);
+const WAIT_POLL: Duration = Duration::from_millis(1);
+
+/// Wait until the journal writer has persisted at least `through`. The
+/// writer persists on a blocking thread, so the bound is wall-clock time:
+/// a count of scheduler yields can run out before the I/O completes.
 async fn wait_persisted(feed: &RepoChangefeed, through: u64) {
-    for _ in 0..200_000 {
-        if feed.last_persisted_version() >= through {
-            return;
+    let reached = tokio::time::timeout(WAIT_GUARD, async {
+        while feed.last_persisted_version() < through {
+            tokio::time::sleep(WAIT_POLL).await;
         }
-        tokio::task::yield_now().await;
-    }
-    panic!("journal writer never persisted through {through}");
+    })
+    .await;
+    assert!(
+        reached.is_ok(),
+        "journal writer never persisted through {through}"
+    );
 }
 
-/// Bounded condition wait until the event at `version` is readable from the
-/// journal store.
+/// Wait until the event at `version` is readable from the journal store.
 async fn wait_event_stored(store: &Arc<ParkStore>, version: u64) {
-    for _ in 0..200_000 {
-        let rows = store.range_from(version_key(version), 1).await.unwrap();
-        if let Some(bytes) = rows.first() {
-            if let Ok(event) = rmp_serde::from_slice::<ChangelogEvent>(bytes) {
-                if event.commit_version == version {
-                    return;
+    let stored = tokio::time::timeout(WAIT_GUARD, async {
+        loop {
+            let rows = store.range_from(version_key(version), 1).await.unwrap();
+            if let Some(bytes) = rows.first() {
+                if let Ok(event) = rmp_serde::from_slice::<ChangelogEvent>(bytes) {
+                    if event.commit_version == version {
+                        return;
+                    }
                 }
             }
+            tokio::time::sleep(WAIT_POLL).await;
         }
-        tokio::task::yield_now().await;
-    }
-    panic!("event at {version} never reached the journal store");
+    })
+    .await;
+    assert!(
+        stored.is_ok(),
+        "event at {version} never reached the journal store"
+    );
 }
 
 /// Drain passes until every repair-pending version is retired.
 async fn drain_until_empty(repo: &RepoInstance, feed: &RepoChangefeed) {
     for _ in 0..100 {
         repo.drainer().drain_all(repo).await.unwrap();
+        if feed.repair_pending_depth() == 0 {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!(
+        "repair-pending set never emptied (depth {})",
+        feed.repair_pending_depth()
+    );
+}
+
+/// Direct repair passes (NO truncation, unlike `drain_all`) until every
+/// repair-pending version is retired. One pass admits only as many versions
+/// as the journal channel has room for; the rest stay pending for the next
+/// pass, so a test that expects several versions must loop.
+async fn repair_until_empty(repo: &RepoInstance, feed: &RepoChangefeed) {
+    for _ in 0..100 {
+        drain_repair_pending(repo).await.unwrap();
         if feed.repair_pending_depth() == 0 {
             return;
         }
@@ -713,12 +745,15 @@ async fn persistent_retention_gate_holds_until_checkpointed_reopens() {
         );
         assert_eq!(feed.first_gap_version(), 0);
 
-        // Release: the channel drains, the direct repair pass admits ALL
-        // five pending versions (v + 4 seals) through the now-empty
-        // channel — exactly one put each.
+        // Release: the channel drains and the direct repair passes admit ALL
+        // five pending versions (v + 4 seals) — exactly one put each. A
+        // single pass is not enough: `wait_persisted` returns as soon as the
+        // first filler is persisted, while most of the backlog is still
+        // queued, so a pass only admits as many versions as there are free
+        // channel slots at that moment.
         store.release_filler.notify_one();
         wait_persisted(&feed, BACKLOG_KEY).await;
-        drain_repair_pending(&repo).await.unwrap();
+        repair_until_empty(&repo, &feed).await;
         assert_eq!(feed.repair_pending_depth(), 0);
         wait_event_stored(&store, v).await;
         assert_eq!(

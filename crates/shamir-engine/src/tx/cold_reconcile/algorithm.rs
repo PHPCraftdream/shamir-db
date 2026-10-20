@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::meta::repl_bookmark::{load_fence_record, load_replication_bookmark};
+use crate::meta::repl::{classify_follower_bookmark, FollowerBookmarkState};
 use crate::repo::RepoInstance;
 use crate::tx::apply_replicated::follower_durability::in_flight_range;
 use crate::tx::clean_horizon::recovery_floor::reserve_recovery_floor;
@@ -54,6 +54,19 @@ pub(super) async fn reconcile_with_hook(
     permit: &crate::repo::RepoWritePermit,
     hook: &mut (dyn FnMut(&'static str) -> DbResult<()> + Send),
 ) -> DbResult<()> {
+    // PR6b-3: classify the durable follower-role state BEFORE every
+    // early-return branch. A legacy/malformed bookmark record refuses the
+    // OPEN (state-table row "typed refusal at open"), including across the
+    // non-persistent-WAL and `h <= j` branches below.
+    let info = repo.tx_info_store().await?;
+    let follower_state = classify_follower_bookmark(&info).await?;
+    let follower_provenance = matches!(follower_state, FollowerBookmarkState::Native(_));
+    if follower_provenance {
+        // Durable role state — a valid v3 record, bookmark zero and
+        // fence-less included — is the ONLY thing that identifies a
+        // follower; enable native visibility before any read below.
+        repo.tx_gate().await?.enable_receipt_native_visibility();
+    }
     if !repo.has_persistent_wal() {
         return repo.certify_legacy_cold_start().await;
     }
@@ -79,7 +92,6 @@ pub(super) async fn reconcile_with_hook(
     // early return and the PR6c classification, so the receipt's versions are
     // certified through the bookmark's clean horizon instead of becoming a
     // recovery GAP.
-    let info = repo.tx_info_store().await?;
     super::receipt_recovery::complete_outstanding_receipt(repo, &info, permit).await?;
     if h <= j {
         if let Some(coverage) = repo.wal_group().await?.coverage_observer() {
@@ -88,9 +100,6 @@ pub(super) async fn reconcile_with_hook(
         return Ok(());
     }
 
-    let bookmark = load_replication_bookmark(&info).await?;
-    let follower_fence = load_fence_record(&info).await?;
-    let follower_provenance = bookmark > 0 || follower_fence.is_some();
     // PR6c: a follower record with a known journal horizon certifies every
     // event through it; only the in-flight batch stays uncertain.
     let certified_through =

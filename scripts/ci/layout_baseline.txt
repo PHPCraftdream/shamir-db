@@ -2,14 +2,6 @@
 # format: dir <path> <n> | file <path> <n>; maintained by check_layout.py
 dir crates/shamir-client-node 10
 dir crates/shamir-client-ts 8
-dir crates/shamir-client/src 11
-dir crates/shamir-client/src/tests 12
-dir crates/shamir-client/tests 8
-dir crates/shamir-connect/src/common 20
-dir crates/shamir-connect/src/common/tests 13
-dir crates/shamir-connect/src/server 19
-dir crates/shamir-connect/src/server/tests 9
-dir crates/shamir-connect/tests 9
 dir crates/shamir-db/src/shamir_db 9
 dir crates/shamir-db/src/shamir_db/execute 25
 dir crates/shamir-db/src/shamir_db/shamir_db 15
@@ -57,14 +49,7 @@ dir crates/shamir-tx/src 25
 dir crates/shamir-tx/src/mvcc_store 9
 dir crates/shamir-tx/src/tests 23
 dir crates/shamir-tx/src/tests/mvcc_store_tests 32
-dir crates/shamir-wal/src 13
-dir crates/shamir-wal/src/tests 10
-dir crates/shamir-wasm-host/src 16
-dir crates/shamir-wasm-host/src/tests 11
-dir crates/shamir-wasm-host/src/wasm 9
 dir scripts 15
-file crates/shamir-client/src/client.rs 1318
-file crates/shamir-connect/tests/integration_resume.rs 1216
 file crates/shamir-db/benches/engine_perf.rs 1365
 file crates/shamir-db/src/shamir_db/execute/admin_schema.rs 1395
 file crates/shamir-db/src/shamir_db/shamir_db/access_control.rs 1255
@@ -85,7 +70,7 @@ file crates/shamir-engine/src/query/filter/tests/eval_tests/collection_tests.rs 
 file crates/shamir-engine/src/query/read/aggregate.rs 1779
 file crates/shamir-engine/src/query/read/tests/exec_tests.rs 1222
 file crates/shamir-engine/src/query/read/tests/qv_postprocess_tests.rs 1354
-file crates/shamir-engine/src/repo/repo_instance.rs 2022
+file crates/shamir-engine/src/repo/repo_instance.rs 1967
 file crates/shamir-engine/src/table/read_exec.rs 3092
 file crates/shamir-engine/src/table/table_manager.rs 1536
 file crates/shamir-engine/src/table/table_manager_tx_ops.rs 1552

@@ -1,0 +1,5 @@
+[[exception]]
+path = "crates/fix/src/once.rs"
+package = "fix"
+reason = "stale: once.rs is mounted normally, no duplicate exists"
+owner = "@rust-guard"

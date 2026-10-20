@@ -30,9 +30,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures_util::stream::Stream;
+use futures_util::stream::{self, Stream};
 use shamir_db::access::{principal64_from_username, Actor};
-use shamir_db::engine::meta::repl::bookmark::save_bookmark_and_clean_horizon;
+use shamir_db::engine::meta::repl::bookmark_v3::{save_bookmark_v3, BookmarkV3};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::table_manager::table_token_for;
 use shamir_db::engine::table::TableConfig;
@@ -45,8 +45,7 @@ use shamir_db::types::value::InnerValue;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl::{
-    alter_subscription, drop_subscription, list_subscriptions, repl_scope, replication_profile,
-    replication_status, subscription,
+    alter_subscription, drop_subscription, repl_scope, replication_profile, subscription,
 };
 use shamir_query_builder::doc;
 use shamir_query_builder::write::insert;
@@ -65,7 +64,7 @@ use crate::replication::supervisor::{ReplSourceFactory, Subscription, Subscripti
 
 /// Build an in-memory `ShamirDb` with db `app`, repo `main`, table `items`,
 /// owned by `alice`. Used for both leader and follower (independent data).
-async fn build_db() -> Arc<ShamirDb> {
+pub(crate) async fn build_db() -> Arc<ShamirDb> {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64_from_username("alice"));
     shamir.create_db_as("app", owner.clone()).await;
@@ -128,7 +127,7 @@ async fn write_rows(leader: &ShamirDb, base: usize, n: usize) {
 
 /// Create a replication profile with a single `pull` stream over `app/main`,
 /// then a subscription bound to it — both on the FOLLOWER catalogue.
-async fn create_profile_and_subscription(follower: &ShamirDb) {
+pub(crate) async fn create_profile_and_subscription(follower: &ShamirDb) {
     let mut b = Batch::new();
     b.id(1);
     b.op(
@@ -150,7 +149,7 @@ async fn create_profile_and_subscription(follower: &ShamirDb) {
 }
 
 /// Run an `alter_subscription` terminal op on the follower catalogue.
-async fn alter(follower: &ShamirDb, op: shamir_query_types::batch::BatchOp) {
+pub(crate) async fn alter(follower: &ShamirDb, op: shamir_query_types::batch::BatchOp) {
     let mut b = Batch::new();
     b.id(1);
     b.op("as", op);
@@ -187,7 +186,7 @@ async fn wait_for_bookmark(follower: &ShamirDb, target: u64) {
     panic!("follower bookmark did not reach {target} (last={b})");
 }
 
-async fn bookmark(follower: &ShamirDb) -> u64 {
+pub(crate) async fn bookmark(follower: &ShamirDb) -> u64 {
     follower
         .get_db("app")
         .and_then(|d| d.get_repo("main"))
@@ -499,136 +498,328 @@ async fn reopen_required_is_visible_and_resume_refused() {
     sup.stop_all().await;
 }
 
-// Behavioral counterfactual: retrying a published history error would issue
-// another pull/version; failing to persist terminal state leaves status active.
-#[tokio::test]
-async fn partial_history_failure_stops_supervisor_and_refuses_paused_resume() {
-    let follower = build_db().await;
-    create_profile_and_subscription(&follower).await;
-    let destination = follower.get_db("app").unwrap().get_repo("main").unwrap();
-    // This failure is in legacy per-table writes: receipt-native atomic history
-    // batches bypass the registered MVCC Store::set hook entirely.
-    let info = destination.tx_info_store().await.unwrap();
-    save_bookmark_and_clean_horizon(&info, 0, 0).await.unwrap();
-    let permit = destination.write_domain().admit().await.unwrap();
-    destination
-        .add_table_admitted(TableConfig::new("other"), &permit)
-        .await
-        .unwrap();
-    drop(permit);
-    let gate = destination.tx_gate().await.unwrap();
-    let mut changes = Vec::new();
-    let mut order = shamir_collections::TFxMap::default();
-    for (id, name) in [(1u8, "items"), (2u8, "other")] {
-        destination.get_table(name).await.unwrap();
-        order.entry(name.to_string()).or_insert(Vec::<()>::new());
-        changes.push(RecordChange {
-            table: name.into(),
-            key: RecordId([id; 16]).to_bytes(),
-            op: ChangeOp::Put,
-            value: Some(InnerValue::Str("row".into()).to_bytes().unwrap()),
-        });
+// ---------------------------------------------------------------------------
+// S5c-X PR6b-3 — receipt I/O pause/retry convergence (replaces the retired
+// partial-history fixture: ordinary history I/O failure does NOT reopen;
+// the receipt pipeline retries transient `DbError::Storage` failures).
+// ---------------------------------------------------------------------------
+
+/// A wrapped MVCC history store whose FIRST THREE `iter_range_stream` calls
+/// yield transient `DbError::Storage` batches, then delegate — the same
+/// store-swap technique the retired fixture used, with a budget large
+/// enough to EXHAUST the apply loop's inline retry (one injected error is
+/// retried inside the same apply call, so it never requires a re-pull),
+/// re-armed at the seam the receipt pipeline actually exercises: the cold
+/// pre-state read of `compute_counters` (`get_current_many` →
+/// `get_current_bytes` cold path → `seek_latest_published`'s
+/// `iter_range_stream` range scan over the swapped history; an empty
+/// history resolves via the scan alone, so a point `get`
+/// injection never fires).
+struct TransientReadHistory {
+    inner: Arc<dyn Store>,
+    /// Exhaustion budget: the first three `iter_range_stream` calls fail,
+    /// then the wrapper is transparent. `checked_sub` prevents wrap at 0.
+    remaining: AtomicUsize,
+    /// Number of INJECTED failures (asserted == 3 after convergence).
+    failures: AtomicUsize,
+}
+
+#[async_trait]
+impl Store for TransientReadHistory {
+    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
+        self.inner.insert(value).await
     }
-    let second = order.keys().nth(1).unwrap();
-    let token = table_token_for(second);
-    let history: Arc<dyn Store> = Arc::new(FailingHistory {
-        inner: Arc::new(InMemoryStore::new()),
-    });
+
+    async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
+        self.inner.set(key, value).await
+    }
+
+    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
+        self.inner.get(key).await
+    }
+
+    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
+        self.inner.remove(key).await
+    }
+
+    fn iter_stream(&self, size: usize) -> HistoryStream {
+        self.inner.iter_stream(size)
+    }
+
+    fn scan_prefix_stream(&self, prefix: Bytes, size: usize) -> HistoryStream {
+        self.inner.scan_prefix_stream(prefix, size)
+    }
+
+    fn iter_range_stream(
+        &self,
+        start: Option<Bytes>,
+        end: Option<Bytes>,
+        size: usize,
+    ) -> HistoryStream {
+        match self
+            .remaining
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+        {
+            Ok(_) => {
+                self.failures.fetch_add(1, Ordering::AcqRel);
+                Box::pin(stream::once(async {
+                    Err(DbError::Storage(
+                        "injected transient receipt-path read failure".into(),
+                    ))
+                }))
+            }
+            Err(_) => self.inner.iter_range_stream(start, end, size),
+        }
+    }
+
+    fn iter_range_stream_reverse(
+        &self,
+        start: Option<Bytes>,
+        end: Option<Bytes>,
+        size: usize,
+    ) -> HistoryStream {
+        self.inner.iter_range_stream_reverse(start, end, size)
+    }
+}
+
+/// Swap `items`' MVCC store for one backed by `history` (pre-attach first so
+/// the swap is the registration, mirroring the retired fixture's technique).
+async fn swap_items_mvcc_history(follower: &ShamirDb, history: Arc<TransientReadHistory>) {
+    let destination = follower.get_db("app").unwrap().get_repo("main").unwrap();
+    let gate = destination.tx_gate().await.unwrap();
+    destination.get_table("items").await.unwrap();
+    let token = table_token_for("items");
     destination.per_table_mvcc().remove_sync(&token);
     assert!(destination
         .per_table_mvcc()
-        .insert_sync(token, Arc::new(MvccStore::new(history, gate.clone())))
+        .insert_sync(token, Arc::new(MvccStore::new(history, gate)))
         .is_ok());
-    let events = vec![ReplicatedEvent {
+}
+
+/// One leader-originated event (insert of row `k1` at commit_version 1).
+pub(crate) fn single_insert_event() -> Vec<ReplicatedEvent> {
+    vec![ReplicatedEvent {
         event: ChangelogEvent {
             repo: "main".into(),
             commit_version: 1,
             tx_id: 1,
             actor: Actor::System,
             timestamp_ns: 0,
-            changes,
+            changes: vec![RecordChange {
+                table: "items".into(),
+                key: RecordId([1u8; 16]).to_bytes(),
+                op: ChangeOp::Put,
+                value: Some(InnerValue::Str("row".into()).to_bytes().unwrap()),
+            }],
         },
         field_bindings: Vec::new(),
-    }];
+    }]
+}
+
+pub(crate) async fn items_row_counter(follower: &ShamirDb) -> u64 {
+    follower
+        .get_db("app")
+        .unwrap()
+        .get_repo("main")
+        .unwrap()
+        .get_table("items")
+        .await
+        .unwrap()
+        .counter_for_test()
+        .get()
+        .await
+        .unwrap()
+}
+
+/// Poll until the subscription row reaches `expected` (terminal-state
+/// persistence is async — the loop task reports it).
+pub(crate) async fn wait_for_sub_state(follower: &ShamirDb, expected: &str) {
+    for _ in 0..200 {
+        if sub_state(follower, "sub_a").await.as_deref() == Some(expected) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!(
+        "subscription never reached state {expected} (last={:?})",
+        sub_state(follower, "sub_a").await
+    );
+}
+
+#[tokio::test]
+async fn receipt_io_pause_retry_convergence() {
+    let leader = build_db().await;
+    write_rows(&leader, 0, 1).await;
+    let leader_version = leader
+        .current_commit_version("app", "main")
+        .await
+        .expect("leader version");
+
+    let follower = build_db().await;
+    create_profile_and_subscription(&follower).await;
+    let history = Arc::new(TransientReadHistory {
+        inner: Arc::new(InMemoryStore::new()),
+        remaining: AtomicUsize::new(3),
+        failures: AtomicUsize::new(0),
+    });
+    swap_items_mvcc_history(&follower, history.clone()).await;
+
+    let events = single_insert_event();
     let source = Arc::new(PartialSource {
         events: rmp_serde::to_vec_named(&events).unwrap(),
         pulls: AtomicUsize::new(0),
     });
     let shared = source.clone();
     let factory: ReplSourceFactory = Arc::new(move |_| shared.clone());
-    let sup =
-        SubscriptionSupervisor::new(follower.clone(), factory, "follower-1").with_max_iterations(2);
+    let sup = SubscriptionSupervisor::new(follower.clone(), factory, "follower-1")
+        .with_poll_wait_ms(20)
+        .with_max_iterations(50);
     sup.reconcile().await;
-    sup.wait_for_subscription("sub_a").await;
-    assert!(gate.requires_reopen());
-    assert_eq!(gate.version_allocation_high_water_mark(), 1);
-    assert_eq!(gate.completion().watermark(), 0);
-    assert_eq!(destination.replication_bookmark().await.unwrap(), 0);
-    assert_eq!(source.pulls.load(Ordering::Acquire), 1);
-    let first = order.keys().next().unwrap();
+
+    // Trace: attempts 1-3 of `try_chunk` each fail in `compute_counters`
+    // (stage.rs) — attempt 1 AFTER `commit_prepared` committed the durable
+    // Prepared receipt, so the park in the apply loop places the paused
+    // reservation and the re-pull takes the RESUME path; attempt >= 3 parks
+    // the guards and surfaces `DbError::Storage`, follower_loop backs off
+    // and re-pulls, and pull #2 resumes the receipt (4th scan call — budget
+    // exhausted, delegates) and converges.
+    // The transient failures are EXHAUSTED inline and the batch CONVERGES.
+    // COUNTERFACTUAL: with the budget at 1 (the old one-shot shape) the
+    // single failure is retried inline inside the same apply call and a
+    // passing `pulls >= 2` proves nothing about pause/re-pull — the
+    // exhaustion (3) is what forces the loop-level pause.
+    wait_for_bookmark(&follower, leader_version).await;
     assert_eq!(
-        destination
-            .get_table(first)
-            .await
-            .unwrap()
-            .counter_for_test()
-            .get()
-            .await
-            .unwrap(),
-        1,
-        "the first table completed before the second history write failed",
+        bookmark(&follower).await,
+        leader_version,
+        "bookmark advanced once to the leader version"
     );
-    for op in [replication_status(), list_subscriptions()] {
-        let mut batch = Batch::new();
-        batch.id(7);
-        batch.op("status", op);
-        let response = follower
-            .execute("app", &batch.to_request_via_msgpack())
-            .await
-            .unwrap();
-        assert!(!response.results.contains_key("__error"), "{response:?}");
-        let value = response.results["status"].records[0].as_value();
-        let subscriptions = value.get("subscriptions").unwrap().as_array().unwrap();
-        assert_eq!(subscriptions.len(), 1);
-        assert_eq!(
-            subscriptions[0]
-                .get("state")
-                .and_then(|value| value.as_str()),
-            Some("reopen_required"),
-        );
-    }
-    alter(
-        &follower,
-        alter_subscription("sub_a").pause().build().unwrap(),
-    )
-    .await;
+    assert_eq!(
+        history.failures.load(Ordering::Acquire),
+        3,
+        "the inline retry budget was exhausted, not merely hit once"
+    );
+    assert!(
+        source.pulls.load(Ordering::Acquire) >= 2,
+        "the pipeline re-pulled after the surfaced (post-exhaustion) error"
+    );
+    // One local version per event — no replacement allocations.
+    let gate = follower
+        .get_db("app")
+        .unwrap()
+        .get_repo("main")
+        .unwrap()
+        .tx_gate()
+        .await
+        .unwrap();
+    assert_eq!(gate.version_allocation_high_water_mark(), 1);
+    assert_eq!(
+        items_row_counter(&follower).await,
+        1,
+        "exactly one local row allocated — no replacements"
+    );
+    // A transient failure is NOT terminal: the row stays `active`. Liveness
+    // is not asserted: the loop is bounded by `with_max_iterations`, and
+    // re-pulls of the applied event are instant, so the budget can be spent
+    // between the convergence and this point (seen on Windows).
     assert_eq!(
         sub_state(&follower, "sub_a").await.as_deref(),
-        Some("paused")
+        Some("active")
     );
-    let mut batch = Batch::new();
-    batch.id(8);
-    batch.op(
-        "resume",
-        alter_subscription("sub_a").resume().build().unwrap(),
-    );
-    let error = follower
-        .execute("app", &batch.to_request_via_msgpack())
-        .await
-        .unwrap_err();
-    assert!(
-        format!("{error:?}").contains("reopen_required"),
-        "{error:?}"
-    );
-    sup.reconcile().await;
-    assert!(!sup.is_running("sub_a"));
-    assert_eq!(source.pulls.load(Ordering::Acquire), 1);
     sup.stop_all().await;
 }
 
-struct PartialSource {
-    events: Vec<u8>,
-    pulls: AtomicUsize,
+// S5c-X PR6b-3: TERMINAL receipt corruption — a valid v3 bookmark whose
+// `outstanding_receipt` pointer references a MISSING receipt. The receipt
+// pipeline fail-stops (`RepoRequiresReopen` family), the supervisor marks
+// the subscription terminal, and a resume is REFUSED AT ADMISSION TIME:
+// the v3 record decodes fine (so this is not the typed
+// `FollowerStateRefused`), but `receipt_pointer_resolves` is false, so the
+// supervisor marks the subscription terminal and returns before any loop is
+// spawned — a dangling pointer can never make progress.
+#[tokio::test]
+async fn terminal_receipt_corruption_stops_supervisor_and_refuses_resume() {
+    let follower = build_db().await;
+    create_profile_and_subscription(&follower).await;
+    let info = follower
+        .get_db("app")
+        .unwrap()
+        .get_repo("main")
+        .unwrap()
+        .tx_info_store()
+        .await
+        .unwrap();
+    save_bookmark_v3(
+        &info,
+        &BookmarkV3 {
+            fence: None,
+            bookmark: 0,
+            clean_through: None,
+            outstanding_receipt: Some([0u8; 16]),
+        },
+    )
+    .await
+    .unwrap();
+
+    let events = single_insert_event();
+    let source = Arc::new(PartialSource {
+        events: rmp_serde::to_vec_named(&events).unwrap(),
+        pulls: AtomicUsize::new(0),
+    });
+    let shared = source.clone();
+    let factory: ReplSourceFactory = Arc::new(move |_| shared.clone());
+    let sup = SubscriptionSupervisor::new(follower.clone(), factory, "follower-1")
+        .with_poll_wait_ms(20)
+        .with_max_iterations(2);
+    sup.reconcile().await;
+    wait_for_sub_state(&follower, "reopen_required").await;
+    assert_eq!(
+        bookmark(&follower).await,
+        0,
+        "no bookmark progress past the corrupt pointer"
+    );
+    assert_eq!(
+        items_row_counter(&follower).await,
+        0,
+        "no events applied past the corrupt pointer"
+    );
+
+    // Admission-time refusal: after pruning the dead loop's registry entry,
+    // an administrative resume + reconcile must NOT start a loop at all —
+    // the supervisor resolves the destination's v3 record, sees the dangling
+    // receipt pointer, marks `reopen_required` and returns BEFORE any loop
+    // spawns. Zero pulls, zero progress.
+    sup.reconcile().await;
+    assert!(!sup.is_running("sub_a"));
+    let pulls_before_resume = source.pulls.load(Ordering::Acquire);
+    alter(
+        &follower,
+        alter_subscription("sub_a").resume().build().unwrap(),
+    )
+    .await;
+    sup.reconcile().await;
+    assert!(
+        !sup.is_running("sub_a"),
+        "the resume was refused at admission: no loop was ever started"
+    );
+    assert_eq!(
+        sub_state(&follower, "sub_a").await.as_deref(),
+        Some("reopen_required"),
+        "the subscription stays terminal reopen_required"
+    );
+    assert_eq!(
+        source.pulls.load(Ordering::Acquire),
+        pulls_before_resume,
+        "the refused resume must not perform any pull"
+    );
+    assert_eq!(bookmark(&follower).await, 0);
+    assert_eq!(items_row_counter(&follower).await, 0);
+    sup.stop_all().await;
+}
+
+pub(crate) struct PartialSource {
+    pub(crate) events: Vec<u8>,
+    pub(crate) pulls: AtomicUsize,
 }
 
 #[async_trait]
@@ -661,58 +852,7 @@ impl ReplSource for PartialSource {
     }
 }
 
-struct FailingHistory {
-    inner: Arc<dyn Store>,
-}
-
 type HistoryStream = Pin<Box<dyn Stream<Item = DbResult<Vec<(RecordKey, Bytes)>>> + Send>>;
-
-#[async_trait]
-impl Store for FailingHistory {
-    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
-        self.inner.insert(value).await
-    }
-
-    async fn set(&self, _key: RecordKey, _value: Bytes) -> DbResult<bool> {
-        Err(DbError::Storage(
-            "injected multi-table history failure".into(),
-        ))
-    }
-
-    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
-        self.inner.get(key).await
-    }
-
-    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
-        self.inner.remove(key).await
-    }
-
-    fn iter_stream(&self, size: usize) -> HistoryStream {
-        self.inner.iter_stream(size)
-    }
-
-    fn scan_prefix_stream(&self, prefix: Bytes, size: usize) -> HistoryStream {
-        self.inner.scan_prefix_stream(prefix, size)
-    }
-
-    fn iter_range_stream(
-        &self,
-        start: Option<Bytes>,
-        end: Option<Bytes>,
-        size: usize,
-    ) -> HistoryStream {
-        self.inner.iter_range_stream(start, end, size)
-    }
-
-    fn iter_range_stream_reverse(
-        &self,
-        start: Option<Bytes>,
-        end: Option<Bytes>,
-        size: usize,
-    ) -> HistoryStream {
-        self.inner.iter_range_stream_reverse(start, end, size)
-    }
-}
 
 // Persisted degradation is diagnostic, not a permanent Resume latch.
 #[tokio::test]
@@ -734,7 +874,7 @@ async fn healthy_destination_can_resume_persisted_reopen_state() {
     );
 }
 
-async fn sub_state(follower: &ShamirDb, name: &str) -> Option<String> {
+pub(crate) async fn sub_state(follower: &ShamirDb, name: &str) -> Option<String> {
     let table = follower.system_store().subscriptions_table().await.ok()?;
     let interner = table.interner_for_test().get().await.ok()?;
     let refs = shamir_db::types::common::new_map();
@@ -799,4 +939,31 @@ async fn resync_required_destination_is_excluded_from_downstream_serving() {
             .unwrap(),
         "an uncovered db must stay servable"
     );
+}
+
+/// Raw catalogue read of one subscription row's `binding_generation` via the
+/// PUBLIC system-store path (mirrors `supervisor.rs::read_all`: the
+/// FilterContext is built engine-side from `info_store_read_view`).
+pub(crate) async fn sub_binding_generation(follower: &ShamirDb, name: &str) -> Option<u64> {
+    let table = follower.system_store().subscriptions_table().await.ok()?;
+    let refs = shamir_db::types::common::new_map();
+    let ctx = table
+        .info_store_read_view()
+        .filter_context(&refs)
+        .await
+        .ok()?;
+    let query = shamir_db::query::read::ReadQuery::new("subscriptions");
+    let result = table.read(&query, &ctx).await.ok()?;
+    result
+        .records
+        .iter()
+        .find(|r| {
+            r.as_value()
+                .get("name")
+                .and_then(|v| v.as_str())
+                .is_some_and(|n| n == name)
+        })?
+        .as_value()
+        .get("binding_generation")
+        .and_then(|v| v.as_u64())
 }

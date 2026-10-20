@@ -340,18 +340,34 @@ async fn supervisor_preserves_typed_terminal_reason_without_advancing_bookmark()
         .unwrap();
     // Test the terminal persistence seam directly: the same path invoked by
     // the supervised loop, with no scheduling or timer-dependent polling.
-    super::super::terminal::persist_terminal(
-        &home,
-        "sub",
-        &ReplError::Seed(SeedRefusal::WrongSchema),
-    )
-    .await;
+    // Durable-sequence generations are monotonic but not small predictable
+    // integers, so the row's generation is read from the catalogue and fed
+    // to the callback (its generation guard must match).
     let table = home.system_store().subscriptions_table().await.unwrap();
     let refs = shamir_collections::TMap::default();
     let ctx = shamir_db::query::filter::FilterContext::new(
         table.interner_for_test().get().await.unwrap(),
         &refs,
     );
+    let generation = {
+        let result = table
+            .read(
+                &shamir_db::query::read::ReadQuery::new("subscriptions"),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        result.records[0].as_value()["binding_generation"]
+            .as_u64()
+            .expect("binding_generation must be present")
+    };
+    super::super::terminal::persist_terminal(
+        &home,
+        "sub",
+        &ReplError::Seed(SeedRefusal::WrongSchema),
+        generation,
+    )
+    .await;
     let result = table
         .read(
             &shamir_db::query::read::ReadQuery::new("subscriptions"),

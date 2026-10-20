@@ -1,4 +1,4 @@
-use super::*;
+use super::set::*;
 
 pub(super) async fn measure(segment_set: &SegmentSet) -> DbResult<u64> {
     let paths: Vec<PathBuf> = {

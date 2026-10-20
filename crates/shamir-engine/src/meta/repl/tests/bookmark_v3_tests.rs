@@ -2,12 +2,11 @@ use crate::meta::repl::{
     decode_bookmark_v3, encode_bookmark_v3, load_bookmark_v3, save_bookmark_v3, BookmarkV3,
 };
 use crate::meta::repl_bookmark::{
-    load_clean_horizon, load_fence_record, load_replication_bookmark,
-    save_bookmark_and_clean_horizon, save_fence_record, save_replication_bookmark, FenceRecord,
+    load_clean_horizon, load_fence_record, load_replication_bookmark, FenceRecord,
 };
 use crate::meta::{MetaEnvelope, MetaKey};
 use bytes::Bytes;
-use shamir_storage::error::DbError;
+use shamir_storage::error::{DbError, FollowerRefusalReason};
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::{RecordKey, Store};
 use std::sync::Arc;
@@ -27,26 +26,6 @@ fn fence(bookmark: u64) -> FenceRecord {
         history_epoch: 3,
         observed_identity: None,
     }
-}
-
-#[tokio::test]
-async fn legacy_records_load_as_v3_without_receipt() {
-    let info = store();
-    save_fence_record(&info, fence(10)).await.unwrap();
-    let loaded = load_bookmark_v3(&info).await.unwrap().unwrap();
-    assert_eq!(loaded.fence, Some(fence(10)));
-    assert_eq!(loaded.bookmark, 10);
-    assert_eq!(loaded.clean_through, None);
-    assert_eq!(loaded.outstanding_receipt, None);
-
-    save_bookmark_and_clean_horizon(&info, 20, 18)
-        .await
-        .unwrap();
-    let loaded = load_bookmark_v3(&info).await.unwrap().unwrap();
-    assert_eq!(loaded.fence, Some(fence(20)));
-    assert_eq!(loaded.bookmark, 20);
-    assert_eq!(loaded.clean_through, Some(18));
-    assert_eq!(loaded.outstanding_receipt, None);
 }
 
 #[tokio::test]
@@ -72,6 +51,26 @@ async fn absent_key_loads_none() {
     assert!(load_bookmark_v3(&info).await.unwrap().is_none());
 }
 
+/// The strict loaders are projections of a valid v3 record.
+#[tokio::test]
+async fn projections_read_v3_records() {
+    let info = store();
+    save_bookmark_v3(
+        &info,
+        &BookmarkV3 {
+            fence: Some(fence(30)),
+            bookmark: 30,
+            clean_through: Some(28),
+            outstanding_receipt: Some([7; 16]),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(load_replication_bookmark(&info).await.unwrap(), 30);
+    assert_eq!(load_fence_record(&info).await.unwrap(), Some(fence(30)));
+    assert_eq!(load_clean_horizon(&info).await.unwrap(), Some(28));
+}
+
 #[tokio::test]
 async fn unknown_version_fails_closed() {
     let info = store();
@@ -89,7 +88,12 @@ async fn unknown_version_fails_closed() {
     info.set(bookmark_key(), Bytes::from(bytes.clone()))
         .await
         .unwrap();
-    assert!(load_bookmark_v3(&info).await.is_err());
+    assert!(matches!(
+        load_bookmark_v3(&info).await,
+        Err(DbError::FollowerStateRefused {
+            reason: FollowerRefusalReason::MalformedBookmark
+        })
+    ));
     assert!(decode_bookmark_v3(&bytes).is_err());
 }
 
@@ -150,43 +154,4 @@ async fn v3_rejects_trailing_bytes() {
     let mut bytes = encode_bookmark_v3(&record).unwrap();
     bytes.push(0);
     assert!(decode_bookmark_v3(&bytes).is_err());
-}
-
-// PR6b-2 scope extension: the LEGACY v2 loaders decode a v3 record through
-// the v3 codec (dropping `outstanding_receipt`), and the legacy save_*
-// writers refuse to downgrade a v3 record instead of silently corrupting it.
-#[tokio::test]
-async fn legacy_v2_loaders_read_v3_records_and_saves_refuse_downgrade() {
-    let info = store();
-    save_bookmark_v3(
-        &info,
-        &BookmarkV3 {
-            fence: Some(fence(30)),
-            bookmark: 30,
-            clean_through: Some(28),
-            outstanding_receipt: Some([7; 16]),
-        },
-    )
-    .await
-    .unwrap();
-    assert_eq!(load_replication_bookmark(&info).await.unwrap(), 30);
-    assert_eq!(load_fence_record(&info).await.unwrap(), Some(fence(30)));
-    assert_eq!(load_clean_horizon(&info).await.unwrap(), Some(28));
-
-    let downgrade = save_replication_bookmark(&info, 31).await.unwrap_err();
-    assert!(matches!(downgrade, DbError::Storage(_)), "{downgrade:?}");
-    let downgrade = save_bookmark_and_clean_horizon(&info, 31, 30)
-        .await
-        .unwrap_err();
-    assert!(matches!(downgrade, DbError::Storage(_)), "{downgrade:?}");
-    // Refused downgrade: the record (and its receipt pointer) is untouched.
-    assert_eq!(load_replication_bookmark(&info).await.unwrap(), 30);
-    assert_eq!(
-        load_bookmark_v3(&info)
-            .await
-            .unwrap()
-            .unwrap()
-            .outstanding_receipt,
-        Some([7; 16])
-    );
 }

@@ -3,6 +3,12 @@
 //! prepared events and run Prepared → Materialized → adopt-counters →
 //! checkpoint (bookmark commit + RAM publication in one poll) per chunk.
 //!
+//! Ordering (PR6b-3): admission (`admit_follower`, durable role validation,
+//! typed refusals) → adoption (a `Fresh` verdict durably writes the v3
+//! baseline) → visibility (`enable_receipt_native_visibility`, derived from
+//! durable role state — Native record or the baseline just written), and
+//! only then any version allocation, table resolution or receipt staging.
+//!
 //! Cancellation: the pipeline runs on the REPOSITORY-OWNED lifecycle worker
 //! (`resume::worker`, ONE lifecycle spawn per repo — the merged
 //! `ForegroundLifecycle` foundation). The caller submits a bounded job and
@@ -26,17 +32,17 @@ use shamir_tx::RepoTxGate;
 use super::super::super::{prepare_event, ApplyOutcome, ApplyPolicy, PreparedEvent};
 #[cfg(test)]
 use super::super::test_seam::{self, Phase};
+use super::resume::activation::{admit_follower, FollowerAdmission};
 use super::resume::worker::ReceiptLease;
 use super::{checkpoint, publish, resume, stage};
 use crate::meta::repl::bookmark::FenceRecord;
-use crate::meta::repl::bookmark_v3::{load_bookmark_v3, BookmarkV3};
+use crate::meta::repl::bookmark_v3::{load_bookmark_v3, save_bookmark_v3, BookmarkV3};
 use crate::meta::repl::{ReceiptBinding, ReceiptPhase, ReplicationReceipt, MAX_RECEIPT_EVENTS};
-use crate::meta::repl_bookmark::{load_fence_record, load_replication_bookmark};
+use crate::meta::repl_bookmark::load_replication_bookmark;
 use crate::repo::changelog_store::write_domain::{RepoWritePermit, RepoWriteReservation};
 use crate::repo::RepoInstance;
 use crate::tx::ReplicatedEvent;
 
-#[cfg_attr(not(test), allow(dead_code))] // entry: wired by the activation chunk (next stage)
 pub(crate) async fn apply_batch_receipt(
     repo: &RepoInstance,
     info: Arc<dyn Store>,
@@ -88,12 +94,6 @@ pub(crate) async fn run_receipt_pipeline(
     lease: &ReceiptLease,
 ) -> DbResult<ApplyOutcome> {
     let gate = repo.tx_gate().await?;
-    // Receipt activation is the provenance boundary for native visibility.
-    // Enable before any receipt materialization can allocate versions.
-    gate.enable_receipt_native_visibility();
-    if gate.requires_reopen() {
-        return Err(DbError::RepoRequiresReopen(repo.name().to_string()));
-    }
     // Repository write-admission domain for the receipt path (PR6b-2c): the
     // DOMAIN permit excludes DDL and every other repository mutation for the
     // pipeline's whole run — there is deliberately NO second admission
@@ -146,6 +146,38 @@ pub(crate) async fn run_receipt_pipeline(
         }
     };
     let _marker = repo.marker_write_mutex().lock().await;
+    // PR6b-3 ordering: ADMISSION (durable role validation; typed refusals
+    // propagate) → ADOPTION (a fresh repo durably writes the v3 baseline —
+    // bookmark 0, no fence, no J, no receipt — BEFORE any version is
+    // allocated, any table resolved, or any receipt staged) → VISIBILITY
+    // (enabled below, derived from durable role state, never
+    // "opportunistically" by the first receipt).
+    match admit_follower(repo, &info).await? {
+        FollowerAdmission::Native => {}
+        FollowerAdmission::Fresh => {
+            save_bookmark_v3(
+                &info,
+                &BookmarkV3 {
+                    fence: None,
+                    bookmark: 0,
+                    clean_through: None,
+                    outstanding_receipt: None,
+                },
+            )
+            .await?;
+            log::info!(
+                "follower admission: adopted fresh repo {} with a v3 baseline \
+                 (bookmark 0, no fence, no clean horizon, no receipt)",
+                repo.name()
+            );
+        }
+    }
+    // Receipt activation is the provenance boundary for native visibility.
+    // Enable before any receipt materialization can allocate versions.
+    gate.enable_receipt_native_visibility();
+    if gate.requires_reopen() {
+        return Err(DbError::RepoRequiresReopen(repo.name().to_string()));
+    }
     if let Some(outstanding) = resume::lookup(repo, &info).await? {
         // Full identity check (finding 1c) BEFORE any resume work and
         // before loading bookmark v3: fence lineage/epoch, offered
@@ -305,15 +337,13 @@ async fn apply_fresh(
             outstanding_receipt: None,
             ..bookmark
         },
-        // Activation guarantees this repo is v3-or-absent, so `None` is a
-        // FRESH INSTALL: synthesize the v3 view from the legacy records
-        // (safe — absent v3 means these are the only stored values).
-        None => BookmarkV3 {
-            fence: load_fence_record(info).await?,
-            bookmark: load_replication_bookmark(info).await?,
-            clean_through: None,
-            outstanding_receipt: None,
-        },
+        // After strict loading and mandatory admission/adoption, `None` is a
+        // contradiction: the v3 baseline exists or the pipeline wrote it.
+        None => {
+            return Err(DbError::RepoRequiresReopen(
+                "replication bookmark v3 baseline vanished".into(),
+            ))
+        }
     };
 
     let mut start = 0usize;
@@ -411,10 +441,7 @@ async fn apply_fresh(
                 ..fence
             }),
             bookmark: new_bookmark,
-            clean_through: Some(
-                old.clean_through
-                    .map_or(chunk_local_end, |j| j.max(chunk_local_end)),
-            ),
+            clean_through: checkpoint::certified_clean_through(repo, &old, chunk_local_end).await?,
             outstanding_receipt: None,
         };
         start = end;
@@ -483,11 +510,17 @@ async fn try_chunk(
                 .version
                 .ok_or_else(|| DbError::Storage("prepared event lost its local version".into()))?;
             if let Some(v3) = load_bookmark_v3(info).await? {
+                // Completion evidence is the checkpoint Uncertain read-back
+                // (checkpoint.rs:328-333): durable bookmark advanced AND
+                // receipt retired — written in ONE atomic batch
+                // (checkpoint.rs:263-280), so observing both means the chunk
+                // is committed and published. `clean_through` (J) is
+                // gap-capped (checkpoint.rs:233-248) and does NOT evidence
+                // completion: with an open gap below this chunk, J stays at
+                // the gap while the bookmark + retired receipt + watermarks
+                // prove the chunk is done.
                 if v3.outstanding_receipt.is_none()
                     && v3.bookmark >= leader_end
-                    && v3
-                        .clean_through
-                        .is_some_and(|clean| clean >= chunk_local_end)
                     && gate.last_committed() >= chunk_local_end
                     && gate.durable_watermark() >= chunk_local_end
                 {
@@ -497,7 +530,7 @@ async fn try_chunk(
         }
         stage::commit_prepared(repo, permit, info, &plan, old).await?;
         #[cfg(test)]
-        fail_after(repo.name(), Phase::ReceiptPrepared)?;
+        fail_after(repo.name(), Phase::Prepared)?;
     }
     run_chunk_tail(repo, permit, info, gate, &mut plan, old, lease).await
 }
@@ -543,7 +576,7 @@ async fn run_chunk_tail(
         // happen inside it, so every idempotency property is kept).
         let stored = &stored.expect("matched above").receipt;
         // Test seam on the FAST path too (reviewer P1 #2): without this
-        // check a sticky `fail_after = ReceiptMaterialized` flag could never
+        // check a sticky `fail_after = Phase::Materialized` flag could never
         // bite after the first Materialized commit — the retry takes this
         // fast path straight to `durable_tail` and succeeds, so a test
         // expecting the pipeline to PARK on the sticky flag would observe a
@@ -553,7 +586,7 @@ async fn run_chunk_tail(
         //   attempt 2: fast path -> seam fires again -> retry
         //   attempt 3: fast path -> seam fires -> attempt >= 3 -> PARK.
         #[cfg(test)]
-        fail_after(repo.name(), Phase::ReceiptMaterialized)?;
+        fail_after(repo.name(), Phase::Materialized)?;
         let publication = publish::publication_from_receipt(repo, permit, stored).await?;
         let chunk_local_end = stored
             .mapping
@@ -577,7 +610,7 @@ async fn run_chunk_tail(
     let (receipt, counters) =
         stage::commit_materialized_work(repo, permit, info, &work, old).await?;
     #[cfg(test)]
-    fail_after(repo.name(), Phase::ReceiptMaterialized)?;
+    fail_after(repo.name(), Phase::Materialized)?;
     let publication = publish::publication_from_plan(repo, permit, plan, &counters).await?;
     let chunk_local_end = receipt
         .mapping

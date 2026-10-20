@@ -169,7 +169,17 @@ async fn exact_retry_and_ordinary_repository_admission_are_distinct() {
         .await
         .is_err());
     let bookmarked = repo(Arc::new(InMemoryRepo::new()), Vec::new());
-    bookmarked.advance_replication_bookmark(8).await.unwrap();
+    crate::meta::repl::bookmark_v3::save_bookmark_v3(
+        &bookmarked.tx_info_store().await.unwrap(),
+        &crate::meta::repl::bookmark_v3::BookmarkV3 {
+            fence: None,
+            bookmark: 8,
+            clean_through: Some(1),
+            outstanding_receipt: None,
+        },
+    )
+    .await
+    .unwrap();
     assert!(SeedImageWriter::begin(bookmarked, receipt(), inventory())
         .await
         .is_err());

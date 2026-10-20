@@ -2,7 +2,7 @@
 
 use shamir_storage::error::DbResult;
 
-use super::WalGroupCommit;
+use super::group_commit::WalGroupCommit;
 
 pub(super) async fn truncate(group: &WalGroupCommit, durable: u64) -> DbResult<usize> {
     // The drainer has flushed history before calling this seam. Snapshot the
