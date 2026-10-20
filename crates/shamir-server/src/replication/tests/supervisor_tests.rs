@@ -718,8 +718,10 @@ async fn receipt_io_pause_retry_convergence() {
         1,
         "exactly one local row allocated — no replacements"
     );
-    // A transient failure is NOT terminal: the subscription keeps running.
-    assert!(sup.is_running("sub_a"));
+    // A transient failure is NOT terminal: the row stays `active`. Liveness
+    // is not asserted: the loop is bounded by `with_max_iterations`, and
+    // re-pulls of the applied event are instant, so the budget can be spent
+    // between the convergence and this point (seen on Windows).
     assert_eq!(
         sub_state(&follower, "sub_a").await.as_deref(),
         Some("active")
