@@ -10,6 +10,13 @@ use crate::ShamirDb;
 use super::catalogue::{binding, matches_scope, receipt, rows, streams};
 use super::SeedRefusal;
 
+/// The refusal code is stable; the typed error text (it names the remedy) is
+/// logged because `SeedRefusal` stays a plain `Copy` code.
+pub(crate) fn atomic_batch_refusal(error: shamir_storage::error::DbError) -> SeedRefusal {
+    log::warn!("replication seed admission refused: {error}");
+    SeedRefusal::AtomicBatchUnsupported
+}
+
 pub(crate) fn batch_error(reason: SeedRefusal) -> BatchError {
     BatchError::QueryError {
         alias: String::new(),
@@ -226,6 +233,10 @@ impl ShamirDb {
                 let Some(repo) = database.get_repo(&name) else {
                     continue;
                 };
+                if stream.direction == ReplDirection::Pull {
+                    repo.validate_repo_wide_atomic_batch(&format!("{}/{name}", stream.scope.db))
+                        .map_err(atomic_batch_refusal)?;
+                }
                 if let Some(receipt) = receipt(&repo).await? {
                     if !matches_scope(&scope, &receipt) {
                         return Err(SeedRefusal::WrongScope);
@@ -258,11 +269,17 @@ impl ShamirDb {
             if !matches_scope(&scope, &bound) {
                 return Err(SeedRefusal::WrongScope);
             }
-            let repo = self
+            let bound_repo = self
                 .get_db(&bound.source_db)
                 .and_then(|db| db.get_repo(&bound.source_repo))
                 .ok_or(SeedRefusal::IncompleteInstall)?;
-            if receipt(&repo).await?.as_ref() != Some(&bound) {
+            bound_repo
+                .validate_repo_wide_atomic_batch(&format!(
+                    "{}/{}",
+                    bound.source_db, bound.source_repo
+                ))
+                .map_err(atomic_batch_refusal)?;
+            if receipt(&bound_repo).await?.as_ref() != Some(&bound) {
                 return Err(SeedRefusal::ConflictingBinding);
             }
         }
@@ -277,6 +294,10 @@ impl ShamirDb {
                 let Some(repo) = database.get_repo(&name) else {
                     continue;
                 };
+                if stream.direction == ReplDirection::Pull {
+                    repo.validate_repo_wide_atomic_batch(&format!("{}/{name}", stream.scope.db))
+                        .map_err(atomic_batch_refusal)?;
+                }
                 let Some(receipt) = receipt(&repo).await? else {
                     continue;
                 };

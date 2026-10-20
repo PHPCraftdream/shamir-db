@@ -1,11 +1,9 @@
-use super::super::barrier::verify_events_and_flush;
 use crate::meta::repl_bookmark::{load_clean_horizon, load_replication_bookmark};
 use crate::repo::{BoxRepo, RepoInstance};
 use crate::table::TableConfig;
-use crate::tx::apply_replicated::apply_replicated_batch_legacy;
+use crate::tx::apply_replicated::apply_replicated_batch;
 use crate::tx::{ApplyOutcome, ApplyPolicy, ReplicatedEvent};
 use bytes::Bytes;
-use shamir_storage::error::DbError;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_storage::types::RecordKey;
 use shamir_tx::{ChangeOp, ChangelogEvent, RecordChange};
@@ -46,7 +44,7 @@ async fn persisted_gap_allows_batch_and_keeps_clean_horizon_unchanged() {
     let name = "follower-gap-barrier";
     let repo = repo(name);
     assert_eq!(
-        apply_replicated_batch_legacy(&repo, &[replicated(1, 1)], 0, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo, &[replicated(1, 1)], 0, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied { local_version: 1 }
@@ -60,7 +58,7 @@ async fn persisted_gap_allows_batch_and_keeps_clean_horizon_unchanged() {
     feed.feed.mark_gap(2);
     assert_eq!(feed.feed.first_gap_version(), 2);
     assert_eq!(
-        apply_replicated_batch_legacy(&repo, &[replicated(2, 2)], 1, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo, &[replicated(2, 2)], 1, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied { local_version: 2 }
@@ -71,7 +69,7 @@ async fn persisted_gap_allows_batch_and_keeps_clean_horizon_unchanged() {
         assert_eq!(load_clean_horizon(&info).await.unwrap(), Some(1));
     }
     assert_eq!(
-        apply_replicated_batch_legacy(&repo, &[replicated(3, 3)], 2, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo, &[replicated(3, 3)], 2, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied { local_version: 3 }
@@ -101,7 +99,7 @@ async fn pending_init_gap_advances_bookmark_without_certifying_horizon() {
     let repo = repo(name);
     repo.record_pending_changefeed_gap(1);
     assert_eq!(
-        apply_replicated_batch_legacy(&repo, &[replicated(1, 1)], 0, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo, &[replicated(1, 1)], 0, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied { local_version: 1 }
@@ -114,7 +112,7 @@ async fn pending_init_gap_advances_bookmark_without_certifying_horizon() {
         assert_eq!(load_clean_horizon(&info).await.unwrap(), None);
     }
     assert_eq!(
-        apply_replicated_batch_legacy(&repo, &[replicated(2, 2)], 1, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo, &[replicated(2, 2)], 1, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied { local_version: 2 }
@@ -126,84 +124,4 @@ async fn pending_init_gap_advances_bookmark_without_certifying_horizon() {
     feed.feed.shutdown_and_wait().await.unwrap();
     drop(feed);
     drop(repo);
-}
-
-#[tokio::test]
-async fn gap_interval_skips_only_covered_event_and_checks_later_bytes() {
-    let store = crate::repo::RepoInstance::new(
-        "unused".into(),
-        BoxRepo::InMemory(Arc::new(InMemoryRepo::new())),
-        Vec::new(),
-    );
-    let journal = store.follower_journal_store().await.unwrap();
-    let first = Arc::new(ChangelogEvent {
-        repo: "follower".into(),
-        commit_version: 2,
-        tx_id: 2,
-        actor: Actor::System,
-        timestamp_ns: 0,
-        changes: Vec::new(),
-    });
-    let later = Arc::new(ChangelogEvent {
-        repo: "follower".into(),
-        commit_version: 4,
-        tx_id: 4,
-        actor: Actor::System,
-        timestamp_ns: 0,
-        changes: Vec::new(),
-    });
-    journal
-        .set(
-            RecordKey::from_slice(&4u64.to_be_bytes()),
-            Bytes::from(rmp_serde::to_vec(later.as_ref()).unwrap()),
-        )
-        .await
-        .unwrap();
-    verify_events_and_flush(
-        journal.as_ref(),
-        &[first, later.clone()],
-        2,
-        4,
-        Some((2, 3)),
-    )
-    .await
-    .unwrap();
-    journal
-        .set(
-            RecordKey::from_slice(&4u64.to_be_bytes()),
-            Bytes::from_static(b"wrong"),
-        )
-        .await
-        .unwrap();
-    assert!(
-        verify_events_and_flush(journal.as_ref(), &[later], 2, 4, Some((2, 3)))
-            .await
-            .is_err()
-    );
-    let feed = store.changefeed().await.unwrap();
-    feed.feed.shutdown_and_wait().await.unwrap();
-}
-
-#[tokio::test]
-async fn missing_event_outside_gap_remains_an_error() {
-    let store = crate::repo::RepoInstance::new(
-        "unused".into(),
-        BoxRepo::InMemory(Arc::new(InMemoryRepo::new())),
-        Vec::new(),
-    );
-    let journal = store.follower_journal_store().await.unwrap();
-    let event = Arc::new(ChangelogEvent {
-        repo: "follower".into(),
-        commit_version: 5,
-        tx_id: 5,
-        actor: Actor::System,
-        timestamp_ns: 0,
-        changes: Vec::new(),
-    });
-    assert!(matches!(
-        verify_events_and_flush(journal.as_ref(), &[event], 2, 5, Some((2, 3))).await,
-        Err(DbError::NotFound(_))
-    ));
-    let feed = store.changefeed().await.unwrap();
-    feed.feed.shutdown_and_wait().await.unwrap();
 }

@@ -42,7 +42,7 @@ impl ShamirDb {
         }
         let registered = self.system_store.load_repository_record(db, repo).await?;
         if let Some(record) = &registered {
-            if record["engine"].as_str() != Some("fjall")
+            if !matches!(record["engine"].as_str(), Some("fjall" | "fjall_raw"))
                 || record["path"].as_str() != path.to_str()
                 || !path.join(".seed-install").is_file()
             {
@@ -189,7 +189,13 @@ impl ShamirDb {
             .save_repository(
                 &receipt.source_db,
                 &receipt.source_repo,
-                "fjall",
+                // S5c-X PR6b-3: the staged image is RAW Fjall — record the
+                // raw kind so the boot path re-attaches it UNBUFFERED via
+                // `factory_from_meta`. Kind `"fjall"` maps to the
+                // MemBuffer-wrapped factory, whose repos report
+                // `supports_atomic_batch() == false` and stall seeded
+                // followers on the admission capability check forever.
+                "fjall_raw",
                 Some(path),
                 &meta,
                 None,

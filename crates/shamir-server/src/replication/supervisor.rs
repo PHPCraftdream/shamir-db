@@ -50,11 +50,9 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use shamir_collections::{THasher, TMap};
-use shamir_db::query::admin::ReplStream;
-use shamir_db::query::read::{QueryResult, ReadQuery};
+use shamir_collections::THasher;
+use shamir_db::engine::meta::repl::bookmark_v3::{self, FollowerBookmarkState};
 use shamir_db::repl_binding::SubscriptionLease;
-use shamir_db::types::value::QueryValue;
 use shamir_db::{SeedRefusal, ShamirDb, SubscriptionBinding};
 use shamir_query_types::admin::ReplDirection;
 use tokio::task::JoinHandle;
@@ -65,64 +63,13 @@ use super::error::ReplError;
 use super::follower_loop::{run_follower_loop, FollowerLoopConfig};
 use super::source::seed::startup_lease::StartupLeaseGuard;
 use super::source::seed::terminal;
-use super::source::ReplSource;
+pub use super::source::seed::terminal::{ReplSourceFactory, Subscription};
 
 /// Test seam awaited between admission and spawn to replace the row in that window.
 #[cfg(test)]
 type StartRaceHook = std::sync::Arc<
     dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
 >;
-
-/// A subscription resolved from `system/subscriptions` (386-a schema).
-///
-/// Passed to the [`ReplSourceFactory`] so it can build the transport
-/// (`WireReplSource` in prod, `InProcessReplSource` in tests) with the
-/// subscription's `upstream` endpoint and credentials.
-#[derive(Debug, Clone)]
-pub struct Subscription {
-    /// Subscription name (registry key).
-    pub name: String,
-    /// Upstream leader endpoint string (e.g. `tcp://leader:9000`). For R1 the
-    /// factory owns credential resolution (see the module TODO on creds).
-    pub upstream: String,
-    /// Publication name advertised by the upstream.
-    pub publication: String,
-    /// Bound replication-profile name (resolved to `pull` streams).
-    pub profile: String,
-    /// `active` → loop should run; `paused` (or anything else) → stopped.
-    pub state: String,
-    /// S5c-X PR8b-2: the row's durable binding generation. The DURABLE
-    /// authority for loop identity on reconcile — a loop started under an
-    /// older generation must never survive to mark or clear a replacement
-    /// binding.
-    pub binding_generation: u64,
-    /// S5c-X PR8b-2: the row's durable destination set — the ENFORCED write
-    /// boundary for follower targets and the coverage authority for
-    /// quarantine. The replication profile is NOT the authority.
-    pub binding_destinations: Vec<(String, String)>,
-}
-
-impl Subscription {
-    /// `true` when the row's `state` field is exactly `active`.
-    fn is_active(&self) -> bool {
-        self.state == "active"
-    }
-}
-
-/// Factory that builds a [`ReplSource`] for a subscription.
-///
-/// This is the seam that makes the supervisor unit-testable: production wires
-/// a `WireReplSource` (a TLS+SCRAM `shamir_client::Client` connected to
-/// `sub.upstream` under a `replicator` account), tests wire an
-/// `InProcessReplSource` over a leader `Arc<ShamirDb>`. The supervisor never
-/// looks at credentials — the factory owns them.
-///
-/// TODO(386-c): upstream credentials. Today the factory carries whatever creds
-/// it needs (prod: a config/env `replicator` account keyed by `upstream`).
-/// A dedicated per-subscription credential store on the catalogue row is
-/// future work — `Subscription.upstream` is the only endpoint hint available.
-pub type ReplSourceFactory =
-    Arc<dyn Fn(&Subscription) -> Arc<dyn ReplSource> + Send + Sync + 'static>;
 
 /// A running subscription: its stop signal, spawned loop tasks, and the
 /// profile + binding generation it was started against (to detect a rebind
@@ -177,7 +124,7 @@ pub struct SubscriptionSupervisor {
     /// Local node — the follower onto which pulled events are applied, and the
     /// source of the `system/subscriptions` + `system/replication_profiles`
     /// catalogue.
-    local: Arc<ShamirDb>,
+    pub(crate) local: Arc<ShamirDb>,
     /// Builds the [`ReplSource`] transport for a subscription.
     factory: ReplSourceFactory,
     /// Stable follower identity advertised in `ReplHello` (§5.2).
@@ -306,6 +253,48 @@ impl SubscriptionSupervisor {
     /// TODO(386-c): replace with a system changefeed watch.
     pub async fn notify_changed(&self) {
         self.reconcile().await;
+    }
+
+    /// Map a gate-initialization failure by KIND: a typed follower-state
+    /// refusal stays machine-readable and terminal — the subscription is
+    /// marked `resync_required` and the typed error is returned; every
+    /// other error keeps the generic retryable `Start` mapping and marks
+    /// nothing. Extracted (round 4) so tests can drive every kind
+    /// directly: the supervisor cannot reach a FAILING `tx_gate()` through
+    /// this fixture — the gate OnceCell is initialized during open
+    /// recovery (tx/recovery.rs:373 → repo_instance.rs:860) and open
+    /// itself refuses legacy/malformed bytes
+    /// (durability_policy/repo_impl.rs:64-65), so the supervisor always
+    /// sees the cached gate.
+    /// `generation` is the start attempt's binding-generation snapshot — the
+    /// fence for the mark below: a start whose row was concurrently replaced
+    /// can never mark or quiesce the replacement (stale mark = a logged
+    /// no-op inside `ShamirDb`).
+    pub(super) async fn refuse_gate_init(
+        &self,
+        sub_name: &str,
+        generation: u64,
+        error: shamir_db::storage::error::DbError,
+    ) -> ReplError {
+        match error {
+            shamir_db::storage::error::DbError::FollowerStateRefused { reason } => {
+                let error = ReplError::FollowerStateRefused { reason };
+                if let Err(persist) = self
+                    .local
+                    .mark_subscription_terminal_generation(
+                        sub_name,
+                        "resync_required",
+                        &error.to_string(),
+                        Some(generation),
+                    )
+                    .await
+                {
+                    return ReplError::Start(persist.to_string());
+                }
+                error
+            }
+            error => ReplError::Start(error.to_string()),
+        }
     }
 
     /// Converge running loops to the declarative catalogue state. Idempotent.
@@ -535,6 +524,7 @@ impl SubscriptionSupervisor {
             }
         }
         let pull_targets = sub.binding_destinations.clone();
+        let generation = sub.binding_generation;
         for (index, (db, repo)) in pull_targets.iter().enumerate() {
             // Interior-window check: an invalidated lease marks nothing in
             // this iteration and never admits a destination.
@@ -564,10 +554,8 @@ impl SubscriptionSupervisor {
                     repo: repo.clone(),
                     owner,
                 };
-                // Generation-aware: this runs synchronously inside a start
-                // whose snapshot was just re-validated against the current
-                // row under the control lock, so the generation passed here
-                // is the row's CURRENT generation.
+                // Fenced by the start's generation snapshot: a concurrently replaced
+                // row turns the mark into a logged no-op inside `ShamirDb`.
                 self.local
                     .mark_subscription_terminal_generation(
                         &sub.name,
@@ -580,20 +568,41 @@ impl SubscriptionSupervisor {
                 return Err(error);
             }
             if let Some(destination) = self.local.get_db(db).and_then(|db| db.get_repo(repo)) {
-                let gate = destination
-                    .tx_gate()
-                    .await
-                    .map_err(|error| ReplError::Start(error.to_string()))?;
+                // Validate repo-wide batch support before probing or spawning.
+                if let Err(storage_error) =
+                    destination.validate_repo_wide_atomic_batch(&format!("{db}/{repo}"))
+                {
+                    let error = ReplError::AtomicBatchUnsupported {
+                        db: db.clone(),
+                        repo: repo.clone(),
+                    };
+                    self.local
+                        .mark_subscription_terminal_generation(
+                            &sub.name,
+                            "resync_required",
+                            &format!("{error}: {storage_error}"),
+                            Some(sub.binding_generation),
+                        )
+                        .await
+                        .map_err(|error| ReplError::Start(error.to_string()))?;
+                    return Err(error);
+                }
+                // Gate-init failures map by KIND, not by string — see
+                // `refuse_gate_init` below (typed refusal → terminal
+                // `resync_required`; anything else → retryable `Start`).
+                let gate = match destination.tx_gate().await {
+                    Ok(gate) => gate,
+                    Err(error) => {
+                        return Err(self.refuse_gate_init(&sub.name, generation, error).await)
+                    }
+                };
                 if gate.requires_reopen() {
                     let error = ReplError::ReopenRequired {
                         db: db.clone(),
                         repo: repo.clone(),
                         detail: "Resume refused until destination is reopened".into(),
                     };
-                    // Generation-aware: this runs synchronously inside a
-                    // start whose snapshot was just re-validated against the
-                    // current row under the control lock, so the generation
-                    // passed here is the row's CURRENT generation.
+                    // Fenced by the same generation snapshot as every mark above.
                     self.local
                         .mark_subscription_terminal_generation(
                             &sub.name,
@@ -604,6 +613,62 @@ impl SubscriptionSupervisor {
                         .await
                         .map_err(|error| ReplError::Start(error.to_string()))?;
                     return Err(error);
+                }
+                let info = destination
+                    .tx_info_store()
+                    .await
+                    .map_err(|error| ReplError::Start(error.to_string()))?;
+                // PR6b-3: refuse resume of a repo whose durable follower
+                // state this version does not support (legacy bookmark,
+                // malformed record, floor-without-bookmark evidence). A
+                // refused repo can never be resumed — the operator reseeds.
+                match bookmark_v3::classify_follower_bookmark(&info).await {
+                    Err(shamir_db::storage::error::DbError::FollowerStateRefused { reason }) => {
+                        let error = ReplError::FollowerStateRefused { reason };
+                        self.local
+                            .mark_subscription_terminal_generation(
+                                &sub.name,
+                                "resync_required",
+                                &error.to_string(),
+                                Some(sub.binding_generation),
+                            )
+                            .await
+                            .map_err(|error| ReplError::Start(error.to_string()))?;
+                        return Err(error);
+                    }
+                    Err(e) => return Err(ReplError::Start(e.to_string())),
+                    Ok(state) => {
+                        // R2-W3: admission-time refusal of Resume for a
+                        // corrupt or retired durable receipt pointer — the v3
+                        // record decodes fine, so this is NOT the typed
+                        // refusal above, but a resume would only re-trip at
+                        // the pipeline with zero progress. Refuse BEFORE any
+                        // loop is spawned.
+                        if let FollowerBookmarkState::Native(v3) = &state {
+                            let resolves = bookmark_v3::receipt_pointer_resolves(&info, v3)
+                                .await
+                                .map_err(|error| ReplError::Start(error.to_string()))?;
+                            if !resolves {
+                                let error = ReplError::ReopenRequired {
+                                    db: db.clone(),
+                                    repo: repo.clone(),
+                                    detail:
+                                        "durable follower record references a corrupt or retired receipt pointer; reopen required"
+                                            .into(),
+                                };
+                                self.local
+                                    .mark_subscription_terminal_generation(
+                                        &sub.name,
+                                        "reopen_required",
+                                        &error.to_string(),
+                                        Some(sub.binding_generation),
+                                    )
+                                    .await
+                                    .map_err(|error| ReplError::Start(error.to_string()))?;
+                                return Err(error);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -631,7 +696,13 @@ impl SubscriptionSupervisor {
         for (db, repo) in pull_targets.iter().cloned() {
             let mut cfg = FollowerLoopConfig::new(self.node_id.clone(), db, repo)
                 .with_poll_wait_ms(self.poll_wait_ms)
-                .with_validate_replicated_payload(self.validate_replicated_payload);
+                .with_validate_replicated_payload(self.validate_replicated_payload)
+                // PR6b-3 stall visibility: let the loop persist a
+                // status_message on this row after repeated no-progress
+                // failures (the loop swallows transient errors internally,
+                // so the supervisor can never observe them via the loop's
+                // return value).
+                .with_subscription(sub.name.clone());
             if let Some(n) = self.max_iterations {
                 cfg = cfg.with_max_iterations(n);
             }
@@ -791,6 +862,64 @@ impl SubscriptionSupervisor {
                             );
                         }
                     }
+                    Err(e @ ReplError::FollowerStateRefused { .. }) => {
+                        // S5c-X PR6b-3 — TERMINAL: the follower repo's durable
+                        // state is unsupported (no migration exists). Same
+                        // quarantine family as the identity fence, WITHOUT
+                        // the identity-fence test seam: always quarantined.
+                        // Round 12 F3: loop-originated -> generation-fenced.
+                        if let Err(mark_err) = local
+                            .mark_subscription_terminal_generation(
+                                &sub_name,
+                                "resync_required",
+                                &e.to_string(),
+                                Some(generation),
+                            )
+                            .await
+                        {
+                            warn!(
+                                subscription = %sub_name,
+                                error = %mark_err,
+                                "supervisor: failed to persist resync_required after follower-state refusal"
+                            );
+                        }
+                        metrics::counter!("shamir_repl_resync_required_total").increment(1);
+                        warn!(
+                            subscription = %sub_name,
+                            error = %e,
+                            "follower state refused; subscription marked resync_required (reseed required)"
+                        );
+                    }
+                    Err(e @ ReplError::AtomicBatchUnsupported { .. }) => {
+                        // S5c-X PR6b-3 R7-2(ii) — TERMINAL: the destination
+                        // backend cannot host the receipt pipeline (no atomic
+                        // batches). Same quarantine family as the
+                        // follower-state refusal: persist the typed terminal
+                        // status ONCE with the remedy in the message; the loop
+                        // never retries it.
+                        // Round 12 F3: loop-originated -> generation-fenced.
+                        if let Err(mark_err) = local
+                            .mark_subscription_terminal_generation(
+                                &sub_name,
+                                "resync_required",
+                                &e.to_string(),
+                                Some(generation),
+                            )
+                            .await
+                        {
+                            warn!(
+                                subscription = %sub_name,
+                                error = %mark_err,
+                                "supervisor: failed to persist resync_required after atomic-batch refusal"
+                            );
+                        }
+                        metrics::counter!("shamir_repl_resync_required_total").increment(1);
+                        warn!(
+                            subscription = %sub_name,
+                            error = %e,
+                            "atomic batches unsupported on destination; subscription marked resync_required (re-create the repo raw)"
+                        );
+                    }
                     Err(e @ ReplError::ReopenRequired { .. }) => {
                         // Generation-aware: a replaced binding outlives the
                         // stale task's reopen mark. Round-5 B3: bounded,
@@ -868,129 +997,4 @@ impl SubscriptionSupervisor {
         }
         Ok(true)
     }
-
-    /// Read the CURRENT catalogue row for one subscription by name,
-    /// mirroring [`Self::read_subscriptions`]' public read path.
-    async fn read_subscription_row(&self, name: &str) -> Result<Option<QueryValue>, String> {
-        let table = self
-            .local
-            .system_store()
-            .subscriptions_table()
-            .await
-            .map_err(|e| e.to_string())?;
-        let records = read_all(&table, "subscriptions")
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(records
-            .into_iter()
-            .find(|r| r.get("name").and_then(|v| v.as_str()) == Some(name)))
-    }
-
-    /// Resolve a profile name → its `streams` by reading
-    /// `system/replication_profiles` (386-a schema: `{name, streams}`).
-    async fn resolve_profile_streams(&self, profile: &str) -> Result<Vec<ReplStream>, String> {
-        let table = self
-            .local
-            .system_store()
-            .replication_profiles_table()
-            .await
-            .map_err(|e| e.to_string())?;
-        let records = read_all(&table, "replication_profiles")
-            .await
-            .map_err(|e| e.to_string())?;
-        let row = records
-            .into_iter()
-            .find(|r| r.get("name").and_then(|v| v.as_str()) == Some(profile))
-            .ok_or_else(|| format!("replication profile '{profile}' not found"))?;
-        let streams_val = row
-            .get("streams")
-            .cloned()
-            .ok_or_else(|| format!("profile '{profile}' has no streams field"))?;
-        // `streams` was persisted via `to_qv(&Vec<ReplStream>)` (a msgpack
-        // round-trip); reverse it the same way.
-        decode_streams(&streams_val)
-    }
-
-    /// Read `system/subscriptions` into typed [`Subscription`]s.
-    async fn read_subscriptions(&self) -> Result<Vec<Subscription>, String> {
-        let table = self
-            .local
-            .system_store()
-            .subscriptions_table()
-            .await
-            .map_err(|e| e.to_string())?;
-        let records = read_all(&table, "subscriptions")
-            .await
-            .map_err(|e| e.to_string())?;
-        records
-            .into_iter()
-            .map(|r| {
-                // S5c-X PR8b-2: the binding is strictly validated; a row
-                // that fails is a typed catalogue error naming the
-                // subscription. Reconcile logs a warning and leaves running
-                // loops alone — fail-safe, never fail-open.
-                let binding = SubscriptionBinding::from_row(&r).map_err(|e| e.to_string())?;
-                let (binding_generation, binding_destinations) =
-                    (binding.generation(), binding.destinations().to_vec());
-                Ok(Subscription {
-                    name: r
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| "subscription row is missing its 'name' string".to_string())?
-                        .to_string(),
-                    upstream: r
-                        .get("upstream")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    publication: r
-                        .get("publication")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    profile: r
-                        .get("profile")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    state: r
-                        .get("state")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    binding_generation,
-                    binding_destinations,
-                })
-            })
-            .collect()
-    }
-}
-
-/// Reverse `to_qv(&Vec<ReplStream>)`: re-encode the `QueryValue` to msgpack
-/// and deserialise the typed streams back out.
-fn decode_streams(v: &QueryValue) -> Result<Vec<ReplStream>, String> {
-    let bytes = rmp_serde::to_vec_named(v).map_err(|e| format!("encode streams: {e}"))?;
-    rmp_serde::from_slice::<Vec<ReplStream>>(&bytes).map_err(|e| format!("decode streams: {e}"))
-}
-
-/// Read every record of a system-store table as owned `QueryValue`s.
-///
-/// Mirrors `admin_replication.rs::read_all` — the system catalogue read path.
-/// `pub(crate)` (round-6 item 2): `seed/terminal.rs`'s generation-currency
-/// check reuses this reader instead of duplicating it.
-pub(crate) async fn read_all(
-    table: &shamir_db::engine::table::TableManager,
-    table_name: &str,
-) -> shamir_db::DbResult<Vec<QueryValue>> {
-    let refs: TMap<String, QueryResult> = TMap::default();
-    // S5c-X F1 (Round 6): the FilterContext is built engine-side; no
-    // `&Interner` crosses the boundary.
-    let ctx = table.info_store_read_view().filter_context(&refs).await?;
-    let query = ReadQuery::new(table_name);
-    let result = table.read(&query, &ctx).await?;
-    Ok(result
-        .records
-        .into_iter()
-        .map(|r| r.as_value().into_owned())
-        .collect())
 }

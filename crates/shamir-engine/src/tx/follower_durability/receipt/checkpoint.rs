@@ -62,7 +62,6 @@ fn fail_final_flush(repo_name: &str) -> bool {
 }
 
 #[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
 pub(crate) fn set_simulate_checkpoint_uncertain(on: bool) {
     SIMULATE_CHECKPOINT_UNCERTAIN.store(on, Ordering::Release);
 }
@@ -79,7 +78,6 @@ pub(crate) fn set_simulate_checkpoint_uncertain(on: bool) {
 static DISABLE_UNCERTAIN_RECONCILE: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
 pub(crate) fn disable_uncertain_reconcile(on: bool) {
     DISABLE_UNCERTAIN_RECONCILE.store(on, Ordering::Release);
 }
@@ -92,7 +90,6 @@ pub(crate) fn disable_uncertain_reconcile(on: bool) {
 static UNCERTAIN_WITHOUT_COMMIT: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
 pub(crate) fn set_uncertain_without_commit(on: bool) {
     UNCERTAIN_WITHOUT_COMMIT.store(on, Ordering::Release);
 }
@@ -105,7 +102,6 @@ pub(crate) fn set_uncertain_without_commit(on: bool) {
 static CHECKPOINT_RECONCILES: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
 pub(crate) fn checkpoint_reconciles() -> usize {
     CHECKPOINT_RECONCILES.load(Ordering::Acquire)
 }
@@ -120,7 +116,6 @@ pub(crate) fn checkpoint_reconciles() -> usize {
 static CHECKPOINT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
 pub(crate) async fn checkpoint_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
     CHECKPOINT_TEST_LOCK.lock().await
 }
@@ -138,24 +133,8 @@ static COMMIT_PARK_REACHED: Notify = Notify::const_new();
 static COMMIT_PARK_RELEASE: Notify = Notify::const_new();
 
 #[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
 pub(crate) fn arm_commit_park(on: bool) {
     COMMIT_PARK_ARMED.store(on, Ordering::Release);
-}
-
-#[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
-pub(crate) async fn wait_commit_park_reached() {
-    let notified = COMMIT_PARK_REACHED.notified();
-    tokio::pin!(notified);
-    notified.as_mut().enable();
-    notified.await;
-}
-
-#[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
-pub(crate) fn release_commit_park() {
-    COMMIT_PARK_RELEASE.notify_waiters();
 }
 
 /// Same gate, INSIDE the Uncertain reconcile branch (immediately before the
@@ -169,13 +148,11 @@ static RECONCILE_PARK_REACHED: Notify = Notify::const_new();
 static RECONCILE_PARK_RELEASE: Notify = Notify::const_new();
 
 #[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
 pub(crate) fn arm_reconcile_park(on: bool) {
     RECONCILE_PARK_ARMED.store(on, Ordering::Release);
 }
 
 #[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
 pub(crate) async fn wait_reconcile_park_reached() {
     let notified = RECONCILE_PARK_REACHED.notified();
     tokio::pin!(notified);
@@ -184,12 +161,11 @@ pub(crate) async fn wait_reconcile_park_reached() {
 }
 
 #[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
 pub(crate) fn release_reconcile_park() {
     RECONCILE_PARK_RELEASE.notify_waiters();
 }
 
-/// Matches `barrier::CONFIRM_BUDGET` (private to the barrier module).
+/// The journal confirmation budget for the durable tail.
 const RECEIPT_CONFIRM_BUDGET: Duration = Duration::from_secs(1);
 
 /// Every receipt event must already be in the follower journal, byte-exact.
@@ -248,6 +224,29 @@ fn local_end(receipt: &ReplicationReceipt) -> u64 {
         .unwrap_or(0)
 }
 
+/// The documented gap invariant (docs/guide-docs/follower-journal-durability.md):
+/// a certified GAP does not reject otherwise valid follower batches — the
+/// upstream bookmark advances while the clean-history horizon J remains at
+/// the last gap-free version. Cap the candidate horizon at the journal
+/// feed's first open gap; a J already certified above the gap never
+/// regresses.
+pub(crate) async fn certified_clean_through(
+    repo: &RepoInstance,
+    old: &BookmarkV3,
+    end: u64,
+) -> DbResult<Option<u64>> {
+    let candidate = old.clean_through.map_or(end, |j| j.max(end));
+    let first_gap = repo.changefeed().await?.feed.first_gap_version();
+    let capped = if first_gap == 0 {
+        candidate
+    } else {
+        candidate.min(first_gap - 1)
+    };
+    Ok(old
+        .clean_through
+        .map_or_else(|| (capped > 0).then_some(capped), |j| Some(j.max(capped))))
+}
+
 async fn stage_checkpoint_batch(
     repo: &RepoInstance,
     permit: &RepoWritePermit,
@@ -256,6 +255,7 @@ async fn stage_checkpoint_batch(
 ) -> DbResult<Box<dyn AtomicBatch>> {
     let end = local_end(receipt);
     let bookmark = old.bookmark.max(receipt.upstream_end);
+    let clean_through = certified_clean_through(repo, old, end).await?;
     // Keep the v3 decode invariant `fence.bookmark == bookmark`: the legacy
     // writers sync the embedded fence's bookmark on every advance, and the
     // fence decoder rejects the record otherwise.
@@ -263,7 +263,7 @@ async fn stage_checkpoint_batch(
     let bookmark = BookmarkV3 {
         fence,
         bookmark,
-        clean_through: Some(old.clean_through.map_or(end, |j| j.max(end))),
+        clean_through,
         outstanding_receipt: None,
     };
     let mut batch = repo.begin_repo_atomic_batch(permit).await?;
@@ -439,15 +439,11 @@ pub(crate) async fn checkpoint(
         publish::apply_publication(gate, group.as_ref(), publication);
     }
     (completion.on_published)();
-    // ReceiptCheckpointed fires only AFTER the publication has completed —
+    // Phase::Checkpointed fires only AFTER the publication has completed —
     // a test that drops the apply future at this phase can never observe
     // the commit-without-publication window.
     #[cfg(test)]
-    super::super::test_seam::phase(
-        repo.name(),
-        super::super::test_seam::Phase::ReceiptCheckpointed,
-    )
-    .await;
+    super::super::test_seam::phase(repo.name(), super::super::test_seam::Phase::Checkpointed).await;
     log::info!(
         "follower receipt: Checkpointed upstream {}..={} on repo {}",
         receipt.upstream_start,

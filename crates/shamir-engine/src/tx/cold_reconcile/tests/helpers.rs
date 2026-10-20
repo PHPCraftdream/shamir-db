@@ -2,10 +2,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::meta::recovery_marker::save_last_committed_flushed;
-use crate::meta::repl_bookmark::{save_bookmark_and_clean_horizon, save_replication_bookmark};
+use crate::meta::repl::bookmark_v3::{save_bookmark_v3, BookmarkV3};
 use crate::repo::{BoxRepoFactory, RepoFactory, RepoInstance};
 use crate::table::TableConfig;
-use shamir_storage::error::DbResult;
+use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{Repo as _, Store};
 use shamir_tx::changefeed::cold::{encode_event, read_event};
 use shamir_tx::changefeed::{clean_horizon_key, ChangelogEvent};
@@ -31,6 +31,42 @@ pub(super) async fn open_with_retry(path: &Path, name: &str) -> RepoInstance {
         }
     }
     unreachable!("retry loop always returns or panics")
+}
+
+/// Open a legacy follower store and return the typed refusal. The refusal
+/// itself must be immediate (fail fast — no replay); only fjall's OS-level
+/// lock lag after a close is retried.
+pub(super) async fn open_refusal_with_retry(path: &Path, name: &str) -> DbError {
+    let mut last: Option<shamir_storage::error::DbError> = None;
+    for attempt in 0..25u32 {
+        match RepoInstance::from_factory(
+            name.to_owned(),
+            BoxRepoFactory::fjall_raw(path),
+            vec![TableConfig::new("items")],
+        )
+        .await
+        {
+            Ok(_) => panic!("legacy follower store must refuse the open"),
+            Err(error)
+                if matches!(
+                    &error,
+                    shamir_storage::error::DbError::FollowerStateRefused {
+                        reason: shamir_storage::error::FollowerRefusalReason::LegacyBookmarkFormat
+                    }
+                ) =>
+            {
+                return error
+            }
+            Err(error) if attempt < 24 => {
+                last = Some(error);
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(error) => {
+                panic!("expected the legacy refusal after retries: last={last:?}, got {error}")
+            }
+        }
+    }
+    panic!("legacy follower store never refused: last={:?}", last)
 }
 
 pub(super) async fn open_unrecovered(path: &Path) -> RepoInstance {
@@ -96,14 +132,19 @@ async fn persist_image(
     save_last_committed_flushed(&info, top)
         .await
         .expect("persist allocation floor");
-    match (bookmark, record_clean_through) {
-        (Some(bookmark), Some(known)) => save_bookmark_and_clean_horizon(&info, bookmark, known)
-            .await
-            .expect("persist follower batch record"),
-        (Some(bookmark), None) => save_replication_bookmark(&info, bookmark)
-            .await
-            .expect("persist follower bookmark"),
-        (None, _) => {}
+    if let Some(bookmark) = bookmark {
+        // v3-only fixture: tests own the record shape; no legacy writer exists.
+        save_bookmark_v3(
+            &info,
+            &BookmarkV3 {
+                fence: None,
+                bookmark,
+                clean_through: record_clean_through,
+                outstanding_receipt: None,
+            },
+        )
+        .await
+        .expect("persist follower v3 record");
     }
     let wal = repo.repo_wal().await.expect("repo WAL");
     for entry in entries {
@@ -176,6 +217,27 @@ pub(super) async fn raw_store(path: &Path, name: &str) -> Arc<dyn Store> {
     let store = raw.store_get(name).await.expect("open raw store");
     drop(raw);
     store
+}
+
+/// A fresh exclusive-lock open right after a close can hit brief fjall lock
+/// lag.
+pub(super) async fn raw_store_with_retry(path: &Path, name: &str) -> Arc<dyn Store> {
+    let mut last_error = None;
+    for _ in 0..25 {
+        match BoxRepoFactory::fjall_raw(path.to_path_buf()).create().await {
+            Ok(raw) => {
+                let store = raw.store_get(name).await.expect("open raw store");
+                drop(raw);
+                return store;
+            }
+            Err(error) => last_error = Some(error),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!(
+        "raw store open with retry exhausted: {:?}",
+        last_error.expect("at least one attempt")
+    );
 }
 
 pub(super) async fn journal_event(store: &dyn Store, version: u64) -> Option<ChangelogEvent> {

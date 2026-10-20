@@ -179,7 +179,6 @@ fn record_materialization_commit(repo_name: &str) {
 static SIMULATE_UNCERTAIN: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
-#[allow(dead_code)] // driven by the PR6b-2 test chunk
 pub(crate) fn set_simulate_uncertain(on: bool) {
     SIMULATE_UNCERTAIN.store(on, Ordering::Release);
 }
@@ -471,8 +470,7 @@ pub(crate) async fn commit_prepared(
     }
     info.flush().await?;
     #[cfg(test)]
-    super::super::test_seam::phase(repo.name(), super::super::test_seam::Phase::ReceiptPrepared)
-        .await;
+    super::super::test_seam::phase(repo.name(), super::super::test_seam::Phase::Prepared).await;
     log::info!(
         "follower receipt: Prepared upstream {}..={} on repo {}",
         plan.receipt.upstream_start,
@@ -902,10 +900,6 @@ pub(crate) async fn commit_materialized_work(
         repo.name()
     );
     #[cfg(test)]
-    super::super::test_seam::phase(
-        repo.name(),
-        super::super::test_seam::Phase::ReceiptMaterialized,
-    )
-    .await;
+    super::super::test_seam::phase(repo.name(), super::super::test_seam::Phase::Materialized).await;
     Ok((receipt, counters))
 }

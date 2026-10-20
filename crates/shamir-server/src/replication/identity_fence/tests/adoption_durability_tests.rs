@@ -7,9 +7,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::stream::Stream;
+use shamir_db::engine::meta::repl::bookmark_v3::{
+    decode_bookmark_v3, load_bookmark_v3, save_bookmark_v3, BookmarkV3,
+};
+use shamir_db::engine::meta::{MetaEnvelope, MetaKey};
 use shamir_db::engine::tx::apply_replicated::apply_replicated_batch;
 use shamir_db::engine::tx::{ApplyOutcome, ApplyPolicy, ReplicatedEvent};
-use shamir_db::storage::error::{DbError, DbResult};
+use shamir_db::storage::error::{DbError, DbResult, FollowerRefusalReason};
 use shamir_db::storage::storage_in_memory::InMemoryStore;
 use shamir_db::storage::types::{RecordKey, Store};
 use shamir_query_types::wire::repl::ReplResponse;
@@ -101,7 +105,9 @@ async fn retry_contact(info: &Arc<dyn Store>, pull: &ReplResponse, reflush: bool
     if reflush {
         checks::prepare_existing(info).await.unwrap();
     }
-    checks::fence_pull_identity(info, pull, None).await.unwrap();
+    checks::fence_pull_identity(info, pull, None, None)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -283,7 +289,7 @@ async fn adoption_retry(park: bool, reflush: bool) {
     if park {
         // Poll to the known post-set flush barrier, then drop the borrowed
         // contact future. No spawned task or timing-dependent cancellation.
-        let contact = checks::fence_pull_identity(&info, &pull, None);
+        let contact = checks::fence_pull_identity(&info, &pull, None, None);
         tokio::pin!(contact);
         tokio::select! {
             biased;
@@ -292,7 +298,7 @@ async fn adoption_retry(park: bool, reflush: bool) {
         }
     } else {
         assert!(matches!(
-            checks::fence_pull_identity(&info, &pull, None).await,
+            checks::fence_pull_identity(&info, &pull, None, None).await,
             Err(crate::replication::ReplError::Bookmark(_))
         ));
     }
@@ -341,11 +347,270 @@ async fn adoption_retry(park: bool, reflush: bool) {
         gap_first: None,
         gap_through: None,
     };
-    checks::fence_pull_identity(&info, &response, None)
+    checks::fence_pull_identity(&info, &response, None, None)
         .await
         .unwrap();
     assert_eq!(
         probe.flushes.load(Ordering::Acquire),
         if reflush { 2 } else { 1 }
     );
+}
+
+// S5c-X PR6b-3: identity adoption lands on a V3 record and preserves the
+// seeded bookmark, the local clean horizon J and the outstanding receipt
+// reference across `save_fence_record_v3_aware` adoption.
+#[tokio::test]
+async fn adoption_lands_v3_record_preserving_bookmark_j_and_receipt() {
+    let leader = build_memory().await;
+    write_rows(&leader, 0, 2).await;
+    let follower = build_memory().await;
+    let info = repo(&follower).tx_info_store().await.unwrap();
+    save_bookmark_v3(
+        &info,
+        &BookmarkV3 {
+            fence: None,
+            bookmark: 7,
+            clean_through: Some(3),
+            outstanding_receipt: Some([0xAB; 16]),
+        },
+    )
+    .await
+    .unwrap();
+
+    let hello = InProcessReplSource::new(leader)
+        .hello("probe")
+        .await
+        .unwrap();
+    checks::fence_hello_recorded(&follower, "app", "main", &hello, None)
+        .await
+        .unwrap();
+
+    let bytes = info
+        .get(RecordKey::from_slice(
+            MetaKey::ReplicationBookmark.as_record_id().as_bytes(),
+        ))
+        .await
+        .unwrap();
+    let (version, _): (u16, BookmarkV3) = MetaEnvelope::open(&bytes).unwrap();
+    assert_eq!(version, 3, "adoption must land a v3 record");
+    let record = decode_bookmark_v3(&bytes).unwrap();
+    let fence = record.fence.expect("adoption records the fence");
+    assert_eq!(record.bookmark, 7, "bookmark preserved across adoption");
+    assert_eq!(fence.bookmark, 7, "fence agrees with the v3 bookmark");
+    assert_eq!(
+        record.clean_through,
+        Some(3),
+        "local clean horizon J preserved across adoption"
+    );
+    assert_eq!(
+        record.outstanding_receipt,
+        Some([0xAB; 16]),
+        "outstanding receipt reference preserved across adoption"
+    );
+}
+
+// S5c-X PR6b-3: a durable allocation floor WITHOUT a v3 bookmark refuses
+// identity adoption with the typed `LegacyFollowerState` refusal — and the
+// refusal holds on repeated attempts: no v3 is minted over the floor.
+#[tokio::test]
+async fn floor_without_v3_refuses_adoption_with_legacy_follower_state() {
+    let leader = build_memory().await;
+    let follower = build_memory().await;
+    write_rows(&follower, 0, 1).await; // durable floor, no v3 bookmark
+    let hello = InProcessReplSource::new(leader)
+        .hello("probe")
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let error = checks::fence_hello_recorded(&follower, "app", "main", &hello, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                crate::replication::ReplError::FollowerStateRefused {
+                    reason: FollowerRefusalReason::LegacyFollowerState,
+                }
+            ),
+            "expected LegacyFollowerState refusal, got {error:?}"
+        );
+    }
+    let info = repo(&follower).tx_info_store().await.unwrap();
+    assert!(load_bookmark_v3(&info).await.unwrap().is_none());
+}
+
+// S5c-X PR6b-3 round 3: visibility is PRESENCE-based. A failed adoption flush
+// leaves the v3 record readable-but-not-durable; the retry over the EXISTING
+// record must still enable receipt-native visibility, otherwise a zero-event
+// follower (which never runs the receipt pipeline) keeps a stale warm gate.
+#[tokio::test]
+async fn warm_visibility_enabled_on_retry_over_existing_v3_zero_event_follower() {
+    let follower = build_memory().await;
+    let pull = ReplResponse::Pull {
+        schema_digest: None,
+        repo_lineage_id: Some([7u8; 16]),
+        history_epoch: Some(0),
+        gap_first: None,
+        gap_through: None,
+        leader_epoch: 1,
+        events: Vec::new(),
+        gap_at: None,
+        current_version: 0,
+    };
+    let repo_handle = repo(&follower);
+    // Round 4: the probe wraps the repository's REAL `__tx__` store (a fresh
+    // handle returns the same memoized store), so durable provenance is
+    // observable through the repo itself — `replication_bookmark()` is
+    // meaningful, unlike a fixture wrapping a detached store.
+    let probe = Arc::new(AdoptionStore {
+        inner: repo_handle.tx_info_store().await.unwrap(),
+        durable: AtomicBool::new(false),
+        flushes: AtomicUsize::new(0),
+        park: false,
+        reached: Notify::new(),
+    });
+    let info: Arc<dyn Store> = probe.clone();
+
+    // (1) Warm gate: no durable v3 record yet → visibility disabled.
+    assert!(!repo_handle
+        .tx_gate()
+        .await
+        .unwrap()
+        .receipt_native_visibility_enabled());
+
+    // (2) First contact: the fail-once flush makes the v3 set land readable
+    // but NOT durable, and the contact errors — nothing enabled visibility.
+    // The fence record and v3 bookmark are both READABLE through a fresh
+    // real-store handle (the probe's `set` passes through to the repo store).
+    assert!(matches!(
+        checks::fence_pull_identity(&info, &pull, None, Some(&repo_handle)).await,
+        Err(ReplError::Bookmark(_))
+    ));
+    assert!(recorded::load(&info).await.unwrap().is_some());
+    assert!(
+        load_bookmark_v3(&repo_handle.tx_info_store().await.unwrap())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(!probe.durable.load(Ordering::Acquire));
+    assert!(!repo_handle
+        .tx_gate()
+        .await
+        .unwrap()
+        .receipt_native_visibility_enabled());
+
+    // (3) Reflush makes the record durable; the retry over the existing
+    // record succeeds AND enables visibility (presence-based, not
+    // creation-based).
+    checks::prepare_existing(&info).await.unwrap();
+    assert!(probe.durable.load(Ordering::Acquire));
+    checks::fence_pull_identity(&info, &pull, None, Some(&repo_handle))
+        .await
+        .unwrap();
+
+    // (4) Gate enabled, record durable, zero events applied.
+    assert!(repo_handle
+        .tx_gate()
+        .await
+        .unwrap()
+        .receipt_native_visibility_enabled());
+    assert!(probe.durable.load(Ordering::Acquire));
+
+    // (5) Durable provenance: the repo's OWN store holds the v3 baseline.
+    let v3 = load_bookmark_v3(&repo_handle.tx_info_store().await.unwrap())
+        .await
+        .unwrap()
+        .expect("repo's own __tx__ store must hold the durable v3 baseline");
+    assert_eq!(v3.bookmark, 0, "zero-event follower: baseline bookmark 0");
+    assert!(v3.fence.is_some(), "adoption records the fence");
+    assert_eq!(
+        repo_handle.replication_bookmark().await.unwrap(),
+        0,
+        "zero-event follower: empty pull must not advance the bookmark"
+    );
+}
+
+// Round 4: a CANCELLED first contact with a REAL metadata store. The
+// pre-existing cancellation tests pass NO repo handle — this closes exactly
+// that gap: visibility stays disabled after the abandoned flush, and the
+// recovery path (prepare_existing + retry) enables it with durable v3
+// provenance in the repo's own store.
+#[tokio::test]
+async fn cancelled_first_contact_recovers_visibility_for_zero_event_follower() {
+    let follower = build_memory().await;
+    let pull = ReplResponse::Pull {
+        schema_digest: None,
+        repo_lineage_id: Some([7u8; 16]),
+        history_epoch: Some(0),
+        gap_first: None,
+        gap_through: None,
+        leader_epoch: 1,
+        events: Vec::new(),
+        gap_at: None,
+        current_version: 0,
+    };
+    let repo_handle = repo(&follower);
+    let probe = Arc::new(AdoptionStore {
+        inner: repo_handle.tx_info_store().await.unwrap(),
+        durable: AtomicBool::new(false),
+        flushes: AtomicUsize::new(0),
+        park: true,
+        reached: Notify::new(),
+    });
+    let info: Arc<dyn Store> = probe.clone();
+
+    // Poll to the known post-set flush barrier, then drop the borrowed
+    // contact future. No spawned task or timing-dependent cancellation.
+    //
+    // The block ENDS before the recovery section: the future — and the
+    // hidden block-scoped local `pin!` stores it in — drops at the closing
+    // brace, so `prepare_existing` and the second contact below run AFTER
+    // cancellation, not beside a live operation. The `Notify` arrival below
+    // proves the drop happened at the parked flush seam (the future was
+    // suspended inside `AdoptionStore::flush` when it was dropped).
+    {
+        let contact = checks::fence_pull_identity(&info, &pull, None, Some(&repo_handle));
+        tokio::pin!(contact);
+        tokio::select! {
+            biased;
+            _ = probe.reached.notified() => {}
+            result = &mut contact => panic!("contact escaped barrier: {result:?}"),
+        }
+    }
+
+    // The cancelled flush left the v3 readable (through a fresh real-store
+    // handle) but NOT durable, and nothing enabled visibility.
+    assert!(
+        load_bookmark_v3(&repo_handle.tx_info_store().await.unwrap())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(!probe.durable.load(Ordering::Acquire));
+    assert!(!repo_handle
+        .tx_gate()
+        .await
+        .unwrap()
+        .receipt_native_visibility_enabled());
+
+    // Recovery: reflush, then a straight retry over the existing record.
+    checks::prepare_existing(&info).await.unwrap();
+    checks::fence_pull_identity(&info, &pull, None, Some(&repo_handle))
+        .await
+        .unwrap();
+
+    assert!(repo_handle
+        .tx_gate()
+        .await
+        .unwrap()
+        .receipt_native_visibility_enabled());
+    assert!(probe.durable.load(Ordering::Acquire));
+    let v3 = load_bookmark_v3(&repo_handle.tx_info_store().await.unwrap())
+        .await
+        .unwrap()
+        .expect("repo's own __tx__ store must hold the durable v3 baseline");
+    assert_eq!(v3.bookmark, 0);
+    assert!(v3.fence.is_some());
+    assert_eq!(repo_handle.replication_bookmark().await.unwrap(), 0);
 }

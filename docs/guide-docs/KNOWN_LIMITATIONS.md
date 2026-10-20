@@ -581,7 +581,7 @@ artifact).
   ids, persists follower-local bindings, and rewrites Put payloads before apply.
   Missing or conflicting bindings are rejected rather than decoded under wrong
   names. Sources: `crates/shamir-engine/src/tx/replicated_event.rs:7-12`,
-  `crates/shamir-engine/src/tx/apply_replicated.rs:230-239,276-280,348-372`.
+  `crates/shamir-engine/src/tx/apply_replicated.rs:148-198,272-297`.
   Existing cross-interner/next-hop coverage:
   `crates/shamir-engine/src/tx/tests/replication_interner_tests.rs:97-148`
   (source inspected, not executed here).
@@ -603,7 +603,7 @@ artifact).
   event touching a missing table is rejected with `UnknownTable` before version
   allocation; the follower loop stops with `ApplyRejected` without advancing
   the bookmark across that event. Sources:
-  `crates/shamir-engine/src/tx/apply_replicated.rs:220-228,284-290`,
+  `crates/shamir-engine/src/tx/apply_replicated.rs:138-146,209-213`,
   `crates/shamir-server/src/replication/follower_loop.rs:389-393`.
 - **Journal pulls preserve settled version order; cold recovery reconciles
   events from surviving WAL before serving.** Pulls capture the contiguous
@@ -656,8 +656,12 @@ artifact).
   pull resumes the SAME receipt with the identical local allocation — no extra
   versions, no lost counters, no new gaps — so the in-flight batch no longer
   requires a reseed; only corruption/ambiguity stays terminal
-  (reopen/quarantine), and v1/v2 bookmarks keep the legacy behaviour until
-  PR6b-3 migrates them (see the follower receipt bullet below). Live
+  (reopen/quarantine). v1/v2/u64 bookmarks and floor-evidence states are
+  REFUSED with the typed `DbError::FollowerStateRefused`
+  (`LegacyBookmarkFormat`/`MalformedBookmark`/`LegacyFollowerState`) at open
+  and first admission; no migration tooling is provided, so the affected
+  subscription must be stopped and the follower reseeded through the existing
+  seed/reseed workflow (see the follower receipt bullet below). Live
   subscriptions deliver from this same journal
   (broadcast is only a wake-up hint); a certified gap terminates a subscription
   (see the live-ordering bullet in section 4 and
@@ -673,9 +677,12 @@ artifact).
   publish + broadcast. Corrupt identity/pointer, decode errors, and
   double-Uncertain stay terminal (reopen/quarantine); ordinary failures no
   longer set `requires-reopen`. Activation: WAL-less follower + backend
-  `supports_atomic_batch` + bookmark v3 or fresh install; v1/v2 bookmarks keep
-  the legacy behaviour until PR6b-3 migrates them (remaining step), and
-  persistent backends without the capability are rejected with
+  `supports_atomic_batch` + a valid bookmark v3 record — fresh adoption and
+  seed installation write the v3 baseline before service, and durable follower
+  provenance IS that v3 record; v1/v2/u64 bookmarks and floor-evidence states
+  are refused with the typed `DbError::FollowerStateRefused` at open and first
+  admission, no migration tooling exists, and the operator reseeds.
+  Persistent backends without the capability are rejected with
   `AtomicBatchUnsupported` before allocation (wrapper/hybrid backends
   excluded). The leader commit path and the non-follower apply path are
   UNCHANGED; the follower apply path gains one receipt write + one atomic batch

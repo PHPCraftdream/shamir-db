@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use shamir_engine::meta::repl::bookmark_v3::{save_bookmark_v3, BookmarkV3};
 use shamir_engine::repo::{BoxRepoFactory, RepoConfig, SeedImageWriter};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl::{paused_subscription, repl_scope, replication_profile};
@@ -221,7 +222,21 @@ async fn bookmark_overflow_and_competing_owner_refuse_without_mutation() {
     create(&isolated).await;
     let before = rows(&isolated, "subscriptions").await.unwrap().remove(0);
     let repo = isolated.get_db("app").unwrap().get_repo("main").unwrap();
-    repo.advance_replication_bookmark(u64::MAX).await.unwrap();
+    // PR6b-3: the bookmark lives only as a strict v3 record now; seed it
+    // beyond any possible source version (u64::MAX) so the seed-resume
+    // bookmark overflow guard refuses — the scenario's original intent.
+    let info = repo.tx_info_store().await.unwrap();
+    save_bookmark_v3(
+        &info,
+        &BookmarkV3 {
+            fence: None,
+            bookmark: u64::MAX,
+            clean_through: None,
+            outstanding_receipt: None,
+        },
+    )
+    .await
+    .unwrap();
     assert_eq!(
         isolated.validate_seed_resume(&before).await,
         Err(SeedRefusal::BookmarkOverflow)

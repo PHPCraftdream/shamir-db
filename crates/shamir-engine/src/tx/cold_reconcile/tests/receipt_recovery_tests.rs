@@ -109,11 +109,11 @@ async fn cold_reopen_completes_outstanding_receipt() {
     let repo = open_with_retry(temp.path(), &name).await;
 
     // Drive the batch through the repository-owned worker until the sticky
-    // `fail_after = ReceiptPrepared` flag exhausts the 3 retries: the worker
+    // `fail_after = Phase::Prepared` flag exhausts the 3 retries: the worker
     // parks the chunk guards, returns Err, goes IDLE, and leaves the durable
     // Prepared receipt outstanding — the same durable state a crash leaves.
     let hook = Arc::new(test_seam::Hook::default());
-    *hook.fail_after.lock().unwrap() = Some(Phase::ReceiptPrepared);
+    *hook.fail_after.lock().unwrap() = Some(Phase::Prepared);
     hook.fail_after_sticky
         .store(true, std::sync::atomic::Ordering::Release);
     test_seam::install(&name, Arc::clone(&hook));
@@ -156,7 +156,7 @@ async fn cold_reopen_materialized_receipt_does_not_recommit() {
     let repo = open_with_retry(temp.path(), &name).await;
 
     let hook = Arc::new(test_seam::Hook::default());
-    *hook.fail_after.lock().unwrap() = Some(Phase::ReceiptMaterialized);
+    *hook.fail_after.lock().unwrap() = Some(Phase::Materialized);
     hook.fail_after_sticky
         .store(true, std::sync::atomic::Ordering::Release);
     test_seam::install(&name, Arc::clone(&hook));

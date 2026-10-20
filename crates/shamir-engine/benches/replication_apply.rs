@@ -1,6 +1,8 @@
-//! Successful follower apply, frozen on both revisions (e1106477/current).
-//! Fixture shape: tx/tests/apply_replicated_journal_order_tests.rs::put_event.
-//! Default 1/16 rows, two increasing leader events per fresh follower.
+//! Successful follower apply through the receipt pipeline (the only follower
+//! apply protocol since PR6b-3). Fixture shape:
+//! tx/tests/apply_replicated_journal_order_tests.rs::put_event.
+//! Default 1/16 rows, two increasing leader events per fresh follower
+//! (the fresh repo self-adopts a v3 baseline on the first batch).
 //! BENCH_REPLICATION_APPLY_SCALE=1 adds 64 rows. Setup/event encoding is
 //! untimed; apply, local-version and byte assertions, and teardown are timed.
 //! ns/op is one TWO-EVENT round, not per-row or pure acknowledgement latency.
@@ -12,7 +14,7 @@ use bench_scale_tool::Harness;
 use shamir_engine::repo::{BoxRepo, RepoInstance};
 use shamir_engine::table::table_manager::table_token_for;
 use shamir_engine::table::TableConfig;
-use shamir_engine::tx::{apply_replicated, ApplyOutcome, ApplyPolicy};
+use shamir_engine::tx::{apply_replicated_batch, ApplyOutcome, ApplyPolicy, ReplicatedEvent};
 use shamir_storage::storage_in_memory::{InMemoryRepo, InMemoryStore};
 use shamir_storage::types::Store;
 use shamir_tx::{ChangelogEvent, IsolationLevel, TxContext, TxId};
@@ -38,12 +40,16 @@ fn record_id(i: usize) -> RecordId {
     RecordId(u128::try_from(i + 1).unwrap().to_be_bytes())
 }
 
-// Thin shared-API adapter. Both revisions have ApplyPolicy::Trusted and
-// Applied { local_version }; current additionally settles/publishes inline.
-// Keep the same success and byte obligations; never time Skipped instead.
-async fn apply(repo: &RepoInstance, event: &ChangelogEvent, watermark: u64) -> u64 {
-    assert!(event.commit_version > watermark);
-    match apply_replicated(repo, event, &[], watermark, ApplyPolicy::Trusted)
+// Apply one event as a ONE-EVENT batch through the receipt pipeline
+// (`apply_replicated_batch` is the only follower apply API). Keep the same
+// success and byte obligations; never time Skipped instead.
+async fn apply(repo: &RepoInstance, event: &ChangelogEvent, bookmark: u64) -> u64 {
+    assert!(event.commit_version > bookmark);
+    let events = [ReplicatedEvent {
+        event: event.clone(),
+        field_bindings: Vec::new(),
+    }];
+    match apply_replicated_batch(repo, &events, bookmark, ApplyPolicy::Trusted)
         .await
         .unwrap()
     {

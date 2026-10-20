@@ -7,11 +7,11 @@
 //!     in-process `ReplSource` which calls the *same* journal-read path
 //!     (`ShamirDb::read_changelog_from_journal` + `current_commit_version`)
 //!     that the wire handler uses;
-//!   * R1-a `RepoInstance::apply_replicated` — the follower apply path;
-//!   * R1-b `replication_bookmark` / `advance_replication_bookmark` — the
-//!     durable idempotency cursor;
+//!   * R1-a `apply_replicated_batch` — the receipt-only follower apply path;
+//!   * R1-b `replication_bookmark` — the durable idempotency cursor (a strict
+//!     v3 record; the receipt pipeline's checkpoint owns its advance);
 //!   * R1-c `run_follower_loop` + `InProcessReplSource` — the engine that
-//!     drives hello → pull → apply → advance in a bounded loop;
+//!     drives hello → pull → receipt apply → checkpoint in a bounded loop;
 //!   * PR4 `NodeMode::ReadOnly` — the client-write gate on the follower's
 //!     `ShamirDbHandler`.
 //!
@@ -28,7 +28,7 @@
 //! The in-process form used here still proves the full convergence +
 //! apply-path + read-only-gate + idempotency story: `InProcessReplSource`
 //! reuses the real journal-read path, `run_follower_loop` is the real engine,
-//! `apply_replicated` is the real apply path, and the read-only gate is
+//! `apply_replicated_batch` (receipt-only) is the real apply path, and the read-only gate is
 //! exercised on a real `ShamirDbHandler` via the public `RequestHandler::handle`
 //! trait (the same dispatch the wire uses). The only thing NOT covered is the
 //! TLS+SCRAM transport itself — and that is already proven by
@@ -79,7 +79,7 @@ use tokio_util::sync::CancellationToken;
 /// owned by `alice` so that:
 ///   * on the leader, `execute_as(alice)` writes pass the Shomer gate and
 ///     emit changelog events;
-///   * on the follower, `apply_replicated` (which runs as `System`, bypassing
+///   * on the follower, `apply_replicated_batch` (which runs as `System`, bypassing
 ///     the gate) writes into the existing `items` table, and `execute_as(alice)`
 ///     reads also pass the gate for the convergence check.
 const OWNER: &str = "alice";
@@ -162,7 +162,9 @@ async fn count_rows(db: &ShamirDb) -> usize {
     resp.results["q"].records.len()
 }
 
-/// The follower's durable replication bookmark for `app/main`.
+/// The follower's durable replication bookmark for `app/main` — the strict
+/// v3 record's upstream cursor (distinct from the follower-local clean
+/// horizon J, which only the receipt pipeline advances).
 async fn follower_bookmark(follower: &ShamirDb) -> u64 {
     let repo = follower
         .get_db(DB)
@@ -188,11 +190,11 @@ async fn wait_for_bookmark(follower: &ShamirDb, target: u64) {
 /// Ensure the follower's `items` table has its per-table MVCC store attached
 /// BEFORE the loop starts applying events.
 ///
-/// `apply_replicated` resolves the per-table MvccStore via
+/// `apply_replicated_batch` resolves the per-table MvccStore via
 /// `RepoInstance::per_table_mvcc()`; the entry is lazily registered on the
 /// first read/execute against the table. If the very first access is a
 /// replication apply (before any client read), the MVCC entry is absent and
-/// `apply_replicated` falls back to the raw base-store path — whose writes
+/// `apply_replicated_batch` falls back to the raw base-store path — whose writes
 /// are not visible to a subsequent SELECT scan (the scan iterates the MVCC
 /// layer). A single throwaway SELECT before the loop forces the attachment so
 /// every replicated event lands in the MVCC overlay + history and is readable.
@@ -393,7 +395,7 @@ async fn repl_convergence_s2_incremental_append_catches_up() {
 /// The follower's `ShamirDbHandler` is built with `NodeMode::ReadOnly`. A
 /// client write batch through `handle()` is rejected with
 /// `DbResponse::Error { code: "read_only_replica" }`, while the replication
-/// apply path (the loop, which calls `apply_replicated` directly) keeps
+/// apply path (the loop, which calls `apply_replicated_batch` directly) keeps
 /// working on the same follower.
 #[tokio::test]
 async fn repl_convergence_s3_readonly_gate_rejects_client_writes_but_allows_replication() {
@@ -420,7 +422,7 @@ async fn repl_convergence_s3_readonly_gate_rejects_client_writes_but_allows_repl
     assert_eq!(count_rows(&follower).await, 0, "no rows before replication");
 
     // 3b. Run the loop: replication apply WORKS on the read-only follower
-    //     (the gate is only on client `execute()`, not on `apply_replicated`).
+    //     (the gate is only on client `execute()`, not on `apply_replicated_batch`).
     run_loop_until_caught_up(follower.clone(), leader, leader_version).await;
     assert_eq!(
         count_rows(&follower).await,

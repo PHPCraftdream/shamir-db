@@ -1,6 +1,8 @@
 use futures::StreamExt;
 
 #[cfg(any(test, feature = "test-util"))]
+use shamir_types::types::value::QueryValue;
+#[cfg(any(test, feature = "test-util"))]
 use std::sync::atomic::Ordering;
 
 use crate::{DbError, DbResult, ShamirDb};
@@ -154,6 +156,32 @@ impl Drop for FinalWriteBarrierForTest {
 }
 
 impl ShamirDb {
+    /// Test-only subscription-catalogue injection seam (S5c-X round 9): upsert
+    /// one subscription row through the SAME handle the real admin writers use
+    /// — `system_store().subscriptions_table()` + `set_via_implicit_tx`, no db
+    /// name (the catalogue lives on the SYSTEM repo, not a user db; a batch
+    /// `Insert` addressed to db `"system"` fails with "Database 'system' not
+    /// found"). `record` must carry the `name` field (the row key).
+    #[cfg(any(test, feature = "test-util"))]
+    pub async fn inject_subscription_row_for_test(&self, record: QueryValue) -> DbResult<()> {
+        let name = record["name"]
+            .as_str()
+            .ok_or_else(|| DbError::Validation("subscription record needs a name".into()))?
+            .to_owned();
+        let store = self.system_store();
+        let table = store.subscriptions_table().await?;
+        let mut key_fields = crate::types::common::new_map();
+        key_fields.insert("name".to_string(), QueryValue::Str(name));
+        let op = crate::query::write::SetOp {
+            set: crate::query::TableRef::new("subscriptions"),
+            key: QueryValue::Map(key_fields),
+            value: record,
+        };
+        store.set_via_implicit_tx(&table, &op).await?;
+        store.persist_table_interner(&table, None).await?;
+        self.flush_seed_catalogue().await
+    }
+
     /// Offline-only live-record cap across all system tables.
     pub const SEED_CATALOGUE_MAX_RECORDS: usize = 4096;
     /// Offline-only live-byte cap across all system tables.

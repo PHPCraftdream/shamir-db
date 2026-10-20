@@ -13,7 +13,28 @@ use shamir_types::types::value::{InnerValue, QueryValue};
 use crate::repo::{BoxRepo, RepoInstance};
 use crate::table::TableConfig;
 use crate::tx::apply_replicated::ApplyRejectReason;
-use crate::tx::{ApplyOutcome, ApplyPolicy, ReplicatedEvent};
+use crate::tx::{apply_replicated_batch, ApplyOutcome, ApplyPolicy, ReplicatedEvent};
+
+/// Apply ONE event through the public batch entry (the receipt pipeline).
+async fn apply_batch(
+    repo: &RepoInstance,
+    event: &ChangelogEvent,
+    field_bindings: &[(u64, String)],
+    bookmark: u64,
+    policy: ApplyPolicy,
+) -> ApplyOutcome {
+    apply_replicated_batch(
+        repo,
+        &[ReplicatedEvent {
+            event: event.clone(),
+            field_bindings: field_bindings.to_vec(),
+        }],
+        bookmark,
+        policy,
+    )
+    .await
+    .unwrap()
+}
 
 fn repo(name: &str) -> RepoInstance {
     RepoInstance::new(
@@ -62,10 +83,7 @@ async fn later_put_missing_binding_is_atomic_before_first_touch() {
         let mut rx = follower.subscribe_changelog().await.unwrap();
         let event = event(&[101, 202]);
         assert_eq!(
-            follower
-                .apply_replicated(&event, &[(101, "first_touch".into())], 0, policy)
-                .await
-                .unwrap(),
+            apply_batch(&follower, &event, &[(101, "first_touch".into())], 0, policy).await,
             ApplyOutcome::Rejected {
                 reason: ApplyRejectReason::MissingFieldBinding,
             },
@@ -102,10 +120,14 @@ async fn downstream_uses_follower_ids_and_chain_consumer_decodes() {
     let mut rx = follower.subscribe_changelog().await.unwrap();
     let source = event(&[101]);
     assert_eq!(
-        follower
-            .apply_replicated(&source, &[(101, "v".into())], 0, ApplyPolicy::Trusted)
-            .await
-            .unwrap(),
+        apply_batch(
+            &follower,
+            &source,
+            &[(101, "v".into())],
+            0,
+            ApplyPolicy::Trusted
+        )
+        .await,
         ApplyOutcome::Applied { local_version: 1 },
     );
     let downstream = rx.try_recv().expect("synchronous re-emission");
@@ -128,15 +150,14 @@ async fn downstream_uses_follower_ids_and_chain_consumer_decodes() {
         consumer_interner.touch_ind(name).unwrap();
     }
     assert_eq!(
-        consumer
-            .apply_replicated(
-                &downstream,
-                &[(local_id, "v".into())],
-                0,
-                ApplyPolicy::Trusted
-            )
-            .await
-            .unwrap(),
+        apply_batch(
+            &consumer,
+            &downstream,
+            &[(local_id, "v".into())],
+            0,
+            ApplyPolicy::Trusted
+        )
+        .await,
         ApplyOutcome::Applied { local_version: 1 },
     );
     let table = consumer.get_table("items").await.unwrap();
@@ -156,15 +177,14 @@ async fn trusted_malformed_bytes_reject_without_names_data_or_version() {
     source.changes[0].value = Some(bytes::Bytes::from_static(&[0xc1]));
     let mut rx = follower.subscribe_changelog().await.unwrap();
     assert_eq!(
-        follower
-            .apply_replicated(
-                &source,
-                &[(101, "untouched".into())],
-                0,
-                ApplyPolicy::Trusted
-            )
-            .await
-            .unwrap(),
+        apply_batch(
+            &follower,
+            &source,
+            &[(101, "untouched".into())],
+            0,
+            ApplyPolicy::Trusted
+        )
+        .await,
         ApplyOutcome::Rejected {
             reason: ApplyRejectReason::UndecodablePayload,
         },
@@ -258,15 +278,14 @@ async fn wire_roundtrip_and_default_bindings_fail_closed() {
     );
     let follower = repo("follower");
     assert_eq!(
-        follower
-            .apply_replicated(
-                &decoded.event,
-                &decoded.field_bindings,
-                0,
-                ApplyPolicy::Trusted
-            )
-            .await
-            .unwrap(),
+        apply_batch(
+            &follower,
+            &decoded.event,
+            &decoded.field_bindings,
+            0,
+            ApplyPolicy::Trusted
+        )
+        .await,
         ApplyOutcome::Rejected {
             reason: ApplyRejectReason::MissingFieldBinding,
         },
@@ -293,10 +312,7 @@ async fn legacy_scalar_put_and_delete_allow_default_empty_bindings() {
         assert_eq!(put.event, source);
         assert!(put.field_bindings.is_empty());
         assert_eq!(
-            follower
-                .apply_replicated(&put.event, &put.field_bindings, 0, policy)
-                .await
-                .unwrap(),
+            apply_batch(&follower, &put.event, &put.field_bindings, 0, policy).await,
             ApplyOutcome::Applied { local_version: 1 },
         );
         let table = follower.get_table("items").await.unwrap();
@@ -311,15 +327,14 @@ async fn legacy_scalar_put_and_delete_allow_default_empty_bindings() {
         assert_eq!(delete.event, source);
         assert!(delete.field_bindings.is_empty());
         assert_eq!(
-            follower
-                .apply_replicated(
-                    &delete.event,
-                    &delete.field_bindings,
-                    put.event.commit_version,
-                    policy,
-                )
-                .await
-                .unwrap(),
+            apply_batch(
+                &follower,
+                &delete.event,
+                &delete.field_bindings,
+                put.event.commit_version,
+                policy
+            )
+            .await,
             ApplyOutcome::Applied { local_version: 2 },
         );
         assert_eq!(table.get_bytes(id).await.unwrap(), None);

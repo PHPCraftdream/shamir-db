@@ -7,16 +7,22 @@ use std::path::Path;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use shamir_storage::error::{DbError, FollowerRefusalReason};
+use shamir_storage::types::RecordKey;
 use shamir_tx::changefeed::{ChangeOp, ChangelogEvent, RecordChange};
 use shamir_types::access::Actor;
+use shamir_types::types::record_id::RecordId;
+use shamir_wal::{WalDurability, WalEntryV2, WalOpV2};
 
 use super::super::follower::ignore_bookmark_j;
-use super::helpers::{open_and_reconcile, prepare_follower_image, prepare_image, temp_path};
-use crate::meta::repl_bookmark::load_clean_horizon;
+use super::helpers::{
+    open_and_reconcile, open_refusal_with_retry, prepare_follower_image, prepare_image,
+    raw_store_with_retry, temp_path,
+};
 use crate::repo::{BoxRepoFactory, RepoInstance};
 use crate::table::TableConfig;
 use crate::tx::apply_replicated::follower_durability::test_seam::{self, Phase};
-use crate::tx::apply_replicated::{apply_replicated_batch_legacy, ApplyOutcome, ApplyPolicy};
+use crate::tx::apply_replicated::{apply_replicated_batch, ApplyOutcome, ApplyPolicy};
 use crate::tx::ReplicatedEvent;
 
 fn event(version: u64) -> ChangelogEvent {
@@ -82,31 +88,21 @@ async fn stop(repo: RepoInstance) {
     drop(repo);
 }
 
-// Crash points of a follower batch, each reopened twice through the REAL
-// open path (`from_factory` runs recovery + cold certification). Graceful
+// Failure points of a follower batch, each reopened twice through the REAL
+// open path (`from_factory` runs recovery + cold certification). The receipt
+// pipeline makes the whole batch atomic: a batch failing at ANY receipt
+// phase leaves an outstanding durable receipt, and the cold reopen
+// COMPLETES it — the in-flight batch's version is certified through the
+// bookmark's clean horizon and is never declared a recovery GAP. Graceful
 // shutdown validates persisted state; it is not a power-cut simulation.
 #[tokio::test(flavor = "current_thread")]
 async fn follower_batch_crash_points_certify_only_the_in_flight_batch() {
-    for (tag, phase, record_landed, expected_versions) in [
-        ("history-written", Phase::HistoryWritten, false, vec![1u64]),
-        (
-            "journal-confirmed",
-            Phase::JournalConfirmed,
-            false,
-            vec![1, 2],
-        ),
-        (
-            "journal-flushed",
-            Phase::AfterJournalFlush,
-            false,
-            vec![1, 2],
-        ),
-        (
-            "bookmark-persisted",
-            Phase::BookmarkPersisted,
-            true,
-            vec![1, 2],
-        ),
+    // The two PRE-checkpoint phases leave a durable receipt outstanding;
+    // at `Phase::Checkpointed` the bookmark already advanced (nothing is in
+    // flight), which the crash-subprocess matrix covers.
+    for (tag, phase) in [
+        ("prepared", Phase::Prepared),
+        ("materialized", Phase::Materialized),
     ] {
         let temp = tempfile::TempDir::new().unwrap();
         let name = format!(
@@ -115,87 +111,64 @@ async fn follower_batch_crash_points_certify_only_the_in_flight_batch() {
         );
         let repo = open(temp.path(), &name).await;
         assert_eq!(
-            apply_replicated_batch_legacy(&repo, &[replicated(1, 1)], 0, ApplyPolicy::Trusted)
+            apply_replicated_batch(&repo, &[replicated(1, 1)], 0, ApplyPolicy::Trusted)
                 .await
                 .expect("first batch applies"),
             ApplyOutcome::Applied { local_version: 1 }
         );
+        // A sticky `fail_after` at the phase boundary exhausts the receipt
+        // pipeline's 3 Storage retries: the worker parks the chunk guards,
+        // leaves the durable receipt outstanding (the same durable state a
+        // crash leaves), returns Err, and goes IDLE.
         let hook = Arc::new(test_seam::Hook::default());
-        *hook.park_at.lock().unwrap() = Some(phase);
+        *hook.fail_after.lock().unwrap() = Some(phase);
+        hook.fail_after_sticky
+            .store(true, std::sync::atomic::Ordering::Release);
         test_seam::install(&name, Arc::clone(&hook));
-        let second_batch = [replicated(2, 2)];
-        let mut apply = Box::pin(apply_replicated_batch_legacy(
-            &repo,
-            &second_batch,
-            1,
-            ApplyPolicy::Trusted,
-        ));
-        let reached = hook.reached.notified();
-        tokio::pin!(reached);
-        reached.as_mut().enable();
-        tokio::select! {
-            _ = &mut reached => {}
-            result = &mut apply => {
-                panic!("apply completed before reaching {phase:?}: {result:?}")
-            }
-        }
-        drop(apply);
-        assert!(repo.tx_gate().await.expect("gate").requires_reopen());
-        let record_j = {
-            let info = repo.tx_info_store().await.expect("tx info store");
-            let horizon = load_clean_horizon(&info).await.expect("record horizon");
-            drop(info);
-            horizon.expect("first batch persisted a known J")
-        };
+        let error = apply_replicated_batch(&repo, &[replicated(2, 2)], 1, ApplyPolicy::Trusted)
+            .await
+            .expect_err("the injected failure must fail the second batch");
+        assert!(
+            matches!(error, shamir_storage::error::DbError::Storage(_)),
+            "expected the injected Storage failure at {tag}: {error:?}"
+        );
         test_seam::remove(&name);
+        // The parked receipt is a DURABLE PAUSE: shutdown must report it and
+        // fail the gate for the next open.
+        let shutdown = repo.shutdown_clean(std::time::Duration::from_secs(5)).await;
+        assert!(
+            matches!(&shutdown, Err(shamir_storage::error::DbError::Storage(message)) if message.contains("durable pause")),
+            "shutdown must report the durable pause at {tag}, got {shutdown:?}"
+        );
+        assert!(repo.tx_gate().await.expect("gate").requires_reopen());
         close(repo).await;
         for _ in 0..2 {
             let reopened = open(temp.path(), &name).await;
-            let gate = reopened.tx_gate().await.expect("gate");
-            let floor = gate.version_allocation_high_water_mark();
-            drop(gate);
             let feed = reopened.changefeed().await.expect("changefeed").feed;
-            // The GAP after reopen is exactly the in-flight batch — or none
-            // when the batch's own J+bookmark record landed.
-            let expected_gap = if record_landed {
-                None
-            } else {
-                assert!(floor > record_j, "in-flight batch must raise the floor");
-                Some((record_j + 1, floor))
-            };
+            // The cold reconcile COMPLETES the outstanding receipt: the
+            // in-flight batch's version is certified, so the gap is NONE at
+            // every receipt crash point — never an in-flight gap.
             assert_eq!(
                 feed.certified_gap_interval(),
-                expected_gap,
+                None,
                 "cold-start gap at {tag}"
             );
             let page = reopened.read_changelog_from(1, 8).await.expect("pull page");
-            // The journal reader serves every event present up to the
-            // confirmed bound and attaches gap_at; it never truncates the
-            // page at the gap. At JournalConfirmed/AfterJournalFlush the
-            // interrupted batch's event IS present (the barrier confirmed and
-            // the writer flushed it) but remains uncertified inside the GAP;
-            // at HistoryWritten it was never enqueued, so only the completed
-            // prefix is served.
             let served_versions: Vec<u64> = page
                 .events
                 .iter()
                 .map(|event| event.commit_version)
                 .collect();
-            assert_eq!(served_versions, expected_versions, "pull events at {tag}");
-            let expected_page_gap = if record_landed {
-                None
-            } else {
-                Some(record_j + 1)
-            };
-            assert_eq!(page.gap_at, expected_page_gap, "pull gap at {tag}");
+            assert_eq!(served_versions, vec![1, 2], "pull events at {tag}");
+            assert_eq!(page.gap_at, None, "pull gap at {tag}");
             drop(feed);
             close(reopened).await;
         }
     }
 }
 
-// An OLD record without a known J (legacy u64 / v1) keeps today's
-// conservative whole-window GAP. Regression guard: must stay true.
+// A v3 record without a known J keeps the conservative whole-window GAP.
+// Regression guard: must stay true.
 #[tokio::test(flavor = "current_thread")]
 async fn unknown_j_record_keeps_the_conservative_gap() {
     let temp = tempfile::tempdir().unwrap();
@@ -270,5 +243,161 @@ async fn non_follower_repos_keep_exact_conservative_certification() {
         assert!(page.events.is_empty());
         drop(feed);
         stop(repo).await;
+    }
+}
+
+// Cold ordering (S5c-X PR6b-3): a legacy bookmark record in `__tx__` must
+// REFUSE the reopen (typed `FollowerStateRefused`) BEFORE WAL replay and
+// publication run. The fixture carries a REAL surviving WAL entry (a
+// `WalEntryV2` Put appended through the repo's own WAL and synced before
+// close) alongside the legacy bytes. After the failed open the durable
+// `LastCommittedVersion` floor and the changelog clean horizon are
+// unchanged, the legacy bytes are untouched, and no recovery gap marker
+// was written.
+#[cfg(feature = "fjall")]
+#[tokio::test(flavor = "current_thread")]
+async fn legacy_bookmark_refuses_reopen_before_replay() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = format!(
+        "cold-legacy-refusal-{}",
+        temp.path().display().to_string().replace('\\', "_")
+    );
+    let repo = open(temp.path(), &name).await;
+    // REAL in-flight WAL evidence: a committed tx (receipt pipeline) whose
+    // WAL entry survives the close.
+    assert_eq!(
+        apply_replicated_batch(&repo, &[replicated(1, 1)], 0, ApplyPolicy::Trusted)
+            .await
+            .expect("the seed batch applies"),
+        ApplyOutcome::Applied { local_version: 1 }
+    );
+    // A real WAL entry through the repo's own WAL (the receipt executor is
+    // WAL-less; its durability is atomic receipt batches): a Put of the same
+    // key shape the seed event used, at commit_version 2. The WAL manager's
+    // `recover()` is a non-consuming replay, so the pre-close assertion
+    // below leaves the entry intact for any later recovery.
+    {
+        let wal = repo.repo_wal().await.expect("repo WAL");
+        let mut rid_bytes = [0u8; 16];
+        rid_bytes[0] = 1;
+        let entry = WalEntryV2::new(
+            wal.fresh_txn_id(),
+            crate::repo::repo_token(&name),
+            vec![WalOpV2::Put {
+                table_id_interned: 0,
+                rid: RecordId(rid_bytes),
+                body: bytes::Bytes::from_static(b"payload"),
+            }],
+        )
+        .with_commit_version(2);
+        wal.begin_grouped(&entry, WalDurability::Buffered)
+            .await
+            .expect("append WAL entry");
+        wal.sync_wal().await.expect("sync WAL");
+        assert!(
+            !wal.recover().await.expect("WAL replay").is_empty(),
+            "the WAL must carry the real entry before the close"
+        );
+    }
+    let info = repo.tx_info_store().await.expect("tx info store");
+    let legacy = crate::meta::MetaEnvelope::new(10u64).encode().unwrap();
+    let bookmark_key = RecordKey::from_slice(
+        crate::meta::MetaKey::ReplicationBookmark
+            .as_record_id()
+            .as_bytes(),
+    );
+    info.set(bookmark_key.clone(), Bytes::from(legacy.clone()))
+        .await
+        .expect("inject legacy bookmark bytes");
+    drop(info);
+    close(repo).await;
+
+    // Baseline from the raw stores AFTER the close, BEFORE the refused
+    // open. One raw store at a time: the handle must be dropped before the
+    // next open — each raw store owns an exclusive fjall database lock.
+    let (floor_before, legacy_before) = {
+        let tx = raw_store_with_retry(temp.path(), "__tx__").await;
+        let floor_before = crate::meta::recovery_marker::load_last_committed(&tx)
+            .await
+            .expect("floor baseline");
+        let legacy_before = tx.get(bookmark_key.clone()).await.expect("legacy bytes");
+        (floor_before, legacy_before)
+    };
+    // The handle must be dropped before the next open — each raw store owns
+    // an exclusive fjall database lock.
+    let (clean_before, gap_before) = {
+        let changelog = raw_store_with_retry(temp.path(), "__changelog__").await;
+        let clean_before = changelog
+            .get(RecordKey::from_slice(
+                &shamir_tx::changefeed::clean_horizon_key(),
+            ))
+            .await
+            .ok();
+        let gap_before = changelog
+            .get(RecordKey::from_slice(
+                &shamir_tx::changefeed::gap_marker_key(),
+            ))
+            .await
+            .ok();
+        (clean_before, gap_before)
+    };
+
+    // The open must FAIL FAST on the typed refusal — only fjall lock lag
+    // retries.
+    let error = open_refusal_with_retry(temp.path(), &name).await;
+    assert!(
+        matches!(
+            error,
+            DbError::FollowerStateRefused {
+                reason: FollowerRefusalReason::LegacyBookmarkFormat
+            }
+        ),
+        "{error:?}"
+    );
+
+    // Handles are again one at a time: the handle must be dropped before
+    // the next open — each raw store owns an exclusive fjall database lock.
+    {
+        let tx_after = raw_store_with_retry(temp.path(), "__tx__").await;
+        assert_eq!(
+            crate::meta::recovery_marker::load_last_committed(&tx_after)
+                .await
+                .expect("floor after"),
+            floor_before,
+            "the durable floor must be unchanged"
+        );
+        assert_eq!(
+            tx_after
+                .get(bookmark_key.clone())
+                .await
+                .expect("bytes after"),
+            legacy_before,
+            "the legacy bookmark bytes must be untouched"
+        );
+    }
+    // The handle must be dropped before the next open — each raw store owns
+    // an exclusive fjall database lock.
+    {
+        let changelog_after = raw_store_with_retry(temp.path(), "__changelog__").await;
+        assert_eq!(
+            changelog_after
+                .get(RecordKey::from_slice(
+                    &shamir_tx::changefeed::clean_horizon_key()
+                ))
+                .await
+                .ok(),
+            clean_before,
+            "the clean horizon must be unchanged"
+        );
+        assert_eq!(
+            changelog_after
+                .get(RecordKey::from_slice(
+                    &shamir_tx::changefeed::gap_marker_key()
+                ))
+                .await
+                .ok(),
+            gap_before,
+            "no gap marker may be written"
+        );
     }
 }

@@ -387,7 +387,13 @@ async fn binding_scope_resume_marker_removal_survives_reopen() {
         shamir
             .add_repo(
                 "testdb",
-                RepoConfig::new("main", BoxRepoFactory::fjall(repo_path.clone())),
+                // RAW fjall (no MemBuffer): this test binds a SUBSCRIPTION to
+                // this repo, and the CREATE/RESUME admission
+                // (validate_repo_wide_atomic_batch) refuses MemBuffer-wrapped
+                // destinations with `atomic_batch_unsupported`. Raw fjall is also
+                // the backend the seed writes through, so the durable directory
+                // survives the reopen below.
+                RepoConfig::new("main", BoxRepoFactory::fjall_raw(repo_path.clone())),
             )
             .await
             .unwrap();
@@ -601,9 +607,18 @@ async fn set_profile_alone_preserves_complete_row_through_reopen() {
             .await
             .unwrap();
         let db = shamir.create_db("testdb").await;
-        db.add_repo(RepoConfig::new("main", BoxRepoFactory::fjall(repo_path)))
-            .await
-            .unwrap();
+        // RAW fjall (no MemBuffer): this test binds a SUBSCRIPTION to
+        // this repo, and the CREATE/RESUME admission
+        // (validate_repo_wide_atomic_batch) refuses MemBuffer-wrapped
+        // destinations with `atomic_batch_unsupported`. Raw fjall is also
+        // the backend the seed writes through, so the durable directory
+        // survives the reopen below.
+        db.add_repo(RepoConfig::new(
+            "main",
+            BoxRepoFactory::fjall_raw(repo_path),
+        ))
+        .await
+        .unwrap();
         let mut b = Batch::new();
         b.id(2);
         for profile in ["prof_a", "prof_b"] {
@@ -687,7 +702,13 @@ async fn pause_and_set_profile_persist_exact_durable_row() {
         let db = shamir.create_db("testdb").await;
         db.add_repo(RepoConfig::new(
             "main",
-            BoxRepoFactory::fjall(repo_path.clone()),
+            // RAW fjall (no MemBuffer): this test binds a SUBSCRIPTION to
+            // this repo, and the CREATE/RESUME admission
+            // (validate_repo_wide_atomic_batch) refuses MemBuffer-wrapped
+            // destinations with `atomic_batch_unsupported`. Raw fjall is also
+            // the backend the seed writes through, so the durable directory
+            // survives the reopen below.
+            BoxRepoFactory::fjall_raw(repo_path.clone()),
         ))
         .await
         .unwrap();

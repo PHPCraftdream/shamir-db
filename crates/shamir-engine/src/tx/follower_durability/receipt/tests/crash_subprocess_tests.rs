@@ -26,18 +26,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::super::resume::activation::{disable_receipt_lookup, receipt_path_selected};
-use crate::meta::recovery_marker::load_last_committed;
-use crate::meta::repl::bookmark::load_replication_bookmark;
-use crate::meta::repl::bookmark_v3::{has_v3_record, load_bookmark_v3};
+use crate::meta::repl::bookmark_v3::load_bookmark_v3;
 use crate::meta::repl::receipt::receipt_key;
-use crate::meta::MetaKey;
 use crate::repo::{BoxRepoFactory, RepoInstance};
 use crate::table::TableConfig;
 use crate::tx::apply_replicated::apply_replicated_batch;
-use crate::tx::apply_replicated::apply_replicated_batch_legacy;
 use crate::tx::apply_replicated::follower_durability::test_seam::{self, Phase};
-use crate::tx::{ApplyOutcome, ApplyPolicy, ReplicatedEvent};
+use crate::tx::{ApplyPolicy, ReplicatedEvent};
 
 /// Full libtest path of the child scenario test in this binary.
 const CHILD_TEST: &str = "tx::apply_replicated::follower_durability::receipt::tests::crash_subprocess_tests::receipt_crash_child_scenario";
@@ -375,16 +370,12 @@ async fn receipt_crash_child_scenario() {
     let path = PathBuf::from(std::env::var("SHAMIR_RECEIPT_CRASH_PATH").unwrap());
     let point = std::env::var("SHAMIR_RECEIPT_CRASH_POINT").unwrap();
     let (phase, phase_str): (Phase, &'static str) = match point.as_str() {
-        "prepared" => (Phase::ReceiptPrepared, "prepared"),
-        "materialized" => (Phase::ReceiptMaterialized, "materialized"),
-        "checkpointed" => (Phase::ReceiptCheckpointed, "checkpointed"),
-        "history-written" => (Phase::HistoryWritten, "history-written"),
+        "prepared" => (Phase::Prepared, "prepared"),
+        "materialized" => (Phase::Materialized, "materialized"),
+        "checkpointed" => (Phase::Checkpointed, "checkpointed"),
         other => panic!("unknown crash point {other}"),
     };
 
-    // NOTE: ordinary receipt crash points use the receipt pipeline; the
-    // history-written legacy case explicitly invokes the legacy fixture below.
-    // The lookup-disable env is honored only by the parent for negative control.
     let name = repo_name(&path);
     let repo = open_with_retry(&path, &name).await;
 
@@ -401,20 +392,14 @@ async fn receipt_crash_child_scenario() {
     *hook.abort_at.lock().unwrap() = Some(phase);
     test_seam::install(&name, Arc::clone(&hook));
 
-    let result = if point == "history-written" {
-        // Explicit test-fixture routing: exercise the legacy implementation
-        // directly without changing production activation/routing.
-        apply_replicated_batch_legacy(&repo, &events, 0, ApplyPolicy::Trusted).await
-    } else {
-        apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted).await
-    };
+    let result = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted).await;
     unreachable!("abort must preempt the apply; it returned {result:?}");
 }
 
 // ------------------------------------------------------------------ parent
 
-/// Serializes the parent tests: they share the process-global
-/// `disable_receipt_lookup` seam and spawn children against shared infra.
+/// Serializes the parent tests: they spawn children against shared
+/// process-global infrastructure.
 static PARENT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Spawns the child scenario in this test binary and returns
@@ -474,10 +459,9 @@ fn assert_child_died(status: std::process::ExitStatus, output: &str, point: &str
          hook (no SHAMIR_RECEIPT_ABORT_FIRED marker); output: {output}"
     );
     let expected_phase = match point {
-        "prepared" => "ReceiptPrepared",
-        "materialized" => "ReceiptMaterialized",
-        "checkpointed" => "ReceiptCheckpointed",
-        "history-written" => "HistoryWritten",
+        "prepared" => "Prepared",
+        "materialized" => "Materialized",
+        "checkpointed" => "Checkpointed",
         other => panic!("unknown crash point {other}"),
     };
     assert!(
@@ -509,11 +493,6 @@ async fn run_point(scenario: Scenario) {
     assert_child_died(status, &output, scenario.point);
 
     let events = scenario.events();
-
-    if scenario.point == "history-written" {
-        run_legacy_history_written_recovery(temp.path(), &name, &scenario, &events).await;
-        return;
-    }
 
     // First reopen + replay (resumes / converges the crashed receipt).
     let journal_snapshot;
@@ -585,213 +564,4 @@ async fn crash_reopen_replay_convergence_matrix() {
         tombstone: true,
     })
     .await;
-}
-
-async fn run_legacy_history_written_recovery(
-    path: &Path,
-    name: &str,
-    scenario: &Scenario,
-    events: &[ReplicatedEvent],
-) {
-    let key = scenario.keys();
-    let mut prior_history = None;
-    let mut prior_journals = None;
-    let mut converged_floor = None;
-
-    // The child stopped after the legacy path wrote history but before it
-    // published its first bookmark. The flushed allocation floor is durable,
-    // while the bookmark is still absent; activation must retain v1/v2.
-    for replay in 0..2 {
-        let repo = open_with_retry(path, name).await;
-        let info = repo.tx_info_store().await.unwrap();
-        assert!(load_last_committed(&info).await.unwrap().unwrap_or(0) > 0);
-        let bookmark_key =
-            RecordKey::from_slice(MetaKey::ReplicationBookmark.as_record_id().as_bytes());
-        let bookmark = load_replication_bookmark(&info).await.unwrap();
-        if replay == 0 {
-            assert!(matches!(
-                info.get(bookmark_key.clone()).await,
-                Err(shamir_storage::error::DbError::NotFound(_))
-            ));
-            assert_eq!(bookmark, 0);
-        } else {
-            assert!(
-                info.get(bookmark_key).await.is_ok(),
-                "legacy bookmark record must persist after first replay"
-            );
-            assert_eq!(bookmark, 1);
-        }
-        assert!(!has_v3_record(&info).await.unwrap());
-        assert!(!receipt_path_selected(&repo, &info).await.unwrap());
-        drop(info);
-
-        let floor_before = repo
-            .tx_gate()
-            .await
-            .unwrap()
-            .version_allocation_high_water_mark();
-        assert!(
-            floor_before > 0,
-            "crash must leave a durable local allocation"
-        );
-        let outcome = apply_replicated_batch(&repo, events, bookmark, ApplyPolicy::Trusted).await;
-        if replay == 0 {
-            assert!(
-                matches!(&outcome, Ok(ApplyOutcome::Applied { .. })),
-                "first legacy replay must apply: {outcome:?}"
-            );
-        } else {
-            assert!(
-                matches!(&outcome, Ok(ApplyOutcome::Skipped)),
-                "bookmark replay must skip: {outcome:?}"
-            );
-        }
-        let history = history_rows(&repo, &key).await;
-        let floor_after = repo
-            .tx_gate()
-            .await
-            .unwrap()
-            .version_allocation_high_water_mark();
-        // Cold open may conservatively skip the crash-owned version; require
-        // bounded convergence, not reuse of a potentially uncertain version.
-        assert!(
-            floor_after >= floor_before && floor_after <= scenario.local_version_watermark() + 1
-        );
-        let journals = collect_journals(&repo, floor_after).await;
-        // No v3 bookmark/receipt protocol is introduced by replaying a legacy
-        // state; the existing v1/v2 bookmark record is the authoritative path.
-        let info = repo.tx_info_store().await.unwrap();
-        assert!(!has_v3_record(&info).await.unwrap());
-        assert_eq!(load_replication_bookmark(&info).await.unwrap(), 1);
-        drop(info);
-        let table = repo.get_table("items").await.unwrap();
-        assert!(table.get_bytes(RecordId([1; 16])).await.unwrap().is_some());
-        // Legacy counter deltas are process-local and may have been lost with
-        // the aborted child; this crash regression asserts durable history and
-        // bookmark convergence, not counter repair outside the legacy contract.
-        drop(table);
-        // A durable history row from the killed process may or may not have
-        // reached storage. The replay-owned row must exist with the exact
-        // payload; any surviving earlier row must be that same payload.
-        let expected_value =
-            Bytes::copy_from_slice(events[0].event.changes[0].value.as_ref().unwrap());
-        let key_bytes = key[0].clone();
-        assert!(history.iter().any(|(row_key, version, value)| {
-            row_key == &key_bytes && *version == floor_after && value == &expected_value
-        }));
-        assert!(history.iter().all(|(row_key, version, value)| {
-            row_key == &key_bytes
-                && (*version == floor_after || (*version < floor_after && value == &expected_value))
-        }), "history may retain the optional crash write but must have no divergent rows: {history:?}");
-        let local_version = floor_after;
-        let journal = journal_bytes(&repo, local_version)
-            .await
-            .expect("recovered legacy journal row must exist");
-        let event = &events[0].event;
-        let expected_event = ChangelogEvent {
-            repo: repo.name().to_owned(),
-            commit_version: local_version,
-            tx_id: event.tx_id,
-            actor: event.actor.clone(),
-            timestamp_ns: event.timestamp_ns,
-            changes: event.changes.clone(),
-        };
-        assert_eq!(
-            journal.as_ref(),
-            rmp_serde::to_vec(&expected_event).unwrap().as_slice()
-        );
-        if let Some(expected) = &prior_history {
-            assert_eq!(
-                &history, expected,
-                "replay must not allocate new history versions"
-            );
-            assert_eq!(&journals, prior_journals.as_ref().unwrap());
-            assert_eq!(floor_after, converged_floor.unwrap());
-        }
-        converged_floor = Some(floor_after);
-        prior_history = Some(history);
-        prior_journals = Some(journals);
-        close(repo).await;
-    }
-}
-
-#[tokio::test]
-async fn crash_legacy_history_written_reopens_and_replays_without_receipt_activation() {
-    let _guard = PARENT_LOCK.lock().await;
-    run_point(Scenario {
-        point: "history-written",
-        multi: false,
-        tombstone: false,
-    })
-    .await;
-}
-
-/// NEGATIVE CONTROL: crash through the receipt pipeline at "materialized",
-/// then replay with the receipt-lookup seam DISABLED — the legacy (unprotected)
-/// path must provably violate the identical-allocation invariant: it allocates
-/// a REPLACEMENT version on top of the receipt's version instead of re-owning
-/// it, and then fail-stops on the v3 bookmark it cannot downgrade.
-#[tokio::test]
-async fn negative_control_lookup_disabled_creates_extra_versions() {
-    let _guard = PARENT_LOCK.lock().await;
-    let temp = tempfile::TempDir::new().unwrap();
-    let name = repo_name(temp.path());
-    let (status, output) = spawn_child(
-        temp.path(),
-        &[
-            ("SHAMIR_RECEIPT_CRASH_POINT", "materialized"),
-            // Documented for harness self-description; see the child's note:
-            // the crash itself must go through the receipt pipeline, the
-            // parent honors this flag for its in-process replay instead.
-            ("SHAMIR_RECEIPT_CRASH_LOOKUP_DISABLED", "1"),
-        ],
-    );
-    assert_child_died(status, &output, "materialized");
-
-    let repo = open_with_retry(temp.path(), &name).await;
-    let key = RecordId([1; 16]).to_bytes().to_vec();
-
-    // Reasoning (verified against the code): with lookup disabled the route
-    // is legacy; the crashed receipt left a v3 bookmark record, so legacy
-    // `finish_batch` writes the batch at a NEW allocation first and only
-    // then fails in `persist_batch_record` → `save_bookmark_and_clean_horizon`
-    // (`refuse_v3`) with `RepoRequiresReopen`.
-    disable_receipt_lookup(true);
-    struct Reset;
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            disable_receipt_lookup(false);
-        }
-    }
-    let _reset = Reset;
-    let error = apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted).await;
-    drop(_reset);
-
-    // (a) the replay ERRORS on the v3 record it cannot persist over...
-    assert!(
-        matches!(
-            &error,
-            Err(shamir_storage::error::DbError::RepoRequiresReopen(_))
-        ),
-        "legacy replay must fail-stop on the outstanding v3 bookmark, got {error:?}"
-    );
-    // ...but only AFTER writing history rows at the NEW (replacement)
-    // allocation: the receipt's version 1 stays, and an extra version 2
-    // appears — the exactly-one-version invariant of the receipt path is
-    // violated.
-    let rows = history_rows(&repo, &[key]).await;
-    assert_eq!(
-        rows.iter().filter(|(_, version, _)| *version == 1).count(),
-        1,
-        "the crashed receipt's version 1 remains"
-    );
-    assert_eq!(
-        rows.iter().filter(|(_, version, _)| *version == 2).count(),
-        1,
-        "legacy replay allocated a REPLACEMENT version 2: unprotected divergence"
-    );
-    let journal_two = journal_bytes(&repo, 2).await.unwrap();
-    assert!(!journal_two.is_empty(), "replacement journal row exists");
-
-    close(repo).await;
 }

@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 use crate::access::Actor;
-use crate::engine::function::DbGateway;
+use crate::engine::function::{DbGateway, NetGateway};
 use crate::engine::query::batch::{BatchError, BatchOp, BatchRequest, QueryEntry, ResultEncoding};
 use crate::engine::query::read::{ReadQuery, Temporal};
 use crate::engine::query::write::InsertOp;
@@ -297,5 +299,63 @@ impl DbGateway for FacadeDbGateway {
             .await
             .map_err(Self::batch_err_to_string)?;
         rmp_serde::to_vec_named(&resp).map_err(|e| format!("execute: response encode error: {e}"))
+    }
+}
+
+impl ShamirDb {
+    /// Build a [`NetGateway`] scoped to `fn_name`'s effective egress reach:
+    /// the function's `net_grants` INTERSECTED with the DB-wide
+    /// `net_allowlist` (a function can never exceed the DB's own ceiling).
+    ///
+    /// Always returns a gateway so that allowlist-denial is a catchable
+    /// runtime error, not a "no net gateway" trap.
+    ///
+    /// # Empty `net_grants` semantics
+    ///
+    /// Task #609: empty `net_grants` now means NO egress, matching
+    /// `secret_grants`'s restrictive-by-default precedent. No
+    /// backward-compatibility constraint applies (pre-release). A
+    /// non-empty `net_grants` list narrows the function to LESS than the DB
+    /// default — there is no way to grant a function MORE than the DB
+    /// ceiling.
+    ///
+    /// # Intersection is literal-string, not pattern-aware (known limitation)
+    ///
+    /// The intersection below matches `net_grants` entries against
+    /// `net_allowlist` entries by EXACT STRING equality, not by resolving
+    /// either side against an actual host the way `check_host_allowed`'s
+    /// `glob_matches` does at fetch time. Concretely: if the DB allowlist
+    /// has the wildcard pattern `"*.example.com"` and a function's
+    /// `net_grants` names a concrete host like `"api.example.com"`, the two
+    /// strings don't match, so the intersection is EMPTY and the function is
+    /// denied ALL egress — even though `api.example.com` is both covered by
+    /// the DB's wildcard and clearly what the grant intended. This fails
+    /// CLOSED (never grants more than intended), so it's not a security
+    /// hole, but it means an operator narrowing a wildcard DB allowlist to a
+    /// concrete per-function host must currently spell `net_grants` with
+    /// the exact same pattern string as it appears in `net_allowlist` — a
+    /// real usability gap, not fixed by this task (see task #544's closing
+    /// report / a follow-up would need to intersect via pattern-subsumption
+    /// rather than string equality).
+    pub(crate) fn build_net_gateway(&self, fn_name: &str) -> Arc<dyn NetGateway> {
+        let net_grants = self.function_meta(fn_name).map(|m| m.net_grants);
+        let effective = match net_grants {
+            // No catalogue entry (builtin, not a user function going
+            // through `CreateFunctionOptions`): fall back to the full
+            // DB-wide allowlist — a different code path from "explicit
+            // empty grants" below.
+            None => self.net_allowlist.to_vec(),
+            // Explicitly empty grants: NO egress at all (task #609).
+            Some(grants) if grants.is_empty() => Vec::new(),
+            // Non-empty grants: intersect with the DB-wide allowlist so the
+            // function is scoped to the OVERLAP, never beyond the DB ceiling.
+            Some(grants) => self
+                .net_allowlist
+                .iter()
+                .filter(|host| grants.contains(host))
+                .cloned()
+                .collect(),
+        };
+        Arc::new(super::super::curl_gateway::CurlNetGateway::new(effective))
     }
 }

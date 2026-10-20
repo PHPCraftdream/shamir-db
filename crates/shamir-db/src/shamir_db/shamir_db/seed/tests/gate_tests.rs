@@ -1,10 +1,22 @@
 #![cfg(all(unix, feature = "fjall"))]
 
+use std::sync::Arc;
+
+use shamir_engine::meta::repl::bookmark_v3::load_bookmark_v3;
 use shamir_engine::meta::repo_identity::RepoIdentity;
 use shamir_engine::repo::{
     BoxRepoFactory, RepoFactory, RepoInstance, SeedImageWriter, SeedInstallState, SeedReceipt,
+    SeedTable,
 };
+use shamir_engine::table::table_manager::table_token_for;
+use shamir_engine::tx::{apply_replicated_batch, ApplyOutcome, ApplyPolicy, ReplicatedEvent};
 use shamir_query_builder::doc;
+use shamir_storage::storage_in_memory::InMemoryStore;
+use shamir_storage::types::{Repo, Store};
+use shamir_tx::{project_event, IsolationLevel, TxContext, TxId};
+use shamir_types::access::Actor as WireActor;
+use shamir_types::types::record_id::RecordId;
+use shamir_types::types::value::InnerValue;
 use shamir_types::types::value::QueryValue;
 use tokio::runtime::{Builder, Runtime};
 
@@ -103,4 +115,160 @@ fn normal_boot_refuses_missing_and_installing_receipts_before_registry() {
         };
         assert!(error.to_string().contains(expected));
     }
+}
+
+/// Build a Put event via the REAL `shamir_tx::project_event` path, exactly
+/// like a leader's journal read emits it (same shape as the engine's
+/// `apply_replicated_tests::put_event` helper).
+fn put_event(value: &str, record: RecordId, leader_version: u64) -> shamir_tx::ChangelogEvent {
+    let mut tx = TxContext::new(TxId::new(1), 0, 0, IsolationLevel::Snapshot);
+    tx.set_actor(WireActor::User(42));
+    let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let body = InnerValue::Str(value.into()).to_bytes().unwrap();
+    tx.ensure_table_staging(table_token_for("items"), "items", data_store)
+        .set(record.to_bytes().into(), body);
+    project_event(&tx, "leader", leader_version).unwrap()
+}
+
+/// R7-3 regression: a seed image staged on RAW Fjall and registered with the
+/// catalogue kind `"fjall_raw"` reopens through the NORMAL boot path as an
+/// unbuffered repo whose backend reports `supports_atomic_batch() == true`,
+/// so the first replicated batch applies and the durable bookmark advances.
+///
+/// COUNTERFACTUAL: with catalogue kind `"fjall"` the boot path
+/// (`factory_from_meta`) re-attaches the image MemBuffer-wrapped; the
+/// receipt pipeline's admission check (`admit_follower`) then fails with
+/// `DbError::AtomicBatchUnsupported` on EVERY attempt and the follower
+/// stalls forever instead of returning `Applied` — the CI stall this test
+/// pins.
+#[test]
+fn seeded_raw_fjall_image_reboots_atomic_batch_capable_and_applies() {
+    let root = tempfile::tempdir().unwrap();
+    let image = root.path().join("image");
+    let catalogue = root.path().join("shamir_db_meta.redb");
+    std::fs::create_dir(&image).unwrap();
+    let rt = runtime();
+    rt.block_on(async {
+        let home = ShamirDb::init(SystemStoreConfig::Fjall(catalogue.clone()))
+            .await
+            .unwrap();
+        // Stage the image on RAW Fjall exactly like production
+        // (`replication_seed/install/staging.rs` uses `fjall_raw`).
+        let backing = BoxRepoFactory::fjall_raw(&image).create().await.unwrap();
+        let instance = RepoInstance::new("main".into(), backing, Vec::new());
+        let writer = SeedImageWriter::begin(
+            instance.clone(),
+            receipt(),
+            vec![SeedTable {
+                name: "items".into(),
+                live_records: 0,
+            }],
+        )
+        .await
+        .unwrap();
+        let store = home
+            .prepare_seed_schema(
+                &instance,
+                "app",
+                "main",
+                &[("items".into(), QueryValue::Null, 0)],
+            )
+            .await
+            .unwrap();
+        writer.finish(std::slice::from_ref(&store)).await.unwrap();
+        home.register_seed_image(&instance, &receipt(), &image)
+            .await
+            .unwrap();
+        let record = home
+            .system_store
+            .load_repository_record("app", "main")
+            .await
+            .unwrap()
+            .expect("seeded repo registered");
+        assert_eq!(
+            record["engine"].as_str(),
+            Some("fjall_raw"),
+            "catalogue must record the RAW fjall kind"
+        );
+        instance.stop_journal_writer_for_test().await.unwrap();
+    });
+    drop(rt);
+    // Reopen through the NORMAL boot path (`factory_from_meta` over the
+    // saved catalogue record, via `ShamirDb::init`).
+    let rt = runtime();
+    rt.block_on(async {
+        let reopened = ShamirDb::init(SystemStoreConfig::Fjall(catalogue))
+            .await
+            .unwrap();
+        let repo = reopened
+            .get_db("app")
+            .and_then(|db| db.get_repo("main"))
+            .expect("seeded repo reopens through the boot path");
+        // The reopened backend must be atomic-batch capable — this is what
+        // `admit_follower` gates on.
+        assert!(repo.seed_backing_repo().supports_atomic_batch());
+        // v3 seed baseline intact: durable bookmark = seed source version,
+        // no outstanding redo receipt.
+        assert_eq!(repo.replication_bookmark().await.unwrap(), 73);
+        let info = repo.tx_info_store().await.unwrap();
+        let baseline = load_bookmark_v3(&info)
+            .await
+            .unwrap()
+            .expect("v3 bookmark written by the seed image");
+        assert_eq!(baseline.bookmark, 73);
+        assert!(baseline.outstanding_receipt.is_none());
+        // One replicated first batch applies (`Applied`), and the durable
+        // bookmark advances to the batch's upstream end.
+        repo.get_table("items").await.unwrap();
+        let event = put_event("hello", RecordId([2u8; 16]), 74);
+        let outcome = apply_replicated_batch(
+            &repo,
+            &[ReplicatedEvent {
+                event,
+                field_bindings: Vec::new(),
+            }],
+            73,
+            ApplyPolicy::Trusted,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Applied { local_version: 2 },
+            "seed install committed local baseline 1, so the first applied batch              takes local version 2 (independent of the upstream bookmark)",
+        );
+        // Read back through the follower's OWN visible floor: the applied
+        // record body is a scalar `InnerValue::Str` (exactly what a leader's
+        // changelog event carries), so a full `table.read` scan cannot serve
+        // it — the scan consumer validates every row with `RecordView::new`
+        // (`shamir-types/src/record_view/lens/view.rs:41`), which rejects a
+        // non-map top level (`NonMapTopLevel`), and the scan silently skips
+        // such rows (`shamir-engine/src/table/read_exec.rs:1262`). The point
+        // read (`TableManager::get` → `MvccStore::get_current_bytes`) decodes
+        // the stored bytes as `InnerValue` and is the correct post-apply read
+        // API; it is floor-capped at `gate.last_committed()`
+        // (`shamir-tx/src/mvcc_store/mod.rs:1330`), so it observes the row
+        // only after publication raised the floor to 2.
+        //
+        // COUNTERFACTUAL: the visible floor is raised twice — by
+        // `MvccStore::publish_materialized`'s `gate.raise_published`
+        // (`shamir-tx/src/mvcc_store/mvcc_history.rs:697`) and by the re-owned
+        // version guard's commit (`receipt/publish.rs:174-182`,
+        // `shamir-tx/src/version_guard.rs:150-164`). Only if BOTH are missing
+        // does the floor stay at the baseline 1, this `get` resolve the cell
+        // as absent, and this assertion be the FIRST to fail ("record not
+        // found"); the exact-payload check below holds either way.
+        let table = repo.get_table("items").await.unwrap();
+        let got = table.get(RecordId([2u8; 16])).await.unwrap();
+        assert_eq!(
+            got,
+            InnerValue::Str("hello".into()),
+            "the event's record data must be applied"
+        );
+        assert_eq!(
+            repo.replication_bookmark().await.unwrap(),
+            74,
+            "bookmark must advance to the batch's upstream end"
+        );
+    });
 }

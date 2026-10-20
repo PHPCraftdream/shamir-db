@@ -168,6 +168,12 @@ impl ShamirDb {
         if actual != *expected || !op.paused {
             return Err(SeedRefusal::ConflictingBinding);
         }
+        image
+            .validate_repo_wide_atomic_batch(&format!(
+                "{}/{}",
+                expected.source_db, expected.source_repo
+            ))
+            .map_err(super::control::atomic_batch_refusal)?;
         let scope = streams(self, &op.profile).await?;
         if !matches_scope(&scope, expected) {
             return Err(SeedRefusal::WrongScope);

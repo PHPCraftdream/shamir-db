@@ -28,6 +28,10 @@ impl RepoInstance {
         instance.disable_background_drainer_for_test();
         instance.set_wal_segment_bytes_for_test(segment_bytes);
         instance.set_durability(policy)?;
+        // PR6b-3: refuse unsupported durable follower state BEFORE any WAL
+        // replay, floor persistence or journal publication.
+        let info = instance.tx_info_store().await?;
+        crate::meta::repl::bookmark_v3::classify_follower_bookmark(&info).await?;
         instance.repo_identity_admitted(&permit).await?;
         // Install BEFORE recovery: the test feed must remain uninitialized.
         if let Some(handle) = pending_journal {
@@ -55,6 +59,10 @@ impl RepoInstance {
         #[cfg(not(test))]
         let instance = Self::from_factory_unrecovered(name, factory, configs).await?;
         instance.set_durability(policy)?;
+        // PR6b-3: refuse unsupported durable follower state BEFORE any WAL
+        // replay, floor persistence or journal publication.
+        let info = instance.tx_info_store().await?;
+        crate::meta::repl::bookmark_v3::classify_follower_bookmark(&info).await?;
         let permit = instance
             .write_domain()
             .admit()

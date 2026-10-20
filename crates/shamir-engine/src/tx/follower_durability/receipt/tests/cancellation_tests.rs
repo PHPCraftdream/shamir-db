@@ -1,7 +1,7 @@
 //! Cancellation convergence tests (S5c-X PR6b-2 item 6, revised for the
 //! repository-owned worker): the pipeline runs on a DETACHED task, so
-//! dropping the caller future at ANY phase boundary (ReceiptPrepared,
-//! ReceiptMaterialized, ReceiptCheckpointed) does NOT cancel the operation —
+//! dropping the caller future at ANY phase boundary (Phase::Prepared,
+//! Phase::Materialized, Phase::Checkpointed) does NOT cancel the operation —
 //! the worker runs to completion from its durable pause point. The tests
 //! assert the deterministic PARKED state (durable receipt outstanding, the
 //! guards still held, watermark untouched), then resume the worker and
@@ -220,7 +220,7 @@ async fn panic_after_materialized_requires_reopen_without_advancing_floors() {
     let name = repo_name("panic-materialized", temp.path());
     let repo = open(temp.path(), &name).await;
     let hook = Arc::new(test_seam::Hook::default());
-    *hook.panic_after.lock().unwrap() = Some(Phase::ReceiptMaterialized);
+    *hook.panic_after.lock().unwrap() = Some(Phase::Materialized);
     test_seam::install(&name, Arc::clone(&hook));
 
     let result =
@@ -289,13 +289,7 @@ async fn drop_at_receipt_prepared_converges_on_reapply() {
     let name = repo_name("cancel-prepared", temp.path());
     let repo = open(temp.path(), &name).await;
 
-    let hook = crash_at_phase(
-        &repo,
-        &name,
-        Phase::ReceiptPrepared,
-        &[event(1, 1), event(2, 2)],
-    )
-    .await;
+    let hook = crash_at_phase(&repo, &name, Phase::Prepared, &[event(1, 1), event(2, 2)]).await;
     // Parked at the durable pause point: the durable Prepared receipt owns
     // the versions, and the worker still holds the guards — so no Aborted
     // mark moved the watermark.
@@ -327,7 +321,7 @@ async fn drop_at_receipt_materialized_converges_on_reapply() {
     let hook = crash_at_phase(
         &repo,
         &name,
-        Phase::ReceiptMaterialized,
+        Phase::Materialized,
         &[event(1, 1), event(2, 2)],
     )
     .await;
@@ -359,7 +353,7 @@ async fn drop_at_receipt_checkpointed_is_fully_converged() {
     let hook = crash_at_phase(
         &repo,
         &name,
-        Phase::ReceiptCheckpointed,
+        Phase::Checkpointed,
         &[event(1, 1), event(2, 2)],
     )
     .await;
@@ -375,7 +369,7 @@ async fn drop_at_receipt_checkpointed_is_fully_converged() {
 }
 
 // Reviewer-finding-5 regression: dropping the caller future at
-// ReceiptMaterialized must NOT advance the watermark — the repository-owned
+// Phase::Materialized must NOT advance the watermark — the repository-owned
 // worker still holds the chunk guards, so no Aborted mark moves
 // `last_committed`/`durable_watermark` past the unpublished versions.
 #[tokio::test]
@@ -387,7 +381,7 @@ async fn watermark_never_passes_unpublished_receipt_versions() {
     let hook = crash_at_phase(
         &repo,
         &name,
-        Phase::ReceiptMaterialized,
+        Phase::Materialized,
         &[event(1, 1), event(2, 2)],
     )
     .await;
@@ -434,13 +428,13 @@ async fn drop_during_checkpoint_commit_still_completes_and_publishes() {
     // other tests that arm them or read the reconcile counter.
     let _lock = checkpoint::checkpoint_test_lock().await;
     checkpoint::arm_commit_park(false); // ensure the PRE-stage park is inert
-                                        // Park the worker at ReceiptMaterialized (AFTER the Materialized batch
+                                        // Park the worker at Phase::Materialized (AFTER the Materialized batch
                                         // is durable), then arm the commit-window seam and release: the worker's
                                         // NEXT atomic commit is the checkpoint's, so the commit-window park
                                         // provably fires inside the checkpoint commit — not inside the earlier
                                         // Prepared/Materialized commits.
     let hook = Arc::new(test_seam::Hook::default());
-    *hook.park_at.lock().unwrap() = Some(Phase::ReceiptMaterialized);
+    *hook.park_at.lock().unwrap() = Some(Phase::Materialized);
     test_seam::install(&name, Arc::clone(&hook));
     // Register the `reached` waker BEFORE spawning the caller so the
     // notification cannot be missed (notify_waiters wakes only registered
@@ -453,7 +447,7 @@ async fn drop_during_checkpoint_commit_still_completes_and_publishes() {
     let caller = tokio::spawn(async move {
         apply_replicated_batch(&worker_repo, &events, 0, ApplyPolicy::Trusted).await
     });
-    // Deterministic wait until the worker is parked at ReceiptMaterialized.
+    // Deterministic wait until the worker is parked at Phase::Materialized.
     reached.await;
     test_seam::remove(&name);
     // Arm the commit window and release the parked worker: its next atomic

@@ -24,6 +24,7 @@ use super::super::stage::{
     inject_materialization_batch_failures, set_materialization_readback_unavailable,
     MaterializationBatchFailure,
 };
+use crate::meta::repl::bookmark::load_clean_horizon;
 use crate::meta::repl::bookmark_v3::load_bookmark_v3;
 use crate::meta::repl::receipt::receipt_key;
 use crate::meta::repl::{decode_receipt, MAX_RECEIPT_EVENTS};
@@ -34,7 +35,7 @@ use crate::tx::apply_replicated::{apply_replicated_batch, ApplyOutcome, ApplyPol
 use crate::tx::ReplicatedEvent;
 
 use super::super::checkpoint::{
-    checkpoint_reconciles, checkpoint_test_lock, disable_uncertain_reconcile,
+    checkpoint_reconciles, checkpoint_test_lock, disable_uncertain_reconcile, set_fail_final_flush,
     set_simulate_checkpoint_uncertain, set_uncertain_without_commit,
 };
 
@@ -647,5 +648,98 @@ async fn multichunk_materialization_failure_resumes_same_receipt_without_extra_a
         ApplyOutcome::Skipped
     );
     assert_eq!(gate.version_allocation_high_water_mark(), n as u64);
+    close(repo).await;
+}
+
+/// P1-1 (S5c-X round 5): the post-checkpoint retry fast path must not use
+/// `clean_through` (J) as completion evidence. With an open gap the
+/// checkpoint gap-caps J (`certified_clean_through`,
+/// checkpoint.rs:233-248), so a COMPLETED, published chunk legitimately ends
+/// with J below the chunk's local end. The fast path therefore recognises
+/// completion exactly like the checkpoint Uncertain read-back
+/// (checkpoint.rs:328-333): durable bookmark advanced AND receipt retired —
+/// written in ONE atomic batch (checkpoint.rs:263-280) — plus the gate's
+/// committed/watermark counters.
+///
+/// COUNTERFACTUAL: restoring the round-3 completion evidence
+/// (`clean_through >= chunk_local_end`) in the fast path
+/// (receipt/apply.rs:512-525) turns this test red — attempt 2 rejects the
+/// fast path, `stage::commit_prepared` re-stages Prepared (and its receipt)
+/// over the ALREADY published chunk, and the sticky final-flush failure
+/// exhausts the 3-attempt budget, so the apply returns `DbError::Storage`
+/// instead of `Applied { 2 }`.
+#[tokio::test]
+async fn post_checkpoint_flush_failure_with_open_gap_is_done() {
+    struct FinalFlushReset(String);
+    impl Drop for FinalFlushReset {
+        fn drop(&mut self) {
+            super::super::checkpoint::set_fail_final_flush(&self.0, false);
+        }
+    }
+    let temp = tempfile::TempDir::new().unwrap();
+    let name = repo_name(temp.path());
+    let repo = open(temp.path(), &name).await;
+    let key2 = key_bytes(2).await;
+    assert_eq!(
+        apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+            .await
+            .unwrap(),
+        ApplyOutcome::Applied { local_version: 1 }
+    );
+    // Open a certified gap at version 2 (same seam as
+    // follower_durability/tests/gap_tests.rs:58).
+    {
+        let feed = repo.changefeed().await.unwrap();
+        feed.feed.mark_gap(2);
+        assert_eq!(feed.feed.first_gap_version(), 2);
+    }
+    let _reset = FinalFlushReset(name.clone());
+    set_fail_final_flush(&name, true);
+    assert_eq!(
+        apply_replicated_batch(&repo, &[event(2, 2)], 1, ApplyPolicy::Trusted)
+            .await
+            .unwrap(),
+        ApplyOutcome::Applied { local_version: 2 }
+    );
+    set_fail_final_flush(&name, false);
+    // The chunk's data is in place exactly once — NOT re-staged by a
+    // `commit_prepared` retry.
+    assert_eq!(history_versions_for(&repo, "items", &key2).await, vec![2]);
+    assert_eq!(
+        repo.get_table("items")
+            .await
+            .unwrap()
+            .counter()
+            .get()
+            .await
+            .unwrap(),
+        2
+    );
+    let info = repo.tx_info_store().await.unwrap();
+    // Gap-capped J: completion no longer rides on `clean_through`.
+    let v3 = load_bookmark_v3(&info).await.unwrap().unwrap();
+    assert_eq!(v3.bookmark, 2);
+    assert_eq!(v3.clean_through, Some(1));
+    assert_eq!(v3.outstanding_receipt, None);
+    assert!(matches!(
+        info.get(receipt_key()).await,
+        Err(DbError::NotFound(_))
+    ));
+    assert_eq!(load_clean_horizon(&info).await.unwrap(), Some(1));
+    drop(info);
+    assert_eq!(
+        apply_replicated_batch(&repo, &[event(2, 2)], 1, ApplyPolicy::Trusted)
+            .await
+            .unwrap(),
+        ApplyOutcome::Skipped
+    );
+    close(repo).await;
+    // Reopen: the advanced bookmark stayed durable.
+    let repo = open(temp.path(), &name).await;
+    let info = repo.tx_info_store().await.unwrap();
+    let v3 = load_bookmark_v3(&info).await.unwrap().unwrap();
+    assert_eq!(v3.bookmark, 2);
+    assert_eq!(v3.outstanding_receipt, None);
+    drop(info);
     close(repo).await;
 }

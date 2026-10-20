@@ -65,10 +65,10 @@ pub enum MetaKey {
     ///
     /// The highest LEADER `commit_version` applied on this follower repo.
     /// Stored in the per-repo `__tx__` info-store via the same envelope
-    /// mechanism as `LastCommittedVersion` / `NextTxId`. R1-b's
-    /// [`crate::meta::repl_bookmark`] reads/writes it; the follower feeds it
-    /// back into [`crate::tx::apply_replicated`] as `applied_watermark` for
-    /// O(1) idempotent re-delivery gating.
+    /// mechanism as `LastCommittedVersion` / `NextTxId`.
+    /// [`crate::meta::repl_bookmark`] reads/writes it; receipt checkpointing
+    /// advances it and the receipt pipeline consults it for O(1) idempotent
+    /// re-delivery gating.
     ReplicationBookmark,
 
     /// S5c-X PR6b-1: outstanding replication redo receipt; separate key

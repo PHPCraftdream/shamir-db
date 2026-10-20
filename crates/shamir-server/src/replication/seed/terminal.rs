@@ -1,10 +1,17 @@
+use std::sync::Arc;
 use std::time::Duration;
 
+use shamir_collections::TMap;
+use shamir_db::query::admin::ReplStream;
+use shamir_db::query::read::{QueryResult, ReadQuery};
+use shamir_db::repl_binding::SubscriptionBinding;
 use shamir_db::types::value::QueryValue;
 use shamir_db::{DbResult, SeedRefusal, ShamirDb};
 use tokio_util::sync::CancellationToken;
+use tracing::{info, warn};
 
-use crate::replication::supervisor::read_all;
+use crate::replication::follower_loop::STALL_VISIBILITY_THRESHOLD;
+use crate::replication::source::ReplSource;
 use crate::replication::ReplError;
 
 /// Round-6 item 2 currency check: read the CURRENT `system/subscriptions`
@@ -174,4 +181,305 @@ pub(crate) async fn validate_target(
         }
     }
     Ok(())
+}
+
+/// PR6b-3 stall visibility: once [`STALL_VISIBILITY_THRESHOLD`] consecutive
+/// swallowed failures accumulate without durable-bookmark progress, persist
+/// a `status_message` on the subscription row so operators (and tests) can
+/// OBSERVE the stalled loop via the existing status/list admin surface.
+///
+/// Mechanism (round 12 F2): [`ShamirDb::set_subscription_status_message`] —
+/// a status-ONLY writer. It rewrites the row's `status_message` and nothing
+/// else: no `state` change, no quarantine, no `last_terminal_reason`, and —
+/// critically — NO lease quiesce. The earlier mechanism
+/// (`mark_subscription_terminal(name, "active", …)`) self-invalidated the
+/// loop's own lease (the terminal writer quiesces first), so a retryable
+/// status report killed the loop at the next top-of-iteration check.
+/// With the status-only writer the row stays `active`, the lease stays
+/// valid and the loop keeps retrying: the stall stays visible, not terminal.
+///
+/// The write is generation-fenced with `generation` (the loop lease's
+/// binding generation): a stale loop's stall report on a replaced binding's
+/// row is a logged no-op inside `ShamirDb`. `subscription = None`
+/// (unsupervised loop) does nothing, as before.
+///
+/// Fires once per stall streak (`stall_reported` guard); cleared by
+/// [`clear_stall`] on the next durable progress.
+///
+/// LOCK CONSTRAINT (round 12 F1): this writer takes the replication control
+/// lock internally, so it must NEVER be awaited while the loop holds its
+/// apply-gate READ guard (control lock → apply_gate.write() is the
+/// documented order; taking the control lock under the read guard inverts
+/// it and self-deadlocks on the quiesce barrier). Guard-held loop arms
+/// defer the call until after the guard is dropped.
+pub(crate) async fn note_swallowed_failure(
+    db: &ShamirDb,
+    node_id: &str,
+    subscription: Option<&str>,
+    generation: u64,
+    failures: usize,
+    last_error: &str,
+    stall_reported: &mut bool,
+) {
+    if failures < STALL_VISIBILITY_THRESHOLD || *stall_reported {
+        return;
+    }
+    let message = format!(
+        "follower stalled: {failures} consecutive failures without progress; \
+         last error: {last_error}"
+    );
+    let Some(name) = subscription else {
+        warn!(
+            node_id = %node_id,
+            failures,
+            "follower_loop: stalled without progress (no subscription row to mark)"
+        );
+        return;
+    };
+    // R7-5: the latch is set ONLY after a SUCCESSFUL persistence — on Err it
+    // stays clear so the NEXT failure retries the write (a failed write must
+    // never silence the stall permanently).
+    match db
+        .set_subscription_status_message(name, &message, generation)
+        .await
+    {
+        Ok(()) => {
+            *stall_reported = true;
+            warn!(
+                node_id = %node_id,
+                subscription = %name,
+                failures,
+                "follower_loop: stall persisted to subscription status_message"
+            );
+        }
+        Err(e) => warn!(
+            node_id = %node_id,
+            subscription = %name,
+            error = %e,
+            "follower_loop: failed to persist stall status_message (will retry on next failure)"
+        ),
+    }
+}
+
+/// PR6b-3: the bookmark advanced after a reported stall — overwrite the
+/// stall `status_message` with a progress note so a RECOVERED loop is as
+/// visible as a stalled one was. Uses the same generation-fenced,
+/// non-quiescing status-only writer as [`note_swallowed_failure`] (round 12
+/// F1/F2); the same lock constraint applies: never call while an apply-gate
+/// read guard is held.
+pub(crate) async fn clear_stall(
+    db: &ShamirDb,
+    node_id: &str,
+    subscription: Option<&str>,
+    bookmark: u64,
+    generation: u64,
+    stall_reported: &mut bool,
+) {
+    *stall_reported = false;
+    let Some(name) = subscription else {
+        return;
+    };
+    let message = format!("replication progress restored; durable bookmark at {bookmark}");
+    if let Err(e) = db
+        .set_subscription_status_message(name, &message, generation)
+        .await
+    {
+        warn!(
+            node_id = %node_id,
+            subscription = %name,
+            error = %e,
+            "follower_loop: failed to persist progress status_message"
+        );
+    } else {
+        info!(
+            node_id = %node_id,
+            subscription = %name,
+            bookmark,
+            "follower_loop: stall cleared (bookmark advanced)"
+        );
+    }
+}
+
+/// A subscription resolved from `system/subscriptions` (386-a schema).
+///
+/// Passed to the [`ReplSourceFactory`] so it can build the transport
+/// (`WireReplSource` in prod, `InProcessReplSource` in tests) with the
+/// subscription's `upstream` endpoint and credentials.
+#[derive(Debug, Clone)]
+pub struct Subscription {
+    /// Subscription name (registry key).
+    pub name: String,
+    /// Upstream leader endpoint string (e.g. `tcp://leader:9000`). For R1 the
+    /// factory owns credential resolution (see the module TODO on creds).
+    pub upstream: String,
+    /// Publication name advertised by the upstream.
+    pub publication: String,
+    /// Bound replication-profile name (resolved to `pull` streams).
+    pub profile: String,
+    /// `active` → loop should run; `paused` (or anything else) → stopped.
+    pub state: String,
+    /// S5c-X PR8b-2: the row's durable binding generation. The DURABLE
+    /// authority for loop identity on reconcile — a loop started under an
+    /// older generation must never survive to mark or clear a replacement
+    /// binding.
+    pub binding_generation: u64,
+    /// S5c-X PR8b-2: the row's durable destination set — the ENFORCED write
+    /// boundary for follower targets and the coverage authority for
+    /// quarantine. The replication profile is NOT the authority.
+    pub binding_destinations: Vec<(String, String)>,
+}
+
+impl Subscription {
+    /// `true` when the row's `state` field is exactly `active`.
+    pub(crate) fn is_active(&self) -> bool {
+        self.state == "active"
+    }
+}
+
+/// Factory that builds a [`ReplSource`] for a subscription.
+///
+/// This is the seam that makes the supervisor unit-testable: production wires
+/// a `WireReplSource` (a TLS+SCRAM `shamir_client::Client` connected to
+/// `sub.upstream` under a `replicator` account), tests wire an
+/// `InProcessReplSource` over a leader `Arc<ShamirDb>`. The supervisor never
+/// looks at credentials — the factory owns them.
+///
+/// TODO(386-c): upstream credentials. Today the factory carries whatever creds
+/// it needs (prod: a config/env `replicator` account keyed by `upstream`).
+/// A dedicated per-subscription credential store on the catalogue row is
+/// future work — `Subscription.upstream` is the only endpoint hint available.
+pub type ReplSourceFactory =
+    Arc<dyn Fn(&Subscription) -> Arc<dyn ReplSource> + Send + Sync + 'static>;
+
+impl crate::replication::supervisor::SubscriptionSupervisor {
+    /// Read the CURRENT catalogue row for one subscription by name,
+    /// mirroring [`Self::read_subscriptions`]' public read path.
+    pub(crate) async fn read_subscription_row(
+        &self,
+        name: &str,
+    ) -> Result<Option<QueryValue>, String> {
+        let table = self
+            .local
+            .system_store()
+            .subscriptions_table()
+            .await
+            .map_err(|e| e.to_string())?;
+        let records = read_all(&table, "subscriptions")
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(records
+            .into_iter()
+            .find(|r| r.get("name").and_then(|v| v.as_str()) == Some(name)))
+    }
+
+    /// Resolve a profile name → its `streams` by reading
+    /// `system/replication_profiles` (386-a schema: `{name, streams}`).
+    pub(crate) async fn resolve_profile_streams(
+        &self,
+        profile: &str,
+    ) -> Result<Vec<ReplStream>, String> {
+        let table = self
+            .local
+            .system_store()
+            .replication_profiles_table()
+            .await
+            .map_err(|e| e.to_string())?;
+        let records = read_all(&table, "replication_profiles")
+            .await
+            .map_err(|e| e.to_string())?;
+        let row = records
+            .into_iter()
+            .find(|r| r.get("name").and_then(|v| v.as_str()) == Some(profile))
+            .ok_or_else(|| format!("replication profile '{profile}' not found"))?;
+        let streams_val = row
+            .get("streams")
+            .cloned()
+            .ok_or_else(|| format!("profile '{profile}' has no streams field"))?;
+        // `streams` was persisted via `to_qv(&Vec<ReplStream>)` (a msgpack
+        // round-trip); reverse it the same way.
+        decode_streams(&streams_val)
+    }
+
+    /// Read `system/subscriptions` into typed [`Subscription`]s.
+    pub(crate) async fn read_subscriptions(&self) -> Result<Vec<Subscription>, String> {
+        let table = self
+            .local
+            .system_store()
+            .subscriptions_table()
+            .await
+            .map_err(|e| e.to_string())?;
+        let records = read_all(&table, "subscriptions")
+            .await
+            .map_err(|e| e.to_string())?;
+        records
+            .into_iter()
+            .map(|r| {
+                // S5c-X PR8b-2: the binding is strictly validated; a row
+                // that fails is a typed catalogue error naming the
+                // subscription. Reconcile logs a warning and leaves running
+                // loops alone — fail-safe, never fail-open.
+                let binding = SubscriptionBinding::from_row(&r).map_err(|e| e.to_string())?;
+                let (binding_generation, binding_destinations) =
+                    (binding.generation(), binding.destinations().to_vec());
+                Ok(Subscription {
+                    name: r
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| "subscription row is missing its 'name' string".to_string())?
+                        .to_string(),
+                    upstream: r
+                        .get("upstream")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    publication: r
+                        .get("publication")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    profile: r
+                        .get("profile")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    state: r
+                        .get("state")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    binding_generation,
+                    binding_destinations,
+                })
+            })
+            .collect()
+    }
+}
+
+/// Reverse `to_qv(&Vec<ReplStream>)`: re-encode the `QueryValue` to msgpack
+/// and deserialise the typed streams back out.
+pub(crate) fn decode_streams(v: &QueryValue) -> Result<Vec<ReplStream>, String> {
+    let bytes = rmp_serde::to_vec_named(v).map_err(|e| format!("encode streams: {e}"))?;
+    rmp_serde::from_slice::<Vec<ReplStream>>(&bytes).map_err(|e| format!("decode streams: {e}"))
+}
+
+/// Read every record of a system-store table as owned `QueryValue`s.
+///
+/// Mirrors `admin_replication.rs::read_all` — the system catalogue read path.
+/// `pub(crate)` (round-6 item 2): `seed/terminal.rs`'s generation-currency
+/// check reuses this reader instead of duplicating it.
+pub(crate) async fn read_all(
+    table: &shamir_db::engine::table::TableManager,
+    table_name: &str,
+) -> shamir_db::DbResult<Vec<QueryValue>> {
+    let refs: TMap<String, QueryResult> = TMap::default();
+    // S5c-X F1 (Round 6): the FilterContext is built engine-side; no
+    // `&Interner` crosses the boundary.
+    let ctx = table.info_store_read_view().filter_context(&refs).await?;
+    let query = ReadQuery::new(table_name);
+    let result = table.read(&query, &ctx).await?;
+    Ok(result
+        .records
+        .into_iter()
+        .map(|r| r.as_value().into_owned())
+        .collect())
 }

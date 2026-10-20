@@ -7,8 +7,8 @@ use crate::{DbError, DbResult};
 use dashmap::DashMap;
 use shamir_collections::THasher;
 use shamir_engine::function::{
-    EnvPolicy, FnCtx, FunctionMeta, FunctionRegistry, GlobalVars, NetGateway, WasmEngine,
-    WasmFunction, WasmLimits,
+    EnvPolicy, FnCtx, FunctionMeta, FunctionRegistry, GlobalVars, WasmEngine, WasmFunction,
+    WasmLimits,
 };
 use shamir_engine::repo::durability_policy::{effective_wal_segment_bytes, resolve};
 use shamir_engine::validator::{RecordValidator, ValidatorRegistry, WasmRecordValidator};
@@ -850,25 +850,43 @@ impl ShamirDb {
             #[cfg(feature = "fjall")]
             "fjall" => path.map(BoxRepoFactory::fjall),
             #[cfg(feature = "fjall")]
+            "fjall_raw" => path.map(BoxRepoFactory::fjall_raw),
+            #[cfg(feature = "fjall")]
             "hybrid" => path.map(BoxRepoFactory::hybrid),
             _ => None,
         }
     }
 
     pub(super) fn extract_storage_type(factory: &BoxRepoFactory) -> String {
+        Self::storage_type_inner(factory, true).to_string()
+    }
+
+    /// `top == true` labels the factory the catalogue will record: a RAW
+    /// `Fjall` variant at the top of the stack is an unbuffered repo and
+    /// must be recorded as `"fjall_raw"` so the boot path re-attaches it
+    /// raw (`supports_atomic_batch() == true`). A `Fjall` reached THROUGH
+    /// a wrapper is part of a buffered stack and must keep reporting the
+    /// wrapped kind `"fjall"` — relabeling it raw would make the boot path
+    /// drop the buffer layer on reopen.
+    fn storage_type_inner(factory: &BoxRepoFactory, top: bool) -> &'static str {
         match factory {
             BoxRepoFactory::InMemory(_) => "in_memory",
             #[cfg(feature = "fjall")]
-            BoxRepoFactory::Fjall(_) => "fjall",
+            BoxRepoFactory::Fjall(_) => {
+                if top {
+                    "fjall_raw"
+                } else {
+                    "fjall"
+                }
+            }
             #[cfg(feature = "fjall")]
             BoxRepoFactory::Hybrid(_) => "hybrid",
-            // The buffer layer doesn't have an identity of its own
-            // — recurse to the underlying backend so reflection
-            // sees the real engine.
-            BoxRepoFactory::MemBuffer(f) => return Self::extract_storage_type(&f.inner),
-            BoxRepoFactory::Cached(f) => return Self::extract_storage_type(&f.inner),
+            // The buffer/cache layers don't have an identity of their own
+            // — recurse to the underlying backend so reflection sees the
+            // real engine, but as a WRAPPED (non-top) backend.
+            BoxRepoFactory::MemBuffer(f) => Self::storage_type_inner(&f.inner, false),
+            BoxRepoFactory::Cached(f) => Self::storage_type_inner(&f.inner, false),
         }
-        .to_string()
     }
 
     pub(super) fn extract_path(factory: &BoxRepoFactory) -> Option<String> {
@@ -940,61 +958,5 @@ impl ShamirDb {
             .with_net(self.build_net_gateway(fn_name))
             .with_secret_grants(grants)
             .with_actor(actor)
-    }
-
-    /// Build a [`NetGateway`] scoped to `fn_name`'s effective egress reach:
-    /// the function's `net_grants` INTERSECTED with the DB-wide
-    /// `net_allowlist` (a function can never exceed the DB's own ceiling).
-    ///
-    /// Always returns a gateway so that allowlist-denial is a catchable
-    /// runtime error, not a "no net gateway" trap.
-    ///
-    /// # Empty `net_grants` semantics
-    ///
-    /// Task #609: empty `net_grants` now means NO egress, matching
-    /// `secret_grants`'s restrictive-by-default precedent. No
-    /// backward-compatibility constraint applies (pre-release). A
-    /// non-empty `net_grants` list narrows the function to LESS than the DB
-    /// default — there is no way to grant a function MORE than the DB
-    /// ceiling.
-    ///
-    /// # Intersection is literal-string, not pattern-aware (known limitation)
-    ///
-    /// The intersection below matches `net_grants` entries against
-    /// `net_allowlist` entries by EXACT STRING equality, not by resolving
-    /// either side against an actual host the way `check_host_allowed`'s
-    /// `glob_matches` does at fetch time. Concretely: if the DB allowlist
-    /// has the wildcard pattern `"*.example.com"` and a function's
-    /// `net_grants` names a concrete host like `"api.example.com"`, the two
-    /// strings don't match, so the intersection is EMPTY and the function is
-    /// denied ALL egress — even though `api.example.com` is both covered by
-    /// the DB's wildcard and clearly what the grant intended. This fails
-    /// CLOSED (never grants more than intended), so it's not a security
-    /// hole, but it means an operator narrowing a wildcard DB allowlist to a
-    /// concrete per-function host must currently spell `net_grants` with
-    /// the exact same pattern string as it appears in `net_allowlist` — a
-    /// real usability gap, not fixed by this task (see task #544's closing
-    /// report / a follow-up would need to intersect via pattern-subsumption
-    /// rather than string equality).
-    pub(super) fn build_net_gateway(&self, fn_name: &str) -> Arc<dyn NetGateway> {
-        let net_grants = self.function_meta(fn_name).map(|m| m.net_grants);
-        let effective = match net_grants {
-            // No catalogue entry (builtin, not a user function going
-            // through `CreateFunctionOptions`): fall back to the full
-            // DB-wide allowlist — a different code path from "explicit
-            // empty grants" below.
-            None => self.net_allowlist.to_vec(),
-            // Explicitly empty grants: NO egress at all (task #609).
-            Some(grants) if grants.is_empty() => Vec::new(),
-            // Non-empty grants: intersect with the DB-wide allowlist so the
-            // function is scoped to the OVERLAP, never beyond the DB ceiling.
-            Some(grants) => self
-                .net_allowlist
-                .iter()
-                .filter(|host| grants.contains(host))
-                .cloned()
-                .collect(),
-        };
-        Arc::new(super::super::curl_gateway::CurlNetGateway::new(effective))
     }
 }

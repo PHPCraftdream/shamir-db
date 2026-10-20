@@ -47,6 +47,8 @@ mod db_execute;
 mod db_tx;
 mod function_invoker;
 mod helpers;
+#[path = "repo_admin/quarantine_helpers/mod.rs"]
+mod quarantine_helpers;
 pub(crate) mod replication_seed;
 mod table_resolver;
 mod visibility_sample;

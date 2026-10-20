@@ -14,7 +14,8 @@ use shamir_types::types::value::InnerValue;
 use crate::repo::{BoxRepo, RepoInstance};
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
-use crate::tx::apply_replicated::{apply_replicated, ApplyOutcome, ApplyPolicy, ApplyRejectReason};
+use crate::tx::apply_replicated::ApplyRejectReason;
+use crate::tx::{apply_replicated_batch, ApplyOutcome, ApplyPolicy, ReplicatedEvent};
 
 fn event(tables: &[&str]) -> ChangelogEvent {
     ChangelogEvent {
@@ -49,9 +50,17 @@ async fn assert_refused(repo: &RepoInstance, event: &ChangelogEvent, reason: App
     let committed = gate.last_committed();
     let durable = gate.durable_watermark();
     let mut downstream = repo.subscribe_changelog().await.unwrap();
-    let outcome = apply_replicated(repo, event, &[], 0, ApplyPolicy::Trusted)
-        .await
-        .unwrap();
+    let outcome = apply_replicated_batch(
+        repo,
+        &[ReplicatedEvent {
+            event: event.clone(),
+            field_bindings: Vec::new(),
+        }],
+        0,
+        ApplyPolicy::Trusted,
+    )
+    .await
+    .unwrap();
     assert_eq!(outcome, ApplyOutcome::Rejected { reason });
     assert_eq!(gate.version_allocation_high_water_mark(), allocated);
     assert_eq!(gate.last_committed(), committed);
