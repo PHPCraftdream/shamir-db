@@ -23,11 +23,6 @@ dir crates/shamir-engine/src/tx/tests/ssi_phantom_tests 9
 dir crates/shamir-engine/src/validator 18
 dir crates/shamir-engine/src/validator/schema 11
 dir crates/shamir-engine/src/validator/tests 13
-dir crates/shamir-funclib/src 32
-dir crates/shamir-numa/src 12
-dir crates/shamir-sdk/src 12
-dir crates/shamir-storage/src 13
-dir crates/shamir-storage/src/key_bytes/tests 8
 dir scripts 15
 file crates/shamir-engine/benches/tx_concurrent.rs 1013
 file crates/shamir-engine/src/query/batch/fk_actions.rs 1438
@@ -59,7 +54,3 @@ file crates/shamir-engine/src/tx/tests/drainer_tests.rs 1344
 file crates/shamir-engine/src/tx/tests/p1096_tx_aware_unique_check_tests.rs 1305
 file crates/shamir-engine/src/tx/tests/recovery_tests.rs 1725
 file crates/shamir-engine/tests/crash_recovery.rs 1651
-file crates/shamir-storage/src/storage_membuffer.rs 1156
-file crates/shamir-storage/src/tests/stores/storage_cached_tests.rs 1212
-file crates/shamir-storage/src/tests/stores/storage_membuffer_tests.rs 1075
-file crates/shamir-storage/src/tests/stores/storage_mirrored_tests.rs 1364
