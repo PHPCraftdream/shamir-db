@@ -186,9 +186,13 @@ fn scope_union_intersects_paths_and_changed_since() {
     // (one in a second scope dir, one sibling-prefix that must stay OUT)
     // are written in-process and committed via the test-only git helpers
     // BEFORE the guard runs — no new fixture directory.
-    let repo = DiffRepo::two_commit("structure/new_file_widen");
-    let base = repo.base_sha.clone();
-    let in_scope = repo.repo.root.join("crates/fix-other/src/mod.rs");
+    //
+    // The bait is committed BEFORE the base revision and is NEVER touched
+    // afterwards, so `--changed-since` alone cannot select it (finding
+    // 10b): only the explicit `--paths` selector brings it in, and the
+    // union must keep it.
+    let repo = TempRepo::with_fixture("structure/new_file_widen/base");
+    let in_scope = repo.root.join("crates/fix-other/src/mod.rs");
     std::fs::create_dir_all(in_scope.parent().expect("parent")).expect("mkdir fix-other");
     std::fs::write(
         &in_scope,
@@ -197,18 +201,43 @@ fn scope_union_intersects_paths_and_changed_since() {
          pub fn helper() -> u32 { 1 }\n",
     )
     .expect("write in-scope public file");
-    let sibling = repo.repo.root.join("crates/fix-other-sibling/src/lib.rs");
+    let sibling = repo.root.join("crates/fix-other-sibling/src/lib.rs");
     std::fs::create_dir_all(sibling.parent().expect("parent")).expect("mkdir sibling");
     std::fs::write(&sibling, "pub(crate) fn hidden() -> u32 { 3 }\n")
         .expect("write sibling-prefix public file");
-    repo.repo.commit_all("head-extra");
+    repo.commit_all("base-with-bait");
+    let base = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
 
-    // Selectors: --paths covers the unchanged fix-other file (the union
-    // must keep it even though --changed-since drops it as unchanged),
+    // Head overlay, deletion-aware (same recipe as `DiffRepo::two_commit`).
+    let base_files = copy_fixture(&repo.root, "structure/new_file_widen/base");
+    let head_files = copy_fixture(&repo.root, "structure/new_file_widen/head");
+    for rel in &base_files {
+        if !head_files.contains(rel) {
+            let _ = std::fs::remove_file(repo.root.join(rel));
+        }
+    }
+    repo.commit_all("head");
+
+    // The bait is unchanged since base, so changed-since alone (scoped to
+    // its own directory, where it would be the ONLY candidate) selects
+    // nothing at all — proving the bait is not change-set selectable.
+    let changed_only = repo.run_guard(&[
+        "structure",
+        "--changed-since",
+        &base,
+        "--scope",
+        "crates/fix-other/src",
+        "--base",
+        &base,
+    ]);
+    assert_clean(&changed_only);
+
+    // Selectors: --paths covers the unchanged bait file (the union must
+    // keep it even though --changed-since drops it as unchanged),
     // --changed-since covers the diff-selected extra.rs widening. Scopes
     // admit fix/src and fix-other/src; the sibling fix-other-sibling
     // prefix must be excluded by the component boundary.
-    let out = repo.repo.run_guard(&[
+    let out = repo.run_guard(&[
         "structure",
         "--paths",
         "crates/fix-other/src/mod.rs",
@@ -238,6 +267,45 @@ fn scope_union_intersects_paths_and_changed_since() {
     // The paths-selected file is unchanged at HEAD, so only a run that
     // actually scans it (paths honored) would report its MODRS_LOGIC.
     assert_finding(&out, "MODRS_LOGIC");
+}
+
+#[test]
+fn component_boundary_keeps_prefix_sibling_package_out() {
+    // 10b component boundary: the campaign scope names the package `fix`;
+    // a package whose name merely EXTENDS that prefix (`fixtwo`) is a
+    // different component — its changed files must NOT be selected, and
+    // its `pub(crate)` widening must not be scanned, hence a clean run.
+    let repo = DiffRepo::two_commit("structure/prefix_boundary");
+    let base = repo.base_sha.clone();
+    let scoped_out = repo.repo.run_guard(&[
+        "structure",
+        "--paths",
+        "**/*.rs",
+        "--scope",
+        "crates/fix",
+        "--changed-since",
+        &base,
+        "--base",
+        &base,
+    ]);
+    assert_clean(&scoped_out);
+
+    // Sanity: the very same run scoped to the `fixtwo` package itself
+    // DOES see the widening — the first run was clean because of the
+    // component boundary, not because the file was ineligible.
+    let scoped_in = repo.repo.run_guard(&[
+        "structure",
+        "--paths",
+        "**/*.rs",
+        "--scope",
+        "crates/fixtwo",
+        "--changed-since",
+        &base,
+        "--base",
+        &base,
+    ]);
+    assert_finding(&scoped_in, "VIS_WIDENING");
+    assert!(stderr(&scoped_in).contains("crates/fixtwo/src/lib.rs"));
 }
 
 #[test]

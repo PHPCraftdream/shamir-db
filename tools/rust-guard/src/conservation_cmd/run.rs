@@ -5,8 +5,8 @@ use super::delta;
 use super::inventory;
 use super::item;
 use super::matching;
-use crate::finding::{exit_code, Report};
-use crate::gitfs::GitFs;
+use crate::common::finding::{exit_code, Report};
+use crate::common::gitfs::GitFs;
 
 /// CLI arguments for `rust-guard conservation` (declared in `main.rs`).
 pub struct ConservationArgs {

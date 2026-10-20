@@ -1,5 +1,6 @@
 use shamir_storage::error::DbResult;
 #[cfg(test)]
+#[cfg(feature = "fjall")]
 use shamir_storage::types::Repo;
 use shamir_storage::types::Store;
 use std::sync::Arc;
@@ -9,12 +10,12 @@ use super::RepoInstance;
 use crate::tx::clean_horizon::checkpoint::test_seam;
 
 impl RepoInstance {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "fjall"))]
     pub(crate) async fn changelog_store_for_test(&self) -> DbResult<Arc<dyn Store>> {
         self.repo.store_get("__changelog__").await
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "fjall"))]
     pub(crate) fn set_wal_segment_bytes_for_test(&mut self, bytes: u64) {
         self.wal_segment_bytes = bytes;
     }

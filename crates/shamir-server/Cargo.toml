@@ -184,6 +184,7 @@ harness = false
 
 [[bench]]
 name = "subscription_throughput"
+path = "benches/subscription/throughput.rs"
 harness = false
 
 [[bench]]
@@ -192,10 +193,12 @@ harness = false
 
 [[bench]]
 name = "subscription_delivery"
+path = "benches/subscription/delivery.rs"
 harness = false
 
 [[bench]]
 name = "subscription_fanout"
+path = "benches/subscription/fanout.rs"
 harness = false
 
 [[bench]]
@@ -204,3 +207,232 @@ harness = false
 
 [lints]
 workspace = true
+
+# Test targets in subfolders (cargo autodiscovers only tests/*.rs directly
+# in tests/, plus tests/<dir>/main.rs — everything else needs an explicit
+# target.  keeps the old file stem so nextest filters/CI log names
+# stay stable.
+[[test]]
+name = "mvp_e2e"
+path = "tests/e2e/core/mvp_e2e.rs"
+harness = true
+
+[[test]]
+name = "mvp_ws_e2e"
+path = "tests/e2e/core/mvp_ws_e2e.rs"
+harness = true
+
+[[test]]
+name = "quickstart_e2e"
+path = "tests/e2e/core/quickstart_e2e.rs"
+harness = true
+
+[[test]]
+name = "persistence_e2e"
+path = "tests/e2e/core/persistence_e2e.rs"
+harness = true
+
+[[test]]
+name = "version_cas_e2e"
+path = "tests/e2e/core/version_cas_e2e.rs"
+harness = true
+
+[[test]]
+name = "shutdown_release_e2e"
+path = "tests/e2e/core/shutdown_release_e2e.rs"
+harness = true
+
+[[test]]
+name = "interactive_tx_e2e"
+path = "tests/e2e/core/interactive_tx_e2e.rs"
+harness = true
+
+[[test]]
+name = "plain_tcp_e2e"
+path = "tests/e2e/transport/plain_tcp_e2e.rs"
+harness = true
+
+[[test]]
+name = "ipc_e2e"
+path = "tests/e2e/transport/ipc_e2e.rs"
+harness = true
+
+[[test]]
+name = "ipc_resume_e2e"
+path = "tests/e2e/transport/ipc_resume_e2e.rs"
+harness = true
+
+[[test]]
+name = "subscriptions_e2e"
+path = "tests/e2e/transport/subscriptions_e2e/main.rs"
+harness = true
+
+[[test]]
+name = "access_tree_e2e"
+path = "tests/e2e/transport/access_tree_e2e.rs"
+harness = true
+
+[[test]]
+name = "permission_e2e"
+path = "tests/admin/identity/permission_e2e/main.rs"
+harness = true
+
+[[test]]
+name = "user_admin_port_wire"
+path = "tests/admin/identity/user_admin_port_wire.rs"
+harness = true
+
+[[test]]
+name = "user_directory"
+path = "tests/admin/identity/user_directory/main.rs"
+harness = true
+
+[[test]]
+name = "change_password_e2e"
+path = "tests/admin/identity/change_password_e2e.rs"
+harness = true
+
+[[test]]
+name = "config"
+path = "tests/admin/ops/config.rs"
+harness = true
+
+[[test]]
+name = "config_unknown_section"
+path = "tests/admin/ops/config_unknown_section.rs"
+harness = true
+
+[[test]]
+name = "migration_api_gating"
+path = "tests/admin/ops/migration_api_gating.rs"
+harness = true
+
+[[test]]
+name = "backup_restore_e2e"
+path = "tests/admin/ops/backup_restore_e2e/main.rs"
+harness = true
+
+[[test]]
+name = "bootstrap_token_lifecycle_e2e"
+path = "tests/admin/ops/bootstrap_token_lifecycle_e2e.rs"
+harness = true
+
+[[test]]
+name = "doctor_e2e"
+path = "tests/admin/ops/doctor_e2e.rs"
+harness = true
+
+[[test]]
+name = "repl_convergence_e2e"
+path = "tests/repl/repl_convergence_e2e.rs"
+harness = true
+
+[[test]]
+name = "repl_pull_e2e"
+path = "tests/repl/repl_pull_e2e.rs"
+harness = true
+
+[[test]]
+name = "repl_supervisor_boot"
+path = "tests/repl/repl_supervisor_boot.rs"
+harness = true
+
+[[test]]
+name = "set_replicator_wire"
+path = "tests/repl/set_replicator_wire.rs"
+harness = true
+
+[[test]]
+name = "set_superuser_wire"
+path = "tests/repl/set_superuser_wire.rs"
+harness = true
+
+[[test]]
+name = "slow_loris"
+path = "tests/connection/slow_loris.rs"
+harness = true
+
+[[test]]
+name = "slow_loris_pre_tls"
+path = "tests/connection/slow_loris_pre_tls.rs"
+harness = true
+
+[[test]]
+name = "duplex_loop"
+path = "tests/connection/duplex_loop.rs"
+harness = true
+
+[[test]]
+name = "duplex_e2e"
+path = "tests/connection/duplex_e2e.rs"
+harness = true
+
+[[test]]
+name = "framer_split"
+path = "tests/connection/framer_split.rs"
+harness = true
+
+[[test]]
+name = "max_connections"
+path = "tests/connection/max_connections.rs"
+harness = true
+
+[[test]]
+name = "resume_fast_path"
+path = "tests/connection/resume_fast_path.rs"
+harness = true
+
+[[test]]
+name = "audit_appender"
+path = "tests/misc/audit_log/audit_appender.rs"
+harness = true
+
+[[test]]
+name = "audit_rotation"
+path = "tests/misc/audit_log/audit_rotation.rs"
+harness = true
+
+[[test]]
+name = "logging_batch"
+path = "tests/misc/audit_log/logging_batch.rs"
+harness = true
+
+[[test]]
+name = "slow_query_log"
+path = "tests/misc/audit_log/slow_query_log.rs"
+harness = true
+
+[[test]]
+name = "observability_http"
+path = "tests/misc/audit_log/observability_http.rs"
+harness = true
+
+[[test]]
+name = "db_handler"
+path = "tests/misc/runtime/db_handler/main.rs"
+harness = true
+
+[[test]]
+name = "create_function_gating"
+path = "tests/misc/runtime/create_function_gating.rs"
+harness = true
+
+[[test]]
+name = "hmac_gate"
+path = "tests/misc/runtime/hmac_gate/main.rs"
+harness = true
+
+[[test]]
+name = "runtime_serve"
+path = "tests/misc/runtime/runtime_serve.rs"
+harness = true
+
+[[test]]
+name = "scheduler"
+path = "tests/misc/runtime/scheduler.rs"
+harness = true
+
+[[test]]
+name = "server_meta"
+path = "tests/misc/runtime/server_meta.rs"
+harness = true
