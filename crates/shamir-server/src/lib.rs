@@ -14,39 +14,26 @@
 //! - [`scheduler`] — background tasks (gc, checkpoint, identity finalize).
 //! - [`db_handler`] — `RequestHandler` bridge to `ShamirDb` query layer.
 
-pub mod access_tree;
-pub mod audit_appender;
-pub mod backup;
-pub mod bootstrap;
-pub mod byte_budget;
-pub mod config;
-pub mod conn_limiter;
-pub mod connection;
-pub mod cursor_registry;
-pub mod db_handler;
-pub mod doctor;
-pub mod framer;
-pub mod logging;
-mod maintenance_lock;
-pub mod observability;
-pub mod ports;
-pub mod replication;
-pub mod replication_seed;
-pub mod restore;
-pub mod runtime;
-pub mod scheduler;
-pub mod server;
-pub mod server_meta;
-pub mod service;
-pub mod subscriptions;
-pub mod tables_registry;
-pub mod tls;
-mod transactions_config;
-pub mod tx_registry;
-pub mod user_directory;
-pub mod version;
+mod boot;
+mod engine;
+mod security;
+mod sync;
+
+pub(crate) use boot::transactions_config;
+pub use boot::{bootstrap, config, runtime, scheduler, version};
+pub use connection::conn_limiter;
+pub(crate) use durability::maintenance_lock;
+pub use durability::{backup, restore, tx_registry};
+pub use engine::{
+    cursor_registry, db_handler, server, server_meta, subscriptions, tables_registry,
+};
+pub use logging::audit_appender;
+pub use observability::doctor;
+pub use observability::logging;
+pub use security::{access_tree, byte_budget, observability, service, tls, user_directory};
 #[cfg(windows)]
-pub mod windows_service;
+pub use service::windows_service;
+pub use sync::{connection, durability, framer, ports, replication, replication_seed};
 
 #[cfg(test)]
 mod tests;

@@ -1,0 +1,305 @@
+use crate::common::{assert_records_equal, fixture_record, fresh_dir};
+use shamir_collections::TFxSet;
+use shamir_connect::server::admin::UserDirectory;
+use shamir_server::user_directory::FjallUserDirectory;
+use std::sync::Arc;
+use std::thread;
+use tempfile::TempDir;
+
+// ----------------------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------------------
+
+#[test]
+fn roundtrip_insert_lookup() {
+    let (_tmp, store) = fresh_dir();
+    let record = fixture_record();
+    let uid = store.insert("alice".to_string(), record.clone()).unwrap();
+
+    let loaded = store.lookup_by_name("alice").expect("alice present");
+    assert_records_equal(&loaded, &record);
+
+    // user_id() must agree with the value insert returned.
+    assert_eq!(store.user_id("alice"), Some(uid));
+}
+
+#[test]
+fn lookup_unknown_returns_none() {
+    let (_tmp, store) = fresh_dir();
+    assert!(store.lookup_by_name("nobody").is_none());
+    assert!(store.user_id("nobody").is_none());
+    assert!(store.lookup_roles("nobody").unwrap().is_none());
+}
+
+#[test]
+fn insert_rejects_duplicate_username() {
+    let (_tmp, store) = fresh_dir();
+    let record = fixture_record();
+    store.insert("alice".to_string(), record.clone()).unwrap();
+    let err = store
+        .insert("alice".to_string(), record)
+        .expect_err("duplicate must reject");
+    match err {
+        shamir_connect::common::error::Error::InvalidInput(msg) => {
+            assert_eq!(msg, "username exists");
+        }
+        other => panic!("expected InvalidInput(\"username exists\"), got {other:?}"),
+    }
+}
+
+#[test]
+fn update_roles_changes_roles_and_bumps_timestamp() {
+    let (_tmp, store) = fresh_dir();
+    store.insert("alice".to_string(), fixture_record()).unwrap();
+
+    // Seed initial roles.
+    let now_initial = 1_000_000u64;
+    let changed = store
+        .update_roles("alice", vec!["read_write".to_string()], now_initial)
+        .unwrap();
+    assert!(changed, "first role assignment must change state");
+    assert_eq!(
+        store.lookup_roles("alice").unwrap(),
+        Some(vec!["read_write".to_string()])
+    );
+
+    // Update to a different set with a higher timestamp.
+    // (Task #557 reserves the literal `"superuser"` string at the directory
+    // write boundary; this test is about role-change mechanics, not about
+    // that specific role name, so the second set uses a different string.)
+    let now_ns = 2_000_000u64;
+    let changed = store
+        .update_roles("alice", vec!["admin".to_string()], now_ns)
+        .unwrap();
+    assert!(changed, "role change must report change");
+
+    // Roles persisted.
+    assert_eq!(
+        store.lookup_roles("alice").unwrap(),
+        Some(vec!["admin".to_string()])
+    );
+
+    // Spec §12.6: timestamp must be at least the supplied `now_ns`.
+    let rec = store.lookup_by_name("alice").unwrap();
+    assert!(
+        rec.tickets_invalid_before_ns >= now_ns,
+        "tickets_invalid_before_ns should advance to >= {now_ns}, got {}",
+        rec.tickets_invalid_before_ns
+    );
+}
+
+#[test]
+fn bump_tickets_invalid_does_not_change_roles() {
+    let (_tmp, store) = fresh_dir();
+    store.insert("alice".to_string(), fixture_record()).unwrap();
+    store
+        .update_roles("alice", vec!["read_write".to_string()], 1_000)
+        .unwrap();
+
+    let before = store.lookup_roles("alice").unwrap().unwrap();
+
+    let now_ns = 5_000u64;
+    let bumped = store.bump_tickets_invalid("alice", now_ns).unwrap();
+    assert!(bumped, "advancing timestamp should report change");
+
+    let after = store.lookup_roles("alice").unwrap().unwrap();
+    assert_eq!(before, after, "roles must not change on bump-only op");
+
+    let rec = store.lookup_by_name("alice").unwrap();
+    assert_eq!(rec.tickets_invalid_before_ns, now_ns);
+
+    // Monotonicity: re-bumping with an older timestamp is a no-op.
+    let bumped_again = store.bump_tickets_invalid("alice", now_ns - 1).unwrap();
+    assert!(!bumped_again, "non-monotonic bump must report no-change");
+    let rec2 = store.lookup_by_name("alice").unwrap();
+    assert_eq!(rec2.tickets_invalid_before_ns, now_ns);
+}
+
+/// **CRITICAL** durability test: after dropping the directory, reopening the
+/// same file must surface the same record byte-identically. This is the spec
+/// §3.5 / §6.2 fsync guarantee.
+#[test]
+fn state_survives_restart() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("users.redb");
+
+    let original = fixture_record();
+    let initial_uid;
+    let initial_roles = vec!["read_write".to_string()];
+
+    {
+        let store = FjallUserDirectory::open(&path).unwrap();
+        initial_uid = store.insert("alice".to_string(), original.clone()).unwrap();
+        // Stamp roles + ts so the persisted blob covers all fields.
+        store
+            .update_roles("alice", initial_roles.clone(), 12_345)
+            .unwrap();
+        // store dropped here → file flushed.
+    }
+
+    // Reopen & verify byte-identical record.
+    {
+        let store = FjallUserDirectory::open(&path).unwrap();
+        let loaded = store
+            .lookup_by_name("alice")
+            .expect("alice must persist across restart");
+        assert_eq!(loaded.salt, original.salt);
+        assert_eq!(loaded.stored_key.0, original.stored_key.0);
+        assert_eq!(loaded.server_key.as_slice(), original.server_key.as_slice());
+        assert_eq!(loaded.kdf_params, original.kdf_params);
+        assert_eq!(loaded.tickets_invalid_before_ns, 12_345);
+        assert_eq!(store.user_id("alice"), Some(initial_uid));
+        assert_eq!(store.lookup_roles("alice").unwrap(), Some(initial_roles));
+    }
+}
+
+#[test]
+fn user_id_lookup_consistent_with_lookup_by_name() {
+    let (_tmp, store) = fresh_dir();
+    let uid = store.insert("alice".to_string(), fixture_record()).unwrap();
+
+    // Both APIs must agree.
+    assert!(store.lookup_by_name("alice").is_some());
+    assert_eq!(store.user_id("alice"), Some(uid));
+
+    // After update, identity stays the same.
+    store
+        .update_roles("alice", vec!["read_write".to_string()], 1_000)
+        .unwrap();
+    assert_eq!(store.user_id("alice"), Some(uid));
+    assert!(store.lookup_by_name("alice").is_some());
+}
+
+#[test]
+fn tickets_invalid_before_ns_lookup_by_user_id_reflects_updates() {
+    // Spec §7.5: changing roles must bump tickets_invalid_before_ns so the
+    // connection layer can invalidate live sessions on the next request.
+    let (_tmp, store) = fresh_dir();
+    let uid = store.insert("alice".to_string(), fixture_record()).unwrap();
+
+    // Fresh user — no invalidation yet.
+    assert_eq!(store.tickets_invalid_before_ns_by_user_id(&uid), 0);
+
+    // Bumping via update_roles writes the new timestamp; lookup MUST see it.
+    store
+        .update_roles("alice", vec!["read_write".to_string()], 12_345)
+        .unwrap();
+    assert_eq!(store.tickets_invalid_before_ns_by_user_id(&uid), 12_345);
+
+    // Direct bump_tickets_invalid also visible.
+    store.bump_tickets_invalid("alice", 99_999).unwrap();
+    assert_eq!(store.tickets_invalid_before_ns_by_user_id(&uid), 99_999);
+
+    // Unknown user_id → 0 (fail-open default; spec §7.5 treats 0 as no invalidation).
+    let unknown_uid = [0xFFu8; 16];
+    assert_eq!(store.tickets_invalid_before_ns_by_user_id(&unknown_uid), 0);
+}
+
+#[test]
+fn user_id_index_survives_restart() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("users.redb");
+    let uid = {
+        let store = FjallUserDirectory::open(&path).unwrap();
+        let uid = store.insert("alice".to_string(), fixture_record()).unwrap();
+        store.bump_tickets_invalid("alice", 7_777).unwrap();
+        uid
+    };
+    {
+        let store = FjallUserDirectory::open(&path).unwrap();
+        assert_eq!(
+            store.tickets_invalid_before_ns_by_user_id(&uid),
+            7_777,
+            "secondary index must survive restart"
+        );
+    }
+}
+
+/// **SECURITY-CRITICAL**: A revocation must survive a restart — i.e. the
+/// in-memory cache is hydrated from the durable store at `open` time, not
+/// left empty (an empty cache would return 0 = "no invalidation" = revoked
+/// ticket accepted).  This is the single test that catches a cache that
+/// fails to warm.
+#[test]
+fn revocation_survives_restart_via_cache_hydration() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("users.redb");
+    let uid = {
+        let store = FjallUserDirectory::open(&path).unwrap();
+        let uid = store.insert("alice".to_string(), fixture_record()).unwrap();
+        // Revoke all tickets issued before 100_000.
+        store.bump_tickets_invalid("alice", 100_000).unwrap();
+        // Verify the cache reflects the revocation immediately.
+        assert_eq!(
+            store.tickets_invalid_before_ns_by_user_id(&uid),
+            100_000,
+            "cache must reflect revocation before restart"
+        );
+        uid
+    };
+    // Reopen — the cache must be hydrated from the durable store so the
+    // revocation is still visible without any additional write.
+    {
+        let store = FjallUserDirectory::open(&path).unwrap();
+        assert_eq!(
+            store.tickets_invalid_before_ns_by_user_id(&uid),
+            100_000,
+            "cache must be hydrated from durable store on restart — \
+             a stale/empty cache would return 0 and accept a revoked ticket"
+        );
+    }
+}
+
+/// Multiple users with different revocation timestamps must each be hydrated
+/// correctly — a partial or last-write-wins warm would fail here.
+#[test]
+fn restart_hydrates_multiple_users_independently() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("users.redb");
+
+    let (uid_a, uid_b, uid_c) = {
+        let store = FjallUserDirectory::open(&path).unwrap();
+        let uid_a = store.insert("alice".to_string(), fixture_record()).unwrap();
+        let uid_b = store.insert("bob".to_string(), fixture_record()).unwrap();
+        let uid_c = store.insert("carol".to_string(), fixture_record()).unwrap();
+
+        store.bump_tickets_invalid("alice", 111).unwrap();
+        store.bump_tickets_invalid("bob", 222_222).unwrap();
+        // carol is never bumped — should read 0.
+        (uid_a, uid_b, uid_c)
+    };
+
+    {
+        let store = FjallUserDirectory::open(&path).unwrap();
+        assert_eq!(store.tickets_invalid_before_ns_by_user_id(&uid_a), 111);
+        assert_eq!(store.tickets_invalid_before_ns_by_user_id(&uid_b), 222_222);
+        assert_eq!(
+            store.tickets_invalid_before_ns_by_user_id(&uid_c),
+            0,
+            "user with no revocation must read 0 after restart"
+        );
+    }
+}
+
+#[test]
+fn concurrent_inserts_assign_distinct_user_ids() {
+    let (_tmp, store) = fresh_dir();
+    let store = Arc::new(store);
+
+    let mut handles = Vec::new();
+    for i in 0..8 {
+        let s = Arc::clone(&store);
+        let handle = thread::spawn(move || {
+            let username = format!("user_{i:02}");
+            s.insert(username, fixture_record()).unwrap()
+        });
+        handles.push(handle);
+    }
+
+    let mut ids: TFxSet<[u8; 16]> = TFxSet::default();
+    for h in handles {
+        let uid = h.join().expect("thread panicked");
+        assert!(ids.insert(uid), "user_id collision detected across threads");
+    }
+    assert_eq!(ids.len(), 8);
+}
