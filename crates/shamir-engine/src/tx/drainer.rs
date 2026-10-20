@@ -26,9 +26,9 @@
 //!      inflight marker ONLY when the interner delta is durably covered.
 //!
 //! Both recovery (cold) and the drainer (warm) converge to the same state.
-//! The shared "replay V → history" core is [`replay_v2_entry`]; the A5
+//! The shared "replay V → history" core is `replay_v2_entry`; the A5
 //! truncation gate is shared via
-//! [`interner_delta_safe_to_truncate`](crate::tx::materialize::interner_delta_safe_to_truncate).
+//! `interner_delta_safe_to_truncate`.
 //!
 //! ## Current flow (P1d-2b cutover — DONE)
 //!
@@ -46,14 +46,14 @@
 //!     calls).
 //!   - **Phase C** — for each finalized entry: `gate.mark_durable(v)`,
 //!     then the A5 interner-hwm gate
-//!     ([`interner_delta_safe_to_truncate`](crate::tx::materialize::interner_delta_safe_to_truncate)),
+//!     (`interner_delta_safe_to_truncate`),
 //!     then `wal.commit(txn_id)` to advance the truncation watermark
 //!     ONLY when the interner delta is durably covered.
 //!
 //! Cold recovery ([`recover_inflight_v2`](crate::tx::recovery::recover_inflight_v2))
 //! and the warm drainer converge to the same state. The shared
-//! "replay V → history" core is [`replay_v2_entry`]; the A5 truncation
-//! gate is shared via [`interner_delta_safe_to_truncate`].
+//! "replay V → history" core is `replay_v2_entry`; the A5 truncation
+//! gate is shared via `interner_delta_safe_to_truncate`.
 //!
 //! ## Truncation liveness bound (A5)
 //!

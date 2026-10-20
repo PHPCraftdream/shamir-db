@@ -3,12 +3,12 @@
 //!
 //! The follower apply entry point is [`apply_replicated_batch`], which routes
 //! unconditionally into the receipt pipeline
-//! ([`follower_durability::receipt`]): durable follower state is admitted
+//! (`follower_durability::receipt`): durable follower state is admitted
 //! with typed refusals and fresh repositories self-adopt a v3 baseline
 //! before any apply work. This module retains the shared
 //! preparation/validation/interner-translation/downstream-projection
-//! semantics the receipt path calls — [`prepare_event`] and
-//! [`reproject_for_downstream`] — plus [`ApplyOutcome`], [`ApplyRejectReason`]
+//! semantics the receipt path calls — `prepare_event` and
+//! `reproject_for_downstream` — plus [`ApplyOutcome`], [`ApplyRejectReason`]
 //! and [`ApplyPolicy`].
 //!
 //! ## Trust precondition (#1199)
@@ -27,7 +27,7 @@
 //! ## Versions — local, not leader's
 //!
 //! The follower allocates LOCAL commit versions via its own
-//! [`RepoTxGate`] (the receipt pipeline owns the guards). The leader's
+//! `RepoTxGate` (the receipt pipeline owns the guards). The leader's
 //! `commit_version` is carried in the event only for IDEMPOTENCY: events at
 //! or below the applied watermark are skipped without touching the store,
 //! and the durable bookmark itself is owned by receipt checkpointing.

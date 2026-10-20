@@ -322,7 +322,7 @@ pub(crate) static TEST_CHILD_PRE_ROLE_DECISION_HOOK: std::sync::OnceLock<
 /// `resolve_repo` error, or a `get_or_build_snapshot` cache-build error —
 /// the hook does NOT fall back to the permissive "assume not an FK child"
 /// behavior; it widens the footprint UNCONDITIONALLY by calling
-/// [`TxContext::require_footprint_for`] anyway. This is safe because a
+/// `TxContext::require_footprint_for` anyway. This is safe because a
 /// `resolve_repo` failure here almost certainly means the SAME resolve will
 /// also fail moments later for the actual write this hook precedes (the
 /// table was just resolved by the caller; a transient failure tends to

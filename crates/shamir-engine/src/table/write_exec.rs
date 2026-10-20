@@ -48,7 +48,7 @@ impl TableManager {
     /// 1. **Immediate check**: for each matched row, call
     ///    `MvccStore::version_of(key)` and compare against `expected`. A
     ///    mismatch on ANY row aborts the WHOLE operation with
-    ///    [`DbError::VersionConflict`] — no partial application.
+    ///    `DbError::VersionConflict` — no partial application.
     /// 2. **SSI registration**: call `record_read_shared(table_token, key,
     ///    expected)` for every matched row, feeding the EXISTING SSI
     ///    `validate_read_set` commit-time re-check to close the race window

@@ -171,7 +171,7 @@ impl TableManager {
         }
     }
 
-    /// CR-B1 (#767): like [`list_stream`], but a tombstoned CURRENT winner is
+    /// CR-B1 (#767): like `list_stream`, but a tombstoned CURRENT winner is
     /// yielded (empty `RecordCow`) instead of being suppressed from
     /// enumeration.
     ///
@@ -184,7 +184,7 @@ impl TableManager {
     /// as-of `get_at` for it. This variant emits it so `read_as_of`'s
     /// `get_at(id, pinned_version)` call gets a chance to resolve the
     /// pre-delete value; a non-MVCC table has no tombstone concept, so it
-    /// falls back to the plain [`list_stream`] (no behavior change there).
+    /// falls back to the plain `list_stream` (no behavior change there).
     ///
     /// `list_stream` itself is completely untouched — every other caller of
     /// it keeps the CURRENT-state-only enumeration.
@@ -223,7 +223,7 @@ impl TableManager {
         }
     }
 
-    /// Like [`list_stream`], but applies a bytes-level pre-filter before
+    /// Like `list_stream`, but applies a bytes-level pre-filter before
     /// decoding each record to `InnerValue`.  Rows that the pre-filter
     /// definitively rejects (`Some(false)`) are skipped without a full
     /// `InnerValue` decode.  Rows where the pre-filter returns `None`
@@ -317,7 +317,7 @@ impl TableManager {
         })
     }
 
-    /// tx-aware streaming variant of [`list_stream`].
+    /// tx-aware streaming variant of `list_stream`.
     ///
     /// Uses the transaction snapshot for Snapshot/Serializable and latest
     /// committed state for Pessimistic or no transaction, then records each
@@ -401,7 +401,7 @@ impl TableManager {
         }
     }
 
-    /// tx-aware streaming variant of [`filter_stream`].
+    /// tx-aware streaming variant of `filter_stream`.
     ///
     /// Streaming filtered scan; it does not install predicate/range locks.
     pub async fn filter_stream_tx<'a>(
@@ -505,7 +505,7 @@ impl TableManager {
     /// non-Serializable tx it adds no per-record work beyond a single
     /// up-front isolation check (the `version_of` lookup and recording are
     /// skipped entirely). `mvcc` is `None` → version `0` (conservative
-    /// default, see [`read_one_tx`]).
+    /// default, see `read_one_tx`).
     pub(super) fn record_scan_reads<'a, S>(
         inner: S,
         tx: Option<&'a shamir_tx::TxContext>,
@@ -583,8 +583,8 @@ impl TableManager {
 
     /// tx-aware single-record read.
     ///
-    /// - `tx == None` → same as [`get`]: direct read from main data_store.
-    /// - `tx == Some(tx)` and no `mvcc_store` attached → same as [`get`].
+    /// - `tx == None` → same as `get`: direct read from main data_store.
+    /// - `tx == Some(tx)` and no `mvcc_store` attached → same as `get`.
     /// - `tx == Some(tx)` and `mvcc_store` attached →
     ///   - `Pessimistic` isolation → `mvcc.get_current_bytes(rid.to_bytes())`
     ///     (the LATEST COMMITTED value), because the caller has already
@@ -744,13 +744,13 @@ impl TableManager {
 
     /// tx-aware raw-bytes read (no InnerValue decode).
     ///
-    /// Same lock / overlay / snapshot semantics as [`read_one_tx`] but
+    /// Same lock / overlay / snapshot semantics as `read_one_tx` but
     /// returns the raw storage msgpack bytes without decoding to an
     /// `InnerValue` tree. Returns `None` when the record is absent
     /// (staged-removed, past the snapshot, or not in the main store) —
     /// real I/O errors propagate via `?`.
     ///
-    /// Used by [`delete_tx`] to feed index planners via a zero-copy
+    /// Used by `delete_tx` to feed index planners via a zero-copy
     /// `RecordView` lens instead of a decoded `InnerValue` tree.
     pub(crate) async fn read_one_tx_bytes(
         &self,
@@ -890,10 +890,10 @@ impl TableManager {
         self.read_for_tx(query, ctx, tx).await
     }
 
-    /// tx-aware variant of [`read_with_encoding`].
+    /// tx-aware variant of `read_with_encoding`.
     ///
     /// Performs the same SSI predicate recording and Pessimistic lock
-    /// acquisition as [`read_tx`] and then dispatches to [`read_for_tx_with_encoding`]
+    /// acquisition as `read_tx` and then dispatches to `read_for_tx_with_encoding`
     /// so that the result rows honour the requested encoding.
     pub async fn read_tx_with_encoding(
         &self,

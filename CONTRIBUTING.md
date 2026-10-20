@@ -21,6 +21,13 @@ check) and the layout check; CI's `test`/`integration` steps invoke
 `./scripts/test.sh --locked` and `./scripts/test.sh --full --locked -E
 'kind(test)'`.
 
+CI-03b adds the compiled gates — `rustdoc`, `engine-features`,
+`engine-features-fast`, `loom-model` discovery, `test-discovery` — and the
+aggregate `merge-gate` job, which is the ONE required check. A draft PR
+always fails it with "draft PR: full matrix not run, not merge-ready";
+`gh pr ready` runs the full matrix and turns it green. Details:
+`CLAUDE.md`, "Compiled gates + merge gate (CI-03b)".
+
 ---
 
 ## Why the pinned toolchain keeps local checks equal to CI

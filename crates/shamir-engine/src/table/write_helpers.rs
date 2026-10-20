@@ -338,7 +338,7 @@ pub(super) fn qv_nav<'a>(
     Some(cur)
 }
 
-/// Build a [`LayeredInterner`] that routes new field names to `tx.interner_overlay`.
+/// Build a `LayeredInterner` that routes new field names to `tx.interner_overlay`.
 pub(super) fn make_layered_interner<'a>(
     base: &'a shamir_types::core::interner::Interner,
     tx: &'a shamir_tx::TxContext,
