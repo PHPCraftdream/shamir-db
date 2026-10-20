@@ -13,16 +13,18 @@
 //! are always compiled — they have no extra deps and are required by
 //! tests across the workspace.
 
-pub mod error;
+pub mod core;
 pub mod key_bytes;
-pub mod storage_cached;
-pub mod storage_in_memory;
-pub mod storage_membuffer;
-pub mod storage_mirrored;
-pub mod types;
+mod stores;
+
+pub use core::{error, types};
+pub use stores::storage_cached;
+pub use stores::storage_in_memory;
+pub use stores::storage_membuffer;
+pub use stores::storage_mirrored;
 
 #[cfg(feature = "fjall")]
-pub mod storage_fjall;
+pub use stores::storage_fjall;
 
 /// Task #535/#539-style test seam: commit-window park for the repository-wide
 /// atomic batch (driven from the shamir-engine test binary — always compiled,

@@ -39,29 +39,15 @@
 //! (`/sys` probe + `sched_setaffinity`) and QEMU-based integration tests land
 //! in Фаза 1b — see `docs/dev-artifacts/research/NUMA-DESIGN-2026-06-29.md`.
 
-mod cache_padded;
-mod cpulist;
-mod detect;
+mod core;
 mod error;
-mod fallback;
-#[cfg(target_os = "linux")]
-mod linux;
-mod mock;
-mod node;
-mod node_replicated;
-mod topology;
+mod platform;
 
-pub use cache_padded::CachePadded;
-pub use cpulist::parse_cpulist;
-pub use detect::detect;
+pub use core::{CachePadded, CpuId, NodeId, NodeReplicated, Topology};
 pub use error::AffinityError;
-pub use fallback::FallbackSingleNodeTopology;
 #[cfg(target_os = "linux")]
-pub use linux::LinuxTopology;
-pub use mock::MockTopology;
-pub use node::{CpuId, NodeId};
-pub use node_replicated::NodeReplicated;
-pub use topology::Topology;
+pub use platform::LinuxTopology;
+pub use platform::{detect, parse_cpulist, FallbackSingleNodeTopology, MockTopology};
 
 #[cfg(test)]
 mod tests;
