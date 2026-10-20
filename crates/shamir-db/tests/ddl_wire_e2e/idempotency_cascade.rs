@@ -8,7 +8,7 @@ use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_builder::ddl::WriteOp;
 
-use super::helpers::*;
+use crate::helpers::*;
 
 // ═══════════════════════════════════════════════════════════════════════
 // Phase 1a: create_table + insert in one non-tx batch via `after`
