@@ -1,0 +1,1000 @@
+//! Ktav-based configuration schema for the ShamirDB v1 production server.
+//!
+//! The server is driven entirely by a single `shamir-server.ktav` file —
+//! data dir, logging level, KDF parameters, listener bindings, TLS cert/key
+//! paths — all loaded through [`Config::from_file`] and then sanity-checked
+//! by [`Config::validate`] before any sockets are bound.
+//!
+//! # Schema
+//!
+//! ```ktav
+//! data_dir: /var/lib/shamir-db
+//!
+//! logging: {
+//!     level: info
+//! }
+//!
+//! kdf_defaults: {
+//!     memory_kb: 131072    # 128 MB (spec §3.7 default)
+//!     time: 4
+//!     parallelism: 1
+//!     argon2_version: 19   # 0x13
+//! }
+//!
+//! argon2_concurrent_max: 64
+//!
+//! listeners: [
+//!     {
+//!         kind: tcp
+//!         addr: 0.0.0.0:7331
+//!         profile: tls_exporter
+//!     }
+//!     {
+//!         kind: ws
+//!         addr: 0.0.0.0:7333
+//!         profile: tls_no_export
+//!         path: /shamir/v1/browser
+//!         browser_origin_allowlist: [
+//!             https://app.example.com
+//!         ]
+//!     }
+//! ]
+//!
+//! tls: {
+//!     cert_path: /var/lib/shamir-db/cert.pem
+//!     key_path:  /var/lib/shamir-db/key.pem
+//! }
+//! ```
+//!
+//! # Validation rules (per spec §3.7.2, §8, §9, TRANSPORT_TCP §2.2)
+//!
+//! - Listener `addr` must parse as a valid `SocketAddr`.
+//! - `kind: ws` requires `path` starting with `/`.
+//! - `profile: plain` may only bind loopback (127.0.0.0/8 or ::1).
+//! - `kind: ws` + `profile: tls_no_export` (browser binding_mode = 0x02)
+//!   REQUIRES a non-empty `browser_origin_allowlist` (per spec §9 origin
+//!   pinning).
+//! - All `KdfConfig` blocks must satisfy the §3.7.2 floor:
+//!   `memory_kb >= 19_456`, `time >= 2`, `parallelism >= 1`,
+//!   `argon2_version == 0x13`.
+//! - `argon2_concurrent_max` must be in `1..=1024`.
+//
+// Wave-1 deliverable. Consumed by `connection.rs` (listener spawn) and
+// `main.rs` (boot path).
+
+use std::net::{IpAddr, SocketAddr};
+use std::path::{Path, PathBuf};
+
+use serde::Deserialize;
+use shamir_query_types::batch::BatchLimits;
+
+pub use crate::durability::DurabilityConfig;
+pub use crate::transactions_config::TransactionsConfig;
+
+/// Top-level configuration as loaded from the `.ktav` file.
+///
+/// Strict schema: unknown top-level keys fail at parse time (typo `durabilty:` → boot error).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    /// Root directory for durable state (server_meta, user_directory,
+    /// audit log, fjall databases).
+    pub data_dir: PathBuf,
+    /// Server-default WAL policy; retention enforcement is planned for PR2.
+    #[serde(default)]
+    pub durability: DurabilityConfig,
+    #[serde(default)]
+    pub transactions: TransactionsConfig,
+    /// Tracing / logging configuration.
+    #[serde(default)]
+    pub logging: LoggingConfig,
+    /// Default KDF parameters applied to every listener that does not
+    /// override them.
+    pub kdf_defaults: KdfConfig,
+    /// Server-wide cap on concurrent Argon2id derivations (spec §8 = 64).
+    #[serde(default = "default_argon2_max")]
+    pub argon2_concurrent_max: u32,
+    /// One entry per network endpoint the server should expose.
+    pub listeners: Vec<ListenerConfig>,
+    /// TLS material for the TLS-bearing listeners.
+    pub tls: TlsConfig,
+    /// Connection / per-request security knobs.
+    #[serde(default)]
+    pub security: SecurityConfig,
+    /// Audit log knobs (rotation, retention).
+    #[serde(default)]
+    pub audit: AuditConfig,
+    /// Observability HTTP server (`/healthz` etc.). Empty block = bind
+    /// to default loopback `127.0.0.1:9090`. Set `addr = ""` to disable.
+    #[serde(default)]
+    pub observability: ObservabilityConfig,
+    /// Optional follower-replication settings. When the whole `replication`
+    /// block is omitted the field is `None` — the `SubscriptionSupervisor`
+    /// still boots (so a subscription added at runtime is picked up), but a
+    /// subscription that needs to reach an upstream cannot connect until
+    /// replicator credentials are configured. Omitting the block MUST NOT
+    /// break existing configs (that is why the field is optional).
+    #[serde(default)]
+    pub replication: Option<ReplicationConfig>,
+}
+
+/// Follower-side replication settings.
+///
+/// Minimal for 386-c: a single `replicator` account (username + password)
+/// used to authenticate every outbound upstream connection, plus an optional
+/// stable `node_id` advertised in `ReplHello` (§5.2). When `node_id` is
+/// omitted the boot path derives one from the machine hostname (falling back
+/// to a random id), so followers still have a stable-enough identity.
+///
+/// TODO(386-c): a per-subscription credential store (keyed by the
+/// subscription's `upstream`) replaces this single shared account — the
+/// current shape only supports one leader identity for all subscriptions.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReplicationConfig {
+    /// Stable follower identity advertised to leaders. When omitted the boot
+    /// path derives one from the hostname.
+    #[serde(default)]
+    pub node_id: Option<String>,
+    /// Username of the `replicator`-role account used to authenticate every
+    /// outbound upstream connection.
+    #[serde(default)]
+    pub replicator_user: Option<String>,
+    /// Password for [`Self::replicator_user`]. Without it (and a user) the
+    /// wire source cannot connect — reconcile logs and skips.
+    #[serde(default)]
+    pub replicator_password: Option<String>,
+    /// Decode replicated Put payloads before allocating a version. Adds per-Put
+    /// decoding cost; rejects undecodable records without schema/validator/DAC
+    /// checks. Defaults to false (Trusted, preserving existing behavior).
+    #[serde(default)]
+    pub validate_replicated_payload: bool,
+    /// SNI hostname to present to the upstream's TLS layer. Defaults to
+    /// `localhost` (matching the self-signed cert the server generates).
+    #[serde(default = "default_repl_server_name")]
+    pub server_name: String,
+}
+
+impl Default for ReplicationConfig {
+    fn default() -> Self {
+        Self {
+            node_id: None,
+            replicator_user: None,
+            replicator_password: None,
+            validate_replicated_payload: false,
+            server_name: default_repl_server_name(),
+        }
+    }
+}
+
+fn default_repl_server_name() -> String {
+    "localhost".to_string()
+}
+
+/// Observability HTTP server (`/healthz`, `/readyz`, `/metrics`, `/info`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ObservabilityConfig {
+    /// Bind address. Default `127.0.0.1:9090`. Empty string disables
+    /// the server entirely (no port bound, no metrics endpoint, no
+    /// liveness probe — typically you don't want this in production).
+    #[serde(default = "default_observability_addr")]
+    pub addr: String,
+    /// M-tier audit M5: explicit opt-in required to bind the
+    /// observability server to a non-loopback `addr`. Defaults to
+    /// `false` — a non-loopback `addr` is rejected at boot unless this
+    /// is set. `/metrics` exposes `auth_attempts_total` labelled by
+    /// result (including `locked_out`), a useful side-channel for
+    /// distributed credential probing, so operators that need a public
+    /// scrape endpoint must opt in explicitly and front the port with
+    /// reverse-proxy auth (bearer token, mTLS, or IP allowlist).
+    #[serde(default)]
+    pub allow_public_metrics: bool,
+}
+
+impl Default for ObservabilityConfig {
+    fn default() -> Self {
+        Self {
+            addr: default_observability_addr(),
+            allow_public_metrics: false,
+        }
+    }
+}
+
+fn default_observability_addr() -> String {
+    "127.0.0.1:9090".to_string()
+}
+
+/// Audit log file management.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuditConfig {
+    /// Max size of the active audit log file before it is
+    /// rotated. `0` disables rotation. Default 100 MB.
+    #[serde(default = "default_audit_max_size_mb")]
+    pub max_file_size_mb: u64,
+    /// Delete rotated audit files older than this. `0` disables cleanup
+    /// (operator manages retention out-of-band). Default 30 days.
+    #[serde(default = "default_audit_retention_days")]
+    pub retention_days: u32,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        Self {
+            max_file_size_mb: default_audit_max_size_mb(),
+            retention_days: default_audit_retention_days(),
+        }
+    }
+}
+
+fn default_audit_max_size_mb() -> u64 {
+    100
+}
+fn default_audit_retention_days() -> u32 {
+    30
+}
+
+/// Connection-level security limits — apply to every listener.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SecurityConfig {
+    /// Slow-loris defence: max wall-clock time to wait for the client's
+    /// `auth_init` after the TLS handshake completes. Real clients send
+    /// it within ~50 ms; the default 5 s is comfortably above network
+    /// jitter while still cutting attackers off quickly.
+    #[serde(default)]
+    pub connection: ConnectionSecurity,
+    /// Hard caps on per-batch resources. Applied as a max — the client's
+    /// `BatchRequest.limits` may shrink them, but cannot exceed.
+    #[serde(default)]
+    pub query_limits: QueryLimitsConfig,
+    /// Hard cap on per-interactive-tx staged bytes.
+    #[serde(default)]
+    pub tx: TxLimitsConfig,
+    /// FG-5b — hard caps on server-side result cursors (per-session count,
+    /// idle-timeout eviction).
+    #[serde(default)]
+    pub cursors: CursorLimitsConfig,
+    /// Per-subnet `auth_init` rate limit (token-bucket, spec §8).
+    /// Each `/24` IPv4 or `/64` IPv6 subnet gets this many tokens per
+    /// second. Default 10. Must be in `1..=100_000`.
+    #[serde(default = "default_auth_init_rate_per_second")]
+    pub auth_init_rate_per_second: u32,
+    /// Opt into the experimental online storage-migration API
+    /// (`StartMigration`/`CommitMigration`/`RollbackMigration`/
+    /// `MigrationStatus`). DISABLED BY DEFAULT — this feature has several
+    /// known, unresolved gaps documented in `KNOWN_LIMITATIONS.md` §2: no
+    /// write interception (writes to the source table during an in-flight
+    /// migration are lost from the destination), only the in-memory
+    /// dst_engine is supported, and migration coordinator state is
+    /// non-durable (a server restart mid-migration loses all state). Enable
+    /// only for internal testing against a disposable data_dir — never in
+    /// a production deployment.
+    #[serde(default)]
+    pub enable_experimental_migration_api: bool,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            connection: Default::default(),
+            query_limits: Default::default(),
+            tx: Default::default(),
+            cursors: Default::default(),
+            auth_init_rate_per_second: default_auth_init_rate_per_second(),
+            enable_experimental_migration_api: false,
+        }
+    }
+}
+
+/// Server-side hard cap on per-interactive-tx staged bytes.
+///
+/// Without this block the default 64 MiB cap applies. A malicious client
+/// staging unbounded data inside a single interactive tx would grow the WAL
+/// entry and in-memory staging until OOM — the cap aborts the tx with
+/// `tx_too_large` before that happens.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TxLimitsConfig {
+    /// Maximum total bytes that an interactive tx may stage across all
+    /// its `TxExecute` calls. Over-budget aborts the tx with
+    /// `tx_too_large`. Default 64 MiB.
+    #[serde(default = "default_max_tx_bytes")]
+    pub max_tx_bytes: usize,
+}
+
+impl Default for TxLimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_tx_bytes: default_max_tx_bytes(),
+        }
+    }
+}
+
+fn default_max_tx_bytes() -> usize {
+    64 * 1024 * 1024 // 64 MiB
+}
+
+/// FG-5b — server-side hard caps on result cursors.
+///
+/// Without this block, the defaults in
+/// `crate::db_handler::config::CursorLimitsCap::DEFAULT` apply: 16 cursors
+/// per session, 60 s idle-timeout eviction. Each open cursor pins an MVCC
+/// snapshot (via `shamir_tx::SnapshotGuard`), so an unbounded per-session
+/// count or an unbounded idle window would let one client block GC
+/// indefinitely.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CursorLimitsConfig {
+    /// Maximum concurrently-open cursors per session. Default 16.
+    #[serde(default = "default_max_cursors_per_session")]
+    pub max_cursors_per_session: usize,
+    /// Seconds a cursor may sit un-fetched before the background reaper
+    /// reclaims it. Longer than the interactive-tx idle TTL (30 s) — a
+    /// cursor's `FetchNext` cadence is paced by client consumption speed,
+    /// not a single round-trip. Default 60.
+    #[serde(default = "default_cursor_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+    /// CR-A3: maximum `page_size` a `CreateCursor`/`FetchNext` request may
+    /// request. `page_size == 0` is always rejected (it makes `has_more`
+    /// compute `0 >= 0 → true` forever, looping the client indefinitely);
+    /// `page_size` above this cap is rejected outright (not silently
+    /// clamped — a client that thinks it got `page_size` rows per page but
+    /// silently got fewer would misinterpret `has_more` semantics). Default
+    /// 10,000.
+    #[serde(default = "default_max_cursor_page_size")]
+    pub max_cursor_page_size: u32,
+}
+
+impl Default for CursorLimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_cursors_per_session: default_max_cursors_per_session(),
+            idle_timeout_secs: default_cursor_idle_timeout_secs(),
+            max_cursor_page_size: default_max_cursor_page_size(),
+        }
+    }
+}
+
+fn default_max_cursors_per_session() -> usize {
+    16
+}
+
+fn default_cursor_idle_timeout_secs() -> u64 {
+    60
+}
+
+fn default_max_cursor_page_size() -> u32 {
+    10_000
+}
+
+/// Server-side hard caps on `BatchRequest.limits`.
+///
+/// Omitted fields use operator defaults; request limits may lower but never
+/// raise these caps or the hard engine ceilings.
+#[derive(Debug, Clone, Deserialize)]
+pub struct QueryLimitsConfig {
+    /// Enforce the cumulative bytes materialized by an execution, estimated
+    /// conservatively and checked before commit. Includes intermediates even
+    /// when not returned, and ForEach/nested containers; dropping or filtering
+    /// results never gives bytes back. Not a serialized-response or RSS cap.
+    /// Default true; false keeps reserve-only batch semantics.
+    #[serde(default = "default_enforce_result_size")]
+    pub enforce_result_size: bool,
+    /// Maximum materialized-result budget when enforcement is enabled, and
+    /// the RI-15 upfront reserve estimate passed as `BatchLimits::max_result_size`.
+    /// Cursor pages retain this hard cap on serialized response bytes.
+    /// Default 64 MiB.
+    #[serde(default = "default_max_result_size_bytes")]
+    pub max_result_size_bytes: usize,
+    /// Maximum total execution time (seconds) — clamps
+    /// `BatchLimits::max_execution_time_secs`. Default 60.
+    #[serde(default = "default_max_execution_time_secs")]
+    pub max_execution_time_secs: u64,
+    /// Maximum number of queries per batch — clamps `BatchLimits::max_queries`.
+    /// Default 100.
+    #[serde(default = "default_max_queries_per_batch")]
+    pub max_queries_per_batch: usize,
+    /// Maximum sub-batch nesting depth. Zero disables nesting. Default 64.
+    #[serde(default = "default_max_nesting_depth")]
+    pub max_nesting_depth: usize,
+    /// Maximum dependency chain depth. Zero allows independent queries only.
+    #[serde(default = "default_max_dependency_depth")]
+    pub max_dependency_depth: usize,
+    /// Maximum loop iterations. Default 10,000.
+    #[serde(default = "default_max_iterations")]
+    pub max_iterations: usize,
+    /// Maximum queries across the entire batch tree. Default 10,000.
+    #[serde(default = "default_max_total_queries")]
+    pub max_total_queries: usize,
+    /// Maximum statically bounded nested/literal loop work. Default 1,000,000.
+    /// Dynamic repetition is not charged at runtime (engine gap outside W4);
+    /// this is not universal runtime aggregate accounting.
+    #[serde(default = "default_max_total_work")]
+    pub max_total_work: u64,
+    /// Maximum requested query page size. Default 100,000.
+    #[serde(default = "default_max_page_size")]
+    pub max_page_size: u64,
+    /// Maximum pagination offset. Zero disables skipping. Default 1,000,000.
+    #[serde(default = "default_max_offset")]
+    pub max_offset: u64,
+    /// RI-15 — global cap (bytes) on the SUM of in-flight response memory
+    /// across every concurrently-executing batch/connection. The
+    /// per-batch `max_result_size_bytes` supplies the upfront estimate; without
+    /// this field nothing bounds the SUM across every concurrent
+    /// connection (`crates/shamir-server/src/byte_budget.rs`'s module doc:
+    /// worst case ~64 GiB buffered at `max_active_connections = 1000` × a
+    /// 64 MiB per-batch cap).
+    ///
+    /// F-29 (#822): the key being ABSENT resolves to a finite default,
+    /// `4 * default_max_result_size_bytes()` (256 MiB) — matches the
+    /// shipped `server.medium.example.ktav`/`server.small.example.ktav`
+    /// profiles' own "4x max_result_size_bytes" convention, and is derived
+    /// from (not hardcoded independent of) `default_max_result_size_bytes`
+    /// so the two stay in lockstep if that default ever changes.
+    /// `ByteBudget::acquire` never hard-errors on exhaustion — it waits
+    /// (bounded, wakes on release) until room frees up — so this default
+    /// change turns unbounded-memory-growth into bounded backpressure for
+    /// any deployment that was relying on the old unbounded default,
+    /// rather than introducing a new rejection/error path.
+    ///
+    /// An operator can still opt BACK into unbounded behavior by setting
+    /// the key EXPLICITLY to `null` in their `.ktav` — serde's `Option<T>`
+    /// deserialization honors an explicit null independently of
+    /// `#[serde(default = ...)]` (the default fn only runs when the key is
+    /// missing entirely), so this round-trips cleanly: absent → finite
+    /// default, explicit `null` → `None`/unbounded. `server_launcher/launch.rs`
+    /// logs a `tracing::warn!` at boot whenever the resolved value is
+    /// `None`, since that is now an explicit escape hatch rather than "the
+    /// default nobody thought about".
+    ///
+    /// When set (to any `Some(_)`, including the new default), MUST be
+    /// `>= max_result_size_bytes` — otherwise no single max-size batch
+    /// could ever be admitted; `Config::validate` rejects that
+    /// configuration at startup. The derived default trivially satisfies
+    /// this (it IS `4 * max_result_size_bytes`'s own default).
+    #[serde(default = "default_max_inflight_response_bytes")]
+    pub max_inflight_response_bytes: Option<usize>,
+}
+
+impl Default for QueryLimitsConfig {
+    fn default() -> Self {
+        Self {
+            enforce_result_size: default_enforce_result_size(),
+            max_result_size_bytes: default_max_result_size_bytes(),
+            max_execution_time_secs: default_max_execution_time_secs(),
+            max_queries_per_batch: default_max_queries_per_batch(),
+            max_nesting_depth: default_max_nesting_depth(),
+            max_dependency_depth: default_max_dependency_depth(),
+            max_iterations: default_max_iterations(),
+            max_total_queries: default_max_total_queries(),
+            max_total_work: default_max_total_work(),
+            max_page_size: default_max_page_size(),
+            max_offset: default_max_offset(),
+            max_inflight_response_bytes: default_max_inflight_response_bytes(),
+        }
+    }
+}
+
+fn default_enforce_result_size() -> bool {
+    true
+}
+
+fn default_max_result_size_bytes() -> usize {
+    64 * 1024 * 1024 // 64 MiB
+}
+fn default_max_execution_time_secs() -> u64 {
+    60
+}
+fn default_max_queries_per_batch() -> usize {
+    100
+}
+
+// Previously uncapped fields default to CEILING, not request defaults:
+// clients may still raise their own limits within the hard engine bounds.
+fn default_max_nesting_depth() -> usize {
+    BatchLimits::CEILING.max_nesting_depth
+}
+fn default_max_dependency_depth() -> usize {
+    BatchLimits::CEILING.max_dependency_depth
+}
+fn default_max_iterations() -> usize {
+    BatchLimits::CEILING.max_iterations
+}
+fn default_max_total_queries() -> usize {
+    BatchLimits::CEILING.max_total_queries
+}
+fn default_max_total_work() -> u64 {
+    BatchLimits::CEILING.max_total_work
+}
+fn default_max_page_size() -> u64 {
+    BatchLimits::CEILING.max_page_size
+}
+fn default_max_offset() -> u64 {
+    BatchLimits::CEILING.max_offset
+}
+
+/// F-29 (#822): finite safe default for `max_inflight_response_bytes`,
+/// derived from (not hardcoded independent of) `default_max_result_size_bytes`
+/// so it automatically tracks that default — currently
+/// `4 * 64 MiB = 256 MiB`, matching the shipped medium profile's own value.
+fn default_max_inflight_response_bytes() -> Option<usize> {
+    Some(default_max_result_size_bytes() * 4)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConnectionSecurity {
+    /// Slow-loris timeout for `auth_init` in milliseconds. Default 5000.
+    ///
+    /// This same timeout is also applied to the TLS handshake and (for WS
+    /// listeners) the WebSocket upgrade that precede `auth_init` — closing
+    /// the unauthenticated slow-loris window identified in audit §2a /
+    /// top-5 #4. See `accept_loop_*` in `server_launcher/launch.rs`.
+    #[serde(default = "default_auth_init_timeout_ms")]
+    pub auth_init_timeout_ms: u64,
+    /// Global hard cap on simultaneously-active connections across all
+    /// listeners. Reached → server closes the new TCP socket immediately
+    /// (TCP RST, no TLS handshake) so an attacker can't waste server CPU
+    /// on TLS for connections that won't be served. Default 1000.
+    #[serde(default = "default_max_active_connections")]
+    pub max_active_connections: usize,
+    /// Per-source-IP cap on simultaneously-active connections. Default
+    /// 100. Bounds a single attacker host to a small fraction of the
+    /// global cap — without this, one IP can occupy the entire
+    /// `max_active_connections` budget with slow-loris sockets and starve
+    /// every legitimate client (audit §2a / top-5 #4). `0` = no per-IP
+    /// limit (mirrors `max_active_connections`'s convention).
+    #[serde(default = "default_max_active_connections_per_ip")]
+    pub max_active_connections_per_ip: usize,
+}
+
+impl Default for ConnectionSecurity {
+    fn default() -> Self {
+        Self {
+            auth_init_timeout_ms: default_auth_init_timeout_ms(),
+            max_active_connections: default_max_active_connections(),
+            max_active_connections_per_ip: default_max_active_connections_per_ip(),
+        }
+    }
+}
+
+fn default_auth_init_timeout_ms() -> u64 {
+    5_000
+}
+
+fn default_max_active_connections() -> usize {
+    1_000
+}
+
+fn default_max_active_connections_per_ip() -> usize {
+    100
+}
+
+/// Logging / tracing configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LoggingConfig {
+    /// Log level: `trace` | `debug` | `info` | `warn` | `error`.
+    /// Defaults to `info` when the whole `logging` block is omitted.
+    #[serde(default = "default_log_level")]
+    pub level: String,
+    /// Log a `WARN` line for every batch whose `execution_time_us`
+    /// exceeds this many milliseconds. Set to `0` to disable. Default
+    /// 1000 ms (1 second).
+    #[serde(default = "default_slow_query_threshold_ms")]
+    pub slow_query_threshold_ms: u64,
+    /// Optional file path for batched log output. When `None` (default)
+    /// logs go to stdout via the non-blocking appender (slice 1). When
+    /// `Some(path)`, logs are written to a file through an in-memory
+    /// buffer flushed every `flush_interval_ms` or on shutdown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// How often (ms) the batched file writer flushes its in-memory
+    /// buffer to disk. Only used when `file` is `Some`. Default 2000 ms.
+    #[serde(default = "default_log_flush_interval_ms")]
+    pub flush_interval_ms: u64,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+            slow_query_threshold_ms: default_slow_query_threshold_ms(),
+            file: None,
+            flush_interval_ms: default_log_flush_interval_ms(),
+        }
+    }
+}
+
+fn default_slow_query_threshold_ms() -> u64 {
+    1_000
+}
+
+fn default_log_flush_interval_ms() -> u64 {
+    2_000
+}
+
+/// Argon2id KDF parameters (spec §3.7).
+///
+/// `argon2_version` is the raw protocol byte — `0x13` is the only
+/// value the spec permits today.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct KdfConfig {
+    /// Memory cost in KiB. Spec §3.7.2 floor = 19_456 (RFC 9106 minimum).
+    pub memory_kb: u32,
+    /// Iteration count. Spec §3.7.2 floor = 2.
+    pub time: u32,
+    /// Lanes. Spec §3.7.2 floor = 1.
+    pub parallelism: u32,
+    /// Argon2 protocol version byte. Must be `0x13`.
+    pub argon2_version: u8,
+}
+
+/// One listener (TCP or WebSocket) the server should expose.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ListenerConfig {
+    /// Wire protocol: native TCP or WebSocket.
+    pub kind: ListenerKind,
+    /// Socket address, e.g. `0.0.0.0:7331` or `127.0.0.1:7334`. Validated
+    /// at [`Config::validate`] time, not at deserialization.
+    pub addr: String,
+    /// Security profile (drives `binding_mode` per spec §3.4 / §9).
+    pub profile: ProfileKind,
+    /// HTTP path for `ws` listeners. Required for `ws`, ignored for `tcp`.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Per-listener override of the default KDF parameters. Used to give
+    /// browser endpoints a softer floor (cf. `docs/dev-artifacts/roadmap/BROWSER_WASM_PLAN.md`).
+    #[serde(default)]
+    pub kdf_override: Option<KdfConfig>,
+    /// Origin header allowlist. REQUIRED for browser endpoints (`ws` +
+    /// `tls_no_export`); ignored otherwise.
+    #[serde(default)]
+    pub browser_origin_allowlist: Vec<String>,
+}
+
+/// Listener wire protocol.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ListenerKind {
+    /// Native TCP (with or without TLS depending on profile).
+    Tcp,
+    /// WebSocket-over-TLS (`wss://`).
+    Ws,
+    /// Local IPC — Unix domain socket (POSIX) or Windows Named Pipe,
+    /// behind `shamir-transport-ipc`'s unified `IpcListener` (spec
+    /// TRANSPORT_UNIX.md). `addr` is a filesystem path (Unix) or pipe name
+    /// (Windows), NOT a `SocketAddr` — see `Config::validate` and
+    /// `server_launcher/launch.rs`'s listener-spawn loop, both of which branch on
+    /// `kind` before attempting a `SocketAddr` parse. Always
+    /// `profile: plain` (`binding_mode = 0x00`) — there is no TLS
+    /// distinction for local IPC (TRANSPORT_UNIX.md §5: OS-level
+    /// permissions/DACL are the access boundary instead).
+    Unix,
+}
+
+/// Listener security profile / `binding_mode` selector.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileKind {
+    /// TLS 1.3 with channel binding via TLS exporter (`binding_mode = 0x01`).
+    /// Default profile. Allowed on any address.
+    TlsExporter,
+    /// TLS 1.3 without exporter (`binding_mode = 0x02`). Used for browser
+    /// WebSocket endpoints where the JS environment can't access the
+    /// exporter.
+    TlsNoExport,
+    /// Plain TCP (`binding_mode = 0x00`). Loopback-only — refused on any
+    /// non-loopback address by [`Config::validate`].
+    Plain,
+}
+
+/// TLS server material. Both files MUST be PEM. If either path does not
+/// exist on first start, the server generates a self-signed pair and
+/// writes them (handled by the boot path, not this module).
+#[derive(Debug, Clone, Deserialize)]
+pub struct TlsConfig {
+    /// Path to the X.509 server certificate (PEM).
+    pub cert_path: PathBuf,
+    /// Path to the matching private key (PEM, PKCS#8 or SEC1).
+    pub key_path: PathBuf,
+}
+
+/// Configuration error covering both load failure and validation failure.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    /// Ktav parser rejected the input. Wraps the formatted ktav error.
+    #[error("config parse: {0}")]
+    Parse(String),
+    /// One of the [`Config::validate`] invariants was violated.
+    #[error("config validation: {0}")]
+    Validation(String),
+    /// Underlying I/O error (file missing, permission denied, etc.).
+    #[error("config io: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+fn default_log_level() -> String {
+    "info".into()
+}
+
+fn default_argon2_max() -> u32 {
+    64
+}
+
+fn default_auth_init_rate_per_second() -> u32 {
+    10
+}
+
+// Spec §3.7.2 KDF floors.
+const KDF_MIN_MEMORY_KB: u32 = 19_456;
+const KDF_MIN_TIME: u32 = 2;
+const KDF_MIN_PARALLELISM: u32 = 1;
+const KDF_REQUIRED_VERSION: u8 = 0x13;
+
+const ARGON2_MAX_PERMITS_FLOOR: u32 = 1;
+const ARGON2_MAX_PERMITS_CEIL: u32 = 1024;
+
+impl Config {
+    /// Load and parse a `.ktav` config file. Does NOT validate semantics;
+    /// call [`Config::validate`] separately for that.
+    pub fn from_file(path: &Path) -> Result<Self, ConfigError> {
+        // ktav::from_file returns its own error type (which itself wraps
+        // io::Error in some variants). We flatten it to a string so callers
+        // get a single `Parse` variant; that keeps `ConfigError::Io`
+        // reserved for io we surface ourselves later (e.g. dir creation).
+        ktav::from_file::<Self, _>(path).map_err(|e| ConfigError::Parse(e.to_string()))
+    }
+
+    /// Sanity-check a parsed [`Config`]. Returns
+    /// [`ConfigError::Validation`] with a human-readable message at the
+    /// first violation; callers can surface that as a startup error.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        self.durability.resolve_policy()?;
+        self.transactions.validate()?;
+        // KDF: defaults first, then any per-listener override.
+        validate_kdf(&self.kdf_defaults)
+            .map_err(|m| ConfigError::Validation(format!("kdf_defaults: {m}")))?;
+
+        // Argon2 concurrency cap.
+        if !(ARGON2_MAX_PERMITS_FLOOR..=ARGON2_MAX_PERMITS_CEIL)
+            .contains(&self.argon2_concurrent_max)
+        {
+            return Err(ConfigError::Validation(format!(
+                "argon2_concurrent_max must be in 1..=1024 (got {})",
+                self.argon2_concurrent_max
+            )));
+        }
+
+        // Auth-init rate limit.
+        if !(1..=100_000).contains(&self.security.auth_init_rate_per_second) {
+            return Err(ConfigError::Validation(format!(
+                "security.auth_init_rate_per_second must be in 1..=100_000 (got {})",
+                self.security.auth_init_rate_per_second
+            )));
+        }
+
+        if self.logging.flush_interval_ms == 0 {
+            return Err(ConfigError::Validation(
+                "logging.flush_interval_ms must be >= 1".into(),
+            ));
+        }
+
+        // `logging::init` parses this via `LevelFilter::from_str`, which silently falls back to
+        // INFO on garbage — reject typos here instead of silently changing verbosity.
+        let lvl = self.logging.level.to_ascii_lowercase();
+        if !matches!(
+            lvl.as_str(),
+            "trace" | "debug" | "info" | "warn" | "error" | "off"
+        ) {
+            return Err(ConfigError::Validation(format!(
+                "logging.level: invalid level {:?} — valid: trace|debug|info|warn|error|off (case-insensitive)",
+                self.logging.level
+            )));
+        }
+
+        let limits = &self.security.query_limits;
+        // Compare like-typed values without narrowing numeric conversions.
+        macro_rules! validate_query_limit {
+            ($field:ident, $ceiling:ident, $minimum:expr) => {
+                if !($minimum..=BatchLimits::CEILING.$ceiling).contains(&limits.$field) {
+                    return Err(ConfigError::Validation(format!(
+                        "security.query_limits.{} must be in {}..={} (got {})",
+                        stringify!($field),
+                        $minimum,
+                        BatchLimits::CEILING.$ceiling,
+                        limits.$field,
+                    )));
+                }
+            };
+        }
+        validate_query_limit!(max_result_size_bytes, max_result_size, 1);
+        validate_query_limit!(max_execution_time_secs, max_execution_time_secs, 1);
+        validate_query_limit!(max_queries_per_batch, max_queries, 1);
+        validate_query_limit!(max_nesting_depth, max_nesting_depth, 0);
+        validate_query_limit!(max_dependency_depth, max_dependency_depth, 0);
+        validate_query_limit!(max_iterations, max_iterations, 1);
+        validate_query_limit!(max_total_queries, max_total_queries, 1);
+        validate_query_limit!(max_total_work, max_total_work, 1);
+        validate_query_limit!(max_page_size, max_page_size, 1);
+        validate_query_limit!(max_offset, max_offset, 0);
+
+        // RI-15: the global in-flight response-byte budget, if set, must be
+        // able to admit at least one max-size batch response — otherwise
+        // every batch that legitimately fills `max_result_size_bytes` would
+        // be permanently rejected by the budget gate.
+        if let Some(max_inflight) = self.security.query_limits.max_inflight_response_bytes {
+            let max_result = self.security.query_limits.max_result_size_bytes;
+            if max_inflight < max_result {
+                return Err(ConfigError::Validation(format!(
+                    "security.query_limits.max_inflight_response_bytes ({max_inflight}) must be >= max_result_size_bytes ({max_result}) — otherwise no single max-size batch could ever be admitted"
+                )));
+            }
+        }
+
+        // CR-A3: a zero cap would make every cursor unusable (every
+        // CreateCursor/FetchNext request would be rejected outright — see
+        // `CursorLimitsConfig::max_cursor_page_size`'s doc comment).
+        if self.security.cursors.max_cursor_page_size == 0 {
+            return Err(ConfigError::Validation(
+                "security.cursors.max_cursor_page_size must be >= 1".into(),
+            ));
+        }
+
+        // CR-C1 (#776): unlike `max_cursor_page_size` above, zero is not a
+        // legitimate value for either of these two fields — there is no
+        // sensible "0 means unlimited/disabled" reading for either, and both
+        // read as accidental misconfiguration rather than deliberate intent:
+        // - `idle_timeout_secs == 0` would evict every cursor almost
+        //   immediately (the reaper sweeps every `DEFAULT_CURSOR_REAPER_INTERVAL`,
+        //   currently 5s, so a cursor would rarely if ever survive to see a
+        //   second `FetchNext`) — indistinguishable from the operator
+        //   wanting the cursor feature to work at all.
+        // - `max_cursors_per_session == 0` would make `CreateCursor` always
+        //   fail with `cursor_limit_exceeded` (the CAS loop in
+        //   `CursorRegistry::register` rejects the very first cursor, since
+        //   `0 >= 0`), silently disabling the whole feature rather than
+        //   expressing a deliberate killswitch (an operator who wants that
+        //   should reach for a real feature flag / ACL denial, not an
+        //   overloaded zero).
+        // Both reject at config-load time rather than surfacing as a
+        // confusing runtime error on the very first cursor request.
+        if self.security.cursors.idle_timeout_secs == 0 {
+            return Err(ConfigError::Validation(
+                "security.cursors.idle_timeout_secs must be >= 1 (a zero idle timeout would evict every cursor almost immediately, disabling the feature outright)"
+                    .into(),
+            ));
+        }
+        if self.security.cursors.max_cursors_per_session == 0 {
+            return Err(ConfigError::Validation(
+                "security.cursors.max_cursors_per_session must be >= 1 (zero would make every \
+                 CreateCursor fail with cursor_limit_exceeded, silently disabling the feature)"
+                    .into(),
+            ));
+        }
+
+        if self.listeners.is_empty() {
+            return Err(ConfigError::Validation(
+                "at least one listener is required".into(),
+            ));
+        }
+
+        for (idx, l) in self.listeners.iter().enumerate() {
+            validate_listener(idx, l)?;
+            if let Some(kdf) = &l.kdf_override {
+                validate_kdf(kdf).map_err(|m| {
+                    ConfigError::Validation(format!("listeners[{idx}].kdf_override: {m}"))
+                })?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Validate a single [`ListenerConfig`] against its profile's invariants.
+fn validate_listener(idx: usize, l: &ListenerConfig) -> Result<(), ConfigError> {
+    // 1. `kind: unix` addresses a filesystem path / pipe name, not a
+    //    `SocketAddr` — validated on its own branch, entirely separate
+    //    from the TCP/WS `SocketAddr` + loopback/origin checks below.
+    if l.kind == ListenerKind::Unix {
+        if l.addr.trim().is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "listeners[{idx}] kind=unix requires a non-empty `addr` \
+                 (filesystem path on Unix, pipe name on Windows)"
+            )));
+        }
+        if l.profile != ProfileKind::Plain {
+            return Err(ConfigError::Validation(format!(
+                "listeners[{idx}] kind=unix requires profile=plain (spec TRANSPORT_UNIX.md — no TLS distinction for local IPC); got {:?}",
+                l.profile
+            )));
+        }
+        return Ok(());
+    }
+
+    // 2. Parse the address.
+    let addr: SocketAddr = l.addr.parse().map_err(|e| {
+        ConfigError::Validation(format!(
+            "listeners[{idx}].addr `{}` is not a valid socket address: {e}",
+            l.addr
+        ))
+    })?;
+
+    // 3. WebSocket: path required and must start with `/`.
+    match l.kind {
+        ListenerKind::Ws => {
+            let path = l.path.as_deref().ok_or_else(|| {
+                ConfigError::Validation(format!(
+                    "listeners[{idx}] kind=ws requires `path` (e.g. /shamir/v1)"
+                ))
+            })?;
+            if !path.starts_with('/') {
+                return Err(ConfigError::Validation(format!(
+                    "listeners[{idx}].path `{path}` must start with `/`"
+                )));
+            }
+        }
+        ListenerKind::Tcp => {
+            // path is ignored for TCP — but we don't reject Some(_), so
+            // operators can keep one shared template if they like.
+        }
+        ListenerKind::Unix => unreachable!("handled by the early return above"),
+    }
+
+    // 4. Plain profile: loopback only.
+    if l.profile == ProfileKind::Plain && !is_loopback_ip(addr.ip()) {
+        return Err(ConfigError::Validation(format!(
+            "listeners[{idx}] profile=plain requires a loopback address (127.0.0.0/8 or ::1); got {}",
+            addr
+        )));
+    }
+
+    // 5. Browser endpoint: must have a non-empty Origin allowlist.
+    if l.kind == ListenerKind::Ws
+        && l.profile == ProfileKind::TlsNoExport
+        && l.browser_origin_allowlist.is_empty()
+    {
+        return Err(ConfigError::Validation(format!(
+            "listeners[{idx}] (ws + tls_no_export, browser endpoint) requires non-empty browser_origin_allowlist (spec §9)"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Validate a [`KdfConfig`] against the spec §3.7.2 floor. Returns the
+/// raw failure reason (no listener-prefix) so callers can wrap it with
+/// the right context.
+fn validate_kdf(kdf: &KdfConfig) -> Result<(), String> {
+    if kdf.memory_kb < KDF_MIN_MEMORY_KB {
+        return Err(format!(
+            "kdf memory_kb must be >= {KDF_MIN_MEMORY_KB} (got {})",
+            kdf.memory_kb
+        ));
+    }
+    if kdf.time < KDF_MIN_TIME {
+        return Err(format!(
+            "kdf time must be >= {KDF_MIN_TIME} (got {})",
+            kdf.time
+        ));
+    }
+    if kdf.parallelism < KDF_MIN_PARALLELISM {
+        return Err(format!(
+            "kdf parallelism must be >= {KDF_MIN_PARALLELISM} (got {})",
+            kdf.parallelism
+        ));
+    }
+    if kdf.argon2_version != KDF_REQUIRED_VERSION {
+        return Err(format!(
+            "kdf argon2_version must be 0x{KDF_REQUIRED_VERSION:02x} (got 0x{:02x})",
+            kdf.argon2_version
+        ));
+    }
+    Ok(())
+}
+
+/// Loopback predicate matching TRANSPORT_TCP §2.2 (127.0.0.0/8 + ::1).
+/// Inlined rather than calling `shamir_transport_tcp::listener::validate_addr`
+/// because that function takes a `ListenerProfile` enum we'd otherwise have
+/// to translate from `ProfileKind`; the loopback check itself is a one-liner.
+fn is_loopback_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_loopback(),
+        IpAddr::V6(v6) => v6.is_loopback(),
+    }
+}

@@ -1,0 +1,970 @@
+//! [`ServerLauncher`]: builds the server runtime from a
+//! [`Config`](crate::config::Config) + bootstrap policy in `launch()`.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use shamir_connect::common::time::UnixNanos;
+use shamir_connect::common::types::{BindingMode, TransportKind};
+use shamir_connect::server::argon2_semaphore::Argon2Semaphore;
+use shamir_connect::server::audit_chain::{AuditAppender, AuditChain, AuditChainWriter};
+use shamir_connect::server::dispatch::RequestHandler;
+use shamir_connect::server::durable_counters::FjallConsumedCounters;
+use shamir_connect::server::lockout::{InMemoryLockoutStore, LockoutSnapshotSink};
+use shamir_connect::server::rate_limit::{InMemoryRateLimiter, RateLimitSnapshotSink};
+use shamir_connect::server::resume::ResumeConfig;
+use shamir_connect::server::session::SessionStore;
+
+use shamir_tunables::runtime::RuntimeTunables;
+
+use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
+use shamir_db::shamir_db::SystemStoreConfig;
+use shamir_db::ShamirDb;
+
+use shamir_transport_ipc::IpcListener;
+use shamir_transport_tcp::listener::{
+    bind_validated as bind_tcp, ListenerProfile as TcpListenerProfile,
+};
+use shamir_transport_ws::listener::{bind_validated as bind_ws, WsListenerProfile};
+
+use tokio::task::JoinHandle;
+use tokio_rustls::TlsAcceptor;
+
+use crate::audit_appender::FjallAuditAppender;
+use crate::bootstrap::{
+    ensure_superuser, BootstrapOutcome, BootstrapPolicy, DEFAULT_BOOTSTRAP_NAME,
+};
+use crate::byte_budget::ByteBudget;
+use crate::config::{Config, ListenerKind, ProfileKind};
+use crate::conn_limiter::{ConnLimiter, PerIpLimiter};
+use crate::db_handler::{
+    AdminGlue, CursorLimitsCap, QueryLimitsCap, ShamirDbHandler, SlowQueryConfig, TxLimitsCap,
+};
+use crate::ports::DirectoryPorts;
+use crate::scheduler::{Scheduler, SchedulerConfig, SchedulerInputs};
+use crate::server::boot_error::BootError;
+use crate::server::bootstrap_mode::BootstrapMode;
+use crate::server::meta_sinks::{spawn_meta_snapshot_task, MetaLockoutSink, MetaRateLimitSink};
+use crate::server::server_handle::ServerHandle;
+use crate::server_meta::ServerMetaStore;
+use crate::tables_registry::TablesRegistry;
+use crate::tls::{load_or_generate, subject_alts_from_addrs, LoadedTls};
+use crate::user_directory::FjallUserDirectory;
+
+use super::accept_loops::{
+    accept_loop_ipc, accept_loop_plain, accept_loop_tcp, accept_loop_ws_browser,
+    accept_loop_ws_native,
+};
+use super::helpers::{
+    browser_origin_policy_from, default_node_id, kdf_from_config, log_bootstrap_outcome,
+    AcceptPath, REPL_RECONCILE_INTERVAL,
+};
+
+/// Launcher: build the server runtime from a [`Config`] + bootstrap policy.
+pub struct ServerLauncher {
+    pub config: Config,
+    pub bootstrap: BootstrapMode,
+}
+
+impl ServerLauncher {
+    /// New launcher with the given config and the default bootstrap mode
+    /// (random token, written to `data_dir/bootstrap_token.txt`).
+    pub fn new(config: Config) -> Self {
+        Self {
+            config,
+            bootstrap: BootstrapMode::default(),
+        }
+    }
+
+    /// Run the boot sequence — everything from "open the redb files" to
+    /// "spawn the accept loops". Returns when all listeners are bound but
+    /// before any connection arrives.
+    pub async fn launch(self) -> Result<ServerHandle, BootError> {
+        let ServerLauncher { config, bootstrap } = self;
+        config.validate()?;
+        let durability = config.durability.resolve_policy()?;
+        config.durability.warn_unimplemented_retention();
+
+        // Root shutdown token — the single source of truth for "the server
+        // is stopping". Every long-lived task (accept loops, meta-snapshot,
+        // tx-reaper) holds a clone; `ServerHandle::shutdown` calls `.cancel()`
+        // exactly once and the signal cascades to all of them. The tree of
+        // tasks maps onto one cancellation: shutdown is a LEVEL (a state),
+        // and CancellationToken is level-triggered (persistent) — unlike
+        // `Notify::notify_waiters`, which is edge-triggered and lossy across
+        // the `select!` subscribe-window (a notify that lands while a task is
+        // executing its tick-branch body, not parked in `select!`, is
+        // silently dropped — the cold-start hang we chased through the accept
+        // loops). One concept, race-free by construction.
+        let shutdown_token = tokio_util::sync::CancellationToken::new();
+
+        // 1. Durable stores.
+        std::fs::create_dir_all(&config.data_dir)?;
+
+        // Single-instance guard: acquire an advisory OS file lock on
+        // `<data_dir>/.shamir.lock` BEFORE opening any redb store. The
+        // lock is held for the entire process lifetime via the `File`
+        // stored in `ServerHandle._data_dir_lock` — drop releases it
+        // (and the kernel releases on crash). This prevents two servers
+        // from opening the same data_dir and corrupting/contending the
+        // redb stores.
+        let data_dir_lock = crate::maintenance_lock::acquire_server(&config.data_dir)?;
+
+        let meta = Arc::new(
+            ServerMetaStore::open_or_init(config.data_dir.join("server_meta"))
+                .map_err(|e| BootError::ServerMeta(e.to_string()))?,
+        );
+
+        let user_dir = Arc::new(
+            FjallUserDirectory::open(config.data_dir.join("users"))
+                .map_err(|e| BootError::UserDirectory(e.to_string()))?,
+        );
+        let counters = Arc::new(
+            FjallConsumedCounters::open(config.data_dir.join("counters"))
+                .map_err(|e| BootError::Counters(e.to_string()))?,
+        );
+
+        let audit_max_bytes = if config.audit.max_file_size_mb == 0 {
+            None
+        } else {
+            Some(config.audit.max_file_size_mb.saturating_mul(1024 * 1024))
+        };
+        let audit_appender = FjallAuditAppender::open_batched_with_rotation(
+            &config.data_dir,
+            std::time::Duration::from_secs(5),
+            audit_max_bytes,
+            config.audit.retention_days,
+        )
+        .map_err(|e| BootError::AuditAppender(e.to_string()))?;
+
+        // Hoisted from step 2 below (CR-A6): the TTL sweep now also needs
+        // `kdf_for_bootstrap` to rotate an expired-and-unused token's SCRAM
+        // credential, so this construction moved ahead of the sweep block.
+        let kdf_for_bootstrap = kdf_from_config(&config.kdf_defaults);
+
+        // 1b. Boot-time bootstrap-token TTL sweep (RI-9 + CR-A6). Runs
+        // unconditionally, in ALL bootstrap modes, BEFORE the bootstrap step
+        // below: a previously-issued token from an earlier `RandomToken`
+        // boot can still be outstanding and expired even if this boot is
+        // `Skip`/`Password`. Best-effort — an I/O failure deleting the file,
+        // or a rotation failure, is logged and does not fail boot. CR-A6:
+        // also rotates the account's SCRAM credential to a fresh random
+        // value — without this an unused, TTL-expired token would still
+        // work as the account's password forever, contradicting the
+        // "one-time token" guarantee.
+        //
+        // F-3: ordering is rotate-FIRST → consume-on-success → delete-file-
+        // last. If the rotate fails — or there is no username to rotate —
+        // the token metadata row is LEFT active so the next boot's sweep
+        // gets another chance. The username MUST be read BEFORE
+        // `consume_bootstrap_token()` clears the bookkeeping row (order
+        // matters); the token path is likewise read before consume.
+        {
+            let now_ns = UnixNanos::now().as_u64();
+            if meta.bootstrap_token_expired(now_ns) {
+                let expired_username = meta.bootstrap_username();
+
+                let rotated_ok = match expired_username {
+                    Some(name) => {
+                        match crate::bootstrap::rotate_bootstrap_credential_to_random(
+                            &user_dir,
+                            &name,
+                            kdf_for_bootstrap,
+                            now_ns,
+                        )
+                        .await
+                        {
+                            Ok(()) => true,
+                            Err(e) => {
+                                tracing::warn!(
+                                    ?e,
+                                    "bootstrap: failed to rotate SCRAM credential for expired \
+                                     token -- token left active for retry"
+                                );
+                                false
+                            }
+                        }
+                    }
+                    None => false,
+                };
+
+                if rotated_ok {
+                    let expired_token_path = meta.bootstrap_token_path();
+                    if let Err(e) = meta.consume_bootstrap_token() {
+                        tracing::warn!(?e, "bootstrap: failed to consume expired token record");
+                    }
+                    if let Some(path) = expired_token_path {
+                        if let Err(e) = std::fs::remove_file(&path) {
+                            if e.kind() != std::io::ErrorKind::NotFound {
+                                tracing::warn!(
+                                    ?path,
+                                    ?e,
+                                    "bootstrap: failed to delete expired token file"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Bootstrap (idempotent).
+        match &bootstrap {
+            BootstrapMode::Password { username, password } => {
+                let outcome = ensure_superuser(
+                    &user_dir,
+                    &config.data_dir,
+                    username,
+                    BootstrapPolicy::Password(password),
+                    &kdf_for_bootstrap,
+                )?;
+                log_bootstrap_outcome(username, &outcome);
+            }
+            BootstrapMode::RandomToken {
+                username,
+                token_path,
+            } => {
+                let name = username.as_deref().unwrap_or(DEFAULT_BOOTSTRAP_NAME);
+                let outcome = ensure_superuser(
+                    &user_dir,
+                    &config.data_dir,
+                    name,
+                    BootstrapPolicy::RandomToken(token_path.clone()),
+                    &kdf_for_bootstrap,
+                )?;
+                if let BootstrapOutcome::Created {
+                    token: Some(tok),
+                    token_path: Some(path),
+                } = &outcome
+                {
+                    let now_ns = UnixNanos::now().as_u64();
+                    if let Err(e) = meta.set_bootstrap_token(
+                        name,
+                        shamir_connect::common::crypto::sha256(tok.as_bytes()),
+                        now_ns.saturating_add(crate::bootstrap::BOOTSTRAP_TOKEN_TTL_NS),
+                        path.clone(),
+                    ) {
+                        tracing::warn!(?e, "bootstrap: failed to persist token TTL/consume record");
+                    }
+                }
+                log_bootstrap_outcome(name, &outcome);
+            }
+            BootstrapMode::Skip => {
+                tracing::debug!("bootstrap: skipped per BootstrapMode::Skip");
+            }
+        }
+
+        // 3. In-memory stores.
+        //
+        // Lockout state is rehydrated from `server_meta.redb` and a
+        // background task (`LOCKOUT_SNAPSHOT_INTERVAL` below) persists it
+        // every 60s so brute-force bookkeeping survives server restarts
+        // — otherwise an attacker who knows the restart cadence resets
+        // all per-pair failure counts and re-bursts the auth path with
+        // no lockout penalty. See `shamir_connect::server::lockout` for
+        // the trade-off rationale (≤60s loss window vs fsync-per-failure).
+        let lockout_sink: Arc<dyn LockoutSnapshotSink> =
+            Arc::new(MetaLockoutSink::new(meta.clone()));
+        let lockout = Arc::new(InMemoryLockoutStore::with_snapshot_sink(lockout_sink));
+        let now_ns = UnixNanos::now().as_u64();
+        // Rate-limit buckets are persisted by the SAME periodic task as
+        // lockout (one 60s tick writes both). On boot the depleted-bucket
+        // state is rehydrated conservatively: token levels survive but each
+        // bucket's refill clock is re-anchored to `now_ns`, so the downtime
+        // grants no free refill (the secure direction). The §8.6 warmup
+        // window (re-armed from `now_ns`) layers extra throttling on top
+        // for the first 60s. See `shamir_connect::server::rate_limit`.
+        let rate_limit_sink: Arc<dyn RateLimitSnapshotSink> =
+            Arc::new(MetaRateLimitSink::new(meta.clone()));
+        let rate_limit = Arc::new(InMemoryRateLimiter::with_snapshot_sink_and_rate(
+            rate_limit_sink,
+            now_ns,
+            config.security.auth_init_rate_per_second,
+        ));
+        let argon2_sem = Arc::new(Argon2Semaphore::with_capacity(config.argon2_concurrent_max));
+        let session_store = Arc::new(SessionStore::new());
+
+        // Spawn the periodic meta-snapshot task. One 60s tick persists
+        // BOTH the lockout store and the rate-limiter buckets. Errors are
+        // logged and ignored — losing a snapshot is not fatal, the next
+        // tick will retry, and a hard crash between writes loses at most
+        // one interval of new state. The returned handle is stored on
+        // `ServerHandle` so `shutdown()` can join it (otherwise it would
+        // hold the redb file lock past shutdown and block any
+        // same-data-dir restart).
+        let meta_snapshot_task = Some(spawn_meta_snapshot_task(
+            lockout.clone(),
+            rate_limit.clone(),
+            shutdown_token.clone(),
+        ));
+
+        // 4. Audit chain — load from checkpoint if present.
+        //
+        // CRITICAL: the writer (used by every connection task to emit
+        // audit events) and the scheduler (which periodically persists
+        // the truncation-defence checkpoint) MUST share a single chain
+        // state. Constructing two independent `AuditChain` instances
+        // here produces a split-brain — appends advance one chain while
+        // the checkpoint snapshots the other (empty) one, so audit.log
+        // restarts at seq=1 on every reboot. See
+        // `audit_writer_and_checkpoint_share_chain_state` for the
+        // regression test.
+        let ack = meta
+            .audit_chain_key()
+            .map_err(|e| BootError::ServerMeta(e.to_string()))?;
+        let audit_chain = match meta.audit_checkpoint() {
+            Some((seq, hmac)) => Arc::new(AuditChain::from_checkpoint(ack, seq, hmac)),
+            None => Arc::new(AuditChain::new(ack)),
+        };
+        let audit_writer = Arc::new(AuditChainWriter::new_with_shared(
+            audit_chain.clone(),
+            audit_appender.clone() as Arc<dyn AuditAppender>,
+        ));
+
+        // 5. ShamirDb — durable system store + a pre-configured `default.main`
+        //    repo backed by redb. Layout under `data_dir`:
+        //
+        //      shamir_db_meta.redb         — system store (db/repo/setting metadata)
+        //      shamir_db_default_main.redb — the `default.main` repo data
+        //
+        //    Wire-side admin ops can still create additional dbs/repos, but
+        //    those are in-memory (`ShamirAdminExecutor` hardcodes engine =
+        //    "in_memory"; a future patch can extend it to accept "redb" with
+        //    auto-derived paths). For v1 this means the `default.main` repo
+        //    is the durable target for application data.
+        let meta_path = config.data_dir.join("shamir_db_meta.redb");
+        let default_main_path = config.data_dir.join("shamir_db_default_main.redb");
+        // Task #559: inject the identity-seam ports (PrincipalResolver +
+        // UserAdminPort) over the real FjallUserDirectory BEFORE wrapping
+        // ShamirDb in Arc. The builder methods consume Self and return
+        // Self, so this must happen on the owned value.
+        let (port, resolver) =
+            DirectoryPorts::new(user_dir.clone(), kdf_for_bootstrap).into_trait_objects();
+        let shamir = Arc::new(
+            ShamirDb::init_with_durability(SystemStoreConfig::Fjall(meta_path), durability)
+                .await
+                .map_err(|e| BootError::ShamirDbInit(e.to_string()))?
+                .with_user_admin_port(port)
+                .with_principal_resolver(resolver),
+        );
+
+        // Consume only repos loaded from the restored catalogue, before new
+        // default repos, handlers, listeners, or replication tasks can exist.
+        crate::restore::consume_restore_marker(&config.data_dir, &shamir)
+            .await
+            .map_err(|e| BootError::ShamirDbInit(format!("restore history epoch: {e}")))?;
+
+        // F-15: opt into the experimental online storage-migration API when
+        // the operator explicitly set `security.enable_experimental_migration_api`
+        // in the config file. This single `Arc<ShamirDb>` (via its internal
+        // `Arc<AtomicBool>` toggle) is the SAME instance every wire-level
+        // `StartMigration` handler reads `experimental_migration_enabled()`
+        // from, so this one boot-time toggle suffices for the whole process.
+        // The flag is `false` by default — the feature has known correctness
+        // gaps (see KNOWN_LIMITATIONS.md §2); never enable in production.
+        if config.security.enable_experimental_migration_api {
+            shamir.enable_experimental_migration_api();
+            tracing::warn!(
+                "experimental online storage-migration API is ENABLED — see \
+                 KNOWN_LIMITATIONS.md §2 for known gaps; do not use in production"
+            );
+        }
+
+        // Task #559 §8: one-time boot audit (read-only, WARN-log only, no
+        // auto-apply). Diffs shamir-db's Store B against the directory and
+        // logs WARN lines for usernames/roles/superuser grants that were
+        // never live. Removable after one release.
+        super::audit_store_b_vs_directory(&shamir, user_dir.as_ref()).await;
+
+        // Idempotent: on the first boot the database+repo are created; on
+        // every subsequent boot `ShamirDb::init` already loaded them from
+        // the system store, so we skip and just use them.
+        if !shamir.has_db("default") {
+            let _ = shamir.create_db("default").await;
+        }
+        let default_db = shamir
+            .get_db("default")
+            .expect("default db must exist after create_db");
+        if !default_db.has_repo("main") {
+            let factory = BoxRepoFactory::fjall(&default_main_path);
+            shamir
+                .add_repo("default", RepoConfig::new("main", factory))
+                .await
+                .map_err(|e| BootError::ShamirDbInit(format!("add_repo default.main: {e}")))?;
+            tracing::info!(path = ?default_main_path, "created durable default.main repo");
+        }
+
+        // Replay the wire-tables registry: re-register every table that a
+        // wire client created in a previous boot so its data file is
+        // re-attached to the in-memory `RepoInstance`. Without this step
+        // the redb file on disk still exists but the running server has no
+        // table config pointing at it, so reads return "table not found".
+        let tables_registry = Arc::new(TablesRegistry::open(&config.data_dir)?);
+        {
+            let snap = tables_registry.snapshot();
+            for (db_name, repo_name, table_name) in snap.iter_entries() {
+                if let Some(db) = shamir.get_db(db_name) {
+                    if !db.has_table(repo_name, table_name) {
+                        if let Err(e) = db.create_table_checked(repo_name, table_name).await {
+                            tracing::warn!(
+                                db = db_name,
+                                repo = repo_name,
+                                table = table_name,
+                                ?e,
+                                "tables_registry replay: create_table failed"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // RI-15 — global in-flight response-byte budget. F-29 (#822): the
+        // code-level default is now finite
+        // (`default_max_inflight_response_bytes`, 4x `max_result_size_bytes`'s
+        // own default) — `None` here means the operator EXPLICITLY set
+        // `max_inflight_response_bytes: null`, opting back into unbounded
+        // (pre-RI-15) behavior: only the per-batch `max_result_size_bytes`
+        // cap applies, no ceiling on the SUM across concurrent connections.
+        // Warn at boot so that choice isn't silent. `Config::validate`
+        // already rejected a configured `Some(_)` value below
+        // `max_result_size_bytes` before boot reached this point.
+        let inflight_cap = config.security.query_limits.max_inflight_response_bytes;
+        if inflight_cap.is_none() {
+            tracing::warn!(
+                "security.query_limits.max_inflight_response_bytes is explicitly unbounded \
+                 (null) — no ceiling on the SUM of in-flight response bytes across every \
+                 concurrent connection; only the per-batch max_result_size_bytes cap applies. \
+                 This is an explicit opt-out of the F-29 finite default — confirm this is \
+                 intentional for this deployment"
+            );
+        }
+        let byte_budget = ByteBudget::new(inflight_cap);
+
+        let handler_concrete: Arc<ShamirDbHandler> = Arc::new(
+            ShamirDbHandler::with_admin(
+                shamir.clone(),
+                AdminGlue {
+                    user_dir: user_dir.clone(),
+                    kdf: kdf_for_bootstrap,
+                    tables_registry: Some(tables_registry.clone()),
+                },
+            )
+            .with_audit_writer(audit_writer.clone())
+            .with_slow_query(SlowQueryConfig::from_ms(
+                config.logging.slow_query_threshold_ms,
+            ))
+            .with_query_limits(QueryLimitsCap::from(&config.security.query_limits))
+            .with_transactions(config.transactions.clone())
+            .with_tx_limits(TxLimitsCap {
+                max_tx_bytes: config.security.tx.max_tx_bytes,
+            })
+            .with_cursor_limits(CursorLimitsCap {
+                max_cursors_per_session: config.security.cursors.max_cursors_per_session,
+                idle_timeout_secs: config.security.cursors.idle_timeout_secs,
+                max_cursor_page_size: config.security.cursors.max_cursor_page_size,
+            })
+            .with_byte_budget(byte_budget.clone())
+            .with_session_store(session_store.clone()),
+        );
+        let tx_registry_for_reaper = handler_concrete.tx_registry();
+        let cursor_registry_for_reaper = handler_concrete.cursor_registry();
+        let handler: Arc<dyn RequestHandler> = handler_concrete;
+
+        // 5b. Follower-replication supervisor (386-c). Constructed here where
+        //     `shamir: Arc<ShamirDb>` is available. It is NOT reconciled yet —
+        //     the initial `reconcile()` runs AFTER all listeners are bound
+        //     (step 10b) so a follower does not dial an upstream before this
+        //     server is itself ready to serve. The prod factory builds a
+        //     `WireReplSource` (TLS+SCRAM) per subscription; when no replicator
+        //     credentials are configured the factory is a no-op stub and any
+        //     `active` subscription is logged-and-skipped by reconcile.
+        let repl_cfg = config.replication.clone().unwrap_or_default();
+        let node_id = repl_cfg.node_id.clone().unwrap_or_else(default_node_id);
+        let repl_factory = crate::replication::build_prod_factory(
+            repl_cfg.replicator_user.clone(),
+            repl_cfg.replicator_password.clone(),
+            repl_cfg.server_name.clone(),
+        )
+        .unwrap_or_else(|| {
+            // No creds → a stub factory that yields a never-connecting source.
+            // reconcile() still runs (idempotent, no-op for empty catalogues);
+            // a subscription with a real upstream simply cannot progress until
+            // credentials are configured. This keeps boot working with the
+            // default `replication = None`.
+            Arc::new(|_: &crate::replication::Subscription| {
+                Arc::new(crate::replication::prod_factory::NoopReplSource)
+                    as Arc<dyn crate::replication::ReplSource>
+            })
+        });
+        let supervisor = Arc::new(
+            crate::replication::SubscriptionSupervisor::new(shamir.clone(), repl_factory, node_id)
+                .with_validate_replicated_payload(repl_cfg.validate_replicated_payload),
+        );
+
+        // Phase B Stage 6 — background reaper for interactive txs that
+        // outlive their idle TTL or absolute deadline. Shares the root
+        // shutdown token: `ServerHandle::shutdown` cancels it once and this
+        // task observes the cancel on its next `select!` poll.
+        let interactive_tx_reaper = Some(crate::tx_registry::spawn_reaper_task(
+            tx_registry_for_reaper,
+            crate::tx_registry::DEFAULT_INTERACTIVE_TX_IDLE_TTL,
+            crate::tx_registry::DEFAULT_REAPER_INTERVAL,
+            shutdown_token.clone(),
+        ));
+
+        // FG-5b — background reaper for result cursors that outlive their
+        // idle TTL. Shares the root shutdown token, same pattern as the
+        // interactive-tx reaper above.
+        let cursor_reaper = Some(crate::cursor_registry::spawn_reaper_task(
+            cursor_registry_for_reaper,
+            Duration::from_secs(config.security.cursors.idle_timeout_secs),
+            crate::cursor_registry::DEFAULT_CURSOR_REAPER_INTERVAL,
+            shutdown_token.clone(),
+        ));
+
+        // 6. ResumeConfig.
+        let (current_key, previous_key) = meta
+            .ticket_keys()
+            .map_err(|e| BootError::ServerMeta(e.to_string()))?;
+        let resume_config = Arc::new(ResumeConfig::new(
+            current_key,
+            previous_key,
+            true,  // allow_browser_ticket_upgrade
+            false, // disable_plain_ticket_upgrade
+        ));
+
+        // 7. Identity material.
+        let identity = Arc::new(
+            meta.identity_state()
+                .map_err(|e| BootError::ServerMeta(e.to_string()))?,
+        );
+        let identity_seed = meta
+            .current_identity_seed()
+            .map_err(|e| BootError::ServerMeta(e.to_string()))?;
+        let secrets = Arc::new(
+            meta.server_secrets()
+                .map_err(|e| BootError::ServerMeta(e.to_string()))?,
+        );
+
+        // 8. Scheduler.
+        let scheduler = Scheduler::spawn(
+            SchedulerInputs {
+                counters: counters.clone(),
+                lockout: lockout.clone(),
+                rate_limit: rate_limit.clone(),
+                session_store: session_store.clone(),
+                session_max_age_ns: 24 * shamir_connect::common::time::ns::HOUR,
+                session_idle_ttl_ns: 30 * shamir_connect::common::time::ns::MINUTE,
+                audit_chain: audit_chain.clone(),
+                audit_appender: audit_appender.clone(),
+                identity: identity.clone(),
+            },
+            SchedulerConfig::default_for_production(),
+        );
+
+        // 9. TLS material — load or generate before binding any TCP+TLS
+        //    listener so we can fail fast on missing PEMs.
+        //
+        // We generate SAN entries lazily for now — the cert covers
+        // `localhost` and every literal IP in the configured listeners.
+        // Self-signed cert chain is informational only (Ed25519 pin in
+        // `auth_ok` is the real identity check).
+        let parsed_addrs: Vec<SocketAddr> = config
+            .listeners
+            .iter()
+            .filter_map(|l| l.addr.parse::<SocketAddr>().ok())
+            .collect();
+        let LoadedTls {
+            server_config: tls_server,
+            generated,
+        } = load_or_generate(
+            &config.tls.cert_path,
+            &config.tls.key_path,
+            subject_alts_from_addrs(&parsed_addrs),
+        )?;
+        if generated {
+            tracing::warn!(
+                cert_path = ?config.tls.cert_path,
+                "tls: self-signed cert generated — clients pin the Ed25519 \
+                 identity, the X.509 chain is informational only",
+            );
+        }
+        let tls_acceptor = TlsAcceptor::from(tls_server);
+
+        // 10. Spawn accept loops. They share the root `shutdown_token`
+        //     created at the top of `launch()` — `shutdown()` cancels it
+        //     once and every accept loop observes the cancel on its next
+        //     `select!` poll.
+        let mut bound_addrs: Vec<Option<SocketAddr>> = Vec::with_capacity(config.listeners.len());
+        // Companion to `bound_addrs`, same length/order — `kind: unix`
+        // listeners have no `SocketAddr` to report (see the early-return
+        // branch below), so they get `None` in `bound_addrs` and `Some(path)`
+        // here instead. Every other listener kind pushes `None` here.
+        let mut bound_ipc_paths: Vec<Option<String>> = Vec::with_capacity(config.listeners.len());
+        let mut listener_tasks: Vec<JoinHandle<()>> = Vec::new();
+
+        // Connection-level security knobs from config (slow-loris timeout, etc.)
+        let auth_init_timeout =
+            Duration::from_millis(config.security.connection.auth_init_timeout_ms);
+        // Global cap on simultaneously-active connections — shared across
+        // every listener.
+        let conn_limiter = ConnLimiter::new(config.security.connection.max_active_connections);
+        // Per-source-IP cap — bounds a single attacker host to a small
+        // fraction of the global cap (audit §2a / top-5 #4). `0` = off.
+        let per_ip_limiter =
+            PerIpLimiter::new(config.security.connection.max_active_connections_per_ip);
+
+        for l in &config.listeners {
+            // Local IPC (`kind: unix`) addresses a filesystem path / pipe
+            // name, not a `SocketAddr` — handled entirely on its own path,
+            // separate from the TCP/WS SocketAddr-based dispatch below
+            // (`Config::validate` already rejected any other `l.kind` +
+            // `l.addr` combination that wouldn't make sense here).
+            if l.kind == ListenerKind::Unix {
+                let listener = IpcListener::bind(&l.addr)
+                    .await
+                    .map_err(|e| BootError::Bind(format!("unix {}: {e}", l.addr)))?;
+                tracing::info!(path = %l.addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
+                let ctx = super::helpers::build_ctx(
+                    &identity,
+                    identity_seed,
+                    &secrets,
+                    kdf_for_bootstrap,
+                    &session_store,
+                    &user_dir,
+                    lockout.clone(),
+                    rate_limit.clone(),
+                    &argon2_sem,
+                    &audit_writer,
+                    &resume_config,
+                    &handler,
+                    BindingMode::None,
+                    TransportKind::Unix,
+                    l.kdf_override.as_ref().map(kdf_from_config),
+                    auth_init_timeout,
+                    &meta,
+                );
+                let token = shutdown_token.clone();
+                let limiter = conn_limiter.clone();
+                let per_ip = per_ip_limiter.clone();
+                listener_tasks.push(tokio::spawn(accept_loop_ipc(
+                    listener, ctx, token, limiter, per_ip,
+                )));
+                bound_addrs.push(None);
+                bound_ipc_paths.push(Some(l.addr.clone()));
+                continue;
+            }
+            bound_ipc_paths.push(None);
+
+            let addr: SocketAddr = match l.addr.parse() {
+                Ok(a) => a,
+                Err(e) => {
+                    return Err(BootError::Bind(format!(
+                        "addr {} is not a SocketAddr: {e}",
+                        l.addr
+                    )));
+                }
+            };
+
+            // Resolve the right (transport, binding_mode) tuple for this
+            // listener.
+            let (transport_kind, binding_mode, accept_path) = match (l.kind, l.profile) {
+                (ListenerKind::Tcp, ProfileKind::TlsExporter) => (
+                    TransportKind::Tcp,
+                    BindingMode::TlsExporter,
+                    AcceptPath::TcpTlsExporter,
+                ),
+                (ListenerKind::Tcp, ProfileKind::Plain) => {
+                    (TransportKind::Tcp, BindingMode::None, AcceptPath::TcpPlain)
+                }
+                (ListenerKind::Ws, ProfileKind::TlsExporter) => (
+                    TransportKind::WebSocket,
+                    BindingMode::TlsExporter,
+                    AcceptPath::WsNative,
+                ),
+                (ListenerKind::Ws, ProfileKind::TlsNoExport) => {
+                    let policy = browser_origin_policy_from(&l.browser_origin_allowlist)?;
+                    (
+                        TransportKind::WebSocket,
+                        BindingMode::TlsNoExport,
+                        AcceptPath::WsBrowser(policy),
+                    )
+                }
+                (kind, profile) => {
+                    tracing::warn!(
+                        addr = %addr,
+                        ?kind,
+                        ?profile,
+                        "listener skipped (unsupported MVP combination)",
+                    );
+                    bound_addrs.push(None);
+                    continue;
+                }
+            };
+
+            let local_addr = match accept_path {
+                AcceptPath::TcpTlsExporter => {
+                    let listener = bind_tcp(addr, TcpListenerProfile::TlsExporter)
+                        .await
+                        .map_err(|e| BootError::Bind(format!("tcp {addr}: {e}")))?;
+                    let local_addr = listener
+                        .local_addr()
+                        .map_err(|e| BootError::Bind(format!("local_addr: {e}")))?;
+                    tracing::info!(local_addr = %local_addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
+                    let ctx = super::helpers::build_ctx(
+                        &identity,
+                        identity_seed,
+                        &secrets,
+                        kdf_for_bootstrap,
+                        &session_store,
+                        &user_dir,
+                        lockout.clone(),
+                        rate_limit.clone(),
+                        &argon2_sem,
+                        &audit_writer,
+                        &resume_config,
+                        &handler,
+                        binding_mode,
+                        transport_kind,
+                        l.kdf_override.as_ref().map(kdf_from_config),
+                        auth_init_timeout,
+                        &meta,
+                    );
+                    let acceptor = tls_acceptor.clone();
+                    let token = shutdown_token.clone();
+
+                    let limiter = conn_limiter.clone();
+                    let per_ip = per_ip_limiter.clone();
+                    listener_tasks.push(tokio::spawn(accept_loop_tcp(
+                        listener, acceptor, ctx, token, limiter, per_ip,
+                    )));
+                    local_addr
+                }
+                AcceptPath::TcpPlain => {
+                    let listener = bind_tcp(addr, TcpListenerProfile::Plain)
+                        .await
+                        .map_err(|e| BootError::Bind(format!("tcp {addr}: {e}")))?;
+                    let local_addr = listener
+                        .local_addr()
+                        .map_err(|e| BootError::Bind(format!("local_addr: {e}")))?;
+                    tracing::info!(local_addr = %local_addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
+                    let ctx = super::helpers::build_ctx(
+                        &identity,
+                        identity_seed,
+                        &secrets,
+                        kdf_for_bootstrap,
+                        &session_store,
+                        &user_dir,
+                        lockout.clone(),
+                        rate_limit.clone(),
+                        &argon2_sem,
+                        &audit_writer,
+                        &resume_config,
+                        &handler,
+                        binding_mode,
+                        transport_kind,
+                        l.kdf_override.as_ref().map(kdf_from_config),
+                        auth_init_timeout,
+                        &meta,
+                    );
+                    let token = shutdown_token.clone();
+
+                    let limiter = conn_limiter.clone();
+                    let per_ip = per_ip_limiter.clone();
+                    listener_tasks.push(tokio::spawn(accept_loop_plain(
+                        listener, ctx, token, limiter, per_ip,
+                    )));
+                    local_addr
+                }
+                AcceptPath::WsNative => {
+                    let listener = bind_ws(addr, WsListenerProfile::Wss)
+                        .await
+                        .map_err(|e| BootError::Bind(format!("ws {addr}: {e}")))?;
+                    let local_addr = listener
+                        .local_addr()
+                        .map_err(|e| BootError::Bind(format!("local_addr: {e}")))?;
+                    tracing::info!(local_addr = %local_addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
+                    let ctx = super::helpers::build_ctx(
+                        &identity,
+                        identity_seed,
+                        &secrets,
+                        kdf_for_bootstrap,
+                        &session_store,
+                        &user_dir,
+                        lockout.clone(),
+                        rate_limit.clone(),
+                        &argon2_sem,
+                        &audit_writer,
+                        &resume_config,
+                        &handler,
+                        binding_mode,
+                        transport_kind,
+                        l.kdf_override.as_ref().map(kdf_from_config),
+                        auth_init_timeout,
+                        &meta,
+                    );
+                    let acceptor = tls_acceptor.clone();
+                    let token = shutdown_token.clone();
+
+                    let limiter = conn_limiter.clone();
+                    let per_ip = per_ip_limiter.clone();
+                    listener_tasks.push(tokio::spawn(accept_loop_ws_native(
+                        listener, acceptor, ctx, token, limiter, per_ip,
+                    )));
+                    local_addr
+                }
+                AcceptPath::WsBrowser(policy) => {
+                    let listener = bind_ws(addr, WsListenerProfile::WssBrowser)
+                        .await
+                        .map_err(|e| BootError::Bind(format!("ws {addr}: {e}")))?;
+                    let local_addr = listener
+                        .local_addr()
+                        .map_err(|e| BootError::Bind(format!("local_addr: {e}")))?;
+                    tracing::info!(local_addr = %local_addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
+                    let ctx = super::helpers::build_ctx(
+                        &identity,
+                        identity_seed,
+                        &secrets,
+                        kdf_for_bootstrap,
+                        &session_store,
+                        &user_dir,
+                        lockout.clone(),
+                        rate_limit.clone(),
+                        &argon2_sem,
+                        &audit_writer,
+                        &resume_config,
+                        &handler,
+                        binding_mode,
+                        transport_kind,
+                        l.kdf_override.as_ref().map(kdf_from_config),
+                        auth_init_timeout,
+                        &meta,
+                    );
+                    let acceptor = tls_acceptor.clone();
+                    let token = shutdown_token.clone();
+
+                    let limiter = conn_limiter.clone();
+                    let per_ip = per_ip_limiter.clone();
+                    listener_tasks.push(tokio::spawn(accept_loop_ws_browser(
+                        listener, acceptor, ctx, token, limiter, per_ip, policy,
+                    )));
+                    local_addr
+                }
+            };
+            bound_addrs.push(Some(local_addr));
+        }
+
+        // 11. Optional observability HTTP server. Spawned LAST so its
+        //     `/readyz` flips to 200 only after every listener is bound.
+        let observability = if config.observability.addr.is_empty() {
+            None
+        } else {
+            let addr: std::net::SocketAddr = config.observability.addr.parse().map_err(|e| {
+                BootError::Bind(format!(
+                    "observability.addr {} invalid: {e}",
+                    config.observability.addr
+                ))
+            })?;
+            let state = crate::observability::ObservabilityState::new();
+            // Record what the data-path bound to — `/info` surfaces this.
+            state.set_bound_addrs(bound_addrs.iter().filter_map(|a| *a).collect());
+            // The Prometheus recorder is global per-process. In integration
+            // tests where multiple servers spawn back-to-back the second
+            // launcher would error on `set_global_recorder`. We swallow
+            // that specific failure (recorder already installed = OK,
+            // we use the existing one) and continue without an exporter
+            // handle in that case.
+            // M-tier audit M5: `allow_public_metrics` comes straight from
+            // the parsed config (`ObservabilityConfig::allow_public_metrics`,
+            // default `false`). A non-loopback `addr` is rejected up-front
+            // unless the operator has explicitly opted in.
+            let allow_public_metrics = config.observability.allow_public_metrics;
+            // F-29 (#822): thread the same `ByteBudget` used by the request
+            // handler into the observability poller so
+            // `shamir_inflight_response_bytes_used`/`_cap` reflect the real
+            // RI-15 budget this server booted with, not a detached instance.
+            let handle = match crate::observability::spawn_with_byte_budget(
+                addr,
+                state.clone(),
+                true,
+                None,
+                Some(byte_budget.clone()),
+                Some(shamir.clone()),
+                allow_public_metrics,
+            )
+            .await
+            {
+                Ok(h) => h,
+                Err(crate::observability::ObservabilityError::RecorderInstall(_)) => {
+                    // Recorder already installed (typical in test process):
+                    // re-spawn without trying to install again.
+                    crate::observability::spawn_with_byte_budget(
+                        addr,
+                        state.clone(),
+                        false,
+                        None,
+                        Some(byte_budget.clone()),
+                        Some(shamir.clone()),
+                        allow_public_metrics,
+                    )
+                    .await
+                    .map_err(|e| BootError::Bind(format!("observability: {e}")))?
+                }
+                Err(e) => return Err(BootError::Bind(format!("observability: {e}"))),
+            };
+            handle.state.mark_ready();
+            Some(handle)
+        };
+
+        // 10b. Now that every listener is bound, converge the follower loops
+        //      to the declarative `system/subscriptions` catalogue and spawn a
+        //      periodic reconcile-tick so a subscription added/paused/dropped
+        //      at runtime is picked up without a restart. §5.6: the tick runs
+        //      on its own task and never blocks the server.
+        //
+        //      TODO(386-c): replace the fixed-interval tick with an
+        //      event-driven watch on the `system` repo changelog (table
+        //      `subscriptions`) → `supervisor.notify_changed()` on each event.
+        supervisor.reconcile().await;
+        let repl_supervisor_task = {
+            let sup = supervisor.clone();
+            let token = shutdown_token.clone();
+            let handle = tokio::spawn(async move {
+                let mut tick = tokio::time::interval(REPL_RECONCILE_INTERVAL);
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                // First tick fires immediately; skip it (we just reconciled).
+                tick.tick().await;
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = token.cancelled() => break,
+                        _ = tick.tick() => sup.reconcile().await,
+                    }
+                }
+            });
+            crate::server::server_handle::ReplSupervisorTask { handle }
+        };
+
+        Ok(ServerHandle {
+            bound_addrs,
+            bound_ipc_paths,
+            listener_tasks,
+            scheduler,
+            audit_appender,
+            shutdown_token,
+
+            observability,
+            meta_snapshot_task,
+            interactive_tx_reaper,
+            cursor_reaper,
+            repl_supervisor: supervisor,
+            repl_supervisor_task: Some(repl_supervisor_task),
+            shamir,
+            data_dir: config.data_dir.clone(),
+            conn_limiter: conn_limiter.clone(),
+            _data_dir_lock: data_dir_lock,
+            tunables: Arc::new(RuntimeTunables::new()),
+        })
+    }
+}
