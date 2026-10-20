@@ -80,11 +80,77 @@ impl ConsRepo {
             "delta.toml",
         ])
     }
+    /// Runs the comparison with `--delta` pointing at an existing file
+    /// in the repo (no write).
+    fn compare_with_delta_file(&self, rel: &str) -> Output {
+        let base = self.base_sha.clone();
+        self.repo.run_guard(&[
+            "conservation",
+            "--base",
+            &base,
+            "--head",
+            "HEAD",
+            "--delta",
+            rel,
+        ])
+    }
+
+    /// Runs the comparison with `--suggest-delta <out_rel>`; the
+    /// suggestion file (if any) is written relative to the repo root
+    /// (the guard's cwd) and read back via `read`.
+    fn compare_with_suggest(&self, out_rel: &str) -> Output {
+        let base = self.base_sha.clone();
+        self.repo.run_guard(&[
+            "conservation",
+            "--base",
+            &base,
+            "--head",
+            "HEAD",
+            "--suggest-delta",
+            out_rel,
+        ])
+    }
+
+    /// Reads a file inside the repo (suggestion files).
+    fn read(&self, rel: &str) -> String {
+        std::fs::read_to_string(self.repo.root.join(rel)).expect("read file")
+    }
+
+    /// Whether the file exists inside the repo (suggestion files).
+    fn read_ok(&self, rel: &str) -> bool {
+        self.repo.root.join(rel).exists()
+    }
 }
 
 /// stderr as text — the guard prints its findings there.
 fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// P3 parity: `--suggest-delta` must not change the gate's output apart
+/// from the note line(s) — same exit code, identical stdout, and a
+/// stderr that is the plain stderr plus note line(s) only.
+fn assert_flagless_output_unchanged(flagged: &Output, plain: &Output, note_marker: &str) {
+    assert_eq!(
+        flagged.status.code(),
+        plain.status.code(),
+        "exit code changed by --suggest-delta"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&flagged.stdout),
+        String::from_utf8_lossy(&plain.stdout),
+        "stdout changed by --suggest-delta"
+    );
+    let stripped: String = String::from_utf8_lossy(&flagged.stderr)
+        .lines()
+        .filter(|line| !line.contains(note_marker))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    assert_eq!(
+        stripped,
+        String::from_utf8_lossy(&plain.stderr),
+        "stderr changed by --suggest-delta beyond the note line(s)"
+    );
 }
 
 const LIB: &str = "crates/fix/src/lib.rs";
@@ -386,4 +452,201 @@ fn phantom_default_branch_is_not_inventoried() {
     // report TEST_LOST even though the unconditional path selects gen.rs.
     let repo = ConsRepo::two_commit("conservation/uncond_path_default_ignored");
     assert_clean(&repo.compare());
+}
+
+#[test]
+fn suggest_flag_writes_undeclared_moves() {
+    let repo = ConsRepo::two_commit("conservation/suggest_clean_moves");
+    let out = repo.compare_with_suggest("suggested.toml");
+    let err = stderr(&out);
+    assert!(!out.status.success(), "expected exit != 0:\n{err}");
+    assert!(err.contains("TEST_LOST"), "expected TEST_LOST:\n{err}");
+    assert!(
+        err.contains("rust-guard: note: 2 undeclared move(s) written to suggested.toml"),
+        "expected the stderr note line:\n{err}"
+    );
+    // P3 parity: apart from the note line the flagged run's output is
+    // byte-identical to the flagless run.
+    let plain = repo.compare();
+    assert_flagless_output_unchanged(&out, &plain, "rust-guard: note:");
+    let text = repo.read("suggested.toml");
+    assert!(
+        text.contains(&format!("base = \"{}\"", repo.base_sha)),
+        "expected the full base sha pin:\n{text}"
+    );
+    for expected in [
+        "path = \"crates/fix/src/lib.rs\"",
+        "item = \"fix::lib::helper\"",
+        "to_path = \"crates/fix/src/m.rs\"",
+        "to_item = \"fix::m::helper\"",
+        "item = \"fix::lib::t_ok\"",
+        "to_item = \"fix::m::t_ok\"",
+    ] {
+        assert!(text.contains(expected), "missing `{expected}`:\n{text}");
+    }
+    for absent in ["t_mut", "gone", "dup", "renamed"] {
+        assert!(
+            !text.contains(absent),
+            "`{absent}` must never be suggested:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn suggestion_feeds_back_to_clean() {
+    let repo = ConsRepo::two_commit("conservation/suggest_clean_moves");
+    let out = repo.compare_with_suggest("suggested.toml");
+    assert!(!out.status.success(), "the undeclared moves still fail");
+    assert!(repo.repo.root.join("suggested.toml").exists());
+    assert_clean(&repo.compare_with_delta_file("suggested.toml"));
+}
+
+#[test]
+fn mixed_fixture_suggests_only_clean_moves() {
+    let repo = ConsRepo::two_commit("conservation/suggest_mixed");
+    let out = repo.compare_with_suggest("suggested-mixed.toml");
+    let err = stderr(&out);
+    assert!(!out.status.success(), "expected exit != 0:\n{err}");
+    // P3 parity: apart from the note line the flagged run's output is
+    // byte-identical to the flagless run.
+    let plain = repo.compare();
+    assert_flagless_output_unchanged(&out, &plain, "rust-guard: note:");
+    assert!(err.contains("ITEM_LOST"), "expected ITEM_LOST:\n{err}");
+    assert!(
+        err.contains("UNPAIRABLE_DUPLICATE"),
+        "expected UNPAIRABLE_DUPLICATE:\n{err}"
+    );
+    let text = repo.read("suggested-mixed.toml");
+    assert_eq!(
+        text.matches("[[moved]]").count(),
+        2,
+        "exactly helper and t_ok are clean moves:\n{text}"
+    );
+    assert!(
+        text.contains("fix::lib::helper") && text.contains("fix::lib::t_ok"),
+        "expected helper + t_ok entries:\n{text}"
+    );
+    for absent in ["t_mut", "gone", "dup"] {
+        assert!(
+            !text.contains(absent),
+            "`{absent}` must never be suggested:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn without_suggest_flag_no_file_no_note() {
+    let repo = ConsRepo::two_commit("conservation/suggest_clean_moves");
+    let out = repo.compare();
+    let err = stderr(&out);
+    assert!(!out.status.success(), "expected exit != 0:\n{err}");
+    assert!(
+        !err.contains("rust-guard: note:"),
+        "no note without the flag:\n{err}"
+    );
+    assert!(
+        !repo.repo.root.join("suggested.toml").exists(),
+        "no suggestion file without the flag"
+    );
+}
+
+#[test]
+fn signature_changed_move_is_not_suggested() {
+    // P2-1: `helper` moved file AND changed signature (u32 -> i64, body
+    // tokens identical). A drifted move must never be suggested: the
+    // flagless findings (ITEM_LOST + ITEM_ADDED) are unchanged and the
+    // suggestion file carries no `helper` entry.
+    let repo = ConsRepo::two_commit("conservation/suggest_sig_changed");
+    let plain = repo.compare();
+    let plain_err = stderr(&plain);
+    assert!(
+        !plain.status.success(),
+        "expected flagless exit != 0:\n{plain_err}"
+    );
+    assert!(
+        plain_err.contains("ITEM_LOST") && plain_err.contains("ITEM_ADDED"),
+        "expected ITEM_LOST + ITEM_ADDED:\n{plain_err}"
+    );
+    let out = repo.compare_with_suggest("suggested.toml");
+    let err = stderr(&out);
+    assert!(!out.status.success(), "expected exit != 0:\n{err}");
+    assert_flagless_output_unchanged(&out, &plain, "rust-guard: note:");
+    if repo.read_ok("suggested.toml") {
+        let text = repo.read("suggested.toml");
+        assert!(
+            !text.contains("helper"),
+            "a signature-drifted move must never be suggested:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn body_changed_moved_test_regression() {
+    // P2-3: `t_mut` moved file AND changed body — it falls apart into a
+    // lost test (flagless), is never suggested, and a HAND-WRITTEN
+    // [[moved]] delta lets the pairing through but the body drift is
+    // reported as BODY_CHANGED (the declaration never silences drift).
+    let repo = ConsRepo::two_commit("conservation/suggest_mixed");
+    // (a) flagless: the move is undeclared AND drifted -> TEST_LOST.
+    let plain = repo.compare();
+    let plain_err = stderr(&plain);
+    assert!(
+        !plain.status.success(),
+        "expected flagless exit != 0:\n{plain_err}"
+    );
+    assert!(
+        plain_err.contains("TEST_LOST"),
+        "expected TEST_LOST:\n{plain_err}"
+    );
+    let out = repo.compare_with_suggest("suggested.toml");
+    assert!(!out.status.success(), "expected exit != 0");
+    assert_flagless_output_unchanged(&out, &plain, "rust-guard: note:");
+    if repo.read_ok("suggested.toml") {
+        let text = repo.read("suggested.toml");
+        assert!(
+            !text.contains("t_mut"),
+            "a body-drifted move must never be suggested:\n{text}"
+        );
+    }
+    // (b) hand-written delta declaring ONLY the t_mut move: the pairing
+    // succeeds, the body change surfaces as BODY_CHANGED.
+    let delta = format!(
+        "base = \"{}\"\n\n\
+         [[moved]]\n\
+         path = \"{LIB}\"\n\
+         item = \"fix::lib::t_mut\"\n\
+         to_path = \"crates/fix/src/m.rs\"\n\
+         to_item = \"fix::m::t_mut\"\n\
+         reason = \"hand-declared move of the drifted test\"\n\
+         owner = \"@rust-guard\"\n",
+        repo.base_sha
+    );
+    repo.write("delta-body.toml", &delta);
+    let out = repo.compare_with_delta_file("delta-body.toml");
+    let err = stderr(&out);
+    assert!(!out.status.success(), "expected exit != 0:\n{err}");
+    assert!(
+        err.contains("BODY_CHANGED"),
+        "the declared move must still report the body drift:\n{err}"
+    );
+}
+
+#[test]
+fn suggest_flag_leaves_failing_fixture_output_unchanged() {
+    // P3: a fixture that produces NO suggestions at all — the flagged
+    // run is byte-identical to the flagless run: same exit code, same
+    // stderr (no note line), and no file written.
+    let repo = ConsRepo::two_commit("conservation/body_changed");
+    let plain = repo.compare();
+    let out = repo.compare_with_suggest("suggested.toml");
+    assert_flagless_output_unchanged(&out, &plain, "rust-guard: note:");
+    let err = stderr(&out);
+    assert!(
+        !err.contains("rust-guard: note:"),
+        "no note when nothing is suggested:\n{err}"
+    );
+    assert!(
+        !repo.repo.root.join("suggested.toml").exists(),
+        "no file when nothing is suggested"
+    );
 }
