@@ -1,0 +1,113 @@
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use super::super::MvccStore;
+
+/// Per-store history retention — three ORTHOGONAL optional knobs
+/// (TEMPORAL.md §3). Default = CurrentOnly (`max_count: Some(0)`): keep only
+/// current + versions pinned by live snapshots. All three knobs are enforced
+/// by [`MvccStore::vacuum_key`] (T1c wired `max_age_secs` once versions
+/// carry a per-version commit timestamp).
+///
+/// Stored on [`MvccStore`] via `ArcSwap<Retention>` (lock-free swappable —
+/// three fields can't be one atomic).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retention {
+    /// AGE cap: reclaim versions whose commit timestamp is older than
+    /// `max_age_secs` seconds (a version with no recorded ts is treated as
+    /// "unknown age" and conservatively KEPT by the age axis).
+    pub max_age_secs: Option<u64>,
+    /// COUNT cap: keep at most N old versions per key (`None` = unlimited).
+    pub max_count: Option<u64>,
+    /// COUNT floor: always keep ≥ M newest old versions per key, EVEN IF
+    /// older than `max_age_secs` (this is `min_count`'s real job — protect
+    /// recent versions from the age cap). Inert against the count cap
+    /// (validation guarantees `min_count ≤ max_count`, so the cap already
+    /// keeps ≥ min_count).
+    pub min_count: Option<u64>,
+}
+
+impl Default for Retention {
+    fn default() -> Self {
+        // CurrentOnly: keep 0 old versions (current + live-snapshot-pinned only).
+        Self {
+            max_age_secs: None,
+            max_count: Some(0),
+            min_count: None,
+        }
+    }
+}
+
+impl Retention {
+    /// CurrentOnly: keep only current + versions pinned by live snapshots.
+    pub fn current_only() -> Self {
+        Self::default()
+    }
+
+    /// KeepHistory (Forever): retain all versions — no count cap.
+    pub fn keep_history() -> Self {
+        Self {
+            max_age_secs: None,
+            max_count: None,
+            min_count: None,
+        }
+    }
+
+    /// Check if this retention is the CurrentOnly default: `max_count == Some(0)`
+    /// and `max_age_secs == None`. Used by the targeted-remove fast path in
+    /// `vacuum_key` (L6) to skip prefix scans on the hot write path.
+    pub fn is_current_only(&self) -> bool {
+        self.max_count == Some(0) && self.max_age_secs.is_none()
+    }
+
+    /// Validate: `min_count` must be `<= max_count` when both are `Some`.
+    /// Returns `Err(message)` on violation.
+    pub fn validate(&self) -> Result<(), String> {
+        if let (Some(mc), Some(maxc)) = (self.min_count, self.max_count) {
+            if mc > maxc {
+                return Err(format!(
+                    "retention: min_count ({mc}) must be <= max_count ({maxc})"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl MvccStore {
+    /// T1c: current wall-clock millis. If `test_now_millis` is non-zero
+    /// (set via [`Self::set_test_now`]) that frozen value is returned;
+    /// otherwise the real `SystemTime` since `UNIX_EPOCH` is used. Retention
+    /// is calendar time, so `SystemTime` (not a monotonic clock) is correct.
+    pub(crate) fn now_millis(&self) -> u64 {
+        let frozen = self.test_now_millis.load(Ordering::Acquire);
+        if frozen != 0 {
+            return frozen;
+        }
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    /// T1c (tests): freeze the clock at `ms` millis for deterministic
+    /// retention behaviour. Pass `0` to restore the real clock.
+    pub fn set_test_now(&self, ms: u64) {
+        self.test_now_millis.store(ms, Ordering::Release);
+    }
+
+    /// Set the history-retention policy (lock-free `ArcSwap` swap).
+    /// Validates first; on invalid `min_count > max_count` the old policy is
+    /// kept (no panic). Returns `Err(message)` on validation failure.
+    pub fn set_retention(&self, policy: Retention) -> Result<(), String> {
+        policy.validate()?;
+        self.retention.store(Arc::new(policy));
+        Ok(())
+    }
+
+    /// Load the current history-retention policy (RCU snapshot).
+    pub fn retention(&self) -> arc_swap::Guard<Arc<Retention>> {
+        self.retention.load()
+    }
+}
