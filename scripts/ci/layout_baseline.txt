@@ -85,11 +85,8 @@ file crates/shamir-engine/src/tx/tests/drainer_tests.rs 1344
 file crates/shamir-engine/src/tx/tests/p1096_tx_aware_unique_check_tests.rs 1305
 file crates/shamir-engine/src/tx/tests/recovery_tests.rs 1726
 file crates/shamir-engine/tests/crash_recovery.rs 1651
-file crates/shamir-server/src/config.rs 1002
 file crates/shamir-server/src/db_handler/cursor_handlers.rs 2090
 file crates/shamir-server/src/db_handler/tests/cursor_handler_tests.rs 5380
-file crates/shamir-server/src/server/server_launcher.rs 1733
-file crates/shamir-server/src/user_directory.rs 1203
 file crates/shamir-server/tests/backup_restore_e2e.rs 1128
 file crates/shamir-server/tests/db_handler.rs 1174
 file crates/shamir-server/tests/hmac_gate.rs 1876
