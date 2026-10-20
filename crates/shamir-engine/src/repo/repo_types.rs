@@ -24,6 +24,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(feature = "fjall")]
 use tokio::sync::OnceCell;
+#[cfg(feature = "fjall")]
 use tokio::task;
 
 #[derive(Clone)]
@@ -61,7 +62,7 @@ pub struct CachedRepoComposite {
 
 /// F-33 Step 2 (#836): composes an ephemeral in-memory repo (table DATA)
 /// with a durable fjall repo (table CONFIGURATION mirror). `store_get`
-/// routes by STORE NAME — see [`HybridRepoComposite::build_store`] for the
+/// routes by STORE NAME — see `HybridRepoComposite::build_store` for the
 /// full per-name routing table and rationale.
 ///
 /// **Critical coupling**: `__interner__` is mirrored with an ALLOW-ALL
@@ -466,6 +467,7 @@ impl BoxRepoFactory {
     /// Users tuning for either side (more cache or stricter
     /// durability) construct their own `MemBufferConfig` and call
     /// `BoxRepoFactory::membuffer(inner, custom)` explicitly.
+    #[cfg(feature = "fjall")]
     fn default_membuffer_config() -> MemBufferConfig {
         MemBufferConfig {
             // 64 MiB resident cap — comfortable for embedded /
@@ -485,6 +487,7 @@ impl BoxRepoFactory {
     /// Wrap a raw factory in the default `MemBufferConfig`. Used
     /// internally by every disk-backend constructor — they all
     /// return a MemBuffer-wrapped factory by default.
+    #[cfg(feature = "fjall")]
     fn wrapped(raw: BoxRepoFactory) -> Self {
         BoxRepoFactory::MemBuffer(Box::new(MemBufferRepoFactory {
             inner: raw,
@@ -552,7 +555,7 @@ impl BoxRepoFactory {
     /// Disk backends return their `path`; `InMemory` returns `None`; the
     /// `MemBuffer`/`Cached` wrappers delegate to their inner factory so the
     /// real disk path at the bottom of the stack surfaces. Used by
-    /// [`RepoInstance::repo_wal`] to decide whether to construct a
+    /// `RepoInstance::repo_wal` to decide whether to construct a
     /// file-backed WAL group (disk) or fall back to the KV-marker WAL
     /// (in-memory).
     pub fn backing_dir(&self) -> Option<PathBuf> {

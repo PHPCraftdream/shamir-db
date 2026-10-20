@@ -6,7 +6,7 @@
 //! module-directory rules apply. Conditional `#[cfg_attr(..., path = "...")]`
 //! is intentionally rejected as `UNSUPPORTED_CFG_ATTR_PATH`.
 
-use crate::gitfs::GitFs;
+use crate::common::gitfs::GitFs;
 
 /// True when a PARSED cfg predicate is statically unsatisfiable — the
 /// forms provably impossible without feature/target evaluation:

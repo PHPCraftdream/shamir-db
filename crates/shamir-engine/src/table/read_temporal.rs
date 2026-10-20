@@ -427,8 +427,8 @@ impl TableManager {
     /// current-state filter path (a streaming scan + the compiled
     /// `where` callback — the same machinery `read_collecting` uses,
     /// but we keep only the ids). For each matched id we ask the
-    /// table's [`MvccStore`] for its full version timeline
-    /// ([`MvccStore::history_of`]), then apply the `History`
+    /// table's `MvccStore` for its full version timeline
+    /// (`MvccStore::history_of`), then apply the `History`
     /// range / order / limit.
     ///
     /// Each output row is the projected fields (via `apply_select` on

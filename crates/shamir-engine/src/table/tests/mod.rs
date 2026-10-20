@@ -5,6 +5,7 @@ pub mod asof_read_tests;
 pub mod batch_hoist_invariants_tests;
 pub mod bindings_len_tests;
 pub mod buffer_config_tests;
+#[cfg(feature = "fjall")]
 pub mod concurrent_tests;
 pub mod corrupt_record_byte_path_tests;
 pub mod corrupt_record_tests;
@@ -73,6 +74,7 @@ pub mod p1088_phase_c_d_tests;
 pub mod p1098_gen_read_order_tests;
 pub mod p967_ddl_structured_error_tests;
 pub mod p997_hash_rename_durability_tests;
+#[cfg(feature = "fjall")]
 pub mod persistence_tests;
 pub mod r0a_registry_watermark_admission_tests;
 pub mod r0c_registry_atomicity_and_namespace_tests;
@@ -97,6 +99,7 @@ pub mod stream_tx_tests;
 pub mod stream_utils;
 pub mod table_config_tests;
 pub mod table_manager_tests;
+#[cfg(feature = "fjall")]
 pub mod table_tests;
 pub mod test_helpers;
 pub mod tx_read_shortcut_tests;

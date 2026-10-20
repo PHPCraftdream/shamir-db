@@ -52,12 +52,12 @@ pub async fn open_interactive_tx(
 /// EXECUTE one batch inside an already-open interactive tx, WITHOUT
 /// committing.
 ///
-/// Mirrors [`execute_batch`] but threads the caller's existing `tx` through
-/// [`execute_plan_tx`]; the returned `BatchResponse` always has
+/// Mirrors `execute_batch` but threads the caller's existing `tx` through
+/// `execute_plan_tx`; the returned `BatchResponse` always has
 /// `transaction: None` (the tx remains open — the commit outcome is reported
 /// later by [`commit_interactive_tx`]).
 ///
-/// The single-repo guard is enforced here exactly as in [`execute_batch`];
+/// The single-repo guard is enforced here exactly as in `execute_batch`;
 /// the caller additionally asserts that the batch targets the SAME repo the
 /// handle is pinned to (the engine tx is committed against one repo).
 ///
@@ -73,7 +73,7 @@ pub async fn open_interactive_tx(
 /// the caller, not this per-call deadline. Commit/WAL are not timed here.
 ///
 /// Takes an [`Authorized`] token, not a raw `&BatchRequest` + `Actor` pair
-/// (#1199) — see [`execute_batch`]'s doc and `authorized.rs`'s module doc.
+/// (#1199) — see `execute_batch`'s doc and `authorized.rs`'s module doc.
 pub async fn execute_in_open_tx(
     auth: Authorized<'_>,
     resolver: &dyn TableResolver,

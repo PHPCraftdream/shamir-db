@@ -113,10 +113,12 @@ pub(crate) mod test_seam {
         }
     }
 
+    #[cfg(all(test, feature = "fjall"))]
     pub(crate) fn on_sample_w(repo: &RepoInstance, callback: impl FnOnce() + Send + 'static) {
         with_state(repo, |state| state.on_sample_w = Some(Box::new(callback)));
     }
 
+    #[cfg(all(test, feature = "fjall"))]
     pub(crate) fn take_order(repo: &RepoInstance) -> Vec<&'static str> {
         with_state(repo, |state| std::mem::take(&mut state.order))
     }
