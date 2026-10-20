@@ -1,9 +1,6 @@
-# 131d — PR8b-3 destination lifecycle: review round-4 findings — RESOLVED LOG (round 5)
+# 131d — PR8b-3 destination lifecycle: round-4 findings (historical resolutions with R8 corrections)
 
-STATUS: ALL items below are closed in `131-s5cx-destination-lifecycle.md` (M),
-`131b-s5cx-destination-lifecycle-surface.md` (S) and
-`131a-s5cx-destination-lifecycle-evidence.md` (E), resolved against the MERGED
-#188/#189 code (master at 95c825f7). This file is retained as the per-item map only.
+STATUS: historical resolutions below are retained; round-8 corrections supersede prior conclusions where stated. Current corrected decisions are recorded in each round-8 entry.
 
 ## D1-D6
 
@@ -85,30 +82,26 @@ STATUS: ALL items below are closed in `131-s5cx-destination-lifecycle.md` (M),
   unbound-repo destruction path; stage-2 absent-destination rule covers never-destroyed
   targets; §7c item 2 scoped to live/catalogued (item 4 live); S:228-vs-M:237 contradiction
   resolved (M §4a step 0, §4c (a); S §7c, A.4).
-- P2-9 — resolved (round 5): terminal event kind unified as `destroyed`; CREATE REPO is
-  repo-scope SHARED (mode by KIND); db-gate fairness caveat + multi-db sorted order added
-  (M §3e item 2, §4e; S A.5).
+- P2-9 — corrected round 8: terminal event kind unified as `destroyed`; CREATE REPO remains repository-scope SHARED, but CREATE DATABASE is database-scope EXCLUSIVE. The old inventory omitted that distinction; M §4e/S §7b provide the proposed path map.
 
-## P3
+- R1 P1: 8b-3c early read-only check after maintenance lock, before find_complete; no control lock, maintenance exclusion through install, matching authoritative catalogue predicates. CI acceptance requires pre-open/import/publish/register assertions.
+- R2 P2: old try_lock cleanup unsafe; S §7a uses strong_count==1 under shared registry lock, forbids bypass handles, and uses safe backpressure.
+- R3 P2: Appendix 13 is merged-only inventory; M §4e/S §7b separately prove proposed compositions, including exclusive CREATE DATABASE scope.
 
 - P3 torn audit line — resolved (round 5): `read_log_for_verify` skips a torn FINAL line
   only; a middle gap fails closed (M §3e item 0b).
 - P3 retention sweep — resolved (round 5): sweeps exclude the active log while
   `audit_pending` is non-empty; a re-append after a bad sweep is benign (M §3e item 7).
-- P3 admissions DashMap — resolved (round 5): entry removed on uncontended release /
-  bounded-size policy (S §7a).
+- P3 admissions DashMap — corrected round 8: the former try_lock-probe cleanup claim was unsafe and is withdrawn. S §7a requires removal only at strong_count == 1 under the same registry lock used by all cloning/get-or-create paths, with no weak/external bypass handles and safe backpressure instead of referenced-entry eviction.
 - P3 recovery-clear reachability — resolved (round 5): predicate is staged, unreachable
   before 8b-3d, asserted only negatively in stage 1 (M §3d; E §10).
 - P3 Blocked(Prepare) — resolved (round 5): unsupported backends refused at preflight;
   `Blocked(Phase::Prepare)` unreachable; `UnsupportedBackend` kept for schema stability
   (M §3b; E §10 8b-3a).
 
-## Round 6 (adversarial review of round 5, K1-K3)
+**Round 8:** the former proposed change description is superseded. Gate-order additions apply to creation and subscription/lifecycle compositions beyond the seed wrapper; see M §4e/S §7b. This review finding is about original merged-code citations, not proof that the future design paths already exist.
 
-- K1 — resolved (round 6): seed-install boundary (i) — 8b-3e wrapper takes gates+control
-  before the installer body, `install_seed_subscription` gains guard parameters (M §4e
-  item 8/Class B; S §7b row 8; E case 14, §10); mechanical merged lock-site inventory
-  added as E Appendix 13 (29 rows) and the M §4e proof redone over the complete table.
+- K1(b) — corrected round 8: merged Appendix 13 remains factual inventory, but the prior Class A leaf conclusion is not valid for the proposed composed system. M §4e/S §7b now enumerate and prove the added gate-before-control paths (CREATE DATABASE, CREATE REPO, generic add-repo, CREATE SUBSCRIPTION/RESUME, remove/rename/destroy/R1, seed wrapper).
 - K2 — resolved (round 6): closed durability-proof rule replaces the adopt-after-fsync
   branch everywhere (M §3e item 6; S A.7a/A.7b; E risk 8, case 3).
 - K3 — resolved (round 6): D5's binding-keyed resume specified — `SubscriptionRemoval`
@@ -133,8 +126,7 @@ STATUS: ALL items below are closed in `131-s5cx-destination-lifecycle.md` (M),
 - C6 — resolved (round 6): challenge failure at (iii) keeps `Prepared`; same-id
   resubmission remedy; challenge gates first submission only (M §4a step 1;
   S §6a/§6c).
-- C7 — resolved (round 6): minimal seed-install reservation check in 8b-3c's
-  existing control section; 8b-3a residual gap stated (M §1/I4; E §10).
+- C7 — corrected round 8: the merged installer exists. 8b-3c's early read-only check is under maintenance-lock exclusion and before find_complete; it does not assert 8b-3e wrapper. Same predicates/typed refusal as catalogue.rs:161; includes rebind and no-optional-subscription and before-open CI assertions.
 - C8 — resolved (round 6): archival of final-`Blocked` + fully-acked with explicit
   reservation release (S Appendix B; M §3e item 7; E risk 7).
 - C9 — resolved (round 6): 8b-3a structural boot hook + synthetic-view unit-test
