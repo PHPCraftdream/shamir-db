@@ -260,11 +260,19 @@ async fn t6_quarantine_survives_restart() {
             .unwrap();
         shamir.create_db("testdb").await;
         // Durable repo, persisted via the facade so the boot reload finds the
-        // catalogue row.
+        // catalogue row. No inline tables: the installed seed image carries
+        // the `users` table (writer registration + catalogue write).
+        // RAW fjall (no MemBuffer): this test installs a replacement SEED on
+        // the repo and binds a SUBSCRIPTION to it, and the new CREATE/RESUME
+        // admission (repo-wide atomic-batch capability, see supervisor.rs
+        // validate_repo_wide_atomic_batch) correctly refuses MemBuffer-wrapped
+        // destinations with `atomic_batch_unsupported`. Raw fjall is also the
+        // backend the seed writes through, so the durable directory survives
+        // the restart below.
         shamir
             .add_repo(
                 "testdb",
-                RepoConfig::new("main", BoxRepoFactory::fjall(repo_path.clone())),
+                RepoConfig::new("main", BoxRepoFactory::fjall_raw(repo_path.clone())),
             )
             .await
             .unwrap();
@@ -778,7 +786,13 @@ async fn t14_bound_destination_stays_refused_after_profile_drop_and_reopen() {
         shamir
             .add_repo(
                 "testdb",
-                RepoConfig::new("main", BoxRepoFactory::fjall(repo_path.clone())),
+                // RAW fjall (no MemBuffer): this test binds a SUBSCRIPTION to
+                // this repo, and the CREATE/RESUME admission
+                // (validate_repo_wide_atomic_batch) refuses MemBuffer-wrapped
+                // destinations with `atomic_batch_unsupported`. Raw fjall is also
+                // the backend the seed writes through, so the durable directory
+                // survives the reopen below.
+                RepoConfig::new("main", BoxRepoFactory::fjall_raw(repo_path.clone())),
             )
             .await
             .unwrap();
@@ -843,7 +857,13 @@ async fn t15_replacement_rebind_survives_reopen_and_resume_requires_full_recover
         shamir
             .add_repo(
                 "testdb",
-                RepoConfig::new("main", BoxRepoFactory::fjall(repo_path.clone())),
+                // RAW fjall (no MemBuffer): this test binds a SUBSCRIPTION to
+                // this repo, and the CREATE/RESUME admission
+                // (validate_repo_wide_atomic_batch) refuses MemBuffer-wrapped
+                // destinations with `atomic_batch_unsupported`. Raw fjall is also
+                // the backend the seed writes through, so the durable directory
+                // survives the reopen below.
+                RepoConfig::new("main", BoxRepoFactory::fjall_raw(repo_path.clone())),
             )
             .await
             .unwrap();

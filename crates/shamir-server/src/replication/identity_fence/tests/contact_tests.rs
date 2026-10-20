@@ -5,11 +5,12 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use shamir_db::engine::meta::repl::bookmark_v3::{
-    decode_bookmark_v3, save_bookmark_v3, BookmarkV3,
+    decode_bookmark_v3, load_bookmark_v3, save_bookmark_v3, BookmarkV3,
 };
 use shamir_db::engine::meta::repo_identity::RepoIdentity;
 use shamir_db::engine::meta::{MetaEnvelope, MetaKey};
 use shamir_db::engine::repo::BoxRepoFactory;
+use shamir_db::storage::error::{DbError, FollowerRefusalReason};
 use shamir_db::storage::types::RecordKey;
 use shamir_db::SeedRefusal;
 use shamir_query_types::wire::repl::ReplResponse;
@@ -134,7 +135,7 @@ async fn missing_identity_is_fail_closed_even_without_a_record() {
     }
     let info = repo(&follower).tx_info_store().await.unwrap();
     assert!(matches!(
-        checks::fence_pull_identity(&info, &pull, None).await,
+        checks::fence_pull_identity(&info, &pull, None, None).await,
         Err(crate::replication::ReplError::Seed(
             SeedRefusal::MissingIdentity
         ))
@@ -239,7 +240,20 @@ fn memory_and_hybrid_reopen_with_new_lineage_and_stop_followers() {
 async fn bookmark_codec_round_trips_boundaries_and_rejects_trailing_bytes() {
     let follower = build_memory().await;
     let info = repo(&follower).tx_info_store().await.unwrap();
-    for bookmark in [0, u64::MAX] {
+    let bookmark_key =
+        || RecordKey::from_slice(MetaKey::ReplicationBookmark.as_record_id().as_bytes());
+    // Round-trip the v3 bookmark CODEC through `save_bookmark_v3` — the v3
+    // writer the receipt advance path is built on — because the
+    // `recorded::save` fresh-baseline path on an ABSENT key forces the flat
+    // AND fence bookmark to ZERO (bookmark.rs fresh-baseline branch), so it
+    // cannot store an arbitrary bookmark. COUNTERFACTUAL: reverting to the
+    // old "save the supplied record on an absent key and expect it back"
+    // oracle turns the u64::MAX iterations red, because that writer forces
+    // bookmark 0 and the equality against the supplied value is
+    // deterministically false. The fence bookmark is synced to the flat
+    // bookmark exactly like the receipt checkpoint does (the v3 decode
+    // invariant `fence.bookmark == record.bookmark`).
+    for bookmark in [0, 1, u64::MAX - 1, u64::MAX] {
         for observed_identity in [
             None,
             Some(RepoIdentity {
@@ -247,27 +261,114 @@ async fn bookmark_codec_round_trips_boundaries_and_rejects_trailing_bytes() {
                 history_epoch: u64::MAX,
             }),
         ] {
-            let record = recorded::FenceRecord {
-                bookmark,
-                lineage_id: [17; 16],
-                history_epoch: u64::MAX,
-                observed_identity,
-            };
-            recorded::save(&info, record).await.unwrap();
-            assert_eq!(recorded::load(&info).await.unwrap(), Some(record));
+            // Fixture reset: each boundary pair round-trips from a clean key
+            // (the strict writer refuses over foreign bytes and preserves an
+            // existing record's bookmark).
+            info.remove(bookmark_key()).await.unwrap();
+            // Establish the fence with the fresh-baseline writer (it writes
+            // bookmark 0 on an absent key, preserving the identity fields).
+            recorded::save(
+                &info,
+                recorded::FenceRecord {
+                    bookmark: 0,
+                    lineage_id: [17; 16],
+                    history_epoch: u64::MAX,
+                    observed_identity,
+                },
+            )
+            .await
+            .unwrap();
+            let fence_from_baseline = recorded::load(&info)
+                .await
+                .unwrap()
+                .expect("the fresh baseline must be readable");
+            // Write the boundary through the v3 writer, syncing the fence's
+            // bookmark to the record's bookmark.
+            save_bookmark_v3(
+                &info,
+                &BookmarkV3 {
+                    fence: Some(recorded::FenceRecord {
+                        bookmark,
+                        ..fence_from_baseline
+                    }),
+                    bookmark,
+                    clean_through: None,
+                    outstanding_receipt: None,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                recorded::load(&info).await.unwrap(),
+                Some(recorded::FenceRecord {
+                    bookmark,
+                    ..fence_from_baseline
+                })
+            );
+            assert_eq!(
+                load_bookmark_v3(&info).await.unwrap().unwrap().bookmark,
+                bookmark
+            );
             assert_eq!(
                 repo(&follower).replication_bookmark().await.unwrap(),
                 bookmark
             );
-            let mut bytes = MetaEnvelope::new((1u16, record)).encode().unwrap();
+            // Honest trailing-byte probe: append one byte to the bytes the
+            // real v3 writer produced, and expect the strict reader to
+            // refuse. A refused state keeps refusing — the writer never
+            // overwrites it (fixture reset below, not production behaviour).
+            let mut bytes = info.get(bookmark_key()).await.unwrap().to_vec();
             bytes.push(0);
-            info.set(
-                RecordKey::from_slice(MetaKey::ReplicationBookmark.as_record_id().as_bytes()),
-                Bytes::from(bytes),
+            info.set(bookmark_key(), Bytes::from(bytes)).await.unwrap();
+            assert!(recorded::load(&info).await.is_err());
+            // `save_bookmark_v3` blind-writes (encode + set), so the
+            // refusal probe goes through the strict aware writer, which
+            // reads before writing and refuses over foreign bytes.
+            assert!(recorded::save(
+                &info,
+                recorded::FenceRecord {
+                    bookmark,
+                    ..fence_from_baseline
+                }
             )
             .await
-            .unwrap();
-            assert!(recorded::load(&info).await.is_err());
+            .is_err());
         }
     }
+    info.remove(bookmark_key()).await.unwrap();
+
+    // Legacy tuple version 1 (the pre-v3 fixed-width fence encoding, no
+    // trailing bytes) is a typed legacy refusal, never a rewrite: `load`
+    // reports `LegacyBookmarkFormat` and `save` declines to mint a v3 record
+    // over it.
+    let legacy = MetaEnvelope::new((
+        1u16,
+        recorded::FenceRecord {
+            bookmark: 7,
+            lineage_id: [17; 16],
+            history_epoch: 0,
+            observed_identity: None,
+        },
+    ))
+    .encode()
+    .unwrap();
+    info.set(bookmark_key(), Bytes::from(legacy)).await.unwrap();
+    assert!(matches!(
+        recorded::load(&info).await,
+        Err(DbError::FollowerStateRefused {
+            reason: FollowerRefusalReason::LegacyBookmarkFormat
+        })
+    ));
+    assert!(recorded::save(
+        &info,
+        recorded::FenceRecord {
+            bookmark: 0,
+            lineage_id: [17; 16],
+            history_epoch: 0,
+            observed_identity: None,
+        }
+    )
+    .await
+    .is_err());
+    info.remove(bookmark_key()).await.unwrap();
 }

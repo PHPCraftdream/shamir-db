@@ -307,11 +307,7 @@ impl Repo for BoxRepo {
             BoxRepo::InMemory(repo) => repo.supports_atomic_batch(),
             #[cfg(feature = "fjall")]
             BoxRepo::Fjall(repo) => repo.supports_atomic_batch(),
-            // Wrapper composites keep read/write caches OUTSIDE an atomic
-            // batch's scope, so a staged commit would bypass them.
             BoxRepo::MemBuffer(_) | BoxRepo::Cached(_) => false,
-            // Hybrid splits stores across two physical databases; no single
-            // atomic commit spans both.
             #[cfg(feature = "fjall")]
             BoxRepo::Hybrid(_) => false,
         }
@@ -323,13 +319,25 @@ impl Repo for BoxRepo {
             #[cfg(feature = "fjall")]
             BoxRepo::Fjall(repo) => repo.begin_atomic_batch().await,
             BoxRepo::MemBuffer(_) | BoxRepo::Cached(_) => Err(DbError::AtomicBatchUnsupported(
-                "MemBuffer/Cached wrappers cannot participate in repository-wide atomic batches"
-                    .into(),
+                "repository-wide atomic batches are unsupported; use a raw in-memory or raw fjall repository".into(),
             )),
             #[cfg(feature = "fjall")]
             BoxRepo::Hybrid(_) => Err(DbError::AtomicBatchUnsupported(
-                "hybrid repos split stores across two physical databases".into(),
+                "repository-wide atomic batches are unsupported for hybrid repositories; use a raw in-memory or raw fjall repository".into(),
             )),
+        }
+    }
+}
+
+impl BoxRepo {
+    /// Validate repository-wide atomic batch support using the repository backend.
+    pub fn validate_repo_wide_atomic_batch(&self, destination: &str) -> DbResult<()> {
+        if self.supports_atomic_batch() {
+            Ok(())
+        } else {
+            Err(DbError::AtomicBatchUnsupported(format!(
+                "repository {destination} does not support repository-wide atomic batches; use a raw in-memory or raw fjall repository"
+            )))
         }
     }
 }

@@ -10,7 +10,7 @@ use crate::meta::recovery_marker::{
     load_last_committed, load_next_tx_id_snapshot, save_last_committed_flushed,
     save_next_tx_id_snapshot,
 };
-use crate::meta::repl_bookmark::save_replication_bookmark;
+use crate::meta::repl::bookmark_v3::{save_bookmark_v3, BookmarkV3};
 use crate::repo::RepoInstance;
 
 use super::inventory::SeedTable;
@@ -265,6 +265,10 @@ impl SeedImageWriter {
     /// Returned receipt authorizes publication, NOT subscription activation.
     /// cancel-safe: NO — bookmark/Complete set may finish without acknowledgement.
     /// On error preserve staging. An exact completed retry must re-flush state.
+    /// PR6b-3: the bookmark record written here is the NEW v3 baseline (upstream
+    /// bookmark = seed source version, local clean horizon = the certified local
+    /// baseline, no outstanding receipt, fence absent until later identity
+    /// adoption) — new-format installation, not migration.
     pub async fn finish(mut self, schema_stores: &[Arc<dyn Store>]) -> DbResult<SeedReceipt> {
         self.enter()?;
         for (table, count) in self.tables.iter().zip(&self.counts) {
@@ -307,7 +311,16 @@ impl SeedImageWriter {
         let bookmark_info = self.bookmark_store.as_ref().unwrap_or(&info);
         #[cfg(not(test))]
         let bookmark_info = &info;
-        save_replication_bookmark(bookmark_info, self.receipt.source_version).await?;
+        save_bookmark_v3(
+            bookmark_info,
+            &BookmarkV3 {
+                fence: None,
+                bookmark: self.receipt.source_version,
+                clean_through: Some(1),
+                outstanding_receipt: None,
+            },
+        )
+        .await?;
         self.boundary(5)?;
         SeedInstallState::Complete(self.receipt.clone())
             .save(&info)
