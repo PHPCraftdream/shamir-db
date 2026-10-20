@@ -33,28 +33,30 @@
 #[cfg(test)]
 mod tests;
 
-pub mod cell_reservation_guard;
+mod gate;
+mod tx;
+mod version;
+
 pub mod changefeed;
-pub mod completion_tracker;
-pub mod gate_diagnostics;
-pub mod id_remap;
-pub mod index_write_op;
-pub mod layered_interner;
-pub mod metrics;
 pub mod mvcc_store;
-pub mod pending_commit;
-pub mod predicate_set;
-pub mod repo_tx_gate;
-pub mod repo_wal_manager;
-pub mod staging_store;
-pub mod tx_context;
-pub mod types;
-pub mod version_codec;
-pub mod version_guard;
-pub mod version_provider;
-pub mod versioned_overlay;
-pub mod visibility_metrics;
-pub mod wal_event;
+pub use version::visibility_metrics;
+pub use version::wal_event;
+
+pub use gate::cell_reservation_guard;
+pub use gate::gate_diagnostics;
+pub use gate::index_write_op;
+pub use gate::predicate_set;
+pub use gate::repo_tx_gate;
+pub use tx::completion_tracker;
+pub use tx::pending_commit;
+pub use tx::repo_wal_manager;
+pub use tx::staging_store;
+pub use tx::support::{id_remap, layered_interner, metrics, types};
+pub use tx::tx_context;
+pub use version::version_codec;
+pub use version::version_guard;
+pub use version::version_provider;
+pub use version::versioned_overlay;
 
 pub use cell_reservation_guard::CellReservationGuard;
 pub use changefeed::{
