@@ -1,5 +1,11 @@
 # 131d — PR8b-3 destination lifecycle: round-4 findings (historical resolutions with R8 corrections)
 
+## Round 9 corrections (historical log; current normative contract in 131/131a/131b)
+
+- OPEN1 — selected new `SeedAuthorityReader::open_existing` and snapshot check before candidate open; read-only existing-system-store adapter is a new deliverable, reservation union mirrors boot, unavailable/incomplete authority fails closed. See 131b §8b and 131 I4.
+- OPEN2 — 8b-3b supplies/tests only admission/control primitives and destruction reservation publication; 8b-3c wires every real publisher and tests races end to end. See 131a case 5/§10, 131b §7b, 131 I13.
+
+
 STATUS: historical resolutions below are retained; round-8 corrections supersede prior conclusions where stated. Current corrected decisions are recorded in each round-8 entry.
 
 ## D1-D6

@@ -1,5 +1,11 @@
 # 131c — PR8b-3 destination lifecycle: defect resolution log (historical; R8 corrections supersede noted claims)
 
+## Round 9 corrections (historical log; current normative contract in 131/131a/131b)
+
+- OPEN1 — selected a new authority-only `SeedAuthorityReader::open_existing` + snapshot check for 8b-3c, not reordered `init_seed`/`ShamirDb::init`. Read only the existing system store through a required read-only adapter; reconstruct the validated §3c/§4d union, ready only after full load, fail closed on unavailable/corrupt/dirty/unsupported authority, and refuse before candidate access or logical publication. See 131b §8b and 131 I4.
+- OPEN2 — 8b-3b is primitive-only; real publisher/control serialization wiring and race tests are 8b-3c. See 131a case 5 and §10, 131b §7b, 131 I13.
+
+
 Round 8 R1: the merged installer exists; 8b-3c's read-only reservation check runs after maintenance-lock acquisition and before `find_complete`, without control lock, relying on the lock through install. The authoritative catalogue-tail recheck keeps the same predicates/refusal typing. R2 replaces unsafe try_lock cleanup with strong_count==1 under the synchronized registry lock and no bypass handles. R3 separates merged Appendix 13 inventory from proposed composition and proof; CREATE DATABASE is exclusive, CREATE REPO shared.
 
 
