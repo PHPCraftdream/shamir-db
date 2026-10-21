@@ -378,14 +378,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/table/interner_manager.rs"
-item = "shamir-engine::lib::table::interner_manager::InternerManager::persist"
-to_path = "crates/shamir-engine/src/table/support/storage/interner_manager.rs"
-to_item = "shamir-engine::lib::table::support::storage::interner_manager::InternerManager::persist"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/interner_manager.rs"
 item = "shamir-engine::lib::table::interner_manager::InternerManager::persisted_high_water"
 to_path = "crates/shamir-engine/src/table/support/storage/interner_manager.rs"
 to_item = "shamir-engine::lib::table::support::storage::interner_manager::InternerManager::persisted_high_water"
@@ -973,14 +965,6 @@ path = "crates/shamir-engine/src/table/record_counter.rs"
 item = "shamir-engine::lib::table::record_counter::RecordCounter::new_with_domain"
 to_path = "crates/shamir-engine/src/table/support/storage/record_counter.rs"
 to_item = "shamir-engine::lib::table::support::storage::record_counter::RecordCounter::new_with_domain"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/record_counter.rs"
-item = "shamir-engine::lib::table::record_counter::RecordCounter::persist"
-to_path = "crates/shamir-engine/src/table/support/storage/record_counter.rs"
-to_item = "shamir-engine::lib::table::support::storage::record_counter::RecordCounter::persist"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -3495,6 +3479,7 @@ path = "crates/shamir-engine/src/table/mod.rs"
 item = "shamir-engine::lib::table::write_receipt"
 reason = "the #[path] attribute of the module declaration follows the moved file"
 owner = "@layout-sweep"
+
 [[moved]]
 path = "crates/shamir-engine/src/table/interner_manager.rs"
 item = "shamir-engine::lib::table::interner_manager::InternerManager::persist"
@@ -4285,4 +4270,232 @@ owner = "@layout-sweep"
 path = "crates/shamir-engine/src/table/write/update/mod.rs"
 item = "shamir-engine::lib::table::write::update::execute"
 reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/candidate_set.rs"
+item = "shamir-engine::lib::table::candidate_set::CandidateSet"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/in_flight_create_guard.rs"
+item = "shamir-engine::lib::table::in_flight_create_guard::InFlightCreateGuard"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/read_exec.rs"
+item = "shamir-engine::lib::table::read_exec::DynBatchStream"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/read_exec.rs"
+item = "shamir-engine::lib::table::read_exec::TableManager::build_explain_plan"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/read_exec.rs"
+item = "shamir-engine::lib::table::read_exec::TableManager::postprocess_candidates"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/read_exec.rs"
+item = "shamir-engine::lib::table::read_exec::TableManager::read_filtered_vector_scan"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/read_exec.rs"
+item = "shamir-engine::lib::table::read_exec::TableManager::read_impl"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/read_exec.rs"
+item = "shamir-engine::lib::table::read_exec::TableManager::read_snapshot_keyset"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/read_exec.rs"
+item = "shamir-engine::lib::table::read_exec::TableManager::read_snapshot_vector"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/read_exec.rs"
+item = "shamir-engine::lib::table::read_exec::contains_vector_similarity"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/read_exec.rs"
+item = "shamir-engine::lib::table::read_exec::intern_simple_projection_ids"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/read_exec.rs"
+item = "shamir-engine::lib::table::read_exec::is_select_simple"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/read_index_scan.rs"
+item = "shamir-engine::lib::table::read_index_scan::TableManager::read_order_limit_fast"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/read_planner.rs"
+item = "shamir-engine::lib::table::read_planner::TableManager::try_plan_index2"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/read_temporal.rs"
+item = "shamir-engine::lib::table::read_temporal::TableManager::read_history"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager::enter_writer_drain"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager::set_create_index2_backfill_hook"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager::set_create_sorted_index_backfill_hook"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager::set_drop_index2_pause_hook"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager::set_drop_index2_post_sweep_hook"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager::set_index2_registered_before_ready_hook"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager::set_phase_b_pause_hook"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager::set_phase_c_pause_hook"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager::set_phase_d_pause_hook"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager::set_rename_index2_early_pause_hook"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager::set_rename_index2_mid_pause_hook"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::WriteBarrierGuard"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::WriteBarrierGuard::retaining_permit"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/table_manager_crud.rs"
+item = "shamir-engine::lib::table::table_manager_crud::TableManager::delete_unacknowledged"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/table_manager_crud.rs"
+item = "shamir-engine::lib::table::table_manager_crud::TableManager::index2_on_delete"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/table_manager_crud.rs"
+item = "shamir-engine::lib::table::table_manager_crud::TableManager::index2_on_insert"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/table_manager_index_mgmt.rs"
+item = "shamir-engine::lib::table::table_manager_index_mgmt::TableManager::write_hash_drop_recovery_status"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/table_manager_tx_ops.rs"
+item = "shamir-engine::lib::table::table_manager_tx_ops::StagedMutation"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/tx_scan_overlay.rs"
+item = "shamir-engine::lib::table::tx_scan_overlay::StagedRowOverlay"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/write_exec.rs"
+item = "shamir-engine::lib::table::write_exec::TableManager::execute_delete_tx"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/write_exec.rs"
+item = "shamir-engine::lib::table::write_exec::TableManager::execute_update_tx"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/write_exec.rs"
+item = "shamir-engine::lib::table::write_exec::project_query_value"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/writer_drain_barrier.rs"
+item = "shamir-engine::lib::table::writer_drain_barrier::WriterDrainBarrier"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
 owner = "@layout-sweep"
