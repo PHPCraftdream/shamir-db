@@ -31,36 +31,13 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
-# Least-privilege default. Both jobs (tier1-mock / tier3-qemu) only read the
-# repo and run tests — no push/comment/registry write.
+# Least-privilege default. The tier3-qemu job only reads the repo and runs a
+# smoke test — no push/comment/registry write. (The DI-mock tier-1 tests run in
+# ci.yml's `test` matrix on all three OSes.)
 permissions:
   contents: read
 
 jobs:
-  # Tier 1 — DI-mock unit tests. Platform-independent (no real NUMA syscalls),
-  # so they pass on every runner. This is the gating signal for the
-  # shamir-numa crate; the main ci.yml `--workspace --lib` matrix also covers
-  # it, but a dedicated job keeps the NUMA signal legible.
-  tier1-mock:
-    name: numa tier1 mock (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    # Draft pushes are covered by the fast tier in ci.yml, not here.
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
-      # Pinned to nextest@0.9.137 — same baseline as ci.yml's test/integration
-      # jobs (see ci.yml's nextest pin comment for the guard-coupling rationale).
-      - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af  # v2.87.11
-        with:
-          tool: nextest@0.9.137
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
-      - run: ./scripts/test.sh -p shamir-numa
-
   # Tier 3 — QEMU NUMA emulation (smoke level, opt-in). Boots a 2-node QEMU
   # guest and confirms the kernel sees both NUMA nodes via serial-console
   # discovery messages. Full cargo-test-inside-guest is gated by KVM

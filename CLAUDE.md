@@ -401,9 +401,10 @@ CI is segmented into two tiers to keep the shared runner pool responsive
   to fmt-only for docs-only diffs.
 * **FULL tier — the merge gate.** `gh pr ready` (ready_for_review), master
   pushes and `workflow_dispatch` run the full matrix (fmt, clippy ×3 OS,
-  test ×3, integration ×3, ts-unit, cooldown, loom) plus the path-gated
-  numa and supply-chain workflows. Windows/macOS-only failures surface only
-  here, at ready.
+  test ×3, integration ×3, ts-unit, cooldown, `deny`, loom) plus the path-gated
+  numa workflow (opt-in QEMU tier). The `deny` job (cargo deny + npm licences)
+  always reports but skips its work when no dependency input changed since
+  the base. Windows/macOS-only failures surface only here, at ready.
 * All three workflows cancel superseded PR runs via `concurrency`.
 * Force the full tier on a draft: `gh workflow run ci.yml --ref <branch>`.
 
