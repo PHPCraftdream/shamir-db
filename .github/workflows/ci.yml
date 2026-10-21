@@ -694,7 +694,8 @@ jobs:
             scope_args=()
             IFS=',' read -ra scope_dirs <<< "$dirs"
             for dir in "${scope_dirs[@]}"; do scope_args+=(--scope "$dir"); done
-            "$guard" structure --repo . --changed-since "$MERGE_BASE" "${scope_args[@]}"
+            "$guard" structure --repo . --changed-since "$MERGE_BASE" "${scope_args[@]}" \
+              --delta "$delta"
             if "$guard" conservation --repo . \
               --base "$MERGE_BASE" --head HEAD \
               --packages "$pkgs" --delta "$delta"
