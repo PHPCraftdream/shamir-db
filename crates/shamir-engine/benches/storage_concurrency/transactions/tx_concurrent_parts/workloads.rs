@@ -14,16 +14,16 @@ use crate::{make_mvcc, make_repo};
 
 /// Observational counters filled by the workload groups below and dumped
 /// by the bench root after `h.run()`.
-pub(crate) struct WCounts {
-    pub(crate) hot_key_snapshot_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>>,
-    pub(crate) hot_key_serializable_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>>,
-    pub(crate) pess_contended_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>>,
-    pub(crate) pess_reverse_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>>,
-    pub(crate) pess_barrier_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>>,
-    pub(crate) pess_in_cs_barrier_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>>,
+pub(in super::super) struct WCounts {
+    pub(in super::super) hot_key_snapshot_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>>,
+    pub(in super::super) hot_key_serializable_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>>,
+    pub(in super::super) pess_contended_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>>,
+    pub(in super::super) pess_reverse_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>>,
+    pub(in super::super) pess_barrier_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>>,
+    pub(in super::super) pess_in_cs_barrier_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>>,
 }
 
-pub(crate) fn run(h: &mut Harness) -> WCounts {
+pub(in super::super) fn run(h: &mut Harness) -> WCounts {
     // Global iteration counter — makes keys unique across ALL calls to a
     // given workload's routine, mirroring the original `iter_i` Criterion
     // gave per-sample-iteration.

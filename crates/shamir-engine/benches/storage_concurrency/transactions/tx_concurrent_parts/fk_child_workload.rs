@@ -21,7 +21,7 @@ use smallvec::smallvec;
 
 use crate::execute_batch;
 
-pub(crate) fn run(h: &mut Harness) {
+pub(in super::super) fn run(h: &mut Harness) {
     // --- Group 9: F-46 concurrency impact — FK-child disjoint inserts -------
     //
     // Same disjoint-key/N-writer/K-row shape as Group 1, but the target
