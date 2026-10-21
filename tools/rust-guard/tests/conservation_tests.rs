@@ -80,11 +80,86 @@ impl ConsRepo {
             "delta.toml",
         ])
     }
+    /// Runs the comparison with `--delta` pointing at an existing file
+    /// in the repo (no write).
+    fn compare_with_delta_file(&self, rel: &str) -> Output {
+        let base = self.base_sha.clone();
+        self.repo.run_guard(&[
+            "conservation",
+            "--base",
+            &base,
+            "--head",
+            "HEAD",
+            "--delta",
+            rel,
+        ])
+    }
+
+    /// Runs the comparison with `--suggest-delta <out_rel>`; the
+    /// suggestion file (if any) is written relative to the repo root
+    /// (the guard's cwd) and read back via `read`.
+    fn compare_with_suggest(&self, out_rel: &str) -> Output {
+        let base = self.base_sha.clone();
+        self.repo.run_guard(&[
+            "conservation",
+            "--base",
+            &base,
+            "--head",
+            "HEAD",
+            "--suggest-delta",
+            out_rel,
+        ])
+    }
+
+    /// Reads a file inside the repo (suggestion files).
+    fn read(&self, rel: &str) -> String {
+        std::fs::read_to_string(self.repo.root.join(rel)).expect("read file")
+    }
+
+    /// Whether the file exists inside the repo (suggestion files).
+    fn read_ok(&self, rel: &str) -> bool {
+        self.repo.root.join(rel).exists()
+    }
 }
 
 /// stderr as text — the guard prints its findings there.
 fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+fn contains_sub(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// P3 parity: `--suggest-delta` must not change the gate's output apart
+/// from the note line(s) — same exit code, identical stdout, and a
+/// stderr that is the plain stderr plus note line(s) only. All three
+/// comparisons are byte-exact (no lossy UTF-8, no line-ending
+/// normalisation); the note line(s) are stripped as raw bytes.
+fn assert_flagless_output_unchanged(flagged: &Output, plain: &Output, note_marker: &str) {
+    assert_eq!(
+        flagged.status.code(),
+        plain.status.code(),
+        "exit code changed by --suggest-delta"
+    );
+    assert_eq!(
+        flagged.stdout, plain.stdout,
+        "stdout changed by --suggest-delta"
+    );
+    // Remove exactly the note line(s) from the flagged stderr, as raw
+    // bytes (no lossy UTF-8, no line-ending normalisation).
+    let marker = note_marker.as_bytes();
+    let stripped: Vec<u8> = flagged
+        .stderr
+        .split_inclusive(|&b| b == b'\n')
+        .filter(|line| !contains_sub(line, marker))
+        .flatten()
+        .copied()
+        .collect();
+    assert_eq!(
+        stripped, plain.stderr,
+        "stderr changed by --suggest-delta beyond the note line(s)"
+    );
 }
 
 const LIB: &str = "crates/fix/src/lib.rs";
@@ -269,6 +344,152 @@ fn duplicate_head_candidates_are_unpairable() {
 }
 
 #[test]
+fn ambiguous_moves_list_their_candidates() {
+    // `make` exists in a.rs and b.rs at base and in c.rs and d.rs at head
+    // with different bodies, so no heuristic can pair them.
+    // Counterfactual: the finding used to name only the key, leaving the
+    // author to hunt for the base items and head candidates by hand.
+    let repo = ConsRepo::two_commit("conservation/declared_moves");
+    let out = repo.compare();
+    assert_finding(&out, "UNPAIRABLE_DUPLICATE");
+    let err = stderr(&out);
+    assert!(
+        err.contains("crates/fix/src/a.rs:1") && err.contains("crates/fix/src/d.rs:1"),
+        "expected the base items and head candidates:\n{err}"
+    );
+}
+
+#[test]
+fn declared_moves_settle_an_ambiguous_key() {
+    // The same fixture with an explicit [[moved]] entry per base item
+    // (a -> c, b -> d) plus the [[changed]] entries for the new bodies.
+    // Counterfactual: without the declared pass the ambiguous key drops
+    // the head items and the entries could never be consumed.
+    let repo = ConsRepo::two_commit("conservation/declared_moves");
+    let delta = format!(
+        "base = \"{}\"\n\n\
+         [[moved]]\n\
+         path = \"crates/fix/src/a.rs\"\n\
+         item = \"fix::lib::a::make\"\n\
+         to_path = \"crates/fix/src/c.rs\"\n\
+         to_item = \"fix::lib::c::make\"\n\
+         reason = \"relocated\"\n\
+         owner = \"@rust-guard\"\n\n\
+         [[moved]]\n\
+         path = \"crates/fix/src/b.rs\"\n\
+         item = \"fix::lib::b::make\"\n\
+         to_path = \"crates/fix/src/d.rs\"\n\
+         to_item = \"fix::lib::d::make\"\n\
+         reason = \"relocated\"\n\
+         owner = \"@rust-guard\"\n\n\
+         [[changed]]\n\
+         path = \"crates/fix/src/a.rs\"\n\
+         item = \"fix::lib::a::make\"\n\
+         reason = \"new body\"\n\
+         owner = \"@rust-guard\"\n\n\
+         [[changed]]\n\
+         path = \"crates/fix/src/b.rs\"\n\
+         item = \"fix::lib::b::make\"\n\
+         reason = \"new body\"\n\
+         owner = \"@rust-guard\"\n",
+        repo.base_sha
+    );
+    assert_clean(&repo.compare_with_delta(&delta));
+}
+
+/// `[[moved]]` for `take` (a.rs -> c.rs), whose signature changed.
+fn moved_take_entry(base_sha: &str) -> String {
+    format!(
+        "base = \"{base_sha}\"\n\n\
+         [[moved]]\n\
+         path = \"crates/fix/src/a.rs\"\n\
+         item = \"fix::lib::a::take\"\n\
+         to_path = \"crates/fix/src/c.rs\"\n\
+         to_item = \"fix::lib::c::take\"\n\
+         reason = \"relocated\"\n\
+         owner = \"@rust-guard\"\n"
+    )
+}
+
+#[test]
+fn declared_move_with_a_changed_signature_needs_a_changed_entry() {
+    // `take(u32) -> u32` moves to c.rs as `take(u64) -> u64`; the [[moved]]
+    // entry pairs the items although the signatures differ, and the drift is
+    // then a SIGNATURE_CHANGED finding.
+    // Counterfactual: without the declared pass the pair never forms (pass 2
+    // needs equal signatures) and the item is just an ITEM_LOST + ITEM_ADDED.
+    let repo = ConsRepo::two_commit("conservation/declared_moves_sig");
+    let out = repo.compare_with_delta(&moved_take_entry(&repo.base_sha));
+    assert_finding(&out, "SIGNATURE_CHANGED");
+    assert!(
+        !stderr(&out).contains("ITEM_LOST"),
+        "the declared move must pair the items:\n{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn declared_move_with_a_changed_signature_is_clean_when_excused() {
+    let repo = ConsRepo::two_commit("conservation/declared_moves_sig");
+    let delta = format!(
+        "{}\n\
+         [[changed]]\n\
+         path = \"crates/fix/src/a.rs\"\n\
+         item = \"fix::lib::a::take\"\n\
+         reason = \"re-qualified types\"\n\
+         owner = \"@rust-guard\"\n",
+        moved_take_entry(&repo.base_sha)
+    );
+    assert_clean(&repo.compare_with_delta(&delta));
+}
+
+#[test]
+fn unchanged_items_of_sibling_targets_stay_paired() {
+    // Both integration-test targets define `N`, `helper` and `works`; all
+    // of them share the logical path `fix::test::*`. Nothing but a lib
+    // comment changed, so the comparison must be clean.
+    // Counterfactual: pairing by the logical identity alone sees two head
+    // candidates per base item, pairs nothing and reports every item as
+    // ITEM_LOST / TEST_LOST.
+    let repo = ConsRepo::two_commit("conservation/dup_unchanged_targets");
+    assert_clean(&repo.compare());
+}
+
+#[test]
+fn unchanged_cfg_twins_stay_paired() {
+    // `plat` and `hook` exist twice under one logical path (cfg variants).
+    // Counterfactual: the identity key is ambiguous, so the old pairing
+    // dropped the head items and reported the base items as ITEM_LOST.
+    let repo = ConsRepo::two_commit("conservation/dup_cfg_twins");
+    assert_clean(&repo.compare());
+}
+
+#[test]
+fn moved_twins_pair_one_to_one_and_feed_back_to_clean() {
+    // `make` exists twice with an identical body (a::make, b::make) and
+    // moves to c::make and d::make. Equal group sizes make the twins
+    // interchangeable, so both moves are suggested and a delta made of the
+    // suggestions is clean.
+    // Counterfactual: without the twin pass the two same-key head
+    // candidates are UNPAIRABLE_DUPLICATE and nothing is suggested.
+    let repo = ConsRepo::two_commit("conservation/twin_moves");
+    let out = repo.compare_with_suggest("suggested-twins.toml");
+    let err = stderr(&out);
+    assert!(!out.status.success(), "undeclared moves must fail:\n{err}");
+    assert!(
+        !err.contains("UNPAIRABLE_DUPLICATE"),
+        "twins must pair:\n{err}"
+    );
+    let text = repo.read("suggested-twins.toml");
+    assert_eq!(
+        text.matches("[[moved]]").count(),
+        2,
+        "expected both twin moves:\n{text}"
+    );
+    assert_clean(&repo.compare_with_delta_file("suggested-twins.toml"));
+}
+
+#[test]
 fn base_only_package_is_a_loss_not_silence() {
     // Counterfactual: discovery used the WORKING tree's cargo metadata,
     // so the base-only package (`crates/gone`, deleted at head) never
@@ -386,4 +607,209 @@ fn phantom_default_branch_is_not_inventoried() {
     // report TEST_LOST even though the unconditional path selects gen.rs.
     let repo = ConsRepo::two_commit("conservation/uncond_path_default_ignored");
     assert_clean(&repo.compare());
+}
+
+#[test]
+fn suggest_flag_writes_undeclared_moves() {
+    let repo = ConsRepo::two_commit("conservation/suggest_clean_moves");
+    let out = repo.compare_with_suggest("suggested.toml");
+    let err = stderr(&out);
+    assert!(!out.status.success(), "expected exit != 0:\n{err}");
+    assert!(err.contains("TEST_LOST"), "expected TEST_LOST:\n{err}");
+    assert!(
+        err.contains("rust-guard: note: 2 undeclared move(s) written to suggested.toml"),
+        "expected the stderr note line:\n{err}"
+    );
+    // P3 parity: apart from the note line the flagged run's output is
+    // byte-identical to the flagless run.
+    let plain = repo.compare();
+    assert_flagless_output_unchanged(&out, &plain, "rust-guard: note:");
+    let text = repo.read("suggested.toml");
+    assert!(
+        text.contains(&format!("base = \"{}\"", repo.base_sha)),
+        "expected the full base sha pin:\n{text}"
+    );
+    for expected in [
+        "path = \"crates/fix/src/lib.rs\"",
+        "item = \"fix::lib::helper\"",
+        "to_path = \"crates/fix/src/m.rs\"",
+        "to_item = \"fix::lib::m::helper\"",
+        "item = \"fix::lib::t_ok\"",
+        "to_item = \"fix::lib::m::t_ok\"",
+    ] {
+        assert!(text.contains(expected), "missing `{expected}`:\n{text}");
+    }
+    for absent in ["t_mut", "gone", "dup", "renamed"] {
+        assert!(
+            !text.contains(absent),
+            "`{absent}` must never be suggested:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn suggestion_feeds_back_to_clean() {
+    let repo = ConsRepo::two_commit("conservation/suggest_clean_moves");
+    let out = repo.compare_with_suggest("suggested.toml");
+    assert!(!out.status.success(), "the undeclared moves still fail");
+    assert!(repo.repo.root.join("suggested.toml").exists());
+    assert_clean(&repo.compare_with_delta_file("suggested.toml"));
+}
+
+#[test]
+fn mixed_fixture_suggests_only_clean_moves() {
+    let repo = ConsRepo::two_commit("conservation/suggest_mixed");
+    let out = repo.compare_with_suggest("suggested-mixed.toml");
+    let err = stderr(&out);
+    assert!(!out.status.success(), "expected exit != 0:\n{err}");
+    // P3 parity: apart from the note line the flagged run's output is
+    // byte-identical to the flagless run.
+    let plain = repo.compare();
+    assert_flagless_output_unchanged(&out, &plain, "rust-guard: note:");
+    assert!(err.contains("ITEM_LOST"), "expected ITEM_LOST:\n{err}");
+    assert!(
+        err.contains("UNPAIRABLE_DUPLICATE"),
+        "expected UNPAIRABLE_DUPLICATE:\n{err}"
+    );
+    let text = repo.read("suggested-mixed.toml");
+    assert_eq!(
+        text.matches("[[moved]]").count(),
+        2,
+        "exactly helper and t_ok are clean moves:\n{text}"
+    );
+    assert!(
+        text.contains("fix::lib::helper") && text.contains("fix::lib::t_ok"),
+        "expected helper + t_ok entries:\n{text}"
+    );
+    for absent in ["t_mut", "gone", "dup"] {
+        assert!(
+            !text.contains(absent),
+            "`{absent}` must never be suggested:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn without_suggest_flag_no_file_no_note() {
+    let repo = ConsRepo::two_commit("conservation/suggest_clean_moves");
+    let out = repo.compare();
+    let err = stderr(&out);
+    assert!(!out.status.success(), "expected exit != 0:\n{err}");
+    assert!(
+        !err.contains("rust-guard: note:"),
+        "no note without the flag:\n{err}"
+    );
+    assert!(
+        !repo.repo.root.join("suggested.toml").exists(),
+        "no suggestion file without the flag"
+    );
+}
+
+#[test]
+fn signature_changed_move_is_not_suggested() {
+    // P2-1: `helper` moved FILE only (via `#[path]`) while changing its
+    // signature (u32 -> i64, body tokens identical). The logical path
+    // `fix::lib::m::helper` is UNCHANGED, so the pair lands in the pass-1
+    // exact-identity branch at matching.rs:111-124 (ITEM_MOVED). This
+    // test FAILS if the `b.signature == h.signature` term is removed
+    // from the suggestion predicate — `helper` (pass-1 file move) would
+    // then be suggested and the file would exist.
+    let repo = ConsRepo::two_commit("conservation/suggest_sig_changed");
+    let plain = repo.compare();
+    let plain_err = stderr(&plain);
+    assert!(
+        !plain.status.success(),
+        "expected flagless exit != 0:\n{plain_err}"
+    );
+    assert!(
+        plain_err.contains("ITEM_MOVED"),
+        "expected ITEM_MOVED for the file-moved item:\n{plain_err}"
+    );
+    let out = repo.compare_with_suggest("suggested.toml");
+    let err = stderr(&out);
+    assert!(!out.status.success(), "expected exit != 0:\n{err}");
+    assert_flagless_output_unchanged(&out, &plain, "rust-guard: note:");
+    assert!(
+        !repo.read_ok("suggested.toml"),
+        "a signature-drifted file move must never be suggested (no file at all):\n{err}"
+    );
+}
+
+#[test]
+fn body_changed_moved_test_regression() {
+    // P2-3: `t_mut` moved file AND changed body — it falls apart into a
+    // lost test (flagless), is never suggested, and a HAND-WRITTEN
+    // [[moved]] delta lets the pairing through but the body drift is
+    // reported as BODY_CHANGED (the declaration never silences drift).
+    let repo = ConsRepo::two_commit("conservation/suggest_mixed");
+    // (a) flagless: the move is undeclared AND drifted -> TEST_LOST.
+    let plain = repo.compare();
+    let plain_err = stderr(&plain);
+    assert!(
+        !plain.status.success(),
+        "expected flagless exit != 0:\n{plain_err}"
+    );
+    assert!(
+        plain_err
+            .lines()
+            .any(|l| l.contains("TEST_LOST") && l.contains("fix::lib::t_mut")),
+        "expected TEST_LOST naming fix::lib::t_mut:\n{plain_err}"
+    );
+    assert!(
+        plain_err
+            .lines()
+            .any(|l| l.contains("TEST_LOST") && l.contains("fix::lib::t_ok")),
+        "expected TEST_LOST naming fix::lib::t_ok:\n{plain_err}"
+    );
+    let out = repo.compare_with_suggest("suggested.toml");
+    assert!(!out.status.success(), "expected exit != 0");
+    assert_flagless_output_unchanged(&out, &plain, "rust-guard: note:");
+    if repo.read_ok("suggested.toml") {
+        let text = repo.read("suggested.toml");
+        assert!(
+            !text.contains("t_mut"),
+            "a body-drifted move must never be suggested:\n{text}"
+        );
+    }
+    // (b) hand-written delta declaring ONLY the t_mut move: the pairing
+    // succeeds, the body change surfaces as BODY_CHANGED.
+    let delta = format!(
+        "base = \"{}\"\n\n\
+         [[moved]]\n\
+         path = \"{LIB}\"\n\
+         item = \"fix::lib::t_mut\"\n\
+         to_path = \"crates/fix/src/m.rs\"\n\
+         to_item = \"fix::lib::m::t_mut\"\n\
+         reason = \"hand-declared move of the drifted test\"\n\
+         owner = \"@rust-guard\"\n",
+        repo.base_sha
+    );
+    repo.write("delta-body.toml", &delta);
+    let out = repo.compare_with_delta_file("delta-body.toml");
+    let err = stderr(&out);
+    assert!(!out.status.success(), "expected exit != 0:\n{err}");
+    assert!(
+        err.contains("BODY_CHANGED"),
+        "the declared move must still report the body drift:\n{err}"
+    );
+}
+
+#[test]
+fn suggest_flag_leaves_failing_fixture_output_unchanged() {
+    // P3: a fixture that produces NO suggestions at all — the flagged
+    // run is byte-identical to the flagless run: same exit code, same
+    // stderr (no note line), and no file written.
+    let repo = ConsRepo::two_commit("conservation/body_changed");
+    let plain = repo.compare();
+    let out = repo.compare_with_suggest("suggested.toml");
+    assert_flagless_output_unchanged(&out, &plain, "rust-guard: note:");
+    let err = stderr(&out);
+    assert!(
+        !err.contains("rust-guard: note:"),
+        "no note when nothing is suggested:\n{err}"
+    );
+    assert!(
+        !repo.repo.root.join("suggested.toml").exists(),
+        "no file when nothing is suggested"
+    );
 }

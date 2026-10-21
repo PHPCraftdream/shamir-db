@@ -139,6 +139,32 @@ impl Delta {
             .collect()
     }
 
+    /// True when an unused `[[moved]]` entry names exactly this base item
+    /// AND this head item (`to_path` and `to_item` are required here).
+    /// Does not consume the entry; used to settle an ambiguous pairing
+    /// with the author's explicit declaration.
+    pub fn moved_names_pair(
+        &self,
+        base_path: &str,
+        base_item: &str,
+        head_path: &str,
+        head_item: &str,
+    ) -> bool {
+        self.moved.iter().any(|e| {
+            e.path == base_path
+                && item_matches(&e.item, base_item)
+                && e.to_path.as_deref() == Some(head_path)
+                && e.to_item
+                    .as_deref()
+                    .is_some_and(|i| item_matches(i, head_item))
+        })
+    }
+
+    /// True when the delta declares at least one move.
+    pub fn has_moves(&self) -> bool {
+        !self.moved.is_empty()
+    }
+
     /// Pops (consumes) the first unused entry of `kind` whose `path` +
     /// `item` match the base side and whose `to_path`/`to_item` (when
     /// present) match the head side.

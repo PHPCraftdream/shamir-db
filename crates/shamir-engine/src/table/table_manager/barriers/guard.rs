@@ -1,7 +1,7 @@
 use crate::repo::RepoWritePermit;
 
 /// F-70 (#897, P0) — RAII guard returned by
-/// [`TableManager::begin_write_barrier`]: raises one bit of the shared
+/// [`TableManager::begin_write_barrier`](crate::table::TableManager::begin_write_barrier): raises one bit of the shared
 /// [`WriteBarrierFlags`](crate::index::write_barrier_flags::WriteBarrierFlags)
 /// word on construction, clears it on drop (including every `?` early-return
 /// path in the caller). Owns a CLONE of the `Arc<AtomicU8>`-backed flags
@@ -11,7 +11,7 @@ use crate::repo::RepoWritePermit;
 ///
 /// F-95 (#957, P0): this guard ALSO embeds the per-table DDL admission
 /// mutex guard (`ddl_admission`), acquired BEFORE the bit is raised inside
-/// [`begin_write_barrier`](TableManager::begin_write_barrier). Embedding it
+/// [`begin_write_barrier`](crate::table::TableManager::begin_write_barrier). Embedding it
 /// here — rather than returning it as a third tuple element — means every
 /// existing call site's destructuring (`let (_barrier, _lock) = …`) is
 /// unchanged, and the admission guard's lifetime is automatically tied to
@@ -27,7 +27,7 @@ use crate::repo::RepoWritePermit;
 /// (`shamir-db::execute::admin_schema`), both of which independently raised
 /// a bit under an ALREADY-HELD `unique_write_lock` (lock-then-drain — the
 /// F-70 inversion). This guard is constructed BEFORE the lock is taken (see
-/// [`begin_write_barrier`](TableManager::begin_write_barrier)); the bit is
+/// [`begin_write_barrier`](crate::table::TableManager::begin_write_barrier)); the bit is
 /// still `SeqCst`-ordered (F-56, extended by F-69 to the whole word), which
 /// is what the `writer_drain_barrier` proof requires regardless of when
 /// the lock is acquired relative to the drain.
@@ -47,7 +47,7 @@ pub struct WriteBarrierGuard {
     admission: tokio::sync::OwnedMutexGuard<()>,
     /// S5c-X — the per-repo admission permit, retained so the caller's
     /// ENTIRE critical section holds repository admission. `Some` when the
-    /// permit was minted by [`TableManager::begin_write_barrier`] itself;
+    /// permit was minted by [`TableManager::begin_write_barrier`](crate::table::TableManager::begin_write_barrier) itself;
     /// `None` on the `_admitted` path, where the caller keeps ownership of
     /// its own permit (dropping it at the end of the enclosing `_admitted`
     /// method — after this guard drops — releases admission).
