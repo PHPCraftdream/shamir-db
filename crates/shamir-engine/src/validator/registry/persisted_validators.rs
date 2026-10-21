@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::ValidatorBinding;
+use crate::validator::ValidatorBinding;
 
 /// Persisted per-table validator bindings (mirrors `PersistedIndexes`).
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -2,7 +2,7 @@
 /// (admission-time, NOT on WAL-replay — replay-safety is free by construction:
 /// the transformed bytes are what gets stored, and replay restores them verbatim).
 ///
-/// Transform rules are aggregated by [`super::schema::SchemaValidator`] (close
+/// Transform rules are aggregated by [`crate::validator::schema::SchemaValidator`] (close
 /// twin of `defaults()`) and applied on the insert path in `write_exec.rs`
 /// AFTER `apply_defaults` and BEFORE encode + CHECK-validators.
 ///

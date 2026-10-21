@@ -1,7 +1,7 @@
 use shamir_query_types::filter::FieldPath;
 use shamir_types::types::value::QueryValue;
 
-use super::{ValidationError, ValidationOutcome};
+use crate::validator::{ValidationError, ValidationOutcome};
 
 /// Errors when decoding a validator's `QueryValue` return into
 /// `ValidationOutcome`.

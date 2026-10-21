@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use shamir_types::types::value::QueryValue;
 use shamir_wasm_host::{FnBatch, FnCtx, Params, ShamirFunction};
 
-use super::{
+use crate::validator::{
     decode_validation_result,
     record_fields::RecordFields,
     record_validator::{RecordValidator, ValidatorCtx},

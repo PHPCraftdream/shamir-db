@@ -1,6 +1,6 @@
 use shamir_types::types::record_id::RecordId;
 
-use super::ValidationError;
+use crate::validator::ValidationError;
 
 /// Aggregated result of running one validator.
 #[derive(Debug, Clone, PartialEq, Eq)]

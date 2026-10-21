@@ -3,7 +3,7 @@
 //! DDL writers clone one immutable state and publish it once. Each read loads
 //! one snapshot; separate read calls may observe different committed versions.
 
-use super::record_validator::RecordValidator;
+use crate::validator::record_validator::RecordValidator;
 use arc_swap::ArcSwap;
 use shamir_collections::TFxMap;
 use shamir_types::types::record_id::RecordId;
@@ -76,7 +76,7 @@ impl ValidatorRegistry {
     }
 
     #[cfg(test)]
-    pub(super) fn set_mutation_hook(&self, hook: Option<MutationHook>) {
+    pub(in crate::validator) fn set_mutation_hook(&self, hook: Option<MutationHook>) {
         *self.mutation_hook.lock().expect("test hook mutex poisoned") = hook;
     }
 

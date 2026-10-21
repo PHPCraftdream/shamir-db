@@ -10,7 +10,7 @@ use shamir_query_types::filter::FilterValue;
 use shamir_types::types::value::QueryValue;
 
 use super::cross_field::CrossFieldCompare;
-use super::foreign_key::ForeignKeyRef;
+use crate::validator::schema::foreign_key::ForeignKeyRef;
 use super::format::FormatKind;
 use super::type_tag::TypeTag;
 
