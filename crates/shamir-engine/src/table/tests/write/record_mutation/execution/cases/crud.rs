@@ -1,8 +1,8 @@
+use crate::query::write::InsertOp;
+use crate::table::tests::write::record_mutation::execution::fixtures::write_exec_tests::*;
 use shamir_query_builder::filter;
 use shamir_query_builder::write::{self, doc, UpdateReturnMode};
-use crate::query::write::{InsertOp};
 use shamir_types::types::common::new_map;
-use crate::table::tests::write::record_mutation::execution::fixtures::write_exec_tests::*;
 
 // ============================================================================
 // INSERT

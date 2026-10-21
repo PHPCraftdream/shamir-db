@@ -2,7 +2,6 @@
 //!
 //! Request-building uses the typed query builder (`shamir_query_builder`).
 
-
 use crate::db_instance::db_instance::DbInstance;
 use crate::query::batch::BatchError;
 use crate::query::filter::eval_context::FilterContext;

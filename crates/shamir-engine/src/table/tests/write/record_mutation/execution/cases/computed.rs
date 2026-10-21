@@ -1,6 +1,6 @@
+use crate::table::tests::write::record_mutation::execution::fixtures::write_exec_tests::*;
 use shamir_query_builder::val::*;
 use shamir_query_builder::write::{self, doc};
-use crate::table::tests::write::record_mutation::execution::fixtures::write_exec_tests::*;
 
 // ============================================================================
 // Computed write values ("установка знаний" via inline $fn)

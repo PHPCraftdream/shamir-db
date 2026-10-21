@@ -1,7 +1,6 @@
-use std::sync::Arc;
-use shamir_types::types::value::InnerValue;
 use crate::table::TableManager;
-
+use shamir_types::types::value::InnerValue;
+use std::sync::Arc;
 
 use crate::table::tests::index_lifecycle::recovery::rename::hash_rename::fixtures::p997_hash_rename_durability_tests::*;
 

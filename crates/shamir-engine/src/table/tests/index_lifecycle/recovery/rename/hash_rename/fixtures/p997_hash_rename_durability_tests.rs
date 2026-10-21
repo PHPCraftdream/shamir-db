@@ -108,21 +108,29 @@ pub(crate) async fn seed_table_with_unique_index(
 }
 
 /// Write a regular rename tombstone directly into info_store.
-pub(crate) async fn seed_regular_rename_tombstone(info_store: &Arc<dyn Store>, entry: &HashRenameTombstone) {
+pub(crate) async fn seed_regular_rename_tombstone(
+    info_store: &Arc<dyn Store>,
+    entry: &HashRenameTombstone,
+) {
     let key = RecordId::system("idx_ren").to_bytes();
     let bytes = bincode::serialize(&vec![entry.clone()]).unwrap();
     info_store.set(key.into(), bytes.into()).await.unwrap();
 }
 
 /// Write a unique rename tombstone directly into info_store.
-pub(crate) async fn seed_unique_rename_tombstone(info_store: &Arc<dyn Store>, entry: &HashRenameTombstone) {
+pub(crate) async fn seed_unique_rename_tombstone(
+    info_store: &Arc<dyn Store>,
+    entry: &HashRenameTombstone,
+) {
     let key = RecordId::system("uidx_ren").to_bytes();
     let bytes = bincode::serialize(&vec![entry.clone()]).unwrap();
     info_store.set(key.into(), bytes.into()).await.unwrap();
 }
 
 /// Read back the persisted regular rename tombstone.
-pub(crate) async fn load_regular_rename_tombstone(info_store: &Arc<dyn Store>) -> Vec<HashRenameTombstone> {
+pub(crate) async fn load_regular_rename_tombstone(
+    info_store: &Arc<dyn Store>,
+) -> Vec<HashRenameTombstone> {
     let key = RecordId::system("idx_ren").to_bytes();
     match info_store.get(key.into()).await {
         Ok(bytes) if bytes.is_empty() => Vec::new(),
@@ -132,7 +140,9 @@ pub(crate) async fn load_regular_rename_tombstone(info_store: &Arc<dyn Store>) -
 }
 
 /// Read back the persisted unique rename tombstone.
-pub(crate) async fn load_unique_rename_tombstone(info_store: &Arc<dyn Store>) -> Vec<HashRenameTombstone> {
+pub(crate) async fn load_unique_rename_tombstone(
+    info_store: &Arc<dyn Store>,
+) -> Vec<HashRenameTombstone> {
     let key = RecordId::system("uidx_ren").to_bytes();
     match info_store.get(key.into()).await {
         Ok(bytes) if bytes.is_empty() => Vec::new(),

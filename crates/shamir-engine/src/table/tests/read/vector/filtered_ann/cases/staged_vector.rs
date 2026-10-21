@@ -1,11 +1,10 @@
-use shamir_query_builder::filter as qf;
-use shamir_query_types::read::ReadQuery;
-use shamir_tx::IsolationLevel;
-use shamir_types::types::common::{new_map};
 use crate::index2::vector::hnsw_adapter::{CO_FILTER_MAX_SELECTIVITY, PRE_FILTER_MAX_CANDIDATES};
 use crate::query::filter::eval_context::FilterContext;
 use crate::table::TableConfig;
-
+use shamir_query_builder::filter as qf;
+use shamir_query_types::read::ReadQuery;
+use shamir_tx::IsolationLevel;
+use shamir_types::types::common::new_map;
 
 use crate::table::tests::read::vector::filtered_ann::fixtures::filtered_ann_tests::*;
 

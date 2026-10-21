@@ -1,7 +1,7 @@
-use shamir_query_builder::write::{self, doc};
 use crate::query::filter::eval_context::FilterContext;
-use shamir_types::types::common::new_map;
 use crate::table::tests::write::record_mutation::execution::fixtures::write_exec_tests::*;
+use shamir_query_builder::write::{self, doc};
+use shamir_types::types::common::new_map;
 
 /// INSERT path: non-tx SET (via `set_via_tx`) creates a new record, stores
 /// bytes that round-trip correctly, and returns `_created = true` with the

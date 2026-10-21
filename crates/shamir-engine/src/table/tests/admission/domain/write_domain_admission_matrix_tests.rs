@@ -5,10 +5,8 @@ use std::sync::Arc;
 
 use smallvec::smallvec;
 
+use super::write_domain_shared::{make_manager, make_manager_on, store_snapshot};
 use crate::repo::RepoWriteDomain;
-use super::write_domain_shared::{
-    make_manager, make_manager_on, store_snapshot,
-};
 use crate::table::TableManager;
 use crate::validator::{ValidatorBinding, WriteOp};
 use shamir_types::types::record_id::RecordId;

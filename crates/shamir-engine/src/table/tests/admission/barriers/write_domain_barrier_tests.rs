@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use crate::index::write_barrier_flags::REGULAR_INDEX_CREATE;
 use super::super::domain::write_domain_shared::make_manager;
+use crate::index::write_barrier_flags::REGULAR_INDEX_CREATE;
 
 #[tokio::test]
 async fn barrier_blocks_while_repo_permit_held() {

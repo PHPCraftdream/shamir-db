@@ -1,13 +1,12 @@
-use shamir_query_builder::filter as qf;
-use shamir_query_types::read::ReadQuery;
-use shamir_tx::IsolationLevel;
-use shamir_types::core::interner::{InternerKey};
-use shamir_types::types::common::{new_map, new_map_wc};
-use shamir_types::types::value::{InnerValue};
 use crate::query::filter::eval_context::FilterContext;
 use crate::table::TableConfig;
 use crate::table::TableManager;
-
+use shamir_query_builder::filter as qf;
+use shamir_query_types::read::ReadQuery;
+use shamir_tx::IsolationLevel;
+use shamir_types::core::interner::InternerKey;
+use shamir_types::types::common::{new_map, new_map_wc};
+use shamir_types::types::value::InnerValue;
 
 use crate::table::tests::read::vector::filtered_ann::fixtures::filtered_ann_tests::*;
 
@@ -143,7 +142,13 @@ pub(crate) fn path_label(result: &crate::query::read::QueryResult) -> &str {
 /// hooks) instead of `count` sequential `insert` round-trips. The co-filter
 /// test lowers only its manager's planner thresholds to keep this fixture
 /// small; index2 still inserts each vector through the real backend.
-pub(crate) async fn commit_cluster(tbl: &TableManager, emb_id: u64, tag_id: u64, tag: &str, count: usize) {
+pub(crate) async fn commit_cluster(
+    tbl: &TableManager,
+    emb_id: u64,
+    tag_id: u64,
+    tag: &str,
+    count: usize,
+) {
     // VR-5 tests query [1.0, 0.0] and stage a vector at [0.99, 0.01] to prove
     // read-your-own-writes. Committed rows here MUST be farther from the
     // query than the staged vector, or `count` distance-0 exact-match ties

@@ -26,12 +26,12 @@ use shamir_types::core::interner::{InternerKey, TouchInd};
 use shamir_types::types::common::{new_map, new_map_wc};
 use shamir_types::types::value::{InnerValue, QueryValue};
 
+use super::super::cases::selectivity::Pcg;
 use crate::query::filter::eval_context::FilterContext;
 use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_types::BoxRepo;
 use crate::table::TableConfig;
 use crate::table::TableManager;
-use super::super::cases::selectivity::Pcg;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
