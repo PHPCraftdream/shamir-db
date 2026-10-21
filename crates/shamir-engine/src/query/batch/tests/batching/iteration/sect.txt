@@ -1,0 +1,14 @@
+// ============================================================================
+// Test 6: param_in_insert_values
+//
+// P3b — canonical case: sub-batch inserts a row where a column value comes
+// from a $param bound to the result of an outer query.
+//
+// Outer:
+//   user → read user by name (returns id = 42)
+//   sub  → BatchOp::Batch with bind: { uid: $query @user[0].id }
+//            inner: insert into orders { user_id: {"$param":"uid"}, note: "order1" }
+//   read_back → read orders where user_id == 42
+//
+// After execution, `read_back` must return exactly one record with user_id=42.
+// ============================================================================
