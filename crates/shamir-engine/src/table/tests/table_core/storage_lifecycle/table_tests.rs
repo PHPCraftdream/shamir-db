@@ -3,8 +3,8 @@
 
 use crate::table::interner_manager::InternerManager;
 use crate::table::record_counter::RecordCounter;
-use crate::table::tests::stream_utils::collect_list_stream;
-use crate::table::tests::test_helpers::query_value_to_inner_tracked;
+use crate::table::tests::behavior::schema::test_helpers::query_value_to_inner_tracked;
+use crate::table::tests::read::streaming::stream_utils::collect_list_stream;
 use crate::table::Table;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_fjall::FjallRepo;

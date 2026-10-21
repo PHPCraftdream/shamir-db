@@ -38,7 +38,9 @@ use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
 use crate::table::record_cow::RecordCow;
 use crate::table::table_manager::TableManager;
-use crate::table::tests::write_exec_tests::{insert_via_tx, setup_empty_table};
+use crate::table::tests::write::record_mutation::execution::fixtures::write_exec_tests::{
+    insert_via_tx, setup_empty_table,
+};
 use crate::table::TableConfig;
 use crate::validator::{
     RecordFields, RecordValidator, Validation, ValidatorBinding, ValidatorCtx, ValidatorRegistry,

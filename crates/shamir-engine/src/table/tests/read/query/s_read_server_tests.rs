@@ -21,7 +21,7 @@
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::{QueryRecord, ReadQuery, Select};
 use crate::table::record_cow::RecordCow;
-use crate::table::tests::write_exec_tests::setup_empty_table;
+use crate::table::tests::write::record_mutation::execution::fixtures::write_exec_tests::setup_empty_table;
 use shamir_query_builder::write;
 use shamir_query_types::batch::ResultEncoding;
 use shamir_query_types::read::{AggFunc, AggregateField, SelectItem};

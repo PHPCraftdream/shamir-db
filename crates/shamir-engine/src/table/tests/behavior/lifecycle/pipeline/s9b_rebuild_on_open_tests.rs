@@ -15,7 +15,7 @@ use shamir_types::types::value::QueryValue;
 
 use crate::index::index_record_key::IndexRecordKey;
 use crate::index2::persistence::load_legacy_index_version;
-use crate::table::tests::test_helpers::query_value_to_inner_tracked;
+use crate::table::tests::behavior::schema::test_helpers::query_value_to_inner_tracked;
 use crate::table::TableManager;
 
 /// Build shared in-memory stores, open a fresh table on them, create a

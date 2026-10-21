@@ -14,7 +14,9 @@ use shamir_types::types::record_id::RecordId;
 use smallvec::smallvec;
 use tokio::sync::Notify;
 
-use crate::table::tests::write_exec_tests::{insert_via_tx, setup_empty_table};
+use crate::table::tests::write::record_mutation::execution::fixtures::write_exec_tests::{
+    insert_via_tx, setup_empty_table,
+};
 use crate::table::TableManager;
 use crate::validator::persistence::load_validators_metadata;
 use crate::validator::{

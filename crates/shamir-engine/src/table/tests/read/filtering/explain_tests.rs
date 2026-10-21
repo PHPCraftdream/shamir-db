@@ -9,7 +9,7 @@ use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::{PlanType, ReadQuery};
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
-use crate::table::tests::test_helpers::query_value_to_inner_tracked;
+use crate::table::tests::behavior::schema::test_helpers::query_value_to_inner_tracked;
 use crate::table::TableConfig;
 use shamir_query_builder::Query;
 use shamir_types::types::common::new_map;

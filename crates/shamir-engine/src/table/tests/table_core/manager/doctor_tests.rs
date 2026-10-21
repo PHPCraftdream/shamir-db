@@ -12,7 +12,10 @@ use crate::index2::state::IndexState;
 use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_types::{BoxRepo, BoxRepoFactory};
 use crate::repo::RepoConfig;
-use crate::table::tests::test_helpers::query_value_to_inner_tracked;
+use crate::table::tests::behavior::schema::test_helpers::query_value_to_inner_tracked;
+use crate::table::tests::write::record_mutation::execution::fixtures::write_exec_tests::{
+    delete_via_tx, update_via_tx,
+};
 use crate::table::TableConfig;
 use shamir_query_builder::{filter, write};
 use shamir_storage::storage_in_memory::InMemoryRepo;
@@ -266,9 +269,7 @@ async fn execute_update_leaves_table_consistent_on_success() {
         .build()
         .unwrap();
 
-    let result = crate::table::tests::write_exec_tests::update_via_tx(&repo, &table, &op, &refs)
-        .await
-        .unwrap();
+    let result = update_via_tx(&repo, &table, &op, &refs).await.unwrap();
     assert!(result.affected > 0, "expected at least one update");
 
     assert!(table.verify().await.unwrap().is_healthy());
@@ -284,9 +285,7 @@ async fn execute_delete_leaves_table_consistent_on_success() {
         .build()
         .unwrap();
 
-    let result = crate::table::tests::write_exec_tests::delete_via_tx(&repo, &table, &op, &refs)
-        .await
-        .unwrap();
+    let result = delete_via_tx(&repo, &table, &op, &refs).await.unwrap();
     assert!(result.affected > 0);
 
     assert!(table.verify().await.unwrap().is_healthy());

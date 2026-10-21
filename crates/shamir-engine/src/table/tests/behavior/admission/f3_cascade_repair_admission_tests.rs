@@ -20,7 +20,7 @@ use crate::table::TableConfig;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
-use crate::table::tests::test_helpers::query_value_to_inner_tracked;
+use crate::table::tests::behavior::schema::test_helpers::query_value_to_inner_tracked;
 
 /// Fresh in-memory DB with a `users` table carrying one regular index (on
 /// `city`) and a handful of seeded rows — enough for `repair()`'s

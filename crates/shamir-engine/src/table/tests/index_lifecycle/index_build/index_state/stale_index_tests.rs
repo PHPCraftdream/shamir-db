@@ -15,7 +15,8 @@
 use crate::db_instance::db_instance::DbInstance;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
-use crate::table::tests::test_helpers::query_value_to_inner_tracked;
+use crate::table::tests::behavior::schema::test_helpers::query_value_to_inner_tracked;
+use crate::table::tests::write::record_mutation::execution::fixtures::write_exec_tests::delete_via_tx;
 use crate::table::TableConfig;
 use shamir_query_builder::{filter, write};
 use shamir_types::types::common::new_map;
@@ -117,9 +118,7 @@ async fn test_stale_index_entry_skipped_in_lookup_records_via_index() {
 
     // This is the critical assertion: the operation must NOT error.
     // On the pre-fix code it would propagate NotFound for the stale id.
-    let result = crate::table::tests::write_exec_tests::delete_via_tx(&repo, &table, &op, &refs)
-        .await
-        .unwrap();
+    let result = delete_via_tx(&repo, &table, &op, &refs).await.unwrap();
 
     // Only the one real record (Alice) should have been deleted.
     assert_eq!(

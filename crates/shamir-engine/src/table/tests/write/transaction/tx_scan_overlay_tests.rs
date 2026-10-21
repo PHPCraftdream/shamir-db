@@ -21,6 +21,7 @@ use shamir_types::types::value::QueryValue;
 use crate::query::filter::eval_context::FilterContext;
 use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_types::BoxRepo;
+use crate::table::tests::behavior::schema::test_helpers::query_value_to_inner_tracked;
 use crate::table::TableConfig;
 use crate::validator::schema::{Constraints, FieldRule, SchemaValidator, TypeTag};
 use crate::validator::{RecordValidator, ValidatorBinding, ValidatorRegistry, WriteOp};
@@ -127,8 +128,7 @@ async fn update_matches_staged_insert_index_arm() {
         ("name", QueryValue::Str("Seed".into())),
         ("status", QueryValue::Str("other".into())),
     ]);
-    let (inner_val, new_keys) =
-        crate::table::tests::test_helpers::query_value_to_inner_tracked(&seed, interner).unwrap();
+    let (inner_val, new_keys) = query_value_to_inner_tracked(&seed, interner).unwrap();
     if !new_keys.is_empty() {
         table.interner().save_new_keys(&new_keys).await.unwrap();
     }
@@ -265,8 +265,7 @@ async fn delete_matches_staged_insert_index_arm() {
         ("name", QueryValue::Str("Seed".into())),
         ("status", QueryValue::Str("other".into())),
     ]);
-    let (inner_val, new_keys) =
-        crate::table::tests::test_helpers::query_value_to_inner_tracked(&seed, interner).unwrap();
+    let (inner_val, new_keys) = query_value_to_inner_tracked(&seed, interner).unwrap();
     if !new_keys.is_empty() {
         table.interner().save_new_keys(&new_keys).await.unwrap();
     }

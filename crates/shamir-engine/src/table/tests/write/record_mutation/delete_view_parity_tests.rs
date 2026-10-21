@@ -24,7 +24,9 @@ use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
-use crate::table::tests::write_exec_tests::{delete_via_tx, setup_empty_table};
+use crate::table::tests::write::record_mutation::execution::fixtures::write_exec_tests::{
+    delete_via_tx, setup_empty_table,
+};
 use crate::table::TableManager;
 
 // ============================================================================

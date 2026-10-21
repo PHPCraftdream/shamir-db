@@ -1,1 +1,145 @@
 base = "2dd6bcd3612fee9dbca5530fdf559c55461b5c9e"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/index_lifecycle/recovery/rename/hash_rename/fixtures/p997_hash_rename_durability_tests.rs"
+item = "make_stores"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/index_lifecycle/recovery/rename/hash_rename/fixtures/p997_hash_rename_durability_tests.rs"
+item = "key_id"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/index_lifecycle/recovery/rename/hash_rename/fixtures/p997_hash_rename_durability_tests.rs"
+item = "record_with_str"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/index_lifecycle/recovery/rename/hash_rename/fixtures/p997_hash_rename_durability_tests.rs"
+item = "seed_table_with_regular_index"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/index_lifecycle/recovery/rename/hash_rename/fixtures/p997_hash_rename_durability_tests.rs"
+item = "seed_table_with_unique_index"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/index_lifecycle/recovery/rename/hash_rename/fixtures/p997_hash_rename_durability_tests.rs"
+item = "seed_regular_rename_tombstone"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/index_lifecycle/recovery/rename/hash_rename/fixtures/p997_hash_rename_durability_tests.rs"
+item = "seed_unique_rename_tombstone"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/index_lifecycle/recovery/rename/hash_rename/fixtures/p997_hash_rename_durability_tests.rs"
+item = "load_regular_rename_tombstone"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/index_lifecycle/recovery/rename/hash_rename/fixtures/p997_hash_rename_durability_tests.rs"
+item = "load_unique_rename_tombstone"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/index_lifecycle/recovery/rename/hash_rename/fixtures/p997_hash_rename_durability_tests.rs"
+item = "rename_entry"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/cases/prefilter_cofilter.rs"
+item = "path_label"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/cases/prefilter_cofilter.rs"
+item = "commit_cluster"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/cases/selectivity.rs"
+item = "Pcg"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/cases/selectivity.rs"
+item = "Pcg::0"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/cases/selectivity.rs"
+item = "Pcg::next"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/fixtures/filtered_ann_tests.rs"
+item = "make_repo"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/fixtures/filtered_ann_tests.rs"
+item = "vector_index_op"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/fixtures/filtered_ann_tests.rs"
+item = "field_id"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/fixtures/filtered_ann_tests.rs"
+item = "vec_record"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/fixtures/filtered_ann_tests.rs"
+item = "tags_in_order"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/fixtures/filtered_ann_tests.rs"
+item = "embeddings_in_order"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/fixtures/filtered_ann_tests.rs"
+item = "bare_vector_similarity_still_works"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/fixtures/filtered_ann_tests.rs"
+item = "setup_two_cluster"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/table/tests/write/record_mutation/execution/fixtures/write_exec_tests.rs"
+item = "setup_table_with_users"
+reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
+owner = "@layout-sweep"
