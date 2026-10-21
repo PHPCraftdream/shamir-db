@@ -67,7 +67,12 @@ Round-6 resolutions below are historical; corrected R1-R3 decisions above take p
   whose live row's generation ≠ the record's fails closed → record `Completed`
   WITHOUT deleting (a recovery landed, causes cured), only the record generation's
   claims released (M §4c step 5 + crash table + merged-handler note; R1-stage-1 lock
-  table row 4; S A.2d + Appendix B; E case 9).
+  table row 4; S A.2d + Appendix B; E case 9). **SUPERSEDED (round 9, brief 131i,
+  P1-5): the "generation changed ⇒ recovery landed, causes cured ⇒ record
+  `Completed` WITHOUT deleting" shortcut is RETRACTED — a generation bump is not a
+  cure; the record stays protected and INCOMPLETE until validated recovery of the
+  old cause (§3d predicate) or a durable identity-bound protection transfer is
+  proved (see the current M §4c crash table).**
 - C2 (P2→P1) — resolved (round 6): `Rejected` rows are excluded from boot's
   non-empty-`audit_pending` load, and the `destruction_rejected` event is emitted
   best-effort DIRECTLY, never enqueued (M §4d steps 1-2, §3b, §3e item 2; S A.2/A.5;

@@ -127,7 +127,10 @@ STATUS: historical resolutions below are retained; round-8 corrections supersede
 - C1 — resolved (round 6): generation-fenced R1 delete predicate
   `(name, binding_generation == record.binding_generation)`; resumed generation
   mismatch fails closed (record `Completed` WITHOUT deleting) (M §4c/§4e row 4;
-  S A.2d/Appendix B; E case 9).
+  S A.2d/Appendix B; E case 9). **SUPERSEDED (round 9, brief 131i, P1-5): the
+  "generation change ⇒ cured ⇒ complete WITHOUT deleting" shortcut is RETRACTED —
+  the record stays protected and INCOMPLETE until validated recovery or a durable
+  identity-bound protection transfer is proved (current M §4c crash table).**
 - C2 — resolved (round 6): `Rejected` rows never enter `audit_pending`; boot
   loading/publication excludes them (M §4d/§3b/§3e item 2; S A.2/A.5; E case 3).
 - C3 — resolved (round 6): single-app-class unpoison path (reconciliation RE-WRITE
