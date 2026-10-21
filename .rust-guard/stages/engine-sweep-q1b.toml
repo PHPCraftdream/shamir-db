@@ -1,4 +1,4 @@
-base = "9041d94de8a658ba32b86217e645a87e45dec578"
+base = "c98ece6578dc62aefedcf9331ad7efc9c62e884f"
 
 [[moved]]
 path = "crates/shamir-engine/src/query/filter/compile.rs"
