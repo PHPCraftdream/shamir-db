@@ -43,7 +43,7 @@ defs.rcu(|cur| { let mut v = cur.clone(); /* mutate */ v });  // COW, all nodes
 2. **Tier 2 — Linux integration** against real `/sys` (Фаза 1b, `LinuxTopology`).
 3. **Tier 3 — QEMU NUMA emulation** in CI for multi-socket correctness without
    physical hardware. Opt-in via `[numa-qemu]` flag in the commit message;
-   implemented in `scripts/ci-qemu-numa-test.sh`.
+   implemented in `scripts/runners/ci-qemu-numa-test.sh`.
 
 ### Tier-3 QEMU harness — current scope
 
@@ -68,7 +68,7 @@ native). A Rust build + nextest run inside TCG QEMU reliably exceeds the
 - **Option C — Cloud-init + SSH**: boot a full Ubuntu cloud image, inject
   and run cargo via SSH (cacheable ~500 MB image).
 
-See the script header in `scripts/ci-qemu-numa-test.sh` for detailed
+See the script header in `scripts/runners/ci-qemu-numa-test.sh` for detailed
 implementation notes on each option.
 
 Performance numbers require **real multi-socket hardware** and are measured

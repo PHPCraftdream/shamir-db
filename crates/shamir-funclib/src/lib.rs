@@ -23,22 +23,28 @@
 pub mod registry;
 pub mod scalar_resolver;
 
-pub mod agg;
-pub mod compare;
+pub mod functions;
 
-pub mod arrays;
-pub mod canonical;
-pub mod cast;
-pub mod crypto;
-pub mod datetime;
-pub mod encode;
-pub mod gen;
-pub mod math;
-pub mod null;
-pub mod object;
-pub mod strings;
+// Declared from the crate root (rather than `functions::text`) because a
+// `text` module nested in a `text` module trips clippy::module_inception.
+#[path = "functions/text/text/mod.rs"]
 pub mod text;
-pub mod validate;
+
+pub use functions::numeric::agg;
+pub use functions::value::compare;
+
+pub use functions::crypto;
+pub use functions::datetime;
+pub use functions::numeric::arrays;
+pub use functions::numeric::gen;
+pub use functions::numeric::math;
+pub use functions::text::strings;
+pub use functions::text::validate;
+pub use functions::value::canonical;
+pub use functions::value::cast;
+pub use functions::value::encode;
+pub use functions::value::null;
+pub use functions::value::object;
 pub mod value_nav;
 
 /// Build a registry populated with every built-in category.

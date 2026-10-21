@@ -154,6 +154,23 @@ directory unless an explicit `--exceptions` path is given.
     entries are `UNUSED_ALLOWANCE` findings — including runs with no
     base revision or no selected files, where no finding could ever
     have consumed them.
+  **Split-off files.** A file that is new at head and does not pair as a
+  whole-file move (the result of splitting a deleted base file) is compared
+  with the VACATED base — the base `.rs` files that no longer exist at
+  head, plus everything that LEFT a selected base file which still exists
+  at head (a facade that shrank: items whose key is gone from its head
+  version, `#[allow]` texts with fewer occurrences, per-file findings that
+  no longer occur) — instead of an empty base: a `pub(crate)`+ item is a
+  `VIS_WIDENING` only if no vacated base file had the same item (kind and
+  qualified name, impl members keyed by self type) at a rank at least as
+  wide; an `#[allow]` is `ALLOW_ADDED` only if its normalised text occurs
+  in no vacated base file; and a `MODRS_LOGIC` / `TESTS_MANIFEST` /
+  `INLINE_TEST_MOD` / `LOCAL_USE` finding is excused only while an
+  identical finding (same code and message) exists in the vacated base
+  files — each base finding excuses one head finding, so the debt can move
+  but never grow. Parse failures and the ownership rule are never excused,
+  an inline test module is excused by its module name, and an item that
+  stays in its source file (a copy) is never indexed.
   `--warn-primary-export` prints a WARNING line (never a finding) for
   each non-`mod.rs` file declaring more than one public item.
 - `rust-guard conservation --base <rev> --head <rev> [--packages p,q]
@@ -201,8 +218,18 @@ directory unless an explicit `--exceptions` path is given.
   fingerprint their type expression, so a changed `type X = ...` is a
   finding even with untouched method bodies. Split `impl` blocks merge
   into one logical member per (impl head, member) before comparison.
-  Pairing: exact identity first; leftovers pair by (kind, name,
-  enclosing) + signature as moves — moves/renames/extractions are only
+  Pairing: exact identity first (a strict form with the physical file and
+  the full content runs before it, so unchanged items that share one
+  logical path — cfg twins, the `main`/`const` items of every bench or
+  example target — keep their own counterpart); leftovers pair by (kind,
+  name, enclosing) + signature as moves (a `[[moved]]` entry that names the
+  base AND the head item pairs them first, which settles an ambiguous key
+  and carries an item whose signature changed with the move (excused by
+  `[[changed]]`, otherwise `SIGNATURE_CHANGED`);
+  content-identical twins with the same number of copies on both sides pair
+  one-to-one next, so a moved helper that exists in several files is not
+  ambiguous) —
+  moves/renames/extractions are only
   legal when declared in the delta; renames compare signatures with the
   item's OWN name normalised out, so `helper` → `helper2` can pair;
   names-only counting is impossible (an identity pair with a different
@@ -301,6 +328,40 @@ directory unless an explicit `--exceptions` path is given.
   are referenced from the campaign entries
 in `.rust-guard/stages.toml` (written by the CI wiring chunk).
 
+### Suggesting moves (`--suggest-delta <path>`, optional diagnostic)
+
+Both `conservation` and `discovery` accept `--suggest-delta <path>`. It
+never changes the findings or the exit code: the gate fails exactly as
+it would without the flag. Pairs that are blocked ONLY by a missing
+`[[moved]]` declaration (otherwise clean moves, tests included) are
+written to `<path>` as a delta file ready to be fed back via `--delta`:
+
+```toml
+base = "abc1234..."            # the resolved full base SHA
+
+[[moved]]
+path    = "crates/x/src/old.rs"
+item    = "shamir_x::old::Plan"
+to_path = "crates/x/src/planner.rs"
+to_item = "shamir_x::planner::Plan"
+reason  = "relocated by the layout sweep"
+owner   = "@layout-sweep"
+```
+
+Entries are sorted by base path, then base item; the file is written
+only when at least one pair exists, and one summary line
+(`rust-guard: note: N undeclared move(s) written to <path>`) goes to
+stderr. Real losses, genuinely new items, body-changed,
+signature-changed and attribute-changed pairs, and ambiguous
+(`UNPAIRABLE_DUPLICATE`) pairings are NEVER suggested — they stay
+findings. `[[renamed]]`, `[[extracted]]`, `[[removed]]`, `[[added]]`
+and `[[changed]]` are never suggested. For `discovery` the `base` value is the resolved
+full base SHA passed via the REQUIRED `--base-sha <sha>` argument
+(clap enforces that `--suggest-delta` and `--base-sha` are given
+together); the loader never checks it against anything (discovery
+compares list files, not revisions), but the pin lets a reviewer
+trace the run.
+
 ## `rust-guard discovery` — compiled test-inventory diff (CI-03b)
 
 `rust-guard discovery --base-list base.json --head-list head.json
@@ -354,6 +415,15 @@ revision; the CI job pins the base list to the merge base instead.
 
 `--kind` (default `lib`) is a label echoed into the finding paths and
 messages so doctest and loom lists can be diffed in separate runs.
+
+`discovery` also accepts `--suggest-delta <path>` (see the conservation
+section above): each unexplained lost test paired with the single
+unclaimed head identity of the same name is written there; ambiguous
+names (several head candidates) are never suggested. `--base-sha
+<sha>` is required with it and is written as the suggestion's `base`
+pin; the pairing must be mutually unique (single base identity and
+single head candidate per test name) with equal `ignored` state,
+otherwise nothing is suggested.
 
 ## When the gates run
 
@@ -479,6 +549,12 @@ Fixture → finding map:
 | `structure/allow_added` | `ALLOW_ADDED` (file gains `#[allow(dead_code)]`); clean with `[[allow]]` |
 | `structure/moved_plain` | none (exit 0) — a TRUE move (old.rs deleted at head) with byte-identical content pairs and stays clean |
 | `structure/copy_of_base_file` | `VIS_WIDENING` — a COPY (base file still present at head) never pairs as a move; the added file is new-file-checked |
+| `structure/split_clean` | none (exit 0) — `old.rs` split into two files that carry its `pub(crate)` item, `#[allow]`, inline test module and function-local `use` |
+| `structure/split_partial_clean` | clean — items, `#[allow]`, local `use` and test module left a surviving facade file |
+| `structure/split_partial_copy` | `VIS_WIDENING` — `a` is copied while it stays in the surviving `old.rs`; the moved `b` is excused |
+| `structure/split_widened` | `VIS_WIDENING` — the split-off item is `pub` where the vacated base item was `pub(crate)` |
+| `structure/split_new_allow` | `ALLOW_ADDED` — only the new `#[allow(unused)]`, not the one the vacated base file had |
+| `structure/split_copy_not_vacated` | `INLINE_TEST_MOD` for the new file — a base file still present at head vacates nothing |
 | `conservation/test_lost` | `TEST_LOST` |
 | `conservation/test_ignored` | `TEST_IGNORED` |
 | `conservation/test_cfg_changed` | `TEST_ATTR_CHANGED` (INHERITED module cfg drift: the inline test module's `#[cfg]` changes v1 → v2) |
@@ -494,6 +570,11 @@ Fixture → finding map:
 | `conservation/broken_mod` | `INVENTORY_ERROR` (`mod ghost;` resolves at neither revision — fail closed) |
 | `conservation/unused_allowance` | `UNUSED_ALLOWANCE` (identical trees — exercises the `--allow-empty` head commit) |
 | `conservation/base_mismatch` | `BASE_MISMATCH` (head carries a real comment-only diff) |
+| `conservation/dup_unchanged_targets` | clean — identically named items of two integration-test targets stay paired |
+| `conservation/dup_cfg_twins` | clean — cfg variants under one logical path stay paired |
+| `conservation/twin_moves` | two identical twins move to two other files: both suggested, the suggestion feeds back to clean |
+| `conservation/declared_moves_sig` | a declared move whose signature changed: `SIGNATURE_CHANGED` without `[[changed]]`, clean with it |
+| `conservation/declared_moves` | `UNPAIRABLE_DUPLICATE` listing base items and head candidates; two `[[moved]]` + `[[changed]]` entries settle it |
 | `conservation/unpairable_duplicate` | `UNPAIRABLE_DUPLICATE` (one base item, two same-key head candidates) |
 | `conservation/uncond_path_default_ignored` | none (exit 0) — an UNCONDITIONAL `#[path]` mod never inventories the phantom default file |
 | (no fixture — bad rev argument) | `BLOCKED_COMPARISON` |

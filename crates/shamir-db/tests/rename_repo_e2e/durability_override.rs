@@ -34,6 +34,26 @@ async fn describe_repo(db: &ShamirDb, name: &str) -> QueryValue {
         .into_owned()
 }
 
+/// Re-open a durable ShamirDb on the same system-store path, retrying
+/// briefly while the dropped instance's store still holds the fjall file lock
+/// (the lock is released lazily after the drop).
+async fn reopen_durable(system_path: std::path::PathBuf) -> ShamirDb {
+    for _ in 0..100 {
+        match ShamirDb::init(SystemStoreConfig::Fjall(system_path.clone())).await {
+            Ok(db) => return db,
+            Err(e) => {
+                let message = e.to_string();
+                assert!(
+                    message.contains("Locked"),
+                    "unexpected reopen error: {message}",
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+    }
+    panic!("fjall lock was not released within the retry window");
+}
+
 fn synced_override() -> DurabilityOverride {
     DurabilityOverride {
         wal_commit: Some(WalCommitTier::Synced),
@@ -116,9 +136,7 @@ async fn create_with_override_describe_and_restart_reload() {
     assert_eq!(plain["durability_override"], QueryValue::Null);
 
     drop(db);
-    let reopened = ShamirDb::init(SystemStoreConfig::Fjall(system_path))
-        .await
-        .unwrap();
+    let reopened = reopen_durable(system_path).await;
     assert_eq!(
         open_policy(&reopened, "testdb", "dur"),
         WalCommitTier::Synced

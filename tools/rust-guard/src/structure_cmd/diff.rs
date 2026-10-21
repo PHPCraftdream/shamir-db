@@ -14,6 +14,7 @@
 //! item on exactly one path and is consumed on first use.
 
 use super::select::Delta;
+use super::vacated::Vacated;
 use crate::common::finding::Report;
 use crate::common::gitfs::GitFs;
 use proc_macro2::Span;
@@ -29,6 +30,7 @@ pub fn check_files(
     head_fs: &GitFs,
     base_rev: &str,
     files: &[String],
+    vacated: &Vacated,
     delta: &mut Delta,
     report: &mut Report,
 ) {
@@ -86,12 +88,13 @@ pub fn check_files(
                         check_allows(path, &moved.file, &head, delta, report);
                     }
                     None => {
-                        // Brand-new file: `pub(crate)`+ items widen the
-                        // crate's surface (finding 10c), and every
-                        // `#[allow]` it carries is new (empty base).
-                        check_new_file(path, &head, delta, report);
-                        let empty = syn::parse_file("").expect("empty file parses");
-                        check_allows(path, &empty, &head, delta, report);
+                        // Brand-new (or split-off) file: `pub(crate)`+ items
+                        // widen the crate's surface (finding 10c) and every
+                        // `#[allow]` is new -- unless the same item or the
+                        // same attribute text lived in a base file that no
+                        // longer exists at head (the file was split).
+                        check_new_file(path, &head, vacated, delta, report);
+                        check_allow_set(path, vacated.allow_hashes(), &head, delta, report);
                     }
                 }
             }
@@ -128,7 +131,7 @@ pub(crate) fn report_unused(delta: &Delta, report: &mut Report) {
 /// to an ancestor of the defining module, so `pub(super) -> pub(crate)`
 /// still moves up a tier (finding 10a).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum VisRank {
+pub(super) enum VisRank {
     Private,
     /// `pub(self)`/`pub(super)`/`pub(in path)`: confined to an ancestor
     /// of the defining module.
@@ -159,7 +162,7 @@ fn rank(v: &Visibility) -> VisRank {
 /// of inline modules carry the module path, so same-named impls in two
 /// different inline modules never overwrite each other (R7c).
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct ItemKey {
+pub(super) struct ItemKey {
     kind: &'static str,
     name: String,
 }
@@ -538,11 +541,20 @@ fn vis_word(r: VisRank) -> &'static str {
 /// `pub(crate)`/`pub` visibility is a widening, matched against the
 /// delta BY ITEM NAME — one entry no longer silences a whole file.
 /// Items that are private or confined to an ancestor module are fine.
-fn check_new_file(path: &str, head: &File, delta: &mut Delta, report: &mut Report) {
+fn check_new_file(
+    path: &str,
+    head: &File,
+    vacated: &Vacated,
+    delta: &mut Delta,
+    report: &mut Report,
+) {
     let idx = vis_index(head);
     for (key, entry) in idx {
         if key.kind == "mod" || entry.rank < VisRank::RestrictedCrate {
             continue;
+        }
+        if vacated.covers_vis(&key, entry.rank) {
+            continue; // the same item at >= this rank lived in a vacated base file
         }
         let label = key_label(&key);
         let line = entry.line;
@@ -572,6 +584,19 @@ fn key_label(key: &ItemKey) -> String {
 fn check_allows(path: &str, base: &File, head: &File, delta: &mut Delta, report: &mut Report) {
     let mut base_set: BTreeSet<u64> = BTreeSet::new();
     collect_allow_hashes(base, &mut base_set);
+    check_allow_set(path, &base_set, head, delta, report);
+}
+
+/// Shared tail of rule 6b: `base_set` holds the hashed `allow` texts the
+/// head file may already rely on (its base counterpart, or every vacated
+/// base file for a split-off file).
+fn check_allow_set(
+    path: &str,
+    base_set: &BTreeSet<u64>,
+    head: &File,
+    delta: &mut Delta,
+    report: &mut Report,
+) {
     let mut head_attrs: Vec<(String, usize)> = Vec::new();
     collect_allow_texts(head, &mut head_attrs);
     for (text, line) in head_attrs {
@@ -637,4 +662,32 @@ fn normalise_attr(attr: &syn::Attribute) -> String {
         .map(|ts| ts.to_string())
         .unwrap_or_default();
     format!("{prefix}[allow({args})]")
+}
+
+/// `ItemKey -> rank` map of one file, for the vacated-base index.
+pub(super) fn rank_map(file: &File) -> BTreeMap<ItemKey, VisRank> {
+    vis_index(file)
+        .into_iter()
+        .map(|(key, entry)| (key, entry.rank))
+        .collect()
+}
+
+/// Hashed normalised `allow` texts of one file, for the vacated-base index.
+pub(super) fn allow_hash_set(file: &File) -> BTreeSet<u64> {
+    let mut out = BTreeSet::new();
+    collect_allow_hashes(file, &mut out);
+    out
+}
+
+/// Occurrences per hashed normalised `allow` text of one file.
+pub(super) fn allow_hash_counts(file: &File) -> BTreeMap<u64, usize> {
+    let mut texts = Vec::new();
+    collect_allow_texts(file, &mut texts);
+    let mut out = BTreeMap::new();
+    for (text, _) in texts {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut h);
+        *out.entry(h.finish()).or_insert(0) += 1;
+    }
+    out
 }

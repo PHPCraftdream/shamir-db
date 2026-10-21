@@ -27,7 +27,7 @@ CREATE INDEX lifecycle across regular/unique/sorted index families; F-58
 high-water re-check; F-59 (`a66d68d6`) fixed `MirroredStore::transact`'s
 whole-batch error atomicity (reordered so the mirror commit runs before
 EITHER subset touches primary); F-60 (`a5c3a29d`) hardened
-`scripts/bench_gate.sh`'s parser to fail closed on missing/duplicate/
+`scripts/bench/bench_gate.sh`'s parser to fail closed on missing/duplicate/
 unbacked-baseline cells; F-61 (`015e9b5f`) restricted `perf-gate.yml` to
 `workflow_dispatch` only after discovering — via `gh repo view` — that the
 repo is ALREADY PUBLIC (not a future concern), so the old `pull_request`
