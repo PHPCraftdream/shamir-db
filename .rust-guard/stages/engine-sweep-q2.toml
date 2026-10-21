@@ -5575,3 +5575,29 @@ path = "crates/shamir-engine/src/validator/transform_spec.rs"
 item = "shamir-engine::lib::validator::transform_spec::TransformSpec"
 reason = "signature tokens re-qualified or body adjusted for the new module location"
 owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/benches/tx_concurrent.rs"
+item = "shamir-engine::bench::main"
+to_path = "crates/shamir-engine/benches/storage_concurrency/transactions/tx_concurrent.rs"
+to_item = "shamir-engine::bench::main"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/benches/storage_concurrency/transactions/tx_concurrent_parts/fk_child_workload.rs"
+item = "shamir-engine::bench::tx_concurrent_parts::fk_child_workload::run"
+reason = "split-out bench workload extracted from the entry point by the layout sweep"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/benches/storage_concurrency/transactions/tx_concurrent_parts/workloads.rs"
+item = "shamir-engine::bench::tx_concurrent_parts::workloads::WCounts"
+reason = "split-out bench workload extracted from the entry point by the layout sweep"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/benches/storage_concurrency/transactions/tx_concurrent_parts/workloads.rs"
+item = "shamir-engine::bench::tx_concurrent_parts::workloads::run"
+reason = "split-out bench workload extracted from the entry point by the layout sweep"
+owner = "@layout-sweep"
