@@ -12,7 +12,8 @@
 //!    or signature changed; an ambiguous key stays open for later passes;
 //! 2. same (kind + name + enclosing + signature) — moves; a `[[moved]]`
 //!    entry that names both the base and the head item pairs them first
-//!    (an explicit declaration settles an ambiguous key), then identical
+//!    (an explicit declaration settles an ambiguous key and may carry a
+//!    changed signature, which `[[changed]]` must then excuse), then identical
 //!    twins (equal group sizes on both sides), then the plain key. A move
 //!    is accepted only
 //!    when a `[[moved]]` entry is declared, otherwise the pair falls
@@ -365,8 +366,11 @@ fn move_key(it: &Item) -> String {
 }
 
 /// Pairs base and head items that a `[[moved]]` entry names on both sides
-/// (same move key). An explicit declaration settles an ambiguous key; the
-/// entry itself is consumed later, in the move loop.
+/// (same kind + name + enclosing; the signature may differ, which is then
+/// reported as SIGNATURE_CHANGED unless `[[changed]]` excuses it). An
+/// explicit declaration settles an ambiguous key and carries an item whose
+/// signature tokens changed with the move (re-qualified paths); the entry
+/// itself is consumed later, in the move loop.
 fn declared_pass(
     base: &[Item],
     head: &[Item],
@@ -380,11 +384,11 @@ fn declared_pass(
     }
     let mut by_key: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for &h in head_left.iter() {
-        by_key.entry(move_key(&head[h])).or_default().push(h);
+        by_key.entry(weak_key(&head[h])).or_default().push(h);
     }
     let mut still: Vec<usize> = Vec::new();
     for &b in base_left.iter() {
-        let (bi, hit) = (&base[b], by_key.get_mut(&move_key(&base[b])));
+        let (bi, hit) = (&base[b], by_key.get_mut(&weak_key(&base[b])));
         let named = hit.and_then(|v| {
             let pos = v.iter().position(|&h| {
                 delta.moved_names_pair(&bi.path, &bi.logical, &head[h].path, &head[h].logical)

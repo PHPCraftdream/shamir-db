@@ -397,6 +397,52 @@ fn declared_moves_settle_an_ambiguous_key() {
     assert_clean(&repo.compare_with_delta(&delta));
 }
 
+/// `[[moved]]` for `take` (a.rs -> c.rs), whose signature changed.
+fn moved_take_entry(base_sha: &str) -> String {
+    format!(
+        "base = \"{base_sha}\"\n\n\
+         [[moved]]\n\
+         path = \"crates/fix/src/a.rs\"\n\
+         item = \"fix::lib::a::take\"\n\
+         to_path = \"crates/fix/src/c.rs\"\n\
+         to_item = \"fix::lib::c::take\"\n\
+         reason = \"relocated\"\n\
+         owner = \"@rust-guard\"\n"
+    )
+}
+
+#[test]
+fn declared_move_with_a_changed_signature_needs_a_changed_entry() {
+    // `take(u32) -> u32` moves to c.rs as `take(u64) -> u64`; the [[moved]]
+    // entry pairs the items although the signatures differ, and the drift is
+    // then a SIGNATURE_CHANGED finding.
+    // Counterfactual: without the declared pass the pair never forms (pass 2
+    // needs equal signatures) and the item is just an ITEM_LOST + ITEM_ADDED.
+    let repo = ConsRepo::two_commit("conservation/declared_moves_sig");
+    let out = repo.compare_with_delta(&moved_take_entry(&repo.base_sha));
+    assert_finding(&out, "SIGNATURE_CHANGED");
+    assert!(
+        !stderr(&out).contains("ITEM_LOST"),
+        "the declared move must pair the items:\n{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn declared_move_with_a_changed_signature_is_clean_when_excused() {
+    let repo = ConsRepo::two_commit("conservation/declared_moves_sig");
+    let delta = format!(
+        "{}\n\
+         [[changed]]\n\
+         path = \"crates/fix/src/a.rs\"\n\
+         item = \"fix::lib::a::take\"\n\
+         reason = \"re-qualified types\"\n\
+         owner = \"@rust-guard\"\n",
+        moved_take_entry(&repo.base_sha)
+    );
+    assert_clean(&repo.compare_with_delta(&delta));
+}
+
 #[test]
 fn unchanged_items_of_sibling_targets_stay_paired() {
     // Both integration-test targets define `N`, `helper` and `works`; all
