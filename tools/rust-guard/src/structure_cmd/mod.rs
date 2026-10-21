@@ -6,5 +6,6 @@ pub mod diff;
 pub mod owned;
 pub mod rules;
 pub mod select;
+pub mod vacated;
 
 pub use select::{run, StructureArgs};
