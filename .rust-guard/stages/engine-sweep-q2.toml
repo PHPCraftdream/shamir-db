@@ -1,4 +1,5 @@
 base = "9041d94de8a658ba32b86217e645a87e45dec578"
+
 [[moved]]
 path = "crates/shamir-engine/benches/backend_matrix.rs"
 item = "shamir-engine::bench::main"
@@ -1592,102 +1593,6 @@ reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
 [[moved]]
-path = "crates/shamir-engine/src/validator/decode.rs"
-item = "shamir-engine::lib::validator::decode::ValidatorDecodeError"
-to_path = "crates/shamir-engine/src/validator/codecs/decode.rs"
-to_item = "shamir-engine::lib::validator::codecs::decode::ValidatorDecodeError"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/decode.rs"
-item = "shamir-engine::lib::validator::decode::decode_error_list"
-to_path = "crates/shamir-engine/src/validator/codecs/decode.rs"
-to_item = "shamir-engine::lib::validator::codecs::decode::decode_error_list"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/decode.rs"
-item = "shamir-engine::lib::validator::decode::decode_single_error"
-to_path = "crates/shamir-engine/src/validator/codecs/decode.rs"
-to_item = "shamir-engine::lib::validator::codecs::decode::decode_single_error"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/decode.rs"
-item = "shamir-engine::lib::validator::decode::decode_validation_result"
-to_path = "crates/shamir-engine/src/validator/codecs/decode.rs"
-to_item = "shamir-engine::lib::validator::codecs::decode::decode_validation_result"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/encode.rs"
-item = "shamir-engine::lib::validator::encode::Validation"
-to_path = "crates/shamir-engine/src/validator/codecs/encode.rs"
-to_item = "shamir-engine::lib::validator::codecs::encode::Validation"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/encode.rs"
-item = "shamir-engine::lib::validator::encode::Validation::accept"
-to_path = "crates/shamir-engine/src/validator/codecs/encode.rs"
-to_item = "shamir-engine::lib::validator::codecs::encode::Validation::accept"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/encode.rs"
-item = "shamir-engine::lib::validator::encode::Validation::error"
-to_path = "crates/shamir-engine/src/validator/codecs/encode.rs"
-to_item = "shamir-engine::lib::validator::codecs::encode::Validation::error"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/encode.rs"
-item = "shamir-engine::lib::validator::encode::Validation::field_error"
-to_path = "crates/shamir-engine/src/validator/codecs/encode.rs"
-to_item = "shamir-engine::lib::validator::codecs::encode::Validation::field_error"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/encode.rs"
-item = "shamir-engine::lib::validator::encode::Validation::is_ok"
-to_path = "crates/shamir-engine/src/validator/codecs/encode.rs"
-to_item = "shamir-engine::lib::validator::codecs::encode::Validation::is_ok"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/encode.rs"
-item = "shamir-engine::lib::validator::encode::Validation::reject"
-to_path = "crates/shamir-engine/src/validator/codecs/encode.rs"
-to_item = "shamir-engine::lib::validator::codecs::encode::Validation::reject"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/encode.rs"
-item = "shamir-engine::lib::validator::encode::Validation::stop"
-to_path = "crates/shamir-engine/src/validator/codecs/encode.rs"
-to_item = "shamir-engine::lib::validator::codecs::encode::Validation::stop"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/encode.rs"
-item = "shamir-engine::lib::validator::encode::validation_to_query_value"
-to_path = "crates/shamir-engine/src/validator/codecs/encode.rs"
-to_item = "shamir-engine::lib::validator::codecs::encode::validation_to_query_value"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
 path = "crates/shamir-engine/src/validator/mod.rs"
 item = "shamir-engine::lib::validator::persistence"
 to_path = "crates/shamir-engine/src/validator/registry/mod.rs"
@@ -1716,918 +1621,6 @@ path = "crates/shamir-engine/src/validator/mod.rs"
 item = "shamir-engine::lib::validator::transform_spec"
 to_path = "crates/shamir-engine/src/validator/execution/mod.rs"
 to_item = "shamir-engine::lib::validator::execution::transform_spec"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/native_adapter.rs"
-item = "shamir-engine::lib::validator::native_adapter::NativeValidatorAdapter"
-to_path = "crates/shamir-engine/src/validator/codecs/native_adapter.rs"
-to_item = "shamir-engine::lib::validator::codecs::native_adapter::NativeValidatorAdapter"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/native_adapter.rs"
-item = "shamir-engine::lib::validator::native_adapter::NativeValidatorAdapter::call"
-to_path = "crates/shamir-engine/src/validator/codecs/native_adapter.rs"
-to_item = "shamir-engine::lib::validator::codecs::native_adapter::NativeValidatorAdapter::call"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/native_adapter.rs"
-item = "shamir-engine::lib::validator::native_adapter::NativeValidatorAdapter::new"
-to_path = "crates/shamir-engine/src/validator/codecs/native_adapter.rs"
-to_item = "shamir-engine::lib::validator::codecs::native_adapter::NativeValidatorAdapter::new"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/native_adapter.rs"
-item = "shamir-engine::lib::validator::native_adapter::NativeValidatorFn"
-to_path = "crates/shamir-engine/src/validator/codecs/native_adapter.rs"
-to_item = "shamir-engine::lib::validator::codecs::native_adapter::NativeValidatorFn"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/native_record_validator.rs"
-item = "shamir-engine::lib::validator::native_record_validator::NativeRecordValidator"
-to_path = "crates/shamir-engine/src/validator/execution/native_record_validator.rs"
-to_item = "shamir-engine::lib::validator::execution::native_record_validator::NativeRecordValidator"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/native_record_validator.rs"
-item = "shamir-engine::lib::validator::native_record_validator::NativeRecordValidator::new"
-to_path = "crates/shamir-engine/src/validator/execution/native_record_validator.rs"
-to_item = "shamir-engine::lib::validator::execution::native_record_validator::NativeRecordValidator::new"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/native_record_validator.rs"
-item = "shamir-engine::lib::validator::native_record_validator::NativeRecordValidator::validate"
-to_path = "crates/shamir-engine/src/validator/execution/native_record_validator.rs"
-to_item = "shamir-engine::lib::validator::execution::native_record_validator::NativeRecordValidator::validate"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/native_record_validator.rs"
-item = "shamir-engine::lib::validator::native_record_validator::NativeValidatorFnNew"
-to_path = "crates/shamir-engine/src/validator/execution/native_record_validator.rs"
-to_item = "shamir-engine::lib::validator::execution::native_record_validator::NativeValidatorFnNew"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/persisted_validators.rs"
-item = "shamir-engine::lib::validator::persisted_validators::PersistedValidators"
-to_path = "crates/shamir-engine/src/validator/registry/persisted_validators.rs"
-to_item = "shamir-engine::lib::validator::registry::persisted_validators::PersistedValidators"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/persistence.rs"
-item = "shamir-engine::lib::validator::persistence::load_validators_metadata"
-to_path = "crates/shamir-engine/src/validator/registry/persistence.rs"
-to_item = "shamir-engine::lib::validator::registry::persistence::load_validators_metadata"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/persistence.rs"
-item = "shamir-engine::lib::validator::persistence::save_validators_metadata"
-to_path = "crates/shamir-engine/src/validator/registry/persistence.rs"
-to_item = "shamir-engine::lib::validator::registry::persistence::save_validators_metadata"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/query_value_conv.rs"
-item = "shamir-engine::lib::validator::query_value_conv::inner_to_query_value"
-to_path = "crates/shamir-engine/src/validator/codecs/query_value_conv.rs"
-to_item = "shamir-engine::lib::validator::codecs::query_value_conv::inner_to_query_value"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/query_value_conv.rs"
-item = "shamir-engine::lib::validator::query_value_conv::inner_to_query_value_with"
-to_path = "crates/shamir-engine/src/validator/codecs/query_value_conv.rs"
-to_item = "shamir-engine::lib::validator::codecs::query_value_conv::inner_to_query_value_with"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::OwnedFields"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::OwnedFields"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::OwnedFields::materialize"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::OwnedFields::materialize"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::OwnedFields::present"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::OwnedFields::present"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::OwnedFields::scalar"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::OwnedFields::scalar"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::OwnedFields::str"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::OwnedFields::str"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::OwnedFields::to_query_value"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::OwnedFields::to_query_value"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::PathCache"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::PathCache"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::RecordFields::materialize"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::RecordFields::materialize"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::RecordFields::present"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::RecordFields::present"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::RecordFields::scalar"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::RecordFields::scalar"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::RecordFields::str"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::RecordFields::str"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::RecordFields::to_query_value"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::RecordFields::to_query_value"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::ViewFields"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::ViewFields"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::ViewFields::materialize"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::ViewFields::materialize"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::ViewFields::new"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::ViewFields::new"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::ViewFields::present"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::ViewFields::present"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::ViewFields::resolve_path"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::ViewFields::resolve_path"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::ViewFields::scalar"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::ViewFields::scalar"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::ViewFields::str"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::ViewFields::str"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::ViewFields::to_query_value"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::ViewFields::to_query_value"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::qv_descend"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::qv_descend"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::qv_to_inner"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::qv_to_inner"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::qv_to_kind"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::qv_to_kind"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_fields.rs"
-item = "shamir-engine::lib::validator::record_fields::qv_to_scalar"
-to_path = "crates/shamir-engine/src/validator/execution/record_fields.rs"
-to_item = "shamir-engine::lib::validator::execution::record_fields::qv_to_scalar"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_validator.rs"
-item = "shamir-engine::lib::validator::record_validator::RecordValidator::defaults"
-to_path = "crates/shamir-engine/src/validator/execution/record_validator.rs"
-to_item = "shamir-engine::lib::validator::execution::record_validator::RecordValidator::defaults"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_validator.rs"
-item = "shamir-engine::lib::validator::record_validator::RecordValidator::nullable_for_field"
-to_path = "crates/shamir-engine/src/validator/execution/record_validator.rs"
-to_item = "shamir-engine::lib::validator::execution::record_validator::RecordValidator::nullable_for_field"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_validator.rs"
-item = "shamir-engine::lib::validator::record_validator::RecordValidator::validate"
-to_path = "crates/shamir-engine/src/validator/execution/record_validator.rs"
-to_item = "shamir-engine::lib::validator::execution::record_validator::RecordValidator::validate"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_validator.rs"
-item = "shamir-engine::lib::validator::record_validator::ValidatorCtx"
-to_path = "crates/shamir-engine/src/validator/execution/record_validator.rs"
-to_item = "shamir-engine::lib::validator::execution::record_validator::ValidatorCtx"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_validator.rs"
-item = "shamir-engine::lib::validator::record_validator::ValidatorCtx::db"
-to_path = "crates/shamir-engine/src/validator/execution/record_validator.rs"
-to_item = "shamir-engine::lib::validator::execution::record_validator::ValidatorCtx::db"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_validator.rs"
-item = "shamir-engine::lib::validator::record_validator::ValidatorCtx::field_name"
-to_path = "crates/shamir-engine/src/validator/execution/record_validator.rs"
-to_item = "shamir-engine::lib::validator::execution::record_validator::ValidatorCtx::field_name"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_validator.rs"
-item = "shamir-engine::lib::validator::record_validator::ValidatorCtx::new"
-to_path = "crates/shamir-engine/src/validator/execution/record_validator.rs"
-to_item = "shamir-engine::lib::validator::execution::record_validator::ValidatorCtx::new"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_validator.rs"
-item = "shamir-engine::lib::validator::record_validator::ValidatorCtx::scalars"
-to_path = "crates/shamir-engine/src/validator/execution/record_validator.rs"
-to_item = "shamir-engine::lib::validator::execution::record_validator::ValidatorCtx::scalars"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_validator.rs"
-item = "shamir-engine::lib::validator::record_validator::ValidatorCtx::with_db"
-to_path = "crates/shamir-engine/src/validator/execution/record_validator.rs"
-to_item = "shamir-engine::lib::validator::execution::record_validator::ValidatorCtx::with_db"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/record_validator.rs"
-item = "shamir-engine::lib::validator::record_validator::ValidatorCtx::with_scalars"
-to_path = "crates/shamir-engine/src/validator/execution/record_validator.rs"
-to_item = "shamir-engine::lib::validator::execution::record_validator::ValidatorCtx::with_scalars"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::Entry"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::Entry"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::MutationHook"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::MutationHook"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::RegistryState"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::RegistryState"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::ValidatorRegistry"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::ValidatorRegistry"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::ValidatorRegistry::add_binding"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::ValidatorRegistry::add_binding"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::ValidatorRegistry::bound_tables"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::ValidatorRegistry::bound_tables"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::ValidatorRegistry::default"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::ValidatorRegistry::default"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::ValidatorRegistry::get_by_id"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::ValidatorRegistry::get_by_id"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::ValidatorRegistry::id_for_name"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::ValidatorRegistry::id_for_name"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::ValidatorRegistry::is_bound"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::ValidatorRegistry::is_bound"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::ValidatorRegistry::is_empty"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::ValidatorRegistry::is_empty"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::ValidatorRegistry::len"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::ValidatorRegistry::len"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::ValidatorRegistry::list"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::ValidatorRegistry::list"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::ValidatorRegistry::lock_writer"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::ValidatorRegistry::lock_writer"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::ValidatorRegistry::name_for_id"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::ValidatorRegistry::name_for_id"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::ValidatorRegistry::new"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::ValidatorRegistry::new"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::ValidatorRegistry::register"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::ValidatorRegistry::register"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::ValidatorRegistry::remove"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::ValidatorRegistry::remove"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::ValidatorRegistry::remove_binding"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::ValidatorRegistry::remove_binding"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::ValidatorRegistry::rename"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::ValidatorRegistry::rename"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::ValidatorRegistry::replace"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::ValidatorRegistry::replace"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::ValidatorRegistry::replace_artifact"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::ValidatorRegistry::replace_artifact"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::ValidatorRegistry::run_hook"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::ValidatorRegistry::run_hook"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::ValidatorRegistry::set_mutation_hook"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::ValidatorRegistry::set_mutation_hook"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::ValidatorRegistry::unbind_all_for_table"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::ValidatorRegistry::unbind_all_for_table"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/registry.rs"
-item = "shamir-engine::lib::validator::registry::ValidatorRegistryError"
-to_path = "crates/shamir-engine/src/validator/registry/validator_registry.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_registry::ValidatorRegistryError"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/constraints.rs"
-item = "shamir-engine::lib::validator::schema::constraints::Constraints"
-to_path = "crates/shamir-engine/src/validator/schema/rules/constraints.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::constraints::Constraints"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/constraints.rs"
-item = "shamir-engine::lib::validator::schema::constraints::Num"
-to_path = "crates/shamir-engine/src/validator/schema/rules/constraints.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::constraints::Num"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/cross_field.rs"
-item = "shamir-engine::lib::validator::schema::cross_field::CompareOp"
-to_path = "crates/shamir-engine/src/validator/schema/rules/cross_field.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::cross_field::CompareOp"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/cross_field.rs"
-item = "shamir-engine::lib::validator::schema::cross_field::CompareOp::eval_scalar"
-to_path = "crates/shamir-engine/src/validator/schema/rules/cross_field.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::cross_field::CompareOp::eval_scalar"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/cross_field.rs"
-item = "shamir-engine::lib::validator::schema::cross_field::CrossFieldCompare"
-to_path = "crates/shamir-engine/src/validator/schema/rules/cross_field.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::cross_field::CrossFieldCompare"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/cross_field.rs"
-item = "shamir-engine::lib::validator::schema::cross_field::CrossFieldCompare::check"
-to_path = "crates/shamir-engine/src/validator/schema/rules/cross_field.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::cross_field::CrossFieldCompare::check"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/cross_field.rs"
-item = "shamir-engine::lib::validator::schema::cross_field::CrossFieldCompare::new"
-to_path = "crates/shamir-engine/src/validator/schema/rules/cross_field.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::cross_field::CrossFieldCompare::new"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/cross_field.rs"
-item = "shamir-engine::lib::validator::schema::cross_field::CrossFieldResult"
-to_path = "crates/shamir-engine/src/validator/schema/rules/cross_field.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::cross_field::CrossFieldResult"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/cross_field.rs"
-item = "shamir-engine::lib::validator::schema::cross_field::scalar_ordering"
-to_path = "crates/shamir-engine/src/validator/schema/rules/cross_field.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::cross_field::scalar_ordering"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/field_rule.rs"
-item = "shamir-engine::lib::validator::schema::field_rule::FieldRule"
-to_path = "crates/shamir-engine/src/validator/schema/rules/field_rule.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::field_rule::FieldRule"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/field_rule.rs"
-item = "shamir-engine::lib::validator::schema::field_rule::FieldRule::check"
-to_path = "crates/shamir-engine/src/validator/schema/rules/field_rule.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::field_rule::FieldRule::check"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/field_rule.rs"
-item = "shamir-engine::lib::validator::schema::field_rule::FieldRule::check_any"
-to_path = "crates/shamir-engine/src/validator/schema/rules/field_rule.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::field_rule::FieldRule::check_any"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/field_rule.rs"
-item = "shamir-engine::lib::validator::schema::field_rule::FieldRule::check_array_of"
-to_path = "crates/shamir-engine/src/validator/schema/rules/field_rule.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::field_rule::FieldRule::check_array_of"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/field_rule.rs"
-item = "shamir-engine::lib::validator::schema::field_rule::FieldRule::check_collection"
-to_path = "crates/shamir-engine/src/validator/schema/rules/field_rule.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::field_rule::FieldRule::check_collection"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/field_rule.rs"
-item = "shamir-engine::lib::validator::schema::field_rule::FieldRule::check_cross_field"
-to_path = "crates/shamir-engine/src/validator/schema/rules/field_rule.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::field_rule::FieldRule::check_cross_field"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/field_rule.rs"
-item = "shamir-engine::lib::validator::schema::field_rule::FieldRule::check_extended"
-to_path = "crates/shamir-engine/src/validator/schema/rules/field_rule.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::field_rule::FieldRule::check_extended"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/field_rule.rs"
-item = "shamir-engine::lib::validator::schema::field_rule::FieldRule::check_f64"
-to_path = "crates/shamir-engine/src/validator/schema/rules/field_rule.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::field_rule::FieldRule::check_f64"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/field_rule.rs"
-item = "shamir-engine::lib::validator::schema::field_rule::FieldRule::check_for_test"
-to_path = "crates/shamir-engine/src/validator/schema/rules/field_rule.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::field_rule::FieldRule::check_for_test"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/field_rule.rs"
-item = "shamir-engine::lib::validator::schema::field_rule::FieldRule::check_format"
-to_path = "crates/shamir-engine/src/validator/schema/rules/field_rule.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::field_rule::FieldRule::check_format"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/field_rule.rs"
-item = "shamir-engine::lib::validator::schema::field_rule::FieldRule::check_int"
-to_path = "crates/shamir-engine/src/validator/schema/rules/field_rule.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::field_rule::FieldRule::check_int"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/field_rule.rs"
-item = "shamir-engine::lib::validator::schema::field_rule::FieldRule::check_one_of"
-to_path = "crates/shamir-engine/src/validator/schema/rules/field_rule.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::field_rule::FieldRule::check_one_of"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/field_rule.rs"
-item = "shamir-engine::lib::validator::schema::field_rule::FieldRule::check_scalar_bridge"
-to_path = "crates/shamir-engine/src/validator/schema/rules/field_rule.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::field_rule::FieldRule::check_scalar_bridge"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/field_rule.rs"
-item = "shamir-engine::lib::validator::schema::field_rule::FieldRule::check_string"
-to_path = "crates/shamir-engine/src/validator/schema/rules/field_rule.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::field_rule::FieldRule::check_string"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/field_rule.rs"
-item = "shamir-engine::lib::validator::schema::field_rule::FieldRule::materialize_as_qv"
-to_path = "crates/shamir-engine/src/validator/schema/rules/field_rule.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::field_rule::FieldRule::materialize_as_qv"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/field_rule.rs"
-item = "shamir-engine::lib::validator::schema::field_rule::FieldRule::type_matches"
-to_path = "crates/shamir-engine/src/validator/schema/rules/field_rule.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::field_rule::FieldRule::type_matches"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/field_rule.rs"
-item = "shamir-engine::lib::validator::schema::field_rule::inner_to_qv"
-to_path = "crates/shamir-engine/src/validator/schema/rules/field_rule.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::field_rule::inner_to_qv"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/field_rule.rs"
-item = "shamir-engine::lib::validator::schema::field_rule::scalar_ref_to_qv"
-to_path = "crates/shamir-engine/src/validator/schema/rules/field_rule.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::field_rule::scalar_ref_to_qv"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/format.rs"
-item = "shamir-engine::lib::validator::schema::format::BARE_DATE_RE"
-to_path = "crates/shamir-engine/src/validator/schema/rules/format.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::format::BARE_DATE_RE"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/format.rs"
-item = "shamir-engine::lib::validator::schema::format::EMAIL_RE"
-to_path = "crates/shamir-engine/src/validator/schema/rules/format.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::format::EMAIL_RE"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/format.rs"
-item = "shamir-engine::lib::validator::schema::format::FormatKind"
-to_path = "crates/shamir-engine/src/validator/schema/rules/format.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::format::FormatKind"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/format.rs"
-item = "shamir-engine::lib::validator::schema::format::FormatKind::as_str"
-to_path = "crates/shamir-engine/src/validator/schema/rules/format.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::format::FormatKind::as_str"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/format.rs"
-item = "shamir-engine::lib::validator::schema::format::FormatKind::matches"
-to_path = "crates/shamir-engine/src/validator/schema/rules/format.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::format::FormatKind::matches"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/format.rs"
-item = "shamir-engine::lib::validator::schema::format::FormatKind::parse"
-to_path = "crates/shamir-engine/src/validator/schema/rules/format.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::format::FormatKind::parse"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/format.rs"
-item = "shamir-engine::lib::validator::schema::format::RFC3339_RE"
-to_path = "crates/shamir-engine/src/validator/schema/rules/format.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::format::RFC3339_RE"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/format.rs"
-item = "shamir-engine::lib::validator::schema::format::URL_RE"
-to_path = "crates/shamir-engine/src/validator/schema/rules/format.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::format::URL_RE"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/format.rs"
-item = "shamir-engine::lib::validator::schema::format::UUID_RE"
-to_path = "crates/shamir-engine/src/validator/schema/rules/format.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::format::UUID_RE"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/format.rs"
-item = "shamir-engine::lib::validator::schema::format::day_is_valid"
-to_path = "crates/shamir-engine/src/validator/schema/rules/format.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::format::day_is_valid"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/format.rs"
-item = "shamir-engine::lib::validator::schema::format::days_in_month"
-to_path = "crates/shamir-engine/src/validator/schema/rules/format.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::format::days_in_month"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/format.rs"
-item = "shamir-engine::lib::validator::schema::format::is_date_like"
-to_path = "crates/shamir-engine/src/validator/schema/rules/format.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::format::is_date_like"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/format.rs"
-item = "shamir-engine::lib::validator::schema::format::is_leap"
-to_path = "crates/shamir-engine/src/validator/schema/rules/format.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::format::is_leap"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/format.rs"
-item = "shamir-engine::lib::validator::schema::format::parse_bare_date"
-to_path = "crates/shamir-engine/src/validator/schema/rules/format.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::format::parse_bare_date"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -2668,38 +1661,6 @@ path = "crates/shamir-engine/src/validator/schema/mod.rs"
 item = "shamir-engine::lib::validator::schema::type_tag"
 to_path = "crates/shamir-engine/src/validator/schema/rules/mod.rs"
 to_item = "shamir-engine::lib::validator::schema::rules::type_tag"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/one_of_set.rs"
-item = "shamir-engine::lib::validator::schema::one_of_set::OneOfSet"
-to_path = "crates/shamir-engine/src/validator/schema/rules/one_of_set.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::one_of_set::OneOfSet"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/one_of_set.rs"
-item = "shamir-engine::lib::validator::schema::one_of_set::OneOfSet::build"
-to_path = "crates/shamir-engine/src/validator/schema/rules/one_of_set.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::one_of_set::OneOfSet::build"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/one_of_set.rs"
-item = "shamir-engine::lib::validator::schema::one_of_set::OneOfSet::contains_materialized"
-to_path = "crates/shamir-engine/src/validator/schema/rules/one_of_set.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::one_of_set::OneOfSet::contains_materialized"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/one_of_set.rs"
-item = "shamir-engine::lib::validator::schema::one_of_set::OneOfSet::contains_scalar"
-to_path = "crates/shamir-engine/src/validator/schema/rules/one_of_set.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::one_of_set::OneOfSet::contains_scalar"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -2860,14 +1821,6 @@ path = "crates/shamir-engine/src/validator/schema/tests/check_tests.rs"
 item = "shamir-engine::lib::validator::schema::tests::check_tests::bool_rejects_str"
 to_path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/check_tests.rs"
 to_item = "shamir-engine::lib::validator::schema::tests::schema_rules::check_tests::bool_rejects_str"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/tests/check_tests.rs"
-item = "shamir-engine::lib::validator::schema::tests::check_tests::check_rule"
-to_path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/check_tests.rs"
-to_item = "shamir-engine::lib::validator::schema::tests::schema_rules::check_tests::check_rule"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -3089,14 +2042,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/validator/schema/tests/check_tests.rs"
-item = "shamir-engine::lib::validator::schema::tests::check_tests::simple_rule"
-to_path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/check_tests.rs"
-to_item = "shamir-engine::lib::validator::schema::tests::schema_rules::check_tests::simple_rule"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/tests/check_tests.rs"
 item = "shamir-engine::lib::validator::schema::tests::check_tests::string_accepts_str"
 to_path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/check_tests.rs"
 to_item = "shamir-engine::lib::validator::schema::tests::schema_rules::check_tests::string_accepts_str"
@@ -3188,22 +2133,6 @@ path = "crates/shamir-engine/src/validator/schema/tests/mod.rs"
 item = "shamir-engine::lib::validator::schema::tests::unique_tests"
 to_path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/mod.rs"
 to_item = "shamir-engine::lib::validator::schema::tests::schema_rules::unique_tests"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/tests/phase_b_tests.rs"
-item = "shamir-engine::lib::validator::schema::tests::phase_b_tests::check_extended_no_ctx"
-to_path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/phase_b_tests.rs"
-to_item = "shamir-engine::lib::validator::schema::tests::schema_rules::phase_b_tests::check_extended_no_ctx"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/tests/phase_b_tests.rs"
-item = "shamir-engine::lib::validator::schema::tests::phase_b_tests::check_extended_with_resolver"
-to_path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/phase_b_tests.rs"
-to_item = "shamir-engine::lib::validator::schema::tests::schema_rules::phase_b_tests::check_extended_with_resolver"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -3369,14 +2298,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/validator/schema/tests/phase_b_tests.rs"
-item = "shamir-engine::lib::validator::schema::tests::phase_b_tests::rule_with"
-to_path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/phase_b_tests.rs"
-to_item = "shamir-engine::lib::validator::schema::tests::schema_rules::phase_b_tests::rule_with"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/tests/phase_b_tests.rs"
 item = "shamir-engine::lib::validator::schema::tests::phase_b_tests::scalar_bridge_accepts_valid_email"
 to_path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/phase_b_tests.rs"
 to_item = "shamir-engine::lib::validator::schema::tests::schema_rules::phase_b_tests::scalar_bridge_accepts_valid_email"
@@ -3481,14 +2402,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/validator/schema/tests/schema_validator_tests.rs"
-item = "shamir-engine::lib::validator::schema::tests::schema_validator_tests::large_status_list"
-to_path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/schema_validator_tests.rs"
-to_item = "shamir-engine::lib::validator::schema::tests::schema_rules::schema_validator_tests::large_status_list"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/tests/schema_validator_tests.rs"
 item = "shamir-engine::lib::validator::schema::tests::schema_validator_tests::literal_default_appears_in_collect_defaults_not_transforms"
 to_path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/schema_validator_tests.rs"
 to_item = "shamir-engine::lib::validator::schema::tests::schema_rules::schema_validator_tests::literal_default_appears_in_collect_defaults_not_transforms"
@@ -3569,14 +2482,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/validator/schema/tests/schema_validator_tests.rs"
-item = "shamir-engine::lib::validator::schema::tests::schema_validator_tests::one_of_rule"
-to_path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/schema_validator_tests.rs"
-to_item = "shamir-engine::lib::validator::schema::tests::schema_rules::schema_validator_tests::one_of_rule"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/tests/schema_validator_tests.rs"
 item = "shamir-engine::lib::validator::schema::tests::schema_validator_tests::one_of_via_schema"
 to_path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/schema_validator_tests.rs"
 to_item = "shamir-engine::lib::validator::schema::tests::schema_rules::schema_validator_tests::one_of_via_schema"
@@ -3601,14 +2506,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/validator/schema/tests/schema_validator_tests.rs"
-item = "shamir-engine::lib::validator::schema::tests::schema_validator_tests::run_schema"
-to_path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/schema_validator_tests.rs"
-to_item = "shamir-engine::lib::validator::schema::tests::schema_rules::schema_validator_tests::run_schema"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/tests/schema_validator_tests.rs"
 item = "shamir-engine::lib::validator::schema::tests::schema_validator_tests::string_max_len_via_builder"
 to_path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/schema_validator_tests.rs"
 to_item = "shamir-engine::lib::validator::schema::tests::schema_rules::schema_validator_tests::string_max_len_via_builder"
@@ -3620,14 +2517,6 @@ path = "crates/shamir-engine/src/validator/schema/tests/unique_tests.rs"
 item = "shamir-engine::lib::validator::schema::tests::unique_tests::fields_from"
 to_path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/unique_tests.rs"
 to_item = "shamir-engine::lib::validator::schema::tests::schema_rules::unique_tests::fields_from"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/tests/unique_tests.rs"
-item = "shamir-engine::lib::validator::schema::tests::unique_tests::rule_with_unique"
-to_path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/unique_tests.rs"
-to_item = "shamir-engine::lib::validator::schema::tests::schema_rules::unique_tests::rule_with_unique"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -3652,30 +2541,6 @@ path = "crates/shamir-engine/src/validator/schema/tests/unique_tests.rs"
 item = "shamir-engine::lib::validator::schema::tests::unique_tests::unique_null_value_skips"
 to_path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/unique_tests.rs"
 to_item = "shamir-engine::lib::validator::schema::tests::schema_rules::unique_tests::unique_null_value_skips"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/tests/unique_tests.rs"
-item = "shamir-engine::lib::validator::schema::tests::unique_tests::validate_no_db"
-to_path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/unique_tests.rs"
-to_item = "shamir-engine::lib::validator::schema::tests::schema_rules::unique_tests::validate_no_db"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/type_tag.rs"
-item = "shamir-engine::lib::validator::schema::type_tag::TypeTag"
-to_path = "crates/shamir-engine/src/validator/schema/rules/type_tag.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::type_tag::TypeTag"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/schema/type_tag.rs"
-item = "shamir-engine::lib::validator::schema::type_tag::TypeTag::fmt"
-to_path = "crates/shamir-engine/src/validator/schema/rules/type_tag.rs"
-to_item = "shamir-engine::lib::validator::schema::rules::type_tag::TypeTag::fmt"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -3812,22 +2677,6 @@ path = "crates/shamir-engine/src/validator/tests/decode_tests.rs"
 item = "shamir-engine::lib::validator::tests::decode_tests::null_is_valid"
 to_path = "crates/shamir-engine/src/validator/tests/codecs/decode_tests.rs"
 to_item = "shamir-engine::lib::validator::tests::codecs::decode_tests::null_is_valid"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/decode_tests.rs"
-item = "shamir-engine::lib::validator::tests::decode_tests::qmap"
-to_path = "crates/shamir-engine/src/validator/tests/codecs/decode_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::codecs::decode_tests::qmap"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/encode_tests.rs"
-item = "shamir-engine::lib::validator::tests::encode_tests::assert_round_trip"
-to_path = "crates/shamir-engine/src/validator/tests/codecs/encode_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::codecs::encode_tests::assert_round_trip"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -3977,14 +2826,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/validator/tests/native_adapter_tests.rs"
-item = "shamir-engine::lib::validator::tests::native_adapter_tests::call_params"
-to_path = "crates/shamir-engine/src/validator/tests/codecs/native_adapter_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::codecs::native_adapter_tests::call_params"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/native_adapter_tests.rs"
 item = "shamir-engine::lib::validator::tests::native_adapter_tests::reject_path_still_encodes_full_map"
 to_path = "crates/shamir-engine/src/validator/tests/codecs/native_adapter_tests.rs"
 to_item = "shamir-engine::lib::validator::tests::codecs::native_adapter_tests::reject_path_still_encodes_full_map"
@@ -4012,46 +2853,6 @@ path = "crates/shamir-engine/src/validator/tests/persistence_tests.rs"
 item = "shamir-engine::lib::validator::tests::persistence_tests::round_trip_save_load"
 to_path = "crates/shamir-engine/src/validator/tests/codecs/persistence_tests.rs"
 to_item = "shamir-engine::lib::validator::tests::codecs::persistence_tests::round_trip_save_load"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/query_value_conv_tests.rs"
-item = "shamir-engine::lib::validator::tests::query_value_conv_tests::Resolver"
-to_path = "crates/shamir-engine/src/validator/tests/codecs/query_value_conv_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::codecs::query_value_conv_tests::Resolver"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/query_value_conv_tests.rs"
-item = "shamir-engine::lib::validator::tests::query_value_conv_tests::Resolver::intern_fn"
-to_path = "crates/shamir-engine/src/validator/tests/codecs/query_value_conv_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::codecs::query_value_conv_tests::Resolver::intern_fn"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/query_value_conv_tests.rs"
-item = "shamir-engine::lib::validator::tests::query_value_conv_tests::Resolver::new"
-to_path = "crates/shamir-engine/src/validator/tests/codecs/query_value_conv_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::codecs::query_value_conv_tests::Resolver::new"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/query_value_conv_tests.rs"
-item = "shamir-engine::lib::validator::tests::query_value_conv_tests::Resolver::resolve_fn"
-to_path = "crates/shamir-engine/src/validator/tests/codecs/query_value_conv_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::codecs::query_value_conv_tests::Resolver::resolve_fn"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/query_value_conv_tests.rs"
-item = "shamir-engine::lib::validator::tests::query_value_conv_tests::assert_round_trip_identity"
-to_path = "crates/shamir-engine/src/validator/tests/codecs/query_value_conv_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::codecs::query_value_conv_tests::assert_round_trip_identity"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -4100,30 +2901,6 @@ path = "crates/shamir-engine/src/validator/tests/query_value_conv_tests.rs"
 item = "shamir-engine::lib::validator::tests::query_value_conv_tests::round_trip_identity_set"
 to_path = "crates/shamir-engine/src/validator/tests/codecs/query_value_conv_tests.rs"
 to_item = "shamir-engine::lib::validator::tests::codecs::query_value_conv_tests::round_trip_identity_set"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/record_fields_tests.rs"
-item = "shamir-engine::lib::validator::tests::record_fields_tests::build_test_qv"
-to_path = "crates/shamir-engine/src/validator/tests/execution/record_fields_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::execution::record_fields_tests::build_test_qv"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/record_fields_tests.rs"
-item = "shamir-engine::lib::validator::tests::record_fields_tests::build_test_record"
-to_path = "crates/shamir-engine/src/validator/tests/execution/record_fields_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::execution::record_fields_tests::build_test_record"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/record_fields_tests.rs"
-item = "shamir-engine::lib::validator::tests::record_fields_tests::ik"
-to_path = "crates/shamir-engine/src/validator/tests/execution/record_fields_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::execution::record_fields_tests::ik"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -4249,54 +3026,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/validator/tests/registry_atomic_tests.rs"
-item = "shamir-engine::lib::validator::tests::registry_atomic_tests::Park"
-to_path = "crates/shamir-engine/src/validator/tests/registry/registry_atomic_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::registry_atomic_tests::Park"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/registry_atomic_tests.rs"
-item = "shamir-engine::lib::validator::tests::registry_atomic_tests::Park::install"
-to_path = "crates/shamir-engine/src/validator/tests/registry/registry_atomic_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::registry_atomic_tests::Park::install"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/registry_atomic_tests.rs"
-item = "shamir-engine::lib::validator::tests::registry_atomic_tests::Park::resume"
-to_path = "crates/shamir-engine/src/validator/tests/registry/registry_atomic_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::registry_atomic_tests::Park::resume"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/registry_atomic_tests.rs"
-item = "shamir-engine::lib::validator::tests::registry_atomic_tests::Park::wait"
-to_path = "crates/shamir-engine/src/validator/tests/registry/registry_atomic_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::registry_atomic_tests::Park::wait"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/registry_atomic_tests.rs"
-item = "shamir-engine::lib::validator::tests::registry_atomic_tests::artifact"
-to_path = "crates/shamir-engine/src/validator/tests/registry/registry_atomic_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::registry_atomic_tests::artifact"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/registry_atomic_tests.rs"
-item = "shamir-engine::lib::validator::tests::registry_atomic_tests::assert_consistent"
-to_path = "crates/shamir-engine/src/validator/tests/registry/registry_atomic_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::registry_atomic_tests::assert_consistent"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/registry_atomic_tests.rs"
 item = "shamir-engine::lib::validator::tests::registry_atomic_tests::lifecycle_conflicts_leave_artifacts_names_bindings_and_count_unchanged"
 to_path = "crates/shamir-engine/src/validator/tests/registry/registry_atomic_tests.rs"
 to_item = "shamir-engine::lib::validator::tests::registry::registry_atomic_tests::lifecycle_conflicts_leave_artifacts_names_bindings_and_count_unchanged"
@@ -4393,81 +3122,9 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/validator/tests/run_validators_tests.rs"
-item = "shamir-engine::lib::validator::tests::run_validators_tests::AcceptValidator"
-to_path = "crates/shamir-engine/src/validator/tests/execution/run_validators_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::execution::run_validators_tests::AcceptValidator"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/run_validators_tests.rs"
-item = "shamir-engine::lib::validator::tests::run_validators_tests::AcceptValidator::validate"
-to_path = "crates/shamir-engine/src/validator/tests/execution/run_validators_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::execution::run_validators_tests::AcceptValidator::validate"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/run_validators_tests.rs"
-item = "shamir-engine::lib::validator::tests::run_validators_tests::RejectValidator"
-to_path = "crates/shamir-engine/src/validator/tests/execution/run_validators_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::execution::run_validators_tests::RejectValidator"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/run_validators_tests.rs"
-item = "shamir-engine::lib::validator::tests::run_validators_tests::RejectValidator::validate"
-to_path = "crates/shamir-engine/src/validator/tests/execution/run_validators_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::execution::run_validators_tests::RejectValidator::validate"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/run_validators_tests.rs"
-item = "shamir-engine::lib::validator::tests::run_validators_tests::StopValidator"
-to_path = "crates/shamir-engine/src/validator/tests/execution/run_validators_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::execution::run_validators_tests::StopValidator"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/run_validators_tests.rs"
-item = "shamir-engine::lib::validator::tests::run_validators_tests::StopValidator::validate"
-to_path = "crates/shamir-engine/src/validator/tests/execution/run_validators_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::execution::run_validators_tests::StopValidator::validate"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/run_validators_tests.rs"
-item = "shamir-engine::lib::validator::tests::run_validators_tests::TrapValidator"
-to_path = "crates/shamir-engine/src/validator/tests/execution/run_validators_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::execution::run_validators_tests::TrapValidator"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/run_validators_tests.rs"
-item = "shamir-engine::lib::validator::tests::run_validators_tests::TrapValidator::validate"
-to_path = "crates/shamir-engine/src/validator/tests/execution/run_validators_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::execution::run_validators_tests::TrapValidator::validate"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/run_validators_tests.rs"
 item = "shamir-engine::lib::validator::tests::run_validators_tests::accept_validator_returns_ok"
 to_path = "crates/shamir-engine/src/validator/tests/execution/run_validators_tests.rs"
 to_item = "shamir-engine::lib::validator::tests::execution::run_validators_tests::accept_validator_returns_ok"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/run_validators_tests.rs"
-item = "shamir-engine::lib::validator::tests::run_validators_tests::build_table_with_validators"
-to_path = "crates/shamir-engine/src/validator/tests/execution/run_validators_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::execution::run_validators_tests::build_table_with_validators"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -4537,30 +3194,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/validator/tests/validator_actor_tests.rs"
-item = "shamir-engine::lib::validator::tests::validator_actor_tests::CallerActorValidator"
-to_path = "crates/shamir-engine/src/validator/tests/execution/validator_actor_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::execution::validator_actor_tests::CallerActorValidator"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/validator_actor_tests.rs"
-item = "shamir-engine::lib::validator::tests::validator_actor_tests::CallerActorValidator::validate"
-to_path = "crates/shamir-engine/src/validator/tests/execution/validator_actor_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::execution::validator_actor_tests::CallerActorValidator::validate"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/validator_actor_tests.rs"
-item = "shamir-engine::lib::validator::tests::validator_actor_tests::items_op"
-to_path = "crates/shamir-engine/src/validator/tests/execution/validator_actor_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::execution::validator_actor_tests::items_op"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/validator_actor_tests.rs"
 item = "shamir-engine::lib::validator::tests::validator_actor_tests::setup"
 to_path = "crates/shamir-engine/src/validator/tests/execution/validator_actor_tests.rs"
 to_item = "shamir-engine::lib::validator::tests::execution::validator_actor_tests::setup"
@@ -4580,118 +3213,6 @@ path = "crates/shamir-engine/src/validator/tests/validator_actor_tests.rs"
 item = "shamir-engine::lib::validator::tests::validator_actor_tests::validator_sees_caller_actor_not_system"
 to_path = "crates/shamir-engine/src/validator/tests/execution/validator_actor_tests.rs"
 to_item = "shamir-engine::lib::validator::tests::execution::validator_actor_tests::validator_sees_caller_actor_not_system"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/validator_db_tests.rs"
-item = "shamir-engine::lib::validator::tests::validator_db_tests::DbReadingValidator"
-to_path = "crates/shamir-engine/src/validator/tests/registry/validator_db_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::validator_db_tests::DbReadingValidator"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/validator_db_tests.rs"
-item = "shamir-engine::lib::validator::tests::validator_db_tests::DbReadingValidator::validate"
-to_path = "crates/shamir-engine/src/validator/tests/registry/validator_db_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::validator_db_tests::DbReadingValidator::validate"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/validator_db_tests.rs"
-item = "shamir-engine::lib::validator::tests::validator_db_tests::FinalStateFkValidator"
-to_path = "crates/shamir-engine/src/validator/tests/registry/validator_db_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::validator_db_tests::FinalStateFkValidator"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/validator_db_tests.rs"
-item = "shamir-engine::lib::validator::tests::validator_db_tests::FinalStateFkValidator::validate"
-to_path = "crates/shamir-engine/src/validator/tests/registry/validator_db_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::validator_db_tests::FinalStateFkValidator::validate"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/validator_db_tests.rs"
-item = "shamir-engine::lib::validator::tests::validator_db_tests::TestLogSink"
-to_path = "crates/shamir-engine/src/validator/tests/registry/validator_db_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::validator_db_tests::TestLogSink"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/validator_db_tests.rs"
-item = "shamir-engine::lib::validator::tests::validator_db_tests::TestLogSink::contains"
-to_path = "crates/shamir-engine/src/validator/tests/registry/validator_db_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::validator_db_tests::TestLogSink::contains"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/validator_db_tests.rs"
-item = "shamir-engine::lib::validator::tests::validator_db_tests::TestLogSink::enabled"
-to_path = "crates/shamir-engine/src/validator/tests/registry/validator_db_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::validator_db_tests::TestLogSink::enabled"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/validator_db_tests.rs"
-item = "shamir-engine::lib::validator::tests::validator_db_tests::TestLogSink::flush"
-to_path = "crates/shamir-engine/src/validator/tests/registry/validator_db_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::validator_db_tests::TestLogSink::flush"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/validator_db_tests.rs"
-item = "shamir-engine::lib::validator::tests::validator_db_tests::TestLogSink::log"
-to_path = "crates/shamir-engine/src/validator/tests/registry/validator_db_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::validator_db_tests::TestLogSink::log"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/validator_db_tests.rs"
-item = "shamir-engine::lib::validator::tests::validator_db_tests::TestLogSink::new"
-to_path = "crates/shamir-engine/src/validator/tests/registry/validator_db_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::validator_db_tests::TestLogSink::new"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/validator_db_tests.rs"
-item = "shamir-engine::lib::validator::tests::validator_db_tests::TestResolver"
-to_path = "crates/shamir-engine/src/validator/tests/registry/validator_db_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::validator_db_tests::TestResolver"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/validator_db_tests.rs"
-item = "shamir-engine::lib::validator::tests::validator_db_tests::TestResolver::resolve"
-to_path = "crates/shamir-engine/src/validator/tests/registry/validator_db_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::validator_db_tests::TestResolver::resolve"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/validator_db_tests.rs"
-item = "shamir-engine::lib::validator::tests::validator_db_tests::TestResolver::resolve_repo"
-to_path = "crates/shamir-engine/src/validator/tests/registry/validator_db_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::validator_db_tests::TestResolver::resolve_repo"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/validator_db_tests.rs"
-item = "shamir-engine::lib::validator::tests::validator_db_tests::corrupt_row"
-to_path = "crates/shamir-engine/src/validator/tests/registry/validator_db_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::validator_db_tests::corrupt_row"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -4753,41 +3274,9 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/validator/tests/validator_db_tests.rs"
-item = "shamir-engine::lib::validator::tests::validator_db_tests::insert_parent_rows"
-to_path = "crates/shamir-engine/src/validator/tests/registry/validator_db_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::validator_db_tests::insert_parent_rows"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/validator_db_tests.rs"
-item = "shamir-engine::lib::validator::tests::validator_db_tests::insert_ref_id_row"
-to_path = "crates/shamir-engine/src/validator/tests/registry/validator_db_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::validator_db_tests::insert_ref_id_row"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/validator_db_tests.rs"
-item = "shamir-engine::lib::validator::tests::validator_db_tests::scalar_to_query_value"
-to_path = "crates/shamir-engine/src/validator/tests/registry/validator_db_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::validator_db_tests::scalar_to_query_value"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/validator_db_tests.rs"
 item = "shamir-engine::lib::validator::tests::validator_db_tests::setup"
 to_path = "crates/shamir-engine/src/validator/tests/registry/validator_db_tests.rs"
 to_item = "shamir-engine::lib::validator::tests::registry::validator_db_tests::setup"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/tests/validator_db_tests.rs"
-item = "shamir-engine::lib::validator::tests::validator_db_tests::setup_with_validator"
-to_path = "crates/shamir-engine/src/validator/tests/registry/validator_db_tests.rs"
-to_item = "shamir-engine::lib::validator::tests::registry::validator_db_tests::setup_with_validator"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -4804,190 +3293,6 @@ path = "crates/shamir-engine/src/validator/tests/validator_db_tests.rs"
 item = "shamir-engine::lib::validator::tests::validator_db_tests::validator_db_no_deadlock_cross_and_self_read"
 to_path = "crates/shamir-engine/src/validator/tests/registry/validator_db_tests.rs"
 to_item = "shamir-engine::lib::validator::tests::registry::validator_db_tests::validator_db_no_deadlock_cross_and_self_read"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/validation_outcome.rs"
-item = "shamir-engine::lib::validator::validation_outcome::ValidationOutcome"
-to_path = "crates/shamir-engine/src/validator/execution/validation_outcome.rs"
-to_item = "shamir-engine::lib::validator::execution::validation_outcome::ValidationOutcome"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/validation_outcome.rs"
-item = "shamir-engine::lib::validator::validation_outcome::ValidatorFailure"
-to_path = "crates/shamir-engine/src/validator/execution/validation_outcome.rs"
-to_item = "shamir-engine::lib::validator::execution::validation_outcome::ValidatorFailure"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/validation_outcome.rs"
-item = "shamir-engine::lib::validator::validation_outcome::ValidatorFailure::fmt"
-to_path = "crates/shamir-engine/src/validator/execution/validation_outcome.rs"
-to_item = "shamir-engine::lib::validator::execution::validation_outcome::ValidatorFailure::fmt"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/validator_binding.rs"
-item = "shamir-engine::lib::validator::validator_binding::ValidatorBinding"
-to_path = "crates/shamir-engine/src/validator/registry/validator_binding.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_binding::ValidatorBinding"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/validator_db.rs"
-item = "shamir-engine::lib::validator::validator_db::ValidatorDb"
-to_path = "crates/shamir-engine/src/validator/registry/validator_db.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_db::ValidatorDb"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/validator_db.rs"
-item = "shamir-engine::lib::validator::validator_db::ValidatorDb::exists_in"
-to_path = "crates/shamir-engine/src/validator/registry/validator_db.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_db::ValidatorDb::exists_in"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/validator_db.rs"
-item = "shamir-engine::lib::validator::validator_db::ValidatorDb::exists_in_self"
-to_path = "crates/shamir-engine/src/validator/registry/validator_db.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_db::ValidatorDb::exists_in_self"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/validator_db.rs"
-item = "shamir-engine::lib::validator::validator_db::ValidatorDb::exists_in_table"
-to_path = "crates/shamir-engine/src/validator/registry/validator_db.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_db::ValidatorDb::exists_in_table"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/validator_db.rs"
-item = "shamir-engine::lib::validator::validator_db::ValidatorDb::new"
-to_path = "crates/shamir-engine/src/validator/registry/validator_db.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_db::ValidatorDb::new"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/validator_db.rs"
-item = "shamir-engine::lib::validator::validator_db::ValidatorDb::staged_field_matches"
-to_path = "crates/shamir-engine/src/validator/registry/validator_db.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_db::ValidatorDb::staged_field_matches"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/validator_db.rs"
-item = "shamir-engine::lib::validator::validator_db::qv_scalar_to_inner"
-to_path = "crates/shamir-engine/src/validator/registry/validator_db.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_db::qv_scalar_to_inner"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/validator_db.rs"
-item = "shamir-engine::lib::validator::validator_db::record_field_matches"
-to_path = "crates/shamir-engine/src/validator/registry/validator_db.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_db::record_field_matches"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/validator_db.rs"
-item = "shamir-engine::lib::validator::validator_db::record_field_matches_by_id"
-to_path = "crates/shamir-engine/src/validator/registry/validator_db.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_db::record_field_matches_by_id"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/validator_db.rs"
-item = "shamir-engine::lib::validator::validator_db::scalar_ref_matches_query_value"
-to_path = "crates/shamir-engine/src/validator/registry/validator_db.rs"
-to_item = "shamir-engine::lib::validator::registry::validator_db::scalar_ref_matches_query_value"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/wasm_record_validator.rs"
-item = "shamir-engine::lib::validator::wasm_record_validator::WasmRecordValidator"
-to_path = "crates/shamir-engine/src/validator/execution/wasm_record_validator.rs"
-to_item = "shamir-engine::lib::validator::execution::wasm_record_validator::WasmRecordValidator"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/wasm_record_validator.rs"
-item = "shamir-engine::lib::validator::wasm_record_validator::WasmRecordValidator::new"
-to_path = "crates/shamir-engine/src/validator/execution/wasm_record_validator.rs"
-to_item = "shamir-engine::lib::validator::execution::wasm_record_validator::WasmRecordValidator::new"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/wasm_record_validator.rs"
-item = "shamir-engine::lib::validator::wasm_record_validator::WasmRecordValidator::validate"
-to_path = "crates/shamir-engine/src/validator/execution/wasm_record_validator.rs"
-to_item = "shamir-engine::lib::validator::execution::wasm_record_validator::WasmRecordValidator::validate"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/validator/wasm_record_validator.rs"
-item = "shamir-engine::lib::validator::wasm_record_validator::wasm_invocation_error"
-to_path = "crates/shamir-engine/src/validator/execution/wasm_record_validator.rs"
-to_item = "shamir-engine::lib::validator::execution::wasm_record_validator::wasm_invocation_error"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/tests/crash_recovery.rs"
-item = "shamir-engine::test::CHILD_SENTINEL_CRIT1"
-to_path = "crates/shamir-engine/tests/crash_recovery/history_seed.rs"
-to_item = "shamir-engine::test::history_seed::CHILD_SENTINEL_CRIT1"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/tests/crash_recovery.rs"
-item = "shamir-engine::test::CHILD_SENTINEL_VEC"
-to_path = "crates/shamir-engine/tests/crash_recovery/vector_delta.rs"
-to_item = "shamir-engine::test::vector_delta::CHILD_SENTINEL_VEC"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/tests/crash_recovery.rs"
-item = "shamir-engine::test::CHILD_SENTINEL_W2D"
-to_path = "crates/shamir-engine/tests/crash_recovery/write_to_data.rs"
-to_item = "shamir-engine::test::write_to_data::CHILD_SENTINEL_W2D"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/tests/crash_recovery.rs"
-item = "shamir-engine::test::TABLE_VEC"
-to_path = "crates/shamir-engine/tests/crash_recovery/vector_delta.rs"
-to_item = "shamir-engine::test::vector_delta::TABLE_VEC"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/tests/crash_recovery.rs"
-item = "shamir-engine::test::W2D_IMPLICIT_FLAG"
-to_path = "crates/shamir-engine/tests/crash_recovery/write_to_data.rs"
-to_item = "shamir-engine::test::write_to_data::W2D_IMPLICIT_FLAG"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -5105,145 +3410,9 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/tests/crash_recovery.rs"
-item = "shamir-engine::test::delta_chunk_count"
-to_path = "crates/shamir-engine/tests/crash_recovery/vector_delta.rs"
-to_item = "shamir-engine::test::vector_delta::delta_chunk_count"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/tests/crash_recovery.rs"
-item = "shamir-engine::test::open_repo_vec"
-to_path = "crates/shamir-engine/tests/crash_recovery/vector_delta.rs"
-to_item = "shamir-engine::test::vector_delta::open_repo_vec"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/tests/crash_recovery.rs"
-item = "shamir-engine::test::read_all_records"
-to_path = "crates/shamir-engine/tests/crash_recovery/write_to_data.rs"
-to_item = "shamir-engine::test::write_to_data::read_all_records"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/tests/crash_recovery.rs"
-item = "shamir-engine::test::read_sidecar_committed"
-to_path = "crates/shamir-engine/tests/crash_recovery/multi_table_drain.rs"
-to_item = "shamir-engine::test::multi_table_drain::read_sidecar_committed"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/tests/crash_recovery.rs"
 item = "shamir-engine::test::regression_419_empty_sidecar_is_not_a_panic"
 to_path = "crates/shamir-engine/tests/crash_recovery/multi_table_drain.rs"
 to_item = "shamir-engine::test::multi_table_drain::regression_419_empty_sidecar_is_not_a_panic"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/tests/crash_recovery.rs"
-item = "shamir-engine::test::run_child_scenario_crit1"
-to_path = "crates/shamir-engine/tests/crash_recovery/history_seed.rs"
-to_item = "shamir-engine::test::history_seed::run_child_scenario_crit1"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/tests/crash_recovery.rs"
-item = "shamir-engine::test::run_child_scenario_multi_table"
-to_path = "crates/shamir-engine/tests/crash_recovery/multi_table_drain.rs"
-to_item = "shamir-engine::test::multi_table_drain::run_child_scenario_multi_table"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/tests/crash_recovery.rs"
-item = "shamir-engine::test::run_child_scenario_trunc"
-to_path = "crates/shamir-engine/tests/crash_recovery/multi_table_drain.rs"
-to_item = "shamir-engine::test::multi_table_drain::run_child_scenario_trunc"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/tests/crash_recovery.rs"
-item = "shamir-engine::test::run_child_scenario_vec"
-to_path = "crates/shamir-engine/tests/crash_recovery/vector_delta.rs"
-to_item = "shamir-engine::test::vector_delta::run_child_scenario_vec"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/tests/crash_recovery.rs"
-item = "shamir-engine::test::run_child_scenario_w2d"
-to_path = "crates/shamir-engine/tests/crash_recovery/write_to_data.rs"
-to_item = "shamir-engine::test::write_to_data::run_child_scenario_w2d"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/tests/crash_recovery.rs"
-item = "shamir-engine::test::spawn_child_crit1"
-to_path = "crates/shamir-engine/tests/crash_recovery/history_seed.rs"
-to_item = "shamir-engine::test::history_seed::spawn_child_crit1"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/tests/crash_recovery.rs"
-item = "shamir-engine::test::spawn_child_multi_table"
-to_path = "crates/shamir-engine/tests/crash_recovery/multi_table_drain.rs"
-to_item = "shamir-engine::test::multi_table_drain::spawn_child_multi_table"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/tests/crash_recovery.rs"
-item = "shamir-engine::test::spawn_child_trunc"
-to_path = "crates/shamir-engine/tests/crash_recovery/multi_table_drain.rs"
-to_item = "shamir-engine::test::multi_table_drain::spawn_child_trunc"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/tests/crash_recovery.rs"
-item = "shamir-engine::test::spawn_child_vec"
-to_path = "crates/shamir-engine/tests/crash_recovery/vector_delta.rs"
-to_item = "shamir-engine::test::vector_delta::spawn_child_vec"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/tests/crash_recovery.rs"
-item = "shamir-engine::test::spawn_child_w2d"
-to_path = "crates/shamir-engine/tests/crash_recovery/write_to_data.rs"
-to_item = "shamir-engine::test::write_to_data::spawn_child_w2d"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/tests/crash_recovery.rs"
-item = "shamir-engine::test::trunc_crash_then_recover"
-to_path = "crates/shamir-engine/tests/crash_recovery/multi_table_drain.rs"
-to_item = "shamir-engine::test::multi_table_drain::trunc_crash_then_recover"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/tests/crash_recovery.rs"
-item = "shamir-engine::test::vec_record"
-to_path = "crates/shamir-engine/tests/crash_recovery/vector_delta.rs"
-to_item = "shamir-engine::test::vector_delta::vec_record"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/tests/crash_recovery.rs"
-item = "shamir-engine::test::vector_index_op"
-to_path = "crates/shamir-engine/tests/crash_recovery/vector_delta.rs"
-to_item = "shamir-engine::test::vector_delta::vector_index_op"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -7175,31 +5344,7 @@ owner = "@layout-sweep"
 
 [[removed]]
 path = "crates/shamir-engine/src/validator/mod.rs"
-item = "shamir-engine::lib::validator::persistence"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/mod.rs"
 item = "shamir-engine::lib::validator::query_value_conv"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/mod.rs"
-item = "shamir-engine::lib::validator::record_fields"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/mod.rs"
-item = "shamir-engine::lib::validator::record_validator"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/mod.rs"
-item = "shamir-engine::lib::validator::transform_spec"
 reason = "module declaration dissolved by the layout sweep; its items are declared separately"
 owner = "@layout-sweep"
 
@@ -7229,139 +5374,7 @@ owner = "@layout-sweep"
 
 [[removed]]
 path = "crates/shamir-engine/src/validator/schema/mod.rs"
-item = "shamir-engine::lib::validator::schema::constraints"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/schema/mod.rs"
-item = "shamir-engine::lib::validator::schema::cross_field"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/schema/mod.rs"
-item = "shamir-engine::lib::validator::schema::field_rule"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/schema/mod.rs"
-item = "shamir-engine::lib::validator::schema::format"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/schema/mod.rs"
 item = "shamir-engine::lib::validator::schema::one_of_set"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/schema/mod.rs"
-item = "shamir-engine::lib::validator::schema::type_tag"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/schema/tests/mod.rs"
-item = "shamir-engine::lib::validator::schema::tests::builder_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/schema/tests/mod.rs"
-item = "shamir-engine::lib::validator::schema::tests::check_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/schema/tests/mod.rs"
-item = "shamir-engine::lib::validator::schema::tests::phase_b_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/schema/tests/mod.rs"
-item = "shamir-engine::lib::validator::schema::tests::schema_validator_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/schema/tests/mod.rs"
-item = "shamir-engine::lib::validator::schema::tests::unique_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/tests/mod.rs"
-item = "shamir-engine::lib::validator::tests::binding_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/tests/mod.rs"
-item = "shamir-engine::lib::validator::tests::decode_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/tests/mod.rs"
-item = "shamir-engine::lib::validator::tests::encode_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/tests/mod.rs"
-item = "shamir-engine::lib::validator::tests::native_adapter_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/tests/mod.rs"
-item = "shamir-engine::lib::validator::tests::persistence_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/tests/mod.rs"
-item = "shamir-engine::lib::validator::tests::query_value_conv_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/tests/mod.rs"
-item = "shamir-engine::lib::validator::tests::record_fields_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/tests/mod.rs"
-item = "shamir-engine::lib::validator::tests::registry_atomic_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/tests/mod.rs"
-item = "shamir-engine::lib::validator::tests::registry_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/tests/mod.rs"
-item = "shamir-engine::lib::validator::tests::run_validators_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/tests/mod.rs"
-item = "shamir-engine::lib::validator::tests::validator_actor_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/validator/tests/mod.rs"
-item = "shamir-engine::lib::validator::tests::validator_db_tests"
 reason = "module declaration dissolved by the layout sweep; its items are declared separately"
 owner = "@layout-sweep"
 
@@ -7415,24 +5428,6 @@ owner = "@layout-sweep"
 
 [[added]]
 path = "crates/shamir-engine/src/validator/execution/mod.rs"
-item = "shamir-engine::lib::validator::execution::record_fields"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/execution/mod.rs"
-item = "shamir-engine::lib::validator::execution::record_validator"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/execution/mod.rs"
-item = "shamir-engine::lib::validator::execution::transform_spec"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/execution/mod.rs"
 item = "shamir-engine::lib::validator::execution::validation_outcome"
 reason = "module declaration created by the layout sweep; its items are declared separately"
 owner = "@layout-sweep"
@@ -7463,12 +5458,6 @@ owner = "@layout-sweep"
 
 [[added]]
 path = "crates/shamir-engine/src/validator/registry/mod.rs"
-item = "shamir-engine::lib::validator::registry::persistence"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/registry/mod.rs"
 item = "shamir-engine::lib::validator::registry::validator_binding"
 reason = "module declaration created by the layout sweep; its items are declared separately"
 owner = "@layout-sweep"
@@ -7493,127 +5482,13 @@ owner = "@layout-sweep"
 
 [[added]]
 path = "crates/shamir-engine/src/validator/schema/rules/mod.rs"
-item = "shamir-engine::lib::validator::schema::rules::constraints"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/schema/rules/mod.rs"
-item = "shamir-engine::lib::validator::schema::rules::cross_field"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/schema/rules/mod.rs"
-item = "shamir-engine::lib::validator::schema::rules::field_rule"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/schema/rules/mod.rs"
-item = "shamir-engine::lib::validator::schema::rules::format"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/schema/rules/mod.rs"
 item = "shamir-engine::lib::validator::schema::rules::one_of_set"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/schema/rules/mod.rs"
-item = "shamir-engine::lib::validator::schema::rules::type_tag"
 reason = "module declaration created by the layout sweep; its items are declared separately"
 owner = "@layout-sweep"
 
 [[added]]
 path = "crates/shamir-engine/src/validator/schema/tests/mod.rs"
 item = "shamir-engine::lib::validator::schema::tests::schema_rules"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/mod.rs"
-item = "shamir-engine::lib::validator::schema::tests::schema_rules::builder_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/mod.rs"
-item = "shamir-engine::lib::validator::schema::tests::schema_rules::check_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/mod.rs"
-item = "shamir-engine::lib::validator::schema::tests::schema_rules::phase_b_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/mod.rs"
-item = "shamir-engine::lib::validator::schema::tests::schema_rules::schema_validator_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/mod.rs"
-item = "shamir-engine::lib::validator::schema::tests::schema_rules::unique_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/tests/codecs/mod.rs"
-item = "shamir-engine::lib::validator::tests::codecs::decode_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/tests/codecs/mod.rs"
-item = "shamir-engine::lib::validator::tests::codecs::encode_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/tests/codecs/mod.rs"
-item = "shamir-engine::lib::validator::tests::codecs::native_adapter_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/tests/codecs/mod.rs"
-item = "shamir-engine::lib::validator::tests::codecs::persistence_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/tests/codecs/mod.rs"
-item = "shamir-engine::lib::validator::tests::codecs::query_value_conv_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/tests/execution/mod.rs"
-item = "shamir-engine::lib::validator::tests::execution::binding_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/tests/execution/mod.rs"
-item = "shamir-engine::lib::validator::tests::execution::record_fields_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/tests/execution/mod.rs"
-item = "shamir-engine::lib::validator::tests::execution::run_validators_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/tests/execution/mod.rs"
-item = "shamir-engine::lib::validator::tests::execution::validator_actor_tests"
 reason = "module declaration created by the layout sweep; its items are declared separately"
 owner = "@layout-sweep"
 
@@ -7632,24 +5507,6 @@ owner = "@layout-sweep"
 [[added]]
 path = "crates/shamir-engine/src/validator/tests/mod.rs"
 item = "shamir-engine::lib::validator::tests::registry"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/tests/registry/mod.rs"
-item = "shamir-engine::lib::validator::tests::registry::registry_atomic_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/tests/registry/mod.rs"
-item = "shamir-engine::lib::validator::tests::registry::registry_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/validator/tests/registry/mod.rs"
-item = "shamir-engine::lib::validator::tests::registry::validator_db_tests"
 reason = "module declaration created by the layout sweep; its items are declared separately"
 owner = "@layout-sweep"
 
@@ -7681,4 +5538,40 @@ owner = "@layout-sweep"
 path = "crates/shamir-engine/benches/tx_concurrent.rs"
 item = "shamir-engine::bench::main"
 reason = "bench entry point now declares the split workload modules"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/validator/record_fields.rs"
+item = "shamir-engine::lib::validator::record_fields::RecordFields"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/validator/record_validator.rs"
+item = "shamir-engine::lib::validator::record_validator::RecordValidator"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/validator/record_validator.rs"
+item = "shamir-engine::lib::validator::record_validator::RecordValidator::as_schema_rules"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/validator/record_validator.rs"
+item = "shamir-engine::lib::validator::record_validator::RecordValidator::fk_refs"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/validator/record_validator.rs"
+item = "shamir-engine::lib::validator::record_validator::RecordValidator::transforms"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/validator/transform_spec.rs"
+item = "shamir-engine::lib::validator::transform_spec::TransformSpec"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
 owner = "@layout-sweep"
