@@ -7,7 +7,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 use wasmtime::{CacheStore, Engine};
 
@@ -23,6 +23,9 @@ pub(crate) struct DiskCacheStore {
     trimming: AtomicBool,
     rejected: AtomicU64,
     hits: AtomicU64,
+    /// Test-only: number of cache frames actually read from disk (`read_exact`).
+    #[cfg(test)]
+    frames_read: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -42,10 +45,14 @@ impl DiskCacheStore {
             trimming: AtomicBool::new(false),
             rejected: AtomicU64::new(0),
             hits: AtomicU64::new(0),
+            #[cfg(test)]
+            frames_read: AtomicU64::new(0),
         }
     }
 
     pub(crate) fn bind(&self, engine: &Engine) -> std::io::Result<()> {
+        // Path contract: `self.root` is the DATA directory; `prepare` derives
+        // `<data>/cache/wasm` from it.
         let root = prepare(&self.root)?;
         let ns = namespace(engine);
         for item in fs::read_dir(&root)? {
@@ -64,8 +71,7 @@ impl DiskCacheStore {
         let directory = root.join(namespace_name(&ns));
         fs::create_dir_all(directory.join("tmp"))?;
         let index = EntryIndex::new();
-        let mut count = 0usize;
-        let mut bytes = 0u64;
+        let mut found: Vec<([u8; 32], u64, u128)> = Vec::new();
         for shard in fs::read_dir(&directory)? {
             let shard = shard?;
             if shard.file_name() == "tmp" {
@@ -91,49 +97,78 @@ impl DiskCacheStore {
                 if len < HEADER_LEN as u64 || len > HEADER_LEN as u64 + MAX_PAYLOAD as u64 {
                     continue;
                 }
-                let tick = u64::try_from(
-                    meta.modified()
-                        .unwrap_or(SystemTime::UNIX_EPOCH)
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos(),
+                let modified = meta
+                    .modified()
+                    .unwrap_or(SystemTime::UNIX_EPOCH)
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                found.push((key, len, modified));
+            }
+        }
+        // Startup recency: rank by modification time, oldest first, with
+        // small ticks (0, 1, 2, ...); the live tick counter starts after the
+        // largest assigned rank so fresh inserts/accesses win eviction.
+        found.sort_by_key(|entry| entry.2);
+        let mut count = 0usize;
+        let mut bytes = 0u64;
+        for (rank, (key, len, _)) in found.iter().enumerate() {
+            if index
+                .entries
+                .insert_sync(
+                    *key,
+                    EntryMeta {
+                        len: *len,
+                        tick: Arc::new(AtomicU64::new(rank as u64)),
+                    },
                 )
-                .unwrap_or(u64::MAX);
-                if index
-                    .entries
-                    .insert_sync(
-                        key,
-                        EntryMeta {
-                            len,
-                            tick: AtomicU64::new(tick),
-                        },
-                    )
-                    .is_ok()
-                {
-                    count += 1;
-                    bytes = bytes.saturating_add(len);
-                }
+                .is_ok()
+            {
+                count = count.saturating_add(1);
+                bytes = bytes.saturating_add(*len);
             }
         }
         index.count.store(count, Ordering::Relaxed);
         index.bytes.store(bytes, Ordering::Relaxed);
+        self.tick
+            .store(u64::try_from(count).unwrap_or(u64::MAX), Ordering::Relaxed);
+        let bound = BoundStore {
+            namespace: ns,
+            directory,
+            index,
+        };
+        // Bring an over-cap cache under the caps immediately at startup.
+        self.trim_caps(&bound, MAX_BYTES, MAX_ENTRIES);
         self.bound
-            .set(BoundStore {
-                namespace: ns,
-                directory,
-                index,
-            })
+            .set(bound)
             .map_err(|_| std::io::Error::other("cache store already bound"))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn rejected(&self) -> u64 {
         self.rejected.load(Ordering::Relaxed)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn hits(&self) -> u64 {
         self.hits.load(Ordering::Relaxed)
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn frames_read(&self) -> u64 {
+        self.frames_read.load(Ordering::Relaxed)
+    }
+
+    /// Test-only `(bytes, count)` snapshot of the shared index accounting.
+    #[cfg(all(test, unix))]
+    pub(crate) fn index_totals(&self) -> (u64, usize) {
+        match self.bound.get() {
+            Some(bound) => (
+                bound.index.bytes.load(Ordering::Relaxed),
+                bound.index.count.load(Ordering::Relaxed),
+            ),
+            None => (0, 0),
+        }
     }
 
     fn entry_path(bound: &BoundStore, key: &[u8; 32]) -> PathBuf {
@@ -154,7 +189,7 @@ impl DiskCacheStore {
         self.trim_caps(bound, MAX_BYTES, MAX_ENTRIES);
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn trim_for_test(&self, max_bytes: u64, max_entries: usize) {
         if let Some(bound) = self.bound.get() {
             self.trim_caps(bound, max_bytes, max_entries);
@@ -175,8 +210,8 @@ impl DiskCacheStore {
             self.trimming.store(false, Ordering::Release);
             return;
         }
-        let target_bytes = max_bytes * 3 / 4;
-        let target_count = max_entries * 3 / 4;
+        let target_bytes = max_bytes / 4 * 3;
+        let target_count = max_entries / 4 * 3;
         let mut victims = Vec::new();
         bound.index.entries.iter_sync(|key, entry| {
             victims.push((*key, entry.len, entry.tick.load(Ordering::Relaxed)));
@@ -189,21 +224,15 @@ impl DiskCacheStore {
             if remaining_bytes <= target_bytes && remaining_count <= target_count {
                 break;
             }
-            if let Some(removed) = bound.index.entries.remove_sync(&key) {
-                if fs::remove_file(Self::entry_path(bound, &key)).is_ok() {
-                    remaining_bytes = remaining_bytes.saturating_sub(removed.1.len);
-                    remaining_count = remaining_count.saturating_sub(1);
-                    bound.index.bytes.store(remaining_bytes, Ordering::Relaxed);
-                    bound.index.count.store(remaining_count, Ordering::Relaxed);
-                } else {
-                    let (restored_key, restored) = removed;
-                    if let Err((_, restored)) =
-                        bound.index.entries.insert_sync(restored_key, restored)
-                    {
-                        bound.index.count.fetch_add(1, Ordering::Relaxed);
-                        bound.index.bytes.fetch_add(restored.len, Ordering::Relaxed);
-                    }
-                }
+            // Account every removed entry with `fetch_sub` of exactly what
+            // was removed; never store snapshot totals over the atomics
+            // (concurrent inserts would be lost).
+            if let Some((_, removed)) = bound.index.entries.remove_sync(&key) {
+                let _ = fs::remove_file(Self::entry_path(bound, &key));
+                bound.index.bytes.fetch_sub(removed.len, Ordering::Relaxed);
+                bound.index.count.fetch_sub(1, Ordering::Relaxed);
+                remaining_bytes = remaining_bytes.saturating_sub(removed.len);
+                remaining_count = remaining_count.saturating_sub(1);
             }
         }
         self.trimming.store(false, Ordering::Release);
@@ -214,40 +243,41 @@ impl CacheStore for DiskCacheStore {
     fn get(&self, key: &[u8]) -> Option<Cow<'_, [u8]>> {
         let key: [u8; 32] = key.try_into().ok()?;
         let bound = self.bound.get()?;
-        let entry = bound.index.entries.get_sync(&key)?;
-        let len = entry.get().len;
+        // Read what we need (len and a clone of the tick handle), then drop
+        // the map entry guard before any I/O: error branches below call
+        // `invalidate`, which would self-deadlock on a held bucket lock.
+        let (len, tick) = {
+            let entry = bound.index.entries.get_sync(&key)?;
+            (entry.get().len, entry.get().tick.clone())
+        };
         let path = Self::entry_path(bound, &key);
-        let metadata = match fs::metadata(&path) {
-            Ok(meta) => meta,
-            Err(_) => {
-                self.invalidate(bound, &key);
+        let read = (|| -> Option<Vec<u8>> {
+            let metadata = fs::metadata(&path).ok()?;
+            if metadata.len() != len || metadata.len() > HEADER_LEN as u64 + MAX_PAYLOAD as u64 {
                 return None;
             }
-        };
-        if metadata.len() != len || metadata.len() > HEADER_LEN as u64 + MAX_PAYLOAD as u64 {
-            self.invalidate(bound, &key);
-            return None;
-        }
-        let size = usize::try_from(metadata.len()).ok()?;
-        let mut frame = vec![0; size];
-        let mut file = match fs::File::open(&path) {
-            Ok(file) => file,
-            Err(_) => {
-                self.invalidate(bound, &key);
-                return None;
+            let size = usize::try_from(metadata.len()).ok()?;
+            let mut frame = vec![0; size];
+            let mut file = fs::File::open(&path).ok()?;
+            #[cfg(test)]
+            self.frames_read.fetch_add(1, Ordering::Relaxed);
+            file.read_exact(&mut frame).ok()?;
+            Some(frame)
+        })();
+        match read {
+            Some(frame) if decode(&frame, &bound.namespace, &key).is_some() => {
+                // Bump recency through the cloned atomic after the guard is
+                // dropped; the Arc keeps it valid even if the entry was
+                // concurrently removed in between.
+                tick.store(self.tick.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                Some(Cow::Owned(frame[HEADER_LEN..].to_vec()))
             }
-        };
-        if file.read_exact(&mut frame).is_err() || decode(&frame, &bound.namespace, &key).is_none()
-        {
-            self.invalidate(bound, &key);
-            return None;
+            _ => {
+                self.invalidate(bound, &key);
+                None
+            }
         }
-        entry
-            .get()
-            .tick
-            .store(self.tick.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
-        self.hits.fetch_add(1, Ordering::Relaxed);
-        Some(Cow::Owned(frame[HEADER_LEN..].to_vec()))
     }
 
     fn insert(&self, key: &[u8], value: Vec<u8>) -> bool {
@@ -303,7 +333,7 @@ impl CacheStore for DiskCacheStore {
                 key,
                 EntryMeta {
                     len: frame.len() as u64,
-                    tick: AtomicU64::new(self.tick.fetch_add(1, Ordering::Relaxed)),
+                    tick: Arc::new(AtomicU64::new(self.tick.fetch_add(1, Ordering::Relaxed))),
                 },
             )
             .is_ok()

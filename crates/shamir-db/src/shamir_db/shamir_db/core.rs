@@ -266,8 +266,10 @@ impl ShamirDb {
         #[cfg(unix)]
         let wasm_engine = {
             if let Some(root) = &data_root {
+                // Path contract: pass the DATA directory; the cache store
+                // derives `<data>/cache/wasm` itself.
                 Arc::new(
-                    WasmEngine::with_compile_cache(root.join("cache").join("wasm"))
+                    WasmEngine::with_compile_cache(root.clone())
                         .map_err(|e| DbError::Function(e.to_string()))?,
                 )
             } else {

@@ -1,10 +1,6 @@
 //! Frame layout (112-byte header + payload):
 //! `magic(8) ns(32) key(32) payload_len u64 LE(8) sha256(bytes[0..80] || payload)(32) payload`.
-//!
-//! The magic is the explicit 8-byte constant `SHMWIC\0\x01` (six ASCII bytes
-//! plus NUL and SOH): the ruling writes `SHMWIC\0\1`, which is seven visible
-//! characters but eight bytes once both escapes are counted, so the constant
-//! is spelled out here to remove the ambiguity.
+//! The magic is the explicit 8-byte constant `SHMWIC\0\x01`.
 
 use sha2::{Digest, Sha256};
 

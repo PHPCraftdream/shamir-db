@@ -28,6 +28,9 @@ impl WasmEngine {
     }
 
     /// Creates an engine with a best-effort, private incremental cache.
+    ///
+    /// `dir` is the DATA directory; the cache store derives the
+    /// `<data_dir>/cache/wasm` layout itself.
     pub fn with_compile_cache(dir: PathBuf) -> FnResult<Self> {
         Self::build(Some(dir))
     }

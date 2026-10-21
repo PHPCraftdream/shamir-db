@@ -1,11 +1,14 @@
 use scc::HashMap;
 use shamir_collections::THasher;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::Arc;
 
+/// Shared tick handle: `Arc` lets `get` clone the handle, drop the map entry
+/// guard, and bump recency afterwards without ever touching a removed entry.
 #[derive(Debug)]
 pub(crate) struct EntryMeta {
     pub(crate) len: u64,
-    pub(crate) tick: AtomicU64,
+    pub(crate) tick: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]

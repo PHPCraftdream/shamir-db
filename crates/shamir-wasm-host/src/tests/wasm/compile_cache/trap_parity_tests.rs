@@ -1,7 +1,9 @@
 //! Cold vs warm parity: an engine with the disk cache must produce the same
-//! traps as an uncached engine for fuel exhaustion and out-of-bounds memory.
+//! traps as an uncached engine for fuel exhaustion, out-of-bounds memory and
+//! epoch interruption — and the warm run must actually be served from the
+//! cache (`hits() >= 1`), so a silently disabled cache cannot pass.
 
-use super::cache_store_tests::{engine, MODULE};
+use super::cache_store_tests::{engine, entry_files, namespace_dir, MODULE};
 use crate::wasm::compile_cache::DiskCacheStore;
 use std::sync::Arc;
 
@@ -45,46 +47,96 @@ fn run_out_of_bounds(engine: &wasmtime::Engine) -> String {
     }
 }
 
+/// Raw epoch-interruption engine: no background ticker is spawned; the test
+/// itself calls `engine.increment_epoch()` after arming a one-tick deadline.
+fn epoch_engine(store: &Arc<DiskCacheStore>) -> wasmtime::Engine {
+    let mut config = wasmtime::Config::new();
+    config.epoch_interruption(true);
+    config
+        .enable_incremental_compilation(store.clone())
+        .unwrap();
+    let engine = wasmtime::Engine::new(&config).unwrap();
+    store.bind(&engine).unwrap();
+    engine
+}
+
+fn run_epoch(engine: &wasmtime::Engine) -> String {
+    let wasm = wat::parse_str(INFINITE_LOOP).unwrap();
+    let module = wasmtime::Module::from_binary(engine, &wasm).unwrap();
+    let mut store = wasmtime::Store::new(engine, ());
+    store.set_epoch_deadline(1);
+    engine.increment_epoch();
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let spin = instance
+        .get_typed_func::<(), ()>(&mut store, "spin")
+        .unwrap();
+    match spin.call(&mut store, ()) {
+        Ok(()) => panic!("looping guest must trap on the epoch deadline"),
+        Err(error) => format!("{error}"),
+    }
+}
+
 #[test]
 fn cold_and_warm_fuel_exhaustion_traps_are_identical() {
     let dir = tempfile::tempdir().unwrap();
-    let cold = engine(
-        Arc::new(DiskCacheStore::new(dir.path().to_path_buf())),
-        true,
-    );
-    let cold_trap = run_with_fuel(&cold, INFINITE_LOOP, 1_000);
+    let root = dir.path().to_path_buf();
+    let cold_store = Arc::new(DiskCacheStore::new(root.clone()));
+    let cold_trap = run_with_fuel(&engine(&cold_store, true), INFINITE_LOOP, 1_000);
 
-    let warm_store = Arc::new(DiskCacheStore::new(dir.path().to_path_buf()));
-    let warm = engine(warm_store, true);
-    let warm_trap = run_with_fuel(&warm, INFINITE_LOOP, 1_000);
+    let warm_store = Arc::new(DiskCacheStore::new(root.clone()));
+    let warm_trap = run_with_fuel(&engine(&warm_store, true), INFINITE_LOOP, 1_000);
 
     assert_eq!(cold_trap, warm_trap, "cache must not change trap behaviour");
     assert!(warm_trap.to_lowercase().contains("fuel"), "{warm_trap}");
+    assert!(
+        warm_store.hits() >= 1,
+        "warm run must be served from the cache"
+    );
 }
 
 #[test]
 fn cold_and_warm_memory_traps_are_identical() {
     let dir = tempfile::tempdir().unwrap();
-    let cold = engine(
-        Arc::new(DiskCacheStore::new(dir.path().to_path_buf())),
-        false,
-    );
-    let cold_trap = run_out_of_bounds(&cold);
+    let root = dir.path().to_path_buf();
+    let cold_store = Arc::new(DiskCacheStore::new(root.clone()));
+    let cold_trap = run_out_of_bounds(&engine(&cold_store, false));
 
-    let warm_store = Arc::new(DiskCacheStore::new(dir.path().to_path_buf()));
-    let warm = engine(warm_store, false);
-    let warm_trap = run_out_of_bounds(&warm);
+    let warm_store = Arc::new(DiskCacheStore::new(root.clone()));
+    let warm_trap = run_out_of_bounds(&engine(&warm_store, false));
 
     assert_eq!(cold_trap, warm_trap, "cache must not change trap behaviour");
+    assert!(
+        warm_store.hits() >= 1,
+        "warm run must be served from the cache"
+    );
+}
+
+#[test]
+fn cold_and_warm_epoch_interruption_traps_are_identical() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let cold_store = Arc::new(DiskCacheStore::new(root.clone()));
+    let cold_trap = run_epoch(&epoch_engine(&cold_store));
+
+    let warm_store = Arc::new(DiskCacheStore::new(root.clone()));
+    let warm_trap = run_epoch(&epoch_engine(&warm_store));
+
+    assert_eq!(cold_trap, warm_trap, "cache must not change trap behaviour");
+    assert!(
+        warm_trap.to_lowercase().contains("interrupt"),
+        "{warm_trap}"
+    );
+    assert!(
+        warm_store.hits() >= 1,
+        "warm run must be served from the cache"
+    );
 }
 
 #[test]
 fn cached_and_uncached_modules_have_identical_exports() {
     let dir = tempfile::tempdir().unwrap();
-    let cached = engine(
-        Arc::new(DiskCacheStore::new(dir.path().to_path_buf())),
-        false,
-    );
+    let cached_store = Arc::new(DiskCacheStore::new(dir.path().to_path_buf()));
+    let cached = engine(&cached_store, false);
     let uncached_engine = wasmtime::Engine::new(&wasmtime::Config::new()).unwrap();
 
     let exports = |engine: &wasmtime::Engine| {
@@ -96,4 +148,5 @@ fn cached_and_uncached_modules_have_identical_exports() {
             .collect::<Vec<_>>()
     };
     assert_eq!(exports(&cached), exports(&uncached_engine));
+    assert!(!entry_files(&namespace_dir(dir.path())).is_empty());
 }
