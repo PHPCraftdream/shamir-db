@@ -26,21 +26,21 @@ pub use execution::{
     native_record_validator, record_fields, record_validator, transform_spec, validation_outcome,
     wasm_record_validator,
 };
-pub use registry::{persistence, persisted_validators, validator_binding, validator_db};
+pub use registry::{persisted_validators, persistence, validator_binding, validator_db};
 
 pub use codecs::decode::{decode_validation_result, ValidatorDecodeError};
 pub use codecs::encode::{validation_to_query_value, Validation};
 pub use codecs::native_adapter::{NativeValidatorAdapter, NativeValidatorFn};
-pub use execution::native_record_validator::{NativeRecordValidator, NativeValidatorFnNew};
-pub use registry::persisted_validators::PersistedValidators;
 pub use codecs::query_value_conv::{inner_to_query_value, inner_to_query_value_with};
+pub use execution::native_record_validator::{NativeRecordValidator, NativeValidatorFnNew};
 pub use execution::record_fields::{OwnedFields, RecordFields, ViewFields};
 pub use execution::record_validator::{RecordValidator, ValidatorCtx};
 pub use execution::transform_spec::TransformSpec;
 pub use execution::validation_outcome::{ValidationOutcome, ValidatorFailure};
+pub use execution::wasm_record_validator::WasmRecordValidator;
+pub use registry::persisted_validators::PersistedValidators;
 pub use registry::validator_binding::ValidatorBinding;
 pub use registry::validator_db::ValidatorDb;
-pub use execution::wasm_record_validator::WasmRecordValidator;
 
 pub use registry::validator_registry::{ValidatorRegistry, ValidatorRegistryError};
 

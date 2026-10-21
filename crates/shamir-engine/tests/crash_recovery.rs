@@ -482,7 +482,6 @@ async fn crash_at_phase7_is_clean_committed() {
     );
 }
 
-
 #[path = "crash_recovery/history_seed.rs"]
 mod history_seed;
 #[path = "crash_recovery/multi_table_drain.rs"]

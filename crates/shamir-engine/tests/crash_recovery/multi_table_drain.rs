@@ -467,4 +467,3 @@ async fn regression_419_empty_sidecar_is_not_a_panic() {
         "a missing sidecar must read as committed=0, never panic the parent"
     );
 }
-

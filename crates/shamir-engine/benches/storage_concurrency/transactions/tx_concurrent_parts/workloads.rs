@@ -4,17 +4,13 @@ use std::sync::Arc;
 use bench_scale_tool::Harness;
 use shamir_engine::repo::{BoxRepo, RepoInstance};
 use shamir_engine::table::TableConfig;
-use shamir_query_builder::batch::Batch;
-use shamir_query_builder::write;
-use shamir_query_builder::write::doc;
-use shamir_storage::storage_in_memory::{InMemoryRepo, InMemoryStore};
+use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_storage::types::RecordKey;
 use shamir_tx::mvcc_store::LockMode;
 use shamir_tx::IsolationLevel;
 use shamir_types::types::value::InnerValue;
-use smallvec::smallvec;
 
-use crate::{execute_batch, make_mvcc, make_repo};
+use crate::{make_mvcc, make_repo};
 
 /// Observational counters filled by the workload groups below and dumped
 /// by the bench root after `h.run()`.
@@ -28,7 +24,6 @@ pub(crate) struct WCounts {
 }
 
 pub(crate) fn run(h: &mut Harness) -> WCounts {
-
     // Global iteration counter — makes keys unique across ALL calls to a
     // given workload's routine, mirroring the original `iter_i` Criterion
     // gave per-sample-iteration.

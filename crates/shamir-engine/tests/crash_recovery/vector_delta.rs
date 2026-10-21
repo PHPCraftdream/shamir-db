@@ -288,4 +288,3 @@ async fn crash_at_phase5c_vector_delta_chunk_absent() {
     // NOTE in the phase5d_delta test). The delta-chunk ABSENCE assertion
     // above is the load-bearing symmetric-control proof.
 }
-

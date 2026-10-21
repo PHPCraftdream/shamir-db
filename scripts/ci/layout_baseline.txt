@@ -1,7 +1,6 @@
 # layout baseline: current violations of the layout limits
 # format: dir <path> <n> | file <path> <n>; maintained by check_layout.py
 dir crates/shamir-client-node 10
-dir crates/shamir-engine/benches 39
 dir crates/shamir-engine/src 12
 dir crates/shamir-engine/src/query 8
 dir crates/shamir-engine/src/query/batch 19
@@ -19,10 +18,6 @@ dir crates/shamir-engine/src/table/tests 114
 dir crates/shamir-engine/src/tx 21
 dir crates/shamir-engine/src/tx/tests 60
 dir crates/shamir-engine/src/tx/tests/ssi_phantom_tests 9
-dir crates/shamir-engine/src/validator 18
-dir crates/shamir-engine/src/validator/schema 11
-dir crates/shamir-engine/src/validator/tests 13
-file crates/shamir-engine/benches/tx_concurrent.rs 1013
 file crates/shamir-engine/src/query/batch/fk_actions.rs 1438
 file crates/shamir-engine/src/query/batch/fk_on_update.rs 1353
 file crates/shamir-engine/src/query/batch/query_runner.rs 2006
@@ -51,4 +46,3 @@ file crates/shamir-engine/src/tx/pre_commit.rs 2818
 file crates/shamir-engine/src/tx/tests/drainer_tests.rs 1344
 file crates/shamir-engine/src/tx/tests/p1096_tx_aware_unique_check_tests.rs 1305
 file crates/shamir-engine/src/tx/tests/recovery_tests.rs 1725
-file crates/shamir-engine/tests/crash_recovery.rs 1651
