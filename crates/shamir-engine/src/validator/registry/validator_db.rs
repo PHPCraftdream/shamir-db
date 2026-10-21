@@ -1,7 +1,7 @@
 //! Phase C1 — tx-scoped read-only database handle for relational validators.
 //!
 //! [`ValidatorDb`] is the narrow read-only interface that a
-//! [`RecordValidator`](super::RecordValidator) uses for cross-table
+//! [`RecordValidator`](crate::validator::RecordValidator) uses for cross-table
 //! (`foreign_key`, Phase C2) and self-table (`unique`, Phase C3) checks.
 //!
 //! # No re-entrancy deadlock

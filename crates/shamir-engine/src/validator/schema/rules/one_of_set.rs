@@ -7,7 +7,7 @@
 //! `String`/`Vec<u8>` clones for `Str`/`Bin` scalars) is pure waste when all
 //! we need is a membership test.
 //!
-//! [`OneOfSet`] is built ONCE, at [`SchemaValidator::new`](super::SchemaValidator::new)
+//! `OneOfSet` is built ONCE, at [`SchemaValidator::new`](crate::validator::schema::SchemaValidator::new)
 //! time, from `Constraints::one_of`. Per-record membership is then an O(1)
 //! hash lookup for the scalar kinds that dominate real `one_of` usage
 //! (Null/Bool/Int/Str/Bin), probed with a **borrowed** `ScalarRef` — no

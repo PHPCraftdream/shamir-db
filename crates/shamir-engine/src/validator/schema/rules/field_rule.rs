@@ -60,7 +60,7 @@ impl FieldRule {
     ///
     /// `one_of_set` is the precomputed membership set for this rule's
     /// `constraints.one_of` (audit group 25 / defect 2), built once by
-    /// [`SchemaValidator::new`](super::schema_validator::SchemaValidator::new)
+    /// [`SchemaValidator::new`](crate::validator::schema::schema_validator::SchemaValidator::new)
     /// and threaded down from [`check_extended`](Self::check_extended).
     /// `None` falls back to the original per-call linear scan — callers
     /// that bypass `SchemaValidator` (direct `FieldRule::check` in tests)

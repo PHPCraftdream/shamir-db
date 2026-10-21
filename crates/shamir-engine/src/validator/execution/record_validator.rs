@@ -12,7 +12,7 @@ use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_types::access::Actor;
 use shamir_types::core::interner::{Interner, InternerKey};
 
-use super::{record_fields::RecordFields, validator_db::ValidatorDb, Validation};
+use crate::validator::{record_fields::RecordFields, validator_db::ValidatorDb, Validation};
 
 // ── ValidatorCtx ──────────────────────────────────────────────────────────────
 
@@ -61,7 +61,7 @@ impl<'a> ValidatorCtx<'a> {
     /// Construct a validator context with a scalar resolver attached.
     ///
     /// This is the Phase B entry point: scalar-bridge rules in a
-    /// [`SchemaValidator`](super::schema::SchemaValidator) resolve their
+    /// [`SchemaValidator`](crate::validator::schema::SchemaValidator) resolve their
     /// named scalar through this resolver.
     pub fn with_scalars(
         actor: &'a Actor,
@@ -138,8 +138,8 @@ impl<'a> ValidatorCtx<'a> {
 ///
 /// # Implementing
 ///
-/// Use [`super::NativeRecordValidator`] for Rust closures and
-/// [`super::WasmRecordValidator`] for WASM guests.  Declarative
+/// Use [`crate::validator::NativeRecordValidator`] for Rust closures and
+/// [`crate::validator::WasmRecordValidator`] for WASM guests.  Declarative
 /// `SchemaValidator` will implement this trait in Phase A.
 #[async_trait]
 pub trait RecordValidator: Send + Sync {
@@ -162,7 +162,7 @@ pub trait RecordValidator: Send + Sync {
     /// Each entry is `(field_path, fk_ref)`. The default implementation
     /// returns an empty vec — only `SchemaValidator` overrides this to
     /// expose its declarative FK rules (Phase D reverse-FK discovery).
-    fn fk_refs(&self) -> Vec<(Vec<String>, super::schema::ForeignKeyRef)> {
+    fn fk_refs(&self) -> Vec<(Vec<String>, crate::validator::schema::ForeignKeyRef)> {
         Vec::new()
     }
 
@@ -194,7 +194,7 @@ pub trait RecordValidator: Send + Sync {
     /// INSERT pass applies computed-defaults and server-side timestamps).
     /// The default returns an empty vec — native/WASM validators carry no
     /// transforms.  Zеркало `defaults()`.
-    fn transforms(&self) -> Vec<(Vec<String>, super::TransformSpec)> {
+    fn transforms(&self) -> Vec<(Vec<String>, crate::validator::TransformSpec)> {
         Vec::new()
     }
 
@@ -205,15 +205,15 @@ pub trait RecordValidator: Send + Sync {
     /// Used by the keyset-cursor schema-safety gate (F-1, #792,
     /// `crates/shamir-server/src/db_handler/cursor_handlers.rs`'s
     /// `order_by_column_is_schema_typed_scalar`) to ask "is this bound
-    /// validator a [`SchemaValidator`](super::schema::SchemaValidator), and
+    /// validator a [`SchemaValidator`](crate::validator::schema::SchemaValidator), and
     /// if so what are its rules?" — a schema-enforced, fixed, non-container
     /// scalar type on the ORDER BY column proves the column is homogeneous
     /// by construction, closing the "mixed `QueryValue` type in one column"
     /// keyset gap for schema-typed tables.
     ///
-    /// Default `None`; only [`SchemaValidator`](super::schema::SchemaValidator)
+    /// Default `None`; only [`SchemaValidator`](crate::validator::schema::SchemaValidator)
     /// overrides it.
-    fn as_schema_rules(&self) -> Option<&[super::schema::FieldRule]> {
+    fn as_schema_rules(&self) -> Option<&[crate::validator::schema::FieldRule]> {
         None
     }
 }

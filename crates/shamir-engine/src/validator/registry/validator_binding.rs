@@ -3,7 +3,7 @@ use smallvec::SmallVec;
 
 use shamir_types::types::record_id::RecordId;
 
-use super::WriteOp;
+use crate::validator::WriteOp;
 
 /// A single validator-to-table binding stored in the info-twin.
 #[derive(Debug, Clone, Serialize, Deserialize)]

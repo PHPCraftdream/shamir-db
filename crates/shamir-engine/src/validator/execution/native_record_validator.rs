@@ -1,13 +1,13 @@
 //! Native (Rust closure) implementation of [`RecordValidator`].
 //!
-//! Unlike the legacy [`NativeValidatorAdapter`](super::NativeValidatorAdapter)
+//! Unlike the legacy [`NativeValidatorAdapter`](crate::validator::NativeValidatorAdapter)
 //! which threaded the record through `QueryValue` and `ShamirFunction`, this
 //! implementation receives `&dyn RecordFields` directly — by name, zero-copy
 //! for scalar checks.
 
 use async_trait::async_trait;
 
-use super::{
+use crate::validator::{
     record_fields::RecordFields,
     record_validator::{RecordValidator, ValidatorCtx},
     Validation,
