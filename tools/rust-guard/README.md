@@ -301,6 +301,40 @@ directory unless an explicit `--exceptions` path is given.
   are referenced from the campaign entries
 in `.rust-guard/stages.toml` (written by the CI wiring chunk).
 
+### Suggesting moves (`--suggest-delta <path>`, optional diagnostic)
+
+Both `conservation` and `discovery` accept `--suggest-delta <path>`. It
+never changes the findings or the exit code: the gate fails exactly as
+it would without the flag. Pairs that are blocked ONLY by a missing
+`[[moved]]` declaration (otherwise clean moves, tests included) are
+written to `<path>` as a delta file ready to be fed back via `--delta`:
+
+```toml
+base = "abc1234..."            # the resolved full base SHA
+
+[[moved]]
+path    = "crates/x/src/old.rs"
+item    = "shamir_x::old::Plan"
+to_path = "crates/x/src/planner.rs"
+to_item = "shamir_x::planner::Plan"
+reason  = "relocated by the layout sweep"
+owner   = "@layout-sweep"
+```
+
+Entries are sorted by base path, then base item; the file is written
+only when at least one pair exists, and one summary line
+(`rust-guard: note: N undeclared move(s) written to <path>`) goes to
+stderr. Real losses, genuinely new items, body-changed,
+signature-changed and attribute-changed pairs, and ambiguous
+(`UNPAIRABLE_DUPLICATE`) pairings are NEVER suggested — they stay
+findings. `[[renamed]]`, `[[extracted]]`, `[[removed]]`, `[[added]]`
+and `[[changed]]` are never suggested. For `discovery` the `base` value is the resolved
+full base SHA passed via the REQUIRED `--base-sha <sha>` argument
+(clap enforces that `--suggest-delta` and `--base-sha` are given
+together); the loader never checks it against anything (discovery
+compares list files, not revisions), but the pin lets a reviewer
+trace the run.
+
 ## `rust-guard discovery` — compiled test-inventory diff (CI-03b)
 
 `rust-guard discovery --base-list base.json --head-list head.json
@@ -354,6 +388,15 @@ revision; the CI job pins the base list to the merge base instead.
 
 `--kind` (default `lib`) is a label echoed into the finding paths and
 messages so doctest and loom lists can be diffed in separate runs.
+
+`discovery` also accepts `--suggest-delta <path>` (see the conservation
+section above): each unexplained lost test paired with the single
+unclaimed head identity of the same name is written there; ambiguous
+names (several head candidates) are never suggested. `--base-sha
+<sha>` is required with it and is written as the suggestion's `base`
+pin; the pairing must be mutually unique (single base identity and
+single head candidate per test name) with equal `ignored` state,
+otherwise nothing is suggested.
 
 ## When the gates run
 
