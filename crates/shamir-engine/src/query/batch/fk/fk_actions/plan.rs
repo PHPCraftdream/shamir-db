@@ -148,7 +148,7 @@ impl MutationDedup {
 /// Walks the cascade tree recursively (up to [`CASCADE_DEPTH_LIMIT`]) at
 /// planning time, collecting all child/grandchild rows that need to be
 /// deleted or nulled.  Returns a flat [`CascadePlan`] that the caller drives
-/// inside the tx via [`apply_cascade_plan`].
+/// inside the tx via `apply_cascade_plan`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn plan_cascade(
     resolver: &dyn TableResolver,

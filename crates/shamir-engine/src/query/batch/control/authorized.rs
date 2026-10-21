@@ -19,8 +19,8 @@
 //! in the dependency graph (`shamir-db` depends on `shamir-engine`, never
 //! the reverse). The engine cannot call `authorize_access` directly
 //! without an illegal reverse dependency. [`AccessGate`] is the same
-//! inversion-of-control seam already used for [`crate::query::batch::1`] /
-//! [`crate::query::batch::1`] / [`crate::query::batch::1`]
+//! inversion-of-control seam already used for `crate::query::batch::1` /
+//! `crate::query::batch::1` / `crate::query::batch::1`
 //! (`executor_traits.rs`): a thin trait defined here, implemented by
 //! `ShamirDb` in `shamir-db` by delegating to `authorize_access`.
 //!

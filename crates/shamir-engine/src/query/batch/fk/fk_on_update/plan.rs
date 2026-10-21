@@ -54,7 +54,7 @@ pub(super) enum PendingMutation {
 
 /// A fully-resolved on-update fan-out plan — a flat list of child mutations
 /// plus (for Restrict) an early-`Err` short-circuit.  Built at planning time
-/// (before the tx); applied inside the tx via [`apply_fk_update_plan`].
+/// (before the tx); applied inside the tx via `apply_fk_update_plan`.
 pub(crate) struct FkUpdatePlan {
     pub(super) mutations: Vec<PendingMutation>,
 }

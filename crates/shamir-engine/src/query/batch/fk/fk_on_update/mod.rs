@@ -44,7 +44,7 @@
 //!   changed, reject (`fk_restrict`).  Mirrors `check_fk_restrict` but keyed
 //!   on the about-to-change old value, not the about-to-delete row.
 //! - **Cascade** — for each child row whose FK == old, UPDATE its FK field to
-//!   `new_value` (NOT a delete).  New [`PendingMutation::UpdateField`].
+//!   `new_value` (NOT a delete).  New `PendingMutation::UpdateField`.
 //! - **SetNull** — for each child row whose FK == old, set the FK field to
 //!   `Null` (child field must be nullable; reuses the `field_is_nullable`
 //!   check).

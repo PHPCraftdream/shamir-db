@@ -63,7 +63,7 @@ impl<'a> QueryRunner<'a> {
     /// `TableManager::execute_*_tx`; read and admin ops are
     /// unchanged.
     ///
-    /// Each data op calls [`trace_access`] with the appropriate [`Action`]
+    /// Each data op calls `trace_access` with the appropriate `Action`
     /// before performing work — an R2 OBSERVABILITY trace, always `Ok`,
     /// NOT the enforcement gate. The real gate already ran earlier, in
     /// `ShamirDb::execute_as` / `tx_execute_as` (the per-op

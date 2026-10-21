@@ -49,7 +49,7 @@ fn scalar_ref_matches_qv(actual: &ScalarRef<'_>, value: &QueryValue) -> bool {
 }
 
 /// Keyed by an already-resolved `InternerKey` instead of a field name — the
-/// field id must come from [`resolve_field_id_layered`] (base + this tx's
+/// field id must come from `resolve_field_id_layered` (base + this tx's
 /// overlay), not a plain by-name interner lookup, since the matched row may
 /// be tx-overlay-sourced (`list_stream_tx`) and use an overlay-only field id.
 pub(super) fn record_field_matches_by_id(

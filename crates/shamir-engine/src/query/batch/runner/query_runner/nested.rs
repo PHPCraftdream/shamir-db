@@ -19,7 +19,7 @@ use crate::query::read::QueryResult;
 /// `execute_batch_impl`'s non-transactional (implicit-per-op-tx) path (#661).
 ///
 /// `plan` is the body's ALREADY-BUILT [`BatchPlan`](shamir_query_types::batch::BatchPlan)
-/// — the caller ran [`plan_and_validate_batch`] (`BatchPlanner::plan` +
+/// — the caller ran `plan_and_validate_batch` (`BatchPlanner::plan` +
 /// `validate_tables` + `validate_filter_depth`) beforehand. For a single
 /// `BatchOp::Batch` recursion the caller does this once, immediately before
 /// calling here (byte-identical to the old inline behavior). For `ForEach`,
@@ -89,7 +89,7 @@ pub(super) fn run_nested_body_in_outer_tx<'a>(
     })
 }
 
-/// Map a [`WriteValueError`] (from [`resolve_write_value`]) to the
+/// Map a [`WriteValueError`] (from `resolve_write_value`) to the
 /// [`BatchError`] shape every Insert/Update/Set dispatch arm already returns
 /// for its `$param`-only substitution failures — `unbound_param` keeps its
 /// pre-existing code, `malformed_marker` is new (a `$query`/`$fn`/`$cond`/
