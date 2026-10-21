@@ -6,6 +6,7 @@ use crate::common::gitfs::GitFs;
 use serde::Deserialize;
 use syn::Item;
 
+use super::vacated::Vacated;
 use super::{diff, owned, rules};
 
 /// CLI arguments for `rust-guard structure` (declared in `main.rs`).
@@ -144,10 +145,17 @@ fn execute(args: StructureArgs) -> Result<u8, String> {
     )?;
     let owned = owned::OwnedImplConfig::load(owned::OWNED_IMPL_FILE)?;
 
+    // Files that are new at head (splits of deleted base files) are
+    // compared with the vacated base files, not with an empty base.
+    let vacated = match &base {
+        Some(base_rev) => Vacated::build(&fs, base_rev, &exceptions, &owned),
+        None => Vacated::empty(),
+    };
     let mut report = Report::new();
     rules::check_files(&fs, &selected, &exceptions, &owned, &mut report);
+    vacated.excuse_new_file_findings(&selected, &mut report);
     if let Some(base_rev) = &base {
-        diff::check_files(&fs, base_rev, &selected, &mut delta, &mut report);
+        diff::check_files(&fs, base_rev, &selected, &vacated, &mut delta, &mut report);
     } else {
         // No base: the diff (the only consumer of delta entries) never
         // ran, so every entry is a leftover (finding 9).
