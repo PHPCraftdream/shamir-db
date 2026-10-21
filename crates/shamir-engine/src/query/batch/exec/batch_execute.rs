@@ -1,0 +1,970 @@
+use std::time::Instant;
+
+use crate::query::batch::authorized::Authorized;
+use crate::query::batch::batch_validate::{
+    validate_filter_depth, validate_filter_patterns, validate_tables,
+};
+use crate::query::batch::exec_scope::ExecScope;
+use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
+use crate::query::batch::op_watchdog::register_op_watchdog;
+#[cfg(test)]
+use crate::query::batch::query_runner::execute_single_impl;
+use crate::query::batch::query_runner::{
+    build_resolved_refs, resolve_skip, skipped_query_result, QueryRunner,
+};
+use crate::query::batch::result_size::ResultSize;
+use crate::query::batch::{
+    BatchError, BatchOp, BatchPlan, BatchRequest, BatchResponse, QueryEntry,
+};
+use crate::query::read::QueryResult;
+use shamir_collections::TFxSet;
+use shamir_query_types::batch::{
+    IndexVisibility, IsolationLevel as WireIsolationLevel, RequestDurability, ResultEncoding,
+};
+use shamir_tx::CommitVisibility;
+use shamir_types::access::Actor;
+use shamir_types::types::common::{new_map, new_map_wc, TMap};
+use shamir_types::types::value::QueryValue;
+
+/// A single op taking longer than this is logged (#1019): the cooperative
+/// deadline (see `execution_deadline.rs`'s module doc, "Deliberate
+/// non-goal") cannot interrupt a stall INSIDE one op's `.await` — it only
+/// notices the overrun at the NEXT checkpoint, once the stalled op finally
+/// returns. That makes a single-op stall indistinguishable, from the
+/// error alone, from "many small ops accumulated past the budget" — this
+/// warning exists so a future occurrence is diagnosable (which alias, how
+/// long) straight from the log instead of only a wall-clock/budget
+/// mismatch in the error message.
+const SLOW_OP_WARN_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Log a warning if a single op's execution took longer than
+/// [`SLOW_OP_WARN_THRESHOLD`]. See its doc comment for why this exists.
+fn warn_if_op_slow(alias: &str, elapsed: std::time::Duration) {
+    if elapsed > SLOW_OP_WARN_THRESHOLD {
+        log::warn!("batch op '{alias}' took {elapsed:?} to execute (exceeds the {SLOW_OP_WARN_THRESHOLD:?} slow-op logging threshold)");
+    }
+}
+
+/// Execute a batch request against a table resolver.
+///
+/// 1. Plans the execution (topological sort into parallel stages)
+/// 2. Executes each stage, passing results to dependent queries
+/// 3. Filters results based on return_all / return_only
+///
+/// `actor` is threaded from the facade (R2) and carried into every
+/// resource-touch point via [`QueryRunner`]. `db_name` provides the
+/// database scope for `ResourcePath` construction.
+///
+/// **#666 (redesigned): wall-clock enforcement of
+/// `BatchLimits.max_execution_time_secs` via COOPERATIVE deadline
+/// checkpoints.** This SINGLE top-level entry point computes an
+/// [`ExecScope`] once and threads it through the whole recursive
+/// execution (`execute_batch_impl`, and transitively any nested
+/// `Batch`/`ForEach` bodies — nested re-entrant calls inherit the outer
+/// call's deadline, so the whole tree shares one budget). At each safe
+/// checkpoint (before every stage-alias dispatch, before every `ForEach`
+/// iteration, at nested-batch entry, and immediately BEFORE `commit_tx`)
+/// an expired budget surfaces as an ordinary
+/// `Err(BatchError::ExecutionTimedOut)` through the normal return path.
+///
+/// The original #666 mechanism (`tokio::time::timeout` wrapping the whole
+/// future) was removed: it raced `commit_tx` — which is explicitly
+/// non-cancel-safe at the API boundary (see its doc comment in
+/// `tx/commit.rs`; a drop between WAL-begin and completion leaves the tx
+/// durably committed while the client sees a timeout error) — and it
+/// bypassed `execute_transactional_impl`'s `Err`-arm
+/// `release_pessimistic_locks` cleanup by dropping the future mid-plan
+/// (`TxContext` has no `Drop` impl for Level-3 locks), leaking pessimistic
+/// locks permanently. With cooperative checkpoints nothing is ever
+/// externally cancelled, so both hazards are structurally impossible. See
+/// `execution_deadline.rs` for the full rationale.
+///
+/// `execute_in_open_tx` shares the same per-call root construction; the
+/// interactive transaction lifetime remains a separate caller-owned budget.
+///
+/// A client-supplied `max_execution_time_secs: 0` is treated as the
+/// smallest valid budget (1 second), NOT as "no timeout" — see
+/// [`crate::query::batch::ExecutionDeadline::from_budget_secs`].
+///
+/// Takes an [`Authorized`] token, not a raw `&BatchRequest` + `Actor` pair
+/// (#1199) — the token can only be minted by [`Authorized::authorize`],
+/// which runs the real access-control check first. See `authorized.rs`'s
+/// module doc for the full rationale.
+pub async fn execute_batch(
+    auth: Authorized<'_>,
+    resolver: &dyn TableResolver,
+    admin: Option<&dyn AdminExecutor>,
+    invoker: Option<&dyn FunctionInvoker>,
+) -> Result<BatchResponse, BatchError> {
+    let scope = auth.root_scope();
+    let (request, actor, db_name) = auth.into_parts();
+    crate::query::batch::receipts::scope(execute_batch_impl(
+        request,
+        resolver,
+        admin,
+        invoker,
+        actor,
+        db_name,
+        0,
+        &new_map(),
+        &scope,
+    ))
+    .await
+}
+
+/// Test-only convenience: calls [`execute_batch`] via
+/// [`Authorized::unchecked`] (no access-control check), preserving the
+/// PRE-#1199 call shape (`&BatchRequest` + `Actor` + `db_name`) so the
+/// large body of existing engine unit tests that exercise execution
+/// mechanics — not authorization — didn't all need a structural rewrite.
+/// Real (non-test) callers MUST go through `Authorized::authorize` with a
+/// real [`crate::query::batch::AccessGate`] — this function does not
+/// exist outside `#[cfg(test)]` builds.
+#[cfg(test)]
+pub(crate) async fn execute_batch_unchecked(
+    request: &BatchRequest,
+    resolver: &dyn TableResolver,
+    admin: Option<&dyn AdminExecutor>,
+    invoker: Option<&dyn FunctionInvoker>,
+    actor: Actor,
+    db_name: &str,
+) -> Result<BatchResponse, BatchError> {
+    let auth = Authorized::unchecked(request, actor, db_name);
+    execute_batch(auth, resolver, admin, invoker).await
+}
+
+/// Plan + validate a batch body's queries — `BatchPlanner::plan` plus the
+/// `validate_tables`/`validate_filter_depth` preamble every
+/// [`execute_batch_impl`] call used to run inline.
+///
+/// This is a pure function of `request.queries`/`request.limits`/
+/// `request.transactional` — neither validation pass (nor the cross-repo
+/// guard below) ever inspects a bound `$param` VALUE, only the query SHAPE
+/// (table refs, filter ASTs, `$query`/`after` edges). That means a caller
+/// that re-executes the SAME body shape many times with only the bound
+/// values differing — the canonical case being `ForEach`'s per-iteration
+/// recursion in `query_runner.rs` — can call this ONCE before the loop and
+/// reuse the resulting [`BatchPlan`] across every iteration, instead of
+/// paying a full re-plan + async table-resolution re-validation on every
+/// single pass (see that module's `ForEach` handling for the loop that does
+/// exactly this).
+///
+/// Split out of `execute_batch_impl` so the single-call path (`ForEach`'s
+/// sibling `BatchOp::Batch`, and the top-level [`execute_batch`] entry)
+/// keeps its exact prior behavior unchanged — it simply calls this once,
+/// same as before.
+pub(in crate::query::batch) async fn plan_and_validate_batch(
+    request: &BatchRequest,
+    resolver: &dyn TableResolver,
+    scope: &ExecScope,
+) -> Result<BatchPlan, BatchError> {
+    crate::query::batch::receipts::validate(request, resolver).await?;
+    let effective = request.limits.clamped_to(scope.limits());
+    for visit in shamir_query_types::batch::BatchTreeVisitor::new(&request.queries) {
+        let nested_wait = match &visit.entry.op {
+            BatchOp::Batch(sub) => sub.batch.visibility_wait,
+            BatchOp::ForEach(fe) => fe.batch.visibility_wait,
+            _ => None,
+        };
+        if request.transactional
+            && matches!(
+                nested_wait,
+                Some(shamir_query_types::batch::VisibilityWait::Bounded { .. })
+            )
+        {
+            return Err(BatchError::QueryError {
+                alias: visit.alias.to_owned(),
+                message: "bounded visibility is unsupported by nested batch bodies".into(),
+                code: Some("validation".into()),
+            });
+        }
+    }
+    // 4.C: cross-repo guard for transactional batches.
+    if request.transactional {
+        let repos = shamir_query_types::batch::distinct_repos(&request.queries);
+        if repos.len() > 1 {
+            let mut repos: Vec<String> = repos.into_iter().collect();
+            repos.sort();
+            return Err(BatchError::CrossRepoNotSupported { repos });
+        }
+    }
+
+    // 1. Plan
+    let plan = shamir_query_types::batch::BatchPlanner::plan(&request.queries, &effective)?;
+
+    // 2. Validate: all referenced tables exist (skip admin ops)
+    validate_tables(&request.queries, resolver, &effective, scope.limits()).await?;
+
+    // 2b. Validate: filter nesting depth (DoS guard)
+    validate_filter_depth(&request.queries)?;
+
+    // 2c. Validate: filter pattern length cap + Regex/Like validity
+    // (DoS guard / silent-full-table-match guard)
+    validate_filter_patterns(&request.queries)?;
+
+    Ok(plan)
+}
+
+/// Durability step shared by [`execute_batch_impl`] and
+/// [`execute_planned_batch_impl`]: if `request.durability == Some(RequestDurability::Synced)`,
+/// flush every distinct repo the batch touched so the write survives an
+/// immediate hard crash. No-op otherwise.
+async fn flush_if_synced_durability(
+    request: &BatchRequest,
+    resolver: &dyn TableResolver,
+    db_name: &str,
+) -> Result<(), BatchError> {
+    if !matches!(request.durability, Some(RequestDurability::Synced)) {
+        return Ok(());
+    }
+    let repos = shamir_query_types::batch::distinct_repos(&request.queries);
+    for repo_name in repos {
+        let repo = resolver
+            .resolve_repo(&repo_name)
+            .await
+            .map_err(|e| BatchError::QueryError {
+                alias: String::new(),
+                message: format!("resolve_repo({}): {}", repo_name, e),
+                code: None,
+            })?;
+        repo.synced_flush()
+            .await
+            .map_err(|e| BatchError::QueryError {
+                alias: String::new(),
+                message: format!("synced flush {}/{}: {}", db_name, repo_name, e),
+                code: None,
+            })?;
+        // Belt-and-suspenders: also fsync the file WAL spine so the
+        // committed entries reach level 3 (the WAL is the source of
+        // truth; data-store flush above is derived). No-op for
+        // in-memory repos.
+        //
+        // PR1: `sync_wal` demands a coalesced sync round that captures
+        // coverage before fsync. Success covers that captured generation;
+        // R advances only through covered predecessors. Successful sync
+        // alone does not guarantee immediate replication serving across holes.
+        repo.sync_wal().await.map_err(|e| BatchError::QueryError {
+            alias: String::new(),
+            message: format!("synced wal {}/{}: {}", db_name, repo_name, e),
+            code: None,
+        })?;
+    }
+    Ok(())
+}
+
+/// Internal entry point that carries the sub-batch recursion state.
+///
+/// - `depth` — current nesting level (0 at the public entry).
+/// - `params` — injected `$param` bindings from the outer batch's
+///   `BatchOp::Batch.bind` map, resolved to concrete `InnerValue`s.
+/// - `scope` — the shared execution budget, computed once in
+///   [`execute_batch`] and INHERITED unchanged by nested `Batch`/`ForEach`
+///   bodies (a nested body's own `limits.max_execution_time_secs` is not
+///   consulted — the outer call owns the budget, matching the original
+///   #666 "one top-level budget covers the whole tree" semantics).
+///
+/// Called recursively by [`QueryRunner::run`] when it encounters a
+/// `BatchOp::Batch` entry; callers above the public entry always pass
+/// `depth = 0` and an empty `params` map.
+///
+/// Returns a boxed future because the function is mutually recursive
+/// (QueryRunner::run → execute_batch_impl → execute_plan_impl →
+/// execute_single_impl → QueryRunner::run) and Rust requires boxing
+/// to give the async state machine a statically known size.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::query::batch) fn execute_batch_impl<'a>(
+    request: &'a BatchRequest,
+    resolver: &'a dyn TableResolver,
+    admin: Option<&'a dyn AdminExecutor>,
+    invoker: Option<&'a dyn FunctionInvoker>,
+    actor: Actor,
+    db_name: &'a str,
+    depth: usize,
+    params: &'a TMap<String, QueryValue>,
+    scope: &'a ExecScope,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<BatchResponse, BatchError>> + Send + 'a>,
+> {
+    Box::pin(async move {
+        let start = Instant::now();
+
+        // #666 checkpoint: nested-batch entry (each `BatchOp::Batch` /
+        // `ForEach`-iteration recursion re-enters here on the non-tx path).
+        // Free at the top-level call (the deadline was minted microseconds
+        // ago); decisive for a recursion that starts after the budget
+        // already elapsed.
+        scope.check()?;
+
+        let mut plan = plan_and_validate_batch(request, resolver, scope).await?;
+
+        // 3. Execute — branch on transactional.
+        let (all_results, tx_info) = if request.transactional {
+            execute_transactional_impl(
+                request,
+                &mut plan,
+                resolver,
+                admin,
+                invoker,
+                &actor,
+                db_name,
+                depth,
+                params,
+                request.result_encoding,
+                scope,
+            )
+            .await?
+        } else {
+            let r = crate::query::batch::receipts::execute_plan(
+                &mut plan,
+                &request.queries,
+                resolver,
+                admin,
+                invoker,
+                &actor,
+                db_name,
+                depth,
+                params,
+                request.result_encoding,
+                scope,
+                request.visibility_wait,
+            )
+            .await?;
+            (r, None)
+        };
+
+        // 3.5. Durability: if `synced`, flush every distinct repo the batch
+        // touched before building the response so the write survives an
+        // immediate hard crash.
+        flush_if_synced_durability(request, resolver, db_name).await?;
+
+        // 4. Filter results for response
+        let results = crate::query::batch::receipts::filter(all_results, request);
+
+        let elapsed = start.elapsed();
+
+        Ok(BatchResponse {
+            id: request.id.clone(),
+            results,
+            execution_plan: std::mem::take(&mut plan.stages),
+            edge_provenance: std::mem::take(&mut plan.edge_provenance),
+            execution_time_us: elapsed.as_micros() as u64,
+            transaction: tx_info,
+            // Ambient interner deltas are attached server-side (shamir-db's
+            // execute_as post-processing); the engine layer leaves this empty.
+            interner_delta: Default::default(),
+        })
+    }) // end Box::pin
+}
+
+/// Boxed future type for [`execute_planned_batch_impl`] — factored into its
+/// own alias (mirroring `query_runner.rs`'s `NestedTxBodyFuture`) so the
+/// return type doesn't trip clippy's `type_complexity` lint.
+type PlannedBatchResultFuture<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<TMap<String, QueryResult>, BatchError>> + Send + 'a,
+    >,
+>;
+
+/// Execute an ALREADY-planned-and-validated batch body and return its
+/// filtered per-alias results.
+///
+/// Companion to [`execute_batch_impl`] for a caller that computed `plan`
+/// once via [`plan_and_validate_batch`] and wants to reuse it across many
+/// executions of the byte-identical body shape — the only such caller
+/// today is `ForEach`'s per-iteration recursion (non-tx arm) in
+/// `query_runner.rs`, which now plans/validates the loop body ONCE before
+/// the loop instead of once per iteration.
+///
+/// Returns just the filtered results map, not a full [`BatchResponse`] —
+/// the plan/timing/id metadata `BatchResponse` otherwise carries is never
+/// consumed by a `ForEach` iteration's caller (only `.results` is).
+#[allow(clippy::too_many_arguments)]
+pub(in crate::query::batch) fn execute_planned_batch_impl<'a>(
+    request: &'a BatchRequest,
+    plan: &'a mut BatchPlan,
+    resolver: &'a dyn TableResolver,
+    admin: Option<&'a dyn AdminExecutor>,
+    invoker: Option<&'a dyn FunctionInvoker>,
+    actor: Actor,
+    db_name: &'a str,
+    depth: usize,
+    params: &'a TMap<String, QueryValue>,
+    scope: &'a ExecScope,
+) -> PlannedBatchResultFuture<'a> {
+    Box::pin(async move {
+        // #666 checkpoint — mirrors `execute_batch_impl`'s pre-plan check.
+        // The plan/validation itself already ran once, before the loop;
+        // the deadline still gets a fresh look before this iteration's
+        // real execution work.
+        scope.check()?;
+
+        // 3. Execute — branch on transactional.
+        let (all_results, _tx_info) = if request.transactional {
+            execute_transactional_impl(
+                request,
+                plan,
+                resolver,
+                admin,
+                invoker,
+                &actor,
+                db_name,
+                depth,
+                params,
+                request.result_encoding,
+                scope,
+            )
+            .await?
+        } else {
+            let r = crate::query::batch::receipts::execute_plan(
+                plan,
+                &request.queries,
+                resolver,
+                admin,
+                invoker,
+                &actor,
+                db_name,
+                depth,
+                params,
+                request.result_encoding,
+                scope,
+                request.visibility_wait,
+            )
+            .await?;
+            (r, None)
+        };
+
+        // 3.5. Durability: same as `execute_batch_impl`.
+        flush_if_synced_durability(request, resolver, db_name).await?;
+
+        // 4. Filter results for response
+        Ok(crate::query::batch::receipts::filter(all_results, request))
+    }) // end Box::pin
+}
+
+/// Execute a batch request with permission checks.
+///
+/// Same as [`execute_batch`] but runs `SessionPermissions::check_batch`
+/// before planning/execution. Returns `BatchError::QueryError` if any
+/// operation is denied.
+///
+/// **NOTE (architectural status):** This role-matrix RBAC +
+/// `row_filter` RLS path is **test-only scaffolding**. The live
+/// server access model is the **Shomer DAC** (owner/group/mode),
+/// enforced via `ShamirDb::execute_as` -> `authorize_access` ->
+/// `permits`. Groups replace roles; row-level security will be a
+/// future Shomer `ResourcePath::Record`-level feature. This
+/// function is retained for engine-level unit tests only.
+#[cfg(test)]
+pub async fn execute_batch_with_permissions(
+    request: &BatchRequest,
+    resolver: &dyn TableResolver,
+    admin: Option<&dyn AdminExecutor>,
+    permissions: &crate::query::auth::SessionPermissions,
+    db_name: &str,
+) -> Result<BatchResponse, BatchError> {
+    // 0. Permission check — fail fast before any work
+    permissions
+        .check_batch(&request.queries, db_name)
+        .map_err(|(alias, action, resource)| BatchError::QueryError {
+            alias,
+            message: format!("Permission denied: {:?} on {:?}", action, resource),
+            code: None,
+        })?;
+
+    // Stage B-1: enforce row-level security. `row_filter()` was computed but
+    // never applied — AND each op's merged row_filter into its WHERE clause so a
+    // row_filter grant actually restricts the rows a Read/Update/Delete touches.
+    let mut request = request.clone();
+    for (_alias, entry) in request.queries.iter_mut() {
+        if let Some(rf) = permissions.row_filter_for_op(&entry.op, db_name) {
+            apply_row_filter(&mut entry.op, rf);
+        }
+    }
+    let auth = Authorized::unchecked(&request, Actor::System, db_name);
+    execute_batch(auth, resolver, admin, None).await
+}
+
+/// AND a row-level-security filter into a data op's WHERE clause.
+/// Read/Update/Delete are restricted; other ops are left unchanged
+/// (Insert/Set row-match validation is a separate follow-up).
+#[cfg(test)]
+fn apply_row_filter(op: &mut crate::query::batch::BatchOp, rf: crate::query::filter::Filter) {
+    match op {
+        BatchOp::Read(q) => q.r#where = Some(and_combine(q.r#where.take(), rf)),
+        BatchOp::Update(u) => u.where_clause = Some(and_combine(u.where_clause.take(), rf)),
+        BatchOp::Delete(d) => {
+            let existing = d.where_clause.clone();
+            d.where_clause = crate::query::filter::Filter::And {
+                filters: vec![existing, rf],
+            };
+        }
+        _ => {}
+    }
+}
+
+/// Combine an optional existing filter with a row filter via AND.
+#[cfg(test)]
+fn and_combine(
+    existing: Option<crate::query::filter::Filter>,
+    rf: crate::query::filter::Filter,
+) -> crate::query::filter::Filter {
+    match existing {
+        Some(f) => crate::query::filter::Filter::And {
+            filters: vec![f, rf],
+        },
+        None => rf,
+    }
+}
+
+/// Execute a planned batch stage by stage.
+///
+/// For each stage, executes all queries sequentially within a stage.
+/// Each query's FilterContext gets only the resolved_refs from its
+/// DataFlow-provenance dependencies (`plan.edge_provenance`) — not all
+/// accumulated results, and NOT `after`-only (`Explicit`) dependencies,
+/// which are pure ordering and grant no data access.
+///
+/// **Note on parallelism.** Stages are a LOGICAL grouping of mutually
+/// independent queries — the planner does not itself run anything, and
+/// nothing here currently drives a stage's queries concurrently. Driving
+/// them concurrently on a single task via `futures::future::try_join_all`
+/// was tried and measured as a no-op on in-memory CPU-bound workloads —
+/// there are no await suspension points inside the queries that would
+/// yield to peers. Real parallelism needs `tokio::spawn`-per-query, which
+/// in turn needs `Arc<dyn TableResolver>` / `Arc<dyn AdminExecutor>` (or a
+/// scoped-spawn helper); kept out of scope for now and tracked as a
+/// future opt. See
+/// `docs/dev-artifacts/design/oql-01-stage-parallelism-adr.md` for the
+/// decision record.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(in crate::query::batch) async fn execute_plan_impl(
+    plan: &mut BatchPlan,
+    queries: &TMap<String, QueryEntry>,
+    resolver: &dyn TableResolver,
+    admin: Option<&dyn AdminExecutor>,
+    invoker: Option<&dyn FunctionInvoker>,
+    actor: &Actor,
+    db_name: &str,
+    depth: usize,
+    params: &TMap<String, QueryValue>,
+    result_encoding: ResultEncoding,
+    scope: &ExecScope,
+) -> Result<TMap<String, QueryResult>, BatchError> {
+    let mut all_results: TMap<String, QueryResult> = new_map_wc(queries.len());
+
+    for stage in &plan.stages {
+        for alias in stage {
+            // #666 checkpoint: once per stage-alias, BEFORE dispatching the
+            // op. An expired budget stops the batch from starting any
+            // further unit of work; the error propagates through the normal
+            // `?` return path like any other op failure.
+            scope.check()?;
+
+            let entry = queries.get(alias).ok_or_else(|| BatchError::QueryError {
+                alias: alias.clone(),
+                message: "Query entry not found".to_string(),
+                code: None,
+            })?;
+
+            // Build resolved_refs with ONLY declared dependencies
+            let deps = plan.edge_provenance.get(alias);
+            let resolved_refs = build_resolved_refs(&all_results, deps);
+
+            // Epic03/B (#645): own `when` false, or cascaded from a
+            // skipped DataFlow/Both dependency — do NOT execute the op.
+            if resolve_skip(
+                entry,
+                &all_results,
+                deps,
+                &resolved_refs,
+                params,
+                resolver.scalar_resolver(),
+            ) {
+                let result = skipped_query_result();
+                if scope.enforce_result_size() {
+                    scope.charge_bytes(ResultSize::result(&result))?;
+                }
+                all_results.insert(alias.clone(), result);
+                continue;
+            }
+
+            scope.charge_work(1)?;
+            let op_started = Instant::now();
+            let _guard = register_op_watchdog(alias);
+            let result = execute_single_impl(
+                alias,
+                entry,
+                resolver,
+                admin,
+                invoker,
+                &resolved_refs,
+                actor,
+                db_name,
+                depth,
+                params,
+                result_encoding,
+                scope,
+            )
+            .await?;
+            warn_if_op_slow(alias, op_started.elapsed());
+            if scope.enforce_result_size() {
+                // Reads finish their own per-read meter in QueryRunner;
+                // containers pay incrementally there as well. Their payloads
+                // must not pay a second time at all_results insertion.
+                if !matches!(
+                    &entry.op,
+                    BatchOp::Read(_) | BatchOp::Batch(_) | BatchOp::ForEach(_)
+                ) {
+                    scope.charge_bytes(ResultSize::result(&result))?;
+                }
+            }
+            all_results.insert(alias.clone(), result);
+        }
+    }
+
+    Ok(all_results)
+}
+
+/// tx-aware variant of `execute_plan_impl`.
+///
+/// Uses `QueryRunner` with `Some(&mut tx)` so each mutation routes
+/// through `execute_*_tx`. Reads route through `TableManager::read_tx`
+/// with a shared `&TxContext` (Vector I.1), so a Serializable batch's
+/// SELECT populates the read-set and SSI write-skew detection is live
+/// end-to-end through this wire path.
+///
+/// Uses the per-call deadline derived from the interactive request's limits.
+/// Nested execution inherits it; no commit or transaction-lifetime bound is
+/// introduced by this entry.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::query::batch) async fn execute_plan_tx(
+    plan: &mut BatchPlan,
+    queries: &TMap<String, QueryEntry>,
+    resolver: &dyn TableResolver,
+    admin: Option<&dyn AdminExecutor>,
+    invoker: Option<&dyn FunctionInvoker>,
+    actor: &Actor,
+    db_name: &str,
+    tx: &mut shamir_tx::TxContext,
+    scope: &ExecScope,
+) -> Result<TMap<String, QueryResult>, BatchError> {
+    execute_plan_tx_impl(
+        plan,
+        queries,
+        resolver,
+        admin,
+        invoker,
+        actor,
+        db_name,
+        tx,
+        0,
+        &new_map(),
+        ResultEncoding::Name,
+        scope,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::query::batch) async fn execute_plan_tx_impl(
+    plan: &mut BatchPlan,
+    queries: &TMap<String, QueryEntry>,
+    resolver: &dyn TableResolver,
+    admin: Option<&dyn AdminExecutor>,
+    invoker: Option<&dyn FunctionInvoker>,
+    actor: &Actor,
+    db_name: &str,
+    tx: &mut shamir_tx::TxContext,
+    depth: usize,
+    params: &TMap<String, QueryValue>,
+    result_encoding: ResultEncoding,
+    scope: &ExecScope,
+) -> Result<TMap<String, QueryResult>, BatchError> {
+    let mut all_results: TMap<String, QueryResult> = new_map_wc(queries.len());
+
+    for stage in &plan.stages {
+        for alias in stage {
+            // #666 checkpoint: once per stage-alias, BEFORE dispatching the
+            // op. The `Err` this raises flows out of `execute_plan_tx_impl`
+            // into `execute_transactional_impl`'s existing `Err` arm — the
+            // one that releases pessimistic locks and never calls
+            // `commit_tx` — so timeout cleanup is byte-identical to any
+            // other op failure's cleanup.
+            scope.check()?;
+
+            let entry = queries.get(alias).ok_or_else(|| BatchError::QueryError {
+                alias: alias.clone(),
+                message: "Query entry not found".to_string(),
+                code: None,
+            })?;
+
+            let deps = plan.edge_provenance.get(alias);
+            let resolved_refs = build_resolved_refs(&all_results, deps);
+
+            // Epic03/B (#645): own `when` false, or cascaded from a
+            // skipped DataFlow/Both dependency — do NOT execute the op.
+            if resolve_skip(
+                entry,
+                &all_results,
+                deps,
+                &resolved_refs,
+                params,
+                resolver.scalar_resolver(),
+            ) {
+                let result = skipped_query_result();
+                if scope.enforce_result_size() {
+                    scope.charge_bytes(ResultSize::result(&result))?;
+                }
+                all_results.insert(alias.clone(), result);
+                continue;
+            }
+
+            scope.charge_work(1)?;
+            let mut runner = QueryRunner {
+                resolver,
+                admin,
+                invoker,
+                tx: Some(&mut *tx),
+                actor: actor.clone(),
+                db_name,
+                depth,
+                params,
+                result_encoding,
+                scope,
+            };
+            let op_started = Instant::now();
+            let _guard = register_op_watchdog(alias);
+            let result = runner.run(alias, entry, &resolved_refs).await?;
+            warn_if_op_slow(alias, op_started.elapsed());
+            if scope.enforce_result_size() {
+                // Reads finish their own per-read meter in QueryRunner;
+                // containers pay incrementally there as well. Their payloads
+                // must not pay a second time at all_results insertion.
+                if !matches!(
+                    &entry.op,
+                    BatchOp::Read(_) | BatchOp::Batch(_) | BatchOp::ForEach(_)
+                ) {
+                    scope.charge_bytes(ResultSize::result(&result))?;
+                }
+            }
+            all_results.insert(alias.clone(), result);
+        }
+    }
+
+    Ok(all_results)
+}
+
+/// Open a tx, execute the plan inside it, commit (or propagate abort).
+///
+/// Returns the per-query results AND the populated TransactionInfo
+/// (committed or aborted with reason).
+#[allow(clippy::too_many_arguments)]
+pub(in crate::query::batch) async fn execute_transactional_impl(
+    request: &BatchRequest,
+    plan: &mut BatchPlan,
+    resolver: &dyn TableResolver,
+    admin: Option<&dyn AdminExecutor>,
+    invoker: Option<&dyn FunctionInvoker>,
+    actor: &Actor,
+    db_name: &str,
+    depth: usize,
+    params: &TMap<String, QueryValue>,
+    result_encoding: ResultEncoding,
+    scope: &ExecScope,
+) -> Result<
+    (
+        TMap<String, QueryResult>,
+        Option<shamir_query_types::batch::TransactionInfo>,
+    ),
+    BatchError,
+> {
+    // Determine target repo (cross-repo guard already enforced single).
+    let repos = shamir_query_types::batch::distinct_repos(&request.queries);
+    let repo_name = repos.into_iter().next().unwrap_or_default();
+
+    if repo_name.is_empty() {
+        return Err(BatchError::QueryError {
+            alias: String::new(),
+            message: "transactional batch has no data ops to target a repo".into(),
+            code: None,
+        });
+    }
+
+    let repo = resolver
+        .resolve_repo(&repo_name)
+        .await
+        .map_err(|e| BatchError::QueryError {
+            alias: String::new(),
+            message: format!("resolve_repo({}): {}", repo_name, e),
+            code: None,
+        })?;
+
+    let visibility_wait = request
+        .visibility_wait
+        .unwrap_or_else(|| repo.commit_visibility_wait());
+
+    // Parse isolation (strict typed enum — exhaustive match, no fallback).
+    let iso = match request.isolation {
+        Some(WireIsolationLevel::Serializable) => shamir_tx::IsolationLevel::Serializable,
+        Some(WireIsolationLevel::Pessimistic) => shamir_tx::IsolationLevel::Pessimistic,
+        Some(WireIsolationLevel::Snapshot) | None => shamir_tx::IsolationLevel::Snapshot,
+    };
+
+    let (mut tx, _guard) = repo
+        .begin_tx(iso)
+        .await
+        .map_err(|e| BatchError::QueryError {
+            alias: String::new(),
+            message: format!("begin_tx: {}", e),
+            code: None,
+        })?;
+    // Thread the actor into the tx for commit-time provenance (R2).
+    tx.set_actor(actor.clone());
+    // Opt into async-index commit visibility when the wire client requests
+    // it (v4 `index_visibility: "async"`; the old `durability: "async_index"`
+    // string is gone). Absent or `"sync"` keeps CommitVisibility::Synchronous
+    // so existing behaviour is byte-identical.
+    if request.index_visibility == Some(IndexVisibility::Async) {
+        tx.set_visibility(CommitVisibility::AsyncIndex);
+    }
+    let snapshot_version = tx.snapshot_version;
+    let tx_id = tx.tx_id.0;
+
+    // Execute plan in tx mode.
+    let plan_result = execute_plan_tx_impl(
+        plan,
+        &request.queries,
+        resolver,
+        admin,
+        invoker,
+        actor,
+        db_name,
+        &mut tx,
+        depth,
+        params,
+        result_encoding,
+        scope,
+    )
+    .await;
+
+    // #666 checkpoint: the LAST consultation of the deadline, immediately
+    // BEFORE the commit decision. If the budget elapsed while the final
+    // op was executing, the tx must NOT be committed — folding the check
+    // into `plan_result` here routes the expired-budget case through the
+    // very same `Err` arm below (pessimistic-lock release + RAII rollback,
+    // `commit_tx` never called). Once `commit_tx` is entered, the deadline
+    // is never consulted again: `commit_tx` always runs to completion,
+    // uncancelled, and its outcome is always observed and reported
+    // truthfully (its doc comment forbids racing it under
+    // `tokio::select!`/`tokio::time::timeout`).
+    let plan_result = plan_result.and_then(|results| {
+        scope.check()?;
+        scope.check_work(0)?;
+        crate::query::batch::receipts::reserve(&results, &request.queries, depth, scope)?;
+        Ok(results)
+    });
+
+    match plan_result {
+        Err(plan_err) => {
+            // Drop tx without commit = RAII rollback. Release any Level-3
+            // pessimistic locks the tx held so blocked txs can proceed (the
+            // locks live in the per-table MvccStore, not in TxContext, so
+            // dropping TxContext alone does not free them). No-op for
+            // Snapshot / Serializable (locked_keys is empty).
+            crate::tx::release_pessimistic_locks(&tx, &repo).await;
+
+            // #666: a deadline-exceeded abort keeps its identity all the
+            // way to the caller — `ExecutionTimedOut` is a top-level batch
+            // outcome (the server maps it to the `limits` error category),
+            // not a per-query failure to be folded into an
+            // `aborted`-TransactionInfo `Ok` response. The lock release +
+            // RAII rollback above have already run at this point, so the
+            // cleanup is identical either way.
+            if matches!(
+                plan_err,
+                BatchError::ExecutionTimedOut { .. }
+                    | BatchError::TooManyQueries { .. }
+                    | BatchError::TooManyIterations { .. }
+                    | BatchError::LimitExceeded { .. }
+                    | BatchError::AsOfVisibilityTimeout { .. }
+            ) {
+                return Err(plan_err);
+            }
+
+            let info = shamir_query_types::batch::TransactionInfo::aborted(
+                tx_id,
+                format!("{:?}", plan_err),
+            );
+            Ok((new_map(), Some(info)))
+        }
+        Ok(results) => {
+            // Commit.
+            match repo.commit_tx_with_options(tx, visibility_wait).await {
+                Ok(outcome) => {
+                    // Thread the commit's materialization state to the
+                    // client. `Complete` → materialized=true (projections
+                    // applied inline); `Deferred` → materialized=false (the
+                    // commit is durable via its WAL entry, but projection
+                    // was deferred to crash-recovery). A `Deferred` outcome
+                    // is still COMMITTED — see `MaterializationState`.
+                    let info = shamir_query_types::batch::TransactionInfo::committed(
+                        outcome.tx_id,
+                        outcome.snapshot_version,
+                        outcome.commit_version,
+                        outcome.materialized(),
+                    )
+                    .with_visibility(outcome.visibility);
+                    Ok((
+                        crate::query::batch::receipts::stamp(
+                            results,
+                            &request.queries,
+                            &info,
+                            depth,
+                        ),
+                        Some(info),
+                    ))
+                }
+                Err(commit_err) => {
+                    let info = commit_err.into_transaction_info(tx_id, snapshot_version);
+                    if info.is_committed() {
+                        Ok((
+                            crate::query::batch::receipts::stamp(
+                                results,
+                                &request.queries,
+                                &info,
+                                depth,
+                            ),
+                            Some(info),
+                        ))
+                    } else {
+                        Ok((new_map(), Some(info)))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Filter results based on return_all / return_only / return_result flags.
+pub(in crate::query::batch) fn filter_results(
+    mut all_results: TMap<String, QueryResult>,
+    request: &BatchRequest,
+) -> TMap<String, QueryResult> {
+    if let Some(ref only) = request.return_only {
+        let keep: TFxSet<String> = only.iter().cloned().collect();
+        all_results.retain(|alias, result| {
+            crate::query::batch::receipts::has_receipt(result) || keep.contains(alias)
+        });
+        return all_results;
+    }
+
+    if !request.return_all {
+        all_results.retain(|alias, result| {
+            crate::query::batch::receipts::has_receipt(result)
+                || request.queries.get(alias).is_some_and(|e| e.return_result)
+        });
+    }
+
+    all_results
+}

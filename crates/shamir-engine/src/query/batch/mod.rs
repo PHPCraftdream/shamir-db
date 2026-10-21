@@ -137,22 +137,17 @@
 //! }
 //! ```
 
-mod authorized;
-mod batch_execute;
-mod batch_validate;
-pub(crate) mod exec_scope;
-mod execution_deadline;
-mod executor_traits;
-mod fk_actions;
-mod fk_on_update;
-mod fk_restrict;
-mod interactive_tx;
-mod op_watchdog;
-mod param_subst;
-mod query_runner;
-mod query_value_serializer;
-pub(crate) mod receipts;
-mod result_size;
+mod control;
+mod exec;
+mod fk;
+mod runner;
+
+pub(crate) use control::receipts;
+use control::{authorized, op_watchdog};
+pub(crate) use exec::exec_scope;
+use exec::{batch_execute, batch_validate, execution_deadline, executor_traits, interactive_tx};
+use fk::{fk_actions, fk_on_update, fk_restrict};
+use runner::{param_subst, query_runner, query_value_serializer, result_size};
 // Only the executor (which actually drives a TableManager) lives here.
 // DTOs, the topological planner, and the `$query` reference parser are
 // all pure-data and live in `shamir-query-types::batch` — re-exported
