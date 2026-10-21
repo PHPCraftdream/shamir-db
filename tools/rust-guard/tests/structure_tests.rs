@@ -734,3 +734,65 @@ fn new_file_allow_is_allow_added() {
     let repo = DiffRepo::two_commit("structure/new_file_allow");
     assert_finding(&repo.scan(), "ALLOW_ADDED");
 }
+
+// ---------- split files are compared with the vacated base files ----------
+
+#[test]
+fn split_files_carrying_base_items_are_clean() {
+    // `old.rs` is split into `part_a.rs`/`part_b.rs`; every `pub(crate)`
+    // item, `#[allow]`, inline test module and function-local `use` it
+    // carries existed in the deleted base file, so none is a new finding.
+    // Counterfactual: without the vacated-base comparison the new files
+    // are judged against an empty base and report VIS_WIDENING,
+    // ALLOW_ADDED, INLINE_TEST_MOD and LOCAL_USE.
+    let repo = DiffRepo::two_commit("structure/split_clean");
+    assert_clean(&repo.scan());
+}
+
+#[test]
+fn split_file_that_widens_an_item_is_vis_widening() {
+    // `a` was `pub(crate)` in the vacated base file and is `pub` now.
+    // Counterfactual: if any base item with the same key excused the head
+    // item regardless of rank, this widening would pass silently.
+    let repo = DiffRepo::two_commit("structure/split_widened");
+    let out = repo.scan();
+    assert_finding(&out, "VIS_WIDENING");
+    assert!(
+        stderr(&out).contains("new file introduces `a` at pub visibility"),
+        "expected the widening of `a`:\n{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn split_file_with_a_new_allow_is_allow_added() {
+    // `dead_code` was in the vacated base file; `unused` is new.
+    // Counterfactual: if the whole vacated set excused every attribute the
+    // new `#[allow(unused)]` would pass.
+    let repo = DiffRepo::two_commit("structure/split_new_allow");
+    let out = repo.scan();
+    assert_finding(&out, "ALLOW_ADDED");
+    let err = stderr(&out);
+    assert!(err.contains("unused"), "expected the new allow:\n{err}");
+    assert!(
+        !err.contains("dead_code"),
+        "the base allow must stay excused:\n{err}"
+    );
+}
+
+#[test]
+fn copy_of_a_base_file_is_not_a_vacated_source() {
+    // `old.rs` still exists at head, so it is a copy source and nothing was
+    // vacated: the inline test module of the new `part.rs` stays a finding.
+    // Counterfactual: indexing every base file (not only deleted ones)
+    // would excuse it.
+    let repo = DiffRepo::two_commit("structure/split_copy_not_vacated");
+    let out = repo.scan();
+    assert!(
+        stderr(&out)
+            .lines()
+            .any(|l| l.contains("part.rs") && l.contains("INLINE_TEST_MOD")),
+        "expected INLINE_TEST_MOD for part.rs:\n{}",
+        stderr(&out)
+    );
+}

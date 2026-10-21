@@ -45,6 +45,16 @@ impl Report {
         });
     }
 
+    /// Read access for post-processing passes.
+    pub fn findings(&self) -> &[Finding] {
+        &self.findings
+    }
+
+    /// Keeps only the findings for which `keep` returns true.
+    pub fn retain(&mut self, keep: impl FnMut(&Finding) -> bool) {
+        self.findings.retain(keep);
+    }
+
     /// True when nothing was reported.
     pub fn is_empty(&self) -> bool {
         self.findings.is_empty()
