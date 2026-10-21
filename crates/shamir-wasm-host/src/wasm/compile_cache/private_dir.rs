@@ -2,7 +2,7 @@
 use std::fs;
 use std::io;
 #[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 #[cfg(unix)]
 use std::path::Component;
 use std::path::{Path, PathBuf};
