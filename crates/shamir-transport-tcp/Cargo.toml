@@ -17,7 +17,10 @@ futures-util = "0.3"
 # TLS
 rustls = "0.23"
 tokio-rustls = "0.26"
-rcgen = "0.13"
+# Self-signed certs sign with aws-lc-rs, the crypto library rustls already uses,
+# instead of rcgen's default `ring` backend: one native crypto library in the
+# tree, and `ring` (C + assembly) is gone.
+rcgen = { version = "0.13", default-features = false, features = ["pem", "aws_lc_rs"] }
 # PEM parsing via the `PemObject` trait — `rustls-pemfile` is unmaintained
 # (RUSTSEC-2025-0134); its own README points here as the direct replacement.
 rustls-pki-types = "1.9"

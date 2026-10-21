@@ -7,6 +7,12 @@ description = "ShamirDB engine — DbInstance / RepoInstance / TableManager / In
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+# F-56 (#882): concurrency model checker for the `WriterDrainBarrier` primitive.
+# A regular dependency that ONLY the `loom` feature turns on, so normal builds
+# and tests do not compile loom (nor its `generator` helper, which builds
+# C/assembly). The `#[cfg(loom)]` module in `writer_drain_barrier.rs` is
+# compiled away from every other build -- see its doc for the opt-in command.
+loom = { version = "0.7", optional = true }
 shamir-types = { path = "../shamir-types" }
 shamir-collections = { path = "../shamir-collections" }
 # Backends inherit `shamir-storage`'s feature set — the engine doesn't
@@ -95,7 +101,7 @@ test-util = []
 # dependency tree stays out of its own loom code paths. Run with:
 #   cargo test -p shamir-engine --features loom --lib \
 #       table::writer_drain_barrier::loom_model
-loom = []
+loom = ["dep:loom"]
 
 [target.'cfg(unix)'.dev-dependencies]
 dhat = "0.3"
@@ -114,13 +120,6 @@ memory-stats = "1.2"
 # Tests build queries via the typed query builder instead of raw wire values.
 # query-builder depends only on query-types/types — no cycle on engine.
 shamir-query-builder = { path = "../shamir-query-builder" }
-# F-56 (#882): concurrency model checker for the `WriterDrainBarrier` primitive.
-# Used ONLY under `RUSTFLAGS="--cfg loom"` (the `#[cfg(loom)]` module in
-# `writer_drain_barrier.rs` is compiled away from every normal build, so the
-# loom tests never run under `./scripts/test.sh`). It IS compiled once for the
-# package's test target (cached thereafter) — see the module doc for the exact
-# opt-in command and its (honestly-scoped) coverage.
-loom = "0.7"
 # (No dev-dep cycle on shamir-db. The two tests that needed the
 # `ShamirDb` facade — `admin_tests.rs`, `auth_tests.rs` — moved to
 # `crates/shamir-db/tests/` as integration tests instead. Keeping the
