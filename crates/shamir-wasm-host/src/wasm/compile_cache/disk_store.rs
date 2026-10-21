@@ -201,22 +201,45 @@ impl DiskCacheStore {
         self.rejected.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Brings the cache under the caps: evicts the lowest recency ticks until
-    /// both totals are at or below 75% of their caps.
+    /// Brings the cache under the caps. A single trimmer runs at a time; an
+    /// insert that finds one running returns at once, so the running trimmer
+    /// re-checks the totals after releasing the flag and goes again while
+    /// they are still over the caps (otherwise an insert that landed after
+    /// the trimmer's snapshot would leave the cache over the caps until the
+    /// next insert).
     fn trim(&self, bound: &BoundStore) {
-        if self
-            .trimming
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-            .is_err()
-        {
-            return;
+        loop {
+            // SeqCst on the flag and on the counters the re-check reads:
+            // either the skipped inserter sees the flag cleared, or the
+            // trimmer sees the inserter's totals.
+            if self
+                .trimming
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                return;
+            }
+            let removed = self.trim_pass(bound);
+            self.trimming.store(false, Ordering::SeqCst);
+            if removed == 0 || !self.over_caps(bound) {
+                return;
+            }
+        }
+    }
+
+    fn over_caps(&self, bound: &BoundStore) -> bool {
+        bound.index.bytes.load(Ordering::SeqCst) > self.max_bytes
+            || bound.index.count.load(Ordering::SeqCst) > self.max_entries
+    }
+
+    /// One pass: evicts the lowest recency ticks until both totals are at or
+    /// below 75% of their caps. Returns the number of entries removed.
+    fn trim_pass(&self, bound: &BoundStore) -> usize {
+        if !self.over_caps(bound) {
+            return 0;
         }
         let bytes = bound.index.bytes.load(Ordering::Relaxed);
         let count = bound.index.count.load(Ordering::Relaxed);
-        if bytes <= self.max_bytes && count <= self.max_entries {
-            self.trimming.store(false, Ordering::Release);
-            return;
-        }
         let target_bytes = three_quarters(self.max_bytes);
         let target_count =
             usize::try_from(three_quarters(self.max_entries as u64)).unwrap_or(usize::MAX);
@@ -228,6 +251,7 @@ impl DiskCacheStore {
         victims.sort_by_key(|entry| entry.2);
         let mut remaining_bytes = bytes;
         let mut remaining_count = count;
+        let mut removed_entries = 0;
         for (key, _, _) in victims {
             if remaining_bytes <= target_bytes && remaining_count <= target_count {
                 break;
@@ -243,9 +267,10 @@ impl DiskCacheStore {
                 bound.index.count.fetch_sub(1, Ordering::Relaxed);
                 remaining_bytes = remaining_bytes.saturating_sub(removed.len);
                 remaining_count = remaining_count.saturating_sub(1);
+                removed_entries += 1;
             }
         }
-        self.trimming.store(false, Ordering::Release);
+        removed_entries
     }
 }
 
@@ -348,8 +373,8 @@ impl CacheStore for DiskCacheStore {
             bound
                 .index
                 .bytes
-                .fetch_add(frame.len() as u64, Ordering::Relaxed);
-            bound.index.count.fetch_add(1, Ordering::Relaxed);
+                .fetch_add(frame.len() as u64, Ordering::SeqCst);
+            bound.index.count.fetch_add(1, Ordering::SeqCst);
         } else {
             return true;
         }
