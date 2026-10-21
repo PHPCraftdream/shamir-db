@@ -116,7 +116,7 @@ pub enum BackupError {
     /// file outside the snapshot directory.
     #[error("unsafe manifest entry path (absolute or contains '..'): {0}")]
     UnsafeManifestPath(String),
-    /// `restore()`: a manifest lists a path inside the private cache subtree.
+    /// `verify_manifest`: a manifest lists a path inside the private cache subtree.
     #[error("snapshot manifest must not contain cache paths: {0}")]
     CacheManifestPath(String),
     /// `verify_manifest`: the same `path` appears more than once in
@@ -416,6 +416,16 @@ pub fn verify_manifest(snapshot_dir: &Path) -> Result<ManifestVerifyReport, Back
         });
     }
 
+    // A snapshot never carries the private cache subtree (backup skips it):
+    // reject it before any file is hashed or restore touches the data dir.
+    if let Some(entry) = manifest
+        .files
+        .iter()
+        .find(|entry| is_cache_manifest_path(&entry.path))
+    {
+        return Err(BackupError::CacheManifestPath(entry.path.clone()));
+    }
+
     let mut accounted: shamir_collections::TFxSet<String> = new_fx_set_wc(manifest.files.len());
 
     let mut total_bytes = 0u64;
@@ -468,7 +478,7 @@ pub fn verify_manifest(snapshot_dir: &Path) -> Result<ManifestVerifyReport, Back
 
 /// Return whether a manifest path addresses the top-level `cache` subtree,
 /// accepting platform separators and harmless `.`/repeated-separator variants.
-pub(crate) fn is_cache_manifest_path(entry_path: &str) -> bool {
+fn is_cache_manifest_path(entry_path: &str) -> bool {
     let normalized = entry_path.replace('\\', "/");
     normalized
         .split('/')

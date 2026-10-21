@@ -78,6 +78,8 @@ fn restore_rejects_manifest_cache_paths_before_touching_data_dir() {
 }
 
 // ----------------------------------------------------------------------------
+// N-6: swap-failure message split — rollback SUCCEEDS case.
+// ----------------------------------------------------------------------------
 
 /// Forces `restore()`'s step-5 second rename (`temp_dir -> data_dir`) to
 /// fail while the rollback rename (`backup_sibling -> data_dir`) succeeds,

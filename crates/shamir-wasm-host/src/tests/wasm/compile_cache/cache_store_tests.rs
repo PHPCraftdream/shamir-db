@@ -105,7 +105,10 @@ fn second_engine_on_same_data_root_gets_hits() {
     let cold = WasmEngine::with_compile_cache(root.clone()).unwrap();
     cold.compile(&wasm).unwrap();
     assert_eq!(cold.cache_hits(), 0, "a fresh root has nothing to hit");
-    assert_eq!(entry_files(&namespace_dir(&root)).len(), 1);
+    assert!(
+        !entry_files(&namespace_dir(&root)).is_empty(),
+        "the cold compile must persist its function entries"
+    );
 
     // A second engine on the same DATA root is served from disk.
     let warm = WasmEngine::with_compile_cache(root.clone()).unwrap();
@@ -127,6 +130,8 @@ fn filled_entry(root: &Path, wasm: &[u8]) -> PathBuf {
 /// refilled by the next compilation (self-healing).
 fn assert_damage_is_a_miss_then_heals(root: &Path, wasm: &[u8], path: &Path) {
     let key = key_of(path);
+    // One module persists several entries (functions and trampolines).
+    let entries_before = entry_files(&namespace_dir(root)).len();
     let second = Arc::new(DiskCacheStore::new(root.to_path_buf()));
     let raw_engine = engine(&second, false); // bind indexes the damaged entry
     assert!(second.get(&key).is_none(), "damaged entry must be a miss");
@@ -136,7 +141,7 @@ fn assert_damage_is_a_miss_then_heals(root: &Path, wasm: &[u8], path: &Path) {
     wasmtime::Module::from_binary(&raw_engine, wasm).unwrap();
     assert_eq!(
         entry_files(&namespace_dir(root)).len(),
-        1,
+        entries_before,
         "recompilation must refill the cache"
     );
 }

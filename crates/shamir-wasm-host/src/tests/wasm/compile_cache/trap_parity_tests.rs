@@ -29,7 +29,7 @@ fn run_with_fuel(engine: &wasmtime::Engine, wat: &str, fuel: u64) -> String {
         .unwrap();
     match run.call(&mut store, ()) {
         Ok(()) => panic!("guest must trap on fuel exhaustion"),
-        Err(error) => format!("{error}"),
+        Err(error) => format!("{error:#}"),
     }
 }
 
@@ -72,7 +72,7 @@ fn run_epoch(engine: &wasmtime::Engine) -> String {
         .unwrap();
     match spin.call(&mut store, ()) {
         Ok(()) => panic!("looping guest must trap on the epoch deadline"),
-        Err(error) => format!("{error}"),
+        Err(error) => format!("{error:#}"),
     }
 }
 
