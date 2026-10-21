@@ -3,10 +3,6 @@
 dir crates/shamir-client-node 10
 dir crates/shamir-engine/benches 39
 dir crates/shamir-engine/src 12
-dir crates/shamir-engine/src/query 8
-dir crates/shamir-engine/src/query/batch 19
-dir crates/shamir-engine/src/query/batch/tests 33
-dir crates/shamir-engine/src/query/batch/tests/executor_tests 12
 dir crates/shamir-engine/src/repo 19
 dir crates/shamir-engine/src/repo/tests 21
 dir crates/shamir-engine/src/table 38
@@ -18,15 +14,6 @@ dir crates/shamir-engine/src/validator 18
 dir crates/shamir-engine/src/validator/schema 11
 dir crates/shamir-engine/src/validator/tests 13
 file crates/shamir-engine/benches/tx_concurrent.rs 1013
-file crates/shamir-engine/src/query/batch/fk_actions.rs 1438
-file crates/shamir-engine/src/query/batch/fk_on_update.rs 1353
-file crates/shamir-engine/src/query/batch/query_runner.rs 2006
-file crates/shamir-engine/src/query/batch/tests/fk_actions_tests.rs 1688
-file crates/shamir-engine/src/query/batch/tests/fk_on_update_tests.rs 2481
-file crates/shamir-engine/src/query/batch/tests/fk_race_closure_tests.rs 1147
-file crates/shamir-engine/src/query/batch/tests/fk_ri_barrier_tests.rs 1341
-file crates/shamir-engine/src/query/batch/tests/for_each_tests.rs 2151
-file crates/shamir-engine/src/query/batch/tests/sub_batch_tests.rs 1509
 file crates/shamir-engine/src/repo/repo_instance.rs 1967
 file crates/shamir-engine/src/table/read_exec.rs 3092
 file crates/shamir-engine/src/table/table_manager.rs 1536
