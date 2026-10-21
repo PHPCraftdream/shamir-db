@@ -344,6 +344,60 @@ fn duplicate_head_candidates_are_unpairable() {
 }
 
 #[test]
+fn ambiguous_moves_list_their_candidates() {
+    // `make` exists in a.rs and b.rs at base and in c.rs and d.rs at head
+    // with different bodies, so no heuristic can pair them.
+    // Counterfactual: the finding used to name only the key, leaving the
+    // author to hunt for the base items and head candidates by hand.
+    let repo = ConsRepo::two_commit("conservation/declared_moves");
+    let out = repo.compare();
+    assert_finding(&out, "UNPAIRABLE_DUPLICATE");
+    let err = stderr(&out);
+    assert!(
+        err.contains("crates/fix/src/a.rs:1") && err.contains("crates/fix/src/d.rs:1"),
+        "expected the base items and head candidates:\n{err}"
+    );
+}
+
+#[test]
+fn declared_moves_settle_an_ambiguous_key() {
+    // The same fixture with an explicit [[moved]] entry per base item
+    // (a -> c, b -> d) plus the [[changed]] entries for the new bodies.
+    // Counterfactual: without the declared pass the ambiguous key drops
+    // the head items and the entries could never be consumed.
+    let repo = ConsRepo::two_commit("conservation/declared_moves");
+    let delta = format!(
+        "base = \"{}\"\n\n\
+         [[moved]]\n\
+         path = \"crates/fix/src/a.rs\"\n\
+         item = \"fix::lib::a::make\"\n\
+         to_path = \"crates/fix/src/c.rs\"\n\
+         to_item = \"fix::lib::c::make\"\n\
+         reason = \"relocated\"\n\
+         owner = \"@rust-guard\"\n\n\
+         [[moved]]\n\
+         path = \"crates/fix/src/b.rs\"\n\
+         item = \"fix::lib::b::make\"\n\
+         to_path = \"crates/fix/src/d.rs\"\n\
+         to_item = \"fix::lib::d::make\"\n\
+         reason = \"relocated\"\n\
+         owner = \"@rust-guard\"\n\n\
+         [[changed]]\n\
+         path = \"crates/fix/src/a.rs\"\n\
+         item = \"fix::lib::a::make\"\n\
+         reason = \"new body\"\n\
+         owner = \"@rust-guard\"\n\n\
+         [[changed]]\n\
+         path = \"crates/fix/src/b.rs\"\n\
+         item = \"fix::lib::b::make\"\n\
+         reason = \"new body\"\n\
+         owner = \"@rust-guard\"\n",
+        repo.base_sha
+    );
+    assert_clean(&repo.compare_with_delta(&delta));
+}
+
+#[test]
 fn unchanged_items_of_sibling_targets_stay_paired() {
     // Both integration-test targets define `N`, `helper` and `works`; all
     // of them share the logical path `fix::test::*`. Nothing but a lib

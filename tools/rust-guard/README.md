@@ -222,9 +222,11 @@ directory unless an explicit `--exceptions` path is given.
   the full content runs before it, so unchanged items that share one
   logical path — cfg twins, the `main`/`const` items of every bench or
   example target — keep their own counterpart); leftovers pair by (kind,
-  name, enclosing) + signature as moves (content-identical twins with the
-  same number of copies on both sides pair one-to-one first, so a moved
-  helper that exists in several files is not ambiguous) —
+  name, enclosing) + signature as moves (a `[[moved]]` entry that names the
+  base AND the head item pairs them first, which settles an ambiguous key;
+  content-identical twins with the same number of copies on both sides pair
+  one-to-one next, so a moved helper that exists in several files is not
+  ambiguous) —
   moves/renames/extractions are only
   legal when declared in the delta; renames compare signatures with the
   item's OWN name normalised out, so `helper` → `helper2` can pair;
@@ -569,6 +571,7 @@ Fixture → finding map:
 | `conservation/dup_unchanged_targets` | clean — identically named items of two integration-test targets stay paired |
 | `conservation/dup_cfg_twins` | clean — cfg variants under one logical path stay paired |
 | `conservation/twin_moves` | two identical twins move to two other files: both suggested, the suggestion feeds back to clean |
+| `conservation/declared_moves` | `UNPAIRABLE_DUPLICATE` listing base items and head candidates; two `[[moved]]` + `[[changed]]` entries settle it |
 | `conservation/unpairable_duplicate` | `UNPAIRABLE_DUPLICATE` (one base item, two same-key head candidates) |
 | `conservation/uncond_path_default_ignored` | none (exit 0) — an UNCONDITIONAL `#[path]` mod never inventories the phantom default file |
 | (no fixture — bad rev argument) | `BLOCKED_COMPARISON` |

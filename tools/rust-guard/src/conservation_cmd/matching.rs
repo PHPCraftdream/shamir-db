@@ -10,9 +10,11 @@
 //!    `main`/`const` items of every bench/example target share one
 //!    logical path). The plain identity form then pairs items whose body
 //!    or signature changed; an ambiguous key stays open for later passes;
-//! 2. same (kind + name + enclosing + signature) — moves; identical
-//!    twins (equal group sizes on both sides) pair first, then the plain
-//!    key. A move is accepted only
+//! 2. same (kind + name + enclosing + signature) — moves; a `[[moved]]`
+//!    entry that names both the base and the head item pairs them first
+//!    (an explicit declaration settles an ambiguous key), then identical
+//!    twins (equal group sizes on both sides), then the plain key. A move
+//!    is accepted only
 //!    when a `[[moved]]` entry is declared, otherwise the pair falls
 //!    apart into ITEM_LOST + ITEM_ADDED; every undeclared move whose
 //!    pair is otherwise clean is additionally recorded as a
@@ -85,6 +87,17 @@ pub fn compare(
         Ambiguity::KeepOpen,
     );
 
+    // Pass 2, declared form: a [[moved]] entry naming both items settles
+    // an ambiguous key.
+    declared_pass(
+        base,
+        head,
+        &mut base_left,
+        &mut head_left,
+        &mut pairs,
+        delta,
+    );
+
     // Pass 2, twin form: moves of content-identical twins.
     pair_pass(
         base,
@@ -99,20 +112,36 @@ pub fn compare(
     // Pass 2: moves (kind + name + enclosing + equal signature). If more
     // than one head item carries the same key there is no way to choose
     // a pairing: UNPAIRABLE_DUPLICATE, everything left unpaired.
-    for dup in pair_pass(
+    for (dup, heads) in pair_pass(
         base,
         head,
         &mut base_left,
         &mut head_left,
         &mut pairs,
-        |it| format!("{}\u{1}{}", weak_key(it), it.signature),
+        move_key,
         Ambiguity::Report,
     ) {
+        let bases: Vec<String> = base_left
+            .iter()
+            .filter(|&&b| move_key(&base[b]) == dup)
+            .map(|&b| format!("{}:{}", base[b].path, base[b].line))
+            .collect();
+        let heads: Vec<String> = heads
+            .iter()
+            .map(|&h| format!("{}:{}", head[h].path, head[h].line))
+            .collect();
         report.add(
             "(matching)",
             1,
             "UNPAIRABLE_DUPLICATE",
-            format!("two or more head items match one base item by kind/name/enclosing: {dup}"),
+            format!(
+                "two or more head items match one base item by kind/name/enclosing: {}; \
+                 base: {}; head candidates: {}; declare a [[moved]] entry per base item \
+                 naming its head item (path, item, to_path, to_item) to settle the pairing",
+                dup.replace('\u{1}', " "),
+                bases.join(", "),
+                heads.join(", ")
+            ),
         );
     }
 
@@ -330,6 +359,54 @@ enum Ambiguity {
     Twins,
 }
 
+/// Key of the move passes: kind + name + enclosing + signature.
+fn move_key(it: &Item) -> String {
+    format!("{}\u{1}{}", weak_key(it), it.signature)
+}
+
+/// Pairs base and head items that a `[[moved]]` entry names on both sides
+/// (same move key). An explicit declaration settles an ambiguous key; the
+/// entry itself is consumed later, in the move loop.
+fn declared_pass(
+    base: &[Item],
+    head: &[Item],
+    base_left: &mut Vec<usize>,
+    head_left: &mut Vec<usize>,
+    pairs: &mut Vec<Pair>,
+    delta: &Delta,
+) {
+    if !delta.has_moves() {
+        return;
+    }
+    let mut by_key: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for &h in head_left.iter() {
+        by_key.entry(move_key(&head[h])).or_default().push(h);
+    }
+    let mut still: Vec<usize> = Vec::new();
+    for &b in base_left.iter() {
+        let (bi, hit) = (&base[b], by_key.get_mut(&move_key(&base[b])));
+        let named = hit.and_then(|v| {
+            let pos = v.iter().position(|&h| {
+                delta.moved_names_pair(&bi.path, &bi.logical, &head[h].path, &head[h].logical)
+            })?;
+            Some(v.remove(pos))
+        });
+        match named {
+            Some(h) => {
+                pairs.push(Pair {
+                    b,
+                    h,
+                    body_changed: base[b].fingerprint != head[h].fingerprint,
+                    signature_changed: base[b].signature != head[h].signature,
+                });
+                still_head(head_left, h);
+            }
+            None => still.push(b),
+        }
+    }
+    *base_left = still;
+}
+
 /// Everything about an item except its location: signature, body
 /// fingerprint, test attributes and cfg.
 fn content_key(it: &Item) -> String {
@@ -350,7 +427,7 @@ fn pair_pass<F>(
     pairs: &mut Vec<Pair>,
     key: F,
     mode: Ambiguity,
-) -> Vec<String>
+) -> Vec<(String, Vec<usize>)>
 where
     F: Fn(&Item) -> String,
 {
@@ -372,7 +449,7 @@ where
             }
         }
     }
-    let mut ambiguous: Vec<String> = Vec::new();
+    let mut ambiguous: Vec<(String, Vec<usize>)> = Vec::new();
     let mut still: Vec<usize> = Vec::new();
     for &b in base_left.iter() {
         let k = key(&base[b]);
@@ -383,11 +460,11 @@ where
                     if mode == Ambiguity::Report {
                         // Cannot choose a pairing: leave base and heads
                         // unpaired.
-                        ambiguous.push(k);
                         let dupes: Vec<usize> = std::mem::take(v);
-                        for h in dupes {
+                        for &h in &dupes {
                             still_head(head_left, h);
                         }
+                        ambiguous.push((k, dupes));
                     }
                     still.push(b);
                 } else {
