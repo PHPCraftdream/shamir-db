@@ -6039,3 +6039,623 @@ to_path = "crates/shamir-engine/src/query/read/tests/aggregation/legacy_and_caps
 to_item = "shamir-engine::lib::query::read::tests::aggregation::legacy_and_caps::string_agg_cap_tests::string_agg_rejects_64_kib_separator_at_creation"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/read/aggregate.rs"
+item = "shamir-engine::lib::query::read::aggregate::AggAccum"
+to_path = "crates/shamir-engine/src/query/read/aggregation/accumulator.rs"
+to_item = "shamir-engine::lib::query::read::aggregation::accumulator::AggAccum"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/filter_node.rs"
+item = "shamir-engine::lib::query::filter::filter_node::CompactPath"
+to_path = "crates/shamir-engine/src/query/filter/evaluation/filter_node.rs"
+to_item = "shamir-engine::lib::query::filter::evaluation::filter_node::CompactPath"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/filter_node.rs"
+item = "shamir-engine::lib::query::filter::filter_node::FilterNode"
+to_path = "crates/shamir-engine/src/query/filter/evaluation/filter_node.rs"
+to_item = "shamir-engine::lib::query::filter::evaluation::filter_node::FilterNode"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/read/aggregate.rs"
+item = "shamir-engine::lib::query::read::aggregate::GroupKeyItem"
+to_path = "crates/shamir-engine/src/query/read/aggregation/accumulator.rs"
+to_item = "shamir-engine::lib::query::read::aggregation::accumulator::GroupKeyItem"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/read/hashable_query_value.rs"
+item = "shamir-engine::lib::query::read::hashable_query_value::HashableQueryValue"
+to_path = "crates/shamir-engine/src/query/read/projection/hashable_query_value.rs"
+to_item = "shamir-engine::lib::query::read::projection::hashable_query_value::HashableQueryValue"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/read/aggregate.rs"
+item = "shamir-engine::lib::query::read::aggregate::OwnedExtreme"
+to_path = "crates/shamir-engine/src/query/read/aggregation/accumulator.rs"
+to_item = "shamir-engine::lib::query::read::aggregation::accumulator::OwnedExtreme"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/read/aggregate.rs"
+item = "shamir-engine::lib::query::read::aggregate::OwnedScalar"
+to_path = "crates/shamir-engine/src/query/read/aggregation/accumulator.rs"
+to_item = "shamir-engine::lib::query::read::aggregation::accumulator::OwnedScalar"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/read/aggregate.rs"
+item = "shamir-engine::lib::query::read::aggregate::RowView"
+to_path = "crates/shamir-engine/src/query/read/aggregation/group_projection.rs"
+to_item = "shamir-engine::lib::query::read::aggregation::group_projection::RowView"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/read/select_projection.rs"
+item = "shamir-engine::lib::query::read::select_projection::SelectProjection"
+to_path = "crates/shamir-engine/src/query/read/projection/select_projection.rs"
+to_item = "shamir-engine::lib::query::read::projection::select_projection::SelectProjection"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/compile.rs"
+item = "shamir-engine::lib::query::filter::compile::compile_contains_all_node"
+to_path = "crates/shamir-engine/src/query/filter/evaluation/planning/compile.rs"
+to_item = "shamir-engine::lib::query::filter::evaluation::planning::compile::compile_contains_all_node"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/compile.rs"
+item = "shamir-engine::lib::query::filter::compile::compile_contains_any_node"
+to_path = "crates/shamir-engine/src/query/filter/evaluation/planning/compile.rs"
+to_item = "shamir-engine::lib::query::filter::evaluation::planning::compile::compile_contains_any_node"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/compile.rs"
+item = "shamir-engine::lib::query::filter::compile::compile_in_node"
+to_path = "crates/shamir-engine/src/query/filter/evaluation/planning/compile.rs"
+to_item = "shamir-engine::lib::query::filter::evaluation::planning::compile::compile_in_node"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/fts.rs"
+item = "shamir-engine::lib::query::filter::fts::fts_word_matches"
+to_path = "crates/shamir-engine/src/query/filter/evaluation/semantics/fts.rs"
+to_item = "shamir-engine::lib::query::filter::evaluation::semantics::fts::fts_word_matches"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/read/aggregate.rs"
+item = "shamir-engine::lib::query::read::aggregate::group_key_item_complex"
+to_path = "crates/shamir-engine/src/query/read/aggregation/accumulator.rs"
+to_item = "shamir-engine::lib::query::read::aggregation::accumulator::group_key_item_complex"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/read/aggregate.rs"
+item = "shamir-engine::lib::query::read::aggregate::intern_field_path_keys"
+to_path = "crates/shamir-engine/src/query/read/aggregation/accumulator.rs"
+to_item = "shamir-engine::lib::query::read::aggregation::accumulator::intern_field_path_keys"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/fts.rs"
+item = "shamir-engine::lib::query::filter::fts::like_pattern_to_regex"
+to_path = "crates/shamir-engine/src/query/filter/evaluation/semantics/fts.rs"
+to_item = "shamir-engine::lib::query::filter::evaluation::semantics::fts::like_pattern_to_regex"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/helpers.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::helpers::make_ab_record"
+to_path = "crates/shamir-engine/src/query/filter/tests/eval_tests/shared/helpers.rs"
+to_item = "shamir-engine::lib::query::filter::tests::eval_tests::shared::helpers::make_ab_record"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/helpers.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::helpers::make_alice_record"
+to_path = "crates/shamir-engine/src/query/filter/tests/eval_tests/shared/helpers.rs"
+to_item = "shamir-engine::lib::query::filter::tests::eval_tests::shared::helpers::make_alice_record"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/helpers.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::helpers::make_body_record"
+to_path = "crates/shamir-engine/src/query/filter/tests/eval_tests/shared/helpers.rs"
+to_item = "shamir-engine::lib::query::filter::tests::eval_tests::shared::helpers::make_body_record"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/helpers.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::helpers::make_date_record"
+to_path = "crates/shamir-engine/src/query/filter/tests/eval_tests/shared/helpers.rs"
+to_item = "shamir-engine::lib::query::filter::tests::eval_tests::shared::helpers::make_date_record"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/helpers.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::helpers::make_email_record"
+to_path = "crates/shamir-engine/src/query/filter/tests/eval_tests/shared/helpers.rs"
+to_item = "shamir-engine::lib::query::filter::tests::eval_tests::shared::helpers::make_email_record"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/collection_tests.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::collection_tests::make_f64_field_record"
+to_path = "crates/shamir-engine/src/query/filter/tests/eval_tests/collections/numeric_coercion_tests.rs"
+to_item = "shamir-engine::lib::query::filter::tests::eval_tests::collections::numeric_coercion_tests::make_f64_field_record"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/collection_tests.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::collection_tests::make_int_field_record"
+to_path = "crates/shamir-engine/src/query/filter/tests/eval_tests/collections/numeric_coercion_tests.rs"
+to_item = "shamir-engine::lib::query::filter::tests::eval_tests::collections::numeric_coercion_tests::make_int_field_record"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/helpers.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::helpers::make_list_record"
+to_path = "crates/shamir-engine/src/query/filter/tests/eval_tests/shared/helpers.rs"
+to_item = "shamir-engine::lib::query::filter::tests::eval_tests::shared::helpers::make_list_record"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/read/tests/exec_tests.rs"
+item = "shamir-engine::lib::query::read::tests::exec_tests::make_name_record"
+to_path = "crates/shamir-engine/src/query/read/tests/aggregation/numeric_and_functions/function_aggregate_tests.rs"
+to_item = "shamir-engine::lib::query::read::tests::aggregation::numeric_and_functions::function_aggregate_tests::make_name_record"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/helpers.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::helpers::make_nested_record"
+to_path = "crates/shamir-engine/src/query/filter/tests/eval_tests/shared/helpers.rs"
+to_item = "shamir-engine::lib::query::filter::tests::eval_tests::shared::helpers::make_nested_record"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/helpers.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::helpers::make_nullable_record"
+to_path = "crates/shamir-engine/src/query/filter/tests/eval_tests/shared/helpers.rs"
+to_item = "shamir-engine::lib::query::filter::tests::eval_tests::shared::helpers::make_nullable_record"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/read/tests/exec_tests.rs"
+item = "shamir-engine::lib::query::read::tests::exec_tests::make_records"
+to_path = "crates/shamir-engine/src/query/read/tests/query_results/select_order_page/helpers.rs"
+to_item = "shamir-engine::lib::query::read::tests::query_results::select_order_page::helpers::make_records"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/helpers.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::helpers::make_set_record"
+to_path = "crates/shamir-engine/src/query/filter/tests/eval_tests/shared/helpers.rs"
+to_item = "shamir-engine::lib::query::filter::tests::eval_tests::shared::helpers::make_set_record"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/read/tests/qv_postprocess_tests.rs"
+item = "shamir-engine::lib::query::read::tests::qv_postprocess_tests::make_test_records"
+to_path = "crates/shamir-engine/src/query/read/tests/query_results/select_order_page/qv_select_tests.rs"
+to_item = "shamir-engine::lib::query::read::tests::query_results::select_order_page::qv_select_tests::make_test_records"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/filter_node.rs"
+item = "shamir-engine::lib::query::filter::filter_node::FilterNode::matches"
+to_path = "crates/shamir-engine/src/query/filter/evaluation/filter_node.rs"
+to_item = "shamir-engine::lib::query::filter::evaluation::filter_node::FilterNode::matches"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/read/aggregate.rs"
+item = "shamir-engine::lib::query::read::aggregate::AggAccum::new"
+to_path = "crates/shamir-engine/src/query/read/aggregation/accumulator.rs"
+to_item = "shamir-engine::lib::query::read::aggregation::accumulator::AggAccum::new"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/index_range.rs"
+item = "shamir-engine::lib::query::filter::index_range::predicate_bound_full_upper"
+to_path = "crates/shamir-engine/src/query/filter/evaluation/planning/index_range.rs"
+to_item = "shamir-engine::lib::query::filter::evaluation::planning::index_range::predicate_bound_full_upper"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/index_range.rs"
+item = "shamir-engine::lib::query::filter::index_range::predicate_bound_lower"
+to_path = "crates/shamir-engine/src/query/filter/evaluation/planning/index_range.rs"
+to_item = "shamir-engine::lib::query::filter::evaluation::planning::index_range::predicate_bound_lower"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/index_range.rs"
+item = "shamir-engine::lib::query::filter::index_range::predicate_bound_prefix"
+to_path = "crates/shamir-engine/src/query/filter/evaluation/planning/index_range.rs"
+to_item = "shamir-engine::lib::query::filter::evaluation::planning::index_range::predicate_bound_prefix"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/index_range.rs"
+item = "shamir-engine::lib::query::filter::index_range::predicate_bound_upper"
+to_path = "crates/shamir-engine/src/query/filter/evaluation/planning/index_range.rs"
+to_item = "shamir-engine::lib::query::filter::evaluation::planning::index_range::predicate_bound_upper"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/read/aggregate.rs"
+item = "shamir-engine::lib::query::read::aggregate::resolve_aggregate_param"
+to_path = "crates/shamir-engine/src/query/read/aggregation/accumulator.rs"
+to_item = "shamir-engine::lib::query::read::aggregation::accumulator::resolve_aggregate_param"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/resolve.rs"
+item = "shamir-engine::lib::query::filter::resolve::resolve_filter_query"
+to_path = "crates/shamir-engine/src/query/filter/evaluation/semantics/resolve.rs"
+to_item = "shamir-engine::lib::query::filter::evaluation::semantics::resolve::resolve_filter_query"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/resolve.rs"
+item = "shamir-engine::lib::query::filter::resolve::resolve_query_ref_value"
+to_path = "crates/shamir-engine/src/query/filter/evaluation/semantics/resolve.rs"
+to_item = "shamir-engine::lib::query::filter::evaluation::semantics::resolve::resolve_query_ref_value"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/filter/mod.rs"
+item = "shamir-engine::lib::query::filter::numeric_cmp"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/mod.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::collection_tests"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/mod.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::helpers"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/read/mod.rs"
+item = "shamir-engine::lib::query::read::aggregate"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/read/mod.rs"
+item = "shamir-engine::lib::query::read::hashable_query_value"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/read/tests/mod.rs"
+item = "shamir-engine::lib::query::read::tests::exec_tests"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/read/tests/mod.rs"
+item = "shamir-engine::lib::query::read::tests::qv_postprocess_tests"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/filter/evaluation/filter_node.rs"
+item = "shamir-engine::lib::query::filter::evaluation::filter_node::membership"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/filter/evaluation/mod.rs"
+item = "shamir-engine::lib::query::filter::evaluation::planning"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/filter/evaluation/mod.rs"
+item = "shamir-engine::lib::query::filter::evaluation::runtime"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/filter/evaluation/mod.rs"
+item = "shamir-engine::lib::query::filter::evaluation::semantics"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/filter/evaluation/runtime/mod.rs"
+item = "shamir-engine::lib::query::filter::evaluation::runtime::core"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/filter/evaluation/semantics/mod.rs"
+item = "shamir-engine::lib::query::filter::evaluation::semantics::numeric_cmp"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/filter/mod.rs"
+item = "shamir-engine::lib::query::filter::caches"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/filter/mod.rs"
+item = "shamir-engine::lib::query::filter::evaluation"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/collections/mod.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::collections::binary_and_large_set_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/collections/mod.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::collections::membership_literals_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/collections/mod.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::collections::numeric_coercion_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/collections/mod.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::collections::range_and_container_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/mod.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::collections"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/mod.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::comparisons"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/mod.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::expressions"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/mod.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::predicates"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/mod.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::references"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/mod.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::shared"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/filter/tests/mod.rs"
+item = "shamir-engine::lib::query::filter::tests::caches"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/filter/tests/mod.rs"
+item = "shamir-engine::lib::query::filter::tests::evaluation"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/aggregation/mod.rs"
+item = "shamir-engine::lib::query::read::aggregation::accumulator"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/aggregation/mod.rs"
+item = "shamir-engine::lib::query::read::aggregation::function_inputs"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/aggregation/mod.rs"
+item = "shamir-engine::lib::query::read::aggregation::group_execution"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/aggregation/mod.rs"
+item = "shamir-engine::lib::query::read::aggregation::group_projection"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/aggregation/mod.rs"
+item = "shamir-engine::lib::query::read::aggregation::validation"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/mod.rs"
+item = "shamir-engine::lib::query::read::aggregation"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/mod.rs"
+item = "shamir-engine::lib::query::read::projection"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/projection/mod.rs"
+item = "shamir-engine::lib::query::read::projection::hashable_query_value"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/tests/aggregation/mod.rs"
+item = "shamir-engine::lib::query::read::tests::aggregation::legacy_and_caps"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/tests/aggregation/mod.rs"
+item = "shamir-engine::lib::query::read::tests::aggregation::numeric_and_functions"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/tests/aggregation/numeric_and_functions/mod.rs"
+item = "shamir-engine::lib::query::read::tests::aggregation::numeric_and_functions::distinct_aggregate_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/tests/aggregation/numeric_and_functions/mod.rs"
+item = "shamir-engine::lib::query::read::tests::aggregation::numeric_and_functions::function_aggregate_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/tests/aggregation/numeric_and_functions/mod.rs"
+item = "shamir-engine::lib::query::read::tests::aggregation::numeric_and_functions::qv_aggregate_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/tests/aggregation/numeric_and_functions/mod.rs"
+item = "shamir-engine::lib::query::read::tests::aggregation::numeric_and_functions::qv_exact_sum_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/tests/mod.rs"
+item = "shamir-engine::lib::query::read::tests::aggregation"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/tests/mod.rs"
+item = "shamir-engine::lib::query::read::tests::query_results"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/tests/query_results/mod.rs"
+item = "shamir-engine::lib::query::read::tests::query_results::select_order_page"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/tests/query_results/select_order_page/mod.rs"
+item = "shamir-engine::lib::query::read::tests::query_results::select_order_page::grouping_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/tests/query_results/select_order_page/mod.rs"
+item = "shamir-engine::lib::query::read::tests::query_results::select_order_page::ordering_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/tests/query_results/select_order_page/mod.rs"
+item = "shamir-engine::lib::query::read::tests::query_results::select_order_page::qv_order_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/tests/query_results/select_order_page/mod.rs"
+item = "shamir-engine::lib::query::read::tests::query_results::select_order_page::qv_select_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/tests/query_results/select_order_page/mod.rs"
+item = "shamir-engine::lib::query::read::tests::query_results::select_order_page::select_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/mod.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::helpers"
+to_path = "crates/shamir-engine/src/query/filter/tests/eval_tests/shared/mod.rs"
+to_item = "shamir-engine::lib::query::filter::tests::eval_tests::shared::helpers"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/tests/query_results/select_order_page/mod.rs"
+item = "shamir-engine::lib::query::read::tests::query_results::select_order_page::helpers"
+reason = "shared test helper introduced by the layout sweep"
+owner = "@layout-sweep"
