@@ -3,8 +3,8 @@ use shamir_tx::predicate_set::PredicateDep;
 use shamir_types::core::interner::Interner;
 use shamir_types::core::sort_codec;
 
-use crate::query::filter::evaluation::semantics::resolve::intern_field_path;
 use crate::index::sorted_index_manager::SortedIndexManager;
+use crate::query::filter::evaluation::semantics::resolve::intern_field_path;
 use crate::query::filter::{Filter, FilterValue};
 
 /// Encode a literal `FilterValue` into sort-codec bytes.
@@ -38,7 +38,10 @@ pub(in crate::query::filter) fn encode_filter_value(v: &FilterValue) -> Option<V
 }
 
 /// Build the physical lower bound key: `SORTED_TAG || name_interned || enc`.
-pub(in crate::query::filter) fn predicate_bound_lower(name_interned: u64, enc: &[u8]) -> std::ops::Bound<Bytes> {
+pub(in crate::query::filter) fn predicate_bound_lower(
+    name_interned: u64,
+    enc: &[u8],
+) -> std::ops::Bound<Bytes> {
     let mut k = Vec::with_capacity(9 + enc.len());
     k.push(shamir_tx::SORTED_TAG);
     k.extend_from_slice(&name_interned.to_be_bytes());
@@ -47,7 +50,10 @@ pub(in crate::query::filter) fn predicate_bound_lower(name_interned: u64, enc: &
 }
 
 /// Build the physical upper bound key: `SORTED_TAG || name_interned || enc || 0xFF*16`.
-pub(in crate::query::filter) fn predicate_bound_upper(name_interned: u64, enc: &[u8]) -> std::ops::Bound<Bytes> {
+pub(in crate::query::filter) fn predicate_bound_upper(
+    name_interned: u64,
+    enc: &[u8],
+) -> std::ops::Bound<Bytes> {
     let mut k = Vec::with_capacity(9 + enc.len() + 16);
     k.push(shamir_tx::SORTED_TAG);
     k.extend_from_slice(&name_interned.to_be_bytes());
@@ -57,7 +63,9 @@ pub(in crate::query::filter) fn predicate_bound_upper(name_interned: u64, enc: &
 }
 
 /// Build the physical prefix-only bound (start of index keyspace).
-pub(in crate::query::filter) fn predicate_bound_prefix(name_interned: u64) -> std::ops::Bound<Bytes> {
+pub(in crate::query::filter) fn predicate_bound_prefix(
+    name_interned: u64,
+) -> std::ops::Bound<Bytes> {
     let mut k = Vec::with_capacity(9);
     k.push(shamir_tx::SORTED_TAG);
     k.extend_from_slice(&name_interned.to_be_bytes());
@@ -65,7 +73,9 @@ pub(in crate::query::filter) fn predicate_bound_prefix(name_interned: u64) -> st
 }
 
 /// Build the full upper bound for the entire index: `SORTED_TAG || name_interned || 0xFF*64`.
-pub(in crate::query::filter) fn predicate_bound_full_upper(name_interned: u64) -> std::ops::Bound<Bytes> {
+pub(in crate::query::filter) fn predicate_bound_full_upper(
+    name_interned: u64,
+) -> std::ops::Bound<Bytes> {
     let mut k = Vec::with_capacity(9 + 64);
     k.push(shamir_tx::SORTED_TAG);
     k.extend_from_slice(&name_interned.to_be_bytes());

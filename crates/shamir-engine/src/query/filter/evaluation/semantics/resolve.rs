@@ -13,8 +13,8 @@ use smallvec::SmallVec;
 use crate::query::filter::caches::cond_cache::{compile_cond_cached, cond_cache_get};
 use crate::query::filter::caches::field_path_cache::field_ref_key;
 use crate::query::filter::caches::query_ref_cache::query_ref_key;
-use crate::query::filter::evaluation::runtime::core::eval_context::FilterContext;
 use crate::query::filter::evaluation::filter_node::CompactPath;
+use crate::query::filter::evaluation::runtime::core::eval_context::FilterContext;
 use crate::query::filter::evaluation::semantics::numeric_cmp::cmp_i64_f64;
 use crate::query::filter::{FilterExpr, FilterExprOp, FilterValue};
 use crate::query::read::QueryResult;
@@ -300,20 +300,18 @@ pub fn resolve_filter_query(
             // `SmallVec` per row — the whole point of caching the interned
             // path is defeated if every hit still re-allocates a copy of it.
             let owned_ipath;
-            let ipath: &[InternerKey] = match ctx
-                .field_path_cache
-                .and_then(|c| c.get(&field_ref_key(fv)))
-            {
-                Some(cached) => cached.as_slice(),
-                None => {
-                    let keys = intern_field_path(path, ctx.interner)?;
-                    owned_ipath = keys
-                        .iter()
-                        .map(|&id| InternerKey::new(id))
-                        .collect::<SmallVec<[InternerKey; 4]>>();
-                    owned_ipath.as_slice()
-                }
-            };
+            let ipath: &[InternerKey] =
+                match ctx.field_path_cache.and_then(|c| c.get(&field_ref_key(fv))) {
+                    Some(cached) => cached.as_slice(),
+                    None => {
+                        let keys = intern_field_path(path, ctx.interner)?;
+                        owned_ipath = keys
+                            .iter()
+                            .map(|&id| InternerKey::new(id))
+                            .collect::<SmallVec<[InternerKey; 4]>>();
+                        owned_ipath.as_slice()
+                    }
+                };
             // Single lens→QueryValue boundary (replaces the old lens→InnerValue
             // materialization). NOT a net-new round-trip — see fn doc.
             record
@@ -349,10 +347,7 @@ pub fn resolve_filter_query(
             // removed by this cache (cache hit or miss) — it is unavoidable
             // within this function's `Option<QueryValue>` (owned) contract;
             // see `query_ref_cache.rs`'s "What this caches" honesty section.
-            if let Some(cell) = ctx
-                .query_ref_cache
-                .and_then(|c| c.get(&query_ref_key(fv)))
-            {
+            if let Some(cell) = ctx.query_ref_cache.and_then(|c| c.get(&query_ref_key(fv))) {
                 return cell
                     .get_or_init(|| {
                         let key = alias.strip_prefix('@').unwrap_or(alias.as_str());
@@ -735,7 +730,10 @@ pub fn resolve_filter_value(
 ///
 /// C6 (#80): returns `QueryValue` (name-keyed) — the filter comparison
 /// layer is now QueryValue-native.
-pub(in crate::query::filter) fn resolve_query_ref_value(qr: &QueryResult, path: Option<&str>) -> Option<QueryValue> {
+pub(in crate::query::filter) fn resolve_query_ref_value(
+    qr: &QueryResult,
+    path: Option<&str>,
+) -> Option<QueryValue> {
     // Call-result path: source is `QueryResult.value`.
     if let Some(value) = &qr.value {
         return resolve_query_value_path(value, path).cloned();

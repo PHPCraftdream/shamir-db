@@ -8,9 +8,7 @@ use shamir_types::core::interner::Interner;
 use shamir_types::types::common::{new_map, new_set};
 use shamir_types::types::value::InnerValue;
 
-use crate::query::filter::tests::eval_tests::shared::helpers::{
-    empty_refs,
-};
+use crate::query::filter::tests::eval_tests::shared::helpers::empty_refs;
 // ============================================================================
 // Int↔F64 coercion in all-literal fast-path nodes (InSet/ContainsAnySet/ContainsAllSet)
 //
@@ -21,14 +19,22 @@ use crate::query::filter::tests::eval_tests::shared::helpers::{
 // whether its value list happened to be fully literal.
 // ============================================================================
 
-pub(in crate::query::filter::tests::eval_tests::collections) fn make_int_field_record(interner: &Interner, field: &str, val: i64) -> InnerValue {
+pub(in crate::query::filter::tests::eval_tests::collections) fn make_int_field_record(
+    interner: &Interner,
+    field: &str,
+    val: i64,
+) -> InnerValue {
     let mut map = new_map();
     let k = interner.touch_ind(field).unwrap().into_key();
     map.insert(k, InnerValue::Int(val));
     InnerValue::Map(map)
 }
 
-pub(in crate::query::filter::tests::eval_tests::collections) fn make_f64_field_record(interner: &Interner, field: &str, val: f64) -> InnerValue {
+pub(in crate::query::filter::tests::eval_tests::collections) fn make_f64_field_record(
+    interner: &Interner,
+    field: &str,
+    val: f64,
+) -> InnerValue {
     let mut map = new_map();
     let k = interner.touch_ind(field).unwrap().into_key();
     map.insert(k, InnerValue::F64(val));
@@ -221,4 +227,3 @@ fn test_inset_non_numeric_exact_match_unchanged() {
     };
     assert!(!compile_filter(&f2, &interner).matches(&record, &ctx));
 }
-

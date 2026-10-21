@@ -3,7 +3,9 @@ use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::{Filter, FilterValue, FnCall};
 use shamir_types::core::interner::Interner;
 
-use crate::query::filter::tests::eval_tests::shared::helpers::{empty_refs, make_ab_record, make_alice_record, make_email_record};
+use crate::query::filter::tests::eval_tests::shared::helpers::{
+    empty_refs, make_ab_record, make_alice_record, make_email_record,
+};
 
 // ============================================================================
 // Computed expression comparison (ComputedCompare FilterNode)

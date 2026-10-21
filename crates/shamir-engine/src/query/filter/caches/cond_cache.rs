@@ -22,8 +22,8 @@ use std::sync::Arc;
 use shamir_types::core::interner::Interner;
 use shamir_types::types::common::{THasher, TMap};
 
-use crate::query::filter::evaluation::planning::compile::compile_filter;
 use crate::query::filter::evaluation::filter_node::FilterNode;
+use crate::query::filter::evaluation::planning::compile::compile_filter;
 use crate::query::filter::{Filter, FilterValue};
 
 /// Content-keyed cache mapping a `$cond`'s `condition: Box<Filter>` to its

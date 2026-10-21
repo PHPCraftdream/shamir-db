@@ -381,4 +381,3 @@ pub(super) fn scalar_ref_to_query(s: ScalarRef<'_>) -> QueryValue {
         ScalarRef::Bin(b) => QueryValue::Bin(b.into()),
     }
 }
-

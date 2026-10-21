@@ -9,10 +9,10 @@ use shamir_types::core::interner::Interner;
 use shamir_types::types::common::TMap;
 use shamir_types::types::value::QueryValue;
 
+use crate::query::batch::exec_scope::RowByteMeter;
 use crate::query::filter::caches::cond_cache::{new_local_cond_cache, CondCache, LocalCondCache};
 use crate::query::filter::caches::field_path_cache::FieldPathCache;
 use crate::query::filter::caches::query_ref_cache::QueryRefCache;
-use crate::query::batch::exec_scope::RowByteMeter;
 use crate::query::read::QueryResult;
 
 /// Context passed to filter callbacks during evaluation.

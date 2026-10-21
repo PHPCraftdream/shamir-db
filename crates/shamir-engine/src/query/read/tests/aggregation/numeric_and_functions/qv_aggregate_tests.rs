@@ -1,7 +1,6 @@
 //! Aggregate-pipeline QueryValue assertions (former
 //! `qv_postprocess_tests.rs`, Stage E).
 
-
 use rust_decimal::Decimal;
 use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_types::types::common::new_map_wc;
@@ -10,6 +9,11 @@ use shamir_types::types::value::QueryValue;
 use crate::query::filter::eval_context::FilterContext;
 
 use crate::query::read::order::{apply_order_by_qv, apply_order_by_topk};
+use crate::query::read::tests::query_results::select_order_page::helpers::to_bytes_records;
+use crate::query::read::tests::query_results::select_order_page::qv_order_tests::qv_map;
+use crate::query::read::tests::query_results::select_order_page::qv_select_tests::{
+    intern, make_test_records,
+};
 use crate::query::read::{
     aggregate::AggAccum, apply_aggregate_all, apply_group_by, AggFunc, AggregateField, GroupBy,
     OrderBy, OrderByItem, OrderDirection, Select,
@@ -18,11 +22,6 @@ use shamir_query_builder::select;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::InnerValue;
-use crate::query::read::tests::query_results::select_order_page::qv_select_tests::{
-    intern, make_test_records,
-};
-use crate::query::read::tests::query_results::select_order_page::helpers::to_bytes_records;
-use crate::query::read::tests::query_results::select_order_page::qv_order_tests::qv_map;
 
 // ── Stage E: aggregate pipeline QueryValue assertions ───────────────────────
 
@@ -564,4 +563,3 @@ fn order_by_big_vs_big_desc_exact() {
     assert_eq!(qvs[0]["v"], QueryValue::Big(bigger));
     assert_eq!(qvs[1]["v"], QueryValue::Big(huge));
 }
-

@@ -1,7 +1,6 @@
 //! apply_select_value QueryValue assertions and the QV aggregate fixtures
 //! (former `qv_postprocess_tests.rs`, Stage D).
 
-
 use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_types::types::value::QueryValue;
 
@@ -26,7 +25,13 @@ pub(in crate::query::read::tests) fn intern(interner: &Interner, s: &str) -> u64
 }
 
 /// Build a record: `{ name: Str, age: Int, city: Str, score: F64 }`.
-pub(in crate::query::read::tests) fn make_record(interner: &Interner, name: &str, age: i64, city: &str, score: f64) -> InnerValue {
+pub(in crate::query::read::tests) fn make_record(
+    interner: &Interner,
+    name: &str,
+    age: i64,
+    city: &str,
+    score: f64,
+) -> InnerValue {
     let mut map = new_map();
     map.insert(
         InternerKey::new(intern(interner, "name")),
@@ -47,7 +52,9 @@ pub(in crate::query::read::tests) fn make_record(interner: &Interner, name: &str
     InnerValue::Map(map)
 }
 
-pub(in crate::query::read::tests) fn make_test_records(interner: &Interner) -> Vec<(RecordId, InnerValue)> {
+pub(in crate::query::read::tests) fn make_test_records(
+    interner: &Interner,
+) -> Vec<(RecordId, InnerValue)> {
     vec![
         (
             RecordId::new(),

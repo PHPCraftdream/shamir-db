@@ -8,10 +8,8 @@ use shamir_types::core::interner::Interner;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::InnerValue;
 
-use crate::query::filter::tests::eval_tests::shared::helpers::{
-    empty_refs, make_alice_record,
-};
 use super::numeric_coercion_tests::make_int_field_record;
+use crate::query::filter::tests::eval_tests::shared::helpers::{empty_refs, make_alice_record};
 
 // F-21 group regressions — per-row allocation elimination in filter eval.
 //

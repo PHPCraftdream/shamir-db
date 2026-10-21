@@ -505,4 +505,3 @@ fn order_by_qv_bool_asc_desc() {
     assert_eq!(qvs[0]["b"], QueryValue::Bool(true));
     assert_eq!(qvs[1]["b"], QueryValue::Bool(false));
 }
-

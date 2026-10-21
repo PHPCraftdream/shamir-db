@@ -90,4 +90,3 @@ pub fn validate_aggregate_select(select: &Select) -> shamir_storage::error::DbRe
     }
     Ok(())
 }
-

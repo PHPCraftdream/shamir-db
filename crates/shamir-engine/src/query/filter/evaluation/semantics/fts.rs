@@ -3,7 +3,10 @@ use regex::Regex;
 /// Convert a SQL LIKE pattern to a regex pattern.
 /// `%` matches any sequence of characters, `_` matches a single character.
 /// All other regex meta-characters are escaped.
-pub(in crate::query::filter) fn like_pattern_to_regex(pattern: &str, case_insensitive: bool) -> Option<Regex> {
+pub(in crate::query::filter) fn like_pattern_to_regex(
+    pattern: &str,
+    case_insensitive: bool,
+) -> Option<Regex> {
     let mut regex_str = String::with_capacity(pattern.len() + 4);
     if case_insensitive {
         regex_str.push_str("(?i)");
@@ -47,7 +50,11 @@ pub(in crate::query::filter) fn fts_word_eq_token(word: &str, token: &str) -> bo
 /// AND-mode word probe (bitmask variant, up to 64 query tokens).
 /// Returns whether the word matched anything; updates `seen` in place.
 #[inline]
-pub(in crate::query::filter) fn fts_word_matches(word: &str, query_tokens: &[String], seen: &mut u64) -> bool {
+pub(in crate::query::filter) fn fts_word_matches(
+    word: &str,
+    query_tokens: &[String],
+    seen: &mut u64,
+) -> bool {
     let mut hit = false;
     for (i, t) in query_tokens.iter().enumerate() {
         let bit = 1u64 << i;

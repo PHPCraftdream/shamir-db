@@ -171,7 +171,10 @@ pub(in crate::query::read) fn group_key_item_scalar(s: Option<ScalarRef<'_>>) ->
 /// a canonical string that matches the equivalence classes of the old
 /// string-keyed path — preserving grouping behaviour.
 #[inline]
-pub(in crate::query::read) fn group_key_item_complex(val: &InnerValue, interner: &Interner) -> GroupKeyItem {
+pub(in crate::query::read) fn group_key_item_complex(
+    val: &InnerValue,
+    interner: &Interner,
+) -> GroupKeyItem {
     let qv = inner_value_to_query_value(val, interner).unwrap_or(QueryValue::Null);
     GroupKeyItem::Complex(query_value_canonical_str(&qv).into_boxed_str())
 }
@@ -346,7 +349,11 @@ pub(in crate::query::read) enum AggState {
 }
 
 impl AggAccum {
-    pub(in crate::query::read) fn new(func: AggFunc, field: &AggregateField, interner: &Interner) -> Self {
+    pub(in crate::query::read) fn new(
+        func: AggFunc,
+        field: &AggregateField,
+        interner: &Interner,
+    ) -> Self {
         let (field_path, all_field) = match field {
             AggregateField::Field(p) => (intern_field_path_keys(p, interner), false),
             AggregateField::All => (None, true),
@@ -757,7 +764,10 @@ fn agg_leaf_exact(v: &InnerValue) -> Option<AggLeafExact> {
 /// `None` on any un-internable segment (mirrors `intern_field_path`'s old
 /// `Option<Vec<u64>>` miss).
 #[inline]
-pub(super) fn intern_field_path_keys(field: &[String], interner: &Interner) -> Option<Vec<InternerKey>> {
+pub(super) fn intern_field_path_keys(
+    field: &[String],
+    interner: &Interner,
+) -> Option<Vec<InternerKey>> {
     let mut keys = Vec::with_capacity(field.len());
     for part in field {
         let id = interner.get_ind(part)?;
@@ -801,7 +811,10 @@ pub(super) fn is_execution_constant(fv: &FilterValue) -> bool {
 
 /// Resolve with an empty row and a fresh execution-local context. Preflight
 /// children so the evaluator's Null fallback cannot hide an unresolved binding.
-pub(super) fn resolve_aggregate_param(fv: &FilterValue, ctx: &FilterContext<'_>) -> DbResult<QueryValue> {
+pub(super) fn resolve_aggregate_param(
+    fv: &FilterValue,
+    ctx: &FilterContext<'_>,
+) -> DbResult<QueryValue> {
     match fv {
         FilterValue::Expr { expr } => {
             for arg in &expr.args {

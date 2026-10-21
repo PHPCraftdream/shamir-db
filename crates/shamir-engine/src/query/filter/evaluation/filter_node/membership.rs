@@ -11,6 +11,7 @@ use std::hash::{Hash, Hasher};
 
 use crate::query::filter::evaluation::semantics::numeric_cmp::cmp_i64_f64;
 
+#[inline]
 pub(super) fn set_contains_coercing(set: &TSet<QueryValue>, sr: ScalarRef<'_>) -> bool {
     match sr {
         ScalarRef::Int(n) => {

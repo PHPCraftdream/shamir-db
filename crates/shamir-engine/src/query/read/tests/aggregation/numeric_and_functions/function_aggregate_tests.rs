@@ -5,6 +5,9 @@ use shamir_funclib::scalar_resolver::ScalarResolver;
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::FilterValue;
 use crate::query::read::exec::*;
+use crate::query::read::tests::query_results::select_order_page::helpers::{
+    intern, make_records, to_bytes_records,
+};
 use crate::query::read::*;
 use shamir_query_builder::select;
 use shamir_query_builder::val::lit;
@@ -13,7 +16,6 @@ use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
-use crate::query::read::tests::query_results::select_order_page::helpers::{intern, make_records, to_bytes_records};
 
 // ============================================================================
 // funclib aggregate dispatch (SelectItem::AggregateFn -> funclib AggRegistry)
@@ -166,7 +168,10 @@ fn make_score_records(interner: &Interner) -> Vec<(RecordId, InnerValue)> {
 }
 
 /// Build a record with a single `"name"` field (Str).
-pub(in crate::query::read::tests) fn make_name_record(interner: &Interner, name: &str) -> InnerValue {
+pub(in crate::query::read::tests) fn make_name_record(
+    interner: &Interner,
+    name: &str,
+) -> InnerValue {
     let mut map = new_map();
     map.insert(
         InternerKey::new(intern(interner, "name")),
@@ -344,4 +349,3 @@ fn validate_accepts_select_expression_mixed_into_aggregate_select() {
         "SelectItem::Expression must no longer be rejected in an aggregate SELECT"
     );
 }
-

@@ -2,6 +2,7 @@
 
 use shamir_funclib::scalar_resolver::ScalarResolver;
 
+use super::helpers::{make_record, make_records, to_bytes_records};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::*;
 use shamir_query_builder::select;
@@ -9,7 +10,6 @@ use shamir_types::core::interner::Interner;
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
-use super::helpers::{make_record, make_records, to_bytes_records};
 
 // ============================================================================
 // apply_group_by tests
@@ -212,4 +212,3 @@ fn aggregate_all_count_sum() {
     assert_eq!(result[0]["total"], 4_i64);
     assert_eq!(result[0]["sum_age"], 115_i64);
 }
-

@@ -157,4 +157,3 @@ fn order_by_empty_items() {
     assert_eq!(records[1]["name"], "Alice");
     assert_eq!(records[2]["name"], "Bob");
 }
-

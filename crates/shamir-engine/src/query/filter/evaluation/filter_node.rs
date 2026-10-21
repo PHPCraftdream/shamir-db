@@ -25,7 +25,9 @@ use shamir_types::types::value::QueryValue;
 use smallvec::SmallVec;
 
 use crate::query::filter::evaluation::runtime::core::eval_context::FilterContext;
-use crate::query::filter::evaluation::semantics::fts::{fts_word_matches, fts_word_matches_or, fts_word_matches_vec};
+use crate::query::filter::evaluation::semantics::fts::{
+    fts_word_matches, fts_word_matches_or, fts_word_matches_vec,
+};
 use crate::query::filter::evaluation::semantics::resolve::{
     compare_values, is_column_query_ref, resolve_filter_query, resolve_query_ref_column,
 };
@@ -419,10 +421,7 @@ impl FilterNode {
                                     let key = alias.strip_prefix('@').unwrap_or(alias.as_str());
                                     let path_str = path.as_deref().unwrap_or("");
                                     if let Some(qr) = ctx.resolved_refs.get(key) {
-                                        let column = resolve_query_ref_column(
-                                            qr,
-                                            Some(path_str),
-                                        );
+                                        let column = resolve_query_ref_column(qr, Some(path_str));
                                         return Some(Arc::new(column.into_iter().collect()));
                                     }
                                 }

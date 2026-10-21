@@ -172,4 +172,3 @@ fn select_scalar_function_unknown_is_null() {
         _ => panic!("expected QueryValue::Map"),
     }
 }
-

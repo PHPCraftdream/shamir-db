@@ -1,7 +1,6 @@
 //! apply_pagination / apply_distinct_qv / has_aggregates tests (former
 //! `exec_tests.rs`).
 
-
 use crate::query::read::exec::*;
 use crate::query::read::*;
 use shamir_query_builder::select;
@@ -115,4 +114,3 @@ fn has_aggregates_false() {
     let select = Select::fields(["name", "age"]);
     assert!(!has_aggregates(&select));
 }
-

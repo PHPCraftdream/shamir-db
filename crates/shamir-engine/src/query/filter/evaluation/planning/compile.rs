@@ -1,9 +1,11 @@
 use shamir_collections::TSet;
 
+use crate::index2::expr::IndexExpr;
 use crate::query::filter::evaluation::filter_node::{CompactPath, CompareOp, FilterNode};
 use crate::query::filter::evaluation::semantics::fts::like_pattern_to_regex;
-use crate::query::filter::evaluation::semantics::resolve::{filter_value_to_query, intern_field_path, intern_field_path_compact};
-use crate::index2::expr::IndexExpr;
+use crate::query::filter::evaluation::semantics::resolve::{
+    filter_value_to_query, intern_field_path, intern_field_path_compact,
+};
 use crate::query::filter::{Filter, FilterValue};
 use regex::Regex;
 use shamir_query_types::filter::ValueCompareOp;
@@ -222,11 +224,7 @@ pub(in crate::query::filter) fn build_index_expr(
 /// (FieldRef, QueryRef, Fn, Param, …) we fall back to `FilterNode::In` with
 /// the pre-resolved parallel slice — the same behaviour as before this
 /// optimisation.
-fn compile_in_node(
-    path: CompactPath,
-    values: &[FilterValue],
-    negate: bool,
-) -> FilterNode {
+fn compile_in_node(path: CompactPath, values: &[FilterValue], negate: bool) -> FilterNode {
     // Attempt to resolve every value to a literal.
     let resolved: Vec<Option<shamir_types::types::value::QueryValue>> =
         values.iter().map(filter_value_to_query).collect();
@@ -257,10 +255,7 @@ fn compile_in_node(
 /// When ALL `values` are literals, materialise them into a `TSet<InnerValue>`
 /// and emit `FilterNode::ContainsAnySet` for O(1) per-element membership checks
 /// instead of the O(N×M) nested scan in `ContainsAny`.
-fn compile_contains_any_node(
-    path: CompactPath,
-    values: &[FilterValue],
-) -> FilterNode {
+fn compile_contains_any_node(path: CompactPath, values: &[FilterValue]) -> FilterNode {
     let resolved: Vec<Option<shamir_types::types::value::QueryValue>> =
         values.iter().map(filter_value_to_query).collect();
     if resolved.iter().all(Option::is_some) {
@@ -283,10 +278,7 @@ fn compile_contains_any_node(
 /// When ALL `values` are literals, materialise them into a `TSet<InnerValue>`
 /// and emit `FilterNode::ContainsAllSet` for O(field_len) counting instead of
 /// the O(N×M) nested scan in `ContainsAll`.
-fn compile_contains_all_node(
-    path: CompactPath,
-    values: &[FilterValue],
-) -> FilterNode {
+fn compile_contains_all_node(path: CompactPath, values: &[FilterValue]) -> FilterNode {
     let resolved: Vec<Option<shamir_types::types::value::QueryValue>> =
         values.iter().map(filter_value_to_query).collect();
     if resolved.iter().all(Option::is_some) {

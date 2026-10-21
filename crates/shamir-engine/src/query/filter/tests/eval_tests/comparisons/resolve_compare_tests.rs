@@ -2,7 +2,9 @@ use crate::query::filter::eval::{compare_values, resolve_field};
 use shamir_types::core::interner::Interner;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
-use crate::query::filter::tests::eval_tests::shared::helpers::{make_alice_record, make_nested_record};
+use crate::query::filter::tests::eval_tests::shared::helpers::{
+    make_alice_record, make_nested_record,
+};
 
 #[test]
 fn test_resolve_field_simple() {

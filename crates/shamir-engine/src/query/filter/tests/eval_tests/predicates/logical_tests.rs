@@ -3,7 +3,9 @@ use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::{Filter, FilterValue};
 use shamir_types::core::interner::Interner;
 
-use crate::query::filter::tests::eval_tests::shared::helpers::{empty_refs, make_alice_record, make_nested_record};
+use crate::query::filter::tests::eval_tests::shared::helpers::{
+    empty_refs, make_alice_record, make_nested_record,
+};
 
 #[test]
 fn test_and_both_true() {

@@ -5,6 +5,10 @@ use shamir_funclib::scalar_resolver::ScalarResolver;
 
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::exec::*;
+use crate::query::read::tests::aggregation::numeric_and_functions::function_aggregate_tests::make_name_record;
+use crate::query::read::tests::query_results::select_order_page::helpers::{
+    make_records, to_bytes_records,
+};
 use crate::query::read::*;
 use shamir_query_builder::select;
 use shamir_storage::error::DbError;
@@ -12,8 +16,6 @@ use shamir_types::core::interner::Interner;
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
-use crate::query::read::tests::query_results::select_order_page::helpers::{make_records, to_bytes_records};
-use crate::query::read::tests::aggregation::numeric_and_functions::function_aggregate_tests::make_name_record;
 
 // ============================================================================
 // Fix 2a — distinct on AggregateFn via DistinctWrapper
