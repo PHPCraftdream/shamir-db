@@ -344,6 +344,52 @@ fn duplicate_head_candidates_are_unpairable() {
 }
 
 #[test]
+fn unchanged_items_of_sibling_targets_stay_paired() {
+    // Both integration-test targets define `N`, `helper` and `works`; all
+    // of them share the logical path `fix::test::*`. Nothing but a lib
+    // comment changed, so the comparison must be clean.
+    // Counterfactual: pairing by the logical identity alone sees two head
+    // candidates per base item, pairs nothing and reports every item as
+    // ITEM_LOST / TEST_LOST.
+    let repo = ConsRepo::two_commit("conservation/dup_unchanged_targets");
+    assert_clean(&repo.compare());
+}
+
+#[test]
+fn unchanged_cfg_twins_stay_paired() {
+    // `plat` and `hook` exist twice under one logical path (cfg variants).
+    // Counterfactual: the identity key is ambiguous, so the old pairing
+    // dropped the head items and reported the base items as ITEM_LOST.
+    let repo = ConsRepo::two_commit("conservation/dup_cfg_twins");
+    assert_clean(&repo.compare());
+}
+
+#[test]
+fn moved_twins_pair_one_to_one_and_feed_back_to_clean() {
+    // `make` exists twice with an identical body (a::make, b::make) and
+    // moves to c::make and d::make. Equal group sizes make the twins
+    // interchangeable, so both moves are suggested and a delta made of the
+    // suggestions is clean.
+    // Counterfactual: without the twin pass the two same-key head
+    // candidates are UNPAIRABLE_DUPLICATE and nothing is suggested.
+    let repo = ConsRepo::two_commit("conservation/twin_moves");
+    let out = repo.compare_with_suggest("suggested-twins.toml");
+    let err = stderr(&out);
+    assert!(!out.status.success(), "undeclared moves must fail:\n{err}");
+    assert!(
+        !err.contains("UNPAIRABLE_DUPLICATE"),
+        "twins must pair:\n{err}"
+    );
+    let text = repo.read("suggested-twins.toml");
+    assert_eq!(
+        text.matches("[[moved]]").count(),
+        2,
+        "expected both twin moves:\n{text}"
+    );
+    assert_clean(&repo.compare_with_delta_file("suggested-twins.toml"));
+}
+
+#[test]
 fn base_only_package_is_a_loss_not_silence() {
     // Counterfactual: discovery used the WORKING tree's cargo metadata,
     // so the base-only package (`crates/gone`, deleted at head) never
