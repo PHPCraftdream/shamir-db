@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! User-defined function engine — execution model (slice 1).
 //!
 //! A function is an async mapping `(ctx, batch, params) -> value` evaluated

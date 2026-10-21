@@ -5,6 +5,7 @@
 //! * [`WasmFunction`] — the [`ShamirFunction`] implementation (`wasm_function`).
 
 mod bindings;
+pub(crate) mod compile_cache;
 mod wasm_engine;
 mod wasm_function;
 mod wasm_sanitizer;

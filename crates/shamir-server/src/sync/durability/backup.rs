@@ -116,6 +116,9 @@ pub enum BackupError {
     /// file outside the snapshot directory.
     #[error("unsafe manifest entry path (absolute or contains '..'): {0}")]
     UnsafeManifestPath(String),
+    /// `verify_manifest`: a manifest lists a path inside the private cache subtree.
+    #[error("snapshot manifest must not contain cache paths: {0}")]
+    CacheManifestPath(String),
     /// `verify_manifest`: the same `path` appears more than once in
     /// `manifest.files` — a hand-crafted/tampered manifest could otherwise
     /// have one entry's checksum shadow another's expectations.
@@ -229,7 +232,7 @@ pub fn backup(from: &Path, to: &Path) -> Result<BackupReport, BackupError> {
 
     let mut bytes = 0u64;
     let mut files = 0u64;
-    copy_dir_recursive(from, &dest_dir, &mut bytes, &mut files)?;
+    copy_dir_recursive(from, &dest_dir, &mut bytes, &mut files, true, true)?;
 
     let manifest_path = write_manifest(&dest_dir)?;
 
@@ -413,6 +416,16 @@ pub fn verify_manifest(snapshot_dir: &Path) -> Result<ManifestVerifyReport, Back
         });
     }
 
+    // A snapshot never carries the private cache subtree (backup skips it):
+    // reject it before any file is hashed or restore touches the data dir.
+    if let Some(entry) = manifest
+        .files
+        .iter()
+        .find(|entry| is_cache_manifest_path(&entry.path))
+    {
+        return Err(BackupError::CacheManifestPath(entry.path.clone()));
+    }
+
     let mut accounted: shamir_collections::TFxSet<String> = new_fx_set_wc(manifest.files.len());
 
     let mut total_bytes = 0u64;
@@ -461,6 +474,16 @@ pub fn verify_manifest(snapshot_dir: &Path) -> Result<ManifestVerifyReport, Back
         files_checked: manifest.files.len() as u64,
         total_bytes,
     })
+}
+
+/// Return whether a manifest path addresses the top-level `cache` subtree,
+/// accepting platform separators and harmless `.`/repeated-separator variants.
+fn is_cache_manifest_path(entry_path: &str) -> bool {
+    let normalized = entry_path.replace('\\', "/");
+    normalized
+        .split('/')
+        .find(|component| !component.is_empty() && *component != ".")
+        == Some("cache")
 }
 
 /// Reject a manifest entry `path` that is absolute or contains a `..`
@@ -554,21 +577,28 @@ fn unix_to_ymd_hms(secs: u64) -> (i32, u32, u32, u32, u32, u32) {
 /// written (see the `fsync_dir(dst)` call at the end of this function) — so
 /// every directory this function writes into, at every recursion level,
 /// gets its own directory-entry fsync, not just the top-level destination a
-/// caller passes in.
+/// caller passes in. Cache exclusion applies only to the root invocation;
+/// nested directories named `cache` remain ordinary user data.
 pub(crate) fn copy_dir_recursive(
     src: &Path,
     dst: &Path,
     bytes: &mut u64,
     files: &mut u64,
+    exclude_cache: bool,
+    top_level: bool,
 ) -> std::io::Result<()> {
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let path = entry.path();
-        let target = dst.join(entry.file_name());
+        let file_name = entry.file_name();
+        if exclude_cache && top_level && file_name == "cache" {
+            continue;
+        }
+        let target = dst.join(&file_name);
         let ft = entry.file_type()?;
         if ft.is_dir() {
             fs::create_dir_all(&target)?;
-            copy_dir_recursive(&path, &target, bytes, files)?;
+            copy_dir_recursive(&path, &target, bytes, files, exclude_cache, false)?;
         } else if ft.is_file() {
             let n = fs::copy(&path, &target)?;
             // F-12 (#802): fsync the just-copied file so its bytes reach

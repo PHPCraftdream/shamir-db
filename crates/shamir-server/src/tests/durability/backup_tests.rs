@@ -30,12 +30,38 @@ fn backup_copies_all_files() {
 }
 
 #[test]
+fn backup_excludes_only_top_level_cache_subtree() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    fs::create_dir_all(src.path().join("cache/wasm")).unwrap();
+    fs::write(src.path().join("cache/wasm/artifact"), b"private").unwrap();
+    fs::create_dir_all(src.path().join("nested/cache")).unwrap();
+    fs::write(src.path().join("nested/cache/keep"), b"ordinary").unwrap();
+
+    let report = backup(src.path(), dst.path()).unwrap();
+    assert!(!report.dest_dir.join("cache").exists());
+    assert_eq!(
+        fs::read(report.dest_dir.join("nested/cache/keep")).unwrap(),
+        b"ordinary"
+    );
+    let manifest: Manifest =
+        serde_json::from_slice(&fs::read(report.manifest_path).unwrap()).unwrap();
+    assert!(!manifest
+        .files
+        .iter()
+        .any(|entry| entry.path.starts_with("cache/")));
+}
+#[test]
 fn backup_refuses_existing_dest() {
     let src = TempDir::new().unwrap();
-    // The destination is named after the wall-clock second, so a collision can only be
-    // forced when the second does not tick between pre-creating the dir and `backup()`'s own
-    // stamp. Check the stamp before and after: an unchanged stamp proves that `backup()`
-    // saw the same one, and the assertion is then exact; otherwise retry with a fresh dir.
+    fs::write(src.path().join("a.txt"), b"hello").unwrap();
+    // Retry with a fresh destination until the clock second is stable across
+    // the attempt: the pre-created `dst` name and `backup()`'s own stamp must
+    // come from the same second for the refusal to be guaranteed; it is only
+    // forced when the second does not tick between pre-creating the dir and
+    // `backup()`'s own stamp. Check the stamp before and after: an unchanged
+    // stamp proves that `backup()` saw the same one, and the assertion is
+    // then exact; otherwise retry with a fresh dir.
     for _ in 0..10 {
         let dst = TempDir::new().unwrap();
         let before = utc_timestamp();

@@ -198,7 +198,7 @@ pub fn restore(from: &Path, data_dir: &Path, force: bool) -> Result<RestoreRepor
     }
     let mut bytes = 0u64;
     let mut files = 0u64;
-    if let Err(e) = copy_dir_recursive(from, &temp_dir, &mut bytes, &mut files) {
+    if let Err(e) = copy_dir_recursive(from, &temp_dir, &mut bytes, &mut files, false, true) {
         // N-6: the error message for this failure gives the operator no
         // reference to `temp_dir` at all — clean it up best-effort (log,
         // don't let a cleanup failure mask the original error) rather than

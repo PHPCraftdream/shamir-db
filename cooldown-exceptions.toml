@@ -242,19 +242,6 @@ approved_by = "PHPCraftdream"
 approved_on = "2026-10-21"
 
 [[exception]]
-package = "wasmtime-internal-cache"
-version = "48.0.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b11ca8945aa341f944558622db59845dffa1435971f318d5fce2f2d9765a69b0"
-published = "2026-10-19T19:16:46Z"
-expires = "2026-11-18"
-kind = "security"
-companion_of = "wasmtime@48.0.7"
-reason = "Security patch release admitted under DEC-3 Q4 (PR 225); a lockstep companion is admitted only because its primary requires it."
-approved_by = "PHPCraftdream"
-approved_on = "2026-10-21"
-
-[[exception]]
 package = "wasmtime-internal-component-macro"
 version = "48.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
