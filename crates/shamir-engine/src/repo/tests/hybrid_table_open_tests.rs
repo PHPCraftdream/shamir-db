@@ -22,6 +22,7 @@ use shamir_types::core::interner::TouchInd;
 use shamir_types::types::common::{new_map, new_map_wc};
 use shamir_types::types::value::{InnerValue, QueryValue};
 
+use crate::index2::backend::{IndexQuery, IndexResult};
 use crate::repo::repo_types::{BoxRepo, BoxRepoFactory, RepoFactory};
 use crate::table::interner_manager::InternerManager;
 use crate::table::table_manager::TableManager;
@@ -359,8 +360,6 @@ async fn create_does_not_error_or_panic_across_restart() {
 
 #[tokio::test]
 async fn vector_index_does_not_resurrect_after_restart() {
-    use crate::index2::backend::{IndexQuery, IndexResult};
-
     let temp_dir = tempfile::tempdir().unwrap();
 
     let repo1 = BoxRepoFactory::hybrid(temp_dir.path())
