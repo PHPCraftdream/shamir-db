@@ -288,7 +288,7 @@ impl TableManager {
     /// mutex), so the per-table handle returned by `interner`
     /// is the SAME manager the repo owns — a write through any table's
     /// interner is visible to every other table's reads. The
-    /// [`PersistRegistry`] keeps a separate clone of the per-table manager it
+    /// [`PersistRegistry`](crate::table::PersistRegistry) keeps a separate clone of the per-table manager it
     /// was built with in [`create`](Self::create); that clone shares the same
     /// Arc state, so `flush_metadata` / `flush_buffers` persist the shared
     /// interner through any registered handle. Idempotent: re-attaching the

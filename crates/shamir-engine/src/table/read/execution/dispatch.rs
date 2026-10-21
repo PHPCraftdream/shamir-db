@@ -235,7 +235,7 @@ impl TableManager {
     ///
     /// When `encoding == Id` and the query is "simple" (SELECT * or plain
     /// field projection, no GROUP BY / aggregates / aliases / computed), rows
-    /// are returned as [`QueryRecord::IdBytes`] — raw id-keyed storage msgpack,
+    /// are returned as [`QueryRecord::IdBytes`](crate::query::read::QueryRecord::IdBytes) — raw id-keyed storage msgpack,
     /// no server de-interning.  For everything else falls back to
     /// [`ResultEncoding::Name`] (R5 de-intern path, fully intact).
     pub async fn read_with_encoding(
