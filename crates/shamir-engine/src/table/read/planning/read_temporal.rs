@@ -1,0 +1,665 @@
+//! Temporal read strategies for TableManager.
+//!
+//! Implements `read_as_of` (point-in-time / MVCC snapshot) and
+//! `read_history` (per-record version timeline).
+
+use std::time::Instant;
+
+use futures::future::join_all;
+use futures::StreamExt;
+
+use crate::query::filter::eval::{compile_filter, FilterNode};
+use crate::query::filter::eval_context::FilterContext;
+use crate::query::read::{
+    exec, At, OrderDirection, QueryRecord, QueryResult, QueryStats, ReadQuery,
+};
+use crate::repo::visibility_observer::observe_gate_with_budget;
+use bytes::Bytes;
+use shamir_query_types::batch::{VisibilityPendingReason, VisibilityState};
+use shamir_storage::error::{DbError, DbResult};
+use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
+use shamir_types::core::interner::Interner;
+use shamir_types::types::record_id::RecordId;
+use shamir_types::types::value::{InnerValue, QueryValue};
+
+use crate::table::read::dispatch::explain::{
+    apply_select_value_bytes, try_project_page_only_bytes,
+};
+use crate::table::support::storage::record_cow::RecordCow;
+use crate::table::table_manager::TableManager;
+
+impl TableManager {
+    /// T4-asof: point-in-time read — return table state as it existed at
+    /// the given `at` version or timestamp.
+    ///
+    /// Strategy: full-scan-at-version. Secondary/sorted indexes reflect the
+    /// CURRENT state and cannot be used here — a record that matches a WHERE
+    /// condition NOW may not have matched at `at`, and vice versa. We
+    /// enumerate every record id, read each record AT the as-of version via
+    /// `MvccStore::get_at`, apply the WHERE filter to the as-of value, then
+    /// project. O(n) — versioned indexes are a later performance slice.
+    ///
+    /// Requires an MVCC-backed table; a non-MVCC table returns a clear error.
+    ///
+    /// `At::Version(v)` is validated against the contiguous completion floor;
+    /// allocated but unsettled versions wait, unallocated versions are rejected.
+    /// `At::Timestamp(t)` is resolved via `MvccStore::version_at_or_before_ts`;
+    /// if no version has a recorded ts ≤ `t` this returns a clear error rather
+    /// than silently treating it as Latest.
+    ///
+    /// `Latest` and `History` arms are NOT handled here — `read()` routes them
+    /// before reaching this method.
+    pub(in crate::table::read) async fn read_as_of(
+        &self,
+        query: &ReadQuery,
+        ctx: &FilterContext<'_>,
+        interner: &Interner,
+        at: At,
+        start: Instant,
+    ) -> DbResult<QueryResult> {
+        let mvcc = self.mvcc_store_ref().ok_or_else(|| {
+            shamir_storage::error::DbError::Validation(
+                "AsOf temporal read requires an MVCC-backed table".to_string(),
+            )
+        })?;
+
+        // ── 1. Resolve `at` to a concrete version number. ──────────────────
+        let version: u64 = match at {
+            At::Version(v) => v,
+            At::Timestamp(t) => match mvcc.version_at_or_before_ts(t).await {
+                Some(v) => v,
+                None => {
+                    return Err(shamir_storage::error::DbError::Validation(format!(
+                            "AsOf(Timestamp({t})): no committed version with recorded ts ≤ {t}ms found; \
+                             ensure the table has MVCC history and the timestamp is not earlier than all \
+                             recorded versions"
+                        )));
+                }
+            },
+        };
+
+        // The changefeed handle carries the same repo gate as the MVCC store.
+        // Standalone MVCC tables must attach it too: an eager floor cannot
+        // establish that an explicit snapshot is stable.
+        let gate = &self
+            .changefeed
+            .as_ref()
+            .ok_or_else(|| DbError::Validation("AsOf read requires a repo gate".into()))?
+            .gate;
+        if version > gate.visible_floor() {
+            let allocated = gate.version_allocation_high_water_mark();
+            if version > allocated {
+                return Err(DbError::AsOfFutureVersion {
+                    requested: version,
+                    allocated,
+                });
+            }
+            // cancel-safe: observation owns only a temporary gate waiter.
+            match observe_gate_with_budget(gate, version, ctx.remaining_read_visibility_budget())
+                .await?
+            {
+                VisibilityState::Visible => {}
+                VisibilityState::Pending {
+                    reason: VisibilityPendingReason::ReopenRequired,
+                    visible_through,
+                    blocking_version,
+                } => {
+                    if gate.visibility().reserve_pending_warning() {
+                        log::warn!(
+                            "AsOf read visibility wait ended in reopen-required: requested={version}, visible_through={visible_through}, blocking_version={blocking_version}",
+                        );
+                    }
+                    return Err(DbError::AsOfReopenRequired { requested: version });
+                }
+                VisibilityState::Pending {
+                    visible_through,
+                    blocking_version,
+                    ..
+                } => {
+                    gate.visibility().record_read_wait_timeout();
+                    if gate.visibility().reserve_pending_warning() {
+                        log::warn!(
+                            "AsOf read visibility wait timed out: requested={version}, visible_through={visible_through}, blocking_version={blocking_version}",
+                        );
+                    }
+                    return Err(DbError::AsOfVisibilityTimeout {
+                        requested: version,
+                        visible_through,
+                        blocking_version,
+                    });
+                }
+            }
+        }
+
+        // F-53b Step 2 (#878) / F-67 (#893): AsOf-aware sorted-index keyset
+        // seek fast path.
+        //
+        // When the query is single-column indexed ORDER BY + keyset
+        // pagination (`Pagination::After`) AND the per-index mutation
+        // high-water gate confirms no concurrent write to THIS SPECIFIC
+        // index (`idx_name`, the index `try_plan_keyset_seek` planned the
+        // seek against) could have moved/removed a pinned posting
+        // (`last_mutation_version(idx_name) <= version`), dispatch to the
+        // seek arm BEFORE the inline-top-K and full-scan tails. The seek
+        // walks the sorted index in ORDER BY direction
+        // (`lookup_range_first_k_page`) and classifies each candidate
+        // against the pinned snapshot via `version_of` + `get_at` —
+        // `O(page_size)` per page instead of `O(N)`. A miss signal
+        // (`Ok(None)` — `concurrent_modified > 0`, defence-in-depth) falls
+        // through to the existing paths below.
+        //
+        // F-67 (#893) scope-narrowing: the gate is keyed per-index
+        // (`name_interned`), not manager-wide. A concurrent write to an
+        // UNRELATED sorted index on the same table no longer disables this
+        // cursor's fast path — only a write to `idx_name` itself does. See
+        // `SortedIndexManager::last_mutation_version`'s doc for the full
+        // per-index monotonic-counter proof (re-derived from F-58's
+        // manager-wide version).
+        //
+        // The gate is the load-bearing safety piece (see the spike memo §1.3
+        // + §5.1): a current-state index CANNOT correctly serve an AsOf ORDER
+        // BY query when a concurrent UPDATE to the indexed field MOVES a
+        // posting or a concurrent DELETE REMOVES one. The gate makes those
+        // cases impossible on this path; the classifier's
+        // `concurrent_modified` counter is the belt-and-suspenders fallback.
+        if let Some((idx_name, encoded_key, after_id, limit, direction)) =
+            self.try_plan_keyset_seek(query, interner)
+        {
+            if self.sorted_indexes().last_mutation_version(idx_name) <= version {
+                if let Some(result) = self
+                    .read_as_of_keyset_seek(
+                        query,
+                        ctx,
+                        interner,
+                        idx_name,
+                        &encoded_key,
+                        after_id.as_ref(),
+                        limit,
+                        direction,
+                        version,
+                        start,
+                    )
+                    .await?
+                {
+                    return Ok(result);
+                }
+                // `Ok(None)` — defence-in-depth fallback (concurrent_modified
+                // > 0 under a gate that should have declined). Fall through to
+                // the existing full-scan path below for this page.
+            }
+        }
+
+        // ── 2. Compile the WHERE filter (will be applied to AS-OF values). ──
+        let filter_cb: Option<FilterNode> =
+            query.r#where.as_ref().map(|f| compile_filter(f, interner));
+
+        // ── 3. Enumerate every record id via a tombstone-INCLUSIVE variant of
+        //       the same full-scan streaming that the normal no-index read
+        //       path uses. For each id, read the AS-OF value from the MVCC
+        //       history (`get_at`). Records that did not yet exist at
+        //       `version` return `None` and are excluded.
+        //
+        //       CR-B1 (#767): `list_stream` (-> `MvccStore::current_stream`)
+        //       suppresses any key whose CURRENT winner is a tombstone —
+        //       correct for the normal Latest read path, but wrong here: a
+        //       key deleted AFTER `version` must still be considered, because
+        //       its pre-delete value at `version` is exactly what AsOf must
+        //       return. `list_stream_with_tombstones` includes those keys in
+        //       enumeration so they get a `get_at(id, version)` attempt below
+        //       (which resolves the pre-delete value); it does not change the
+        //       WHAT-IS-RETURNED logic in this loop at all.
+        //
+        //       NOTE: secondary/sorted indexes reflect the CURRENT state and are
+        //       intentionally NOT used here. A versioned index is a later slice.
+        let stream = self.list_stream_with_tombstones(FULL_SCAN_BATCH);
+        futures::pin_mut!(stream);
+
+        let mut matched: Vec<(RecordId, Bytes)> = Vec::new();
+        let mut records_scanned: u64 = 0;
+
+        // F-53a (#874): mirror read_collecting's inline top-K bounded heap.
+        // When the query has ORDER BY + finite LIMIT (no distinct/group_by/
+        // agg), project + push each WHERE-passing AS-OF row straight into a
+        // `k = skip + take` heap DURING the scan, never accumulating the full
+        // `matched` Vec. The pre-F-53a path always materialised every matched
+        // `(RecordId, Bytes)` THEN sorted+paged post-hoc — full O(N) memory
+        // even with a LIMIT. `read_as_of` carries the full `ReadQuery`, so the
+        // order/limit spec IS in scope at the scan loop (unlike the brief's
+        // hypothetical "needs separate follow-up" case) — this is the same
+        // class of fix as read_collecting's.
+        //
+        // `with_version` is not supported on the temporal path (it always
+        // returns `versions: None`), so the heap never needs to carry ids
+        // here. `count_total` composes via the independent running counter.
+        let has_group_by = query.group_by.is_some();
+        let has_agg = exec::has_aggregates(&query.select);
+        let (skip_resolved, take_resolved) = query
+            .pagination
+            .try_resolve()
+            .map_err(|e| shamir_storage::error::DbError::Validation(e.to_string()))?;
+        let use_topk = query.order_by.is_some()
+            && take_resolved.is_some()
+            && !query.select.distinct
+            && !has_group_by
+            && !has_agg;
+        let mut topk_heap: Option<exec::TopKHeap<'_>> = if use_topk {
+            Some(exec::TopKHeap::new(
+                query.order_by.as_ref().unwrap(),
+                skip_resolved as usize,
+                take_resolved.unwrap() as usize,
+                false,
+            ))
+        } else {
+            None
+        };
+        let topk_proj = if use_topk {
+            Some(
+                exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?
+                    .with_context(ctx),
+            )
+        } else {
+            None
+        };
+        let mut topk_total: u64 = 0;
+        // Declared up here (not after the loop, as pre-F-53a) so the inline
+        // top-K projection can report corrupt rows during the scan.
+        let mut corrupt: Vec<crate::query::read::CorruptRecordRef> = Vec::new();
+
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
+            records_scanned += batch.len() as u64;
+
+            // CR-C3 (#778): fetch the AS-OF value for the WHOLE batch in one
+            // vectored call instead of one `get_at` await per record. The
+            // ids are collected up front so `get_at_many` can partition them
+            // into a batched history.get_many subset (direct path) and a
+            // per-key fallback subset (concurrent-write range-scan) — see
+            // `MvccStore::get_at_many`'s doc comment. Zipping the results
+            // back against `batch` preserves order, so the filter/projection
+            // body below is byte-identical to the prior per-record loop.
+            let ids: Vec<Bytes> = batch.iter().map(|(id, _cow)| id.to_bytes()).collect();
+            let asof_values = mvcc.get_at_many(&ids, version).await?;
+
+            for ((id, _cow), asof_bytes) in batch.into_iter().zip(asof_values) {
+                let Some(bytes) = asof_bytes else {
+                    // Record did not exist at this version — exclude it.
+                    continue;
+                };
+                // bytes is already Bytes from get_at_many.
+                // Apply the WHERE filter to the AS-OF value (NOT the current
+                // value). This ensures `AsOf` semantics: the filter evaluates
+                // the world as it was at `version`.
+                // S4: filter via RecordView lens (bare-scalar fallback to
+                // InnerValue for non-map records).
+                let passes = match filter_cb.as_ref() {
+                    Some(cb) => match shamir_types::record_view::RecordView::new(&bytes) {
+                        Ok(view) => cb.matches(&view, ctx),
+                        Err(_) => match InnerValue::from_bytes(bytes.as_ref()) {
+                            Ok(iv) => cb.matches(&iv, ctx),
+                            Err(_) => false,
+                        },
+                    },
+                    None => true,
+                };
+                if passes {
+                    if let Some(heap) = topk_heap.as_mut() {
+                        // F-53a (#874): inline bounded heap — project the AS-OF
+                        // bytes straight into the heap. The projection mirrors
+                        // `apply_select_value_bytes` exactly (RecordView →
+                        // InnerValue fallback → corrupt + Null placeholder), so
+                        // ORDER BY nulls-ordering still applies to undecodable
+                        // rows byte-for-byte. `topk_total` is the independent
+                        // `count_total` counter.
+                        topk_total += 1;
+                        let qv = match shamir_types::record_view::RecordView::new(&bytes) {
+                            Ok(view) => topk_proj.as_ref().unwrap().project_value(&view, interner),
+                            Err(_) => match InnerValue::from_bytes(bytes.as_ref()) {
+                                Ok(iv) => topk_proj.as_ref().unwrap().project_value(&iv, interner),
+                                Err(_) => {
+                                    corrupt.push(crate::query::read::CorruptRecordRef {
+                                        table: self.name().to_string(),
+                                        id,
+                                    });
+                                    QueryValue::Null
+                                }
+                            },
+                        };
+                        heap.push(qv, None);
+                    } else {
+                        matched.push((id, bytes));
+                    }
+                }
+            }
+        }
+
+        // F-53a (#874): inline bounded-heap short-circuit. When the query has
+        // ORDER BY + finite LIMIT (no distinct/group_by/agg), the heap already
+        // applied ORDER BY + skip/take during the scan — drain, sort, and
+        // return. No full `matched` Vec was accumulated for this path, so the
+        // `try_project_page_only_bytes` / `apply_select_value_bytes` /
+        // `apply_order_by_qv` / `apply_pagination` tail below is skipped
+        // entirely.
+        if let Some(heap) = topk_heap {
+            let (qvs, _ids) = heap.into_sorted();
+            let pagination =
+                exec::topk_pagination(&query.pagination, query.count_total, topk_total);
+            let records_returned = qvs.len() as u64;
+            let records: Vec<QueryRecord> = qvs.into_iter().map(QueryRecord::Direct).collect();
+            return Ok(QueryResult::with_stats(
+                records,
+                QueryStats {
+                    index_used: Some("temporal_asof".to_string()),
+                    records_scanned,
+                    records_returned,
+                    execution_time_us: start.elapsed().as_micros() as u64,
+                },
+            )
+            .with_pagination(pagination)
+            .with_corrupt_records(corrupt));
+        }
+
+        // Pipeline tail — same helpers as the collecting / index-scan paths.
+        // S4: matched is now Bytes-typed; all three branches consume Bytes.
+        // (has_group_by / has_agg / corrupt were declared above, before the
+        // scan loop, so the inline top-K path could use them.)
+
+        if let Some((paged, pagination)) =
+            try_project_page_only_bytes(query, &matched, interner, ctx, self.name(), &mut corrupt)?
+        {
+            let records_returned = paged.len() as u64;
+            return Ok(QueryResult::with_stats(
+                paged,
+                QueryStats {
+                    index_used: Some("temporal_asof".to_string()),
+                    records_scanned,
+                    records_returned,
+                    execution_time_us: start.elapsed().as_micros() as u64,
+                },
+            )
+            .with_pagination(pagination)
+            .with_corrupt_records(corrupt));
+        }
+
+        let mut result_qv = if has_group_by {
+            exec::validate_aggregate_select(&query.select)?;
+            let group_by = query.group_by.as_ref().unwrap();
+            exec::try_apply_group_by(&matched, group_by, &query.select, interner, ctx)?
+        } else if has_agg {
+            exec::validate_aggregate_select(&query.select)?;
+            exec::apply_aggregate_all_with_context(&matched, &query.select, interner, ctx)?
+        } else {
+            apply_select_value_bytes(
+                &matched,
+                &query.select,
+                interner,
+                ctx,
+                self.name(),
+                &mut corrupt,
+            )?
+        };
+
+        if query.select.distinct {
+            result_qv = exec::apply_distinct_qv(result_qv);
+        }
+        if let Some(ref order_by) = query.order_by {
+            exec::apply_order_by_qv(&mut result_qv, order_by);
+        }
+
+        let (records_qv, pagination) =
+            exec::apply_pagination(result_qv, &query.pagination, query.count_total);
+
+        let records_returned = records_qv.len() as u64;
+        let records: Vec<QueryRecord> = records_qv.into_iter().map(QueryRecord::Direct).collect();
+        Ok(QueryResult::with_stats(
+            records,
+            QueryStats {
+                index_used: Some("temporal_asof".to_string()),
+                records_scanned,
+                records_returned,
+                execution_time_us: start.elapsed().as_micros() as u64,
+            },
+        )
+        .with_pagination(pagination)
+        .with_corrupt_records(corrupt))
+    }
+
+    /// T4-history: the per-record version timeline.
+    ///
+    /// Semantics: "the history of the records that currently match".
+    /// The matched record ids are resolved with the EXISTING
+    /// current-state filter path (a streaming scan + the compiled
+    /// `where` callback — the same machinery `read_collecting` uses,
+    /// but we keep only the ids). For each matched id we ask the
+    /// table's `MvccStore` for its full version timeline
+    /// (`MvccStore::history_of`), then apply the `History`
+    /// range / order / limit.
+    ///
+    /// Each output row is the projected fields (via `apply_select` on
+    /// the single `(id, decoded_version_value)` pair) PLUS `_version`
+    /// (u64) and `_ts` (millis or null).
+    ///
+    /// Requires an MvccStore; a non-MVCC table returns a clear error.
+    /// No versioned indexes are consulted (History is orthogonal to
+    /// them). `Latest`/`AsOf` are NOT handled here — `read()` routes
+    /// them before reaching this method.
+    #[allow(clippy::too_many_lines)] // one cohesive read strategy
+    pub(in crate::table::read) async fn read_history(
+        &self,
+        query: &ReadQuery,
+        ctx: &FilterContext<'_>,
+        interner: &Interner,
+        start: Instant,
+    ) -> DbResult<QueryResult> {
+        let mvcc = self.mvcc_store_ref().ok_or_else(|| {
+            shamir_storage::error::DbError::Validation(
+                "History temporal read requires an MVCC-backed table".to_string(),
+            )
+        })?;
+
+        // ── 1. Resolve matched record ids (reuse the current-state
+        //     filter path). We stream every record, apply the compiled
+        //     `where` callback, and keep only the RecordIds of the
+        //     records that match RIGHT NOW. The current InnerValue is
+        //     kept too — `history_of` already returns the current
+        //     value, but having it lets us skip ids whose main value
+        //     vanished between the match and the history call (a
+        //     deleted record contributes only historical rows, which
+        //     is the documented semantics; we still ask history_of
+        //     for them).
+        let filter_cb: Option<FilterNode> =
+            query.r#where.as_ref().map(|f| compile_filter(f, interner));
+
+        let stream = self.list_stream(FULL_SCAN_BATCH);
+        futures::pin_mut!(stream);
+        let mut matched_ids: Vec<RecordId> = Vec::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
+            for (id, cow) in batch {
+                let passes = match (&filter_cb, &cow) {
+                    (Some(cb), RecordCow::Borrowed(b)) => {
+                        match shamir_types::record_view::RecordView::new(b) {
+                            Ok(view) => cb.matches(&view, ctx),
+                            Err(_) => false,
+                        }
+                    }
+                    (Some(cb), RecordCow::Owned(record)) => cb.matches(record, ctx),
+                    (None, _) => true,
+                };
+                if passes {
+                    matched_ids.push(id);
+                }
+            }
+        }
+
+        // ── 2. For each matched id, pull its full timeline.
+        let temporal = &query.temporal;
+        let (from, to, limit, order) = match temporal {
+            crate::query::read::Temporal::History {
+                from,
+                to,
+                limit,
+                order,
+            } => (from.as_ref(), to.as_ref(), *limit, *order),
+            // Unreachable: read() only routes History here.
+            _ => unreachable!("read_history invoked for non-History temporal"),
+        };
+
+        // Collect every (id, version, ts, value) tuple across all
+        // matched records, applying the from/to range filter inline.
+        // `from`/`to` resolve `At::Version` directly against the
+        // entry's version; `At::Timestamp(t)` filters by `ts_millis`
+        // (entries with unknown ts are EXCLUDED from a ts-bounded
+        // range — they can't be proven to lie inside it).
+        #[inline]
+        fn in_range(version: u64, ts: Option<u64>, from: Option<&At>, to: Option<&At>) -> bool {
+            let ok_from = match from {
+                None => true,
+                Some(At::Version(v)) => version >= *v,
+                Some(At::Timestamp(t)) => match ts {
+                    Some(ts_val) => ts_val >= *t,
+                    None => false,
+                },
+            };
+            let ok_to = match to {
+                None => true,
+                Some(At::Version(v)) => version <= *v,
+                Some(At::Timestamp(t)) => match ts {
+                    Some(ts_val) => ts_val <= *t,
+                    None => false,
+                },
+            };
+            ok_from && ok_to
+        }
+
+        // Row shape: (record_id, version, ts, value_bytes).
+        // CR-C3-adjacent (mirrors `read_as_of`'s `get_at_many` vectorization):
+        // fetch every matched record's timeline via `history_of_many` instead
+        // of one sequential `history_of` await per record.
+        let mut rows: Vec<(RecordId, u64, Option<u64>, bytes::Bytes)> = Vec::new();
+        let timelines = history_of_many(mvcc, &matched_ids).await?;
+        for (id, timeline) in matched_ids.iter().zip(timelines) {
+            for entry in timeline {
+                if in_range(entry.version, entry.ts_millis, from, to) {
+                    rows.push((*id, entry.version, entry.ts_millis, entry.value));
+                }
+            }
+        }
+
+        // ── 3. Order by version (Asc default; Desc reverses).
+        match order {
+            OrderDirection::Asc => rows.sort_by_key(|(_, v, _, _)| *v),
+            OrderDirection::Desc => rows.sort_by_key(|b| std::cmp::Reverse(b.1)),
+        }
+
+        // ── 4. Limit is applied over the WHOLE flattened result
+        //     (documented): `limit` rows total, not per record.
+        if let Some(n) = limit {
+            rows.truncate(n as usize);
+        }
+
+        // ── 5. Project each version's value bytes via the RecordView lens
+        //     and attach `_version` and `_ts`.
+        let mut out_records: Vec<QueryRecord> = Vec::with_capacity(rows.len());
+        let mut corrupt: Vec<crate::query::read::CorruptRecordRef> = Vec::new();
+        for (id, version, ts, value_bytes) in rows {
+            // Project directly from the version's storage bytes via the
+            // RecordView lens (no full InnerValue decode for the common
+            // map-record case; bare-scalar history values fall back to a
+            // transient InnerValue inside the helper). A corrupt entry
+            // (engine-written bytes — should never fire) yields a Null row
+            // (rather than being skipped) AND is now reported via
+            // `corrupt_records` (F-30/#823).
+            let mut projected = apply_select_value_bytes(
+                &[(id, value_bytes)],
+                &query.select,
+                interner,
+                ctx,
+                self.name(),
+                &mut corrupt,
+            )?;
+            // apply_select_value returns one QueryValue per input record.
+            let row_qv = projected
+                .pop()
+                .unwrap_or(QueryValue::Map(shamir_types::types::common::new_map_wc(0)));
+            // Attach the timeline metadata. If projection produced a
+            // Map, insert directly; otherwise wrap so the metadata has
+            // a home.
+            let final_qv = match row_qv {
+                QueryValue::Map(mut map) => {
+                    map.insert("_version".to_string(), QueryValue::Int(version as i64));
+                    map.insert(
+                        "_ts".to_string(),
+                        match ts {
+                            Some(t) => QueryValue::Int(t as i64),
+                            None => QueryValue::Null,
+                        },
+                    );
+                    QueryValue::Map(map)
+                }
+                other => {
+                    let mut map = shamir_types::types::common::new_map_wc(3);
+                    map.insert("value".to_string(), other);
+                    map.insert("_version".to_string(), QueryValue::Int(version as i64));
+                    map.insert(
+                        "_ts".to_string(),
+                        match ts {
+                            Some(t) => QueryValue::Int(t as i64),
+                            None => QueryValue::Null,
+                        },
+                    );
+                    QueryValue::Map(map)
+                }
+            };
+            out_records.push(QueryRecord::Direct(final_qv));
+        }
+
+        let records_returned = out_records.len() as u64;
+        Ok(QueryResult::with_stats(
+            out_records,
+            QueryStats {
+                index_used: Some("temporal_history".to_string()),
+                records_scanned: matched_ids.len() as u64,
+                records_returned,
+                execution_time_us: start.elapsed().as_micros() as u64,
+            },
+        )
+        .with_corrupt_records(corrupt))
+    }
+}
+
+/// Vectorized sibling of [`shamir_tx::MvccStore::history_of`] for callers
+/// that need the full version timeline of MANY record ids (`read_history`'s
+/// matched-record set). Mirrors `MvccStore::get_at_many`'s vectorization
+/// shape — chunked at `FULL_SCAN_BATCH`, the same page size `read_as_of`
+/// already batches `get_at_many` at — but `history_of` has no native
+/// multi-key store primitive to collapse into (each key's version range
+/// lives at a different, non-adjacent physical location, unlike
+/// `get_at_many`'s single-version point lookups, which DO collapse into one
+/// `history.get_many` call): dispatching each chunk's `history_of` calls
+/// CONCURRENTLY (mirrors the `join_all` pattern already used for per-table
+/// fan-out in `tx::materialize`) is the achievable win here, overlapping N
+/// per-record round-trips (each itself a range-scan stream plus a
+/// `lookup_ts` await per archived version) instead of serializing them.
+///
+/// Results are returned in the SAME order as `ids`. `join_all` preserves
+/// input order in its output, and results are drained in that same order
+/// with `?` — so the FIRST id (in input order) whose lookup failed is the
+/// one whose error propagates, matching the previous sequential loop's
+/// error-selection exactly, even though the lookups themselves ran
+/// concurrently.
+async fn history_of_many(
+    mvcc: &shamir_tx::MvccStore,
+    ids: &[RecordId],
+) -> DbResult<Vec<Vec<shamir_tx::VersionEntry>>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(FULL_SCAN_BATCH) {
+        let futs = chunk.iter().map(|id| mvcc.history_of(id.as_bytes()));
+        for result in join_all(futs).await {
+            out.push(result?);
+        }
+    }
+    Ok(out)
+}

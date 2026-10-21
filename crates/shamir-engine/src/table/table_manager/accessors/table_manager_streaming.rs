@@ -1,0 +1,990 @@
+use std::sync::Arc;
+
+use bytes::Bytes;
+use futures::future::Either;
+use futures::StreamExt;
+use shamir_query_types::batch::ResultEncoding;
+#[cfg(test)]
+use shamir_storage::error::DbError;
+use shamir_storage::error::DbResult;
+use shamir_storage::types::RecordKey;
+use shamir_types::record_view::RecordView;
+use shamir_types::types::record_id::RecordId;
+use shamir_types::types::value::InnerValue;
+
+use crate::query::filter::eval::compile_filter;
+use crate::query::filter::eval_context::FilterContext;
+use crate::query::filter::Filter;
+use crate::table::record_cow::RecordCow;
+use crate::table::table::Table;
+use crate::table::table_manager::TableManager;
+use crate::table::tx_scan_overlay::{
+    merge_filtered_stream_with_tx_overlay, merge_stream_with_tx_overlay, overlay_rows_for_tx,
+};
+
+// ── F-65 (#891) test-only failure-injection seam ────────────────────────────
+//
+// Mirrors the `TEST_*_HOOK` family (`table_manager_crud.rs::TEST_POST_BARRIER_PRE_WRITE_HOOK`,
+// `commit.rs::TEST_POST_VALIDATE_PRE_PUBLISH_HOOK`, etc.): a `#[cfg(test)]`
+// `OnceLock<Arc<Hook>>` global, zero cost when unset. Where those seams are
+// pause/resume handshakes for ordering tests, this one is a one-shot FAILURE
+// injector: it lets a test make the NEXT `read_one_tx_bytes` call for a given
+// `(table_token, RecordId)` return a genuine `Err(DbError::Storage)` instead of
+// reading the bytes — so an FK indexed-action fast-path candidate RE-READ hits a
+// real read error deterministically (no sleeps, no timing races).
+//
+// The injector is one-shot per arm: once an armed `(table_token, id)` fires it
+// is consumed, so a retry of the SAME id reads normally — keeping the injection
+// scoped to exactly one call and avoiding an accidental infinite-failure loop.
+// `read_one_tx_bytes` does NOT decode (it returns raw bytes), so corrupting
+// storage bytes cannot reach its `Err` branch — that is why a dedicated seam is
+// the cleanest deterministic way to exercise the `Err` path here.
+//
+// Task-group-2 (2026-09, shamir-engine review) extension: the same injector
+// also gates [`TableManager::read_one_tx`] (this file) and
+// [`TableManager::get`] (`table_manager_crud.rs`) — the write-path pre-reads
+// behind `delete`/`set`/`update_tx` — so a test can force any of those three
+// call sites' pre-read to fail with a genuine `Err(DbError::Storage)` and
+// assert the write fails closed instead of silently treating the row as
+// absent (the F-65 defect class, applied to the three sites F-65 itself
+// didn't cover).
+//
+// `std::sync::Mutex` is used (not a lock-free map) because this is a test-only,
+// cold, zero-contention path behind a `OnceLock::get()` that is `None` for every
+// non-test build — the lock-free-first rule applies to hot paths, not to this.
+
+#[cfg(test)]
+pub(crate) static TEST_READ_ONE_TX_BYTES_FAILURE: std::sync::OnceLock<
+    std::sync::Arc<ReadOneTxBytesFailHook>,
+> = std::sync::OnceLock::new();
+
+/// Test-only one-shot failure injector for [`TableManager::read_one_tx_bytes`].
+/// See [`TEST_READ_ONE_TX_BYTES_FAILURE`]'s doc for the rationale.
+///
+/// Also carries a sibling CORRUPT-bytes injector (added alongside the
+/// decode-error fail-closed fix for `fk_actions.rs` / `fk_on_update.rs` /
+/// `fk_restrict.rs`'s `RecordView::new`-then-`InnerValue::from_bytes` decode
+/// idiom): a WHERE-filtered scan (`collect_parent_values`) can never see a
+/// genuinely undecodable row reach its own decode step, because the SAME
+/// row already failed the upstream filter-decode gate — but
+/// `plan_cascade_for_ids`'s grandchild ref-field collection loop re-reads an
+/// ALREADY-classified cascade candidate via `read_one_tx_bytes` with no such
+/// gate, so substituting undecodable bytes for exactly that second read
+/// (while the earlier classifying scan still sees the real, valid bytes)
+/// deterministically exercises its fail-closed `Err(DbError::Codec)` path.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct ReadOneTxBytesFailHook {
+    inner: std::sync::Mutex<Vec<(u64, RecordId)>>,
+    corrupt: std::sync::Mutex<Vec<(u64, RecordId, Bytes)>>,
+}
+
+#[cfg(test)]
+impl ReadOneTxBytesFailHook {
+    /// Arm a one-shot injected `Err` for the next `read_one_tx_bytes(table_token, id)`.
+    pub(crate) fn arm(&self, table_token: u64, id: RecordId) {
+        self.inner.lock().unwrap().push((table_token, id));
+    }
+
+    /// Returns `Some(Err)` if `(table_token, id)` is armed, consuming the arm
+    /// (one-shot); `None` otherwise. `pub(crate)` (not module-private): reused
+    /// by `TableManager::get` (`table_manager_crud.rs`) in addition to
+    /// `read_one_tx` / `read_one_tx_bytes` (this file).
+    pub(crate) fn take_injected(&self, table_token: u64, id: RecordId) -> Option<DbError> {
+        let mut guard = self.inner.lock().unwrap();
+        let pos = guard
+            .iter()
+            .position(|(tt, rid)| *tt == table_token && *rid == id)?;
+        guard.swap_remove(pos);
+        Some(DbError::Storage(format!(
+            "F-65 injected read_one_tx_bytes failure (table_token={table_token}, id={id:?})"
+        )))
+    }
+
+    /// Arm a one-shot CORRUPT-bytes substitution for the next
+    /// `read_one_tx_bytes(table_token, id)`: instead of the real stored
+    /// value, the call returns `Ok(Some(bytes))` with the given
+    /// (deliberately undecodable) bytes.
+    pub(crate) fn arm_corrupt(&self, table_token: u64, id: RecordId, bytes: Bytes) {
+        self.corrupt.lock().unwrap().push((table_token, id, bytes));
+    }
+
+    /// Returns `Some(bytes)` if a corrupt substitution is armed for
+    /// `(table_token, id)`, consuming the arm (one-shot); `None` otherwise.
+    fn take_corrupt(&self, table_token: u64, id: RecordId) -> Option<Bytes> {
+        let mut guard = self.corrupt.lock().unwrap();
+        let pos = guard
+            .iter()
+            .position(|(tt, rid, _)| *tt == table_token && *rid == id)?;
+        Some(guard.swap_remove(pos).2)
+    }
+}
+
+/// Boxed committed-row batch stream (snapshot or latest source).
+type CommittedScan<'a> = std::pin::Pin<
+    Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + Send + 'a>,
+>;
+
+impl TableManager {
+    /// Stream records in batches, returning InnerValues
+    ///
+    /// This is memory-efficient for large tables as it doesn't load all records at once.
+    /// Returns a stream that yields batches of records.
+    ///
+    /// # Arguments
+    /// * `batch_size` - Number of records per batch
+    ///
+    /// # Returns
+    /// A stream that yields batches of (RecordId, InnerValue) tuples
+    pub fn list_stream(
+        &self,
+        batch_size: usize,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + '_ {
+        type DynStream<'a> = std::pin::Pin<
+            Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + Send + 'a>,
+        >;
+        if let Err(error) = self.ensure_repo_readable() {
+            let failed: DynStream<'_> = Box::pin(futures::stream::once(async move { Err(error) }));
+            return failed;
+        }
+        if let Some(mvcc) = self.mvcc_store_ref() {
+            let mvcc = Arc::clone(mvcc);
+            let s: DynStream<'_> = Box::pin(async_stream::stream! {
+                let mut raw = mvcc.current_stream(batch_size);
+                while let Some(batch_result) = raw.next().await {
+                    let batch_bytes = match batch_result {
+                        Ok(b) => b,
+                        Err(e) => {
+                            yield Err(e);
+                            return;
+                        }
+                    };
+                    for decoded in Table::decode_raw_batch(batch_bytes) {
+                        yield decoded;
+                    }
+                }
+            });
+            s
+        } else {
+            let s: DynStream<'_> = Box::pin(self.table.list_stream(batch_size));
+            s
+        }
+    }
+
+    /// CR-B1 (#767): like `list_stream`, but a tombstoned CURRENT winner is
+    /// yielded (empty `RecordCow`) instead of being suppressed from
+    /// enumeration.
+    ///
+    /// Used ONLY by `TableManager::read_as_of`'s enumeration source. A
+    /// cursor's / `AsOf` read's pinned snapshot version can predate a
+    /// concurrent DELETE — the deleted key's CURRENT winner is now a
+    /// tombstone, but the pinned version should still see the pre-delete
+    /// value. `list_stream`'s enumeration (via `MvccStore::current_stream`)
+    /// suppresses that key entirely, so `read_as_of` never even attempts an
+    /// as-of `get_at` for it. This variant emits it so `read_as_of`'s
+    /// `get_at(id, pinned_version)` call gets a chance to resolve the
+    /// pre-delete value; a non-MVCC table has no tombstone concept, so it
+    /// falls back to the plain `list_stream` (no behavior change there).
+    ///
+    /// `list_stream` itself is completely untouched — every other caller of
+    /// it keeps the CURRENT-state-only enumeration.
+    pub(crate) fn list_stream_with_tombstones(
+        &self,
+        batch_size: usize,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + '_ {
+        type DynStream<'a> = std::pin::Pin<
+            Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + Send + 'a>,
+        >;
+        if let Err(error) = self.ensure_repo_readable() {
+            let failed: DynStream<'_> = Box::pin(futures::stream::once(async move { Err(error) }));
+            return failed;
+        }
+        if let Some(mvcc) = self.mvcc_store_ref() {
+            let mvcc = Arc::clone(mvcc);
+            let s: DynStream<'_> = Box::pin(async_stream::stream! {
+                let mut raw = mvcc.current_stream_with_tombstones(batch_size);
+                while let Some(batch_result) = raw.next().await {
+                    let batch_bytes = match batch_result {
+                        Ok(b) => b,
+                        Err(e) => {
+                            yield Err(e);
+                            return;
+                        }
+                    };
+                    for decoded in Table::decode_raw_batch(batch_bytes) {
+                        yield decoded;
+                    }
+                }
+            });
+            s
+        } else {
+            let s: DynStream<'_> = Box::pin(self.table.list_stream(batch_size));
+            s
+        }
+    }
+
+    /// Like `list_stream`, but applies a bytes-level pre-filter before
+    /// decoding each record to `InnerValue`.  Rows that the pre-filter
+    /// definitively rejects (`Some(false)`) are skipped without a full
+    /// `InnerValue` decode.  Rows where the pre-filter returns `None`
+    /// (unsupported filter shape) are decoded normally — the caller's
+    /// compiled filter is the authoritative decision in all cases.
+    pub(crate) fn list_stream_filtered(
+        &self,
+        batch_size: usize,
+        pre_filter: std::sync::Arc<crate::query::filter::FilterNode>,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + '_ {
+        type DynStream<'a> = std::pin::Pin<
+            Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + Send + 'a>,
+        >;
+        if let Err(error) = self.ensure_repo_readable() {
+            let failed: DynStream<'_> = Box::pin(futures::stream::once(async move { Err(error) }));
+            return failed;
+        }
+        if let Some(mvcc) = self.mvcc_store_ref() {
+            let mvcc = Arc::clone(mvcc);
+            let s: DynStream<'_> = Box::pin(async_stream::stream! {
+                let mut raw = mvcc.current_stream(batch_size);
+                while let Some(batch_result) = raw.next().await {
+                    let batch_bytes = match batch_result {
+                        Ok(b) => b,
+                        Err(e) => {
+                            yield Err(e);
+                            return;
+                        }
+                    };
+                    for decoded in Table::decode_raw_batch_filtered(batch_bytes, &pre_filter) {
+                        yield decoded;
+                    }
+                }
+            });
+            s
+        } else {
+            let pf = Arc::clone(&pre_filter);
+            let s: DynStream<'_> = Box::pin(self.table.list_stream_filtered(batch_size, pf));
+            s
+        }
+    }
+
+    /// Stream records filtered by a compiled filter callback.
+    ///
+    /// Compiles the Filter AST into a callback network, then yields
+    /// batches of matching records. The filter is compiled once; only
+    /// matching records are yielded — non-matching records are dropped
+    /// immediately without accumulation.
+    ///
+    /// # Arguments
+    /// * `batch_size` - Number of records per batch from storage
+    /// * `filter` - Filter AST to compile and apply
+    /// * `ctx` - Filter context with interner and resolved query refs
+    pub async fn filter_stream<'a>(
+        &'a self,
+        batch_size: usize,
+        filter: &Filter,
+        ctx: &'a FilterContext<'a>,
+    ) -> DbResult<impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a> {
+        self.ensure_repo_readable()?;
+        let interner = self.interner.get().await?;
+        let callback = compile_filter(filter, interner);
+        let table_stream = self.list_stream(batch_size);
+
+        Ok(async_stream::stream! {
+            futures::pin_mut!(table_stream);
+            while let Some(batch_result) = table_stream.next().await {
+                match batch_result {
+                    Err(e) => { yield Err(e); return; }
+                    Ok(batch) => {
+                        let filtered: Vec<_> = batch
+                            .into_iter()
+                            .filter(|(_, cow)| {
+                                match cow {
+                                    RecordCow::Borrowed(b) => {
+                                        match shamir_types::record_view::RecordView::new(b) {
+                                            Ok(view) => callback.matches(&view, ctx),
+                                            Err(_) => false, // malformed → skip
+                                        }
+                                    }
+                                    RecordCow::Owned(record) => callback.matches(record, ctx),
+                                }
+                            })
+                            .collect();
+                        if !filtered.is_empty() {
+                            yield Ok(filtered);
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    /// tx-aware streaming variant of `list_stream`.
+    ///
+    /// Uses the transaction snapshot for Snapshot/Serializable and latest
+    /// committed state for Pessimistic or no transaction, then records each
+    /// materialised Serializable read. Recording remains a lazy side-effect.
+    ///
+    /// Streaming-scan SSI records yielded keys, not predicate/range locks;
+    /// concurrent phantom inserts are outside its guarantee.
+    ///
+    /// FG-3 overlays this tx's staged writes on the committed stream; other
+    /// transactions' streams remain unaffected.
+    pub fn list_stream_tx<'a>(
+        &'a self,
+        tx: Option<&'a shamir_tx::TxContext>,
+        batch_size: usize,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a {
+        if let Err(error) = self.ensure_repo_readable() {
+            return Either::Left(futures::stream::once(async move { Err(error) }));
+        }
+        // Direct callers need coarse predicate tracking; read_tx records a
+        // precise predicate and calls the helper below instead.
+        if let Some(t) = tx {
+            if t.isolation == shamir_tx::IsolationLevel::Serializable {
+                t.record_predicate_shared(shamir_tx::predicate_set::PredicateDep::TableScan {
+                    table_token: self.table_token(),
+                });
+            }
+        }
+        Either::Right(self.list_stream_tx_after_predicate(tx, batch_size))
+    }
+
+    /// Variant for read_tx after its precise predicate has already been recorded.
+    pub(in crate::table) fn list_stream_tx_after_predicate<'a>(
+        &'a self,
+        tx: Option<&'a shamir_tx::TxContext>,
+        batch_size: usize,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a {
+        let inner = self.committed_stream_tx(tx, batch_size);
+        let token = self.table_token();
+        let mvcc = self.mvcc_store.clone();
+        let recorded = Self::record_scan_reads(inner, tx, token, mvcc);
+        let overlay = overlay_rows_for_tx(tx, token);
+        merge_stream_with_tx_overlay(recorded, overlay, batch_size)
+    }
+
+    /// Committed scan source; staging is merged only after SSI recording.
+    fn committed_stream_tx<'a>(
+        &'a self,
+        tx: Option<&'a shamir_tx::TxContext>,
+        batch_size: usize,
+    ) -> CommittedScan<'a> {
+        if let Err(error) = self.ensure_repo_readable() {
+            return Box::pin(futures::stream::once(async move { Err(error) }));
+        }
+        match (self.mvcc_store_ref(), tx) {
+            (Some(mvcc), Some(t))
+                if matches!(
+                    t.isolation,
+                    shamir_tx::IsolationLevel::Snapshot | shamir_tx::IsolationLevel::Serializable
+                ) =>
+            {
+                let mvcc = Arc::clone(mvcc);
+                Box::pin(async_stream::stream! {
+                    let raw = mvcc.snapshot_stream(batch_size, t.snapshot_version);
+                    futures::pin_mut!(raw);
+                    while let Some(batch) = raw.next().await {
+                        match batch {
+                            Ok(bytes) => {
+                                for decoded in Table::decode_raw_batch(bytes) {
+                                    yield decoded;
+                                }
+                            }
+                            Err(e) => {
+                                yield Err(e);
+                                return;
+                            }
+                        }
+                    }
+                })
+            }
+            _ => Box::pin(self.list_stream(batch_size)),
+        }
+    }
+
+    /// tx-aware streaming variant of `filter_stream`.
+    ///
+    /// Streaming filtered scan; it does not install predicate/range locks.
+    pub async fn filter_stream_tx<'a>(
+        &'a self,
+        tx: Option<&'a shamir_tx::TxContext>,
+        batch_size: usize,
+        filter: &Filter,
+        ctx: &'a FilterContext<'a>,
+    ) -> DbResult<impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a> {
+        self.ensure_repo_readable()?;
+        // Phase C (Step 6): predicate recording for filter streams
+        // reached directly (bypassing read_tx). Zero-overhead: gate on
+        // Serializable before any work.
+        if let Some(t) = tx {
+            if t.isolation == shamir_tx::IsolationLevel::Serializable {
+                let token = self.table_token();
+                let deps = crate::query::filter::eval::predicate_to_index_range(
+                    filter,
+                    self.sorted_indexes(),
+                    ctx.interner,
+                    token,
+                );
+                if deps.is_empty() {
+                    t.record_predicate_shared(shamir_tx::predicate_set::PredicateDep::TableScan {
+                        table_token: token,
+                    });
+                } else {
+                    for d in deps {
+                        t.record_predicate_shared(d);
+                    }
+                }
+            }
+        }
+        let interner = self.interner().get().await?;
+        let callback = compile_filter(filter, interner);
+        let source = self.committed_stream_tx(tx, batch_size);
+        let inner = async_stream::stream! {
+            futures::pin_mut!(source);
+            while let Some(batch) = source.next().await {
+                match batch {
+                    Err(e) => {
+                        yield Err(e);
+                        return;
+                    }
+                    Ok(rows) => {
+                        let filtered: Vec<_> = rows
+                            .into_iter()
+                            .filter(|(_, cow)| match cow {
+                                RecordCow::Borrowed(b) => match RecordView::new(b) {
+                                    Ok(view) => callback.matches(&view, ctx),
+                                    Err(_) => match InnerValue::from_bytes(b.clone()) {
+                                        Ok(record) => callback.matches(&record, ctx),
+                                        Err(_) => false, // malformed → skip
+                                    },
+                                },
+                                RecordCow::Owned(record) => callback.matches(record, ctx),
+                            })
+                            .collect();
+                        if !filtered.is_empty() {
+                            yield Ok(filtered);
+                        }
+                    }
+                }
+            }
+        };
+        let token = self.table_token();
+        let mvcc = self.mvcc_store.clone();
+        let recorded = Self::record_scan_reads(inner, tx, token, mvcc);
+        // FG-3: overlay this tx's own staged writes, filtered variant —
+        // overlay-sourced rows are re-evaluated against `filter` (a staged
+        // UPDATE's new bytes may match/not-match differently than the old
+        // committed value did; a staged INSERT was never filtered before).
+        let overlay = overlay_rows_for_tx(tx, token);
+        if overlay.is_empty() {
+            return Ok(Box::pin(recorded)
+                as std::pin::Pin<
+                    Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a>,
+                >);
+        }
+        let interner = self.interner().get().await?;
+        let callback = compile_filter(filter, interner);
+        let keep = move |_id: &RecordId, bytes: &Bytes| match RecordView::new(bytes) {
+            Ok(view) => callback.matches(&view, ctx),
+            Err(_) => match InnerValue::from_bytes(bytes.clone()) {
+                Ok(tree) => callback.matches(&tree, ctx),
+                Err(_) => false, // malformed → exclude
+            },
+        };
+        Ok(Box::pin(merge_filtered_stream_with_tx_overlay(
+            recorded, overlay, batch_size, keep,
+        ))
+            as std::pin::Pin<
+                Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a>,
+            >)
+    }
+
+    /// Wrap a record stream so that, for a Serializable tx, each yielded
+    /// record's key is recorded into the read-set at the version observed
+    /// when it is pulled. The wrapper is transparent: it yields exactly what
+    /// the inner stream yields, in the same order. For `tx == None` or a
+    /// non-Serializable tx it adds no per-record work beyond a single
+    /// up-front isolation check (the `version_of` lookup and recording are
+    /// skipped entirely). `mvcc` is `None` → version `0` (conservative
+    /// default, see `read_one_tx`).
+    pub(in crate::table) fn record_scan_reads<'a, S>(
+        inner: S,
+        tx: Option<&'a shamir_tx::TxContext>,
+        token: u64,
+        mvcc: Option<Arc<shamir_tx::MvccStore>>,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a
+    where
+        S: futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a,
+    {
+        // Only Serializable txs track reads; everything else is a pass-through
+        // so the non-SSI scan path pays nothing per record.
+        let recording_tx = tx.filter(|t| t.isolation == shamir_tx::IsolationLevel::Serializable);
+        async_stream::stream! {
+            futures::pin_mut!(inner);
+            while let Some(batch_result) = inner.next().await {
+                if let (Ok(batch), Some(tx)) = (&batch_result, recording_tx) {
+                    for (rid, _) in batch {
+                        let key = rid.to_bytes();
+                        // A3: record the version of the value ACTUALLY READ,
+                        // not the cell's current version. The scan reads via
+                        // `get_at(key, snapshot)` (snapshot-gated), so the
+                        // returned bytes never correspond to a version newer
+                        // than the tx's snapshot. Clamping the recorded
+                        // version to `min(version_of(key), snapshot)` ensures
+                        // a concurrent committer that pushed the cell past
+                        // the snapshot is detected at `validate_read_set`
+                        // (`current > version_seen`), instead of masked
+                        // (`current == version_seen` when the raw cell version
+                        // was recorded). `snapshot_version` is constant for
+                        // the tx, so `min` is computed per-record with no
+                        // extra lookup.
+                        let snapshot_v = tx.snapshot_version;
+                        let version = mvcc
+                            .as_ref()
+                            .map_or(0, |m| m.version_of(key.as_ref()).min(snapshot_v));
+                        tx.record_read_shared(token, key, version);
+                    }
+                }
+                yield batch_result;
+            }
+        }
+    }
+
+    /// FINAL-A helper: drain `list_stream` into a vec of `(RecordId, InnerValue)`.
+    /// Used by `create_index` / `create_unique_index` to backfill from the seam
+    /// rather than the raw `data_store` when an MvccStore is attached.
+    /// FINAL-A helper: drain `list_stream` into a vec of `(RecordId, InnerValue)`.
+    /// Used by `create_index` / `create_unique_index` to backfill from the seam
+    /// rather than the raw `data_store` when an MvccStore is attached.
+    ///
+    /// Decodes every `Borrowed` row to an owned `InnerValue` tree — correct for
+    /// index backfill which needs the full tree.
+    pub(in crate::table) async fn collect_all_current_records(
+        &self,
+    ) -> DbResult<Vec<(RecordId, InnerValue)>> {
+        let mut out = Vec::new();
+        let stream = self.list_stream(1000);
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            for (id, cow) in batch? {
+                let inner = match cow {
+                    RecordCow::Borrowed(b) => InnerValue::from_bytes(b).map_err(|e| {
+                        shamir_storage::error::DbError::Codec(format!(
+                            "Failed to deserialize record: {}",
+                            e
+                        ))
+                    })?,
+                    RecordCow::Owned(v) => v,
+                };
+                out.push((id, inner));
+            }
+        }
+        Ok(out)
+    }
+
+    /// tx-aware single-record read.
+    ///
+    /// - `tx == None` → same as `get`: direct read from main data_store.
+    /// - `tx == Some(tx)` and no `mvcc_store` attached → same as `get`.
+    /// - `tx == Some(tx)` and `mvcc_store` attached →
+    ///   - `Pessimistic` isolation → `mvcc.get_current_bytes(rid.to_bytes())`
+    ///     (the LATEST COMMITTED value), because the caller has already
+    ///     acquired a Shared lock on the key (see
+    ///     `acquire_pessimistic_read_lock` above) — possibly after waiting
+    ///     for an Exclusive holder to release. A read taken under a held
+    ///     lock MUST reflect the latest committed value at the moment the
+    ///     lock was granted, not the tx's original snapshot, otherwise a
+    ///     read-modify-write cycle would compute from stale data and lose
+    ///     the just-released committer's update (A4 fix b).
+    ///   - `Snapshot` / `Serializable` isolation →
+    ///     `mvcc.get_at(rid.to_bytes(), tx.snapshot_version)`
+    ///     (snapshot-gated read, unchanged):
+    ///     - `Some(bytes)` → deserialize and return.
+    ///     - `None` → `DbError::NotFound`.
+    ///
+    /// I.4 — read-your-own-writes. Before consulting the snapshot base, the
+    /// tx's own staging overlay (`tx.write_set[token]`, the `StagingStore`
+    /// holding this tx's un-committed set/remove ops) is checked for `key`:
+    ///   - staged `Set(bytes)` → return the staged value (read-your-own-write);
+    ///   - staged `Remove`     → return `NotFound` (read-your-own-delete);
+    ///   - not staged          → fall through to `get_at(snapshot)` (the base).
+    ///
+    /// HIGH-C — SSI read tracking. When `tx` is `Some`, the key and the
+    /// version observed at read time are recorded into the tx's read-set via
+    /// [`record_read_shared`](shamir_tx::TxContext::record_read_shared) (a
+    /// no-op under Snapshot isolation, so callers pay nothing there).
+    ///
+    /// §5b floor (#61): point-read API returns an OWNED `InnerValue` — the
+    /// caller owns the deserialized record. Narrowing this to the lens would
+    /// ripple across all callers. See `docs/dev-artifacts/perf/innervalue-floor.md`
+    /// (Category 4 — owned-value boundaries).
+    pub async fn read_one_tx(
+        &self,
+        id: RecordId,
+        tx: Option<&shamir_tx::TxContext>,
+    ) -> DbResult<InnerValue> {
+        self.ensure_repo_readable()?;
+        // Task-group-2 test-only fault injection: reuses the F-65 seam (see
+        // [`TEST_READ_ONE_TX_BYTES_FAILURE`]'s doc) so a test can force
+        // `update_tx`'s pre-read to fail with a genuine `Err` instead of
+        // reading, proving it fails closed rather than treating the row as
+        // absent. One-shot per `(table_token, id)`.
+        #[cfg(test)]
+        if let Some(hook) = TEST_READ_ONE_TX_BYTES_FAILURE.get() {
+            if let Some(err) = hook.take_injected(self.table_token(), id) {
+                return Err(err);
+            }
+        }
+        if let Some(tx) = tx {
+            let key = id.to_bytes();
+            // Level-3: acquire a Shared lock on the key before reading.
+            // No-op for Snapshot / Serializable (the helper self-gates).
+            // A wound-wait abort surfaces as DbError::Conflict and the tx
+            // must abort (the executor / commit path handles it). task #532:
+            // the lock registry is `RecordKey`-keyed — build the key inline
+            // from the rid (alloc-free) rather than round-tripping `Bytes`.
+            self.acquire_pessimistic_read_lock(RecordKey::from_slice(id.as_bytes()), tx)
+                .await?;
+            // A3: record the version of the value ACTUALLY READ, not the
+            // cell's current version. `read_one_tx` reads via
+            // `get_at(key, tx.snapshot_version)` (snapshot-gated), so the
+            // returned bytes never correspond to a version newer than the
+            // tx's snapshot. A concurrent committer can push the cell's
+            // current version past the snapshot BETWEEN this `version_of`
+            // call and the `get_at` call (or the cell may already be ahead
+            // before the read starts); recording that newer version would
+            // mask the conflict at `validate_read_set` (which checks
+            // `current > version_seen`). Clamping to
+            // `min(version_of(key), snapshot_version)` guarantees the
+            // recorded version never exceeds what could possibly have been
+            // read, so any post-snapshot commit is correctly detected.
+            // No-op for Snapshot isolation.
+            let version = self.mvcc_store.as_ref().map_or(0, |mvcc| {
+                mvcc.version_of(key.as_ref()).min(tx.snapshot_version)
+            });
+            tx.record_read_shared(self.table_token(), key.clone(), version);
+
+            // I.4 read-your-own-writes: the tx's own staging overlay wins
+            // over the snapshot base. A targeted per-key probe (alloc-free,
+            // no fall-through to base): staged Set → return the staged value,
+            // staged Remove → NotFound, not staged → fall through to the
+            // snapshot base below. Only the table's own staging is probed
+            // (guarded by the write_set lookup), so a tx that never wrote this
+            // table pays nothing.
+            if let Some(staging) = tx.write_set.get(&self.table_token()) {
+                match staging.staged_op(key.as_ref()) {
+                    Some(shamir_tx::staging_store::StagedKind::Set(v)) => {
+                        return InnerValue::from_bytes(v).map_err(|e| {
+                            shamir_storage::error::DbError::Codec(format!(
+                                "Failed to deserialize InnerValue: {}",
+                                e
+                            ))
+                        });
+                    }
+                    Some(shamir_tx::staging_store::StagedKind::Removed) => {
+                        return Err(shamir_storage::error::DbError::NotFound(format!(
+                            "record staged-removed in tx: {:?}",
+                            id
+                        )));
+                    }
+                    None => {}
+                }
+            }
+
+            if let Some(mvcc) = self.mvcc_store.as_ref() {
+                // A4 (fix b): for a Pessimistic tx reading UNDER a held lock
+                // (the `acquire_pessimistic_read_lock` call above already
+                // granted the Shared lock — possibly after waiting for an
+                // Exclusive holder to release), the read MUST resolve to the
+                // LATEST COMMITTED value, not the tx's original snapshot.
+                // Otherwise a tx that began before a concurrent committer's
+                // publish, then acquired the lock AFTER that publish, would
+                // still see the stale snapshot value — defeating the entire
+                // purpose of taking the lock (a read-modify-write cycle
+                // computed from stale data → lost update). Snapshot /
+                // Serializable isolation's snapshot-gated `get_at` semantics
+                // are unchanged below.
+                if tx.isolation == shamir_tx::IsolationLevel::Pessimistic {
+                    match mvcc.get_current_bytes(key.as_ref()).await? {
+                        Some(bytes) => {
+                            return InnerValue::from_bytes(bytes).map_err(|e| {
+                                shamir_storage::error::DbError::Codec(format!(
+                                    "Failed to deserialize InnerValue: {}",
+                                    e
+                                ))
+                            });
+                        }
+                        None => {
+                            return Err(shamir_storage::error::DbError::NotFound(format!(
+                                "record not found (latest committed) under Pessimistic lock: {:?}",
+                                id
+                            )));
+                        }
+                    }
+                }
+                match mvcc.get_at(key.as_ref(), tx.snapshot_version).await? {
+                    Some(bytes) => {
+                        return InnerValue::from_bytes(bytes).map_err(|e| {
+                            shamir_storage::error::DbError::Codec(format!(
+                                "Failed to deserialize InnerValue: {}",
+                                e
+                            ))
+                        });
+                    }
+                    None => {
+                        return Err(shamir_storage::error::DbError::NotFound(format!(
+                            "record not found at snapshot {}: {:?}",
+                            tx.snapshot_version, id
+                        )));
+                    }
+                }
+            }
+        }
+        self.get(id).await
+    }
+
+    /// tx-aware raw-bytes read (no InnerValue decode).
+    ///
+    /// Same lock / overlay / snapshot semantics as `read_one_tx` but
+    /// returns the raw storage msgpack bytes without decoding to an
+    /// `InnerValue` tree. Returns `None` when the record is absent
+    /// (staged-removed, past the snapshot, or not in the main store) —
+    /// real I/O errors propagate via `?`.
+    ///
+    /// Used by `delete_tx` to feed index planners via a zero-copy
+    /// `RecordView` lens instead of a decoded `InnerValue` tree.
+    pub(crate) async fn read_one_tx_bytes(
+        &self,
+        id: RecordId,
+        tx: Option<&shamir_tx::TxContext>,
+    ) -> DbResult<Option<Bytes>> {
+        self.ensure_repo_readable()?;
+        // F-65 (#891) test-only fault injection: if a test armed a failure for
+        // this exact `(table_token, id)`, return the injected `Err` instead of
+        // reading. One-shot (consumed on first match). See
+        // [`TEST_READ_ONE_TX_BYTES_FAILURE`]'s doc.
+        #[cfg(test)]
+        if let Some(hook) = TEST_READ_ONE_TX_BYTES_FAILURE.get() {
+            if let Some(err) = hook.take_injected(self.table_token(), id) {
+                return Err(err);
+            }
+            if let Some(bytes) = hook.take_corrupt(self.table_token(), id) {
+                return Ok(Some(bytes));
+            }
+        }
+        if let Some(tx) = tx {
+            let key = id.to_bytes();
+            // Level-3: acquire a Shared lock on the key before reading.
+            // No-op for Snapshot / Serializable (the helper self-gates).
+            // task #532: lock registry is `RecordKey`-keyed — build inline.
+            self.acquire_pessimistic_read_lock(RecordKey::from_slice(id.as_bytes()), tx)
+                .await?;
+            // A3: record the version of the value ACTUALLY READ, not the
+            // cell's current version. See `read_one_tx` for the full
+            // rationale on the `.min(snapshot_version)` clamp. No-op for
+            // Snapshot isolation.
+            let version = self.mvcc_store.as_ref().map_or(0, |mvcc| {
+                mvcc.version_of(key.as_ref()).min(tx.snapshot_version)
+            });
+            tx.record_read_shared(self.table_token(), key.clone(), version);
+
+            // I.4 read-your-own-writes: check the tx staging overlay first.
+            if let Some(staging) = tx.write_set.get(&self.table_token()) {
+                match staging.staged_op(key.as_ref()) {
+                    Some(shamir_tx::staging_store::StagedKind::Set(v)) => {
+                        return Ok(Some(v));
+                    }
+                    Some(shamir_tx::staging_store::StagedKind::Removed) => {
+                        return Ok(None);
+                    }
+                    None => {}
+                }
+            }
+
+            if let Some(mvcc) = self.mvcc_store.as_ref() {
+                // A4 (fix b): see `read_one_tx` — a Pessimistic tx reading
+                // under a held lock resolves to the LATEST COMMITTED value,
+                // not the snapshot. Snapshot / Serializable unchanged.
+                if tx.isolation == shamir_tx::IsolationLevel::Pessimistic {
+                    return mvcc.get_current_bytes(key.as_ref()).await;
+                }
+                return mvcc.get_at(key.as_ref(), tx.snapshot_version).await;
+            }
+        }
+        // No tx, or no mvcc: read raw bytes from the data store.
+        if let Some(mvcc) = self.mvcc_store.as_ref() {
+            return mvcc.get_current_bytes(id.as_bytes()).await;
+        }
+        match self
+            .table
+            .data_store()
+            .get(RecordKey::from_slice(id.as_bytes()))
+            .await
+        {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(shamir_storage::error::DbError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// tx-aware read-query execution (Vector I.1).
+    ///
+    /// The wire `execute_batch` path dispatches `BatchOp::Read` here when a
+    /// `transactional` batch is in flight, so a Serializable batch's SELECT
+    /// populates the tx read-set and SSI write-skew detection becomes live
+    /// end-to-end.
+    pub async fn read_tx(
+        &self,
+        query: &crate::query::read::ReadQuery,
+        ctx: &FilterContext<'_>,
+        tx: Option<&shamir_tx::TxContext>,
+    ) -> DbResult<crate::query::read::QueryResult> {
+        self.ensure_repo_readable()?;
+        // Only a Serializable tx records reads; for everything else the
+        // recording pass is pure overhead, so dispatch straight to `read`.
+        let recording = tx
+            .filter(|t| t.isolation == shamir_tx::IsolationLevel::Serializable)
+            .is_some();
+        if recording {
+            // Phase C (Step 6): one-shot predicate-set recording derived
+            // from query.r#where. Zero-overhead: this block only runs for
+            // Serializable txs.
+            let tx_ref = tx.expect("recording=true implies tx is Some");
+            let token = self.table_token();
+            match query.r#where.as_ref() {
+                None => {
+                    // No WHERE → coarse TableScan over the whole table.
+                    tx_ref.record_predicate_shared(
+                        shamir_tx::predicate_set::PredicateDep::TableScan { table_token: token },
+                    );
+                }
+                Some(filter) => {
+                    let deps = crate::query::filter::eval::predicate_to_index_range(
+                        filter,
+                        self.sorted_indexes(),
+                        ctx.interner,
+                        token,
+                    );
+                    if deps.is_empty() {
+                        tx_ref.record_predicate_shared(
+                            shamir_tx::predicate_set::PredicateDep::TableScan {
+                                table_token: token,
+                            },
+                        );
+                    } else {
+                        for dep in deps {
+                            tx_ref.record_predicate_shared(dep);
+                        }
+                    }
+                }
+            }
+        }
+        // Level-3: acquire a Shared lock on every record the query touches
+        // BEFORE reading. Zero-overhead: only runs for Pessimistic txs. A
+        // wound-wait abort surfaces as DbError::Conflict and propagates up.
+        if let Some(t) = tx.filter(|t| t.isolation == shamir_tx::IsolationLevel::Pessimistic) {
+            self.lock_query_reads(query, ctx, t).await?;
+        }
+        // Fused SSI path: read_for_tx uses tx-aware streams in the full-scan
+        // fallback so SSI read-set recording is folded into the single scan
+        // that emits rows (eliminates the previous double-scan).
+        self.read_for_tx(query, ctx, tx).await
+    }
+
+    /// tx-aware variant of `read_with_encoding`.
+    ///
+    /// Performs the same SSI predicate recording and Pessimistic lock
+    /// acquisition as `read_tx` and then dispatches to `read_for_tx_with_encoding`
+    /// so that the result rows honour the requested encoding.
+    pub async fn read_tx_with_encoding(
+        &self,
+        query: &crate::query::read::ReadQuery,
+        ctx: &FilterContext<'_>,
+        tx: Option<&shamir_tx::TxContext>,
+        encoding: ResultEncoding,
+    ) -> DbResult<crate::query::read::QueryResult> {
+        self.ensure_repo_readable()?;
+        // Only a Serializable tx records reads; for everything else the
+        // recording pass is pure overhead, so skip it.
+        let recording = tx
+            .filter(|t| t.isolation == shamir_tx::IsolationLevel::Serializable)
+            .is_some();
+        if recording {
+            let tx_ref = tx.expect("recording=true implies tx is Some");
+            let token = self.table_token();
+            match query.r#where.as_ref() {
+                None => {
+                    tx_ref.record_predicate_shared(
+                        shamir_tx::predicate_set::PredicateDep::TableScan { table_token: token },
+                    );
+                }
+                Some(filter) => {
+                    let deps = crate::query::filter::eval::predicate_to_index_range(
+                        filter,
+                        self.sorted_indexes(),
+                        ctx.interner,
+                        token,
+                    );
+                    if deps.is_empty() {
+                        tx_ref.record_predicate_shared(
+                            shamir_tx::predicate_set::PredicateDep::TableScan {
+                                table_token: token,
+                            },
+                        );
+                    } else {
+                        for dep in deps {
+                            tx_ref.record_predicate_shared(dep);
+                        }
+                    }
+                }
+            }
+        }
+        // Level-3: acquire a Shared lock on every record the query touches
+        // BEFORE reading (Pessimistic isolation only).
+        if let Some(t) = tx.filter(|t| t.isolation == shamir_tx::IsolationLevel::Pessimistic) {
+            self.lock_query_reads(query, ctx, t).await?;
+        }
+        self.read_for_tx_with_encoding(query, ctx, tx, encoding)
+            .await
+    }
+
+    /// Level-3: acquire a `Shared` lock on every record matching `query`'s
+    /// WHERE clause (or the whole table when there is no WHERE). Pessimistic
+    /// only — never called for Snapshot / Serializable.
+    async fn lock_query_reads(
+        &self,
+        query: &crate::query::read::ReadQuery,
+        ctx: &FilterContext<'_>,
+        tx: &shamir_tx::TxContext,
+    ) -> DbResult<()> {
+        let batch_size = 1000;
+        match query.r#where.as_ref() {
+            Some(filter) => {
+                let stream = self.filter_stream(batch_size, filter, ctx).await?;
+                futures::pin_mut!(stream);
+                while let Some(batch) = stream.next().await {
+                    for (rid, _cow) in batch? {
+                        self.acquire_pessimistic_read_lock(
+                            RecordKey::from_slice(rid.as_bytes()),
+                            tx,
+                        )
+                        .await?;
+                    }
+                }
+            }
+            None => {
+                let stream = self.list_stream(batch_size);
+                futures::pin_mut!(stream);
+                while let Some(batch) = stream.next().await {
+                    for (rid, _cow) in batch? {
+                        self.acquire_pessimistic_read_lock(
+                            RecordKey::from_slice(rid.as_bytes()),
+                            tx,
+                        )
+                        .await?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
