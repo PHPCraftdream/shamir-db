@@ -7511,3 +7511,1260 @@ to_path = "crates/shamir-engine/src/query/batch/tests/limits/watchdog_tests.rs"
 to_item = "shamir-engine::lib::query::batch::tests::limits::watchdog_tests::watchdog_warns_while_slow_op_still_running"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
+item = "shamir-engine::lib::query::batch::query_value_serializer::QvMap::Error"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::QvMap::Error"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
+item = "shamir-engine::lib::query::batch::query_value_serializer::QvMap::Ok"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::QvMap::Ok"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
+item = "shamir-engine::lib::query::batch::query_value_serializer::QvMap::end"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::QvMap::end"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
+item = "shamir-engine::lib::query::batch::query_value_serializer::QvSeq::Error"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::QvSeq::Error"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
+item = "shamir-engine::lib::query::batch::query_value_serializer::QvSeq::Ok"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::QvSeq::Ok"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
+item = "shamir-engine::lib::query::batch::query_value_serializer::QvSeq::end"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::QvSeq::end"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
+item = "shamir-engine::lib::query::batch::query_value_serializer::QvSeq::serialize_element"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::QvSeq::serialize_element"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
+item = "shamir-engine::lib::query::batch::query_value_serializer::Unreachable::Error"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::Unreachable::Error"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
+item = "shamir-engine::lib::query::batch::query_value_serializer::Unreachable::Ok"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::Unreachable::Ok"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
+item = "shamir-engine::lib::query::batch::query_value_serializer::Unreachable::end"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::Unreachable::end"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
+item = "shamir-engine::lib::query::batch::query_value_serializer::Unreachable::serialize_field"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::Unreachable::serialize_field"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/fk_actions.rs"
+item = "shamir-engine::lib::query::batch::fk_actions::CASCADE_DEPTH_LIMIT"
+to_path = "crates/shamir-engine/src/query/batch/fk/fk_actions/plan.rs"
+to_item = "shamir-engine::lib::query::batch::fk::fk_actions::plan::CASCADE_DEPTH_LIMIT"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/fk_actions.rs"
+item = "shamir-engine::lib::query::batch::fk_actions::CascadePlan"
+to_path = "crates/shamir-engine/src/query/batch/fk/fk_actions/plan.rs"
+to_item = "shamir-engine::lib::query::batch::fk::fk_actions::plan::CascadePlan"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/result_size.rs"
+item = "shamir-engine::lib::query::batch::result_size::ResultSize::ENTRY"
+to_path = "crates/shamir-engine/src/query/batch/runner/result_size.rs"
+to_item = "shamir-engine::lib::query::batch::runner::result_size::ResultSize::ENTRY"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
+item = "shamir-engine::lib::query::batch::query_value_serializer::QvMap::Error"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::QvMap::Error"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
+item = "shamir-engine::lib::query::batch::query_value_serializer::QvSeq::Error"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::QvSeq::Error"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
+item = "shamir-engine::lib::query::batch::query_value_serializer::Unreachable::Error"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::Unreachable::Error"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/fk_on_update.rs"
+item = "shamir-engine::lib::query::batch::fk_on_update::FkUpdatePlan"
+to_path = "crates/shamir-engine/src/query/batch/fk/fk_on_update/plan.rs"
+to_item = "shamir-engine::lib::query::batch::fk::fk_on_update::plan::FkUpdatePlan"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_runner.rs"
+item = "shamir-engine::lib::query::batch::query_runner::NestedTxBodyFuture"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_runner/nested.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_runner::nested::NestedTxBodyFuture"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
+item = "shamir-engine::lib::query::batch::query_value_serializer::QvMap::Ok"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::QvMap::Ok"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
+item = "shamir-engine::lib::query::batch::query_value_serializer::QvSeq::Ok"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::QvSeq::Ok"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
+item = "shamir-engine::lib::query::batch::query_value_serializer::Unreachable::Ok"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::Unreachable::Ok"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/fk_on_update.rs"
+item = "shamir-engine::lib::query::batch::fk_on_update::OnUpdateRef"
+to_path = "crates/shamir-engine/src/query/batch/fk/fk_on_update/plan.rs"
+to_item = "shamir-engine::lib::query::batch::fk::fk_on_update::plan::OnUpdateRef"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/result_size.rs"
+item = "shamir-engine::lib::query::batch::result_size::ResultSize"
+to_path = "crates/shamir-engine/src/query/batch/runner/result_size.rs"
+to_item = "shamir-engine::lib::query::batch::runner::result_size::ResultSize"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/result_size.rs"
+item = "shamir-engine::lib::query::batch::result_size::ResultSize::SHELL"
+to_path = "crates/shamir-engine/src/query/batch/runner/result_size.rs"
+to_item = "shamir-engine::lib::query::batch::runner::result_size::ResultSize::SHELL"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/sub_batch_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::sub_batch_tests::TestResolverWithScalars"
+to_path = "crates/shamir-engine/src/query/batch/tests/batching/iteration/support.rs"
+to_item = "shamir-engine::lib::query::batch::tests::batching::iteration::support::TestResolverWithScalars"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/param_subst.rs"
+item = "shamir-engine::lib::query::batch::param_subst::WriteValueError"
+to_path = "crates/shamir-engine/src/query/batch/runner/param_subst.rs"
+to_item = "shamir-engine::lib::query::batch::runner::param_subst::WriteValueError"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
+item = "shamir-engine::lib::query::batch::query_value_serializer::QvMap::end"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::QvMap::end"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
+item = "shamir-engine::lib::query::batch::query_value_serializer::QvSeq::end"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::QvSeq::end"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
+item = "shamir-engine::lib::query::batch::query_value_serializer::Unreachable::end"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::Unreachable::end"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::batch_execute::execute_batch"
+to_path = "crates/shamir-engine/src/query/batch/exec/batch_execute.rs"
+to_item = "shamir-engine::lib::query::batch::exec::batch_execute::execute_batch"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::batch_execute::execute_batch_impl"
+to_path = "crates/shamir-engine/src/query/batch/exec/batch_execute.rs"
+to_item = "shamir-engine::lib::query::batch::exec::batch_execute::execute_batch_impl"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::batch_execute::execute_planned_batch_impl"
+to_path = "crates/shamir-engine/src/query/batch/exec/batch_execute.rs"
+to_item = "shamir-engine::lib::query::batch::exec::batch_execute::execute_planned_batch_impl"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::batch_execute::execute_transactional_impl"
+to_path = "crates/shamir-engine/src/query/batch/exec/batch_execute.rs"
+to_item = "shamir-engine::lib::query::batch::exec::batch_execute::execute_transactional_impl"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/receipts/dependency.rs"
+item = "shamir-engine::lib::query::batch::receipts::dependency::failure_result"
+to_path = "crates/shamir-engine/src/query/batch/control/receipts/dependency.rs"
+to_item = "shamir-engine::lib::query::batch::control::receipts::dependency::failure_result"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/receipts/propagation.rs"
+item = "shamir-engine::lib::query::batch::receipts::propagation::filter"
+to_path = "crates/shamir-engine/src/query/batch/control/receipts/propagation.rs"
+to_item = "shamir-engine::lib::query::batch::control::receipts::propagation::filter"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::batch_execute::filter_results"
+to_path = "crates/shamir-engine/src/query/batch/exec/batch_execute.rs"
+to_item = "shamir-engine::lib::query::batch::exec::batch_execute::filter_results"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_actions_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_actions_tests::insert_helper"
+to_path = "crates/shamir-engine/src/query/batch/tests/fk/actions/support.rs"
+to_item = "shamir-engine::lib::query::batch::tests::fk::actions::support::insert_helper"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::batch_execute::plan_and_validate_batch"
+to_path = "crates/shamir-engine/src/query/batch/exec/batch_execute.rs"
+to_item = "shamir-engine::lib::query::batch::exec::batch_execute::plan_and_validate_batch"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_race_closure_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_race_closure_tests::read_first_i64"
+to_path = "crates/shamir-engine/src/query/batch/tests/fk/races/support.rs"
+to_item = "shamir-engine::lib::query::batch::tests::fk::races::support::read_first_i64"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec_scope::ExecScope::read_visibility_budget_at_for_test"
+to_path = "crates/shamir-engine/src/query/batch/exec/exec_scope.rs"
+to_item = "shamir-engine::lib::query::batch::exec::exec_scope::ExecScope::read_visibility_budget_at_for_test"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/result_size.rs"
+item = "shamir-engine::lib::query::batch::result_size::ResultSize::result"
+to_path = "crates/shamir-engine/src/query/batch/runner/result_size.rs"
+to_item = "shamir-engine::lib::query::batch::runner::result_size::ResultSize::result"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_runner.rs"
+item = "shamir-engine::lib::query::batch::query_runner::QueryRunner::run_with_wait"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_runner/runner.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_runner::runner::QueryRunner::run_with_wait"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/executor_tests/when_skip_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::executor_tests::when_skip_tests::seed_req_for_after_own_when_false"
+to_path = "crates/shamir-engine/src/query/batch/tests/executor/ops/when_skip_tests.rs"
+to_item = "shamir-engine::lib::query::batch::tests::executor::ops::when_skip_tests::seed_req_for_after_own_when_false"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
+item = "shamir-engine::lib::query::batch::query_value_serializer::QvSeq::serialize_element"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::QvSeq::serialize_element"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
+item = "shamir-engine::lib::query::batch::query_value_serializer::Unreachable::serialize_field"
+to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
+to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::Unreachable::serialize_field"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/batch_validate.rs"
+item = "shamir-engine::lib::query::batch::batch_validate::validate_filter_depth"
+to_path = "crates/shamir-engine/src/query/batch/exec/batch_validate.rs"
+to_item = "shamir-engine::lib::query::batch::exec::batch_validate::validate_filter_depth"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec_scope::ExecScope::with_deadline_cap"
+to_path = "crates/shamir-engine/src/query/batch/exec/exec_scope.rs"
+to_item = "shamir-engine::lib::query::batch::exec::exec_scope::ExecScope::with_deadline_cap"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/authorized.rs"
+item = "shamir-engine::lib::query::batch::authorized::Authorized::with_deadline_cap_at_for_test"
+to_path = "crates/shamir-engine/src/query/batch/control/authorized.rs"
+to_item = "shamir-engine::lib::query::batch::control::authorized::Authorized::with_deadline_cap_at_for_test"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/mod.rs"
+item = "shamir-engine::lib::query::batch::authorized"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/mod.rs"
+item = "shamir-engine::lib::query::batch::batch_execute"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/mod.rs"
+item = "shamir-engine::lib::query::batch::batch_validate"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/mod.rs"
+item = "shamir-engine::lib::query::batch::execution_deadline"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/mod.rs"
+item = "shamir-engine::lib::query::batch::executor_traits"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/mod.rs"
+item = "shamir-engine::lib::query::batch::fk_actions"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/mod.rs"
+item = "shamir-engine::lib::query::batch::fk_on_update"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/mod.rs"
+item = "shamir-engine::lib::query::batch::fk_restrict"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/mod.rs"
+item = "shamir-engine::lib::query::batch::interactive_tx"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/mod.rs"
+item = "shamir-engine::lib::query::batch::op_watchdog"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/mod.rs"
+item = "shamir-engine::lib::query::batch::param_subst"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/mod.rs"
+item = "shamir-engine::lib::query::batch::query_runner"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/mod.rs"
+item = "shamir-engine::lib::query::batch::query_value_serializer"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/mod.rs"
+item = "shamir-engine::lib::query::batch::result_size"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/tests/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::executor_tests"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/tests/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_actions_tests"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/tests/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_on_update_tests"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/tests/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_race_closure_tests"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/tests/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_ri_barrier_tests"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/tests/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::for_each_tests"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/tests/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::sub_batch_tests"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/control/mod.rs"
+item = "shamir-engine::lib::query::batch::control::authorized"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/control/mod.rs"
+item = "shamir-engine::lib::query::batch::control::op_watchdog"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/exec/mod.rs"
+item = "shamir-engine::lib::query::batch::exec::batch_execute"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/exec/mod.rs"
+item = "shamir-engine::lib::query::batch::exec::batch_validate"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/exec/mod.rs"
+item = "shamir-engine::lib::query::batch::exec::execution_deadline"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/exec/mod.rs"
+item = "shamir-engine::lib::query::batch::exec::executor_traits"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/exec/mod.rs"
+item = "shamir-engine::lib::query::batch::exec::interactive_tx"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/fk/fk_actions/mod.rs"
+item = "shamir-engine::lib::query::batch::fk::fk_actions::apply"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/fk/fk_actions/mod.rs"
+item = "shamir-engine::lib::query::batch::fk::fk_actions::helpers"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/fk/fk_actions/mod.rs"
+item = "shamir-engine::lib::query::batch::fk::fk_actions::plan"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/fk/fk_on_update/mod.rs"
+item = "shamir-engine::lib::query::batch::fk::fk_on_update::apply"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/fk/fk_on_update/mod.rs"
+item = "shamir-engine::lib::query::batch::fk::fk_on_update::helpers"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/fk/fk_on_update/mod.rs"
+item = "shamir-engine::lib::query::batch::fk::fk_on_update::plan"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/fk/fk_on_update/mod.rs"
+item = "shamir-engine::lib::query::batch::fk::fk_on_update::scan"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/fk/mod.rs"
+item = "shamir-engine::lib::query::batch::fk::fk_actions"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/fk/mod.rs"
+item = "shamir-engine::lib::query::batch::fk::fk_on_update"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/fk/mod.rs"
+item = "shamir-engine::lib::query::batch::fk::fk_restrict"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/mod.rs"
+item = "shamir-engine::lib::query::batch::control"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/mod.rs"
+item = "shamir-engine::lib::query::batch::exec"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/mod.rs"
+item = "shamir-engine::lib::query::batch::fk"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/mod.rs"
+item = "shamir-engine::lib::query::batch::runner"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/runner/mod.rs"
+item = "shamir-engine::lib::query::batch::runner::param_subst"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/runner/mod.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/runner/mod.rs"
+item = "shamir-engine::lib::query::batch::runner::query_value_serializer"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/runner/mod.rs"
+item = "shamir-engine::lib::query::batch::runner::result_size"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/runner/query_runner/mod.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::arms_read"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/runner/query_runner/mod.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::arms_write"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/runner/query_runner/mod.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::fk_isolation"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/runner/query_runner/mod.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::helpers"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/runner/query_runner/mod.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::nested"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/runner/query_runner/mod.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::runner"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/batching/iteration/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::iteration::for_each_core_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/batching/iteration/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::iteration::for_each_gate_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/batching/iteration/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::iteration::for_each_over_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/batching/iteration/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::iteration::sub_batch_basic_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/batching/iteration/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::iteration::sub_batch_params_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/batching/iteration/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::iteration::support"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/batching/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::access"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/batching/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::iteration"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/batching/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::planning"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/batching/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::serializer"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/executor/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::guards"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/executor/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::ops"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/executor/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::runner"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/executor/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::tx"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/fk/actions/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::actions::fk_actions_delete_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/fk/actions/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::actions::fk_actions_tx_index_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/fk/actions/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::actions::support"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/fk/barriers/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::barriers::fk_ri_barrier_publish_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/fk/barriers/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::barriers::fk_ri_barrier_snapshot_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/fk/barriers/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::barriers::support"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/fk/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::actions"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/fk/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::barriers"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/fk/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::fail_closed"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/fk/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::on_update"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/fk/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::races"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/fk/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::support"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/fk/on_update/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::on_update::on_update_basic_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/fk/on_update/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::on_update::on_update_multi_ref_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/fk/on_update/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::on_update::on_update_self_ref_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/fk/on_update/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::on_update::on_update_tx_index_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/fk/on_update/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::on_update::support"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/fk/races/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::races::fk_race_closure_delete_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/fk/races/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::races::fk_race_closure_on_update_tests"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/fk/races/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::races::support"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/limits/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::limits::budgets"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::batching"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::executor"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::fk"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/tests/mod.rs"
+item = "shamir-engine::lib::query::batch::tests::limits"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/fk_on_update.rs"
+item = "shamir-engine::lib::query::batch::fk_on_update::PendingMutation"
+to_path = "crates/shamir-engine/src/query/batch/fk/fk_on_update/plan.rs"
+to_item = "shamir-engine::lib::query::batch::fk::fk_on_update::plan::PendingMutation"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/fk_actions.rs"
+item = "shamir-engine::lib::query::batch::fk_actions::PendingMutation"
+to_path = "crates/shamir-engine/src/query/batch/fk/fk_actions/plan.rs"
+to_item = "shamir-engine::lib::query::batch::fk::fk_actions::plan::PendingMutation"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/fk_restrict.rs"
+item = "shamir-engine::lib::query::batch::fk_restrict::filter_matches"
+to_path = "crates/shamir-engine/src/query/batch/fk/fk_restrict.rs"
+to_item = "shamir-engine::lib::query::batch::fk::fk_restrict::filter_matches"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/fk_on_update.rs"
+item = "shamir-engine::lib::query::batch::fk_on_update::filter_matches"
+to_path = "crates/shamir-engine/src/query/batch/fk/fk_actions/helpers.rs"
+to_item = "shamir-engine::lib::query::batch::fk::fk_actions::helpers::filter_matches"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/fk_actions.rs"
+item = "shamir-engine::lib::query::batch::fk_actions::filter_matches"
+reason = "duplicate test helper consolidated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/authorized_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::authorized_tests::TestResolver"
+to_path = "crates/shamir-engine/src/query/batch/tests/batching/access/authorized_tests.rs"
+to_item = "shamir-engine::lib::query::batch::tests::batching::access::authorized_tests::TestResolver"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/dos_gate_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::dos_gate_tests::TestResolver"
+to_path = "crates/shamir-engine/src/query/batch/tests/limits/dos_gate_tests.rs"
+to_item = "shamir-engine::lib::query::batch::tests::limits::dos_gate_tests::TestResolver"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/filter_guard_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::filter_guard_tests::TestResolver"
+to_path = "crates/shamir-engine/src/query/batch/tests/batching/access/filter_guard_tests.rs"
+to_item = "shamir-engine::lib::query::batch::tests::batching::access::filter_guard_tests::TestResolver"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/index_visibility_parity_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::index_visibility_parity_tests::TestResolver"
+to_path = "crates/shamir-engine/src/query/batch/tests/batching/serializer/index_visibility_parity_tests.rs"
+to_item = "shamir-engine::lib::query::batch::tests::batching::serializer::index_visibility_parity_tests::TestResolver"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/sub_batch_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::sub_batch_tests::TestResolver"
+to_path = "crates/shamir-engine/src/query/batch/tests/batching/iteration/sub_batch_basic_tests.rs"
+to_item = "shamir-engine::lib::query::batch::tests::batching::iteration::sub_batch_basic_tests::TestResolver"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/for_each_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::for_each_tests::TestResolver"
+to_path = "crates/shamir-engine/src/query/batch/tests/batching/iteration/support.rs"
+to_item = "shamir-engine::lib::query::batch::tests::batching::iteration::support::TestResolver"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/call_tx_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::call_tx_tests::TxTestResolver"
+to_path = "crates/shamir-engine/src/query/batch/tests/executor/tx/call_tx_tests.rs"
+to_item = "shamir-engine::lib::query::batch::tests::executor::tx::call_tx_tests::TxTestResolver"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/interactive_deadline_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::interactive_deadline_tests::TxTestResolver"
+to_path = "crates/shamir-engine/src/query/batch/tests/executor/tx/interactive_deadline_tests.rs"
+to_item = "shamir-engine::lib::query::batch::tests::executor::tx::interactive_deadline_tests::TxTestResolver"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_ri_barrier_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_ri_barrier_tests::TxTestResolver"
+to_path = "crates/shamir-engine/src/query/batch/tests/fk/barriers/support.rs"
+to_item = "shamir-engine::lib::query::batch::tests::fk::barriers::support::TxTestResolver"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_race_closure_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_race_closure_tests::TxTestResolver"
+to_path = "crates/shamir-engine/src/query/batch/tests/fk/races/support.rs"
+to_item = "shamir-engine::lib::query::batch::tests::fk::races::support::TxTestResolver"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/sub_batch_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::sub_batch_tests::TxTestResolver"
+to_path = "crates/shamir-engine/src/query/batch/tests/batching/iteration/support.rs"
+to_item = "shamir-engine::lib::query::batch::tests::batching::iteration::support::TxTestResolver"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/for_each_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::for_each_tests::TxTestResolver"
+to_path = "crates/shamir-engine/src/query/batch/tests/batching/iteration/sub_batch_basic_tests.rs"
+to_item = "shamir-engine::lib::query::batch::tests::batching::iteration::sub_batch_basic_tests::TxTestResolver"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_restrict_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_restrict_tests::FkTestResolver"
+to_path = "crates/shamir-engine/src/query/batch/tests/fk/support.rs"
+to_item = "shamir-engine::lib::query::batch::tests::fk::support::FkTestResolver"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_on_update_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_on_update_tests::FkTestResolver"
+to_path = "crates/shamir-engine/src/query/batch/tests/fk/on_update/support.rs"
+to_item = "shamir-engine::lib::query::batch::tests::fk::on_update::support::FkTestResolver"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_indexed_action_read_error_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_indexed_action_read_error_tests::FkTestResolver"
+to_path = "crates/shamir-engine/src/query/batch/tests/fk/actions/support.rs"
+to_item = "shamir-engine::lib::query::batch::tests::fk::actions::support::FkTestResolver"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_actions_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_actions_tests::FkTestResolver"
+reason = "duplicate test helper consolidated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_restrict_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_restrict_tests::FkTestResolver::resolve"
+to_path = "crates/shamir-engine/src/query/batch/tests/fk/support.rs"
+to_item = "shamir-engine::lib::query::batch::tests::fk::support::FkTestResolver::resolve"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_on_update_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_on_update_tests::FkTestResolver::resolve"
+to_path = "crates/shamir-engine/src/query/batch/tests/fk/on_update/support.rs"
+to_item = "shamir-engine::lib::query::batch::tests::fk::on_update::support::FkTestResolver::resolve"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_indexed_action_read_error_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_indexed_action_read_error_tests::FkTestResolver::resolve"
+to_path = "crates/shamir-engine/src/query/batch/tests/fk/actions/support.rs"
+to_item = "shamir-engine::lib::query::batch::tests::fk::actions::support::FkTestResolver::resolve"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_actions_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_actions_tests::FkTestResolver::resolve"
+reason = "duplicate test helper consolidated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_reverse_cache_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_reverse_cache_tests::FkTestResolver::resolve_repo"
+to_path = "crates/shamir-engine/src/query/batch/tests/fk/races/fk_reverse_cache_tests.rs"
+to_item = "shamir-engine::lib::query::batch::tests::fk::races::fk_reverse_cache_tests::FkTestResolver::resolve_repo"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_restrict_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_restrict_tests::FkTestResolver::resolve_repo"
+to_path = "crates/shamir-engine/src/query/batch/tests/fk/support.rs"
+to_item = "shamir-engine::lib::query::batch::tests::fk::support::FkTestResolver::resolve_repo"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_on_update_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_on_update_tests::FkTestResolver::resolve_repo"
+to_path = "crates/shamir-engine/src/query/batch/tests/fk/on_update/support.rs"
+to_item = "shamir-engine::lib::query::batch::tests::fk::on_update::support::FkTestResolver::resolve_repo"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_indexed_action_read_error_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_indexed_action_read_error_tests::FkTestResolver::resolve_repo"
+to_path = "crates/shamir-engine/src/query/batch/tests/fk/actions/support.rs"
+to_item = "shamir-engine::lib::query::batch::tests::fk::actions::support::FkTestResolver::resolve_repo"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_actions_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_actions_tests::FkTestResolver::resolve_repo"
+reason = "duplicate test helper consolidated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_race_closure_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_race_closure_tests::RaceInjectingResolver"
+to_path = "crates/shamir-engine/src/query/batch/tests/fk/races/support.rs"
+to_item = "shamir-engine::lib::query::batch::tests::fk::races::support::RaceInjectingResolver"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_ri_barrier_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_ri_barrier_tests::RaceInjectingResolver"
+to_path = "crates/shamir-engine/src/query/batch/tests/fk/barriers/support.rs"
+to_item = "shamir-engine::lib::query::batch::tests::fk::barriers::support::RaceInjectingResolver"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_race_closure_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_race_closure_tests::InjectedWriter"
+to_path = "crates/shamir-engine/src/query/batch/tests/fk/races/support.rs"
+to_item = "shamir-engine::lib::query::batch::tests::fk::races::support::InjectedWriter"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_ri_barrier_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_ri_barrier_tests::InjectedWriter"
+to_path = "crates/shamir-engine/src/query/batch/tests/fk/barriers/support.rs"
+to_item = "shamir-engine::lib::query::batch::tests::fk::barriers::support::InjectedWriter"
+reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::arms_read::QueryRunner::run_sub_batch_arm"
+reason = "per-arm method extracted from run_with_wait by the layout sweep"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::arms_read::QueryRunner::run_for_each_arm"
+reason = "per-arm method extracted from run_with_wait by the layout sweep"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::arms_read::QueryRunner::run_read_arm"
+reason = "per-arm method extracted from run_with_wait by the layout sweep"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/runner/query_runner/arms_write.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::arms_write::QueryRunner::run_insert_arm"
+reason = "per-arm method extracted from run_with_wait by the layout sweep"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/runner/query_runner/arms_write.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::arms_write::QueryRunner::run_update_arm"
+reason = "per-arm method extracted from run_with_wait by the layout sweep"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/runner/query_runner/arms_write.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::arms_write::QueryRunner::run_delete_arm"
+reason = "per-arm method extracted from run_with_wait by the layout sweep"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/runner/query_runner/arms_write.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::arms_write::QueryRunner::run_set_arm"
+reason = "per-arm method extracted from run_with_wait by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/runtime_byte_budget_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::runtime_byte_budget_tests::estimator_metadata_and_serialized_envelope_presence_are_exact"
+to_path = "crates/shamir-engine/src/query/batch/tests/limits/budgets/runtime_byte_budget_tests.rs"
+to_item = "shamir-engine::lib::query::batch::tests::limits::budgets::runtime_byte_budget_tests::estimator_metadata_and_serialized_envelope_presence_are_exact"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/tests/runtime_byte_budget_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::runtime_byte_budget_tests::estimator_metadata_and_serialized_envelope_presence_are_exact"
+reason = "serializer path adjusted to the new module location, assertions unchanged"
+owner = "@layout-sweep"
