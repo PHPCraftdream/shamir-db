@@ -36,7 +36,7 @@ fn entry_cap_trims_to_target_by_oldest_tick() {
     insert_keys(&store, 5, 16);
 
     assert_eq!(remaining_keys(&namespace_dir(dir.path())), vec![3, 4, 5]);
-    assert_eq!(store.index_totals(), (u64::from(3 * (112 + 16)), 3));
+    assert_eq!(store.index_totals(), (3 * (112 + 16), 3));
 }
 
 /// Byte cap 400, frames of 112 + 64 = 176 bytes: the third insert reaches
@@ -64,7 +64,7 @@ fn maximum_caps_keep_every_entry() {
         remaining_keys(&namespace_dir(dir.path())),
         vec![1, 2, 3, 4, 5]
     );
-    assert_eq!(store.index_totals(), (u64::from(5 * (112 + 16)), 5));
+    assert_eq!(store.index_totals(), (5 * (112 + 16), 5));
 }
 
 /// The 75% target is computed in a wider type: it is exact for small caps and
