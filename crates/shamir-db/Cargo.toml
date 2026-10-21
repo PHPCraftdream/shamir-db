@@ -73,7 +73,10 @@ tempfile    = "3.10.1"         # curl gateway temp files for secrets
 # obsolete code doesn't bit-rot before its planned deletion.
 rustls       = "0.23"
 tokio-rustls = "0.26"
-rcgen        = "0.13"
+# Self-signed certs sign with aws-lc-rs, the crypto library rustls already uses,
+# instead of rcgen's default `ring` backend: one native crypto library in the
+# tree, and `ring` (C + assembly) is gone.
+rcgen        = { version = "0.13", default-features = false, features = ["pem", "aws_lc_rs"] }
 
 # Bench allocator options (optional — gated by bench-sefer / bench-mimalloc features).
 sefer-alloc = { version = "0.2.1", features = ["production"], optional = true }

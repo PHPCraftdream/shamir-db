@@ -7,6 +7,12 @@ description = "ShamirDB index system — FTS / Functional / Vector backends."
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+# F-1103 (#1103): concurrency model checker for the `ReaderDrainGate` primitive.
+# A regular dependency that ONLY the `loom` feature turns on, so normal builds
+# and tests do not compile loom (nor its `generator` helper, which builds
+# C/assembly). The `#[cfg(loom)]` module in `reader_drain_gate.rs` is compiled
+# away from every other build -- see its doc for the opt-in command.
+loom = { version = "0.7", optional = true }
 shamir-types       = { path = "../shamir-types" }
 shamir-collections = { path = "../shamir-collections" }
 shamir-funclib     = { path = "../shamir-funclib" }
@@ -66,13 +72,6 @@ rust_decimal = { version = "1.40.0", features = ["serde"] }
 num-bigint = { version = "0.4", features = ["serde"] }
 shamir-bench-utils = { path = "../shamir-bench-utils", features = ["peak_mem"] }
 bench-scale-tool = { workspace = true, features = ["async"] }
-# F-1103 (#1103): concurrency model checker for the `ReaderDrainGate` primitive.
-# Used ONLY under `cfg(loom)` (the `#[cfg(loom)]` module in
-# `reader_drain_gate.rs` is compiled away from every normal build, so the
-# loom tests never run under `./scripts/test.sh`). It IS compiled once for the
-# package's test target (cached thereafter) — see the module doc for the exact
-# opt-in command and its (honestly-scoped) coverage.
-loom = "0.7"
 
 [[bench]]
 name = "sq8_hot_path"
@@ -104,7 +103,7 @@ doctest = false
 # dependency tree stays out of its own loom code paths. Run with:
 #   cargo test -p shamir-index --features loom --lib \
 #       reader_drain_gate::loom_model
-loom = []
+loom = ["dep:loom"]
 
 [lints]
 workspace = true
