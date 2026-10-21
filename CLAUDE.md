@@ -452,7 +452,9 @@ self-tests run in the `rust-guard self-test` job, CI only):
 * `structure` — AST rules on the PR's changed files: no logic in
   `mod.rs`, no inline `#[cfg(test)]` modules, no local `use`, no impl
   outside `.rust-guard/owned_impl.toml`'s owner modules, no visibility
-  widening or new `#[allow]` vs the merge base.
+  widening or new `#[allow]` vs the merge base. During a campaign the
+  active delta file also carries the per-item `[[allow_widen]]` /
+  `[[allow]]` declarations for this gate.
 * `conservation` — per active campaign (`.rust-guard/stages.toml`,
   normally empty = no-op): every item survives between revisions, or the
   change is declared in the campaign's delta file.
