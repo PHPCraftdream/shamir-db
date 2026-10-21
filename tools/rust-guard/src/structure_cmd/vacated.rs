@@ -7,13 +7,17 @@
 //! `#[allow]`, inline test module or function-local `use` it carries would
 //! be reported as if it were introduced by the PR.
 //!
-//! The VACATED base files are the base `.rs` files that no longer exist at
-//! head. This module indexes them once and answers, for a file that is new
-//! at head, whether a finding is backed by an identical item in a vacated
-//! base file. It only ever REMOVES findings that are backed that way: a
-//! genuinely new item, a widened item or a new attribute stays a finding.
+//! The VACATED part of the base is (a) every base `.rs` file that no longer
+//! exists at head, and (b) the items, `#[allow]` attributes and per-file
+//! findings that LEFT a base file which still exists at head (a facade that
+//! shrank because its content moved into new files). This module indexes
+//! them once and answers, for a file that is new at head, whether a finding
+//! is backed by an identical item that left its base file. It only ever
+//! REMOVES findings that are backed that way: a genuinely new item, a
+//! widened item, a copy that stays in its source file or a new attribute
+//! stays a finding.
 
-use super::diff::{allow_hash_set, rank_map, ItemKey, VisRank};
+use super::diff::{allow_hash_counts, allow_hash_set, rank_map, ItemKey, VisRank};
 use super::owned::OwnedImplConfig;
 use super::rules;
 use crate::common::exceptions::Exceptions;
@@ -31,7 +35,7 @@ const EXCUSABLE: [&str; 4] = [
     "TESTS_MANIFEST",
 ];
 
-/// Index of the base files that no longer exist at head.
+/// Index of what left the base files (see the module doc).
 pub struct Vacated {
     base_fs: Option<GitFs>,
     /// Highest visibility rank per item key over all vacated base files.
@@ -53,10 +57,12 @@ impl Vacated {
         }
     }
 
-    /// Indexes the base files of `base_rev` that are absent from `head_fs`.
+    /// Indexes the base files of `base_rev` that are absent from `head_fs`
+    /// and what left the `selected` files that exist in both revisions.
     pub fn build(
         head_fs: &GitFs,
         base_rev: &str,
+        selected: &[String],
         exceptions: &Exceptions,
         owned_cfg: &OwnedImplConfig,
     ) -> Self {
@@ -83,23 +89,90 @@ impl Vacated {
                 continue;
             };
             for (key, rank) in rank_map(&file) {
-                let slot = out.ranks.entry(key).or_insert(rank);
-                if rank > *slot {
-                    *slot = rank;
-                }
+                out.add_rank(key, rank);
             }
             out.allows.extend(allow_hash_set(&file));
         }
         // Per-file rule findings of the vacated files, as a multiset.
         let mut base_report = Report::new();
         rules::check_files(&base_fs, &paths, exceptions, owned_cfg, &mut base_report);
-        for f in base_report.findings() {
-            *out.findings
-                .entry((f.code.to_owned(), f.message.clone()))
-                .or_insert(0) += 1;
-        }
+        out.add_findings(&base_report, &BTreeMap::new());
+        out.add_donors(head_fs, &base_fs, selected, exceptions, owned_cfg);
         out.base_fs = Some(base_fs);
         out
+    }
+
+    /// Indexes what left the selected files that exist in both revisions
+    /// (a facade shrinks when its content moves into new files): items whose
+    /// key is gone from the head version of the same file, `#[allow]`
+    /// attributes with fewer occurrences at head, and per-file findings
+    /// that no longer occur at head. An item that stays in its source file
+    /// is a copy and is never indexed.
+    fn add_donors(
+        &mut self,
+        head_fs: &GitFs,
+        base_fs: &GitFs,
+        selected: &[String],
+        exceptions: &Exceptions,
+        owned_cfg: &OwnedImplConfig,
+    ) {
+        let mut donors: Vec<String> = Vec::new();
+        for path in selected {
+            if !path.ends_with(".rs") {
+                continue;
+            }
+            let (Some(base_src), Some(head_src)) = (base_fs.read(path), head_fs.read(path)) else {
+                continue;
+            };
+            if base_src == head_src {
+                continue;
+            }
+            let (Ok(base), Ok(head)) = (syn::parse_file(&base_src), syn::parse_file(&head_src))
+            else {
+                continue;
+            };
+            let head_ranks = rank_map(&head);
+            for (key, rank) in rank_map(&base) {
+                if !head_ranks.contains_key(&key) {
+                    self.add_rank(key, rank);
+                }
+            }
+            let head_allows = allow_hash_counts(&head);
+            for (hash, count) in allow_hash_counts(&base) {
+                if count > head_allows.get(&hash).copied().unwrap_or(0) {
+                    self.allows.insert(hash);
+                }
+            }
+            donors.push(path.clone());
+        }
+        let mut base_report = Report::new();
+        rules::check_files(base_fs, &donors, exceptions, owned_cfg, &mut base_report);
+        let mut head_report = Report::new();
+        rules::check_files(head_fs, &donors, exceptions, owned_cfg, &mut head_report);
+        self.add_findings(&base_report, &finding_counts(&head_report));
+    }
+
+    fn add_rank(&mut self, key: ItemKey, rank: VisRank) {
+        let slot = self.ranks.entry(key).or_insert(rank);
+        if rank > *slot {
+            *slot = rank;
+        }
+    }
+
+    /// Adds the findings of `report` to the multiset, less `still_there`
+    /// (findings that also occur at head did not leave the base file).
+    fn add_findings(&mut self, report: &Report, still_there: &BTreeMap<(String, String), usize>) {
+        let mut left = still_there.clone();
+        for f in report.findings() {
+            let key = (f.code.to_owned(), f.message.clone());
+            if let Some(n) = left.get_mut(&key) {
+                if *n > 0 {
+                    *n -= 1;
+                    continue;
+                }
+            }
+            *self.findings.entry(key).or_insert(0) += 1;
+        }
     }
 
     /// True when an item with `key` existed in a vacated base file at a
@@ -139,4 +212,14 @@ impl Vacated {
             }
         });
     }
+}
+
+/// Multiset of (code, message) over a report.
+fn finding_counts(report: &Report) -> BTreeMap<(String, String), usize> {
+    let mut out = BTreeMap::new();
+    for f in report.findings() {
+        *out.entry((f.code.to_owned(), f.message.clone()))
+            .or_insert(0) += 1;
+    }
+    out
 }

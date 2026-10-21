@@ -678,3 +678,16 @@ pub(super) fn allow_hash_set(file: &File) -> BTreeSet<u64> {
     collect_allow_hashes(file, &mut out);
     out
 }
+
+/// Occurrences per hashed normalised `allow` text of one file.
+pub(super) fn allow_hash_counts(file: &File) -> BTreeMap<u64, usize> {
+    let mut texts = Vec::new();
+    collect_allow_texts(file, &mut texts);
+    let mut out = BTreeMap::new();
+    for (text, _) in texts {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut h);
+        *out.entry(h.finish()).or_insert(0) += 1;
+    }
+    out
+}

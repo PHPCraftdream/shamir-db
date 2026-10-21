@@ -3,8 +3,16 @@
 //! Passes over the two inventories:
 //! 1. exact identity (package + kind + logical path + enclosing + impl
 //!    head + name) — unchanged items, compared by fingerprint and test
-//!    attributes;
-//! 2. same (kind + name + enclosing + signature) — moves; accepted only
+//!    attributes. A strict form runs first: identity + physical file +
+//!    signature + fingerprint + test attributes + cfg. Items sharing
+//!    such a key are identical twins, so groups of equal size on both
+//!    sides pair one-to-one in inventory order (cfg twins and the
+//!    `main`/`const` items of every bench/example target share one
+//!    logical path). The plain identity form then pairs items whose body
+//!    or signature changed; an ambiguous key stays open for later passes;
+//! 2. same (kind + name + enclosing + signature) — moves; identical
+//!    twins (equal group sizes on both sides) pair first, then the plain
+//!    key. A move is accepted only
 //!    when a `[[moved]]` entry is declared, otherwise the pair falls
 //!    apart into ITEM_LOST + ITEM_ADDED; every undeclared move whose
 //!    pair is otherwise clean is additionally recorded as a
@@ -27,7 +35,7 @@ use super::delta::Delta;
 use super::item::{identity, weak_key, Item, TestKind};
 use crate::common::finding::Report;
 use crate::common::suggest::MoveSuggestion;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One accepted pairing and what drifted between the two sides.
 struct Pair {
@@ -54,7 +62,19 @@ pub fn compare(
     let mut head_left: Vec<usize> = (0..head.len()).collect();
     let mut pairs: Vec<Pair> = Vec::new();
 
-    // Pass 1: exact identity.
+    // Pass 1, strict form: unchanged items (same file, same content);
+    // twins pair one-to-one.
+    pair_pass(
+        base,
+        head,
+        &mut base_left,
+        &mut head_left,
+        &mut pairs,
+        |it| format!("{}\u{1}{}\u{1}{}", identity(it), it.path, content_key(it)),
+        Ambiguity::Twins,
+    );
+
+    // Pass 1: exact identity; an ambiguous key stays open.
     pair_pass(
         base,
         head,
@@ -62,6 +82,18 @@ pub fn compare(
         &mut head_left,
         &mut pairs,
         identity,
+        Ambiguity::KeepOpen,
+    );
+
+    // Pass 2, twin form: moves of content-identical twins.
+    pair_pass(
+        base,
+        head,
+        &mut base_left,
+        &mut head_left,
+        &mut pairs,
+        |it| format!("{}\u{1}{}", weak_key(it), content_key(it)),
+        Ambiguity::Twins,
     );
 
     // Pass 2: moves (kind + name + enclosing + equal signature). If more
@@ -74,6 +106,7 @@ pub fn compare(
         &mut head_left,
         &mut pairs,
         |it| format!("{}\u{1}{}", weak_key(it), it.signature),
+        Ambiguity::Report,
     ) {
         report.add(
             "(matching)",
@@ -283,8 +316,32 @@ fn consume_side(delta: &mut Delta, kind: &str, b: &Item, h: &Item) -> bool {
         || delta.consume_pair(kind, &h.path, &h.logical, &b.path, &b.logical)
 }
 
+/// What `pair_pass` does with a key shared by several items.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ambiguity {
+    /// Several head items carry a base item's key: report the key and drop
+    /// those head items from every later pass (the final move pass).
+    Report,
+    /// Leave the base and head items of the key open for the later passes.
+    KeepOpen,
+    /// The key covers the whole content, so its items are interchangeable
+    /// twins: a group with as many base as head items pairs one-to-one in
+    /// inventory order; any other shared key stays open.
+    Twins,
+}
+
+/// Everything about an item except its location: signature, body
+/// fingerprint, test attributes and cfg.
+fn content_key(it: &Item) -> String {
+    format!(
+        "{}\u{1}{}\u{1}{:?}\u{1}{:?}",
+        it.signature, it.fingerprint, it.test, it.cfg
+    )
+}
+
 /// Greedy one-pass pairing on an exact key. Returns the ambiguous keys
-/// (more than one head item carrying the same key as a base item).
+/// (more than one head item carrying the same key as a base item) when
+/// `mode` is [`Ambiguity::Report`].
 fn pair_pass<F>(
     base: &[Item],
     head: &[Item],
@@ -292,6 +349,7 @@ fn pair_pass<F>(
     head_left: &mut Vec<usize>,
     pairs: &mut Vec<Pair>,
     key: F,
+    mode: Ambiguity,
 ) -> Vec<String>
 where
     F: Fn(&Item) -> String,
@@ -300,6 +358,20 @@ where
     for &h in head_left.iter() {
         by_key.entry(key(&head[h])).or_default().push(h);
     }
+    // Group sizes for the twin rule: a shared key pairs only when both
+    // sides hold the same number of items.
+    let mut twin_groups: BTreeSet<String> = BTreeSet::new();
+    if mode == Ambiguity::Twins {
+        let mut base_sizes: BTreeMap<String, usize> = BTreeMap::new();
+        for &b in base_left.iter() {
+            *base_sizes.entry(key(&base[b])).or_insert(0) += 1;
+        }
+        for (k, heads) in &by_key {
+            if base_sizes.get(k) == Some(&heads.len()) {
+                twin_groups.insert(k.clone());
+            }
+        }
+    }
     let mut ambiguous: Vec<String> = Vec::new();
     let mut still: Vec<usize> = Vec::new();
     for &b in base_left.iter() {
@@ -307,16 +379,19 @@ where
         let hit = by_key.get_mut(&k);
         match hit {
             Some(v) if !v.is_empty() => {
-                if v.len() > 1 {
-                    // Cannot choose a pairing: leave base and heads open.
-                    ambiguous.push(k);
-                    still.push(b);
-                    let dupes: Vec<usize> = std::mem::take(v);
-                    for h in dupes {
-                        still_head(head_left, h);
+                if v.len() > 1 && !twin_groups.contains(&k) {
+                    if mode == Ambiguity::Report {
+                        // Cannot choose a pairing: leave base and heads
+                        // unpaired.
+                        ambiguous.push(k);
+                        let dupes: Vec<usize> = std::mem::take(v);
+                        for h in dupes {
+                            still_head(head_left, h);
+                        }
                     }
+                    still.push(b);
                 } else {
-                    let h = v.pop().expect("non-empty");
+                    let h = v.remove(0);
                     pairs.push(Pair {
                         b,
                         h,

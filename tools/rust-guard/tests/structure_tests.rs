@@ -796,3 +796,34 @@ fn copy_of_a_base_file_is_not_a_vacated_source() {
         stderr(&out)
     );
 }
+
+#[test]
+fn items_that_left_a_surviving_base_file_are_clean() {
+    // `old.rs` survives as a facade (keeps `keep`); `a`, `b`, `c`, the
+    // `#[allow]`, the local `use` and the test module moved to `part.rs`.
+    // Counterfactual: indexing only deleted base files leaves `part.rs`
+    // judged against an empty base (VIS_WIDENING, ALLOW_ADDED,
+    // INLINE_TEST_MOD, LOCAL_USE).
+    let repo = DiffRepo::two_commit("structure/split_partial_clean");
+    assert_clean(&repo.scan());
+}
+
+#[test]
+fn item_that_stays_in_its_surviving_base_file_is_a_copy() {
+    // `a` is still in `old.rs` and also appears in `part.rs`: a copy, so
+    // it stays a VIS_WIDENING; `b` really left `old.rs` and is excused.
+    // Counterfactual: indexing every item of a changed base file (not only
+    // the ones missing from its head version) would excuse the copy.
+    let repo = DiffRepo::two_commit("structure/split_partial_copy");
+    let out = repo.scan();
+    assert_finding(&out, "VIS_WIDENING");
+    let err = stderr(&out);
+    assert!(
+        err.contains("new file introduces `a` at pub(crate) visibility"),
+        "expected the copy of `a`:\n{err}"
+    );
+    assert!(
+        !err.contains("introduces `b`"),
+        "`b` left its base file and must stay excused:\n{err}"
+    );
+}
