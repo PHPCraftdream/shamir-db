@@ -21,10 +21,9 @@ wasmtime = { version = "48", default-features = false, features = [
     "wat",
     "async",
     "pooling-allocator",
+    "incremental-cache",
 ] }
-# Wasmtime's own `cache` feature is NOT enabled: it compresses with zstd, a C
-# library. `wasm/compile_cache.rs` is the pure-Rust replacement.
-blake3 = { version = "1.5", features = ["pure"] }
+sha2 = "0.10.9"
 tempfile = "3.10.1"
 scc = "3.8"
 # Used by `compile_rust_source` to enforce a wall-clock timeout on the
@@ -35,11 +34,11 @@ wait-timeout = "0.2.1"
 # version wasmtime 48 pulls transitively (see `Cargo.lock`) so no second
 # copy enters the dependency graph.
 wasmparser = "=0.254.2"
-# WAT-text -> binary conversion for `WasmFunction::from_wat`, so the
-# sanitizer (which parses raw `.wasm` section bytes) can run on WAT-authored
-# test modules the same way it runs on `from_binary`'s compiled artifacts.
-# Already a transitive dep of wasmtime's `wat` feature; pinned exactly here.
+# WAT-text -> binary conversion for `WasmFunction::from_wat`.
 wat = "=1.254.2"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", default-features = false, features = ["std", "process"] }
 
 [dev-dependencies]
 argon2 = "0.5"

@@ -161,6 +161,19 @@ pub fn restore(from: &Path, data_dir: &Path, force: bool) -> Result<RestoreRepor
 
     // ---- Step 2: verify the SOURCE snapshot's manifest, before touching
     // data_dir at all. ----
+    let raw_manifest = fs::read(from.join(backup::MANIFEST_FILE_NAME))?;
+    let manifest: backup::Manifest = serde_json::from_slice(&raw_manifest).map_err(|error| {
+        BackupError::ManifestInvalid(format!("decode restore manifest: {error}"))
+    })?;
+    if let Some(entry) = manifest
+        .files
+        .iter()
+        .find(|entry| backup::is_cache_manifest_path(&entry.path))
+    {
+        return Err(RestoreError::ManifestVerification(
+            BackupError::CacheManifestPath(entry.path.clone()),
+        ));
+    }
     backup::verify_manifest(from)?;
 
     // ---- Step 3: copy to a temporary sibling directory ----
@@ -198,7 +211,7 @@ pub fn restore(from: &Path, data_dir: &Path, force: bool) -> Result<RestoreRepor
     }
     let mut bytes = 0u64;
     let mut files = 0u64;
-    if let Err(e) = copy_dir_recursive(from, &temp_dir, &mut bytes, &mut files) {
+    if let Err(e) = copy_dir_recursive(from, &temp_dir, &mut bytes, &mut files, false, true) {
         // N-6: the error message for this failure gives the operator no
         // reference to `temp_dir` at all — clean it up best-effort (log,
         // don't let a cleanup failure mask the original error) rather than

@@ -34,8 +34,49 @@ fn make_snapshot(root: &Path) -> std::path::PathBuf {
     report.dest_dir
 }
 
-// ----------------------------------------------------------------------------
-// N-6: swap-failure message split — rollback SUCCEEDS case.
+#[test]
+fn restore_rejects_manifest_cache_paths_before_touching_data_dir() {
+    let root = TempDir::new().unwrap();
+    let snapshot = make_snapshot(root.path());
+    let manifest_path = snapshot.join(crate::backup::MANIFEST_FILE_NAME);
+    let manifest = crate::backup::Manifest {
+        format_version: crate::backup::MANIFEST_FORMAT_VERSION,
+        created_at_unix_ns: 1,
+        files: vec![crate::backup::ManifestFileEntry {
+            path: "cache/wasm/artifact".to_string(),
+            sha256: "0".repeat(64),
+            size_bytes: 0,
+        }],
+    };
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let data_dir = root.path().join("data_dir");
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::write(data_dir.join("preserve"), b"original").unwrap();
+    let result = restore(&snapshot, &data_dir, true);
+
+    assert!(matches!(
+        result,
+        Err(RestoreError::ManifestVerification(
+            crate::backup::BackupError::CacheManifestPath(_)
+        ))
+    ));
+    assert_eq!(fs::read(data_dir.join("preserve")).unwrap(), b"original");
+    assert!(!fs::read_dir(root.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .contains(".restore_tmp_")
+        }));
+}
+
 // ----------------------------------------------------------------------------
 
 /// Forces `restore()`'s step-5 second rename (`temp_dir -> data_dir`) to

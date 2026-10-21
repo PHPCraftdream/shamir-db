@@ -261,6 +261,20 @@ impl ShamirDb {
         let admin_user_locks = Arc::new(DashMap::with_hasher(THasher::default()));
         let group_member_locks = Arc::new(DashMap::with_hasher(THasher::default()));
         let active_migrations = Arc::new(DashMap::with_hasher(THasher::default()));
+        // DEC-3 Q5: reuse compiled wasm modules from an on-disk cache when a
+        // data root exists (unix only); fall back to a fresh engine otherwise.
+        #[cfg(unix)]
+        let wasm_engine = {
+            if let Some(root) = &data_root {
+                Arc::new(
+                    WasmEngine::with_compile_cache(root.join("cache").join("wasm"))
+                        .map_err(|e| DbError::Function(e.to_string()))?,
+                )
+            } else {
+                Arc::new(WasmEngine::new().map_err(|e| DbError::Function(e.to_string()))?)
+            }
+        };
+        #[cfg(not(unix))]
         let wasm_engine =
             Arc::new(WasmEngine::new().map_err(|e| DbError::Function(e.to_string()))?);
         let functions = Arc::new(FunctionRegistry::with_builtins());

@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! User-defined function engine — execution model (slice 1).
 //!
 //! A function is an async mapping `(ctx, batch, params) -> value` evaluated
@@ -40,9 +42,6 @@ pub use wasm::{verify_wasm_module, WasmEngine, WasmFunction, WasmLimits, SANCTIO
 
 #[cfg(test)]
 pub(crate) use wasm::test_linker_and_store;
-
-#[cfg(test)]
-pub(crate) use wasm::{CompileCache, Outcome};
 
 #[cfg(test)]
 mod tests;

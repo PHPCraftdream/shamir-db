@@ -3904,10 +3904,11 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "argon2",
  "async-trait",
- "blake3",
  "log",
+ "rustix 1.1.4",
  "scc",
  "serde",
+ "sha2",
  "shamir-collections",
  "shamir-funclib",
  "shamir-types",
