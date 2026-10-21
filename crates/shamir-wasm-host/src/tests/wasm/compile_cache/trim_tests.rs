@@ -1,17 +1,24 @@
 //! Trim regression: caps are respected, the oldest logical ticks go first,
-//! and `u64::MAX` / `usize::MAX` test hooks do not overflow.
+//! and the 75% target computation cannot overflow.
 
-use super::cache_store_tests::{engine, entry_files, namespace_dir};
-use crate::wasm::compile_cache::DiskCacheStore;
+use super::cache_store_tests::{engine, namespace_dir, remaining_keys};
+use crate::wasm::compile_cache::{three_quarters, DiskCacheStore};
+use std::path::Path;
 use std::sync::Arc;
 use wasmtime::CacheStore;
 
-fn bound_store(root: &std::path::Path) -> Arc<DiskCacheStore> {
-    let store = Arc::new(DiskCacheStore::new(root.to_path_buf()));
+fn bound_store(root: &Path, max_bytes: u64, max_entries: usize) -> Arc<DiskCacheStore> {
+    let store = Arc::new(DiskCacheStore::with_caps_for_test(
+        root.to_path_buf(),
+        max_bytes,
+        max_entries,
+    ));
     engine(&store, false);
     store
 }
 
+/// Insert `count` entries whose first key byte is 1..=count, one after the
+/// other (so their recency ticks are strictly increasing).
 fn insert_keys(store: &DiskCacheStore, count: u8, value_len: usize) {
     for index in 0..count {
         let mut key = [0u8; 32];
@@ -20,46 +27,56 @@ fn insert_keys(store: &DiskCacheStore, count: u8, value_len: usize) {
     }
 }
 
-/// Entry cap: 5 entries, cap 4 -> target 4/4*3 = 3 -> evict the two oldest
-/// ticks, keeping exactly ticks [4, 5].
+/// Entry cap 4: the fifth insert exceeds it, the trim targets 75% = 3 entries
+/// and evicts the two oldest ticks, so exactly the three newest keys remain.
 #[test]
 fn entry_cap_trims_to_target_by_oldest_tick() {
     let dir = tempfile::tempdir().unwrap();
-    let store = bound_store(dir.path());
+    let store = bound_store(dir.path(), u64::MAX, 4);
     insert_keys(&store, 5, 16);
 
-    store.trim_for_test(u64::MAX, 4);
-    assert_eq!(entry_files(&namespace_dir(dir.path())).len(), 3);
-    let (bytes, count) = store.index_totals();
-    assert_eq!(count, 3);
-    assert_eq!(bytes, u64::from(3 * (112 + 16)));
+    assert_eq!(remaining_keys(&namespace_dir(dir.path())), vec![3, 4, 5]);
+    assert_eq!(store.index_totals(), (u64::from(3 * (112 + 16)), 3));
 }
 
-/// Byte cap: 4 frames of 112 + 64 = 176 bytes; cap 400 -> target 300.
-/// Evicting the 3 oldest frames leaves 176 <= 300 bytes (1 entry), while
-/// evicting only 2 would leave 352 > 300 — so exactly 1 entry remains.
+/// Byte cap 400, frames of 112 + 64 = 176 bytes: the third insert reaches
+/// 528 bytes, the trim targets 300 and evicts the two oldest frames (176 is
+/// the first total at or below 300), leaving key 3; the fourth insert (352
+/// bytes) stays under the cap, so keys 3 and 4 remain.
 #[test]
 fn byte_cap_trims_to_target_by_oldest_tick() {
     let dir = tempfile::tempdir().unwrap();
-    let store = bound_store(dir.path());
+    let store = bound_store(dir.path(), 400, usize::MAX);
     insert_keys(&store, 4, 64);
 
-    store.trim_for_test(400, usize::MAX);
-    assert_eq!(entry_files(&namespace_dir(dir.path())).len(), 1);
-    let (bytes, count) = store.index_totals();
-    assert_eq!(count, 1);
-    assert!(bytes <= 300, "remaining bytes must be within the target");
+    assert_eq!(remaining_keys(&namespace_dir(dir.path())), vec![3, 4]);
+    assert_eq!(store.index_totals(), (2 * 176, 2));
 }
 
-/// `u64::MAX` / `usize::MAX` hooks must not overflow (target computation is
-/// divide-then-multiply): a trim at the maximum caps is a no-op.
+/// Maximum caps never trim and never overflow.
 #[test]
-fn maximum_cap_hooks_do_not_overflow_or_lose_entries() {
+fn maximum_caps_keep_every_entry() {
     let dir = tempfile::tempdir().unwrap();
-    let store = bound_store(dir.path());
+    let store = bound_store(dir.path(), u64::MAX, usize::MAX);
     insert_keys(&store, 5, 16);
 
-    store.trim_for_test(u64::MAX, usize::MAX);
-    assert_eq!(entry_files(&namespace_dir(dir.path())).len(), 5);
+    assert_eq!(
+        remaining_keys(&namespace_dir(dir.path())),
+        vec![1, 2, 3, 4, 5]
+    );
     assert_eq!(store.index_totals(), (u64::from(5 * (112 + 16)), 5));
+}
+
+/// The 75% target is computed in a wider type: it is exact for small caps and
+/// does not overflow for the maximum.
+#[test]
+fn three_quarters_is_exact_and_overflow_free() {
+    assert_eq!(three_quarters(0), 0);
+    assert_eq!(three_quarters(1), 0);
+    assert_eq!(three_quarters(4), 3);
+    assert_eq!(three_quarters(400), 300);
+    assert_eq!(
+        three_quarters(u64::MAX),
+        u64::MAX / 4 * 3 + 3 * (u64::MAX % 4) / 4
+    );
 }

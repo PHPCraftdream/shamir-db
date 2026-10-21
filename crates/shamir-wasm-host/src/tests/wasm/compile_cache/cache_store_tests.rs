@@ -5,6 +5,7 @@
 //! `<root>/cache/wasm`; every assertion inspects that level.
 
 use crate::wasm::compile_cache::DiskCacheStore;
+use crate::wasm::WasmEngine;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -100,58 +101,70 @@ fn second_engine_on_same_data_root_gets_hits() {
     let root = dir.path().to_path_buf();
     let wasm = wat::parse_str(MODULE).unwrap();
 
-    // Cold engine (raw store, same contract as production) writes the entry.
-    let cold = Arc::new(DiskCacheStore::new(root.clone()));
-    wasmtime::Module::from_binary(&engine(&cold, false), &wasm).unwrap();
-    assert_eq!(cold.hits(), 0);
+    // Cold engine, built through the public constructor on a fresh data root.
+    let cold = WasmEngine::with_compile_cache(root.clone()).unwrap();
+    cold.compile(&wasm).unwrap();
+    assert_eq!(cold.cache_hits(), 0, "a fresh root has nothing to hit");
     assert_eq!(entry_files(&namespace_dir(&root)).len(), 1);
 
-    // A second engine bound to the same DATA root must be served from disk.
-    let warm = Arc::new(DiskCacheStore::new(root.clone()));
-    wasmtime::Module::from_binary(&engine(&warm, false), &wasm).unwrap();
-    assert!(warm.hits() >= 1, "second engine must read a cache entry");
-    assert_eq!(warm.rejected(), 0);
+    // A second engine on the same DATA root is served from disk.
+    let warm = WasmEngine::with_compile_cache(root.clone()).unwrap();
+    warm.compile(&wasm).unwrap();
+    assert!(
+        warm.cache_hits() >= 1,
+        "second engine must read a cache entry"
+    );
+}
+
+/// Fill the cache with one entry through a raw engine and return its path.
+fn filled_entry(root: &Path, wasm: &[u8]) -> PathBuf {
+    let first = Arc::new(DiskCacheStore::new(root.to_path_buf()));
+    wasmtime::Module::from_binary(&engine(&first, false), wasm).unwrap();
+    entry_files(&namespace_dir(root)).remove(0)
+}
+
+/// A damaged entry must be a miss on a bound store, be removed, and be
+/// refilled by the next compilation (self-healing).
+fn assert_damage_is_a_miss_then_heals(root: &Path, wasm: &[u8], path: &Path) {
+    let key = key_of(path);
+    let second = Arc::new(DiskCacheStore::new(root.to_path_buf()));
+    let raw_engine = engine(&second, false); // bind indexes the damaged entry
+    assert!(second.get(&key).is_none(), "damaged entry must be a miss");
+    assert_eq!(second.rejected(), 1);
+    assert!(!path.exists(), "damaged entry file must be removed");
+
+    wasmtime::Module::from_binary(&raw_engine, wasm).unwrap();
+    assert_eq!(
+        entry_files(&namespace_dir(root)).len(),
+        1,
+        "recompilation must refill the cache"
+    );
 }
 
 #[test]
 fn flipped_payload_byte_is_a_miss_and_removes_the_file() {
     let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().to_path_buf();
     let wasm = wat::parse_str(MODULE).unwrap();
-    let first = Arc::new(DiskCacheStore::new(root.clone()));
-    wasmtime::Module::from_binary(&engine(&first, false), &wasm).unwrap();
+    let path = filled_entry(dir.path(), &wasm);
 
-    let path = &entry_files(&namespace_dir(&root))[0];
-    let mut frame = std::fs::read(path).unwrap();
+    let mut frame = std::fs::read(&path).unwrap();
     let last = frame.len() - 1;
     frame[last] ^= 0xff;
-    std::fs::write(path, &frame).unwrap();
+    std::fs::write(&path, &frame).unwrap();
 
-    let second = Arc::new(DiskCacheStore::new(root.clone()));
-    wasmtime::Module::from_binary(&engine(&second.clone(), false), &wasm).unwrap();
-    assert_eq!(second.rejected(), 1, "tampered entry must be rejected");
-    assert!(
-        entry_files(&namespace_dir(&root)).is_empty(),
-        "tampered entry file must be removed"
-    );
+    assert_damage_is_a_miss_then_heals(dir.path(), &wasm, &path);
 }
 
 #[test]
 fn truncated_file_is_a_miss() {
     let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().to_path_buf();
     let wasm = wat::parse_str(MODULE).unwrap();
-    let first = Arc::new(DiskCacheStore::new(root.clone()));
-    wasmtime::Module::from_binary(&engine(&first, false), &wasm).unwrap();
+    let path = filled_entry(dir.path(), &wasm);
 
-    let path = &entry_files(&namespace_dir(&root))[0];
-    let frame = std::fs::read(path).unwrap();
-    std::fs::write(path, &frame[..frame.len() - 1]).unwrap();
+    let frame = std::fs::read(&path).unwrap();
+    std::fs::write(&path, &frame[..frame.len() - 1]).unwrap();
 
-    let second = Arc::new(DiskCacheStore::new(root.clone()));
-    wasmtime::Module::from_binary(&engine(&second.clone(), false), &wasm).unwrap();
-    assert_eq!(second.rejected(), 1, "truncated entry must be rejected");
-    assert!(entry_files(&namespace_dir(&root)).is_empty());
+    assert_damage_is_a_miss_then_heals(dir.path(), &wasm, &path);
 }
 
 #[test]
@@ -172,7 +185,10 @@ fn deleted_file_behind_live_index_returns_miss_within_bounded_time() {
     let (sender, receiver) = std::sync::mpsc::channel();
     let store = second.clone();
     let lookup = key;
-    std::thread::spawn(move || sender.send(store.get(&lookup)).unwrap());
+    std::thread::spawn(move || {
+        let owned = store.get(&lookup).map(|payload| payload.into_owned());
+        sender.send(owned).unwrap();
+    });
     let result = receiver
         .recv_timeout(Duration::from_secs(5))
         .expect("get must not hang when the indexed file is missing");
@@ -266,19 +282,23 @@ fn startup_purges_stale_temp_files() {
     std::fs::write(&stale, b"x").unwrap();
 
     let second = Arc::new(DiskCacheStore::new(root.clone()));
-    second.bind(&engine(&second, false)).unwrap();
+    engine(&second, false); // bind purges tmp/
     assert!(!stale.exists(), "tmp/ must be purged at bind");
 }
 
-/// Concurrent inserts racing one trim: the shared index accounting must end
-/// up exactly equal to the on-directory sum (count and bytes).
+/// Concurrent inserts under small caps trigger overlapping trims: the shared
+/// index accounting must end up exactly equal to the on-directory sum.
 #[test]
-fn concurrent_inserts_and_trim_keep_index_accounting_equal_to_disk() {
+fn concurrent_inserts_and_trims_keep_index_accounting_equal_to_disk() {
     let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(DiskCacheStore::new(dir.path().to_path_buf()));
+    let store = Arc::new(DiskCacheStore::with_caps_for_test(
+        dir.path().to_path_buf(),
+        u64::MAX,
+        40,
+    ));
     engine(&store, false);
 
-    let inserters: Vec<_> = (0..8)
+    let inserters: Vec<_> = (0..8u32)
         .map(|thread| {
             let store = store.clone();
             std::thread::spawn(move || {
@@ -290,14 +310,9 @@ fn concurrent_inserts_and_trim_keep_index_accounting_equal_to_disk() {
             })
         })
         .collect();
-    let trimmer = {
-        let store = store.clone();
-        std::thread::spawn(move || store.trim_for_test(4_000, 100))
-    };
     for handle in inserters {
         handle.join().unwrap();
     }
-    trimmer.join().unwrap();
 
     let files = entry_files(&namespace_dir(dir.path()));
     let disk_bytes: u64 = files
@@ -305,6 +320,18 @@ fn concurrent_inserts_and_trim_keep_index_accounting_equal_to_disk() {
         .map(|path| std::fs::metadata(path).unwrap().len())
         .sum();
     let (index_bytes, index_count) = store.index_totals();
+    assert!(files.len() <= 40, "the entry cap must hold after the burst");
     assert_eq!(index_count, files.len(), "count must match the directory");
     assert_eq!(index_bytes, disk_bytes, "bytes must match the directory");
+}
+
+/// First byte of every entry file name, sorted (the tests derive keys whose
+/// first byte identifies the entry).
+pub(super) fn remaining_keys(namespace: &Path) -> Vec<u8> {
+    let mut keys: Vec<u8> = entry_files(namespace)
+        .iter()
+        .map(|path| key_of(path)[0])
+        .collect();
+    keys.sort_unstable();
+    keys
 }

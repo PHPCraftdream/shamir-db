@@ -5,6 +5,8 @@ use super::private_dir::prepare;
 use std::borrow::Cow;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -17,6 +19,8 @@ const MAX_ENTRIES: usize = 65_536;
 #[derive(Debug)]
 pub(crate) struct DiskCacheStore {
     root: PathBuf,
+    max_bytes: u64,
+    max_entries: usize,
     bound: OnceLock<BoundStore>,
     sequence: AtomicU64,
     tick: AtomicU64,
@@ -37,8 +41,20 @@ struct BoundStore {
 
 impl DiskCacheStore {
     pub(crate) fn new(root: PathBuf) -> Self {
+        Self::with_caps(root, MAX_BYTES, MAX_ENTRIES)
+    }
+
+    /// Test-only: a store with small caps so cap enforcement is observable.
+    #[cfg(all(test, unix))]
+    pub(crate) fn with_caps_for_test(root: PathBuf, max_bytes: u64, max_entries: usize) -> Self {
+        Self::with_caps(root, max_bytes, max_entries)
+    }
+
+    fn with_caps(root: PathBuf, max_bytes: u64, max_entries: usize) -> Self {
         Self {
             root,
+            max_bytes,
+            max_entries,
             bound: OnceLock::new(),
             sequence: AtomicU64::new(0),
             tick: AtomicU64::new(0),
@@ -138,7 +154,7 @@ impl DiskCacheStore {
             index,
         };
         // Bring an over-cap cache under the caps immediately at startup.
-        self.trim_caps(&bound, MAX_BYTES, MAX_ENTRIES);
+        self.trim(&bound);
         self.bound
             .set(bound)
             .map_err(|_| std::io::Error::other("cache store already bound"))
@@ -185,18 +201,9 @@ impl DiskCacheStore {
         self.rejected.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Brings the cache under the caps: evicts the lowest recency ticks until
+    /// both totals are at or below 75% of their caps.
     fn trim(&self, bound: &BoundStore) {
-        self.trim_caps(bound, MAX_BYTES, MAX_ENTRIES);
-    }
-
-    #[cfg(all(test, unix))]
-    pub(crate) fn trim_for_test(&self, max_bytes: u64, max_entries: usize) {
-        if let Some(bound) = self.bound.get() {
-            self.trim_caps(bound, max_bytes, max_entries);
-        }
-    }
-
-    fn trim_caps(&self, bound: &BoundStore, max_bytes: u64, max_entries: usize) {
         if self
             .trimming
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
@@ -206,12 +213,13 @@ impl DiskCacheStore {
         }
         let bytes = bound.index.bytes.load(Ordering::Relaxed);
         let count = bound.index.count.load(Ordering::Relaxed);
-        if bytes <= max_bytes && count <= max_entries {
+        if bytes <= self.max_bytes && count <= self.max_entries {
             self.trimming.store(false, Ordering::Release);
             return;
         }
-        let target_bytes = max_bytes / 4 * 3;
-        let target_count = max_entries / 4 * 3;
+        let target_bytes = three_quarters(self.max_bytes);
+        let target_count =
+            usize::try_from(three_quarters(self.max_entries as u64)).unwrap_or(usize::MAX);
         let mut victims = Vec::new();
         bound.index.entries.iter_sync(|key, entry| {
             victims.push((*key, entry.len, entry.tick.load(Ordering::Relaxed)));
@@ -228,6 +236,8 @@ impl DiskCacheStore {
             // was removed; never store snapshot totals over the atomics
             // (concurrent inserts would be lost).
             if let Some((_, removed)) = bound.index.entries.remove_sync(&key) {
+                // A file that cannot be deleted is no longer served; the next
+                // bind re-indexes it and trims it under the caps again.
                 let _ = fs::remove_file(Self::entry_path(bound, &key));
                 bound.index.bytes.fetch_sub(removed.len, Ordering::Relaxed);
                 bound.index.count.fetch_sub(1, Ordering::Relaxed);
@@ -313,10 +323,7 @@ impl CacheStore for DiskCacheStore {
             let mut options = OpenOptions::new();
             options.write(true).create_new(true);
             #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
+            options.mode(0o600);
             let mut file = options.open(&temp)?;
             file.write_all(&frame)?;
             fs::rename(&temp, &final_path)?;
@@ -349,6 +356,11 @@ impl CacheStore for DiskCacheStore {
         self.trim(bound);
         true
     }
+}
+
+/// 75% of `cap`, computed without overflow for any value.
+pub(crate) fn three_quarters(cap: u64) -> u64 {
+    u64::try_from(u128::from(cap) * 3 / 4).unwrap_or(u64::MAX)
 }
 
 fn namespace_name(namespace: &[u8; 32]) -> String {

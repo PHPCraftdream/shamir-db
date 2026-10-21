@@ -19,6 +19,9 @@ use wasmtime::{Engine, InstanceAllocationStrategy, Module, PoolingAllocationConf
 #[derive(Clone)]
 pub struct WasmEngine {
     engine: Engine,
+    /// Test-only handle to observe cache hits through the public constructor.
+    #[cfg(all(test, unix))]
+    store: Option<Arc<DiskCacheStore>>,
 }
 
 impl WasmEngine {
@@ -110,13 +113,23 @@ impl WasmEngine {
             log::info!("Wasmtime pooling allocator disabled via SHAMIR_WASM_NO_POOL env var");
             Engine::new(&config).map_err(|e| FunctionError::Compute(e.to_string()))?
         };
-        if let Some(store) = store {
+        if let Some(store) = &store {
             if let Err(error) = store.bind(&engine) {
                 log::warn!("Wasm incremental cache disabled: {error}");
             }
         }
         Self::spawn_epoch_ticker(&engine);
-        Ok(Self { engine })
+        Ok(Self {
+            engine,
+            #[cfg(all(test, unix))]
+            store,
+        })
+    }
+
+    /// Test-only: cache hits served to this engine's disk store.
+    #[cfg(all(test, unix))]
+    pub(crate) fn cache_hits(&self) -> u64 {
+        self.store.as_ref().map_or(0, |store| store.hits())
     }
 
     /// Cadence at which the background task increments the engine epoch.
