@@ -1,29 +1,46 @@
-# Supply-chain cooldown — never adopt a crate version younger than 30 days.
+# Dependency admission policy (supply-chain cooldown).
 #
 # WHY: freshly-published compromised releases are the dominant registry attack
 # vector (npm/PyPI 2025). A 30-day quarantine gives automated scanners + the
 # community time to catch a malicious version BEFORE we pull it. This is RFC
 # 3923 (cargo-min-publish-age); cargo's native client-side
 # `registry.global-min-publish-age` enforcement is still pending (registry-side
-# pubtime infra landed in Cargo 1.94), so enforcement today is via the
-# `cargo-cooldown` subcommand.
+# pubtime infra landed in Cargo 1.94).
 #
-# HOW TO USE (devs + CI):
+# POLICY (DEC-3 Q4). A registry package version may enter any committed
+# Cargo.lock only if it was published at least 30 days before admission. "New"
+# means absent from the protected base (current master); presence in a proposed
+# lockfile is never approval, and `cargo update --precise` records a resolution,
+# not an authorization. A younger version may be admitted only for a security
+# fix, through an entry in `cooldown-exceptions.toml` naming the exact package,
+# source, version, checksum and registry publication time; the RUSTSEC
+# advisories it fixes (or the exact primary it is a required lockstep companion
+# of); the reason; the approver and approval date; and an expiry equal to its
+# 30-day maturity date. Exceptions waive publication age only - never advisory,
+# license, source, integrity or test gates. Wildcards, families, ranges and
+# labels are not exceptions. CI fails on a missing, mismatched, unused or
+# expired exception; at maturity the entry is deleted by a reconciliation PR
+# (history keeps the record) and the version is never downgraded.
+#
+# ENFORCEMENT: the CI job `cooldown` runs
+# scripts/ci/gates/dependency_admission_check.py against the merge base (PR) or
+# the previous master tip (push); the weekly supply-chain schedule runs it in
+# `--expiry-only` mode. The gate reads `global-min-publish-age` below.
+#
+# DEVELOPER TOOLING (optional): `cargo-cooldown` honours the keys below when
+# refreshing dependencies locally.
 #   cargo install --locked cargo-cooldown      # one-time
 #   cargo cooldown update                       # refresh deps, cooling fresh ones
-#   cargo cooldown check                         # CI guard (fail-closed)
-#   cargo cooldown build|test                    # build/test through the cooldown
-# To intentionally adopt a fresh version (e.g. an urgent security fix), pin it:
-#   cargo update <crate> --precise <ver>   (records the choice in Cargo.lock)
 #
-# When cargo ships native client-side min-publish-age, drop cargo-cooldown and
-# move this to `.cargo/config.toml`'s [registry] global-min-publish-age.
+# When cargo ships native client-side min-publish-age with per-package
+# exceptions, replace the admission checker with it and move this to
+# `.cargo/config.toml`'s [registry] global-min-publish-age.
 
 [cooldown]
 # Fail (do NOT silently downgrade) if resolution requires a too-fresh version.
 incompatible-publish-age = "deny"
-# Versions already in Cargo.lock are the protected baseline (grandfathered);
-# only NEW too-fresh resolutions are blocked.
+# Local tooling only: versions already in Cargo.lock are not re-cooled. This is
+# NOT an approval mechanism; the CI gate diffs against the protected base.
 lockfile-baseline = "floor"
 
 [registry]
