@@ -6365,12 +6365,6 @@ reason = "module declaration dissolved by the layout sweep; its items are declar
 owner = "@layout-sweep"
 
 [[removed]]
-path = "crates/shamir-engine/src/query/filter/tests/eval_tests/mod.rs"
-item = "shamir-engine::lib::query::filter::tests::eval_tests::helpers"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
 path = "crates/shamir-engine/src/query/read/mod.rs"
 item = "shamir-engine::lib::query::read::aggregate"
 reason = "module declaration dissolved by the layout sweep; its items are declared separately"
@@ -6658,4 +6652,244 @@ owner = "@layout-sweep"
 path = "crates/shamir-engine/src/query/read/tests/query_results/select_order_page/mod.rs"
 item = "shamir-engine::lib::query::read::tests::query_results::select_order_page::helpers"
 reason = "shared test helper introduced by the layout sweep"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/compile.rs"
+item = "shamir-engine::lib::query::filter::compile::compile_contains_all_node"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/compile.rs"
+item = "shamir-engine::lib::query::filter::compile::compile_contains_any_node"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/compile.rs"
+item = "shamir-engine::lib::query::filter::compile::compile_in_node"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/filter_node.rs"
+item = "shamir-engine::lib::query::filter::filter_node::CompactPath"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/filter_node.rs"
+item = "shamir-engine::lib::query::filter::filter_node::FilterNode"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/filter_node.rs"
+item = "shamir-engine::lib::query::filter::filter_node::FilterNode::matches"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/fts.rs"
+item = "shamir-engine::lib::query::filter::fts::fts_word_matches"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/fts.rs"
+item = "shamir-engine::lib::query::filter::fts::like_pattern_to_regex"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/index_range.rs"
+item = "shamir-engine::lib::query::filter::index_range::predicate_bound_full_upper"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/index_range.rs"
+item = "shamir-engine::lib::query::filter::index_range::predicate_bound_lower"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/index_range.rs"
+item = "shamir-engine::lib::query::filter::index_range::predicate_bound_prefix"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/index_range.rs"
+item = "shamir-engine::lib::query::filter::index_range::predicate_bound_upper"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/resolve.rs"
+item = "shamir-engine::lib::query::filter::resolve::resolve_filter_query"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/resolve.rs"
+item = "shamir-engine::lib::query::filter::resolve::resolve_query_ref_value"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/collection_tests.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::collection_tests::make_f64_field_record"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/collection_tests.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::collection_tests::make_int_field_record"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/helpers.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::helpers::make_ab_record"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/helpers.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::helpers::make_alice_record"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/helpers.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::helpers::make_body_record"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/helpers.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::helpers::make_date_record"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/helpers.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::helpers::make_email_record"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/helpers.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::helpers::make_list_record"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/helpers.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::helpers::make_nested_record"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/helpers.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::helpers::make_nullable_record"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/helpers.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::helpers::make_set_record"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/tests/eval_tests/mod.rs"
+item = "shamir-engine::lib::query::filter::tests::eval_tests::helpers"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/read/aggregate.rs"
+item = "shamir-engine::lib::query::read::aggregate::AggAccum"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/read/aggregate.rs"
+item = "shamir-engine::lib::query::read::aggregate::AggAccum::new"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/read/aggregate.rs"
+item = "shamir-engine::lib::query::read::aggregate::GroupKeyItem"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/read/aggregate.rs"
+item = "shamir-engine::lib::query::read::aggregate::OwnedExtreme"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/read/aggregate.rs"
+item = "shamir-engine::lib::query::read::aggregate::OwnedScalar"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/read/aggregate.rs"
+item = "shamir-engine::lib::query::read::aggregate::RowView"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/read/aggregate.rs"
+item = "shamir-engine::lib::query::read::aggregate::group_key_item_complex"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/read/aggregate.rs"
+item = "shamir-engine::lib::query::read::aggregate::intern_field_path_keys"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/read/aggregate.rs"
+item = "shamir-engine::lib::query::read::aggregate::resolve_aggregate_param"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/read/hashable_query_value.rs"
+item = "shamir-engine::lib::query::read::hashable_query_value::HashableQueryValue"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/read/select_projection.rs"
+item = "shamir-engine::lib::query::read::select_projection::SelectProjection"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/read/tests/exec_tests.rs"
+item = "shamir-engine::lib::query::read::tests::exec_tests::make_name_record"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/read/tests/exec_tests.rs"
+item = "shamir-engine::lib::query::read::tests::exec_tests::make_records"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/read/tests/qv_postprocess_tests.rs"
+item = "shamir-engine::lib::query::read::tests::qv_postprocess_tests::make_test_records"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
 owner = "@layout-sweep"
