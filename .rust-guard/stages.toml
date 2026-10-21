@@ -3,11 +3,7 @@
 # conservation and the delta file that declares the legal moves for its
 # current stage.
 #
-# With `[[campaigns]]
-name     = "engine-sweep-q1a"
-packages = ["shamir-engine"]
-delta    = ".rust-guard/stages/engine-sweep-q1a.toml"
-` (the default state) conservation is a no-op:
+# With `campaigns = []` (the default state) conservation is a no-op:
 # the CI `source-integrity` job reads this file and simply finds no
 # campaigns to run. Add an entry ONLY when a refactor stage starts, and
 # remove it (and its delta) when the stage lands.
@@ -29,4 +25,3 @@ delta    = ".rust-guard/stages/engine-sweep-q1a.toml"
 name     = "engine-sweep-q1a"
 packages = ["shamir-engine"]
 delta    = ".rust-guard/stages/engine-sweep-q1a.toml"
-
