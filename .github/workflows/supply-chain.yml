@@ -4,7 +4,10 @@ name: supply-chain
 #
 # Three jobs on different cadences:
 #
-#  - `deny` runs on EVERY push/PR to master. `cargo deny check` is fast (no
+#  - `deny` runs when the dependency graph or the policy changed: a push to
+#    master or a PR that touches a Cargo.toml, Cargo.lock or deny.toml (plus
+#    the weekly schedule and on demand). The npm side has the same trigger
+#    shape in `npm-licenses.yml`. `cargo deny check` is fast (no
 #    compile), hermetic (consults Cargo.lock + deny.toml), and catches the
 #    push-time regressions: a newly-unsatisfiable license expression, a yanked
 #    crate entering the tree, a duplicate-version explosion, or a
@@ -44,10 +47,19 @@ name: supply-chain
 #    This job is retained for between-release / on-demand SBOM generation.
 
 on:
-  # Push to master stays UNFILTERED — the lockfile gate must cover every
-  # commit that lands, regardless of which paths it touches.
+  # Push to master is path-gated exactly like a PR: the license/bans/sources
+  # outcome depends only on the manifests, the lockfile and deny.toml, so a
+  # push that touches none of them since the previous master tip cannot change
+  # it and does not queue the job. Every push that does touch them (including
+  # one that bypassed a PR) still runs it. The weekly schedule below is the
+  # time-decoupled advisory re-scan and stays unconditional.
   push:
     branches: [master]
+    paths:
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'deny.toml'
+      - '.github/workflows/supply-chain.yml'
   pull_request:
     branches: [master]
     # ready_for_review starts the run when a draft is promoted. Path-gated:
