@@ -20,6 +20,27 @@ use crate::shamir_db::SystemStoreConfig;
 use crate::types::value::QueryValue;
 use crate::ShamirDb;
 
+#[cfg(unix)]
+/// Re-open a durable ShamirDb on the same system-store path, retrying
+/// briefly while the dropped instance's store still holds the fjall file lock
+/// (the lock is released lazily after the drop).
+async fn reopen_durable(sys_path: std::path::PathBuf) -> ShamirDb {
+    for _ in 0..100 {
+        match ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone())).await {
+            Ok(db) => return db,
+            Err(e) => {
+                let message = e.to_string();
+                assert!(
+                    message.contains("Locked"),
+                    "unexpected reopen error: {message}",
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+    }
+    panic!("fjall lock was not released within the retry window");
+}
+
 /// In-memory ShamirDb with `testdb/{main,side}` and `otherdb/main`, each
 /// carrying a `users` table — two databases so cross-database bindings are
 /// exercised.
@@ -667,9 +688,7 @@ async fn set_profile_alone_preserves_complete_row_through_reopen() {
             .expect("SetProfile row");
         assert_eq!(fresh, expected, "SetProfile may change profile only");
     }
-    let reopened = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
-        .await
-        .unwrap();
+    let reopened = reopen_durable(sys_path).await;
     let fresh = super::super::catalogue::rows(&reopened, "subscriptions")
         .await
         .unwrap()
@@ -786,9 +805,7 @@ async fn pause_and_set_profile_persist_exact_durable_row() {
         assert_eq!(row.get("status_message"), None);
         assert_eq!(row.get("resync_from_receipt"), None);
     }
-    let reopened = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
-        .await
-        .unwrap();
+    let reopened = reopen_durable(sys_path).await;
     let rows = super::super::catalogue::rows(&reopened, "subscriptions")
         .await
         .unwrap();
