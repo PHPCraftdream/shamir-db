@@ -281,7 +281,7 @@ Records the NEW attempt's storage-object id so an interrupted install's prefligh
   format_version: u16 = 1 }
 ```
 
-**Degraded-copy rule — aligned with 131 §4c (a):** repo unopenable ⇒ the catalogue copy alone is authoritative. The R1-stage-2 handoff completes when the catalogue copy is verified AND (the repo copy is verified OR the destination is NOT live (absent or destroyed) — no repo copy is possible for an absent destination). Retry is idempotent by `(cause, storage_object_id)` with incident-id reuse (131 §3d).
+**Degraded-copy rule — aligned with 131 §4c (a):** repo unopenable ⇒ the catalogue copy alone is authoritative. The R1-stage-2 handoff completes when `protected(d)` holds for every bound destination (131 §4c, the protection predicate): the catalogue copy is verified AND the repo copy is verified WHEN the destination is live and openable; a live but unopenable destination is protected by the catalogue copy alone (`degraded_copy = true`); a catalogued-only, absent-undestroyed (`UnresolvedProvenance`) or destroyed destination needs no repo copy. Retry is idempotent by `(cause, storage_object_id)` with incident-id reuse (131 §3d).
 
 **A.5 Audit event envelope (extension of `AuditEntry`)** — `details_canonical_msgpack` payload:
 
