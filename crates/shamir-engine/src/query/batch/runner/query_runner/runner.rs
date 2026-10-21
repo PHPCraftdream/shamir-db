@@ -1,7 +1,8 @@
 use shamir_collections::TFxSet;
-use shamir_query_types::batch::ResultEncoding;
+use shamir_query_types::batch::{ResultEncoding, VisibilityWait};
 use shamir_query_types::filter::Filter;
 use shamir_types::access::{Actor, ResourcePath};
+use shamir_types::core::interner::Interner;
 use shamir_types::types::common::{new_map, TMap};
 use shamir_types::types::value::QueryValue;
 
@@ -11,6 +12,7 @@ use crate::query::batch::{BatchError, BatchOp, QueryEntry};
 use crate::query::filter::FilterContext;
 use crate::query::read::QueryResult;
 use crate::query::TableRef;
+use crate::table::TableManager;
 
 /// Encapsulates per-query execution context — resolver, admin, optional
 /// transaction state, and the [`Actor`] + db name (R2) for the
@@ -47,6 +49,20 @@ pub struct QueryRunner<'a> {
     /// The borrow is bounded by this runner's execution lifetime.
     pub scope: &'a ExecScope,
 }
+/// Everything a per-op data arm (read / insert / update / delete / set)
+/// needs once `run_with_wait` has resolved the table: bundled so each arm
+/// takes one argument instead of eight.
+pub(super) struct DataArm<'a> {
+    pub(super) alias: &'a str,
+    pub(super) entry: &'a QueryEntry,
+    pub(super) table_ref: &'a TableRef,
+    pub(super) resource: ResourcePath,
+    pub(super) table: &'a TableManager,
+    pub(super) interner: &'a Interner,
+    pub(super) ctx: FilterContext<'a>,
+    pub(super) wait: Option<VisibilityWait>,
+}
+
 impl<'a> QueryRunner<'a> {
     /// Build a [`ResourcePath::Table`] for the given table reference.
     fn table_resource(&self, table_ref: &TableRef) -> ResourcePath {
@@ -223,37 +239,22 @@ impl<'a> QueryRunner<'a> {
             .with_scalars(self.resolver.scalar_resolver())
             .with_params(self.params);
 
+        let arm = DataArm {
+            alias,
+            entry,
+            table_ref,
+            resource,
+            table: &table,
+            interner,
+            ctx,
+            wait,
+        };
         match &entry.op {
-            BatchOp::Read(_) => {
-                self.run_read_arm(
-                    alias, entry, table_ref, resource, &table, interner, ctx, wait,
-                )
-                .await
-            }
-            BatchOp::Insert(_) => {
-                self.run_insert_arm(
-                    alias, entry, table_ref, resource, &table, interner, ctx, wait,
-                )
-                .await
-            }
-            BatchOp::Update(_) => {
-                self.run_update_arm(
-                    alias, entry, table_ref, resource, &table, interner, ctx, wait,
-                )
-                .await
-            }
-            BatchOp::Delete(_) => {
-                self.run_delete_arm(
-                    alias, entry, table_ref, resource, &table, interner, ctx, wait,
-                )
-                .await
-            }
-            BatchOp::Set(_) => {
-                self.run_set_arm(
-                    alias, entry, table_ref, resource, &table, interner, ctx, wait,
-                )
-                .await
-            }
+            BatchOp::Read(_) => self.run_read_arm(arm).await,
+            BatchOp::Insert(_) => self.run_insert_arm(arm).await,
+            BatchOp::Update(_) => self.run_update_arm(arm).await,
+            BatchOp::Delete(_) => self.run_delete_arm(arm).await,
+            BatchOp::Set(_) => self.run_set_arm(arm).await,
 
             // Admin ops are handled before this match via is_admin() check
             _ => unreachable!("Admin ops should have been handled earlier"),
