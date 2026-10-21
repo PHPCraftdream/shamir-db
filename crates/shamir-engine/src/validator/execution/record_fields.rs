@@ -66,7 +66,7 @@ pub trait RecordFields: Send + Sync {
     /// declarative validators never call this method — they use `scalar` /
     /// `str` / `present` by name.
     ///
-    /// [`WasmRecordValidator`]: super::WasmRecordValidator
+    /// [`WasmRecordValidator`]: crate::validator::WasmRecordValidator
     fn to_query_value(&self) -> QueryValue;
 }
 

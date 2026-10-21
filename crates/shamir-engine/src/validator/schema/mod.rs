@@ -4,15 +4,15 @@
 //! [`FormatKind`], [`CrossFieldCompare`], [`CompareOp`].
 //! Fluent builder: [`rule`].
 
-pub mod constraints;
-pub mod cross_field;
-pub mod field_rule;
+mod rules;
+
 pub mod foreign_key;
-pub mod format;
-mod one_of_set;
 pub mod rule_builder;
 pub mod schema_validator;
-pub mod type_tag;
+
+// Module-path facades: the pre-sweep rule file names stay reachable at
+// `crate::validator::schema::<name>` so no caller in any crate changes.
+pub use rules::{constraints, cross_field, field_rule, format, one_of_set, type_tag};
 
 pub use constraints::{Constraints, Num};
 pub use cross_field::{CompareOp, CrossFieldCompare, CrossFieldResult};
