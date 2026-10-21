@@ -1,7 +1,10 @@
 //! [`WasmEngine`] and [`WasmLimits`] — Wasmtime engine configuration.
 
+use super::compile_cache::{CompileCache, DEFAULT_SOFT_LIMIT_BYTES};
 use crate::runtime::error::{FnResult, FunctionError};
-use wasmtime::{Engine, InstanceAllocationStrategy, PoolingAllocationConfig};
+use std::env;
+use std::sync::Arc;
+use wasmtime::{Engine, InstanceAllocationStrategy, Module, PoolingAllocationConfig};
 
 // ── WasmEngine ────────────────────────────────────────────────────────
 
@@ -11,13 +14,15 @@ use wasmtime::{Engine, InstanceAllocationStrategy, PoolingAllocationConfig};
 ///
 /// # Compilation cache
 ///
-/// The engine enables Wasmtime's built-in disk compilation cache
-/// (`wasmtime::Cache`) when possible. The cache is a **node-local
-/// derivative** — it is fully recoverable from the original `.wasm`
-/// bytecode, never replicated between nodes, and safe to delete at any
-/// time. Wasmtime automatically invalidates stale entries when the
-/// engine version or compilation target changes, so no manual
-/// housekeeping is needed.
+/// Compiled modules are cached on disk by a pure-Rust cache
+/// ([`CompileCache`]; Wasmtime's own cache would pull in the C zstd
+/// library). The cache is a **node-local derivative** — it is fully
+/// recoverable from the original `.wasm` bytecode, never replicated between
+/// nodes, and safe to delete at any time. A corrupt entry or one made by
+/// another Wasmtime version or engine configuration is dropped and
+/// recompiled, so no manual housekeeping is needed. The directory is
+/// `SHAMIR_WASM_CACHE_DIR` or a per-user OS cache directory; set
+/// `SHAMIR_WASM_NO_CACHE` (any value) to disable the cache.
 ///
 /// If the cache cannot be initialised (missing directory, insufficient
 /// permissions, unsupported platform) the engine falls back to
@@ -25,16 +30,16 @@ use wasmtime::{Engine, InstanceAllocationStrategy, PoolingAllocationConfig};
 #[derive(Clone)]
 pub struct WasmEngine {
     engine: Engine,
+    cache: Option<Arc<CompileCache>>,
 }
 
 impl WasmEngine {
     /// Create a new engine with fuel consumption, async support, and
-    /// disk compilation cache enabled.
+    /// the disk compilation cache enabled.
     ///
     /// The disk cache is a **node-local derivative** recoverable from
     /// the original `.wasm` bytecode. It is not replicated between nodes.
-    /// On version or target mismatch Wasmtime silently recompiles;
-    /// on any cache init error the engine falls back to uncached
+    /// On any cache init error the engine falls back to uncached
     /// compilation (logged at `warn` level).
     pub fn new() -> FnResult<Self> {
         let mut config = wasmtime::Config::new();
@@ -54,24 +59,6 @@ impl WasmEngine {
         // linear-memory data segments are mapped from a CoW image
         // instead of being copied byte-by-byte on each instantiation.
         config.memory_init_cow(true);
-
-        // Enable Wasmtime's built-in disk compilation cache.
-        // `CacheConfig::new()` uses sensible defaults (OS-specific cache
-        // dir, zstd compression, background cleanup worker).
-        // `Cache::new()` validates the config and spawns the worker;
-        // on failure we log and proceed without cache.
-        match wasmtime::Cache::new(wasmtime::CacheConfig::new()) {
-            Ok(cache) => {
-                config.cache(Some(cache));
-                log::debug!("Wasmtime disk compilation cache enabled");
-            }
-            Err(e) => {
-                log::warn!(
-                    "Wasmtime disk compilation cache unavailable, \
-                     falling back to uncached compilation: {e}"
-                );
-            }
-        }
 
         // ── Allocator strategy ───────────────────────────────────────
         //
@@ -127,7 +114,36 @@ impl WasmEngine {
             Engine::new(&config).map_err(|e| FunctionError::Compute(e.to_string()))?
         };
         Self::spawn_epoch_ticker(&engine);
-        Ok(Self { engine })
+        Ok(Self {
+            engine,
+            cache: Self::open_cache(),
+        })
+    }
+
+    /// Opens the compilation cache; `None` (uncached compilation) when it is
+    /// disabled or cannot be initialised.
+    fn open_cache() -> Option<Arc<CompileCache>> {
+        if env::var_os("SHAMIR_WASM_NO_CACHE").is_some() {
+            log::info!("Wasm compilation cache disabled via SHAMIR_WASM_NO_CACHE env var");
+            return None;
+        }
+        let Some(dir) = CompileCache::default_dir() else {
+            log::warn!("Wasm compilation cache unavailable: no cache directory could be resolved");
+            return None;
+        };
+        match CompileCache::open(dir.clone(), DEFAULT_SOFT_LIMIT_BYTES) {
+            Ok(cache) => {
+                log::debug!("Wasm compilation cache enabled at {}", dir.display());
+                Some(Arc::new(cache))
+            }
+            Err(e) => {
+                log::warn!(
+                    "Wasm compilation cache unavailable at {},                      falling back to uncached compilation: {e}",
+                    dir.display()
+                );
+                None
+            }
+        }
     }
 
     /// Cadence at which the background task increments the engine epoch.
@@ -204,6 +220,15 @@ impl WasmEngine {
     /// Access the underlying Wasmtime engine.
     pub fn engine(&self) -> &Engine {
         &self.engine
+    }
+
+    /// Compiles `wasm` (already sanitized), through the compilation cache
+    /// when one is open.
+    pub(crate) fn compile(&self, wasm: &[u8]) -> Result<Module, wasmtime::Error> {
+        match &self.cache {
+            Some(cache) => cache.module(&self.engine, wasm).map(|(module, _)| module),
+            None => Module::from_binary(&self.engine, wasm),
+        }
     }
 }
 

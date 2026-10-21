@@ -42,4 +42,7 @@ pub use wasm::{verify_wasm_module, WasmEngine, WasmFunction, WasmLimits, SANCTIO
 pub(crate) use wasm::test_linker_and_store;
 
 #[cfg(test)]
+pub(crate) use wasm::{CompileCache, Outcome};
+
+#[cfg(test)]
 mod tests;

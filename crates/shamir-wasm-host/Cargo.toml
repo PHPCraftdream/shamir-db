@@ -20,9 +20,11 @@ wasmtime = { version = "48", default-features = false, features = [
     "std",
     "wat",
     "async",
-    "cache",
     "pooling-allocator",
 ] }
+# Wasmtime's own `cache` feature is NOT enabled: it compresses with zstd, a C
+# library. `wasm/compile_cache.rs` is the pure-Rust replacement.
+blake3 = { version = "1.5", features = ["pure"] }
 tempfile = "3.10.1"
 scc = "3.8"
 # Used by `compile_rust_source` to enforce a wall-clock timeout on the

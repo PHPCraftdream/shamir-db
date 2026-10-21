@@ -5,6 +5,7 @@
 //! * [`WasmFunction`] — the [`ShamirFunction`] implementation (`wasm_function`).
 
 mod bindings;
+mod compile_cache;
 mod wasm_engine;
 mod wasm_function;
 mod wasm_sanitizer;
@@ -12,6 +13,11 @@ mod wasm_sanitizer;
 pub use wasm_engine::{WasmEngine, WasmLimits};
 pub use wasm_function::WasmFunction;
 pub use wasm_sanitizer::{verify_wasm_module, SANCTIONED_HOST_IMPORTS};
+
+/// Test-only re-export of the compilation cache for
+/// `tests::wasm::compile_cache_tests`.
+#[cfg(test)]
+pub(crate) use compile_cache::{CompileCache, Outcome};
 
 /// Test-only re-export: lets
 /// `tests::wasm_sanitizer_tests::sanctioned_list_matches_linker_registrations`
