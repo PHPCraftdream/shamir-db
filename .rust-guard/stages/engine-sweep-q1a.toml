@@ -1,4 +1,4 @@
-base = "d5f49fa8596d452ad58043d3977f86f60f855bfd"
+base = "9041d94de8a658ba32b86217e645a87e45dec578"
 
 [[moved]]
 path = "crates/shamir-engine/src/query/batch/authorized.rs"
