@@ -1,7 +1,11 @@
 # cargo-deny configuration — supply-chain gate (audit C1).
 #
 # Run locally:   cargo install --locked cargo-deny && cargo deny check
-# CI:            .github/workflows/supply-chain.yml (every push/PR)
+# CI:            .github/workflows/supply-chain.yml (push to master / PR that touches
+#                a Cargo.toml, Cargo.lock or this file; weekly schedule; on demand)
+#                The npm lockfiles are gated by .github/workflows/npm-licenses.yml with
+#                the SAME allow-list (scripts/ci/gates/npm_licenses_check.py: keep the
+#                two lists in sync when a license is added here).
 #
 # The allow-lists below were derived from the ACTUAL license tree of this
 # workspace (extracted via `cargo metadata`), not copied blindly. Every license
