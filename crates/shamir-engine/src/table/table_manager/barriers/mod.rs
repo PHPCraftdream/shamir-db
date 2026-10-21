@@ -6,6 +6,5 @@
 //! `table_manager.rs`, so every file here can see `TableManager`'s
 //! private/`pub(super)` fields.
 
-#[allow(clippy::module_inception)]
-mod barriers;
+mod ddl_barriers;
 pub(super) mod guard;

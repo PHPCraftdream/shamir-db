@@ -20,7 +20,7 @@ use shamir_types::access::Actor;
 
 use crate::table::record_cow::RecordCow;
 use crate::table::table_manager::TableManager;
-use crate::table::write::set::set::project_query_value;
+use crate::table::write::set::execute::project_query_value;
 use crate::table::write::write_helpers::{
     apply_transforms, intern_via_layered, make_layered_interner, resolve_computed_record,
     validator_failure_to_db_error,

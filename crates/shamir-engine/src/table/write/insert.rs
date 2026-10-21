@@ -20,7 +20,7 @@ use crate::validator::WriteOp;
 use shamir_types::access::Actor;
 
 use crate::table::table_manager::TableManager;
-use crate::table::write::set::set::{build_insert_result_records, project_query_value};
+use crate::table::write::set::execute::{build_insert_result_records, project_query_value};
 use crate::table::write::write_helpers::{
     apply_defaults, apply_transforms, intern_via_layered, make_layered_interner,
     resolve_computed_record, validator_failure_to_db_error,

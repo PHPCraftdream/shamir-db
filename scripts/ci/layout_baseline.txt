@@ -14,7 +14,6 @@ dir crates/shamir-engine/src/query/read 8
 dir crates/shamir-engine/src/query/read/tests 11
 dir crates/shamir-engine/src/repo 19
 dir crates/shamir-engine/src/repo/tests 21
-dir crates/shamir-engine/src/table 38
 dir crates/shamir-engine/src/table/tests 114
 dir crates/shamir-engine/src/tx 21
 dir crates/shamir-engine/src/tx/tests 60
@@ -38,13 +37,9 @@ file crates/shamir-engine/src/query/read/aggregate.rs 1779
 file crates/shamir-engine/src/query/read/tests/exec_tests.rs 1222
 file crates/shamir-engine/src/query/read/tests/qv_postprocess_tests.rs 1354
 file crates/shamir-engine/src/repo/repo_instance.rs 1967
-file crates/shamir-engine/src/table/read_exec.rs 3092
-file crates/shamir-engine/src/table/table_manager.rs 1536
-file crates/shamir-engine/src/table/table_manager_tx_ops.rs 1552
 file crates/shamir-engine/src/table/tests/filtered_ann_tests.rs 1107
 file crates/shamir-engine/src/table/tests/p997_hash_rename_durability_tests.rs 1155
 file crates/shamir-engine/src/table/tests/write_exec_tests.rs 1009
-file crates/shamir-engine/src/table/write_exec.rs 1452
 file crates/shamir-engine/src/tx/commit.rs 1183
 file crates/shamir-engine/src/tx/drainer.rs 1730
 file crates/shamir-engine/src/tx/pre_commit.rs 2818

@@ -4,8 +4,7 @@
 //! `table_manager.rs`, so every file here can see `TableManager`'s
 //! private/`pub(super)` fields.
 
-#[allow(clippy::module_inception)]
-mod accessors;
+mod table_accessors;
 pub(in crate::table) mod table_manager_changefeed;
 pub(in crate::table) mod table_manager_locks;
 pub(in crate::table) mod table_manager_streaming;

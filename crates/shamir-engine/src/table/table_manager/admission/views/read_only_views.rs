@@ -80,7 +80,7 @@ use crate::query::filter::{compile_filter, FilterContext, FilterNode};
 /// * [`load_migration_state`](Self::load_migration_state) — read a persisted
 ///   migration state record for COMMIT MIGRATION retry.
 pub struct TableInfoStoreReadView<'a> {
-    pub(in crate::table) manager: &'a TableManager,
+    pub(super) manager: &'a TableManager,
 }
 
 impl<'a> TableInfoStoreReadView<'a> {
@@ -325,7 +325,7 @@ impl InternerReadView {
 /// readers only need the durability flush; the migration snapshot stream is
 /// encapsulated engine-side in `admitted_ops.rs`.
 pub struct TableDataStoreReadView<'a> {
-    pub(in crate::table) manager: &'a TableManager,
+    pub(super) manager: &'a TableManager,
 }
 
 impl TableDataStoreReadView<'_> {
