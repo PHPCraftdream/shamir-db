@@ -13,39 +13,36 @@
 //! - [`NativeRecordValidator`] — Rust closure validator (by-name, zero-copy).
 //! - [`WasmRecordValidator`] — WASM adapter (materialises internally).
 
-pub mod persistence;
-pub mod record_fields;
-pub mod record_validator;
-mod registry;
 pub mod schema;
-pub mod transform_spec;
 
-mod decode;
-mod encode;
-mod native_adapter;
-mod native_record_validator;
-mod persisted_validators;
-mod query_value_conv;
-mod validation_outcome;
-mod validator_binding;
-mod validator_db;
-mod wasm_record_validator;
+mod codecs;
+mod execution;
+mod registry;
 
-pub use decode::{decode_validation_result, ValidatorDecodeError};
-pub use encode::{validation_to_query_value, Validation};
-pub use native_adapter::{NativeValidatorAdapter, NativeValidatorFn};
-pub use native_record_validator::{NativeRecordValidator, NativeValidatorFnNew};
-pub use persisted_validators::PersistedValidators;
-pub use query_value_conv::{inner_to_query_value, inner_to_query_value_with};
-pub use record_fields::{OwnedFields, RecordFields, ViewFields};
-pub use record_validator::{RecordValidator, ValidatorCtx};
-pub use transform_spec::TransformSpec;
-pub use validation_outcome::{ValidationOutcome, ValidatorFailure};
-pub use validator_binding::ValidatorBinding;
-pub use validator_db::ValidatorDb;
-pub use wasm_record_validator::WasmRecordValidator;
+// Module-path facades: the pre-sweep file names stay reachable at
+// `crate::validator::<name>` so no caller in any crate changes.
+pub use codecs::{decode, encode, native_adapter, query_value_conv};
+pub use execution::{
+    native_record_validator, record_fields, record_validator, transform_spec, validation_outcome,
+    wasm_record_validator,
+};
+pub use registry::{persisted_validators, persistence, validator_binding, validator_db};
 
-pub use registry::{ValidatorRegistry, ValidatorRegistryError};
+pub use codecs::decode::{decode_validation_result, ValidatorDecodeError};
+pub use codecs::encode::{validation_to_query_value, Validation};
+pub use codecs::native_adapter::{NativeValidatorAdapter, NativeValidatorFn};
+pub use codecs::query_value_conv::{inner_to_query_value, inner_to_query_value_with};
+pub use execution::native_record_validator::{NativeRecordValidator, NativeValidatorFnNew};
+pub use execution::record_fields::{OwnedFields, RecordFields, ViewFields};
+pub use execution::record_validator::{RecordValidator, ValidatorCtx};
+pub use execution::transform_spec::TransformSpec;
+pub use execution::validation_outcome::{ValidationOutcome, ValidatorFailure};
+pub use execution::wasm_record_validator::WasmRecordValidator;
+pub use registry::persisted_validators::PersistedValidators;
+pub use registry::validator_binding::ValidatorBinding;
+pub use registry::validator_db::ValidatorDb;
+
+pub use registry::validator_registry::{ValidatorRegistry, ValidatorRegistryError};
 
 // -- re-exports from the wire crate -----------------------------------------
 pub use shamir_query_types::validator::{ValidationError, WriteOp};
