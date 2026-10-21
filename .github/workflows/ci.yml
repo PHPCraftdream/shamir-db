@@ -477,12 +477,15 @@ jobs:
         if: steps.ts_changes.outputs.changed != 'false'
         working-directory: crates/shamir-client-ts
 
-  # Supply-chain cooldown gate (RFC 3923, fail-closed) — fails the PR if
-  # resolving the workspace would pull a crate version younger than 30 days
-  # (config: /cooldown.toml). The `--locked` flags above keep the other jobs on
-  # the committed Cargo.lock; THIS job catches a PR that introduces a too-fresh
-  # dependency. Native cargo support is pending, so we use the cargo-cooldown
-  # subcommand. `check` restores the original lock if enforcement fails.
+  # Dependency admission gate (RFC 3923 cooldown, fail-closed; policy:
+  # /cooldown.toml, DEC-3 Q4). Fails the PR when it admits a registry version
+  # younger than 30 days (present in the head Cargo.lock, absent from the
+  # protected base) without an exact, unexpired entry in
+  # /cooldown-exceptions.toml, and fails on any unused or expired entry. The
+  # `--locked` flags above keep the other jobs on the committed Cargo.lock;
+  # THIS job catches a PR that introduces a too-fresh dependency. Stdlib Python,
+  # no toolchain: crates.io publication times and the RustSec advisory database
+  # are read over the network and any failure to read them fails the job.
   cooldown:
     name: dependency cooldown (30d)
     runs-on: ubuntu-latest
@@ -490,19 +493,26 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
-      # Pinned: an unpinned supply-chain-freshness tool silently changing
-      # behavior between CI runs is exactly the kind of drift a "cooldown"
-      # gate exists to prevent for the WORKSPACE's dependencies — it would
-      # be inconsistent to leave the gate tool itself unpinned. `--locked`
-      # only pins cargo-cooldown's OWN internal Cargo.lock during its build,
-      # NOT which published version gets installed (same misconception
-      # corrected for cargo-nextest in the nextest pin above). `--version`
-      # pins the exact crates.io release. When upgrading, bump the version
-      # here to match.
-      - run: cargo install --locked --version 0.3.4 cargo-cooldown
-      - run: cargo cooldown check
+        with:
+          fetch-depth: 0
+      - name: Select the protected base
+        id: base
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            # Master push (squash merge): the previous master tip is the base.
+            base=$(git rev-parse HEAD^1)
+          else
+            git fetch --no-tags origin master
+            base=$(git merge-base origin/master HEAD)
+          fi
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
+      - name: Fetch the RustSec advisory database
+        run: git clone --depth 1 https://github.com/rustsec/advisory-db "$RUNNER_TEMP/advisory-db"
+      - name: Check admissions against the exceptions
+        run: >
+          python3 -I scripts/ci/gates/dependency_admission_check.py
+          --base-ref "${{ steps.base.outputs.sha }}"
+          --advisory-db "$RUNNER_TEMP/advisory-db"
 
   # F-80 (#907) — loom model-checker gate for the WriterDrainBarrier
   # interleaving contract (F-56, #882). This is the proof mechanism

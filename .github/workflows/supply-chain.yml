@@ -173,3 +173,15 @@ jobs:
           name: sbom-cyclonedx-${{ github.run_id }}
           path: crates/*/*.cdx.json
           if-no-files-found: error
+
+  # Weekly reconciliation of the cooldown exceptions (cooldown-exceptions.toml):
+  # fails on an expired or unused entry and warns in the last week before
+  # expiry, so a version that matured is cleaned up even without a PR touching
+  # the lockfile. Policy: /cooldown.toml.
+  exceptions-expiry:
+    name: cooldown exceptions expiry
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - run: python3 -I scripts/ci/gates/dependency_admission_check.py --expiry-only
