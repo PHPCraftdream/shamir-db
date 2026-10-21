@@ -1826,30 +1826,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
-item = "shamir-engine::lib::query::batch::query_value_serializer::QvMap::Error"
-to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
-to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::QvMap::Error"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
-item = "shamir-engine::lib::query::batch::query_value_serializer::QvMap::Ok"
-to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
-to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::QvMap::Ok"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
-item = "shamir-engine::lib::query::batch::query_value_serializer::QvMap::end"
-to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
-to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::QvMap::end"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
 item = "shamir-engine::lib::query::batch::query_value_serializer::QvMap::finish"
 to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
 to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::QvMap::finish"
@@ -1922,14 +1898,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
-item = "shamir-engine::lib::query::batch::query_value_serializer::QvSeq::serialize_element"
-to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
-to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::QvSeq::serialize_element"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
 item = "shamir-engine::lib::query::batch::query_value_serializer::QvSeq::serialize_field"
 to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
 to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::QvSeq::serialize_field"
@@ -1965,38 +1933,6 @@ path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
 item = "shamir-engine::lib::query::batch::query_value_serializer::Unreachable"
 to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
 to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::Unreachable"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
-item = "shamir-engine::lib::query::batch::query_value_serializer::Unreachable::Error"
-to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
-to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::Unreachable::Error"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
-item = "shamir-engine::lib::query::batch::query_value_serializer::Unreachable::Ok"
-to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
-to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::Unreachable::Ok"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
-item = "shamir-engine::lib::query::batch::query_value_serializer::Unreachable::end"
-to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
-to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::Unreachable::end"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
-item = "shamir-engine::lib::query::batch::query_value_serializer::Unreachable::serialize_field"
-to_path = "crates/shamir-engine/src/query/batch/runner/query_value_serializer.rs"
-to_item = "shamir-engine::lib::query::batch::runner::query_value_serializer::Unreachable::serialize_field"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -7511,6 +7447,7 @@ to_path = "crates/shamir-engine/src/query/batch/tests/limits/watchdog_tests.rs"
 to_item = "shamir-engine::lib::query::batch::tests::limits::watchdog_tests::watchdog_warns_while_slow_op_still_running"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
+
 [[moved]]
 path = "crates/shamir-engine/src/query/batch/query_value_serializer.rs"
 item = "shamir-engine::lib::query::batch::query_value_serializer::QvMap::Error"
@@ -8767,4 +8704,284 @@ owner = "@layout-sweep"
 path = "crates/shamir-engine/src/query/batch/tests/runtime_byte_budget_tests.rs"
 item = "shamir-engine::lib::query::batch::tests::runtime_byte_budget_tests::estimator_metadata_and_serialized_envelope_presence_are_exact"
 reason = "serializer path adjusted to the new module location, assertions unchanged"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/authorized.rs"
+item = "shamir-engine::lib::query::batch::authorized::Authorized::with_deadline_cap_at_for_test"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::batch_execute::execute_batch"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::batch_execute::execute_batch_impl"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::batch_execute::execute_planned_batch_impl"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::batch_execute::execute_transactional_impl"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::batch_execute::filter_results"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::batch_execute::plan_and_validate_batch"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/batch_validate.rs"
+item = "shamir-engine::lib::query::batch::batch_validate::validate_filter_depth"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec_scope::ExecScope::read_visibility_budget_at_for_test"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec_scope::ExecScope::with_deadline_cap"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/fk_actions.rs"
+item = "shamir-engine::lib::query::batch::fk_actions::CASCADE_DEPTH_LIMIT"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/fk_actions.rs"
+item = "shamir-engine::lib::query::batch::fk_actions::CascadePlan"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/fk_actions.rs"
+item = "shamir-engine::lib::query::batch::fk_actions::PendingMutation"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/fk_on_update.rs"
+item = "shamir-engine::lib::query::batch::fk_on_update::FkUpdatePlan"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/fk_on_update.rs"
+item = "shamir-engine::lib::query::batch::fk_on_update::OnUpdateRef"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/fk_on_update.rs"
+item = "shamir-engine::lib::query::batch::fk_on_update::PendingMutation"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/param_subst.rs"
+item = "shamir-engine::lib::query::batch::param_subst::WriteValueError"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/query_runner.rs"
+item = "shamir-engine::lib::query::batch::query_runner::NestedTxBodyFuture"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/query_runner.rs"
+item = "shamir-engine::lib::query::batch::query_runner::QueryRunner::run_with_wait"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/receipts/dependency.rs"
+item = "shamir-engine::lib::query::batch::receipts::dependency::failure_result"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/receipts/propagation.rs"
+item = "shamir-engine::lib::query::batch::receipts::propagation::filter"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/result_size.rs"
+item = "shamir-engine::lib::query::batch::result_size::ResultSize"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/result_size.rs"
+item = "shamir-engine::lib::query::batch::result_size::ResultSize::ENTRY"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/result_size.rs"
+item = "shamir-engine::lib::query::batch::result_size::ResultSize::SHELL"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/result_size.rs"
+item = "shamir-engine::lib::query::batch::result_size::ResultSize::result"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/tests/executor_tests/when_skip_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::executor_tests::when_skip_tests::seed_req_for_after_own_when_false"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_actions_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_actions_tests::insert_helper"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_indexed_action_read_error_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_indexed_action_read_error_tests::FkTestResolver"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_on_update_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_on_update_tests::FkTestResolver"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_race_closure_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_race_closure_tests::InjectedWriter"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_race_closure_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_race_closure_tests::RaceInjectingResolver"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_race_closure_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_race_closure_tests::TxTestResolver"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_race_closure_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_race_closure_tests::read_first_i64"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_restrict_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_restrict_tests::FkTestResolver"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_ri_barrier_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_ri_barrier_tests::InjectedWriter"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_ri_barrier_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_ri_barrier_tests::RaceInjectingResolver"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_ri_barrier_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_ri_barrier_tests::TxTestResolver"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/tests/for_each_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::for_each_tests::TestResolver"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/tests/for_each_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::for_each_tests::TxTestResolver"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/tests/sub_batch_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::sub_batch_tests::TestResolverWithScalars"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/tests/sub_batch_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::sub_batch_tests::TxTestResolver"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_race_closure_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_race_closure_tests::setup_race_test"
+to_path = "crates/shamir-engine/src/query/batch/tests/fk/races/support.rs"
+to_item = "shamir-engine::lib::query::batch::tests::fk::races::support::setup_race_test"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_ri_barrier_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_ri_barrier_tests::setup_race_test"
+to_path = "crates/shamir-engine/src/query/batch/tests/fk/barriers/support.rs"
+to_item = "shamir-engine::lib::query::batch::tests::fk::barriers::support::setup_race_test"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_race_closure_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_race_closure_tests::setup_race_test"
+reason = "helper adjusted to its new support module"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/batch/tests/fk_ri_barrier_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk_ri_barrier_tests::setup_race_test"
+reason = "helper adjusted to its new support module"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/batch/fk/fk_on_update/helpers.rs"
+item = "shamir-engine::lib::query::batch::fk::fk_on_update::helpers::filter_matches"
+reason = "shared helper extracted by the layout sweep"
 owner = "@layout-sweep"
