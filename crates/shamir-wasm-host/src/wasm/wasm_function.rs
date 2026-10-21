@@ -240,7 +240,8 @@ impl WasmFunction {
         let wasm_bytes = wat::parse_str(wat)
             .map_err(|e| FunctionError::Compute(format!("WAT parse error: {e}")))?;
         verify_wasm_module(&wasm_bytes)?;
-        let module = Module::new(engine.engine(), wat)
+        let module = engine
+            .compile(&wasm_bytes)
             .map_err(|e| FunctionError::Compute(format!("WAT compile error: {e}")))?;
         let instance_pre = build_instance_pre(&engine, &module)?;
         Ok(Self {
@@ -278,7 +279,8 @@ impl WasmFunction {
         limits: WasmLimits,
     ) -> FnResult<Self> {
         verify_wasm_module(wasm_or_cwasm_bytes)?;
-        let module = Module::from_binary(engine.engine(), wasm_or_cwasm_bytes)
+        let module = engine
+            .compile(wasm_or_cwasm_bytes)
             .map_err(|e| FunctionError::Compute(format!("WASM compile error: {e}")))?;
         let instance_pre = build_instance_pre(&engine, &module)?;
         Ok(Self {
