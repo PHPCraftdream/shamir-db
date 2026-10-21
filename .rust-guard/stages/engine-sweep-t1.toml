@@ -3495,3 +3495,794 @@ path = "crates/shamir-engine/src/table/mod.rs"
 item = "shamir-engine::lib::table::write_receipt"
 reason = "the #[path] attribute of the module declaration follows the moved file"
 owner = "@layout-sweep"
+[[moved]]
+path = "crates/shamir-engine/src/table/interner_manager.rs"
+item = "shamir-engine::lib::table::interner_manager::InternerManager::persist"
+to_path = "crates/shamir-engine/src/table/support/storage/interner_manager.rs"
+to_item = "shamir-engine::lib::table::support::storage::interner_manager::InternerManager::persist"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/record_counter.rs"
+item = "shamir-engine::lib::table::record_counter::RecordCounter::persist"
+to_path = "crates/shamir-engine/src/table/support/storage/record_counter.rs"
+to_item = "shamir-engine::lib::table::support::storage::record_counter::RecordCounter::persist"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/candidate_set.rs"
+item = "shamir-engine::lib::table::candidate_set::CandidateSet"
+to_path = "crates/shamir-engine/src/table/read/execution/candidate_set.rs"
+to_item = "shamir-engine::lib::table::read::execution::candidate_set::CandidateSet"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/read_exec.rs"
+item = "shamir-engine::lib::table::read_exec::DynBatchStream"
+to_path = "crates/shamir-engine/src/table/read/execution/dispatch.rs"
+to_item = "shamir-engine::lib::table::read::execution::dispatch::DynBatchStream"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/in_flight_create_guard.rs"
+item = "shamir-engine::lib::table::in_flight_create_guard::InFlightCreateGuard"
+to_path = "crates/shamir-engine/src/table/support/guards/in_flight_create_guard.rs"
+to_item = "shamir-engine::lib::table::support::guards::in_flight_create_guard::InFlightCreateGuard"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/table_manager_tx_ops.rs"
+item = "shamir-engine::lib::table::table_manager_tx_ops::StagedMutation"
+to_path = "crates/shamir-engine/src/table/table_manager/transactions/tx_support.rs"
+to_item = "shamir-engine::lib::table::table_manager::transactions::tx_support::StagedMutation"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/tx_scan_overlay.rs"
+item = "shamir-engine::lib::table::tx_scan_overlay::StagedRowOverlay"
+to_path = "crates/shamir-engine/src/table/support/test_seams/tx_scan_overlay.rs"
+to_item = "shamir-engine::lib::table::support::test_seams::tx_scan_overlay::StagedRowOverlay"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::WriteBarrierGuard"
+to_path = "crates/shamir-engine/src/table/table_manager/barriers/guard.rs"
+to_item = "shamir-engine::lib::table::table_manager::barriers::guard::WriteBarrierGuard"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/writer_drain_barrier.rs"
+item = "shamir-engine::lib::table::writer_drain_barrier::WriterDrainBarrier"
+to_path = "crates/shamir-engine/src/table/support/guards/writer_drain_barrier.rs"
+to_item = "shamir-engine::lib::table::support::guards::writer_drain_barrier::WriterDrainBarrier"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/read_exec.rs"
+item = "shamir-engine::lib::table::read_exec::TableManager::build_explain_plan"
+to_path = "crates/shamir-engine/src/table/read/dispatch/explain.rs"
+to_item = "shamir-engine::lib::table::read::dispatch::explain::TableManager::build_explain_plan"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/read_exec.rs"
+item = "shamir-engine::lib::table::read_exec::contains_vector_similarity"
+to_path = "crates/shamir-engine/src/table/read/dispatch/explain.rs"
+to_item = "shamir-engine::lib::table::read::dispatch::explain::contains_vector_similarity"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/table_manager_crud.rs"
+item = "shamir-engine::lib::table::table_manager_crud::TableManager::delete_unacknowledged"
+to_path = "crates/shamir-engine/src/table/table_manager/operations/table_manager_crud.rs"
+to_item = "shamir-engine::lib::table::table_manager::operations::table_manager_crud::TableManager::delete_unacknowledged"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager::enter_writer_drain"
+to_path = "crates/shamir-engine/src/table/table_manager/barriers/ddl_barriers.rs"
+to_item = "shamir-engine::lib::table::table_manager::barriers::ddl_barriers::TableManager::enter_writer_drain"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/write_exec.rs"
+item = "shamir-engine::lib::table::write_exec::TableManager::execute_delete_tx"
+to_path = "crates/shamir-engine/src/table/write/delete/execute.rs"
+to_item = "shamir-engine::lib::table::write::delete::execute::TableManager::execute_delete_tx"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/write_exec.rs"
+item = "shamir-engine::lib::table::write_exec::TableManager::execute_update_tx"
+to_path = "crates/shamir-engine/src/table/write/update/execute.rs"
+to_item = "shamir-engine::lib::table::write::update::execute::TableManager::execute_update_tx"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/table_manager_crud.rs"
+item = "shamir-engine::lib::table::table_manager_crud::TableManager::index2_on_delete"
+to_path = "crates/shamir-engine/src/table/table_manager/operations/table_manager_crud.rs"
+to_item = "shamir-engine::lib::table::table_manager::operations::table_manager_crud::TableManager::index2_on_delete"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/table_manager_crud.rs"
+item = "shamir-engine::lib::table::table_manager_crud::TableManager::index2_on_insert"
+to_path = "crates/shamir-engine/src/table/table_manager/operations/table_manager_crud.rs"
+to_item = "shamir-engine::lib::table::table_manager::operations::table_manager_crud::TableManager::index2_on_insert"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/read_exec.rs"
+item = "shamir-engine::lib::table::read_exec::intern_simple_projection_ids"
+to_path = "crates/shamir-engine/src/table/read/execution/dispatch.rs"
+to_item = "shamir-engine::lib::table::read::execution::dispatch::intern_simple_projection_ids"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/read_exec.rs"
+item = "shamir-engine::lib::table::read_exec::is_select_simple"
+to_path = "crates/shamir-engine/src/table/read/execution/dispatch.rs"
+to_item = "shamir-engine::lib::table::read::execution::dispatch::is_select_simple"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/interner_manager.rs"
+item = "shamir-engine::lib::table::interner_manager::InternerManager::persist"
+to_path = "crates/shamir-engine/src/table/support/storage/interner_manager.rs"
+to_item = "shamir-engine::lib::table::support::storage::interner_manager::InternerManager::persist"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/record_counter.rs"
+item = "shamir-engine::lib::table::record_counter::RecordCounter::persist"
+to_path = "crates/shamir-engine/src/table/support/storage/record_counter.rs"
+to_item = "shamir-engine::lib::table::support::storage::record_counter::RecordCounter::persist"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/read_exec.rs"
+item = "shamir-engine::lib::table::read_exec::TableManager::postprocess_candidates"
+to_path = "crates/shamir-engine/src/table/read/dispatch/vector.rs"
+to_item = "shamir-engine::lib::table::read::dispatch::vector::TableManager::postprocess_candidates"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/write_exec.rs"
+item = "shamir-engine::lib::table::write_exec::project_query_value"
+to_path = "crates/shamir-engine/src/table/write/set/execute.rs"
+to_item = "shamir-engine::lib::table::write::set::execute::project_query_value"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/read_exec.rs"
+item = "shamir-engine::lib::table::read_exec::TableManager::read_filtered_vector_scan"
+to_path = "crates/shamir-engine/src/table/read/dispatch/vector.rs"
+to_item = "shamir-engine::lib::table::read::dispatch::vector::TableManager::read_filtered_vector_scan"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/read_temporal.rs"
+item = "shamir-engine::lib::table::read_temporal::TableManager::read_history"
+to_path = "crates/shamir-engine/src/table/read/planning/read_temporal.rs"
+to_item = "shamir-engine::lib::table::read::planning::read_temporal::TableManager::read_history"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/read_exec.rs"
+item = "shamir-engine::lib::table::read_exec::TableManager::read_impl"
+to_path = "crates/shamir-engine/src/table/read/execution/dispatch.rs"
+to_item = "shamir-engine::lib::table::read::execution::dispatch::TableManager::read_impl"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/read_index_scan.rs"
+item = "shamir-engine::lib::table::read_index_scan::TableManager::read_order_limit_fast"
+to_path = "crates/shamir-engine/src/table/read/planning/read_index_scan.rs"
+to_item = "shamir-engine::lib::table::read::planning::read_index_scan::TableManager::read_order_limit_fast"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/read_exec.rs"
+item = "shamir-engine::lib::table::read_exec::TableManager::read_snapshot_keyset"
+to_path = "crates/shamir-engine/src/table/read/dispatch/scan.rs"
+to_item = "shamir-engine::lib::table::read::dispatch::scan::TableManager::read_snapshot_keyset"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/read_exec.rs"
+item = "shamir-engine::lib::table::read_exec::TableManager::read_snapshot_vector"
+to_path = "crates/shamir-engine/src/table/read/dispatch/vector.rs"
+to_item = "shamir-engine::lib::table::read::dispatch::vector::TableManager::read_snapshot_vector"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::WriteBarrierGuard::retaining_permit"
+to_path = "crates/shamir-engine/src/table/table_manager/barriers/guard.rs"
+to_item = "shamir-engine::lib::table::table_manager::barriers::guard::WriteBarrierGuard::retaining_permit"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager::set_create_index2_backfill_hook"
+to_path = "crates/shamir-engine/src/table/table_manager/accessors/table_accessors.rs"
+to_item = "shamir-engine::lib::table::table_manager::accessors::table_accessors::TableManager::set_create_index2_backfill_hook"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager::set_create_sorted_index_backfill_hook"
+to_path = "crates/shamir-engine/src/table/table_manager/accessors/table_accessors.rs"
+to_item = "shamir-engine::lib::table::table_manager::accessors::table_accessors::TableManager::set_create_sorted_index_backfill_hook"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager::set_drop_index2_pause_hook"
+to_path = "crates/shamir-engine/src/table/table_manager/accessors/table_accessors.rs"
+to_item = "shamir-engine::lib::table::table_manager::accessors::table_accessors::TableManager::set_drop_index2_pause_hook"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager::set_drop_index2_post_sweep_hook"
+to_path = "crates/shamir-engine/src/table/table_manager/accessors/table_accessors.rs"
+to_item = "shamir-engine::lib::table::table_manager::accessors::table_accessors::TableManager::set_drop_index2_post_sweep_hook"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager::set_index2_registered_before_ready_hook"
+to_path = "crates/shamir-engine/src/table/table_manager/accessors/table_accessors.rs"
+to_item = "shamir-engine::lib::table::table_manager::accessors::table_accessors::TableManager::set_index2_registered_before_ready_hook"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager::set_phase_b_pause_hook"
+to_path = "crates/shamir-engine/src/table/table_manager/accessors/table_accessors.rs"
+to_item = "shamir-engine::lib::table::table_manager::accessors::table_accessors::TableManager::set_phase_b_pause_hook"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager::set_phase_c_pause_hook"
+to_path = "crates/shamir-engine/src/table/table_manager/accessors/table_accessors.rs"
+to_item = "shamir-engine::lib::table::table_manager::accessors::table_accessors::TableManager::set_phase_c_pause_hook"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager::set_phase_d_pause_hook"
+to_path = "crates/shamir-engine/src/table/table_manager/accessors/table_accessors.rs"
+to_item = "shamir-engine::lib::table::table_manager::accessors::table_accessors::TableManager::set_phase_d_pause_hook"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager::set_rename_index2_early_pause_hook"
+to_path = "crates/shamir-engine/src/table/table_manager/accessors/table_accessors.rs"
+to_item = "shamir-engine::lib::table::table_manager::accessors::table_accessors::TableManager::set_rename_index2_early_pause_hook"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager::set_rename_index2_mid_pause_hook"
+to_path = "crates/shamir-engine/src/table/table_manager/accessors/table_accessors.rs"
+to_item = "shamir-engine::lib::table::table_manager::accessors::table_accessors::TableManager::set_rename_index2_mid_pause_hook"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/read_planner.rs"
+item = "shamir-engine::lib::table::read_planner::TableManager::try_plan_index2"
+to_path = "crates/shamir-engine/src/table/read/planning/read_planner.rs"
+to_item = "shamir-engine::lib::table::read::planning::read_planner::TableManager::try_plan_index2"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/table_manager_index_mgmt.rs"
+item = "shamir-engine::lib::table::table_manager_index_mgmt::TableManager::write_hash_drop_recovery_status"
+to_path = "crates/shamir-engine/src/table/table_manager/operations/table_manager_index_mgmt.rs"
+to_item = "shamir-engine::lib::table::table_manager::operations::table_manager_index_mgmt::TableManager::write_hash_drop_recovery_status"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::candidate_set"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::filtered_vector"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::migration_freeze_guard"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::read_asof_seek"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::read_exec"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::read_index_scan"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::read_planner"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::read_temporal"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::table"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::table_manager_buffer"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::table_manager_changefeed"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::table_manager_crud"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::table_manager_index_mgmt"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::table_manager_locks"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::table_manager_replication"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::table_manager_sorted_index"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::table_manager_streaming"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::table_manager_tx_ops"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::table_manager_validators"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::tx_scan_overlay"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::write_exec"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::read"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::support"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/mod.rs"
+item = "shamir-engine::lib::table::write"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/read/dispatch/mod.rs"
+item = "shamir-engine::lib::table::read::dispatch::collect"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/read/dispatch/mod.rs"
+item = "shamir-engine::lib::table::read::dispatch::explain"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/read/dispatch/mod.rs"
+item = "shamir-engine::lib::table::read::dispatch::paged"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/read/dispatch/mod.rs"
+item = "shamir-engine::lib::table::read::dispatch::scan"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/read/dispatch/mod.rs"
+item = "shamir-engine::lib::table::read::dispatch::vector"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/read/execution/mod.rs"
+item = "shamir-engine::lib::table::read::execution::candidate_set"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/read/execution/mod.rs"
+item = "shamir-engine::lib::table::read::execution::dispatch"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/read/mod.rs"
+item = "shamir-engine::lib::table::read::dispatch"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/read/mod.rs"
+item = "shamir-engine::lib::table::read::execution"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/read/mod.rs"
+item = "shamir-engine::lib::table::read::planning"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/read/mod.rs"
+item = "shamir-engine::lib::table::read::vector"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/read/planning/mod.rs"
+item = "shamir-engine::lib::table::read::planning::read_asof_seek"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/read/planning/mod.rs"
+item = "shamir-engine::lib::table::read::planning::read_index_scan"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/read/planning/mod.rs"
+item = "shamir-engine::lib::table::read::planning::read_planner"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/read/planning/mod.rs"
+item = "shamir-engine::lib::table::read::planning::read_temporal"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/read/vector/mod.rs"
+item = "shamir-engine::lib::table::read::vector::filtered_vector"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/support/guards/mod.rs"
+item = "shamir-engine::lib::table::support::guards::migration_freeze_guard"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/support/mod.rs"
+item = "shamir-engine::lib::table::support::guards"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/support/mod.rs"
+item = "shamir-engine::lib::table::support::model"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/support/mod.rs"
+item = "shamir-engine::lib::table::support::storage"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/support/mod.rs"
+item = "shamir-engine::lib::table::support::test_seams"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/support/model/mod.rs"
+item = "shamir-engine::lib::table::support::model::table"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/support/test_seams/mod.rs"
+item = "shamir-engine::lib::table::support::test_seams::tx_scan_overlay"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::accessors"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::barriers"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::diagnostics"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::operations"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::transactions"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/table_manager/accessors/mod.rs"
+item = "shamir-engine::lib::table::table_manager::accessors::table_accessors"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/table_manager/accessors/mod.rs"
+item = "shamir-engine::lib::table::table_manager::accessors::table_manager_changefeed"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/table_manager/accessors/mod.rs"
+item = "shamir-engine::lib::table::table_manager::accessors::table_manager_locks"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/table_manager/accessors/mod.rs"
+item = "shamir-engine::lib::table::table_manager::accessors::table_manager_streaming"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/table_manager/accessors/mod.rs"
+item = "shamir-engine::lib::table::table_manager::accessors::table_manager_validators"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/table_manager/accessors/mod.rs"
+item = "shamir-engine::lib::table::table_manager::accessors::tokenizer"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/table_manager/barriers/mod.rs"
+item = "shamir-engine::lib::table::table_manager::barriers::ddl_barriers"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/table_manager/barriers/mod.rs"
+item = "shamir-engine::lib::table::table_manager::barriers::guard"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/table_manager/operations/mod.rs"
+item = "shamir-engine::lib::table::table_manager::operations::table_manager_buffer"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/table_manager/operations/mod.rs"
+item = "shamir-engine::lib::table::table_manager::operations::table_manager_crud"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/table_manager/operations/mod.rs"
+item = "shamir-engine::lib::table::table_manager::operations::table_manager_index_mgmt"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/table_manager/operations/mod.rs"
+item = "shamir-engine::lib::table::table_manager::operations::table_manager_replication"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/table_manager/operations/mod.rs"
+item = "shamir-engine::lib::table::table_manager::operations::table_manager_sorted_index"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/table_manager/transactions/mod.rs"
+item = "shamir-engine::lib::table::table_manager::transactions::tx_delete"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/table_manager/transactions/mod.rs"
+item = "shamir-engine::lib::table::table_manager::transactions::tx_insert"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/table_manager/transactions/mod.rs"
+item = "shamir-engine::lib::table::table_manager::transactions::tx_support"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/table_manager/transactions/mod.rs"
+item = "shamir-engine::lib::table::table_manager::transactions::tx_update"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/write/delete/mod.rs"
+item = "shamir-engine::lib::table::write::delete::execute"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/write/mod.rs"
+item = "shamir-engine::lib::table::write::delete"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/write/mod.rs"
+item = "shamir-engine::lib::table::write::insert"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/write/mod.rs"
+item = "shamir-engine::lib::table::write::set"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/write/mod.rs"
+item = "shamir-engine::lib::table::write::update"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/write/set/mod.rs"
+item = "shamir-engine::lib::table::write::set::execute"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/table/write/update/mod.rs"
+item = "shamir-engine::lib::table::write::update::execute"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
