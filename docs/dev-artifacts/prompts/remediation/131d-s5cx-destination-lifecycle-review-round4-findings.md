@@ -1,4 +1,13 @@
-# 131d — PR8b-3 destination lifecycle: round-4 findings (historical resolutions with R8 corrections)
+# 131d — PR8b-3 destination lifecycle: round-4 findings
+
+**STATUS: HISTORICAL, NON-NORMATIVE.** This file records past review findings and their resolutions. The current normative contract is 131/131a/131b as amended by [DEC-3 Q3](../../design/dec3-owner-rulings-2026-10-21.md#q3---pr8b-3-design-and-draft-196). Where a historical resolution below conflicts with the DEC-3 amendments (notably A1 authorization atomicity, A2 archival no-release), the DEC-3 amendments win.
+
+## Superseded by DEC-3
+
+- **C6 — SUPERSEDED by DEC-3 A1.** The round-6 remedy "resubmit the SAME operation id to claim the stranded `Prepared`" is DELETED: a challenge failure at Prepare writes NO row (the challenge DELETE-IF-MATCHES and the `Prepared` PUT-IF-ABSENT are ONE system-store transaction); the remedy is re-preview + a fresh operation id (or `destruction_retry` only if a prior authorized row genuinely exists).
+- **C8 — SUPERSEDED by DEC-3 A2.** The round-6 archival form "final-`Blocked` + fully-acked with explicit reservation release" is DELETED: `destruction_archive` NEVER releases protection (eligible only Repo/Database `Destroyed` + fully acked, and SubscriptionRemoval `Completed`; tombstone replaces the row; operation ids never reusable; final Blocked exits only via `destruction_retry` → `Destroyed`; quota on concurrent non-terminal operations with backpressure refusal).
+- **F1b — SUPERSEDED by DEC-3 A2.** The round-6 "RowDeleted + Blocked + acked-drained archival-eligible WITH explicit reservation release" form is DELETED: a Blocked SubscriptionRemoval at `RowDeleted` whose re-verification found data converts that data into an R2' target or an incident, NEVER a release.
+- **P3 Blocked(Prepare) — the `UnsupportedBackend` kept-for-schema-stability clause is SUPERSEDED by DEC-3 A4:** the row variant is deleted entirely; unsupported backends are refused at preflight and have no `ErrorClass`/row variant.
 
 ## Round 9 corrections (historical log; current normative contract in 131/131a/131b)
 
@@ -101,9 +110,8 @@ STATUS: historical resolutions below are retained; round-8 corrections supersede
 - P3 admissions DashMap — corrected round 8: the former try_lock-probe cleanup claim was unsafe and is withdrawn. S §7a requires removal only at strong_count == 1 under the same registry lock used by all cloning/get-or-create paths, with no weak/external bypass handles and safe backpressure instead of referenced-entry eviction.
 - P3 recovery-clear reachability — resolved (round 5): predicate is staged, unreachable
   before 8b-3d, asserted only negatively in stage 1 (M §3d; E §10).
-- P3 Blocked(Prepare) — resolved (round 5): unsupported backends refused at preflight;
-  `Blocked(Phase::Prepare)` unreachable; `UnsupportedBackend` kept for schema stability
-  (M §3b; E §10 8b-3a).
+- P3 Blocked(Prepare) — resolved (round 5) — **`UnsupportedBackend` kept-for-schema-stability clause SUPERSEDED by DEC-3 A4**: unsupported backends refused at preflight;
+  `Blocked(Phase::Prepare)` unreachable; the row variant is deleted entirely (M §3b; E §10 8b-3a).
 
 **Round 8:** the former proposed change description is superseded. Gate-order additions apply to creation and subscription/lifecycle compositions beyond the seed wrapper; see M §4e/S §7b. This review finding is about original merged-code citations, not proof that the future design paths already exist.
 
@@ -129,11 +137,12 @@ STATUS: historical resolutions below are retained; round-8 corrections supersede
   epoch CAS (M §4a/§4f/§3b; S Appendix B).
 - C5 — resolved (round 6): Appendix 13 row 30 admits inventory + honest scope
   statement (E §13; M §4e Class F).
-- C6 — resolved (round 6): challenge failure at (iii) keeps `Prepared`; same-id
+- C6 — resolved (round 6) — **SUPERSEDED by DEC-3 A1**: challenge failure at (iii) keeps `Prepared`; same-id
   resubmission remedy; challenge gates first submission only (M §4a step 1;
-  S §6a/§6c).
+  S §6a/§6c). The resubmission-as-remedy is deleted; see the Superseded by DEC-3 section above.
 - C7 — corrected round 8: the merged installer exists. 8b-3c's early read-only check is under maintenance-lock exclusion and before find_complete; it does not assert 8b-3e wrapper. Same predicates/typed refusal as catalogue.rs:161; includes rebind and no-optional-subscription and before-open CI assertions.
-- C8 — resolved (round 6): archival of final-`Blocked` + fully-acked with explicit
-  reservation release (S Appendix B; M §3e item 7; E risk 7).
+- C8 — resolved (round 6) — **SUPERSEDED by DEC-3 A2**: archival of final-`Blocked` + fully-acked with explicit
+  reservation release (S Appendix B; M §3e item 7; E risk 7). The Blocked-row archival
+  release is deleted; see the Superseded by DEC-3 section above.
 - C9 — resolved (round 6): 8b-3a structural boot hook + synthetic-view unit-test
   acceptance criterion (M §3a; E §10 8b-3a).

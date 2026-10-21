@@ -1,4 +1,12 @@
-# 131c — PR8b-3 destination lifecycle: defect resolution log (historical; R8 corrections supersede noted claims)
+# 131c — PR8b-3 destination lifecycle: defect resolution log
+
+**STATUS: HISTORICAL, NON-NORMATIVE.** This file records past review findings and their resolutions. The current normative contract is 131/131a/131b as amended by [DEC-3 Q3](../../design/dec3-owner-rulings-2026-10-21.md#q3---pr8b-3-design-and-draft-196). Where a historical resolution below conflicts with the DEC-3 amendments (notably A1 authorization atomicity, A2 archival no-release), the DEC-3 amendments win.
+
+## Superseded by DEC-3
+
+- **C6 — SUPERSEDED by DEC-3 A1.** The round-6 remedy "resubmit the SAME operation id to claim the stranded `Prepared`" is DELETED: a challenge failure at Prepare writes NO row (the challenge DELETE-IF-MATCHES and the `Prepared` PUT-IF-ABSENT are ONE system-store transaction); the remedy is re-preview + a fresh operation id (or `destruction_retry` only if a prior authorized row genuinely exists).
+- **C8 — SUPERSEDED by DEC-3 A2.** The round-6 archival form "FINAL-`Blocked` + fully-acked with EXPLICIT release of the `Blocked` row's reservations" is DELETED: `destruction_archive` NEVER releases protection (eligible only Repo/Database `Destroyed` + fully acked, and SubscriptionRemoval `Completed`; tombstone replaces the row; operation ids never reusable; final Blocked exits only via `destruction_retry` → `Destroyed`; quota on concurrent non-terminal operations with backpressure refusal).
+- **F1b — SUPERSEDED by DEC-3 A2.** The round-6 "RowDeleted + Blocked + acked-drained archival-eligible WITH explicit reservation release" form is DELETED: a Blocked SubscriptionRemoval at `RowDeleted` whose re-verification found data converts that data into an R2' target or an incident, NEVER a release.
 
 ## Round 9 corrections (historical log; current normative contract in 131/131a/131b)
 
@@ -77,15 +85,17 @@ Round-6 resolutions below are historical; corrected R1-R3 decisions above take p
   migration `admit_pair` fixed ascending-token order); the inventory scope is stated
   honestly (control/lease sites exhaustive; admit() classes with representatives)
   (E §13 preamble + row 30; M §4e Class F + inventory item note).
-- C6 (P2) — resolved (round 6): a challenge failure at Prepare (iii) leaves the row
+- C6 (P2) — resolved (round 6) — **SUPERSEDED by DEC-3 A1**: a challenge failure at Prepare (iii) leaves the row
   `Prepared` (reservations held, nothing deleted) and the remedy is to resubmit the
   SAME operation id; the challenge gates only the first submission by design (M §4a
-  step 1 (iii); S §6a, §6c `DestructionTargetChanged` row).
+  step 1 (iii); S §6a, §6c `DestructionTargetChanged` row). The resubmission-as-remedy
+  is deleted; see the Superseded by DEC-3 section above.
 - C7 (P2) — corrected round 8: the merged installer exists. 8b-3c adds a read-only precheck after maintenance-lock acquisition and before find_complete, with consistent predicates and typed refusal at catalogue.rs:161. No 8b-3e wrapper required; applies to rebind and subscription-free install; nonterminal destruction refused before open/mutation. Maintenance-lock exclusion is required. CI asserts refusal before open/import/publish/register.
-- C8 (P2) — resolved (round 6): `destruction_archive` eligibility = `Destroyed` +
+- C8 (P2) — resolved (round 6) — **SUPERSEDED by DEC-3 A2**: `destruction_archive` eligibility = `Destroyed` +
   fully-acked OR final-`Blocked` + fully-acked, with EXPLICIT release of the
   `Blocked` row's reservations (owner decision surface; reservations never lapse
-  silently) (S Appendix B; M §3e item 7; E §11 risk 7).
+  silently) (S Appendix B; M §3e item 7; E §11 risk 7). The Blocked-row archival
+  release is deleted; see the Superseded by DEC-3 section above.
 - C9 (P2) — resolved (round 6): the 8b-3a boot skip-and-fence lands as a structural
   hook (empty reservation-view consult, inert until 8b-3b wires the view); acceptance
   = hook exists + a unit test drives it with a synthetic non-empty view (M §3a; E §10
@@ -98,7 +108,7 @@ Round-7 resolutions (historical; amended by round 8 corrections above):
 - A-1 (SHOULD-FIX) — resolved (round 7): a `repo_create_locks` holder waits only
   DOWNWARD for control; no control holder ever takes a create mutex (cycle-free; the
   earlier "never waits for either" was mis-stated) (M §4e Class F; E §13 row 29).
-- A-2/A-3 (NIT) — resolved (round 7): M §3e item 7 adds the F1b archival form;
+- A-2/A-3 (NIT) — resolved (round 7): M §3e item 7 adds the F1b archival form — **SUPERSEDED by DEC-3 A2** (see above);
   M I4's operation clause is kind-scoped to `kind: Repo | Database`.
 - B-1..B-11 — resolved (round 7): no occurrences of the stale claims exist in M/E/S/
   C/R for B-1 (uncoded Validation), B-2 (public `_locked`), B-5 (deleted tx files),
