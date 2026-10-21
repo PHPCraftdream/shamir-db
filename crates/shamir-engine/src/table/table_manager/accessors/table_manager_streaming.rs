@@ -12,15 +12,15 @@ use shamir_types::record_view::RecordView;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
+use crate::query::filter::eval::compile_filter;
+use crate::query::filter::eval_context::FilterContext;
+use crate::query::filter::Filter;
 use crate::table::record_cow::RecordCow;
 use crate::table::table::Table;
 use crate::table::table_manager::TableManager;
 use crate::table::tx_scan_overlay::{
     merge_filtered_stream_with_tx_overlay, merge_stream_with_tx_overlay, overlay_rows_for_tx,
 };
-use crate::query::filter::eval::compile_filter;
-use crate::query::filter::eval_context::FilterContext;
-use crate::query::filter::Filter;
 
 // ── F-65 (#891) test-only failure-injection seam ────────────────────────────
 //
@@ -349,7 +349,7 @@ impl TableManager {
     }
 
     /// Variant for read_tx after its precise predicate has already been recorded.
-    pub(super) fn list_stream_tx_after_predicate<'a>(
+    pub(in crate::table) fn list_stream_tx_after_predicate<'a>(
         &'a self,
         tx: Option<&'a shamir_tx::TxContext>,
         batch_size: usize,
@@ -506,7 +506,7 @@ impl TableManager {
     /// up-front isolation check (the `version_of` lookup and recording are
     /// skipped entirely). `mvcc` is `None` → version `0` (conservative
     /// default, see `read_one_tx`).
-    pub(super) fn record_scan_reads<'a, S>(
+    pub(in crate::table) fn record_scan_reads<'a, S>(
         inner: S,
         tx: Option<&'a shamir_tx::TxContext>,
         token: u64,
@@ -558,7 +558,7 @@ impl TableManager {
     ///
     /// Decodes every `Borrowed` row to an owned `InnerValue` tree — correct for
     /// index backfill which needs the full tree.
-    pub(super) async fn collect_all_current_records(
+    pub(in crate::table) async fn collect_all_current_records(
         &self,
     ) -> DbResult<Vec<(RecordId, InnerValue)>> {
         let mut out = Vec::new();

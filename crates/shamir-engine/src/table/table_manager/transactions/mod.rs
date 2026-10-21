@@ -5,7 +5,7 @@
 //! `table_manager.rs`, so every file here can see `TableManager`'s
 //! private/`pub(super)` fields.
 
-pub(in crate::table) mod tx_support;
-mod tx_insert;
-mod tx_update;
 mod tx_delete;
+mod tx_insert;
+pub(in crate::table) mod tx_support;
+mod tx_update;

@@ -2,9 +2,9 @@ use futures::StreamExt;
 use shamir_storage::error::DbResult;
 use shamir_types::types::record_id::RecordId;
 
-use crate::table::table_manager::TableManager;
 use crate::index::sorted_index_manager::SortedIndexDefinition;
 use crate::repo::RepoWritePermit;
+use crate::table::table_manager::TableManager;
 
 impl TableManager {
     /// Register a new sorted (B-tree-by-value) index over a single

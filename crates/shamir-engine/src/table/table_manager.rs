@@ -1,19 +1,14 @@
+use crate::repo::RepoWriteDomain;
+
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use futures::FutureExt;
-
 use super::interner_manager::InternerManager;
-use super::migration_freeze_guard::MigrationFreezeGuard;
 use super::persistable::PersistRegistry;
 use super::record_counter::RecordCounter;
 use super::table::Table;
 use crate::index::index_manager::IndexManager;
 use crate::index::sorted_index_manager::SortedIndexManager;
-use crate::index2::kind::{StemLanguage, TokenizerKind};
-use crate::repo::{RepoWriteDomain, RepoWritePermit};
-use crate::tx::CommitError;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::Store;
 
@@ -58,6 +53,10 @@ pub(in crate::table) mod transactions;
 // Kept name re-export: `WriteBarrierGuard` used to be defined in this file;
 // it now lives in `barriers/guard.rs`.
 pub use barriers::guard::WriteBarrierGuard;
+
+// Kept path re-export (W4 split): `fts_tokenizer_from_dsl` used to be defined
+// in this file; tests and the index-admission impl reach it via this path.
+pub(crate) use accessors::tokenizer::fts_tokenizer_from_dsl;
 
 pub use read_only_views::{
     Index2ReadView, InternerReadView, TableDataStoreReadView, TableInfoStoreReadView,

@@ -5,13 +5,13 @@ use shamir_storage::types::RecordKey;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
+use crate::index::index_definition::IndexDefinition;
 use crate::table::table_manager::TableManager;
 #[cfg(test)]
 use crate::table::TEST_READ_ONE_TX_BYTES_FAILURE;
-use crate::index::index_definition::IndexDefinition;
 
 impl TableManager {
-    pub(super) fn ensure_repo_readable(&self) -> DbResult<()> {
+    pub(in crate::table) fn ensure_repo_readable(&self) -> DbResult<()> {
         if self.changefeed.as_ref().is_some_and(|changefeed| {
             changefeed.gate.receipt_native_visibility_enabled() && changefeed.gate.requires_reopen()
         }) {
@@ -99,7 +99,11 @@ impl TableManager {
         DbError::Internal(e.to_string())
     }
 
-    pub(super) async fn index2_on_insert(&self, rid: &RecordId, rec: &InnerValue) -> DbResult<()> {
+    pub(in crate::table) async fn index2_on_insert(
+        &self,
+        rid: &RecordId,
+        rec: &InnerValue,
+    ) -> DbResult<()> {
         let backends = self.index2_registry.all_backends().await;
         self.index2_on_insert_with_backends(&backends, rid, rec)
             .await
@@ -128,7 +132,7 @@ impl TableManager {
         Ok(())
     }
 
-    pub(super) async fn index2_on_update(
+    pub(in crate::table) async fn index2_on_update(
         &self,
         rid: &RecordId,
         old: &InnerValue,
@@ -146,7 +150,11 @@ impl TableManager {
         Ok(())
     }
 
-    pub(super) async fn index2_on_delete(&self, rid: &RecordId, rec: &InnerValue) -> DbResult<()> {
+    pub(in crate::table) async fn index2_on_delete(
+        &self,
+        rid: &RecordId,
+        rec: &InnerValue,
+    ) -> DbResult<()> {
         for backend in self.index2_registry.all_backends().await {
             let ops = backend.plan_delete(*rid, rec).await.map_err(Self::io_err)?;
             crate::index2::apply_index_ops(&ops, &self.info_store, backend.as_ref())
@@ -182,7 +190,7 @@ impl TableManager {
     /// Like [`insert`](Self::insert) but also returns the MVCC version
     /// assigned by the underlying store (for changefeed version
     /// alignment). Returns `0` when no `MvccStore` is attached.
-    pub(super) async fn insert_unacknowledged(
+    pub(in crate::table) async fn insert_unacknowledged(
         &self,
         value: &InnerValue,
     ) -> DbResult<(RecordId, u64)> {
@@ -293,7 +301,7 @@ impl TableManager {
     /// maximum MVCC version assigned across the batch (for changefeed
     /// version alignment). Returns `0` when no `MvccStore` is attached
     /// or the batch is empty.
-    pub(super) async fn insert_many_unacknowledged(
+    pub(in crate::table) async fn insert_many_unacknowledged(
         &self,
         values: &[InnerValue],
     ) -> DbResult<(Vec<RecordId>, u64)> {
@@ -472,7 +480,10 @@ impl TableManager {
     /// assigned by the underlying store (for changefeed version
     /// alignment). Returns `0` when no `MvccStore` is attached or the
     /// record did not exist.
-    pub(super) async fn delete_unacknowledged(&self, id: RecordId) -> DbResult<(bool, u64)> {
+    pub(in crate::table) async fn delete_unacknowledged(
+        &self,
+        id: RecordId,
+    ) -> DbResult<(bool, u64)> {
         // #534 finding 1: hold the barrier across the whole delete→index-cleanup
         // sequence while an index2 create_index_v2 backfill is in flight, so the
         // new index's backfill and this delete's posting removal can't interleave
@@ -564,7 +575,7 @@ impl TableManager {
     /// Like [`set`](Self::set) but also returns the MVCC version
     /// assigned by the underlying store (for changefeed version
     /// alignment). Returns `0` when no `MvccStore` is attached.
-    pub(super) async fn set_unacknowledged(
+    pub(in crate::table) async fn set_unacknowledged(
         &self,
         id: RecordId,
         value: &InnerValue,

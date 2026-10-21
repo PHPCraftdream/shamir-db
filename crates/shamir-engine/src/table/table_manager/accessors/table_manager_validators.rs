@@ -250,7 +250,7 @@ impl TableManager {
     ///
     /// Phase C1: `tx` (previously `_tx`) is now used to build a [`ValidatorDb`]
     /// for relational validators.
-    pub(super) async fn run_validators_view(
+    pub(in crate::table) async fn run_validators_view(
         &self,
         op: crate::validator::WriteOp,
         new_record: Option<&QueryValue>,

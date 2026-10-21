@@ -2,13 +2,14 @@ use bytes::Bytes;
 use shamir_collections::TFxSet;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::{KvOp, RecordKey};
-use shamir_tx::{IndexFamily, IndexWriteOp};
-use shamir_types::record_view::{RecordRef, RecordView};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
+use super::tx_support::{
+    fire_post_gen_capture_pre_unique_check_test_hook, refresh_released_unique_cache, StagedMutation,
+};
+use crate::index::index_definition::IndexDefinition;
 use crate::table::table_manager::TableManager;
-use crate::index::index_definition::IndexDefinition
 impl TableManager {
     /// tx-aware insert.
     ///

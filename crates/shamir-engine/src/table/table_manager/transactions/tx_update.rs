@@ -1,16 +1,14 @@
+use shamir_types::record_view::RecordView;
+
 use bytes::Bytes;
-use shamir_collections::TFxSet;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::{KvOp, RecordKey};
-use shamir_tx::{IndexFamily, IndexWriteOp};
-use shamir_types::record_view::{RecordRef, RecordView};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
+use super::tx_support::{refresh_released_unique_cache, StagedMutation};
 use crate::table::table_manager::TableManager;
-use crate::index::index_definition::IndexDefinition
 impl TableManager {
-
     /// tx-aware update.
     ///
     /// `tx == None` → existing `set` (since `update` is currently

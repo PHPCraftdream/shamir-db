@@ -10,4 +10,4 @@ pub(in crate::table) mod table_manager_changefeed;
 pub(in crate::table) mod table_manager_locks;
 pub(in crate::table) mod table_manager_streaming;
 pub(in crate::table) mod table_manager_validators;
-mod tokenizer;
+pub(super) mod tokenizer;

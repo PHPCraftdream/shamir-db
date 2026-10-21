@@ -56,7 +56,7 @@ pub struct WriteBarrierGuard {
 }
 
 impl WriteBarrierGuard {
-    fn set(
+    pub(in crate::table::table_manager) fn set(
         flags: crate::index::write_barrier_flags::WriteBarrierFlags,
         bit: u8,
         admission: tokio::sync::OwnedMutexGuard<()>,
@@ -74,7 +74,10 @@ impl WriteBarrierGuard {
     /// Attach the caller-minted admission permit to a guard produced by the
     /// `_admitted` path, so the returned compound guard releases repo
     /// admission only when it drops.
-    fn retaining_permit(mut self, permit: RepoWritePermit) -> Self {
+    pub(in crate::table::table_manager) fn retaining_permit(
+        mut self,
+        permit: RepoWritePermit,
+    ) -> Self {
         self.permit = Some(permit);
         self
     }

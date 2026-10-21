@@ -1,17 +1,20 @@
+#[cfg(any(test, feature = "test-util"))]
+use crate::index::sorted_index_manager::SortedIndexManager;
+#[cfg(any(test, feature = "test-util"))]
+use crate::table::table::Table;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use futures::FutureExt;
 
 use crate::index::index_manager::IndexManager;
-use crate::index::sorted_index_manager::SortedIndexManager;
 use crate::table::interner_manager::InternerManager;
 use crate::table::record_counter::RecordCounter;
-use crate::table::table::Table;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::Store;
 
 use super::super::read_only_views::{TableDataStoreReadView, TableInfoStoreReadView};
+use super::super::TableManager;
 use super::super::{panic_payload_message, table_token_for, AUTO_VERIFY_EVERY_N_WRITES};
 
 impl TableManager {
@@ -377,4 +380,4 @@ impl TableManager {
     pub fn sorted_indexes_for_test(&self) -> &SortedIndexManager {
         &self.sorted_indexes
     }
-
+}

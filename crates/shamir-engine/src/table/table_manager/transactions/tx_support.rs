@@ -1,21 +1,19 @@
-use bytes::Bytes;
-use shamir_collections::TFxSet;
+use shamir_storage::types::KvOp;
+use shamir_types::record_view::RecordRef;
+
 use shamir_storage::error::DbResult;
-use shamir_storage::types::{KvOp, RecordKey};
 use shamir_tx::{IndexFamily, IndexWriteOp};
-use shamir_types::record_view::{RecordRef, RecordView};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
 use crate::table::table_manager::TableManager;
-use crate::index::index_definition::IndexDefinition
 
 /// Bundled mutation effect for one record. Built by *_tx methods,
 /// applied by `stage_mutation` to a TxContext.
-pub(super) struct StagedMutation {
-    pub(super) data_op: KvOp,
-    pub(super) index_ops: Vec<shamir_tx::IndexWriteOp>,
-    pub(super) counter_delta: i64,
+pub(in crate::table) struct StagedMutation {
+    pub(in crate::table) data_op: KvOp,
+    pub(in crate::table) index_ops: Vec<shamir_tx::IndexWriteOp>,
+    pub(in crate::table) counter_delta: i64,
 }
 
 // ── #1098 test-only pause seam ──────────────────────────────────────────
@@ -47,7 +45,7 @@ pub(crate) static TEST_POST_GEN_CAPTURE_PRE_UNIQUE_CHECK_HOOK: std::sync::OnceLo
 /// Parks on `TEST_POST_GEN_CAPTURE_PRE_UNIQUE_CHECK_HOOK` if a test
 /// installed one; a true no-op otherwise. One-shot (CAS true→false) so
 /// only the FIRST caller to reach this seam actually parks.
-async fn fire_post_gen_capture_pre_unique_check_test_hook() {
+pub(in crate::table) async fn fire_post_gen_capture_pre_unique_check_test_hook() {
     #[cfg(test)]
     if let Some(hook) = TEST_POST_GEN_CAPTURE_PRE_UNIQUE_CHECK_HOOK.get() {
         hook.reached
@@ -151,14 +149,14 @@ impl TableManager {
     /// calling this — see `StagingStore::mark_referenced_ids_captured`'s
     /// contract. A no-op if this table has no staging entry (nothing was
     /// staged, e.g. an empty batch).
-    pub(super) fn mark_staged_ids_captured(&self, tx: &mut shamir_tx::TxContext) {
+    pub(in crate::table) fn mark_staged_ids_captured(&self, tx: &mut shamir_tx::TxContext) {
         if let Some(staging) = tx.write_set.get_mut(&self.table_token()) {
             staging.mark_referenced_ids_captured();
         }
     }
 
     /// Apply a staged mutation to the TxContext.
-    pub(super) async fn stage_mutation(
+    pub(in crate::table) async fn stage_mutation(
         &self,
         m: StagedMutation,
         tx: &mut shamir_tx::TxContext,
@@ -188,7 +186,7 @@ impl TableManager {
     /// instead of the live structure (HIGH-6). Stateless backends
     /// (FTS / functional / btree) fall through to `plan_insert` via
     /// the default trait impl.
-    pub(super) async fn plan_insert_ops(
+    pub(in crate::table) async fn plan_insert_ops(
         &self,
         rid: RecordId,
         rec: &InnerValue,
@@ -223,7 +221,7 @@ impl TableManager {
     /// unreachable — the backend came FROM `all_backends()`) leaves the
     /// placeholder `instance_epoch: 0` untouched, which the reconcile
     /// correctly treats as "no live definition matches" (retract).
-    pub(super) async fn stamp_index2_provenance(
+    pub(in crate::table) async fn stamp_index2_provenance(
         &self,
         backend: &std::sync::Arc<dyn shamir_index::backend::IndexBackend>,
         ops: &mut [shamir_tx::IndexWriteOp],
@@ -263,7 +261,7 @@ impl TableManager {
     ///
     /// The tx-aware `plan_*_tx` methods deliberately leave the live graph
     /// untouched (no-op for `Some(tx)`), so this is the sole staging path.
-    pub(super) async fn stage_vectors(
+    pub(in crate::table) async fn stage_vectors(
         &self,
         rid: RecordId,
         rec: &InnerValue,
@@ -288,7 +286,7 @@ impl TableManager {
     /// vector at a backend's field path returns `None` and contributes
     /// nothing — so a non-vector-backed delete is a no-op here, and the
     /// non-tx path (which forwards to `plan_delete`) is untouched.
-    pub(super) async fn stage_vector_delete<R>(
+    pub(in crate::table) async fn stage_vector_delete<R>(
         &self,
         rid: RecordId,
         rec: &R,
@@ -313,7 +311,7 @@ impl TableManager {
     /// restart, since no `DeltaOp::Delete` is appended). A backend where
     /// `new` still carries a vector contributes nothing here — the staged
     /// insert (`stage_vectors`) replaces it at promote time.
-    pub(super) async fn stage_vector_deletes_on_update<Old, New>(
+    pub(in crate::table) async fn stage_vector_deletes_on_update<Old, New>(
         &self,
         rid: RecordId,
         old: &Old,
@@ -337,7 +335,7 @@ impl TableManager {
     /// Does NOT apply — ops go into tx.index_write_set for deferred apply.
     ///
     /// See `plan_insert_ops` for the `tx_id` parameter.
-    pub(super) async fn plan_update_ops(
+    pub(in crate::table) async fn plan_update_ops(
         &self,
         rid: RecordId,
         old: &InnerValue,
@@ -360,7 +358,7 @@ impl TableManager {
     ///
     /// Accepts any `RecordRef` (`InnerValue` or `RecordView`) so the update
     /// path can feed zero-copy lenses instead of decoded trees.
-    pub(super) async fn plan_update_ops_ref<R>(
+    pub(in crate::table) async fn plan_update_ops_ref<R>(
         &self,
         rid: RecordId,
         old: &R,
@@ -389,7 +387,7 @@ impl TableManager {
     ///
     /// Accepts any `RecordRef` (`InnerValue` or `RecordView`) so the delete
     /// path can feed a zero-copy lens instead of a decoded tree.
-    pub(super) async fn plan_delete_ops<R>(
+    pub(in crate::table) async fn plan_delete_ops<R>(
         &self,
         rid: RecordId,
         rec: &R,
@@ -417,7 +415,7 @@ impl TableManager {
     /// so applying them at commit time produces postings indistinguishable
     /// from the non-tx `on_record_created` path. The unique ops do NOT
     /// validate — validation runs separately at stage time in `insert_tx`.
-    pub(super) async fn plan_base_index_insert_ops(
+    pub(in crate::table) async fn plan_base_index_insert_ops(
         &self,
         rid: RecordId,
         rec: &InnerValue,
@@ -433,7 +431,7 @@ impl TableManager {
     }
 
     /// HIGH-6: base_index + sorted posting ops for a tx update.
-    pub(super) async fn plan_base_index_update_ops(
+    pub(in crate::table) async fn plan_base_index_update_ops(
         &self,
         rid: RecordId,
         old: &InnerValue,
@@ -456,7 +454,7 @@ impl TableManager {
     ///
     /// Accepts any `RecordRef` (`InnerValue` or `RecordView`) so the update
     /// path can feed zero-copy lenses instead of decoded trees.
-    pub(super) async fn plan_base_index_update_ops_ref<R>(
+    pub(in crate::table) async fn plan_base_index_update_ops_ref<R>(
         &self,
         rid: RecordId,
         old: &R,
@@ -482,7 +480,7 @@ impl TableManager {
     ///
     /// Accepts any `RecordRef` (`InnerValue` or `RecordView`) so the delete
     /// path can feed a zero-copy lens instead of a decoded tree.
-    pub(super) async fn plan_base_index_delete_ops<R>(
+    pub(in crate::table) async fn plan_base_index_delete_ops<R>(
         &self,
         rid: RecordId,
         old: &R,
@@ -499,5 +497,4 @@ impl TableManager {
         ops.extend(self.sorted_indexes.plan_record_deleted(&rid, old)?);
         Ok(ops)
     }
-
 }

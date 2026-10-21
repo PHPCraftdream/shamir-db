@@ -1,10 +1,14 @@
+use std::sync::Arc;
+
+use crate::index::sorted_index_manager::SortedIndexManager;
 use crate::repo::RepoWritePermit;
+use crate::table::interner_manager::InternerManager;
 use crate::table::migration_freeze_guard::MigrationFreezeGuard;
 use crate::tx::CommitError;
 use shamir_storage::error::DbResult;
 
+use super::super::{NonTxChangefeed, TableManager};
 use super::guard::WriteBarrierGuard;
-use super::super::NonTxChangefeed;
 
 impl TableManager {
     /// F-70 (#897, P0) — THE canonical acquisition path for a DDL-side write
@@ -174,7 +178,9 @@ impl TableManager {
     /// caller is the engine's own tx-commit prelock. The non-tx writer methods
     /// in `table_manager_crud.rs` access `self.writer_drain` directly (same
     /// module); this accessor exists for the cross-module prelock call site.
-    pub(crate) fn enter_writer_drain(&self) -> crate::table::writer_drain_barrier::WriterDrainGuard {
+    pub(crate) fn enter_writer_drain(
+        &self,
+    ) -> crate::table::writer_drain_barrier::WriterDrainGuard {
         self.writer_drain.enter_writer()
     }
 
@@ -357,4 +363,3 @@ impl TableManager {
         self
     }
 }
-

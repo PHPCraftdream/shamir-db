@@ -1,6 +1,6 @@
 use super::TableManager;
 use crate::repo::RepoWritePermit;
-use crate::table::table_manager_index_mgmt::PhaseBAResult;
+use crate::table::table_manager::operations::table_manager_index_mgmt::PhaseBAResult;
 use futures::StreamExt;
 use shamir_index::base_index::index_keys::{build_index_key_from_record, build_posting_key};
 use shamir_storage::error::DbResult;

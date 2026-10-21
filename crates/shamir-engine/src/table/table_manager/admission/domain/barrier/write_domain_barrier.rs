@@ -2,7 +2,7 @@
 //!
 //! `#[path]`-wired impl-block file (a CHILD of the `table_manager` module,
 //! declared at the top of `table_manager.rs`): being a descendant module, it
-//! can see `TableManager`'s private/`pub(super)` fields, which is what makes
+//! can see `TableManager`'s private/`pub(in crate::table)` fields, which is what makes
 //! the move out of the over-limit `table_manager.rs` legal without widening
 //! any visibility. See `repo/changelog_store.rs` for the same pattern.
 //!
@@ -57,7 +57,7 @@ impl TableManager {
         self.begin_write_barrier_admitted_impl(bit).await
     }
 
-    pub(super) async fn begin_write_barrier_admitted_impl(
+    pub(in crate::table) async fn begin_write_barrier_admitted_impl(
         &self,
         bit: u8,
     ) -> (WriteBarrierGuard, tokio::sync::OwnedMutexGuard<()>) {
