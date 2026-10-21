@@ -48,6 +48,7 @@ REQUIRED_JOBS = [
     "integration",
     "ts-unit",
     "cooldown",
+    "deny",
     "loom-model",
     "source-integrity",
     "rust-guard-selftest",
