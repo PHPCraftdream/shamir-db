@@ -1,8 +1,7 @@
 use shamir_types::access::{trace_access, Action};
 
 use super::nested::write_value_error_to_batch_error;
-use super::runner::QueryRunner;
-use crate::table::TableManager;
+use super::runner::{DataArm, QueryRunner};
 
 use super::fk_isolation::{
     implicit_tx_isolation_for_fk_parent, require_footprint_if_fk_child, retry_on_tx_conflict,
@@ -10,22 +9,23 @@ use super::fk_isolation::{
 };
 use crate::query::batch::param_subst::{contains_param_ref, resolve_write_value};
 use crate::query::batch::receipts::write_result_to_query_result_with_encoding;
-use crate::query::batch::{BatchError, BatchOp, QueryEntry};
-use crate::query::filter::FilterContext;
+use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;
 impl<'a> QueryRunner<'a> {
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn run_insert_arm(
         &mut self,
-        alias: &str,
-        entry: &QueryEntry,
-        table_ref: &crate::query::TableRef,
-        resource: shamir_types::access::ResourcePath,
-        table: &TableManager,
-        interner: &shamir_types::core::interner::Interner,
-        ctx: FilterContext<'_>,
-        wait: Option<shamir_query_types::batch::VisibilityWait>,
+        arm: DataArm<'_>,
     ) -> Result<QueryResult, BatchError> {
+        let DataArm {
+            alias,
+            entry,
+            table_ref,
+            resource,
+            table,
+            interner,
+            ctx,
+            wait,
+        } = arm;
         let BatchOp::Insert(op) = &entry.op else {
             unreachable!()
         };
@@ -163,18 +163,20 @@ impl<'a> QueryRunner<'a> {
         ))
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn run_update_arm(
         &mut self,
-        alias: &str,
-        entry: &QueryEntry,
-        table_ref: &crate::query::TableRef,
-        resource: shamir_types::access::ResourcePath,
-        table: &TableManager,
-        interner: &shamir_types::core::interner::Interner,
-        ctx: FilterContext<'_>,
-        wait: Option<shamir_query_types::batch::VisibilityWait>,
+        arm: DataArm<'_>,
     ) -> Result<QueryResult, BatchError> {
+        let DataArm {
+            alias,
+            entry,
+            table_ref,
+            resource,
+            table,
+            interner,
+            ctx,
+            wait,
+        } = arm;
         let BatchOp::Update(op) = &entry.op else {
             unreachable!()
         };
@@ -368,18 +370,20 @@ impl<'a> QueryRunner<'a> {
         ))
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn run_delete_arm(
         &mut self,
-        alias: &str,
-        entry: &QueryEntry,
-        table_ref: &crate::query::TableRef,
-        resource: shamir_types::access::ResourcePath,
-        table: &TableManager,
-        interner: &shamir_types::core::interner::Interner,
-        ctx: FilterContext<'_>,
-        wait: Option<shamir_query_types::batch::VisibilityWait>,
+        arm: DataArm<'_>,
     ) -> Result<QueryResult, BatchError> {
+        let DataArm {
+            alias,
+            entry,
+            table_ref,
+            resource,
+            table,
+            interner,
+            ctx,
+            wait,
+        } = arm;
         let BatchOp::Delete(op) = &entry.op else {
             unreachable!()
         };
@@ -555,18 +559,20 @@ impl<'a> QueryRunner<'a> {
         ))
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn run_set_arm(
         &mut self,
-        alias: &str,
-        entry: &QueryEntry,
-        table_ref: &crate::query::TableRef,
-        resource: shamir_types::access::ResourcePath,
-        table: &TableManager,
-        interner: &shamir_types::core::interner::Interner,
-        ctx: FilterContext<'_>,
-        wait: Option<shamir_query_types::batch::VisibilityWait>,
+        arm: DataArm<'_>,
     ) -> Result<QueryResult, BatchError> {
+        let DataArm {
+            alias,
+            entry,
+            table_ref,
+            resource,
+            table,
+            interner,
+            ctx,
+            wait,
+        } = arm;
         let BatchOp::Set(op) = &entry.op else {
             unreachable!()
         };

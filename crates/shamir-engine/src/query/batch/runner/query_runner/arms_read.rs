@@ -1,7 +1,6 @@
 use shamir_types::access::{trace_access, Action};
 
-use super::runner::QueryRunner;
-use crate::table::TableManager;
+use super::runner::{DataArm, QueryRunner};
 
 use shamir_types::types::common::{new_map, TMap};
 use shamir_types::types::value::{InnerValue, QueryValue};
@@ -490,18 +489,19 @@ impl<'a> QueryRunner<'a> {
         unreachable!("op was matched as ForEach above");
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn run_read_arm(
         &mut self,
-        alias: &str,
-        entry: &QueryEntry,
-        table_ref: &crate::query::TableRef,
-        resource: shamir_types::access::ResourcePath,
-        table: &TableManager,
-        _interner: &shamir_types::core::interner::Interner,
-        ctx: FilterContext<'_>,
-        _wait: Option<shamir_query_types::batch::VisibilityWait>,
+        arm: DataArm<'_>,
     ) -> Result<QueryResult, BatchError> {
+        let DataArm {
+            alias,
+            entry,
+            table_ref,
+            resource,
+            table,
+            ctx,
+            ..
+        } = arm;
         let BatchOp::Read(query) = &entry.op else {
             unreachable!()
         };
