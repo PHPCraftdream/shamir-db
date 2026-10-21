@@ -156,8 +156,11 @@ directory unless an explicit `--exceptions` path is given.
     have consumed them.
   **Split-off files.** A file that is new at head and does not pair as a
   whole-file move (the result of splitting a deleted base file) is compared
-  with the VACATED base files — the base `.rs` files that no longer exist
-  at head — instead of an empty base: a `pub(crate)`+ item is a
+  with the VACATED base — the base `.rs` files that no longer exist at
+  head, plus everything that LEFT a selected base file which still exists
+  at head (a facade that shrank: items whose key is gone from its head
+  version, `#[allow]` texts with fewer occurrences, per-file findings that
+  no longer occur) — instead of an empty base: a `pub(crate)`+ item is a
   `VIS_WIDENING` only if no vacated base file had the same item (kind and
   qualified name, impl members keyed by self type) at a rank at least as
   wide; an `#[allow]` is `ALLOW_ADDED` only if its normalised text occurs
@@ -166,8 +169,8 @@ directory unless an explicit `--exceptions` path is given.
   identical finding (same code and message) exists in the vacated base
   files — each base finding excuses one head finding, so the debt can move
   but never grow. Parse failures and the ownership rule are never excused,
-  an inline test module is excused by its module name, and a base file
-  that still exists at head (a copy) vacates nothing.
+  an inline test module is excused by its module name, and an item that
+  stays in its source file (a copy) is never indexed.
   `--warn-primary-export` prints a WARNING line (never a finding) for
   each non-`mod.rs` file declaring more than one public item.
 - `rust-guard conservation --base <rev> --head <rev> [--packages p,q]
@@ -537,6 +540,8 @@ Fixture → finding map:
 | `structure/moved_plain` | none (exit 0) — a TRUE move (old.rs deleted at head) with byte-identical content pairs and stays clean |
 | `structure/copy_of_base_file` | `VIS_WIDENING` — a COPY (base file still present at head) never pairs as a move; the added file is new-file-checked |
 | `structure/split_clean` | none (exit 0) — `old.rs` split into two files that carry its `pub(crate)` item, `#[allow]`, inline test module and function-local `use` |
+| `structure/split_partial_clean` | clean — items, `#[allow]`, local `use` and test module left a surviving facade file |
+| `structure/split_partial_copy` | `VIS_WIDENING` — `a` is copied while it stays in the surviving `old.rs`; the moved `b` is excused |
 | `structure/split_widened` | `VIS_WIDENING` — the split-off item is `pub` where the vacated base item was `pub(crate)` |
 | `structure/split_new_allow` | `ALLOW_ADDED` — only the new `#[allow(unused)]`, not the one the vacated base file had |
 | `structure/split_copy_not_vacated` | `INLINE_TEST_MOD` for the new file — a base file still present at head vacates nothing |

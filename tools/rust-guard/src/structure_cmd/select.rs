@@ -148,7 +148,7 @@ fn execute(args: StructureArgs) -> Result<u8, String> {
     // Files that are new at head (splits of deleted base files) are
     // compared with the vacated base files, not with an empty base.
     let vacated = match &base {
-        Some(base_rev) => Vacated::build(&fs, base_rev, &exceptions, &owned),
+        Some(base_rev) => Vacated::build(&fs, base_rev, &selected, &exceptions, &owned),
         None => Vacated::empty(),
     };
     let mut report = Report::new();
