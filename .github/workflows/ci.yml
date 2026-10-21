@@ -626,15 +626,31 @@ jobs:
             IFS=',' read -ra scope_dirs <<< "$dirs"
             for dir in "${scope_dirs[@]}"; do scope_args+=(--scope "$dir"); done
             "$guard" structure --repo . --changed-since "$MERGE_BASE" "${scope_args[@]}"
-            "$guard" conservation --repo . \
+            if "$guard" conservation --repo . \
               --base "$MERGE_BASE" --head HEAD \
               --packages "$pkgs" --delta "$delta"
+            then :
+            else
+              rc=$?
+              "$guard" conservation --repo . \
+                --base "$MERGE_BASE" --head HEAD \
+                --packages "$pkgs" --delta "$delta" \
+                --suggest-delta "suggested-$name.toml" || true
+              exit "$rc"
+            fi
             ran=1
           done < campaigns.tsv
           rm -f metadata.json campaigns.tsv
           if [ "$ran" -eq 0 ]; then
             echo "::notice::no active campaign package touched by this diff; structure and conservation skipped"
           fi
+      - name: upload suggested deltas
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rust-guard-suggested-delta
+          path: suggested-*.toml
+          if-no-files-found: ignore
       # Same ratchet the fmt job runs; repeated here so the source-integrity
       # job is self-contained (cheap, stdlib-only).
       - name: baseline monotonic check
@@ -792,10 +808,29 @@ jobs:
         if: steps.select.outputs.campaigns != ''
         shell: bash
         run: |
-          tools/rust-guard/target/debug/rust-guard discovery \
+          set -euo pipefail
+          if tools/rust-guard/target/debug/rust-guard discovery \
             --base-list base-list.json \
             --head-list head-list.json \
             --kind lib
+          then :
+          else
+            rc=$?
+            tools/rust-guard/target/debug/rust-guard discovery \
+              --base-list base-list.json \
+              --head-list head-list.json \
+              --kind lib \
+              --base-sha "$(git rev-parse "$MERGE_BASE")" \
+              --suggest-delta suggested-discovery.toml || true
+            exit "$rc"
+          fi
+      - name: upload suggested deltas
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rust-guard-suggested-delta-${{ matrix.os }}-${{ matrix.config.id }}
+          path: suggested-*.toml
+          if-no-files-found: ignore
 
   # The tool's own test suite (`tools/rust-guard/tests/`). Runs in CI ONLY —
   # CLAUDE.md bans local builds/tests. The crate is workspace-excluded, so

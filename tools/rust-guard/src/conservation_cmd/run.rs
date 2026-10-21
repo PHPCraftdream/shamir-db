@@ -7,6 +7,7 @@ use super::item;
 use super::matching;
 use crate::common::finding::{exit_code, Report};
 use crate::common::gitfs::GitFs;
+use crate::common::suggest;
 
 /// CLI arguments for `rust-guard conservation` (declared in `main.rs`).
 pub struct ConservationArgs {
@@ -16,6 +17,9 @@ pub struct ConservationArgs {
     pub head: String,
     pub packages: Vec<String>,
     pub delta: Option<String>,
+    /// `--suggest-delta` target file (diagnostic; never affects the
+    /// findings or the exit code).
+    pub suggest_delta: Option<String>,
 }
 
 /// Runs the gate; returns the process exit code.
@@ -57,6 +61,7 @@ fn execute(args: ConservationArgs) -> Result<u8, String> {
     }
 
     let mut delta = delta::load(args.delta.as_deref())?;
+    let mut suggestions = Vec::new();
     let mut report = Report::new();
     if let Some(expected) = delta.base.as_deref() {
         if !sha_matches(&base_sha, expected) {
@@ -90,8 +95,19 @@ fn execute(args: ConservationArgs) -> Result<u8, String> {
     dedup(&mut base_inv.items);
     dedup(&mut head_inv.items);
 
-    matching::compare(&base_inv.items, &head_inv.items, &mut delta, &mut report);
+    matching::compare(
+        &base_inv.items,
+        &head_inv.items,
+        &mut delta,
+        &mut report,
+        &mut suggestions,
+    );
     report.print();
+    if let Some(path) = &args.suggest_delta {
+        // Diagnostic only: written after the report, so the exit code
+        // below is identical to a flagless run.
+        suggest::write(path, &base_sha, &suggestions)?;
+    }
     Ok(exit_code(&report))
 }
 

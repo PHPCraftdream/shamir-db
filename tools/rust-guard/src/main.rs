@@ -82,6 +82,10 @@ enum Command {
         /// every difference is a finding).
         #[arg(long)]
         delta: Option<String>,
+        /// Write the [[moved]] entries the run is missing to this TOML
+        /// file (diagnostic only; exit code unchanged).
+        #[arg(long)]
+        suggest_delta: Option<String>,
     },
 
     /// Compiled test-inventory diff between two `cargo nextest list
@@ -102,6 +106,14 @@ enum Command {
         /// diffed separately (default: lib).
         #[arg(long, default_value = "lib")]
         kind: String,
+        /// Write the [[moved]] entries the run is missing to this TOML
+        /// file (diagnostic only; exit code unchanged).
+        #[arg(long, requires = "base_sha")]
+        suggest_delta: Option<String>,
+        /// Resolved full base SHA; REQUIRED with --suggest-delta, written
+        /// as the suggestion file's `base` pin.
+        #[arg(long, requires = "suggest_delta")]
+        base_sha: Option<String>,
     },
 }
 
@@ -136,23 +148,29 @@ fn main() -> ExitCode {
             head,
             packages,
             delta,
+            suggest_delta,
         } => ExitCode::from(conservation_cmd::run(conservation_cmd::ConservationArgs {
             repo,
             base,
             head,
             packages,
             delta,
+            suggest_delta,
         })),
         Command::Discovery {
             base_list,
             head_list,
             delta,
             kind,
+            suggest_delta,
+            base_sha,
         } => ExitCode::from(discovery_cmd::run(discovery_cmd::DiscoveryArgs {
             base_list,
             head_list,
             delta,
             kind,
+            suggest_delta,
+            base_sha,
         })),
     }
 }

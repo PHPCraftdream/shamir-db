@@ -6,3 +6,4 @@
 pub(crate) mod exceptions;
 pub(crate) mod finding;
 pub(crate) mod gitfs;
+pub(crate) mod suggest;

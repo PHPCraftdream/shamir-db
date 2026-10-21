@@ -428,3 +428,300 @@ fn filter_rejected_testcases_are_not_inventory() {
     let out = run(Some(base), Some(&lines("b", &["kept"])), None);
     assert_clean(&out);
 }
+
+/// Throwaway repo with the given list files and an optional
+/// `--suggest-delta` target, then one `discovery` run against them
+/// (the repo is returned so callers can read back the suggestion file
+/// and re-run against it). `--base-sha` is REQUIRED with
+/// `--suggest-delta` (clap-enforced), so it is always passed.
+fn run_suggest(
+    base: &str,
+    head: &str,
+    base_sha: &str,
+    suggest: Option<&str>,
+) -> (TempRepo, Output) {
+    let repo = TempRepo::with_fixture("discovery_none");
+    write(&repo, "base.json", base);
+    write(&repo, "head.json", head);
+    let mut args = vec![
+        "discovery",
+        "--base-list",
+        "base.json",
+        "--head-list",
+        "head.json",
+    ];
+    if let Some(p) = suggest {
+        args.extend(["--base-sha", base_sha, "--suggest-delta", p]);
+    }
+    let out = repo.run_guard(&args);
+    (repo, out)
+}
+
+fn contains_sub(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// P3 parity: `--suggest-delta` must not change the gate's output apart
+/// from the note line(s) — same exit code, identical stdout, and a
+/// stderr that is the plain stderr plus note line(s) only. All three
+/// comparisons are byte-exact (no lossy UTF-8, no line-ending
+/// normalisation); the note line(s) are stripped as raw bytes.
+fn assert_flagless_output_unchanged(flagged: &Output, plain: &Output, note_marker: &str) {
+    assert_eq!(
+        flagged.status.code(),
+        plain.status.code(),
+        "exit code changed by --suggest-delta"
+    );
+    assert_eq!(
+        flagged.stdout, plain.stdout,
+        "stdout changed by --suggest-delta"
+    );
+    // Remove exactly the note line(s) from the flagged stderr, as raw
+    // bytes (no lossy UTF-8, no line-ending normalisation).
+    let marker = note_marker.as_bytes();
+    let stripped: Vec<u8> = flagged
+        .stderr
+        .split_inclusive(|&b| b == b'\n')
+        .filter(|line| !contains_sub(line, marker))
+        .flatten()
+        .copied()
+        .collect();
+    assert_eq!(
+        stripped, plain.stderr,
+        "stderr changed by --suggest-delta beyond the note line(s)"
+    );
+}
+
+fn stderr_text(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+#[test]
+fn discovery_suggests_single_name_match() {
+    // `t` moved from bin_a to bin_b with no declaration: TEST_LOST, but
+    // the head side is unambiguous, so --suggest-delta proposes it.
+    let (_repo, out) = run_suggest(
+        &lines("bin_a", &["t", "u"]),
+        &doc(&[("bin_a", &[("u", false)]), ("bin_b", &[("t", false)])]),
+        "0123456789abcdef0123456789abcdef01234567",
+        Some("suggested-disc.toml"),
+    );
+    let err = stderr_text(&out);
+    assert!(!out.status.success(), "expected exit != 0:\n{err}");
+    assert!(err.contains("TEST_LOST"), "expected TEST_LOST:\n{err}");
+    assert!(
+        err.contains("rust-guard: note: 1 undeclared move(s) written to suggested-disc.toml"),
+        "expected the stderr note line:\n{err}"
+    );
+    let text =
+        std::fs::read_to_string(_repo.root.join("suggested-disc.toml")).expect("read suggestion");
+    for expected in [
+        "[[moved]]",
+        "path = \"bin_a\"",
+        "item = \"t\"",
+        "to_path = \"bin_b\"",
+        "to_item = \"t\"",
+        "base = \"0123456789abcdef0123456789abcdef01234567\"",
+    ] {
+        assert!(text.contains(expected), "missing `{expected}`:\n{text}");
+    }
+}
+
+#[test]
+fn discovery_suggestion_feeds_back_clean() {
+    let (repo, out) = run_suggest(
+        &lines("bin_a", &["t", "u"]),
+        &doc(&[("bin_a", &[("u", false)]), ("bin_b", &[("t", false)])]),
+        "0123456789abcdef0123456789abcdef01234567",
+        Some("suggested-disc.toml"),
+    );
+    assert!(!out.status.success(), "the undeclared move still fails");
+    assert!(repo.root.join("suggested-disc.toml").exists());
+    let clean = repo.run_guard(&[
+        "discovery",
+        "--base-list",
+        "base.json",
+        "--head-list",
+        "head.json",
+        "--delta",
+        "suggested-disc.toml",
+    ]);
+    assert_clean(&clean);
+}
+
+#[test]
+fn discovery_ambiguous_name_not_suggested() {
+    // Two head candidates carry the test name: no pairing can be
+    // chosen, so nothing is suggested and no file is written.
+    let (repo, out) = run_suggest(
+        &lines("bin_a", &["t"]),
+        &doc(&[("bin_b", &[("t", false)]), ("bin_c", &[("t", false)])]),
+        "0123456789abcdef0123456789abcdef01234567",
+        Some("suggested-amb.toml"),
+    );
+    let err = stderr_text(&out);
+    assert!(!out.status.success(), "expected exit != 0:\n{err}");
+    assert!(err.contains("TEST_LOST"), "expected TEST_LOST:\n{err}");
+    assert!(err.contains("TARGET_LOST"), "expected TARGET_LOST:\n{err}");
+    assert!(
+        !repo.root.join("suggested-amb.toml").exists(),
+        "an ambiguous pairing must never be suggested"
+    );
+}
+
+#[test]
+fn discovery_without_flag_no_file() {
+    let (repo, out) = run_suggest(
+        &lines("bin_a", &["t", "u"]),
+        &doc(&[("bin_a", &[("u", false)]), ("bin_b", &[("t", false)])]),
+        "0123456789abcdef0123456789abcdef01234567",
+        None,
+    );
+    let err = stderr_text(&out);
+    assert!(!out.status.success(), "expected exit != 0:\n{err}");
+    assert!(
+        !err.contains("rust-guard: note:"),
+        "no note without the flag:\n{err}"
+    );
+    assert!(
+        !repo.root.join("suggested-disc.toml").exists(),
+        "no suggestion file without the flag"
+    );
+}
+
+#[test]
+fn discovery_reverse_ambiguity_not_suggested() {
+    // Reverse ambiguity: TWO base identities carry the test name and only
+    // ONE head candidate exists — the 1:1 assumption is unproven (which
+    // base test moved?), so no one gets a suggestion.
+    let base = doc(&[("bin_a", &[("t", false)]), ("bin_b", &[("t", false)])]);
+    let (repo, out) = run_suggest(
+        &base,
+        &lines("bin_c", &["t"]),
+        "0123456789abcdef0123456789abcdef01234567",
+        Some("suggested-rev.toml"),
+    );
+    let err = stderr_text(&out);
+    assert!(!out.status.success(), "expected exit != 0:\n{err}");
+    assert!(err.contains("TEST_LOST"), "expected TEST_LOST:\n{err}");
+    assert!(
+        !repo.root.join("suggested-rev.toml").exists(),
+        "a reverse-ambiguous pairing must never be suggested"
+    );
+}
+
+#[test]
+fn discovery_ignored_drift_not_suggested() {
+    // The candidate test is `ignored` at head but active at base: the
+    // ignored-state drift must stay a finding, never a suggestion.
+    let (repo, out) = run_suggest(
+        &lines("bin_a", &["t"]),
+        &doc(&[("bin_b", &[("t", true)])]),
+        "0123456789abcdef0123456789abcdef01234567",
+        Some("suggested-ign.toml"),
+    );
+    let err = stderr_text(&out);
+    assert!(!out.status.success(), "expected exit != 0:\n{err}");
+    assert!(err.contains("TEST_LOST"), "expected TEST_LOST:\n{err}");
+    assert!(
+        !repo.root.join("suggested-ign.toml").exists(),
+        "an ignored-drifted move must never be suggested (no suggestions -> no file)"
+    );
+}
+
+#[test]
+fn discovery_flagless_output_unchanged() {
+    // P3: apart from the note line(s), the flagged run's output is
+    // byte-identical to the flagless run.
+    let base = &lines("bin_a", &["t", "u"]);
+    let head = &doc(&[("bin_a", &[("u", false)]), ("bin_b", &[("t", false)])]);
+    let (_repo, flagged) = run_suggest(
+        base,
+        head,
+        "0123456789abcdef0123456789abcdef01234567",
+        Some("suggested-parity.toml"),
+    );
+    let (_repo2, plain) = run_suggest(base, head, "unused", None);
+    assert_flagless_output_unchanged(&flagged, &plain, "rust-guard: note:");
+}
+
+#[test]
+fn discovery_suggestion_escapes_special_characters() {
+    // P2-5: TOML basic-string escaping. The test name carries a quote, a
+    // backslash and a control byte; the suggestion file must escape them
+    // (Rust's `{:?}` renders `\u{7}` which is INVALID TOML), and feeding
+    // the file back as `--delta` must round-trip the identity exactly.
+    // The pinned `--base-sha` carries a quote too, proving the `base =`
+    // line is escaped as well. In the JSON builder string the name is
+    // JSON-escaped:
+    // we"ird\test<U+0007>x -> we\"ird\\test\u0007x
+    let weird = "we\\\"ird\\\\test\\u0007x";
+    let base = lines("bin_a", &[weird]);
+    let head = lines("bin_b", &[weird]);
+    let pinned = "dead\"beef";
+    let (repo, out) = run_suggest(&base, &head, pinned, Some("suggested-esc.toml"));
+    let err = stderr_text(&out);
+    assert!(!out.status.success(), "expected exit != 0:\n{err}");
+    assert!(err.contains("TEST_LOST"), "expected TEST_LOST:\n{err}");
+    assert!(
+        err.contains("rust-guard: note: 1 undeclared move(s) written to suggested-esc.toml"),
+        "expected the stderr note line:\n{err}"
+    );
+    let text =
+        std::fs::read_to_string(repo.root.join("suggested-esc.toml")).expect("read suggestion");
+    assert!(
+        text.contains("\\u0007"),
+        "the control byte must be \\u-escaped:\n{text}"
+    );
+    assert!(
+        !text.contains('\u{7}'),
+        "the raw control byte must not appear:\n{text}"
+    );
+    assert!(
+        text.contains("base = \"dead\\\"beef\""),
+        "the pinned base sha must be escaped (raw quote would break TOML):\n{text}"
+    );
+    // Feed the suggestion back: it must parse (no MALFORMED_DELTA) and
+    // the escaped strings must round-trip exactly (the [[moved]] entry
+    // is only consumed on an exact path/item match), making the run clean.
+    let clean = repo.run_guard(&[
+        "discovery",
+        "--base-list",
+        "base.json",
+        "--head-list",
+        "head.json",
+        "--delta",
+        "suggested-esc.toml",
+    ]);
+    let clean_err = stderr_text(&clean);
+    assert!(
+        !clean_err.contains("MALFORMED_DELTA"),
+        "the suggestion file must be valid TOML:\n{clean_err}"
+    );
+    assert_clean(&clean);
+}
+
+#[test]
+fn discovery_flag_leaves_no_suggestion_fixture_output_unchanged() {
+    // P3: a fixture that produces NO suggestions — the flagged run is
+    // byte-identical to the flagless run (no note line, no file).
+    let base = &lines("bin_a", &["t"]);
+    let head = &doc(&[("bin_b", &[("t", false)]), ("bin_c", &[("t", false)])]);
+    let (repo, flagged) = run_suggest(
+        base,
+        head,
+        "0123456789abcdef0123456789abcdef01234567",
+        Some("suggested-parity.toml"),
+    );
+    let (_repo2, plain) = run_suggest(base, head, "unused", None);
+    assert_flagless_output_unchanged(&flagged, &plain, "rust-guard: note:");
+    let err = stderr_text(&flagged);
+    assert!(
+        !err.contains("rust-guard: note:"),
+        "no note when nothing is suggested:\n{err}"
+    );
+    assert!(
+        !repo.root.join("suggested-parity.toml").exists(),
+        "no file when nothing is suggested"
+    );
+}

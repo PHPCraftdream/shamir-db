@@ -144,6 +144,14 @@ The repository's required pre-commit checks are documented in [CONTRIBUTING.md](
 - **Streaming**: bounds wire/client-side memory for unsorted result streams; `ORDER BY`/`GROUP BY`/`DISTINCT` queries and cursor bookmarks still materialize/sort the full matching set server-side before the first page returns (see [`docs/guide-docs/KNOWN_LIMITATIONS.md`](docs/guide-docs/KNOWN_LIMITATIONS.md#6-results))
 - **Scale envelope**: unique/sorted/FTS/functional/vector `CREATE INDEX` blocks writers for the whole backfill (~140–160 s at 100k rows) and FTS/functional indexes are rebuilt on every restart — see [`docs/guide-docs/KNOWN_LIMITATIONS.md`](docs/guide-docs/KNOWN_LIMITATIONS.md) §11
 
+## 🔀 Suggesting moves
+
+The `rust-guard` source-integrity gates (`conservation`, `discovery`) accept a diagnostic `--suggest-delta <file>` flag: after a failing run they write the `[[moved]]` declarations that would have explained the observed relocations, as a starting point for the author's delta file.
+
+- **Discovery requires a pin**: `discovery --suggest-delta` now REQUIRES `--base-sha <sha>` (and vice versa — each flag requires the other). The resolved base SHA is written verbatim as the suggestion file's `base` pin so reviewers can trace the run.
+- **Conservative pairing**: a move is only suggested when the pairing is mutually unique (exactly one base and one head identity carry the test name) and drift-free (the `ignored` state is equal on both sides — an active→ignored move stays a finding). Ambiguous or drifted relocations are never suggested.
+- The suggestions are diagnostic only: findings and exit codes are unchanged.
+
 ## 🤝 Contributing
 
 Issues and pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before making changes. For security vulnerabilities, follow [SECURITY.md](SECURITY.md) instead of opening a public issue.

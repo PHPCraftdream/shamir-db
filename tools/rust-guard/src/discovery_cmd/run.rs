@@ -6,7 +6,9 @@
 
 use super::lists::TestList;
 use crate::common::finding::{exit_code, Report};
+use crate::common::suggest::{self, MoveSuggestion};
 use crate::conservation_cmd::delta;
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 /// CLI arguments for `rust-guard discovery` (declared in `main.rs`).
@@ -23,6 +25,12 @@ pub struct DiscoveryArgs {
     /// Label (`lib|loom|doc`) echoed into finding paths/messages so
     /// doctest/loom lists can be diffed separately.
     pub kind: String,
+    /// `--suggest-delta` target file (diagnostic; never affects the
+    /// findings or the exit code).
+    pub suggest_delta: Option<String>,
+    /// Resolved full base SHA (required with `--suggest-delta`); written
+    /// verbatim as the suggestion file's `base` pin.
+    pub base_sha: Option<String>,
 }
 
 /// Runs the gate; returns the process exit code.
@@ -167,6 +175,53 @@ fn execute(args: DiscoveryArgs) -> Result<u8, String> {
         );
     }
 
+    // Undeclared moves the pairing could not explain. The pairing must
+    // be MUTUALLY unique and drift-free before it is suggested:
+    // - the head candidate must be the ONLY unclaimed head identity with
+    //   that test name, AND the base side must be the ONLY base identity
+    //   with that test name (with base (a,t)+(b,t) and one new head
+    //   (c,t) no one gets a suggestion — the 1:1 assumption is unproven);
+    // - the ignored state must be EQUAL on both sides (an active ->
+    //   ignored move stays a finding, not a silent suggestion);
+    // - exactly one head candidate: removed from the candidate map on
+    //   use, so no head identity is ever suggested twice (diagnostic
+    //   only — findings and exit code are untouched).
+    let mut by_test: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for identity in head.counts.keys().filter(|identity| {
+        !base.counts.contains_key(*identity) && !claimed_heads.contains(*identity)
+    }) {
+        by_test
+            .entry(identity.1.clone())
+            .or_default()
+            .push(identity.clone());
+    }
+    let mut suggestions: Vec<MoveSuggestion> = Vec::new();
+    let mut base_name_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for identity in base.counts.keys() {
+        *base_name_counts.entry(identity.1.clone()).or_default() += 1;
+    }
+    for (bin, test) in &unexplained {
+        if base_name_counts.get(test) != Some(&1) {
+            continue;
+        }
+        let cands = by_test.get(test).map(|v| v.as_slice()).unwrap_or(&[]);
+        if let [(cand_bin, cand_test)] = cands {
+            let cand = (cand_bin.clone(), cand_test.clone());
+            let base_ignored = base.ignored.get(&(bin.clone(), test.clone()));
+            let head_ignored = head.ignored.get(&cand);
+            if base_ignored.copied().unwrap_or(false) != head_ignored.copied().unwrap_or(false) {
+                continue;
+            }
+            suggestions.push(MoveSuggestion {
+                path: bin.clone(),
+                item: test.clone(),
+                to_path: cand.0,
+                to_item: cand.1,
+            });
+            by_test.remove(test);
+        }
+    }
+
     // A base binary is lost when every one of its remaining unpaired
     // tests is gone AND the head list carries no tests for it (a
     // declared move of the binary's last test to another binary is
@@ -200,6 +255,16 @@ fn execute(args: DiscoveryArgs) -> Result<u8, String> {
     }
 
     report.print();
+    if let Some(path) = &args.suggest_delta {
+        let base = args
+            .base_sha
+            .as_deref()
+            .expect("clap enforces --base-sha with --suggest-delta");
+        // The delta loader requires a non-empty `base` and discovery never
+        // checks the sha (it compares list files, not revisions) — but the
+        // file now carries the real pin so reviewers can trace the run.
+        suggest::write(path, base, &suggestions)?;
+    }
     Ok(exit_code(&report))
 }
 

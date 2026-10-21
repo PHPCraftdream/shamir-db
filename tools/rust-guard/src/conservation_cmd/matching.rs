@@ -6,7 +6,9 @@
 //!    attributes;
 //! 2. same (kind + name + enclosing + signature) — moves; accepted only
 //!    when a `[[moved]]` entry is declared, otherwise the pair falls
-//!    apart into ITEM_LOST + ITEM_ADDED;
+//!    apart into ITEM_LOST + ITEM_ADDED; every undeclared move whose
+//!    pair is otherwise clean is additionally recorded as a
+//!    `MoveSuggestion` (diagnostic only, findings unchanged);
 //! 3. everything equal except the name, unique on both sides — renames,
 //!    declared with `[[renamed]]`; the rename comparison normalises the
 //!    item's OWN name out of the signature tokens (the signature keeps
@@ -24,6 +26,7 @@
 use super::delta::Delta;
 use super::item::{identity, weak_key, Item, TestKind};
 use crate::common::finding::Report;
+use crate::common::suggest::MoveSuggestion;
 use std::collections::BTreeMap;
 
 /// One accepted pairing and what drifted between the two sides.
@@ -38,7 +41,15 @@ struct Pair {
 
 /// Runs the comparison and fills `report`. `delta` is consumed as
 /// allowances are matched; leftovers become `UNUSED_ALLOWANCE`.
-pub fn compare(base: &[Item], head: &[Item], delta: &mut Delta, report: &mut Report) {
+/// `suggestions` receives the undeclared, otherwise-clean moves for the
+/// `--suggest-delta` diagnostic; it never affects `report`.
+pub fn compare(
+    base: &[Item],
+    head: &[Item],
+    delta: &mut Delta,
+    report: &mut Report,
+    suggestions: &mut Vec<MoveSuggestion>,
+) {
     let mut base_left: Vec<usize> = (0..base.len()).collect();
     let mut head_left: Vec<usize> = (0..head.len()).collect();
     let mut pairs: Vec<Pair> = Vec::new();
@@ -80,23 +91,41 @@ pub fn compare(base: &[Item], head: &[Item], delta: &mut Delta, report: &mut Rep
             still.push(p); // unchanged item
         } else if consume_side(delta, "moved", b, h) {
             still.push(p);
-        } else if b.logical == h.logical {
-            // Whole-module file move: logical path kept, only the
-            // physical file changed — a move by definition, still
-            // declared so the delta tells the story.
-            report.add(
-                &h.path,
-                h.line,
-                "ITEM_MOVED",
-                format!(
-                    "`{}` moved files ({}:{}); declare [[moved]]",
-                    h.logical, b.path, b.line
-                ),
-            );
-            still.push(p);
         } else {
-            base_left.push(p.b);
-            head_left.push(p.h);
+            // Not declared and not an unchanged item: if the pair is
+            // clean apart from the move (same fingerprint, test attrs
+            // and cfg) the ONLY blocker is the missing [[moved]] entry
+            // — suggest it. Drifted pairs must never be suggested.
+            if b.fingerprint == h.fingerprint
+                && b.signature == h.signature
+                && b.test == h.test
+                && b.cfg == h.cfg
+            {
+                suggestions.push(MoveSuggestion {
+                    path: b.path.clone(),
+                    item: b.logical.clone(),
+                    to_path: h.path.clone(),
+                    to_item: h.logical.clone(),
+                });
+            }
+            if b.logical == h.logical {
+                // Whole-module file move: logical path kept, only the
+                // physical file changed — a move by definition, still
+                // declared so the delta tells the story.
+                report.add(
+                    &h.path,
+                    h.line,
+                    "ITEM_MOVED",
+                    format!(
+                        "`{}` moved files ({}:{}); declare [[moved]]",
+                        h.logical, b.path, b.line
+                    ),
+                );
+                still.push(p);
+            } else {
+                base_left.push(p.b);
+                head_left.push(p.h);
+            }
         }
     }
     pairs = still;
