@@ -6893,3 +6893,45 @@ path = "crates/shamir-engine/src/query/read/tests/qv_postprocess_tests.rs"
 item = "shamir-engine::lib::query::read::tests::qv_postprocess_tests::make_test_records"
 reason = "signature tokens re-qualified or body adjusted for the new module location"
 owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/tests/query_results/select_order_page/helpers.rs"
+item = "shamir-engine::lib::query::read::tests::query_results::select_order_page::helpers::make_record"
+reason = "shared helper extracted by the layout sweep"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/tests/query_results/select_order_page/helpers.rs"
+item = "shamir-engine::lib::query::read::tests::query_results::select_order_page::helpers::to_bytes_records"
+reason = "shared helper extracted by the layout sweep"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/query/read/tests/query_results/select_order_page/qv_select_tests.rs"
+item = "shamir-engine::lib::query::read::tests::query_results::select_order_page::qv_select_tests::make_record"
+reason = "shared helper extracted by the layout sweep"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/read/tests/exec_tests.rs"
+item = "shamir-engine::lib::query::read::tests::exec_tests::make_record"
+reason = "duplicate helper consolidated by the layout sweep"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/read/tests/exec_tests.rs"
+item = "shamir-engine::lib::query::read::tests::exec_tests::to_bytes_records"
+reason = "duplicate helper consolidated by the layout sweep"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/read/tests/qv_postprocess_tests.rs"
+item = "shamir-engine::lib::query::read::tests::qv_postprocess_tests::make_record"
+reason = "duplicate helper consolidated by the layout sweep"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/query/read/tests/qv_postprocess_tests.rs"
+item = "shamir-engine::lib::query::read::tests::qv_postprocess_tests::to_bytes_records"
+reason = "duplicate helper consolidated by the layout sweep"
+owner = "@layout-sweep"
