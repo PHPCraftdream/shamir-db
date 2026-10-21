@@ -2,10 +2,6 @@
 # format: dir <path> <n> | file <path> <n>; maintained by check_layout.py
 dir crates/shamir-client-node 10
 dir crates/shamir-engine/src 12
-dir crates/shamir-engine/src/query 8
-dir crates/shamir-engine/src/query/batch 19
-dir crates/shamir-engine/src/query/batch/tests 33
-dir crates/shamir-engine/src/query/batch/tests/executor_tests 12
 dir crates/shamir-engine/src/query/filter 16
 dir crates/shamir-engine/src/query/filter/tests 8
 dir crates/shamir-engine/src/query/filter/tests/eval_tests 19
@@ -18,15 +14,6 @@ dir crates/shamir-engine/src/table/tests 114
 dir crates/shamir-engine/src/tx 21
 dir crates/shamir-engine/src/tx/tests 60
 dir crates/shamir-engine/src/tx/tests/ssi_phantom_tests 9
-file crates/shamir-engine/src/query/batch/fk_actions.rs 1438
-file crates/shamir-engine/src/query/batch/fk_on_update.rs 1353
-file crates/shamir-engine/src/query/batch/query_runner.rs 2006
-file crates/shamir-engine/src/query/batch/tests/fk_actions_tests.rs 1688
-file crates/shamir-engine/src/query/batch/tests/fk_on_update_tests.rs 2481
-file crates/shamir-engine/src/query/batch/tests/fk_race_closure_tests.rs 1147
-file crates/shamir-engine/src/query/batch/tests/fk_ri_barrier_tests.rs 1341
-file crates/shamir-engine/src/query/batch/tests/for_each_tests.rs 2151
-file crates/shamir-engine/src/query/batch/tests/sub_batch_tests.rs 1509
 file crates/shamir-engine/src/query/filter/filter_node.rs 1099
 file crates/shamir-engine/src/query/filter/tests/eval_tests/collection_tests.rs 1318
 file crates/shamir-engine/src/query/read/aggregate.rs 1779
