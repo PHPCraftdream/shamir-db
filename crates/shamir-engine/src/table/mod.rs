@@ -1,26 +1,18 @@
-pub mod buffer_config;
+mod support;
+
+pub(in crate::table) use support::guards::migration_freeze_guard;
+pub use support::guards::{in_flight_create_guard, writer_drain_barrier};
+pub use support::model::{buffer_config, table, table_config};
+pub use support::storage::{interner_manager, persistable, record_counter, record_cow};
+#[cfg(test)]
+pub use support::test_seams::index2_backfill_hook;
+pub(in crate::table) use support::test_seams::tx_scan_overlay;
+
 // Re-export ddl_op_log from shamir-index for inline terminal status writes
 pub use shamir_index::base_index::ddl_op_log;
-mod candidate_set;
 pub mod degraded_index_count;
 pub mod doctor;
-mod filtered_vector;
-pub mod in_flight_create_guard;
-#[cfg(test)]
-pub mod index2_backfill_hook;
-pub mod interner_manager;
-mod migration_freeze_guard;
-pub mod persistable;
-mod read_asof_seek;
-mod read_exec;
-mod read_index_scan;
-mod read_planner;
-mod read_temporal;
-pub mod record_counter;
-pub mod record_cow;
-#[allow(clippy::module_inception)]
-pub mod table;
-pub mod table_config;
+mod read;
 pub mod table_manager;
 mod table_manager_buffer;
 mod table_manager_changefeed;
@@ -35,12 +27,19 @@ mod table_manager_tx_ops;
 #[cfg(test)]
 pub(crate) use table_manager_tx_ops::refresh_released_unique_cache;
 mod table_manager_validators;
-mod tx_scan_overlay;
-mod write_exec;
-pub(crate) mod write_helpers;
+mod write;
+#[cfg(test)]
+pub(crate) use write::write_helpers;
+// Engine sweep T1 chunk W3: `write_exec.rs` was split into `write/{insert,
+// update/update, delete/delete, set/set}.rs` and `write_helpers.rs` moved to
+// `write/write_helpers.rs`; the old `crate::table::write_helpers` path is
+// kept via this module re-export.
+#[path = "table_manager/admission/mod.rs"]
 pub mod write_receipt;
 pub use write_receipt::WriteOutcome;
-pub mod writer_drain_barrier;
+
+#[cfg(test)]
+pub(in crate::table) use read::vector::filtered_vector;
 
 #[cfg(test)]
 pub mod tests;
@@ -69,4 +68,8 @@ pub(crate) use table_manager_streaming::{ReadOneTxBytesFailHook, TEST_READ_ONE_T
 // rendezvous a concurrent AsOf read against a racing commit's Phase 5c
 // seam. Test-only.
 #[cfg(test)]
-pub(crate) use read_asof_seek::{SeekLoopPreIterHook, TEST_SEEK_LOOP_PRE_ITER_HOOK};
+pub(in crate::table) use read::planning::read_asof_seek;
+#[cfg(test)]
+pub(crate) use read::planning::read_asof_seek::{
+    SeekLoopPreIterHook, TEST_SEEK_LOOP_PRE_ITER_HOOK,
+};

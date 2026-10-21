@@ -1,0 +1,869 @@
+use bytes::Bytes;
+use shamir_collections::TFxSet;
+use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::types::RecordKey;
+use shamir_types::types::record_id::RecordId;
+use shamir_types::types::value::InnerValue;
+
+use crate::table::table_manager::TableManager;
+#[cfg(test)]
+use crate::table::TEST_READ_ONE_TX_BYTES_FAILURE;
+use crate::index::index_definition::IndexDefinition;
+
+impl TableManager {
+    pub(super) fn ensure_repo_readable(&self) -> DbResult<()> {
+        if self.changefeed.as_ref().is_some_and(|changefeed| {
+            changefeed.gate.receipt_native_visibility_enabled() && changefeed.gate.requires_reopen()
+        }) {
+            return Err(DbError::RepoRequiresReopen(self.name().to_string()));
+        }
+        Ok(())
+    }
+}
+
+// ── F-48 (#859) test-only pause seam ────────────────────────────────────────
+//
+// Mirrors F-46's `TEST_POST_VALIDATE_PRE_PUBLISH_HOOK` (commit.rs, #857) and
+// F-47's `TEST_POST_GENCHECK_PRE_PUBLISH_HOOK` (fk_reverse_cache.rs, #858): a
+// `#[cfg(test)]` `OnceLock<Arc<Hook>>` global, zero cost when unset. The seam
+// fires in each non-tx writer method strictly AFTER `needs_write_barrier()`
+// is read (so the test knows which path the writer took) and BEFORE the
+// data-store write. A test installs the hook, spawns a writer, busy-polls
+// `reached`, then drives the DDL's barrier + drain + count-proof while the
+// writer is parked, then `resume`s it — deterministically reproducing the
+// check-then-act interleaving the review's P0-3 finding describes.
+
+/// Test-only pause/resume handshake installed via
+/// [`TEST_POST_BARRIER_PRE_WRITE_HOOK`]. `reached` lets the harness detect
+/// (via polling, no sleeps) that the writer under test has actually parked at
+/// the seam; `resume` is the release signal; `armed` makes the pause one-shot
+/// (CAS true→false) so only the FIRST writer to reach the seam parks — every
+/// later arrival passes through immediately. Shape mirrors
+/// `commit.rs::PostValidatePrePublishHook` (F-46) exactly.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct PostBarrierPreWriteHook {
+    pub(crate) reached: std::sync::atomic::AtomicUsize,
+    pub(crate) resume: tokio::sync::Notify,
+    pub(crate) armed: std::sync::atomic::AtomicBool,
+}
+
+/// Test-only pause seam. Fires in the non-tx writer methods immediately AFTER
+/// `needs_write_barrier()` returns (so the writer has committed to the fast
+/// or slow path) and BEFORE the data-store write. See
+/// [`PostBarrierPreWriteHook`]'s doc for the exact rationale.
+///
+/// `nextest` runs each test in its own process, so this global cannot leak
+/// across test files. Uninstalled (`None`, the default for every other test)
+/// this is a single `OnceLock::get()` read with no lock, no allocation, no
+/// await point taken.
+#[cfg(test)]
+pub(crate) static TEST_POST_BARRIER_PRE_WRITE_HOOK: std::sync::OnceLock<
+    std::sync::Arc<PostBarrierPreWriteHook>,
+> = std::sync::OnceLock::new();
+
+/// Parks on `TEST_POST_BARRIER_PRE_WRITE_HOOK` if a test installed one;
+/// a true no-op otherwise.
+async fn fire_post_barrier_pre_write_test_hook() {
+    #[cfg(test)]
+    if let Some(hook) = TEST_POST_BARRIER_PRE_WRITE_HOOK.get() {
+        hook.reached
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // One-shot: only the FIRST writer to reach this seam actually parks
+        // (CAS true→false). Every later arrival passes straight through — see
+        // `PostBarrierPreWriteHook::armed`'s doc for why this is
+        // load-bearing (the concurrent DDL-side writer or any other
+        // in-flight op must not deadlock here).
+        let should_pause = hook
+            .armed
+            .compare_exchange(
+                true,
+                false,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok();
+        if should_pause {
+            hook.resume.notified().await;
+        }
+    }
+}
+
+impl TableManager {
+    // ---- index2 event hooks (used by crud + replication) ----
+
+    /// Map an `IndexError` to a `DbError::Internal` for propagation.
+    /// This ensures scalar-eval failures (e.g. user scalar not re-registered
+    /// after reopen) surface as LOUD errors instead of being swallowed.
+    fn io_err(e: shamir_index::IndexError) -> DbError {
+        DbError::Internal(e.to_string())
+    }
+
+    pub(super) async fn index2_on_insert(&self, rid: &RecordId, rec: &InnerValue) -> DbResult<()> {
+        let backends = self.index2_registry.all_backends().await;
+        self.index2_on_insert_with_backends(&backends, rid, rec)
+            .await
+    }
+
+    /// Batched sibling of [`index2_on_insert`](Self::index2_on_insert) —
+    /// takes a pre-fetched backend snapshot instead of calling
+    /// `all_backends()` itself. Lets a per-record loop hoist the
+    /// `all_backends()` walk (an `scc::HashMap` iteration) ABOVE the loop
+    /// and reuse the same list for every record, instead of re-walking the
+    /// registry once per record for a backend set that cannot change
+    /// mid-batch (no DDL can mutate the index2 registry concurrently with
+    /// an in-flight batch insert on the same table).
+    async fn index2_on_insert_with_backends(
+        &self,
+        backends: &[std::sync::Arc<dyn crate::index2::backend::IndexBackend>],
+        rid: &RecordId,
+        rec: &InnerValue,
+    ) -> DbResult<()> {
+        for backend in backends {
+            let ops = backend.plan_insert(*rid, rec).await.map_err(Self::io_err)?;
+            crate::index2::apply_index_ops(&ops, &self.info_store, backend.as_ref())
+                .await
+                .map_err(Self::io_err)?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn index2_on_update(
+        &self,
+        rid: &RecordId,
+        old: &InnerValue,
+        new: &InnerValue,
+    ) -> DbResult<()> {
+        for backend in self.index2_registry.all_backends().await {
+            let ops = backend
+                .plan_update(*rid, old, new)
+                .await
+                .map_err(Self::io_err)?;
+            crate::index2::apply_index_ops(&ops, &self.info_store, backend.as_ref())
+                .await
+                .map_err(Self::io_err)?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn index2_on_delete(&self, rid: &RecordId, rec: &InnerValue) -> DbResult<()> {
+        for backend in self.index2_registry.all_backends().await {
+            let ops = backend.plan_delete(*rid, rec).await.map_err(Self::io_err)?;
+            crate::index2::apply_index_ops(&ops, &self.info_store, backend.as_ref())
+                .await
+                .map_err(Self::io_err)?;
+        }
+        Ok(())
+    }
+
+    // ---- public CRUD surface ----
+    // MVCC primitives must not wait inside validate -> write -> index updates:
+    // lower post-WAL orphan posting replay needs our writer drain/UWL barrier.
+    // Acknowledge only at the end, after explicitly releasing both branches.
+
+    /// Insert an InnerValue, returns RecordId (with counter and index update)
+    ///
+    /// Validates unique indexes BEFORE insert, returns error if constraint violated.
+    ///
+    /// cancel-safe: NO — sequence is data-write → counter-bump → 3 index
+    /// updates with no WAL marker around it. Cancellation between the
+    /// data write (`self.table.insert`) and the index hooks leaves the
+    /// data store with orphan records that the indexes don't see.
+    /// F5a: single-record CRUD is best-effort no-WAL (recovery via the
+    /// doctor's `repair()` pass); the WAL-covered path is the batch /
+    /// implicit-tx route. Do NOT call this under `tokio::select!` or
+    /// `tokio::time::timeout` — use the batch / implicit-tx path for
+    /// WAL-covered writes.
+    pub async fn insert(&self, value: &InnerValue) -> DbResult<RecordId> {
+        let (id, _version) = self.insert_returning_version(value).await?;
+        Ok(id)
+    }
+
+    /// Like [`insert`](Self::insert) but also returns the MVCC version
+    /// assigned by the underlying store (for changefeed version
+    /// alignment). Returns `0` when no `MvccStore` is attached.
+    pub(super) async fn insert_unacknowledged(
+        &self,
+        value: &InnerValue,
+    ) -> DbResult<(RecordId, u64)> {
+        // #534 finding 1: `needs_write_barrier()` is also `true` while an
+        // index2 `create_index_v2` is in flight, so this insert can't slip
+        // into the backfill→register window and get lost by the new index.
+        //
+        // F-48/F-56: bump the drain counter (SeqCst) BEFORE reading the barrier
+        // flag (SeqCst) so the cross-atomic happens-before edge to the DDL's
+        // SeqCst drain load is carried by the single SeqCst total order (NOT a
+        // flag coherence chain — Release/Acquire cannot span two independent
+        // atomics; see `writer_drain_barrier`'s proof). If the flag is up
+        // (slow path), exit the drain set and take `unique_write_lock` instead
+        // — the lock serializes us, not the counter.
+        let mut drain_guard = Some(self.writer_drain.enter_writer());
+        let needs_barrier = self.needs_write_barrier();
+        let _guard = if needs_barrier {
+            drop(drain_guard.take());
+            let guard = self.unique_write_lock.lock().await;
+            if self
+                .write_barrier_flags
+                .is_set(crate::index::write_barrier_flags::MIGRATION_FREEZE)
+            {
+                return Err(DbError::MigrationFrozen {
+                    table: self.name.clone(),
+                });
+            }
+            Some(guard)
+        } else {
+            None
+            // drain_guard stays alive for the whole fast-path sequence.
+        };
+
+        // F-48 test seam: parks strictly AFTER the flag read, BEFORE the
+        // write. No-op in every non-test build.
+        fire_post_barrier_pre_write_test_hook().await;
+
+        // 1. Validate unique indexes BEFORE write
+        self.index_manager.validate_unique_for_create(value).await?;
+
+        // 2. Write to table. Route through MvccStore (SSI / version cache
+        //    + history archival under active snapshots) when one is
+        //    attached; otherwise fall back to a direct data_store write.
+        //    Pre-generating the RecordId here lets us use the keyed
+        //    `set_versioned` path instead of `Table::insert`'s auto-key
+        //    `data_store.insert`. The MvccStore writes to `main` (same
+        //    physical layout as direct `set`), so observers reading via
+        //    `data_store.get` see the new record identically.
+        let id = RecordId::new();
+        let bytes = value.to_bytes().map_err(|e| {
+            shamir_storage::error::DbError::Codec(format!("Failed to serialize InnerValue: {}", e))
+        })?;
+        let version = if let Some(mvcc) = &self.mvcc_store {
+            // task #532: `set_versioned` is `RecordKey`-keyed — build the key
+            // inline from the rid (alloc-free for the 16-byte shape) instead of
+            // the prior `id.to_bytes()` heap `Bytes` that the store then had to
+            // convert back to `RecordKey` internally.
+            mvcc.set_versioned_no_wait(RecordKey::from_slice(id.as_bytes()), bytes)
+                .await?
+        } else {
+            self.table
+                .data_store()
+                .set_no_flag(RecordKey::from_slice(id.as_bytes()), bytes)
+                .await?;
+            0
+        };
+        self.counter.increment(1).await?;
+
+        // 3. Update indexes AFTER write
+        self.index_manager.on_record_created(&id, value).await?;
+        self.index_manager
+            .on_record_created_unique(&id, value)
+            .await?;
+        self.sorted_indexes
+            .on_record_created(&id, value, version)
+            .await?;
+        self.index2_on_insert(&id, value).await?;
+
+        // SSI footprint: record this non-tx insert so Serializable txs see it.
+        let ssi_ops = self
+            .sorted_indexes
+            .plan_record_created(&id, value, version)
+            .unwrap_or_default();
+        self.record_nontx_ssi_footprint(version, &ssi_ops);
+
+        drop(_guard);
+        drop(drain_guard);
+        Ok((id, version))
+    }
+
+    /// Batched insert of N records. Validates unique indexes first
+    /// for all values, then issues one batched `Table::insert_many`
+    /// (which dispatches to `Store::insert_many` — on nebari / persy /
+    /// redb that's a single transaction = one fsync for the data
+    /// store). Counter increments by N once; index updates still
+    /// loop per-record (a follow-up sprint can batch the index
+    /// writes through `info_store.set_many`).
+    ///
+    /// Atomicity matches `Store::insert_many` for the chosen backend
+    /// (transactional all-or-nothing on nebari / persy / redb;
+    /// per-record on backends using the default loop impl).
+    pub async fn insert_many(&self, values: &[InnerValue]) -> DbResult<Vec<RecordId>> {
+        let (ids, _version) = self.insert_many_returning_version(values).await?;
+        Ok(ids)
+    }
+
+    /// Like [`insert_many`](Self::insert_many) but also returns the
+    /// maximum MVCC version assigned across the batch (for changefeed
+    /// version alignment). Returns `0` when no `MvccStore` is attached
+    /// or the batch is empty.
+    pub(super) async fn insert_many_unacknowledged(
+        &self,
+        values: &[InnerValue],
+    ) -> DbResult<(Vec<RecordId>, u64)> {
+        if values.is_empty() {
+            return Ok((Vec::new(), 0));
+        }
+
+        // #534 finding 1: hold the barrier across validate→write→index while an
+        // index2 create_index_v2 backfill is in flight (also across the whole
+        // batch's unique validation + posting writes when a unique index
+        // exists, matching the single-row path's atomicity). Without an index2
+        // create in flight and without a unique index, this stays lock-free.
+        //
+        // F-48 (#859): bump the drain counter BEFORE reading the barrier flag.
+        // See `writer_drain_barrier` for the memory-model rationale.
+        let mut drain_guard = Some(self.writer_drain.enter_writer());
+        let needs_barrier = self.needs_write_barrier();
+        let _guard = if needs_barrier {
+            drop(drain_guard.take());
+            let guard = self.unique_write_lock.lock().await;
+            if self
+                .write_barrier_flags
+                .is_set(crate::index::write_barrier_flags::MIGRATION_FREEZE)
+            {
+                return Err(DbError::MigrationFrozen {
+                    table: self.name.clone(),
+                });
+            }
+            Some(guard)
+        } else {
+            None
+        };
+
+        // F-48 test seam: parks strictly AFTER the flag read, BEFORE the
+        // write. No-op in every non-test build.
+        fire_post_barrier_pre_write_test_hook().await;
+
+        // 1. Validate unique indexes for every value first. Two
+        //    layers of check: persisted state (via
+        //    `validate_unique_for_create`) AND batch-local seen
+        //    map, because two rows within ONE batch with the same
+        //    unique value would otherwise both pass the persisted
+        //    check and silently overwrite each other in step 3.
+        if self.index_manager.has_unique_indexes() {
+            // Snapshot unique-index defs ONCE per batch — they are stable for the
+            // duration of insert_many (mutated only by DDL). Eliminates 2×N
+            // DashMap-iter + N×IndexDefinition::clone seen on the hot path
+            // (flamegraph: dashmap::Iter::next 3.2% + lock_shared 0.89%).
+            let unique_defs: Vec<IndexDefinition> =
+                self.index_manager.iter_unique_indexes().collect();
+            // Map: (unique_index_name_interned, encoded_values_key)
+            // → first index in the batch that claimed it. Cheap
+            // bincode-based key avoids fighting `InnerValue` hash
+            // requirements (Map keyed by interner ids isn't `Hash`).
+            let mut batch_seen: TFxSet<(u64, Vec<u8>)> = TFxSet::default();
+            for (i, v) in values.iter().enumerate() {
+                self.index_manager
+                    .validate_unique_for_create_with_defs(v, &unique_defs)
+                    .await?;
+                // Now record this row's unique-index claims so the
+                // next iteration sees them.
+                for def in &unique_defs {
+                    if let Some(vs) = crate::index::index_keys::extract_index_leaves(v, &def.paths)
+                    {
+                        let key = bincode::serialize(&vs)
+                            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+                        if !batch_seen.insert((def.name_interned, key)) {
+                            return Err(shamir_storage::error::DbError::DuplicateKey(format!(
+                                "Unique index '{}' violated within batch (row {} duplicates an earlier row)",
+                                def.name_interned, i
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Data-store write. When an MvccStore is attached, route the
+        //    whole batch through `set_versioned_many_append_only` (III.4) so
+        //    `version_cache` and history archival stay consistent with
+        //    non-tx writes WHILE collapsing the main writes into a single
+        //    `Store::transact` — one fsync instead of N on backends that
+        //    override `transact`. The previous per-record `set_versioned`
+        //    loop re-introduced the N× fsync amplification this path now
+        //    avoids. Without an MvccStore we keep the legacy batched path
+        //    (one transaction = one fsync on backends that override
+        //    `insert_many`).
+        let (ids, batch_version): (Vec<RecordId>, u64) = if let Some(mvcc) = &self.mvcc_store {
+            let mut ids = Vec::with_capacity(values.len());
+            let mut items = Vec::with_capacity(values.len());
+            for v in values {
+                let rid = RecordId::new();
+                let bytes = v.to_bytes().map_err(|e| {
+                    shamir_storage::error::DbError::Codec(format!(
+                        "Failed to serialize InnerValue: {}",
+                        e
+                    ))
+                })?;
+                // task #532: `set_versioned_many_append_only` is keyed on
+                // `RecordKey` — build the key inline (alloc-free) rather than
+                // `rid.to_bytes()` → store-internal `Bytes`→`RecordKey`.
+                items.push((RecordKey::from_slice(rid.as_bytes()), bytes));
+                ids.push(rid);
+            }
+            let ver = mvcc.set_versioned_many_append_only_no_wait(items).await?;
+            (ids, ver)
+        } else {
+            let ids = self.table.insert_many(values).await?;
+            (ids, 0)
+        };
+
+        // F4b-4: the V1 per-table WAL marker (`begin_with_delta`/`commit`)
+        // is GONE. This batched non-tx insert path is now reachable only via
+        // the query_runner's non-tx branch — which routes through the implicit
+        // Snapshot tx (`run_implicit_batch_tx` → `execute_insert_tx`) and emits
+        // ONE `WalEntryV2` to the repo file WAL — and from tests. Crash
+        // recoverability is therefore owned by the file WAL, not the V1 marker.
+        // (`shamir_wal::WalManager` + V1 codec removed in F5c.)
+
+        // 4. counter + indexes (all in info_store).
+        self.counter.increment(ids.len() as i64).await?;
+        let pairs_iter = || ids.iter().zip(values.iter());
+        self.index_manager
+            .on_records_created_batch(pairs_iter())
+            .await?;
+        self.index_manager
+            .on_records_created_unique_batch(pairs_iter())
+            .await?;
+        self.sorted_indexes
+            .on_records_created_batch(pairs_iter(), batch_version)
+            .await?;
+        // Hoist the `all_backends()` walk out of the per-record loop below —
+        // see `index2_on_insert_with_backends`'s doc: the backend set is
+        // stable for the duration of this batch, so re-walking the registry
+        // once per record (O(records × backends)) is pure waste versus
+        // walking it once and reusing the list (O(backends)).
+        let index2_backends = self.index2_registry.all_backends().await;
+        for (id, value) in pairs_iter() {
+            self.index2_on_insert_with_backends(&index2_backends, id, value)
+                .await?;
+        }
+
+        // 5. Bump the watchdog. Every AUTO_VERIFY_EVERY_N_WRITES
+        //    operations a background verify fires and logs any
+        //    inconsistency. Non-blocking, single-flight, best-
+        //    effort signal.
+        self.bump_write_counter(ids.len() as u64);
+
+        // F4b-4: the SSI footprint for this batch is now recorded by the
+        // implicit-tx commit path (`gate.record_commit_writes`), since the only
+        // live caller (query_runner non-tx branch) routes through that tx. The
+        // redundant `record_nontx_ssi_footprint` call was removed here.
+
+        drop(_guard);
+        drop(drain_guard);
+        Ok((ids, batch_version))
+    }
+
+    /// Delete a record by RecordId (with counter and index update)
+    ///
+    /// cancel-safe: NO — data-delete → counter decrement → 3 index
+    /// deletes without WAL coverage. Cancellation after the data delete
+    /// but before the index hooks leaves orphan index entries (a record
+    /// the data store no longer has but the indexes still point to).
+    /// F5a: single-record CRUD is best-effort no-WAL (recovery via the
+    /// doctor's `repair()` pass); the WAL-covered delete path is the
+    /// batch / implicit-tx route (`run_implicit_batch_tx` +
+    /// `execute_delete_tx`). Do NOT call this under `tokio::select!` or
+    /// `tokio::time::timeout`.
+    pub async fn delete(&self, id: RecordId) -> DbResult<bool> {
+        let (removed, _version) = self.delete_returning_version(id).await?;
+        Ok(removed)
+    }
+
+    /// Like [`delete`](Self::delete) but also returns the MVCC version
+    /// assigned by the underlying store (for changefeed version
+    /// alignment). Returns `0` when no `MvccStore` is attached or the
+    /// record did not exist.
+    pub(super) async fn delete_unacknowledged(&self, id: RecordId) -> DbResult<(bool, u64)> {
+        // #534 finding 1: hold the barrier across the whole delete→index-cleanup
+        // sequence while an index2 create_index_v2 backfill is in flight, so the
+        // new index's backfill and this delete's posting removal can't interleave
+        // (the backfill could otherwise re-add a posting for a just-deleted row).
+        //
+        // F-48 (#859): bump the drain counter BEFORE reading the barrier flag.
+        // See `writer_drain_barrier` for the memory-model rationale.
+        let mut drain_guard = Some(self.writer_drain.enter_writer());
+        let needs_barrier = self.needs_write_barrier();
+        let _guard = if needs_barrier {
+            drop(drain_guard.take());
+            let guard = self.unique_write_lock.lock().await;
+            if self
+                .write_barrier_flags
+                .is_set(crate::index::write_barrier_flags::MIGRATION_FREEZE)
+            {
+                return Err(DbError::MigrationFrozen {
+                    table: self.name.clone(),
+                });
+            }
+            Some(guard)
+        } else {
+            None
+        };
+        // F-48 test seam: parks strictly AFTER the flag read, BEFORE the
+        // write. No-op in every non-test build.
+        fire_post_barrier_pre_write_test_hook().await;
+        // Get old value before deletion for index cleanup; only NotFound is
+        // absence, every other pre-read error fails closed.
+        let old_value = match self.get(id).await {
+            Ok(value) => Some(value),
+            Err(DbError::NotFound(_)) => None,
+            Err(error) => return Err(error),
+        };
+        // Route through MvccStore when attached so the old bytes are
+        // archived to history under active snapshots and `version_cache`
+        // is bumped.
+        let (removed, version) = if let Some(mvcc) = &self.mvcc_store {
+            if old_value.is_some() {
+                // task #532: `delete_versioned` is `RecordKey`-keyed — inline.
+                let v = mvcc
+                    .delete_versioned_no_wait(RecordKey::from_slice(id.as_bytes()))
+                    .await?;
+                (true, v)
+            } else {
+                (false, 0)
+            }
+        } else {
+            let r = self.table.delete(id).await?;
+            (r, 0)
+        };
+        if removed {
+            self.counter.increment(-1).await?;
+            if let Some(ref old) = old_value {
+                self.index_manager.on_record_deleted(&id, old).await?;
+                self.index_manager
+                    .on_record_deleted_unique(&id, old)
+                    .await?;
+                self.sorted_indexes
+                    .on_record_deleted(&id, old, version)
+                    .await?;
+                self.index2_on_delete(&id, old).await?;
+            }
+            // SSI footprint: delete touches the table (coarse TableScan
+            // detection). No new index postings for a delete.
+            self.record_nontx_ssi_footprint(version, &[]);
+        }
+        drop(_guard);
+        drop(drain_guard);
+        Ok((removed, version))
+    }
+
+    /// Set a record by RecordId - creates if not exists, updates if exists (with counter and index update)
+    ///
+    /// Validates unique indexes BEFORE write, returns error if constraint violated.
+    ///
+    /// cancel-safe: NO — read-then-validate-then-write-then-index-update
+    /// without WAL coverage. Cancellation between the table write and
+    /// the index hooks leaves stale index entries (indexes point at the
+    /// previous value while the data store holds the new one). Use the
+    /// batch path (`execute_update` / `insert_many`) when atomicity
+    /// matters; do NOT call this under `tokio::select!` or
+    /// `tokio::time::timeout`.
+    pub async fn set(&self, id: RecordId, value: &InnerValue) -> DbResult<bool> {
+        let (created, _version) = self.set_returning_version(id, value).await?;
+        Ok(created)
+    }
+
+    /// Like [`set`](Self::set) but also returns the MVCC version
+    /// assigned by the underlying store (for changefeed version
+    /// alignment). Returns `0` when no `MvccStore` is attached.
+    pub(super) async fn set_unacknowledged(
+        &self,
+        id: RecordId,
+        value: &InnerValue,
+    ) -> DbResult<(bool, u64)> {
+        // #534 finding 1: also lock while an index2 create_index_v2 backfill
+        // is in flight, so a concurrent update isn't lost by the new index.
+        //
+        // F-48 (#859): bump the drain counter BEFORE reading the barrier flag.
+        // See `writer_drain_barrier` for the memory-model rationale.
+        let mut drain_guard = Some(self.writer_drain.enter_writer());
+        let needs_barrier = self.needs_write_barrier();
+        let _guard = if needs_barrier {
+            drop(drain_guard.take());
+            let guard = self.unique_write_lock.lock().await;
+            if self
+                .write_barrier_flags
+                .is_set(crate::index::write_barrier_flags::MIGRATION_FREEZE)
+            {
+                return Err(DbError::MigrationFrozen {
+                    table: self.name.clone(),
+                });
+            }
+            Some(guard)
+        } else {
+            None
+        };
+
+        // F-48 test seam: parks strictly AFTER the flag read, BEFORE the
+        // write. No-op in every non-test build.
+        fire_post_barrier_pre_write_test_hook().await;
+
+        // Get old value before update for index maintenance; only NotFound is
+        // absence, every other pre-read error fails closed.
+        let old_value = match self.get(id).await {
+            Ok(value) => Some(value),
+            Err(DbError::NotFound(_)) => None,
+            Err(error) => return Err(error),
+        };
+
+        // 1. Validate unique indexes BEFORE write
+        if let Some(ref old) = old_value {
+            self.index_manager
+                .validate_unique_for_update(&id, old, value)
+                .await?;
+        } else {
+            self.index_manager.validate_unique_for_create(value).await?;
+        }
+
+        // 2. Write to table. Route through MvccStore when attached so
+        //    `version_cache` is updated for SSI conflict detection and
+        //    the old bytes are archived to history under active snapshots.
+        //    `created` is derived from the pre-read above (same semantics
+        //    as the previous `self.table.set` which internally did the
+        //    same exists-check).
+        let bytes = value.to_bytes().map_err(|e| {
+            shamir_storage::error::DbError::Codec(format!("Failed to serialize InnerValue: {}", e))
+        })?;
+        let created = old_value.is_none();
+        let version = if let Some(mvcc) = &self.mvcc_store {
+            // task #532: `set_versioned` is `RecordKey`-keyed — build the key
+            // inline from the rid (alloc-free for the 16-byte shape) instead of
+            // the prior `id.to_bytes()` heap `Bytes` that the store then had to
+            // convert back to `RecordKey` internally.
+            mvcc.set_versioned_no_wait(RecordKey::from_slice(id.as_bytes()), bytes)
+                .await?
+        } else {
+            self.table
+                .data_store()
+                .set_no_flag(RecordKey::from_slice(id.as_bytes()), bytes)
+                .await?;
+            0
+        };
+
+        // 3. Update indexes AFTER write
+        let ssi_ops = if created {
+            self.counter.increment(1).await?;
+            self.index_manager.on_record_created(&id, value).await?;
+            self.index_manager
+                .on_record_created_unique(&id, value)
+                .await?;
+            self.sorted_indexes
+                .on_record_created(&id, value, version)
+                .await?;
+            self.index2_on_insert(&id, value).await?;
+            self.sorted_indexes
+                .plan_record_created(&id, value, version)
+                .unwrap_or_default()
+        } else if let Some(ref old) = old_value {
+            self.index_manager
+                .on_record_updated(&id, old, value)
+                .await?;
+            self.index_manager
+                .on_record_updated_unique(&id, old, value)
+                .await?;
+            self.sorted_indexes
+                .on_record_updated(&id, old, value, version)
+                .await?;
+            self.index2_on_update(&id, old, value).await?;
+            self.sorted_indexes
+                .plan_record_updated(&id, old, value, version)
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+
+        // SSI footprint: record this non-tx write so Serializable txs see it.
+        self.record_nontx_ssi_footprint(version, &ssi_ops);
+
+        drop(_guard);
+        drop(drain_guard);
+        Ok((created, version))
+    }
+
+    /// Count records (uses stored counter for O(1) performance)
+    pub async fn count(&self) -> DbResult<usize> {
+        self.ensure_repo_readable()?;
+        Ok(self.counter.get().await? as usize)
+    }
+
+    /// Get a record by RecordId
+    pub async fn get(&self, id: RecordId) -> DbResult<InnerValue> {
+        self.ensure_repo_readable()?;
+        // Test-only fault injection (F-65 seam): forces the set/delete
+        // pre-read to fail with a genuine error.
+        #[cfg(test)]
+        if let Some(hook) = TEST_READ_ONE_TX_BYTES_FAILURE.get() {
+            if let Some(err) = hook.take_injected(self.table_token(), id) {
+                return Err(err);
+            }
+        }
+        if let Some(mvcc) = self.mvcc_store_ref() {
+            match mvcc.get_current_bytes(id.as_bytes()).await? {
+                Some(bytes) => InnerValue::from_bytes(bytes)
+                    .map_err(|e| DbError::Codec(format!("Failed to deserialize InnerValue: {e}"))),
+                None => Err(DbError::NotFound(format!("record not found: {id:?}"))),
+            }
+        } else {
+            self.table.get(id).await
+        }
+    }
+
+    /// Vectored current-version read through the seam. FINAL-A: when an
+    /// MvccStore is attached, reads from the version log (`get_current`);
+    /// otherwise falls through to the raw `table.get_many` (data_store).
+    /// Returns `None` for a slot when the key is absent or tombstoned.
+    pub async fn get_many(&self, ids: &[RecordId]) -> DbResult<Vec<Option<InnerValue>>> {
+        self.ensure_repo_readable()?;
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(mvcc) = self.mvcc_store_ref() {
+            // L3: batched MVCC read — one history.get_many for warm keys.
+            let batch_keys: Vec<Bytes> = ids.iter().map(|id| id.to_bytes()).collect();
+            let raw = mvcc.get_current_many(&batch_keys).await?;
+            let mut out = Vec::with_capacity(raw.len());
+            for slot in raw {
+                match slot {
+                    Some(bytes) => {
+                        let v = InnerValue::from_bytes(bytes).map_err(|e| {
+                            DbError::Codec(format!("Failed to deserialize InnerValue: {e}"))
+                        })?;
+                        out.push(Some(v));
+                    }
+                    None => out.push(None),
+                }
+            }
+            Ok(out)
+        } else {
+            self.table.get_many(ids).await
+        }
+    }
+
+    /// Byte-level single-record read — returns the raw storage bytes WITHOUT
+    /// decoding to `InnerValue`. Callers wrap in `RecordView::new(&bytes)` for
+    /// zero-copy field access. The `InnerValue`-decoding `get` is kept for
+    /// the aggregate pipeline and other callers that need the full tree.
+    pub async fn get_bytes(&self, id: RecordId) -> DbResult<Option<Bytes>> {
+        self.ensure_repo_readable()?;
+        if let Some(mvcc) = self.mvcc_store_ref() {
+            mvcc.get_current_bytes(id.as_bytes()).await
+        } else {
+            match self
+                .table
+                .data_store()
+                .get(RecordKey::from_slice(id.as_bytes()))
+                .await
+            {
+                Ok(b) => Ok(Some(b)),
+                Err(DbError::NotFound(_)) => Ok(None),
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    /// Vectored byte-level read — returns raw storage bytes for each id
+    /// WITHOUT decoding to `InnerValue`. Returns `None` for missing/tombstoned
+    /// keys. Callers wrap each `Bytes` in `RecordView::new(&bytes)` for
+    /// zero-copy field access. The `InnerValue`-decoding `get_many` is kept
+    /// for the aggregate pipeline.
+    pub async fn get_many_bytes(&self, ids: &[RecordId]) -> DbResult<Vec<Option<Bytes>>> {
+        self.ensure_repo_readable()?;
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(mvcc) = self.mvcc_store_ref() {
+            // L3: batched MVCC read — one history.get_many for warm keys.
+            let batch_keys: Vec<Bytes> = ids.iter().map(|id| id.to_bytes()).collect();
+            mvcc.get_current_many(&batch_keys).await
+        } else {
+            let keys: Vec<RecordKey> = ids
+                .iter()
+                .map(|id| RecordKey::from_slice(id.as_bytes()))
+                .collect();
+            self.table.data_store().get_many(keys).await
+        }
+    }
+
+    /// tx-aware vectored byte-level read for the filtered-ANN path (V3.1).
+    ///
+    /// Falls through to `get_many_bytes` when `tx` is `None`. When `tx` is
+    /// `Some`, resolves each id against the tx's staging store FIRST (so
+    /// staged inserts are visible as bytes), then the committed snapshot for
+    /// Snapshot/Serializable or latest committed state for Pessimistic.
+    /// A staged `Remove` yields `None` (the record is gone from this tx's
+    /// view). This mirrors the `StagingStore::get` read-through contract but
+    /// in vectored form.
+    pub(crate) async fn get_many_bytes_tx(
+        &self,
+        ids: &[RecordId],
+        tx: Option<&shamir_tx::TxContext>,
+    ) -> DbResult<Vec<Option<Bytes>>> {
+        self.ensure_repo_readable()?;
+        // Fast path: no tx → plain vectored read.
+        let tx = match tx {
+            None => return self.get_many_bytes(ids).await,
+            Some(t) => t,
+        };
+        let snapshot_read = matches!(
+            tx.isolation,
+            shamir_tx::IsolationLevel::Snapshot | shamir_tx::IsolationLevel::Serializable
+        );
+        let token = self.table_token();
+        // Resolve staging first; absent staging still reads the transaction's
+        // snapshot for Snapshot/Serializable, latest state for Pessimistic.
+        let staging_opt = tx.write_set.get(&token);
+        match staging_opt {
+            None => {
+                if let Some(mvcc) = self.mvcc_store_ref().filter(|_| snapshot_read) {
+                    let keys: Vec<Bytes> = ids.iter().map(|id| id.to_bytes()).collect();
+                    mvcc.get_at_many(&keys, tx.snapshot_version).await
+                } else {
+                    self.get_many_bytes(ids).await
+                }
+            }
+            Some(staging) => {
+                // For each id: check staging first, then fall through to the
+                // committed store. The staging probe is sync (TMap lookup),
+                // so we batch the committed-store fallback into one get_many.
+                let mut out: Vec<Option<Bytes>> = Vec::with_capacity(ids.len());
+                let mut fallback_idxs: Vec<usize> = Vec::new();
+                let mut fallback_keys: Vec<Bytes> = Vec::new();
+                for (i, id) in ids.iter().enumerate() {
+                    let key = id.to_bytes();
+                    match staging.staged_op(&key) {
+                        Some(shamir_tx::staging_store::StagedKind::Set(b)) => {
+                            out.push(Some(b));
+                        }
+                        Some(shamir_tx::staging_store::StagedKind::Removed) => {
+                            out.push(None);
+                        }
+                        None => {
+                            out.push(None); // placeholder; resolved below
+                            fallback_idxs.push(i);
+                            fallback_keys.push(key);
+                        }
+                    }
+                }
+                // Batch-resolve the non-staged ids from the committed store.
+                if !fallback_keys.is_empty() {
+                    let committed = if let Some(mvcc) = self.mvcc_store_ref() {
+                        if snapshot_read {
+                            mvcc.get_at_many(&fallback_keys, tx.snapshot_version)
+                                .await?
+                        } else {
+                            mvcc.get_current_many(&fallback_keys).await?
+                        }
+                    } else {
+                        // Boundary: `fallback_keys` is `Bytes` (also fed by-ref
+                        // to the mvcc branch); `get_many` takes `RecordKey`.
+                        let keys: Vec<RecordKey> =
+                            fallback_keys.into_iter().map(Into::into).collect();
+                        self.table.data_store().get_many(keys).await?
+                    };
+                    for (slot, bytes) in fallback_idxs.into_iter().zip(committed) {
+                        out[slot] = bytes;
+                    }
+                }
+                Ok(out)
+            }
+        }
+    }
+}
