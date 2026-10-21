@@ -120,7 +120,11 @@ fn child_entrypoint_vec() {
 fn spawn_child_vec(phase: &str, repo_path: &Path) -> std::process::ExitStatus {
     let exe = std::env::current_exe().expect("current_exe");
     std::process::Command::new(exe)
-        .args(["--exact", "child_entrypoint_vec", "--nocapture"])
+        .args([
+            "--exact",
+            "vector_delta::child_entrypoint_vec",
+            "--nocapture",
+        ])
         .env(CHILD_SENTINEL_VEC, "1")
         .env(CRASH_AFTER, phase)
         .env(REPO_PATH, repo_path)

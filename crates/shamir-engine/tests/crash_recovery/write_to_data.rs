@@ -100,7 +100,11 @@ fn child_entrypoint_w2d() {
 fn spawn_child_w2d(phase: &str, repo_path: &Path, implicit: bool) -> std::process::ExitStatus {
     let exe = std::env::current_exe().expect("current_exe");
     std::process::Command::new(exe)
-        .args(["--exact", "child_entrypoint_w2d", "--nocapture"])
+        .args([
+            "--exact",
+            "write_to_data::child_entrypoint_w2d",
+            "--nocapture",
+        ])
         .env(CHILD_SENTINEL_W2D, "1")
         .env(CRASH_AFTER, phase)
         .env(W2D_IMPLICIT_FLAG, if implicit { "1" } else { "0" })

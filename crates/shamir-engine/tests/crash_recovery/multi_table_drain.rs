@@ -168,7 +168,11 @@ fn child_entrypoint_trunc() {
 fn spawn_child_trunc(phase: &str, repo_path: &Path) -> std::process::ExitStatus {
     let exe = std::env::current_exe().expect("current_exe");
     std::process::Command::new(exe)
-        .args(["--exact", "child_entrypoint_trunc", "--nocapture"])
+        .args([
+            "--exact",
+            "multi_table_drain::child_entrypoint_trunc",
+            "--nocapture",
+        ])
         .env(CHILD_SENTINEL_TRUNC, "1")
         .env(CRASH_AFTER, phase)
         .env(SEG_MAX_BYTES_ENV, TRUNC_SEG_CAP)
@@ -224,7 +228,11 @@ async fn trunc_crash_then_recover(phase: &str) -> (usize, usize) {
 fn spawn_child_multi_table(phase: &str, repo_path: &Path) -> std::process::ExitStatus {
     let exe = std::env::current_exe().expect("current_exe");
     std::process::Command::new(exe)
-        .args(["--exact", "child_entrypoint_multi_table", "--nocapture"])
+        .args([
+            "--exact",
+            "multi_table_drain::child_entrypoint_multi_table",
+            "--nocapture",
+        ])
         .env(CHILD_SENTINEL_MULTI, "1")
         .env(CRASH_AFTER, phase)
         .env(REPO_PATH, repo_path)

@@ -99,7 +99,11 @@ fn child_entrypoint_crit1() {
 fn spawn_child_crit1(repo_path: &Path) -> std::process::ExitStatus {
     let exe = std::env::current_exe().expect("current_exe");
     std::process::Command::new(exe)
-        .args(["--exact", "child_entrypoint_crit1", "--nocapture"])
+        .args([
+            "--exact",
+            "history_seed::child_entrypoint_crit1",
+            "--nocapture",
+        ])
         .env(CHILD_SENTINEL_CRIT1, "1")
         .env(REPO_PATH, repo_path)
         .output()
