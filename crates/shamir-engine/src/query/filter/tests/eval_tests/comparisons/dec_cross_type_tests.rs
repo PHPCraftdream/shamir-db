@@ -1,0 +1,650 @@
+//! Dec/Big cross-type comparison in the filter layer.
+//!
+//! These tests cover the three sub-bugs closed by the "Dec blind spot" fix:
+//!
+//! 1. **scalar_ref_cmp_qv** — a record FIELD that is `Int`/`F64` compared
+//!    against a FILTER OPERAND that is `Dec`/`Big` (typically a `$fn`
+//!    result). Before the fix, `scalar_ref_cmp_qv(Int, &Dec)` fell to
+//!    `_ => None`, making every `Eq`/`Gt`/`Gte`/`Lt`/`Lte` silently `false`
+//!    (and `Ne` silently `true`) for every row.
+//! 2. **compare_values** — the `Value<K>` twin (feeds `ValueCompare` and the
+//!    Min/Max container fallback). Before the fix, `Dec`/`Big` operands were
+//!    silently `None`.
+//! 3. **as_f64 in $expr** — a Dec operand in `$expr` arithmetic collapsed to
+//!    `None`, silently making the enclosing comparison false.
+
+use crate::query::filter::eval::{compare_values, compile_filter, resolve_filter_query};
+use crate::query::filter::eval_context::FilterContext;
+use crate::query::filter::{Filter, FilterExpr, FilterExprOp, FilterValue, FnCall};
+use shamir_types::core::interner::Interner;
+use shamir_types::types::value::QueryValue;
+
+use crate::query::filter::tests::eval_tests::shared::helpers::{empty_refs, make_alice_record};
+use std::cmp::Ordering;
+
+// ============================================================================
+// Part 1a — scalar_ref_cmp_qv: WHERE field op $fn-returning-Dec
+// ============================================================================
+
+/// `abs(-100)` → `Dec(100)`. `age = 30 < 100` → `Lt` should be `true`.
+#[test]
+fn filter_lt_int_field_vs_dec_fn_result() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner); // age = 30
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Lt {
+        field: vec!["age".into()],
+        value: FilterValue::FnCall {
+            call: FnCall::complex("math/abs", vec![FilterValue::Int(-100)]),
+        },
+    };
+    let node = compile_filter(&filter, &interner);
+    assert!(
+        node.matches(&record, &ctx),
+        "age(30) < abs(-100)=Dec(100) must match"
+    );
+}
+
+/// `abs(-10)` → `Dec(10)`. `age = 30 > 10` → `Gt` should be `true`.
+#[test]
+fn filter_gt_int_field_vs_dec_fn_result() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner); // age = 30
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Gt {
+        field: vec!["age".into()],
+        value: FilterValue::FnCall {
+            call: FnCall::complex("math/abs", vec![FilterValue::Int(-10)]),
+        },
+    };
+    let node = compile_filter(&filter, &interner);
+    assert!(
+        node.matches(&record, &ctx),
+        "age(30) > abs(-10)=Dec(10) must match"
+    );
+}
+
+/// `abs(-100)` → `Dec(100)`. `age = 30`. `Ne` against a Dec operand should
+/// be `true` (30 ≠ 100). Before the fix, `Ne` was *always* `true` regardless
+/// of values (because `None` makes only `Ne` true). This test confirms `Ne`
+/// is correct by also checking `Eq` is `false`.
+#[test]
+fn filter_eq_ne_int_field_vs_dec_fn_result() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner); // age = 30
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    // Eq: 30 == Dec(100) → false.
+    let eq_filter = Filter::Eq {
+        field: vec!["age".into()],
+        value: FilterValue::FnCall {
+            call: FnCall::complex("math/abs", vec![FilterValue::Int(-100)]),
+        },
+    };
+    let node = compile_filter(&eq_filter, &interner);
+    assert!(!node.matches(&record, &ctx), "age(30) == Dec(100) is false");
+
+    // Ne: 30 != Dec(100) → true.
+    let ne_filter = Filter::Ne {
+        field: vec!["age".into()],
+        value: FilterValue::FnCall {
+            call: FnCall::complex("math/abs", vec![FilterValue::Int(-100)]),
+        },
+    };
+    let node = compile_filter(&ne_filter, &interner);
+    assert!(node.matches(&record, &ctx), "age(30) != Dec(100) is true");
+}
+
+/// Exact equality: `abs(-30)` → `Dec(30)`. `age = 30 == Dec(30)` → `Eq`
+/// should be `true`. Before the fix this was silently `false`.
+#[test]
+fn filter_eq_int_field_vs_equal_dec_fn_result() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner); // age = 30
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Eq {
+        field: vec!["age".into()],
+        value: FilterValue::FnCall {
+            call: FnCall::complex("math/abs", vec![FilterValue::Int(-30)]),
+        },
+    };
+    let node = compile_filter(&filter, &interner);
+    assert!(
+        node.matches(&record, &ctx),
+        "age(30) == abs(-30)=Dec(30) must match"
+    );
+}
+
+// ============================================================================
+// Part 1b — compare_values: Dec/Big direct Value<K> comparison
+// ============================================================================
+
+#[test]
+fn compare_values_dec_dec_exact() {
+    let a = QueryValue::Dec("3.5".parse().unwrap());
+    let b = QueryValue::Dec("3.5".parse().unwrap());
+    assert_eq!(compare_values(&a, &b), Some(Ordering::Equal));
+
+    let a = QueryValue::Dec("3.5".parse().unwrap());
+    let b = QueryValue::Dec("10.0".parse().unwrap());
+    assert_eq!(compare_values(&a, &b), Some(Ordering::Less));
+
+    let a = QueryValue::Dec("100.0".parse().unwrap());
+    let b = QueryValue::Dec("10.0".parse().unwrap());
+    assert_eq!(compare_values(&a, &b), Some(Ordering::Greater));
+}
+
+#[test]
+fn compare_values_int_dec_exact() {
+    // Int↔Dec is exact (Decimal represents every i64 exactly).
+    assert_eq!(
+        compare_values(
+            &QueryValue::Int(10),
+            &QueryValue::Dec("10.0".parse().unwrap())
+        ),
+        Some(Ordering::Equal)
+    );
+    assert_eq!(
+        compare_values(
+            &QueryValue::Int(5),
+            &QueryValue::Dec("10.0".parse().unwrap())
+        ),
+        Some(Ordering::Less)
+    );
+    assert_eq!(
+        compare_values(
+            &QueryValue::Dec("10.0".parse().unwrap()),
+            &QueryValue::Int(5)
+        ),
+        Some(Ordering::Greater)
+    );
+}
+
+#[test]
+fn compare_values_f64_dec_fallback() {
+    // F64↔Dec uses the f64 fallback (not exact, but correct ordering for
+    // finite values).
+    assert_eq!(
+        compare_values(
+            &QueryValue::F64(5.0),
+            &QueryValue::Dec("10.0".parse().unwrap())
+        ),
+        Some(Ordering::Less)
+    );
+    assert_eq!(
+        compare_values(
+            &QueryValue::Dec("10.0".parse().unwrap()),
+            &QueryValue::F64(5.0)
+        ),
+        Some(Ordering::Greater)
+    );
+}
+
+#[test]
+fn compare_values_big_fallback() {
+    // Big/Big is exact `BigInt::cmp`; Int/Big is exact `BigInt` conversion
+    // (CR-C5, #780) — both stopped being a silent `None` (FG-6) and are now
+    // ALSO exact, not an f64 approximation.
+    use num_bigint::BigInt;
+    assert_eq!(
+        compare_values(
+            &QueryValue::Big(BigInt::from(100)),
+            &QueryValue::Big(BigInt::from(200))
+        ),
+        Some(Ordering::Less)
+    );
+    assert_eq!(
+        compare_values(&QueryValue::Int(200), &QueryValue::Big(BigInt::from(100))),
+        Some(Ordering::Greater)
+    );
+}
+
+// ============================================================================
+// CR-C5 (#780) — exact Big comparisons, eliminate f64 rounding.
+// ============================================================================
+
+/// THE core regression this task exists to fix: `i64::MAX` vs
+/// `i64::MAX + 1` (promoted to `Big`, matching this codebase's own
+/// promotion rule — `BigInt::from(i64::MAX) + 1`) must compare as `Less`,
+/// NOT `Equal`. Before the fix, both operands rounded to the SAME `f64`
+/// (`lossy_f64`), silently collapsing two distinct large integers.
+#[test]
+fn compare_values_int_max_vs_big_max_plus_one_is_exact() {
+    use num_bigint::BigInt;
+
+    let int_max = QueryValue::Int(i64::MAX);
+    let bigger = QueryValue::Big(BigInt::from(i64::MAX) + 1);
+
+    assert_eq!(compare_values(&int_max, &bigger), Some(Ordering::Less));
+    assert_eq!(compare_values(&bigger, &int_max), Some(Ordering::Greater));
+    assert_ne!(
+        compare_values(&int_max, &bigger),
+        Some(Ordering::Equal),
+        "i64::MAX and i64::MAX+1 must not collapse to equal"
+    );
+}
+
+/// `u64::MAX` (promoted to `Big`) vs `u64::MAX - 1` (also promoted to `Big`
+/// — both exceed `i64::MAX`, so both promote) must not collapse to equal.
+/// `u64::MAX` as `f64` rounds to the same value as several of its
+/// neighbours, so this is exactly the precision class the fix targets.
+#[test]
+fn compare_values_u64_max_vs_u64_max_minus_one_big_big_is_exact() {
+    use num_bigint::BigInt;
+
+    let max = QueryValue::Big(BigInt::from(u64::MAX));
+    let max_minus_one = QueryValue::Big(BigInt::from(u64::MAX) - 1);
+
+    assert_eq!(compare_values(&max_minus_one, &max), Some(Ordering::Less));
+    assert_eq!(
+        compare_values(&max, &max_minus_one),
+        Some(Ordering::Greater)
+    );
+}
+
+/// `Big` vs `Dec` boundary case: an exact-integer-valued `Big` vs a `Dec`
+/// with a fractional part numerically close enough that `f64` could not
+/// distinguish them, proving the cross-multiplication approach
+/// (`cmp_big_dec`) orders them correctly at `f64`-defeating precision.
+///
+/// `big = i64::MAX + 1` (~9.223372036854776e18) vs
+/// `dec = i64::MAX.5` (half a unit below `big`) — both operands round to
+/// the SAME `f64` at this magnitude (`f64` only has ~15-17 significant
+/// decimal digits, `i64::MAX` already has 19), so a naive `f64`-based
+/// comparison could not tell them apart; the exact cross-multiplication
+/// path must.
+#[test]
+fn compare_values_big_vs_dec_close_boundary_is_exact() {
+    use num_bigint::BigInt;
+    use rust_decimal::prelude::ToPrimitive;
+    use rust_decimal::Decimal;
+
+    let big_val: BigInt = BigInt::from(i64::MAX) + 1; // 9223372036854775808
+    let big = QueryValue::Big(big_val.clone());
+    // dec = 9223372036854775807.5 -- half a unit below `big`, a fractional
+    // Dec value that (cast through f64) would round to the SAME f64 as
+    // `big` (both are within 1 ULP at this magnitude).
+    let dec_str = format!("{}.5", i64::MAX);
+    let dec: Decimal = dec_str.parse().unwrap();
+    let dec_qv = QueryValue::Dec(dec);
+
+    // Sanity: confirm this boundary really would defeat a naive f64
+    // comparison — both operands' f64 approximations collapse to equal —
+    // so the correct ordering below can only come from the exact
+    // cross-multiplication path, not a lucky f64 rounding.
+    let big_f64: f64 = big_val.to_f64().unwrap();
+    let dec_f64 = dec.to_f64().unwrap();
+    assert_eq!(
+        big_f64, dec_f64,
+        "test setup invariant: these two operands must collapse to the \
+         same f64 for this to be a meaningful precision-loss regression test"
+    );
+
+    assert_eq!(compare_values(&big, &dec_qv), Some(Ordering::Greater));
+    assert_eq!(compare_values(&dec_qv, &big), Some(Ordering::Less));
+}
+
+/// Mixed `Int`+`Big` column, total order + stability: a multi-row ORDER BY
+/// over a column mixing plain `Int` and promoted `Big` values, including
+/// values numerically CLOSE (within f64's rounding distance of each other).
+/// Every row must land in its precisely correct position.
+#[test]
+fn order_by_mixed_int_and_big_close_values_exact_total_order() {
+    use crate::query::read::order::apply_order_by_qv;
+    use crate::query::read::OrderBy;
+    use num_bigint::BigInt;
+    use shamir_types::types::common::new_map_wc;
+
+    fn qv_map(pairs: &[(&str, QueryValue)]) -> QueryValue {
+        let mut m = new_map_wc(pairs.len());
+        for (k, v) in pairs {
+            m.insert((*k).to_string(), v.clone());
+        }
+        QueryValue::Map(m)
+    }
+
+    // i64::MAX and i64::MAX - 1 collapse to the same f64; likewise
+    // i64::MAX+1 (Big) and i64::MAX+2 (Big) collapse to the same f64. A
+    // correct exact total order still separates all four.
+    let mut qvs = vec![
+        qv_map(&[("v", QueryValue::Big(BigInt::from(i64::MAX) + 2))]),
+        qv_map(&[("v", QueryValue::Int(i64::MAX))]),
+        qv_map(&[("v", QueryValue::Big(BigInt::from(i64::MAX) + 1))]),
+        qv_map(&[("v", QueryValue::Int(i64::MAX - 1))]),
+    ];
+
+    apply_order_by_qv(&mut qvs, &OrderBy::asc("v"));
+
+    assert_eq!(qvs[0]["v"], QueryValue::Int(i64::MAX - 1));
+    assert_eq!(qvs[1]["v"], QueryValue::Int(i64::MAX));
+    assert_eq!(qvs[2]["v"], QueryValue::Big(BigInt::from(i64::MAX) + 1));
+    assert_eq!(qvs[3]["v"], QueryValue::Big(BigInt::from(i64::MAX) + 2));
+}
+
+// ============================================================================
+// CR-D3 (#784) — exact plain `Int`<->`F64` comparison (no `Big` involved).
+// ============================================================================
+
+/// THE core regression this task exists to fix: two distinct large `i64`
+/// values near `i64::MAX`'s magnitude that collapse to the SAME `f64` under
+/// the OLD `as f64` cast (`f64`'s 52-bit mantissa can't distinguish every
+/// integer once the magnitude exceeds `2^53`) must still compare correctly
+/// (not both `Equal`) against that shared `f64` operand.
+///
+/// `a = 9223372036854774784`, `b = a - 500`: both close enough to
+/// `i64::MAX`'s magnitude (~9.2e18, `f64`'s ULP there is 1024) that
+/// `a as f64 == b as f64` -- the naive cast genuinely collapses them, but
+/// they remain 500 apart as exact `i64` values.
+#[test]
+fn compare_values_int_large_neighbors_collapsed_by_naive_f64_cast_stay_distinct() {
+    let a: i64 = 9223372036854774784;
+    let b: i64 = a - 500;
+
+    // Sanity: confirm the naive `as f64` casts of both operands really do
+    // collapse to the same value -- otherwise this wouldn't be a meaningful
+    // precision-loss regression test.
+    assert_eq!(
+        a as f64, b as f64,
+        "test setup invariant: a and b must collapse to the same f64 for \
+         this to be a meaningful precision-loss regression test"
+    );
+
+    let f_operand = QueryValue::F64(a as f64);
+
+    // f == a exactly (a as f64 round-trips to a, see cmp_i64_f64's
+    // derivation) -- Eq.
+    assert_eq!(
+        compare_values(&QueryValue::Int(a), &f_operand),
+        Some(Ordering::Equal)
+    );
+    // b < a == f -- Less, NOT Equal (the old cast would report Equal here
+    // too, since b as f64 == a as f64 == f).
+    assert_eq!(
+        compare_values(&QueryValue::Int(b), &f_operand),
+        Some(Ordering::Less)
+    );
+    assert_eq!(
+        compare_values(&f_operand, &QueryValue::Int(b)),
+        Some(Ordering::Greater)
+    );
+    assert_ne!(
+        compare_values(&QueryValue::Int(b), &f_operand),
+        Some(Ordering::Equal),
+        "b and a must not both collapse to equal against the shared f64"
+    );
+}
+
+/// Boundary at `2^63`: `f = 2^63` (exactly at the exclusive upper bound) vs
+/// `i = i64::MAX` -- `f` is strictly greater than any representable `i64`,
+/// so this must report `Less` (i < f).
+#[test]
+fn compare_values_int_max_vs_f64_two_pow_63_boundary() {
+    let two_pow_63: f64 = 9223372036854775808.0; // 2^63, exact f64 literal
+    assert_eq!(
+        compare_values(&QueryValue::Int(i64::MAX), &QueryValue::F64(two_pow_63)),
+        Some(Ordering::Less)
+    );
+    assert_eq!(
+        compare_values(&QueryValue::F64(two_pow_63), &QueryValue::Int(i64::MAX)),
+        Some(Ordering::Greater)
+    );
+}
+
+/// `i64::MIN` boundary: `f = -2^63` (exactly `i64::MIN` as `f64`) vs
+/// `i = i64::MIN` -- must report `Equal`.
+#[test]
+fn compare_values_int_min_vs_f64_negative_two_pow_63_boundary() {
+    let neg_two_pow_63: f64 = -9223372036854775808.0; // -2^63, exact f64 literal
+    assert_eq!(
+        compare_values(&QueryValue::Int(i64::MIN), &QueryValue::F64(neg_two_pow_63)),
+        Some(Ordering::Equal)
+    );
+    assert_eq!(
+        compare_values(&QueryValue::F64(neg_two_pow_63), &QueryValue::Int(i64::MIN)),
+        Some(Ordering::Equal)
+    );
+}
+
+/// Fractional tie-break: `i = 5` vs `f = 5.5` -- `i < f` -> `Less`; `i = 5`
+/// vs `f = 4.5` -- `i > f` -> `Greater`.
+#[test]
+fn compare_values_int_f64_fractional_tie_break() {
+    assert_eq!(
+        compare_values(&QueryValue::Int(5), &QueryValue::F64(5.5)),
+        Some(Ordering::Less)
+    );
+    assert_eq!(
+        compare_values(&QueryValue::Int(5), &QueryValue::F64(4.5)),
+        Some(Ordering::Greater)
+    );
+}
+
+// ============================================================================
+// W-1 (#788) -- cmp_i64_f64's tie-break used trunc-based f.fract(), which is
+// sign-preserving (negative for negative fractional f), not floor-based;
+// fixed to compare directly against f_floor instead.
+// ============================================================================
+
+/// THE core regression this task exists to fix: `Int(-1)` vs `F64(-0.5)`
+/// must be `Less`, NOT `Equal`. Under the OLD bug, `f.fract() > 0.0` was
+/// `(-0.5).fract() > 0.0` == `-0.5 > 0.0` == `false`, wrongly reporting
+/// `Equal` (`-1 == floor(-0.5) == -1`, and the tie-break itself was wrong).
+#[test]
+fn compare_values_int_f64_negative_fractional_tie_break_regression() {
+    // Setup-invariant sanity check: proves the OLD code's premise
+    // ("f.fract() >= 0 always") was false, and confirms floor() is the
+    // correct floor value used by the tie-break.
+    assert_eq!((-0.5_f64).floor(), -1.0);
+    assert!(
+        (-0.5_f64).fract() < 0.0,
+        "fract() is trunc-based and sign-preserving -- negative here, \
+         proving the old fract()-sign premise false"
+    );
+
+    assert_eq!(
+        compare_values(&QueryValue::Int(-1), &QueryValue::F64(-0.5)),
+        Some(Ordering::Less)
+    );
+}
+
+/// Mirror at `-5` / `-4.5`: `Int(-5)` vs `F64(-4.5)` must be `Less`.
+#[test]
+fn compare_values_int_f64_negative_fractional_tie_break_mirror_minus_five() {
+    assert_eq!((-4.5_f64).floor(), -5.0);
+    assert!((-4.5_f64).fract() < 0.0);
+
+    assert_eq!(
+        compare_values(&QueryValue::Int(-5), &QueryValue::F64(-4.5)),
+        Some(Ordering::Less)
+    );
+}
+
+/// Reversed-argument-order mirror for both regression cases above: proves
+/// the `(F64, Int)` arm's `.map(Ordering::reverse)` still composes correctly
+/// with the fixed comparator.
+#[test]
+fn compare_values_f64_int_negative_fractional_tie_break_reversed() {
+    assert_eq!(
+        compare_values(&QueryValue::F64(-0.5), &QueryValue::Int(-1)),
+        Some(Ordering::Greater)
+    );
+    assert_eq!(
+        compare_values(&QueryValue::F64(-4.5), &QueryValue::Int(-5)),
+        Some(Ordering::Greater)
+    );
+}
+
+/// Positive-fraction regression guard: CR-D3's own
+/// `compare_values_int_f64_fractional_tie_break` case (i = 5 vs f = 5.5 /
+/// f = 4.5) must still pass unchanged after the fix -- the positive-fraction
+/// path was already correct and must not regress.
+#[test]
+fn compare_values_int_f64_positive_fractional_tie_break_still_correct() {
+    assert_eq!(
+        compare_values(&QueryValue::Int(5), &QueryValue::F64(5.5)),
+        Some(Ordering::Less)
+    );
+    assert_eq!(
+        compare_values(&QueryValue::Int(5), &QueryValue::F64(4.5)),
+        Some(Ordering::Greater)
+    );
+}
+
+/// Exact-integer-valued negative `f64`: `Int(-3)` vs `F64(-3.0)` must be
+/// `Equal` -- proves the fix doesn't break the true-equal case for negative
+/// operands (`f > f_floor` is `false` when `f` has no fractional part).
+#[test]
+fn compare_values_int_f64_exact_integer_negative_operand_is_equal() {
+    assert_eq!(
+        compare_values(&QueryValue::Int(-3), &QueryValue::F64(-3.0)),
+        Some(Ordering::Equal)
+    );
+}
+
+/// `QvSortKey` mirror: an `ORDER BY` over a column mixing `Int(-5)` /
+/// `F64(-4.5)` / `Int(-6)` must sort to the correct total order
+/// `Int(-6) < Int(-5) < F64(-4.5)`, not the old bug's `Int(-5)` and
+/// `F64(-4.5)` comparing `Equal`.
+#[test]
+fn order_by_mixed_int_and_f64_negative_fractional_exact_total_order() {
+    use crate::query::read::order::apply_order_by_qv;
+    use crate::query::read::OrderBy;
+    use shamir_types::types::common::new_map_wc;
+
+    fn qv_map(pairs: &[(&str, QueryValue)]) -> QueryValue {
+        let mut m = new_map_wc(pairs.len());
+        for (k, v) in pairs {
+            m.insert((*k).to_string(), v.clone());
+        }
+        QueryValue::Map(m)
+    }
+
+    let mut qvs = vec![
+        qv_map(&[("v", QueryValue::F64(-4.5))]),
+        qv_map(&[("v", QueryValue::Int(-6))]),
+        qv_map(&[("v", QueryValue::Int(-5))]),
+    ];
+
+    apply_order_by_qv(&mut qvs, &OrderBy::asc("v"));
+
+    assert_eq!(qvs[0]["v"], QueryValue::Int(-6));
+    assert_eq!(qvs[1]["v"], QueryValue::Int(-5));
+    assert_eq!(qvs[2]["v"], QueryValue::F64(-4.5));
+}
+
+/// NaN unchanged: `compare_values(Int(5), F64(NAN))` still returns `None` --
+/// the existing, unmodified NaN convention.
+#[test]
+fn compare_values_int_vs_f64_nan_is_none() {
+    assert_eq!(
+        compare_values(&QueryValue::Int(5), &QueryValue::F64(f64::NAN)),
+        None
+    );
+    assert_eq!(
+        compare_values(&QueryValue::F64(f64::NAN), &QueryValue::Int(5)),
+        None
+    );
+}
+
+/// `QvSortKey` mirror: the same large-`i64`-neighbors-collapse scenario
+/// through `apply_order_by_qv`/`compare_qv_sort_keys`, proving a mixed
+/// `Int`+`F64` `ORDER BY` column now produces a correct total order at this
+/// boundary (not the old "compares Equal, falls back to insertion order"
+/// behavior).
+#[test]
+fn order_by_mixed_int_and_f64_close_values_exact_total_order() {
+    use crate::query::read::order::apply_order_by_qv;
+    use crate::query::read::OrderBy;
+    use shamir_types::types::common::new_map_wc;
+
+    fn qv_map(pairs: &[(&str, QueryValue)]) -> QueryValue {
+        let mut m = new_map_wc(pairs.len());
+        for (k, v) in pairs {
+            m.insert((*k).to_string(), v.clone());
+        }
+        QueryValue::Map(m)
+    }
+
+    // a and b are 500 apart but collapse to the SAME f64 under the OLD naive
+    // `as f64` cast (both land in the same 1024-wide f64 ULP bucket at this
+    // magnitude); c is far enough below to land in a genuinely different,
+    // lower f64 bucket. True order: c < b < a. Under the OLD bug, `a`/`b`
+    // would tie (Equal) against any F64 probe in their shared bucket instead
+    // of resolving via a genuine `Int`/`Int` comparison -- this exercises the
+    // fix through the F64-vs-F64-bucket-boundary path (c as a real F64
+    // value), not the same-value-both-ways case already covered directly by
+    // `compare_values_int_large_neighbors_collapsed_by_naive_f64_cast_stay_distinct`.
+    let a: i64 = 9223372036854774784;
+    let b: i64 = a - 500;
+    let c: i64 = a - 1200;
+
+    let mut qvs = vec![
+        qv_map(&[("v", QueryValue::Int(a))]),
+        qv_map(&[("v", QueryValue::F64(c as f64))]),
+        qv_map(&[("v", QueryValue::Int(b))]),
+    ];
+
+    apply_order_by_qv(&mut qvs, &OrderBy::asc("v"));
+
+    assert_eq!(qvs[0]["v"], QueryValue::F64(c as f64));
+    assert_eq!(qvs[1]["v"], QueryValue::Int(b));
+    assert_eq!(qvs[2]["v"], QueryValue::Int(a));
+}
+
+// ============================================================================
+// Part 1c — $expr as_f64: arithmetic over a Dec operand
+// ============================================================================
+
+/// `$expr add(abs(-50), 1)` → `abs(-50)` = `Dec(50)`, then `add(Dec(50),
+/// Int(1))`. Before the fix, `as_f64(Dec(50))` returned `None` and the whole
+/// expr collapsed to `None`.
+#[test]
+fn expr_add_over_dec_operand() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let fv = FilterValue::Expr {
+        expr: FilterExpr::add(vec![
+            FilterValue::FnCall {
+                call: FnCall::complex("math/abs", vec![FilterValue::Int(-50)]),
+            },
+            FilterValue::Int(1),
+        ]),
+    };
+    let result = resolve_filter_query(&fv, &record, &ctx);
+    // abs(-50) = Dec(50), add(Dec(50), 1) = F64(51.0) via the as_f64 fallback.
+    assert_eq!(result, Some(QueryValue::F64(51.0)));
+}
+
+/// `$expr gt(abs(-10), 5)` — `abs(-10)` = `Dec(10)`, `gt(Dec(10), Int(5))` →
+/// `Bool(true)`. Exercises compare_values(Int, Dec) inside $expr.
+#[test]
+fn expr_gt_over_dec_operand() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let fv = FilterValue::Expr {
+        expr: FilterExpr::new(
+            FilterExprOp::Gt,
+            vec![
+                FilterValue::FnCall {
+                    call: FnCall::complex("math/abs", vec![FilterValue::Int(-10)]),
+                },
+                FilterValue::Int(5),
+            ],
+        ),
+    };
+    let result = resolve_filter_query(&fv, &record, &ctx);
+    assert_eq!(result, Some(QueryValue::Bool(true)));
+}

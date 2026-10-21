@@ -5,11 +5,16 @@
 //! `shamir-query-types::read`. Execution (`exec`) and query parser
 //! stay here because they touch Interner / runtime state.
 
-pub mod aggregate;
+pub mod aggregation;
 pub mod exec;
-pub(crate) mod hashable_query_value;
-pub mod order;
-pub mod select_projection;
+pub mod projection;
+
+// Module-path aliases preserving the historical `read::*` module paths.
+pub use aggregation as aggregate;
+pub use projection::{order, select_projection};
+// Crate-internal module (kept at the historical
+// `read::hashable_query_value` path).
+pub(crate) use projection::hashable_query_value;
 
 // Re-export DTOs from the shared types crate.
 pub use aggregate::{apply_aggregate_all, apply_group_by};

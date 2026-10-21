@@ -7,19 +7,17 @@
 //! Evaluation runtime (`compile_filter`, `eval_context`)
 //! stays in this crate because it touches Interner state.
 
-pub mod compile;
-pub mod cond_cache;
-pub mod eval;
-pub mod eval_bytes;
-pub mod eval_context;
-pub mod field_path_cache;
-pub mod filter_node;
-pub mod fts;
-pub mod index_range;
-pub(crate) mod numeric_cmp;
-pub mod pattern_guard;
-pub mod query_ref_cache;
-pub mod resolve;
+pub mod caches;
+pub mod evaluation;
+
+// Module-path aliases preserving the historical `filter::*` module paths.
+pub use caches::{cond_cache, field_path_cache, query_ref_cache};
+pub use evaluation::filter_node;
+pub use evaluation::planning::{compile, index_range};
+pub use evaluation::runtime::core::{eval, eval_bytes, eval_context};
+pub use evaluation::semantics::{fts, pattern_guard, resolve};
+// Crate-internal module (kept at the historical `filter::numeric_cmp` path).
+pub(crate) use evaluation::semantics::numeric_cmp;
 
 // Re-export DTOs from the shared types crate.
 pub use compile::compile_filter;
