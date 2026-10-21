@@ -218,8 +218,14 @@ directory unless an explicit `--exceptions` path is given.
   fingerprint their type expression, so a changed `type X = ...` is a
   finding even with untouched method bodies. Split `impl` blocks merge
   into one logical member per (impl head, member) before comparison.
-  Pairing: exact identity first; leftovers pair by (kind, name,
-  enclosing) + signature as moves — moves/renames/extractions are only
+  Pairing: exact identity first (a strict form with the physical file and
+  the full content runs before it, so unchanged items that share one
+  logical path — cfg twins, the `main`/`const` items of every bench or
+  example target — keep their own counterpart); leftovers pair by (kind,
+  name, enclosing) + signature as moves (content-identical twins with the
+  same number of copies on both sides pair one-to-one first, so a moved
+  helper that exists in several files is not ambiguous) —
+  moves/renames/extractions are only
   legal when declared in the delta; renames compare signatures with the
   item's OWN name normalised out, so `helper` → `helper2` can pair;
   names-only counting is impossible (an identity pair with a different
@@ -560,6 +566,9 @@ Fixture → finding map:
 | `conservation/broken_mod` | `INVENTORY_ERROR` (`mod ghost;` resolves at neither revision — fail closed) |
 | `conservation/unused_allowance` | `UNUSED_ALLOWANCE` (identical trees — exercises the `--allow-empty` head commit) |
 | `conservation/base_mismatch` | `BASE_MISMATCH` (head carries a real comment-only diff) |
+| `conservation/dup_unchanged_targets` | clean — identically named items of two integration-test targets stay paired |
+| `conservation/dup_cfg_twins` | clean — cfg variants under one logical path stay paired |
+| `conservation/twin_moves` | two identical twins move to two other files: both suggested, the suggestion feeds back to clean |
 | `conservation/unpairable_duplicate` | `UNPAIRABLE_DUPLICATE` (one base item, two same-key head candidates) |
 | `conservation/uncond_path_default_ignored` | none (exit 0) — an UNCONDITIONAL `#[path]` mod never inventories the phantom default file |
 | (no fixture — bad rev argument) | `BLOCKED_COMPARISON` |
