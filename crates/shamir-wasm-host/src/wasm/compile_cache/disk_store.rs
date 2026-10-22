@@ -45,7 +45,7 @@ impl DiskCacheStore {
     }
 
     /// Test-only: a store with small caps so cap enforcement is observable.
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub(crate) fn with_caps_for_test(root: PathBuf, max_bytes: u64, max_entries: usize) -> Self {
         Self::with_caps(root, max_bytes, max_entries)
     }
@@ -160,23 +160,23 @@ impl DiskCacheStore {
             .map_err(|_| std::io::Error::other("cache store already bound"))
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub(crate) fn rejected(&self) -> u64 {
         self.rejected.load(Ordering::Relaxed)
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub(crate) fn hits(&self) -> u64 {
         self.hits.load(Ordering::Relaxed)
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub(crate) fn frames_read(&self) -> u64 {
         self.frames_read.load(Ordering::Relaxed)
     }
 
     /// Test-only `(bytes, count)` snapshot of the shared index accounting.
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub(crate) fn index_totals(&self) -> (u64, usize) {
         match self.bound.get() {
             Some(bound) => (

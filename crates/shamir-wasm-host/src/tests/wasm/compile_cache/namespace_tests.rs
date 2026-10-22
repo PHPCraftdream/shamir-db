@@ -5,6 +5,7 @@
 
 use super::cache_store_tests::{entry_files, key_of, namespace_dir, remaining_keys};
 use crate::wasm::compile_cache::DiskCacheStore;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -90,6 +91,9 @@ fn changing_consume_fuel_selects_a_new_namespace_and_removes_the_old() {
     assert!(!old.exists(), "the old namespace directory must be removed");
 }
 
+/// Unix-only: mode bits are the trust anchor there; Windows has its
+/// counterparts in `windows_trust_tests`.
+#[cfg(unix)]
 #[test]
 fn group_writable_cache_directory_disables_the_disk_tier() {
     let dir = tempfile::tempdir().unwrap();
@@ -109,6 +113,9 @@ fn group_writable_cache_directory_disables_the_disk_tier() {
     );
 }
 
+/// Unix-only: symlink components; Windows has its junction counterpart
+/// in `windows_trust_tests`.
+#[cfg(unix)]
 #[test]
 fn symlinked_cache_component_disables_the_disk_tier() {
     let dir = tempfile::tempdir().unwrap();

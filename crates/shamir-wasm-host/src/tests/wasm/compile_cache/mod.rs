@@ -1,13 +1,10 @@
-// Disk-tier regression suite: every disk-store module is `#[cfg(unix)]`
-// (the disk tier is disabled on non-Unix platforms); the single non-Unix
-// test asserts that `with_compile_cache` degrades to an uncached engine.
-#[cfg(unix)]
+// Disk-tier regression suite. Since Q5-c the disk tier is enabled and
+// private-directory-verified on BOTH Unix and Windows; the tests below
+// run cross-platform except where they exercise a truly Unix-only API
+// (mode bits, symlinks) or a Windows-only one (DACL, junctions).
 pub mod cache_store_tests;
-#[cfg(unix)]
 pub mod namespace_tests;
-#[cfg(unix)]
 pub mod trap_parity_tests;
-#[cfg(unix)]
 pub mod trim_tests;
 #[cfg(windows)]
-pub mod windows_degrade_tests;
+pub mod windows_trust_tests;
