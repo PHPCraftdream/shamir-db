@@ -1,1 +1,13 @@
 base = "4d2ef81654588e527b0e07bd60f7f7f7342a84c5"
+
+[[allow]]
+path = "crates/shamir-engine/src/tx/mod.rs"
+item = "#[allow(unused_imports)]"
+reason = "compatibility aliases for the pre-E1 crate::tx::commit_driver / commit_tail_barrier module paths; nothing in the crate names them today"
+owner = "engine-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/tx/replication/follower_durability/receipt/resume/worker.rs"
+item = "receipt_handler"
+reason = "the impl RepoInstance block of the receipt worker moved into repo_instance (owned_impl); it installs receipt_handler from there, so the narrowest audience that compiles is pub(crate)"
+owner = "engine-sweep"
