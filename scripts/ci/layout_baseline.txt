@@ -4,4 +4,3 @@ dir crates/shamir-client-node 9
 dir crates/shamir-engine/src 12
 dir crates/shamir-engine/src/repo 19
 dir crates/shamir-engine/src/tx 21
-dir crates/shamir-engine/src/tx/tests 60

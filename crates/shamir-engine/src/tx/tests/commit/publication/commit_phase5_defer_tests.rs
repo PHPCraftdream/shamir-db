@@ -33,8 +33,8 @@ use crate::table::TableConfig;
 use crate::tx::commit_phases::{
     FAIL_PHASE_5A_TABLE_TOKEN, FAIL_PHASE_5A_TX_ID, FAIL_PHASE_5C_TX_ID,
 };
-use crate::tx::tests::materialized_means_visible_tests::spawn_deferred_commit;
-use crate::tx::tests::post_wal_orphan_ordering_tests::fixture;
+use crate::tx::tests::commit::visibility::materialized_means_visible_tests::spawn_deferred_commit;
+use crate::tx::tests::drain::orphans::post_wal_orphan_ordering_tests::fixture;
 use crate::tx::tx_outcome::MaterializationState;
 
 fn make_repo() -> RepoInstance {
@@ -56,7 +56,8 @@ const INJECT_TX_ID: u64 = 7_000_001;
 /// during materialization), so this is `tokio::sync::Mutex` — async-aware,
 /// no poisoning, and clippy-clean across the await. Contention is bounded
 /// to the two injecting tests.
-pub(super) static PHASE_5C_INJECT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(in crate::tx::tests) static PHASE_5C_INJECT_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
 
 /// Serialises the arm → commit → reset window of the multi-table Phase 5a
 /// injection test. `FAIL_PHASE_5A_TX_ID` / `FAIL_PHASE_5A_TABLE_TOKEN` are a

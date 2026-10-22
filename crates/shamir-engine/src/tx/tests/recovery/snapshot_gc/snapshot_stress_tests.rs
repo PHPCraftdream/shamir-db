@@ -13,7 +13,7 @@ use crate::query::read::ReadQuery;
 use crate::repo::RepoInstance;
 use crate::table::{TableConfig, TableManager};
 use crate::tx::materialize::TEST_PRE_MATERIALIZE_REPO;
-use crate::tx::tests::post_wal_orphan_ordering_tests::fixture;
+use crate::tx::tests::drain::orphans::post_wal_orphan_ordering_tests::fixture;
 
 async fn scores(table: &TableManager, query: &ReadQuery, tx: &TxContext) -> Vec<i64> {
     let interner = table.interner().get().await.unwrap();

@@ -5,8 +5,8 @@ use shamir_types::types::value::InnerValue;
 
 use crate::query::filter::FilterContext;
 use crate::tx::commit::TxError;
-use crate::tx::tests::post_wal_orphan_ordering_tests::fixture;
-use crate::tx::tests::snapshot_visibility_park_tests::spawn_settled_commit;
+use crate::tx::tests::drain::orphans::post_wal_orphan_ordering_tests::fixture;
+use crate::tx::tests::recovery::snapshot_gc::snapshot_visibility_park_tests::spawn_settled_commit;
 
 // Catches eager GC floors and either vacuum path deleting the K@5 anchor.
 #[tokio::test]

@@ -18,12 +18,12 @@ use crate::tx::commit::TxError;
 use crate::tx::commit_phases::{
     FAIL_PHASE_5A_TABLE_TOKEN, FAIL_PHASE_5A_TX_ID, FAIL_PHASE_5C_TX_ID,
 };
-use crate::tx::tests::post_wal_orphan_ordering_tests::fixture;
+use crate::tx::tests::drain::orphans::post_wal_orphan_ordering_tests::fixture;
 use crate::tx::{MaterializationState, TxOutcome};
 
 // Shared by older deferral regressions: observe an actual pending driver poll,
 // never inline-await an ack whose orphan replay is deliberately suppressed.
-pub(super) async fn spawn_deferred_commit(
+pub(in crate::tx::tests) async fn spawn_deferred_commit(
     repo: &RepoInstance,
     tx: TxContext,
 ) -> JoinHandle<Result<TxOutcome, TxError>> {

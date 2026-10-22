@@ -6,8 +6,8 @@ use shamir_types::types::value::InnerValue;
 
 use super::super::repair_event;
 use crate::table::TableConfig;
-use crate::tx::tests::post_wal_orphan_ordering_tests::{fixture, panic_post_wal};
-use crate::tx::tests::snapshot_visibility_park_tests::spawn_settled_commit;
+use crate::tx::tests::drain::orphans::post_wal_orphan_ordering_tests::{fixture, panic_post_wal};
+use crate::tx::tests::recovery::snapshot_gc::snapshot_visibility_park_tests::spawn_settled_commit;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn orphan_is_repaired_and_bounded_pull_has_no_gap() {

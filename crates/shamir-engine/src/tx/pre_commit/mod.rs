@@ -10,7 +10,7 @@ mod stale_value;
 
 #[cfg(test)]
 pub(crate) use claims::{PostPrelockPreMaterializeHook, TEST_POST_PRELOCK_PRE_MATERIALIZE_HOOK};
-// Only `tx::tests::recovery_tests` consumes the old path; within the module
+// Only `tx::tests::recovery::recovery_tests` consumes the old path; within the module
 // `locked` reads `claims::REPO_INTERNER_SCOPE` directly.
 #[cfg(test)]
 pub(crate) use claims::REPO_INTERNER_SCOPE;
