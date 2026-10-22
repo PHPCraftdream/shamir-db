@@ -1,19 +1,4 @@
 base = "d9e258e23245ced1aca9f0d3300cbd40a3516da5"
-[[moved]]
-path = "crates/shamir-engine/src/tx/tests/recovery_tests.rs"
-item = "shamir-engine::lib::tx::tests::recovery_tests::CRIT1_INJECT_LOCK"
-to_path = "crates/shamir-engine/src/tx/tests/recovery_tests/seed_failure.rs"
-to_item = "shamir-engine::lib::tx::tests::recovery_tests::seed_failure::CRIT1_INJECT_LOCK"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/tests/recovery_tests.rs"
-item = "shamir-engine::lib::tx::tests::recovery_tests::CRIT1_INJECT_TX_ID"
-to_path = "crates/shamir-engine/src/tx/tests/recovery_tests/seed_failure.rs"
-to_item = "shamir-engine::lib::tx::tests::recovery_tests::seed_failure::CRIT1_INJECT_TX_ID"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/tx/tests/recovery_tests.rs"
@@ -68,14 +53,6 @@ path = "crates/shamir-engine/src/tx/tests/recovery_tests.rs"
 item = "shamir-engine::lib::tx::tests::recovery_tests::crit1_no_injection_recovery_succeeds"
 to_path = "crates/shamir-engine/src/tx/tests/recovery_tests/seed_failure.rs"
 to_item = "shamir-engine::lib::tx::tests::recovery_tests::seed_failure::crit1_no_injection_recovery_succeeds"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/tests/recovery_tests.rs"
-item = "shamir-engine::lib::tx::tests::recovery_tests::make_repo"
-to_path = "crates/shamir-engine/src/tx/tests/recovery_tests/support.rs"
-to_item = "shamir-engine::lib::tx::tests::recovery_tests::support::make_repo"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -241,4 +218,66 @@ owner = "@layout-sweep"
 path = "crates/shamir-engine/src/tx/tests/recovery_tests/mod.rs"
 item = "shamir-engine::lib::tx::tests::recovery_tests::v2_replay"
 reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/tests/recovery_tests.rs"
+item = "shamir-engine::lib::tx::tests::recovery_tests::replay_inflight_v2_from_simulated_partial_commit_state"
+to_path = "crates/shamir-engine/src/tx/tests/recovery_tests/v2_replay.rs"
+to_item = "shamir-engine::lib::tx::tests::recovery_tests::v2_replay::replay_inflight_v2_from_simulated_partial_commit_state"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/tests/recovery_tests.rs"
+item = "shamir-engine::lib::tx::tests::recovery_tests::f3_file_wal_process_crash_recovery_replays_committed_tx"
+to_path = "crates/shamir-engine/src/tx/tests/recovery_tests/crash_replay.rs"
+to_item = "shamir-engine::lib::tx::tests::recovery_tests::crash_replay::f3_file_wal_process_crash_recovery_replays_committed_tx"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/tests/recovery_tests.rs"
+item = "shamir-engine::lib::tx::tests::recovery_tests::f4b_nontx_insert_crash_recovery"
+to_path = "crates/shamir-engine/src/tx/tests/recovery_tests/crash_replay.rs"
+to_item = "shamir-engine::lib::tx::tests::recovery_tests::crash_replay::f4b_nontx_insert_crash_recovery"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/tests/recovery_tests.rs"
+item = "shamir-engine::lib::tx::tests::recovery_tests::c5_implicit_insert_new_field_recovers_with_preserved_id"
+to_path = "crates/shamir-engine/src/tx/tests/recovery_tests/crash_replay.rs"
+to_item = "shamir-engine::lib::tx::tests::recovery_tests::crash_replay::c5_implicit_insert_new_field_recovers_with_preserved_id"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/tests/recovery_tests.rs"
+item = "shamir-engine::lib::tx::tests::recovery_tests::f3_file_wal_replay_is_idempotent"
+to_path = "crates/shamir-engine/src/tx/tests/recovery_tests/crash_replay.rs"
+to_item = "shamir-engine::lib::tx::tests::recovery_tests::crash_replay::f3_file_wal_replay_is_idempotent"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/tests/recovery_tests.rs"
+item = "shamir-engine::lib::tx::tests::recovery_tests::stage_i_cross_table_shared_interner_id"
+to_path = "crates/shamir-engine/src/tx/tests/recovery_tests/interner.rs"
+to_item = "shamir-engine::lib::tx::tests::recovery_tests::interner::stage_i_cross_table_shared_interner_id"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/tests/recovery_tests.rs"
+item = "shamir-engine::lib::tx::tests::recovery_tests::stage_i_repo_scope_interner_delta_recovers"
+to_path = "crates/shamir-engine/src/tx/tests/recovery_tests/interner.rs"
+to_item = "shamir-engine::lib::tx::tests::recovery_tests::interner::stage_i_repo_scope_interner_delta_recovers"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/tests/recovery_tests.rs"
+item = "shamir-engine::lib::tx::tests::recovery_tests::reopen_disk_repo"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
 owner = "@layout-sweep"
