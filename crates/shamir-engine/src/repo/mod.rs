@@ -1,5 +1,6 @@
 pub mod instance;
 pub mod journal;
+pub mod meta;
 pub mod seed;
 
 #[cfg(test)]

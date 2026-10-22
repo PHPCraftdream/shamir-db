@@ -83,13 +83,13 @@ db.create_index("main", "users", "email_idx", &["email"]).await?;
 ```
 src/
 ├── db_instance/
-│   └── db_instance.rs    → DbInstance
+│   └── db_instance.rs                      → DbInstance
 ├── repo/
-│   └── repo_instance.rs → RepoInstance
+│   └── instance/repo_instance.rs           → RepoInstance
 ├── table/
-│   └── table_manager.rs → TableManager
-└── index/
-    └── index_manager.rs → IndexManager
+│   └── table_manager.rs                    → TableManager
+└── lib.rs                                  → `index` re-exports IndexManager
+                                              (implemented in the `shamir-index` crate)
 ```
 
 ### Поток вызовов

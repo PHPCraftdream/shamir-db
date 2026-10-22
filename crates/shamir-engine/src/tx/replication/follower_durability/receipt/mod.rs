@@ -22,5 +22,4 @@ pub(crate) use apply::apply_batch_receipt;
 pub(crate) use resume::worker::{ReceiptApplyJob, ReceiptLease};
 
 #[cfg(test)]
-#[path = "tests/mod.rs"]
 mod tests;

@@ -13,5 +13,4 @@ pub(in crate::tx::drain::drainer) use repair::repair_event;
 pub(in crate::tx::drain::drainer) use settle::settle_event;
 
 #[cfg(test)]
-#[path = "tests/mod.rs"]
 mod tests;
