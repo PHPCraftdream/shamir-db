@@ -8,6 +8,4 @@ dir crates/shamir-engine/src/tx 21
 dir crates/shamir-engine/src/tx/tests 60
 file crates/shamir-engine/src/repo/repo_instance.rs 1967
 file crates/shamir-engine/src/tx/commit.rs 1183
-file crates/shamir-engine/src/tx/drainer.rs 1730
-file crates/shamir-engine/src/tx/tests/drainer_tests.rs 1344
 file crates/shamir-engine/src/tx/tests/recovery_tests.rs 1725
