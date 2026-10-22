@@ -1,4 +1,4 @@
-use super::RepoInstance;
+use super::super::super::RepoInstance;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::{Repo as _, Store};
 use std::sync::Arc;
