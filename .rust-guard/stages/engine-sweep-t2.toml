@@ -1,4 +1,4 @@
-base = "c1905f875b57251da91dc315a2c2ecde4c347e6b"
+base = "c6db17c6d4a9b320cc6f3f0365fcd3ae5e7dbe37"
 
 [[allow_widen]]
 path = "crates/shamir-engine/src/table/tests/index_lifecycle/recovery/rename/hash_rename/shared/p997_hash_rename_durability_tests.rs"
