@@ -5,7 +5,7 @@ use shamir_storage::types::Repo;
 use shamir_storage::types::Store;
 use std::sync::Arc;
 
-use super::RepoInstance;
+use super::super::RepoInstance;
 #[cfg(test)]
 use crate::tx::clean_horizon::checkpoint::test_seam;
 

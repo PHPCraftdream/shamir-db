@@ -7,7 +7,7 @@ use shamir_tx::visibility_metrics::{
 };
 use shamir_tx::RepoTxGate;
 
-use super::RepoInstance;
+use super::super::RepoInstance;
 
 impl RepoInstance {
     /// Observe settlement through a repository-scoped position, not a commit decision.

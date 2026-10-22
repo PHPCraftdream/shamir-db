@@ -1,7 +1,7 @@
 use shamir_storage::error::DbResult;
 use shamir_storage::types::Repo;
 
-use super::RepoInstance;
+use super::super::RepoInstance;
 
 impl RepoInstance {
     /// Strict offline metadata flush. Unlike persist's unchanged fast path,

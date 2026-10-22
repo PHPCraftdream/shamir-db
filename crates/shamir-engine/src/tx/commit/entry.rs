@@ -423,7 +423,7 @@ impl From<TxError> for DbError {
     }
 }
 
-#[path = "../../repo/durability_policy/durability_policy/commit_policy.rs"]
+#[path = "../../repo/journal/backend/durability_policy/durability_policy/commit_policy.rs"]
 mod durability_completion;
 #[cfg(test)]
 pub(crate) use durability_completion::TEST_SYNCED_WAL_REPO;

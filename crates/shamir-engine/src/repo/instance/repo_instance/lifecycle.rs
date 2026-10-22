@@ -12,6 +12,12 @@ use std::sync::Arc;
 
 use super::RepoInstance;
 
+mod clean_horizon_repo_impl;
+mod durability_repo_impl;
+mod recovery;
+mod seed_backing_impl;
+mod seed_metadata_impl;
+
 impl RepoInstance {
     pub(crate) fn commit_tail(&self) -> &Arc<CommitTailBarrier> {
         &self.commit_tail

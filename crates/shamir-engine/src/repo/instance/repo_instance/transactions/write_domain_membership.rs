@@ -2,8 +2,8 @@
 
 use shamir_storage::error::DbResult;
 
-use super::super::repo_instance::RepoInstance;
-use super::write_domain::RepoWritePermit;
+use super::RepoInstance;
+use crate::repo::changelog_store::write_domain::RepoWritePermit;
 use crate::table::TableConfig;
 
 impl RepoInstance {

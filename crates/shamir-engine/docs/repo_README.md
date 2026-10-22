@@ -101,9 +101,9 @@ RepoConfig::new("main", BoxRepoFactory::in_memory())
 
 | Файл | Описание |
 |------|----------|
-| `repo_instance.rs` | `RepoInstance` — управление таблицами |
-| `repo_types.rs` | `BoxRepo`, `BoxRepoFactory`, `RepoFactory` trait, фабрики для 7 движков |
-| `repo_config.rs` | `RepoConfig` |
+| `instance/repo_instance.rs` | `RepoInstance` — управление таблицами |
+| `journal/backend/repo_types.rs` | `BoxRepo`, `BoxRepoFactory`, `RepoFactory` trait, фабрики для 7 движков |
+| `instance/config.rs` | `RepoConfig` |
 | `mod.rs` | Re-exports |
 
 ## Архитектура

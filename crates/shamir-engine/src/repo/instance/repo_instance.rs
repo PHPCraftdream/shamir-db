@@ -1,10 +1,8 @@
-#[path = "../durability_policy/durability_policy/repo_impl.rs"]
-mod durability_impl;
 use crate::repo::changelog_store::write_domain::RepoWriteDomain;
 use crate::repo::durability_policy::{DurabilityMetrics, DurabilityPolicy};
 use crate::repo::fk_reverse_cache::FkReverseCache;
 use crate::repo::group_commit::GroupCommit;
-use crate::repo::repo_types::{BoxRepo, BoxRepoFactory};
+use crate::repo::repo_types::BoxRepo;
 use crate::repo::version_provider::register_token;
 pub use crate::repo::version_provider::repo_token;
 use crate::table::interner_manager::InternerManager;
@@ -17,7 +15,7 @@ use crate::tx::clean_horizon::checkpoint::test_seam;
 use crate::tx::cold_reconcile::lifecycle::ForegroundLifecycle;
 use crate::tx::CommitTailBarrier;
 use shamir_query_types::batch::VisibilityWait;
-use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::error::DbResult;
 
 use shamir_types::types::common::{new_dash_map_wc, TDashMap, THasher};
 use std::sync::atomic::AtomicU64;
@@ -25,22 +23,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::OnceCell;
 
-#[path = "../clean_horizon/repo_impl.rs"]
-mod clean_horizon_impl;
-
-#[path = "../clean_horizon/shutdown_impl.rs"]
-mod shutdown_impl;
-
-#[path = "../cold_reconcile/repo_impl.rs"]
-mod cold_reconcile_impl;
-
-#[path = "../changelog_store/repo_membership_impl.rs"]
-mod membership_impl;
-
-mod catalog;
+pub(in crate::repo) mod catalog;
 mod journal;
 mod lifecycle;
-mod tables;
 mod transactions;
 
 /// Fixed read-side budget, not a tunable: a stalled writer returns an older
@@ -159,7 +144,7 @@ pub struct RepoInstance {
     /// Shared policy installed before recovery and observed by every clone.
     durability: Arc<arc_swap::ArcSwap<DurabilityPolicy>>,
     durability_metrics: Arc<DurabilityMetrics>,
-    /// Per-open cache for the completed-reseed lifecycle record (see `repo_impl.rs`).
+    /// Per-open cache for the completed-reseed lifecycle record (see `durability_repo_impl.rs`).
     replication_armed: Arc<std::sync::atomic::AtomicBool>,
     /// PR2 S5c-X — lock-free WAL retention gate (refuse flag + counters);
     /// shared across clones like every other field.
