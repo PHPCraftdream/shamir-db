@@ -21,7 +21,4 @@
 # packages = ["shamir-db"]
 # delta   = ".rust-guard/stages/split-repo-instance.toml"
 
-[[campaigns]]
-name     = "engine-sweep-e1"
-packages = ["shamir-engine"]
-delta    = ".rust-guard/stages/engine-sweep-e1.toml"
+campaigns = []
