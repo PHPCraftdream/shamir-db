@@ -1,7 +1,7 @@
 use crate::db_instance::db_instance::DbInstance;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
-use crate::table::tests::write::record_mutation::execution::fixtures::write_exec_tests::*;
+use crate::table::tests::write::record_mutation::execution::shared::write_exec_tests::*;
 use crate::table::TableConfig;
 use shamir_query_builder::write::{self, doc};
 use shamir_types::types::common::new_map;

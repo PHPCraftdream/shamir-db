@@ -2,7 +2,7 @@
 //! (`try_extract_filtered_vector_query` / `build_residual` / `resolve_oversample`).
 //!
 //! Pure unit tests on the recognition functions; the end-to-end filtered-ANN
-//! behaviour lives in [`super::filtered_ann::fixtures::filtered_ann_tests`]. These were previously
+//! behaviour lives in [`super::filtered_ann::shared::filtered_ann_tests`]. These were previously
 //! inlined in `filtered_vector.rs` and moved here per the repo convention
 //! (CLAUDE.md: tests live in `tests/`, not inline `mod tests` in impl files).
 

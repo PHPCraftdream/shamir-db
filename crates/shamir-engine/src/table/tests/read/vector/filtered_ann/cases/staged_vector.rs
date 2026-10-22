@@ -6,7 +6,7 @@ use shamir_query_types::read::ReadQuery;
 use shamir_tx::IsolationLevel;
 use shamir_types::types::common::new_map;
 
-use crate::table::tests::read::vector::filtered_ann::fixtures::filtered_ann_tests::*;
+use crate::table::tests::read::vector::filtered_ann::shared::filtered_ann_tests::*;
 
 use super::prefilter_cofilter::{commit_cluster, path_label};
 /// Contract pin: speeding up VR-5 must not change production planner defaults.

@@ -45,7 +45,7 @@ use smallvec::smallvec;
 
 use crate::repo::RepoInstance;
 use crate::table::table_manager::TableManager;
-use crate::table::tests::write::record_mutation::execution::fixtures::write_exec_tests::{
+use crate::table::tests::write::record_mutation::execution::shared::write_exec_tests::{
     insert_via_tx, setup_empty_table,
 };
 use crate::validator::schema::{rule, SchemaValidator};

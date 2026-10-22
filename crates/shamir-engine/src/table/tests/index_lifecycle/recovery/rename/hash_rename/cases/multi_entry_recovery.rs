@@ -3,7 +3,7 @@ use shamir_index::base_index::backfill_pause_hook::BackfillPauseHook;
 use shamir_types::types::record_id::RecordId;
 use std::sync::Arc;
 
-use crate::table::tests::index_lifecycle::recovery::rename::hash_rename::fixtures::p997_hash_rename_durability_tests::*;
+use crate::table::tests::index_lifecycle::recovery::rename::hash_rename::shared::p997_hash_rename_durability_tests::*;
 
 // ============================================================================
 // #1048 (P1-2 sub-slice B): e2e crash-recovery test proving RFC §2.3's

@@ -34,7 +34,7 @@ use shamir_types::record_view::ScalarRef;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
-use crate::table::tests::write::record_mutation::execution::fixtures::write_exec_tests::{
+use crate::table::tests::write::record_mutation::execution::shared::write_exec_tests::{
     insert_via_tx, set_via_tx, setup_empty_table, update_via_tx,
 };
 use crate::validator::{

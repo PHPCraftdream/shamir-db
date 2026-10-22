@@ -1,4 +1,4 @@
-use crate::table::tests::write::record_mutation::execution::fixtures::write_exec_tests::*;
+use crate::table::tests::write::record_mutation::execution::shared::write_exec_tests::*;
 use shamir_query_builder::val::*;
 use shamir_query_builder::write::{self, doc};
 

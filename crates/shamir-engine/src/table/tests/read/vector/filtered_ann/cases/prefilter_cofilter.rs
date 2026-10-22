@@ -8,7 +8,7 @@ use shamir_types::core::interner::InternerKey;
 use shamir_types::types::common::{new_map, new_map_wc};
 use shamir_types::types::value::InnerValue;
 
-use crate::table::tests::read::vector::filtered_ann::fixtures::filtered_ann_tests::*;
+use crate::table::tests::read::vector::filtered_ann::shared::filtered_ann_tests::*;
 
 use super::selectivity::Pcg;
 /// Build a record `{embedding: [f32...], tag: &str, price: f64}`.

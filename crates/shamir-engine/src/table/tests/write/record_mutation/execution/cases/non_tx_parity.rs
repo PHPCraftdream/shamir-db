@@ -1,5 +1,5 @@
 use crate::query::filter::eval_context::FilterContext;
-use crate::table::tests::write::record_mutation::execution::fixtures::write_exec_tests::*;
+use crate::table::tests::write::record_mutation::execution::shared::write_exec_tests::*;
 use shamir_query_builder::write::{self, doc};
 use shamir_types::types::common::new_map;
 

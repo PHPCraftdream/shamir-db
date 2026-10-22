@@ -4,7 +4,7 @@ use shamir_query_builder::filter as qf;
 use shamir_query_types::read::ReadQuery;
 use shamir_types::types::common::new_map;
 
-use crate::table::tests::read::vector::filtered_ann::fixtures::filtered_ann_tests::*;
+use crate::table::tests::read::vector::filtered_ann::shared::filtered_ann_tests::*;
 
 /// Minimal PCG-style PRNG for deterministic test data (avoids pulling in
 /// the `rand` crate). Not cryptographically secure — just needs to scatter

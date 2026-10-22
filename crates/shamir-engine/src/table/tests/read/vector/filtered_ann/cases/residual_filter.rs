@@ -5,7 +5,7 @@ use shamir_query_types::read::ReadQuery;
 use shamir_tx::IsolationLevel;
 use shamir_types::types::common::new_map;
 
-use crate::table::tests::read::vector::filtered_ann::fixtures::filtered_ann_tests::*;
+use crate::table::tests::read::vector::filtered_ann::shared::filtered_ann_tests::*;
 
 use super::selectivity::Pcg;
 /// A predicate matching NOTHING must terminate and return empty. The retry

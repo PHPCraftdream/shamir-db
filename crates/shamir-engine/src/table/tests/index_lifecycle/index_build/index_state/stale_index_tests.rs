@@ -16,7 +16,7 @@ use crate::db_instance::db_instance::DbInstance;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
 use crate::table::tests::behavior::schema::test_helpers::query_value_to_inner_tracked;
-use crate::table::tests::write::record_mutation::execution::fixtures::write_exec_tests::delete_via_tx;
+use crate::table::tests::write::record_mutation::execution::shared::write_exec_tests::delete_via_tx;
 use crate::table::TableConfig;
 use shamir_query_builder::{filter, write};
 use shamir_types::types::common::new_map;

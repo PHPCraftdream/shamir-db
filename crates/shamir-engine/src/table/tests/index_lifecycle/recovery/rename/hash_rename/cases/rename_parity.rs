@@ -4,7 +4,7 @@ use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use std::sync::Arc;
 
-use crate::table::tests::index_lifecycle::recovery::rename::hash_rename::fixtures::p997_hash_rename_durability_tests::*;
+use crate::table::tests::index_lifecycle::recovery::rename::hash_rename::shared::p997_hash_rename_durability_tests::*;
 
 // ============================================================================
 // #1000 (@oh post-#997-review fix): recovery interrupted between two
