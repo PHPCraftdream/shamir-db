@@ -19,8 +19,6 @@ use crate::tx::apply_replicated::follower_durability::receipt::{
 #[cfg(test)]
 use crate::tx::clean_horizon::checkpoint::test_seam;
 use crate::tx::cold_reconcile::lifecycle::ForegroundLifecycle;
-#[cfg(test)]
-use crate::tx::tests::commit::publication::journal_publish_order_tests::JournalPublishHook;
 use crate::tx::CommitTailBarrier;
 use shamir_query_types::batch::VisibilityWait;
 use shamir_storage::error::{DbError, DbResult};
@@ -94,7 +92,9 @@ pub struct RepoInstance {
     /// Minimum unpublished-to-journal version after init failure; zero = none.
     pending_changefeed_gap: Arc<AtomicU64>,
     #[cfg(test)]
-    pub(crate) journal_publish_hook: Arc<arc_swap::ArcSwapOption<JournalPublishHook>>,
+    pub(crate) journal_publish_hook: Arc<
+        arc_swap::ArcSwapOption<crate::tx::tests::journal_publish_order_tests::JournalPublishHook>,
+    >,
     /// `backing_dir()` at construction. `Some(dir)` selects a file-backed WAL;
     /// `None` selects the in-memory WAL used by ephemeral backends.
     wal_dir: Option<std::path::PathBuf>,
