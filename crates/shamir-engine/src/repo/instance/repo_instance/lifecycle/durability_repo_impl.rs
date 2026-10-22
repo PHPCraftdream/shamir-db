@@ -1,8 +1,13 @@
 //! Durability accessors and replication-only page wiring.
 
-use super::*;
-use crate::repo::durability_policy::{resolve, DurabilityMetricsSnapshot};
+use crate::repo::durability_policy::{resolve, DurabilityMetricsSnapshot, DurabilityPolicy};
+use crate::repo::repo_types::BoxRepoFactory;
+use crate::table::TableConfig;
 use shamir_query_types::{DurabilityOverride, ReplicationServe};
+
+use super::super::RepoInstance;
+use shamir_storage::error::{DbError, DbResult};
+use std::sync::Arc;
 
 #[cfg(all(test, feature = "fjall"))]
 use crate::tx::clean_horizon::tests::test_journal_seam;
@@ -184,7 +189,7 @@ impl RepoInstance {
     /// pulled the bound below the first page's. When the first page already
     /// fits under `R` (the common case, incl. every `Mem` WAL) there is no
     /// re-read and no fsync.
-    pub(super) async fn read_changelog_replication_page(
+    pub(in crate::repo::instance::repo_instance) async fn read_changelog_replication_page(
         &self,
         from_version: u64,
         limit: usize,

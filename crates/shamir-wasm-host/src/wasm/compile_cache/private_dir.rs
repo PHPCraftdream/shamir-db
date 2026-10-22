@@ -1,11 +1,17 @@
-#[cfg(unix)]
 use std::fs;
 use std::io;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 #[cfg(unix)]
 use std::path::Component;
+#[cfg(windows)]
+use std::path::Component as WindowsComponent;
 use std::path::{Path, PathBuf};
+
+#[cfg(windows)]
+use shamir_private_dir::{create_private_dir, verify_private_dir};
 
 #[cfg(unix)]
 pub(crate) fn prepare(data_dir: &Path) -> io::Result<PathBuf> {
@@ -33,12 +39,42 @@ pub(crate) fn prepare(data_dir: &Path) -> io::Result<PathBuf> {
     ensure_private(&cache.join("wasm"), uid)
 }
 
-#[cfg(not(unix))]
-pub(crate) fn prepare(_data_dir: &Path) -> io::Result<PathBuf> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "disk cache disabled on this platform",
-    ))
+/// Windows disk tier (DEC-3 Q5-c): the same trust contract as the Unix
+/// `prepare`, enforced through `shamir-private-dir`. `data_dir` itself is
+/// canonicalized and checked (real directory, not a reparse point); every
+/// component below it that this code creates (`cache`, `cache/wasm`) goes
+/// through `create_private_dir` when missing and `verify_private_dir`
+/// when present.
+#[cfg(windows)]
+pub(crate) fn prepare(data_dir: &Path) -> io::Result<PathBuf> {
+    let data = fs::canonicalize(data_dir)?;
+    let metadata = fs::symlink_metadata(&data)?;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(permission("untrusted data directory"));
+    }
+    let cache = ensure_private(&data.join("cache"))?;
+    ensure_private(&cache.join("wasm"))
+}
+
+/// Creates-or-verifies one private directory level on Windows and returns
+/// its canonical path (rejecting any `..` component that a canonicalized
+/// junction or mapped path might smuggle in).
+#[cfg(windows)]
+fn ensure_private(path: &Path) -> io::Result<PathBuf> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => verify_private_dir(path)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => create_private_dir(path)?,
+        Err(error) => return Err(error),
+    }
+    let canonical = fs::canonicalize(path)?;
+    if canonical
+        .components()
+        .any(|part| matches!(part, WindowsComponent::ParentDir))
+    {
+        return Err(permission("invalid cache directory"));
+    }
+    Ok(canonical)
 }
 
 #[cfg(unix)]
@@ -74,7 +110,6 @@ fn ensure_private(path: &Path, uid: u32) -> io::Result<PathBuf> {
     Ok(canonical)
 }
 
-#[cfg(unix)]
 fn permission(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, message)
 }

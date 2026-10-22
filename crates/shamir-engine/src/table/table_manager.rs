@@ -16,7 +16,7 @@ use shamir_storage::types::Store;
 // `table/mod.rs`) so they become CHILD modules of `table_manager` and can
 // see its private/`pub(super)` fields — that is what makes the
 // line-budget-driven move of the admitted twins out of this file legal
-// without widening visibility. Same pattern as `repo/changelog_store.rs`.
+// without widening visibility. Same pattern as `repo/journal/changelog_store.rs`.
 #[path = "table_manager/admission/domain/barrier/admitted_ops.rs"]
 mod admitted_ops;
 #[path = "table_manager/admission/views/read_only_views.rs"]

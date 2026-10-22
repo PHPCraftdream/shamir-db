@@ -1,4 +1,4 @@
-use super::repo_types::BoxRepoFactory;
+use crate::repo::journal::backend::repo_types::BoxRepoFactory;
 use crate::table::TableConfig;
 
 #[derive(Clone)]

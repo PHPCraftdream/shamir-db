@@ -4,7 +4,7 @@
 //! declared at the top of `table_manager.rs`): being a descendant module, it
 //! can see `TableManager`'s private/`pub(in crate::table)` fields, which is what makes
 //! the move out of the over-limit `table_manager.rs` legal without widening
-//! any visibility. See `repo/changelog_store.rs` for the same pattern.
+//! any visibility. See `repo/journal/changelog_store.rs` for the same pattern.
 //!
 //! Contents:
 //! - [`TableManager::admit`] — per-repo admission acquisition (lock order root).

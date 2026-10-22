@@ -1,11 +1,10 @@
 //! S5c-X PR6b-2a/2c: table-membership + table-open impl block, moved out of
 //! `repo_instance.rs` for the line ratchet.
 //!
-//! This file is wired as a DESCENDANT of the `repo_instance` module via
-//! `#[path = "changelog_store/repo_membership_impl.rs"] mod membership_impl;`,
-//! so the private `RepoInstance` fields (`tables`, `configs`, `token_names`,
-//! `fk_reverse_cache`, ...) and the private free fn `register_token` remain
-//! reachable through `super::`.
+//! This file is wired as a DESCENDANT of the `repo_instance` module
+//! (declared by `repo_instance/catalog.rs`), so the private `RepoInstance`
+//! fields (`tables`, `configs`, `token_names`, `fk_reverse_cache`, ...) and
+//! the free fn `register_token` remain reachable.
 
 use std::sync::Arc;
 
@@ -16,7 +15,7 @@ use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{fully_unwrap_store, Repo, Store};
 use tokio::sync::OnceCell;
 
-use super::RepoInstance;
+use super::super::RepoInstance;
 
 impl RepoInstance {
     #[cfg(test)]
@@ -281,7 +280,7 @@ impl RepoInstance {
         // Same synchronous DDL lock order as remove_table. This closes the
         // config/reverse-token re-add window without holding guards over await.
         let _entry = self.tables.entry(config.name.clone());
-        super::register_token(&self.token_names, &config.name);
+        crate::repo::version_provider::register_token(&self.token_names, &config.name);
         self.configs.insert(config.name.clone(), config);
         self.fk_reverse_cache.invalidate();
     }

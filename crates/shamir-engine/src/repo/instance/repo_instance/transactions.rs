@@ -12,7 +12,9 @@ use std::sync::Arc;
 
 use super::RepoInstance;
 
+mod follower_durability;
 mod receipt_worker_impl;
+mod write_domain_membership;
 
 impl RepoInstance {
     /// cancel-safe: yes — `OnceCell::get_or_try_init` semantics. If

@@ -20,7 +20,7 @@ use wasmtime::{Engine, InstanceAllocationStrategy, Module, PoolingAllocationConf
 pub struct WasmEngine {
     engine: Engine,
     /// Test-only handle to observe cache hits through the public constructor.
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     store: Option<Arc<DiskCacheStore>>,
 }
 
@@ -121,13 +121,13 @@ impl WasmEngine {
         Self::spawn_epoch_ticker(&engine);
         Ok(Self {
             engine,
-            #[cfg(all(test, unix))]
+            #[cfg(test)]
             store,
         })
     }
 
     /// Test-only: cache hits served to this engine's disk store.
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub(crate) fn cache_hits(&self) -> u64 {
         self.store.as_ref().map_or(0, |store| store.hits())
     }

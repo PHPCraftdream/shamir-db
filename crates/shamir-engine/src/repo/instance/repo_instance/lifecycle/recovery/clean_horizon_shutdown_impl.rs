@@ -55,7 +55,7 @@ async fn timed_stage<F: Future>(repo: &str, stage: &str, fut: F) -> F::Output {
 use crate::tx::apply_replicated::follower_durability::receipt::{ApplyOutcome, ReceiptApplyJob};
 use crate::tx::cold_reconcile::lifecycle::{RepoWorkerLifecycle, WorkerTerminal};
 
-use super::RepoInstance;
+use super::super::super::RepoInstance;
 
 impl RepoInstance {
     /// Caller MUST stop commit/apply admission before calling this method.
