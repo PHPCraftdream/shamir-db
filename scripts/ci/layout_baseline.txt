@@ -4,14 +4,10 @@ dir crates/shamir-client-node 10
 dir crates/shamir-engine/src 12
 dir crates/shamir-engine/src/repo 19
 dir crates/shamir-engine/src/repo/tests 21
-dir crates/shamir-engine/src/table/tests 114
 dir crates/shamir-engine/src/tx 21
 dir crates/shamir-engine/src/tx/tests 60
 dir crates/shamir-engine/src/tx/tests/ssi_phantom_tests 9
 file crates/shamir-engine/src/repo/repo_instance.rs 1967
-file crates/shamir-engine/src/table/tests/filtered_ann_tests.rs 1107
-file crates/shamir-engine/src/table/tests/p997_hash_rename_durability_tests.rs 1155
-file crates/shamir-engine/src/table/tests/write_exec_tests.rs 1009
 file crates/shamir-engine/src/tx/commit.rs 1183
 file crates/shamir-engine/src/tx/drainer.rs 1730
 file crates/shamir-engine/src/tx/pre_commit.rs 2818
