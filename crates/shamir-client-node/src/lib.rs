@@ -210,7 +210,7 @@ impl ShamirClient {
             .ok_or_else(|| Error::from_reason("client closed"))?;
         // Domain-level DB errors (ClientError::Db) are routed through
         // [`encode_db_error`] as a marker Buffer instead of thrown as a plain
-        // napi Error — the JS wrapper (index.js) decodes the marker and throws
+        // napi Error — the JS wrapper (js/wrapper.js) decodes the marker and throws
         // a typed ShamirDbError with `.code` / `.retryable`. See task #519.
         match client.execute(&db, batch_req).await {
             Ok(response) => {
@@ -333,7 +333,7 @@ impl ShamirClient {
 // Instead, domain-level DB errors (`ClientError::Db { code, message }`) are
 // NOT thrown at the napi boundary. The Rust method returns `Ok(Buffer)` where
 // the buffer is a msgpack-encoded `DbResponse::Error { kind: "error", code,
-// message }`. The JS wrapper in `index.js` decodes every response buffer and,
+// message }`. The JS wrapper in `js/wrapper.js` decodes every response buffer and,
 // if it detects the `kind: "error"` marker, throws a typed `ShamirDbError`
 // (mirrors the TS SDK's `shamir-client-ts/src/core/support/errors.ts`) with `.code`
 // and `.retryable` properties.
