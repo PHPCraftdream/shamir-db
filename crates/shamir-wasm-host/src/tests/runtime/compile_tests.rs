@@ -270,3 +270,81 @@ pub async fn heavy(_ctx: Ctx, _batch: Batch, _params: Params) -> Result<Value> {
         Err(other) => panic!("unexpected error: {other:?}"),
     }
 }
+
+// ============================================================================
+// Q5-b — from_binary_blocking (spawn_blocking wrapper)
+// ============================================================================
+
+/// Compiling through `from_binary_blocking` (tokio `spawn_blocking`) must
+/// yield a function that behaves identically to the synchronous
+/// `from_binary` result: same input, same output.
+#[tokio::test]
+async fn from_binary_blocking_matches_sync_behavior() {
+    let wasm = match compile_rust_source(DOUBLE_SOURCE) {
+        Ok(w) => w,
+        Err(FunctionError::ToolchainUnavailable(msg)) => {
+            eprintln!("SKIP from_binary_blocking_matches_sync_behavior: {msg}");
+            return;
+        }
+        Err(e) => panic!("compile failed: {e}"),
+    };
+
+    let sync_wf = WasmFunction::from_binary(
+        Arc::new(WasmEngine::new().unwrap()),
+        &wasm,
+        WasmLimits::default(),
+    )
+    .unwrap();
+    let blocking_wf = WasmFunction::from_binary_blocking(
+        Arc::new(WasmEngine::new().unwrap()),
+        &wasm,
+        WasmLimits::default(),
+    )
+    .await
+    .unwrap();
+
+    let mut params = Params::new();
+    params.set("n", QueryValue::Int(21));
+
+    let sync_val = sync_wf
+        .call(&FnCtx::new(), &FnBatch::new(), &params)
+        .await
+        .expect("sync call should succeed");
+    let blocking_val = blocking_wf
+        .call(&FnCtx::new(), &FnBatch::new(), &params)
+        .await
+        .expect("blocking call should succeed");
+
+    assert_eq!(sync_val, QueryValue::Int(42));
+    assert_eq!(blocking_val, sync_val, "blocking path must match sync path");
+}
+
+/// A panic inside the blocking closure must surface as a mapped
+/// `FunctionError::Compute` (the same variant a failed compile produces),
+/// not as a panic in the caller. Exercises the `JoinError` arm of the
+/// shared `run_compile_blocking` helper used by `from_binary_blocking`.
+#[tokio::test]
+async fn blocking_compile_join_failure_maps_to_compute_error() {
+    use crate::wasm::run_compile_blocking;
+
+    let result: Result<(), FunctionError> =
+        run_compile_blocking(|| -> Result<(), FunctionError> {
+            panic!("deliberate blocking-task panic");
+        })
+        .await;
+
+    match result {
+        Err(FunctionError::Compute(msg)) => {
+            assert!(
+                msg.contains("blocking compile join failure"),
+                "expected join-failure message, got: {msg}"
+            );
+            assert!(
+                msg.contains("deliberate blocking-task panic"),
+                "expected panic message to be preserved, got: {msg}"
+            );
+        }
+        Ok(()) => panic!("panicking closure must not succeed"),
+        Err(other) => panic!("expected Compute error, got: {other:?}"),
+    }
+}

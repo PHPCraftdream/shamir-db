@@ -21,3 +21,10 @@ pub use wasm_sanitizer::{verify_wasm_module, SANCTIONED_HOST_IMPORTS};
 /// [`wasmtime::Linker::iter`].
 #[cfg(test)]
 pub(crate) use wasm_function::test_linker_and_store;
+
+/// Test-only re-export: lets `tests::runtime::compile_tests` exercise the
+/// `JoinError` mapping path of [`WasmFunction::from_binary_blocking`] by
+/// spawning a deliberately panicking closure through the shared
+/// `spawn_blocking` helper.
+#[cfg(test)]
+pub(crate) use wasm_function::run_compile_blocking;

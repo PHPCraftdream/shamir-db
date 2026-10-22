@@ -454,11 +454,13 @@ impl ShamirDb {
                     continue;
                 }
             };
-            match WasmFunction::from_binary(
+            match WasmFunction::from_binary_blocking(
                 shamir.wasm_engine.clone(),
                 &wasm_bytes,
                 WasmLimits::default(),
-            ) {
+            )
+            .await
+            {
                 Ok(wf) => {
                     if shamir.functions.register(&name, Arc::new(wf)).is_err() {
                         log::warn!(
@@ -555,11 +557,13 @@ impl ShamirDb {
                     continue;
                 }
             };
-            match WasmFunction::from_binary(
+            match WasmFunction::from_binary_blocking(
                 shamir.wasm_engine.clone(),
                 &wasm_bytes,
                 WasmLimits::default(),
-            ) {
+            )
+            .await
+            {
                 Ok(wf) => {
                     // Wrap in WasmRecordValidator — the registry stores
                     // Arc<dyn RecordValidator> since Phase 0.

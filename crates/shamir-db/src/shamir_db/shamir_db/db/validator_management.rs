@@ -221,9 +221,14 @@ impl ShamirDb {
             }
         };
 
-        // Validate the wasm by compiling it.
-        let wf = WasmFunction::from_binary(self.wasm_engine.clone(), &wasm, WasmLimits::default())
-            .map_err(|e| DbError::Validation(e.to_string()))?;
+        // Validate the wasm by compiling it (on the blocking thread pool).
+        let wf = WasmFunction::from_binary_blocking(
+            self.wasm_engine.clone(),
+            &wasm,
+            WasmLimits::default(),
+        )
+        .await
+        .map_err(|e| DbError::Validation(e.to_string()))?;
 
         let wasm_b64 = base64::engine::general_purpose::STANDARD.encode(&wasm);
         let mut hasher = rustc_hash::FxHasher::default();
