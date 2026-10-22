@@ -1,4 +1,4 @@
-base = "4d2ef81654588e527b0e07bd60f7f7f7342a84c5"
+base = "af914f6b4ddd30b0db6ae441322680098ed9bfdc"
 
 [[allow]]
 path = "crates/shamir-engine/src/tx/mod.rs"
