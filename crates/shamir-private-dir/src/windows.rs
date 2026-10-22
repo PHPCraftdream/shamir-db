@@ -335,6 +335,83 @@ impl Drop for OwnerOnlySecurityDescriptor {
     }
 }
 
+/// Test support (compiled ONLY for this crate's tests): rewrites `path`'s
+/// DACL to the SAME single owner ACE but UNPROTECTED — the exact
+/// `D:(A;OICI;FA;;;<current-user-sid>)` of [`create_private_dir`] minus
+/// the `P` flag — so a rejection from [`verify_private_dir`] can only come
+/// from the `SE_DACL_PROTECTED` control-word check. Owner and group are
+/// left untouched (`DACL_SECURITY_INFORMATION` only).
+#[cfg(all(windows, test))]
+pub(crate) fn set_unprotected_owner_only_dacl_for_test(path: &Path) -> io::Result<()> {
+    use windows_sys::Win32::Security::Authorization::SetNamedSecurityInfoW;
+    use windows_sys::Win32::Security::{
+        GetSecurityDescriptorDacl, UNPROTECTED_DACL_SECURITY_INFORMATION,
+    };
+
+    let sid = current_user_sid_string()?;
+    let sddl = "D:(A;OICI;FA;;;<sid>)".replace("<sid>", &sid);
+    let sddl_wide = to_wide_null(&sddl);
+    let mut psd: *mut c_void = ptr::null_mut();
+    // SAFETY: `sddl_wide` is a valid null-terminated UTF-16 string for the
+    // duration of this call; `psd` is a valid out-param. On success `psd`
+    // is heap-allocated by the OS (`LocalAlloc`) and freed below on every
+    // exit path.
+    let ok = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl_wide.as_ptr(),
+            SDDL_REVISION_1,
+            &mut psd,
+            ptr::null_mut(),
+        )
+    };
+    if ok == 0 || psd.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let mut dacl_present: i32 = 0;
+    let mut dacl_defaulted: i32 = 0;
+    let mut dacl: *mut ACL = ptr::null_mut();
+    // SAFETY: `psd` is the valid descriptor allocated above; the three
+    // out-params are valid locals. On success `dacl` points INTO `psd` (no
+    // separate allocation), so it stays valid until `psd` is freed below.
+    let got = unsafe {
+        GetSecurityDescriptorDacl(psd, &mut dacl_present, &mut dacl, &mut dacl_defaulted)
+    };
+    if got == 0 || dacl_present == 0 || dacl.is_null() {
+        let error = io::Error::last_os_error();
+        // SAFETY: freeing the same `LocalAlloc`-backed descriptor exactly once.
+        unsafe {
+            LocalFree(psd);
+        }
+        return Err(error);
+    }
+    let path_wide = path_to_wide(path)?;
+    // SAFETY: `path_wide` is a valid null-terminated UTF-16 path and `dacl`
+    // a valid ACL living inside `psd`; `SetNamedSecurityInfoW` copies what
+    // it needs and does not retain the pointer. Only the DACL is written
+    // (owner/group params are null), with
+    // `UNPROTECTED_DACL_SECURITY_INFORMATION` so inheritance stays enabled,
+    // i.e. `SE_DACL_PROTECTED` ends up CLEAR.
+    let error = unsafe {
+        SetNamedSecurityInfoW(
+            path_wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            dacl as *const ACL,
+            ptr::null_mut(),
+        )
+    };
+    // SAFETY: freeing the same `LocalAlloc`-backed descriptor exactly once.
+    unsafe {
+        LocalFree(psd);
+    }
+    if error != 0 {
+        return Err(io::Error::from_raw_os_error(error as i32));
+    }
+    Ok(())
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────
 
 /// Raw SID bytes of the current process token's user. Used for the
