@@ -497,6 +497,12 @@ and `#[ignore]` changes are never declarable**.
   newly ignored, empty list, blocked comparison all fail); campaign-gated
   through
   `scripts/ci/rust_guard_select.py`, a no-op pass with no active campaign.
+* `node-binding` (full tier, windows-latest) — builds the `shamir-client`
+  napi binding (`npm ci` + `npm run build:debug`), checks the generated
+  `native/index.js`/`index.d.ts` for drift, packs the tarball and installs
+  it into a clean consumer directory (require-smoke for `ShamirClient` /
+  `ShamirDbError`), then `tsc --noEmit`-typechecks
+  `tests/e2e/packaging/consumer.ts` against the published `.d.ts`.
 * `merge-gate` — `merge gate (required)`, `if: always()`, `needs:` every
   gating job; the ONE required branch-protection check, decided by
   `scripts/ci/gates/merge_gate_check.py` from `toJSON(needs)`. Failure or
