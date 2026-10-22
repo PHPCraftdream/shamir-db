@@ -1,4 +1,3 @@
-mod backing;
 mod inventory;
 mod receipt;
 mod row;

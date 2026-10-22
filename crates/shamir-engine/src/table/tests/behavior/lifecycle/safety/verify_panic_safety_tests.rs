@@ -6,7 +6,7 @@
 //! skipped that reset, permanently disabling the background consistency
 //! watchdog with no signal to anyone (the identical shape as the
 //! group-commit leader bug fixed alongside this test in
-//! `repo/group_commit/tests/panicking_flush_tests.rs`).
+//! `repo/journal/backend/group_commit/tests/panicking_flush_tests.rs`).
 
 use std::time::Duration;
 
