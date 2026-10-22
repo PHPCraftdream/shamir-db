@@ -281,10 +281,14 @@ fn unclean_disk_export_certifies_and_twice_preserves_j_and_gap() {
 #[test]
 fn disk_export_refuses_resync_quarantined_repo() {
     let dir = tempfile::tempdir().unwrap();
+    // The fixture's handles must be gone (runtime dropped) before the next
+    // open, as in `exercise`: fjall releases its directory lock asynchronously.
+    let rt = runtime();
+    let (version, _, _) = rt.block_on(fixture(dir.path(), true));
+    drop(rt);
+    assert_eq!(version, 4);
     let rt = runtime();
     rt.block_on(async {
-        let (version, _, _) = fixture(dir.path(), true).await;
-        assert_eq!(version, 4);
         let source = ShamirDb::init(SystemStoreConfig::Fjall(
             dir.path().join("shamir_db_meta.redb"),
         ))
