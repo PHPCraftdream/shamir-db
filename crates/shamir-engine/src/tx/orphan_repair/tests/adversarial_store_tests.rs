@@ -14,7 +14,7 @@ use crate::repo::{BoxRepo, RepoInstance};
 use crate::table::TableConfig;
 use crate::tx::commit::{PostWalPrePublishHook, TEST_POST_WAL_PRE_PUBLISH_HOOK};
 use crate::tx::drainer::orphan_repair::repair_event;
-use crate::tx::tests::post_wal_orphan_ordering_tests::panic_post_wal;
+use crate::tx::tests::drain::orphans::post_wal_orphan_ordering_tests::panic_post_wal;
 
 struct CountingStore {
     inner: StoreChangelog,

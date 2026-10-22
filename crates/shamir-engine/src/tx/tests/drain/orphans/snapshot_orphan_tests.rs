@@ -7,8 +7,8 @@ use shamir_wal::{WalEntryV2, WalTicket, WalTicketState};
 
 use crate::repo::repo_token;
 use crate::tx::materialize::TEST_PRE_MATERIALIZE_REPO;
-use crate::tx::tests::post_wal_orphan_ordering_tests::{fixture, panic_post_wal};
-use crate::tx::tests::snapshot_visibility_park_tests::spawn_settled_commit;
+use crate::tx::tests::drain::orphans::post_wal_orphan_ordering_tests::{fixture, panic_post_wal};
+use crate::tx::tests::recovery::snapshot_gc::snapshot_visibility_park_tests::spawn_settled_commit;
 use crate::tx::MaterializationState;
 
 // Catches acknowledging B across a written orphan, or settling A without replay.

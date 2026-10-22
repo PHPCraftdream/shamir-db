@@ -17,7 +17,7 @@ use crate::repo::RepoInstance;
 use crate::table::TableManager;
 use crate::tx::commit::TxError;
 use crate::tx::materialize::TEST_PRE_MATERIALIZE_REPO;
-use crate::tx::tests::post_wal_orphan_ordering_tests::fixture;
+use crate::tx::tests::drain::orphans::post_wal_orphan_ordering_tests::fixture;
 use crate::tx::{MaterializationState, TxOutcome};
 
 // Observe the actual driver poll after its own version settles, not scheduling.

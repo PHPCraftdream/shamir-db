@@ -10,6 +10,7 @@ use crate::repo::{BoxRepoFactory, RepoInstance};
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
 use crate::tx::commit::{PostWalPrePublishHook, TEST_POST_WAL_PRE_PUBLISH_HOOK};
+use crate::tx::tests::recovery::snapshot_gc::snapshot_visibility_park_tests::spawn_settled_commit;
 
 pub(crate) async fn fixture(name: &str) -> (RepoInstance, Arc<PostWalPrePublishHook>) {
     let hook = Arc::new(PostWalPrePublishHook {
@@ -212,8 +213,7 @@ async fn post_wal_panic_same_record_later_writer_posting_survives_drain() {
             provenance: Default::default(),
         },
     ));
-    let (later_version, task) =
-        super::snapshot_visibility_park_tests::spawn_settled_commit(&repo, tx).await;
+    let (later_version, task) = spawn_settled_commit(&repo, tx).await;
     drop(snapshot);
     assert_eq!(later_version, orphan_version + 1);
     assert!(!task.is_finished());

@@ -17,10 +17,10 @@ use crate::table::TableConfig;
 use crate::tx::drainer::Drainer;
 #[cfg(debug_assertions)]
 use crate::tx::drainer::FAIL_INDEX_BATCH_TABLE_ID;
-use crate::tx::tests::journal_publish_order_tests::JournalPublishHook;
-use crate::tx::tests::post_wal_orphan_ordering_tests::fixture;
+use crate::tx::tests::commit::publication::journal_publish_order_tests::JournalPublishHook;
+use crate::tx::tests::drain::orphans::post_wal_orphan_ordering_tests::fixture;
 #[cfg(debug_assertions)]
-use crate::tx::tests::post_wal_orphan_ordering_tests::panic_post_wal;
+use crate::tx::tests::drain::orphans::post_wal_orphan_ordering_tests::panic_post_wal;
 
 // Red before instrumentation: the engine snapshot has no replay progress.
 // The real post-WAL driver is parked, then unwound into an orphan; the

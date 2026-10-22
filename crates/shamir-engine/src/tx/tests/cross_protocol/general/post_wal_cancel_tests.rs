@@ -13,6 +13,7 @@ use crate::repo::{BoxRepoFactory, RepoInstance};
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
 use crate::tx::commit::{PostWalPrePublishHook, TEST_POST_WAL_PRE_PUBLISH_HOOK};
+use crate::tx::tests::recovery::snapshot_gc::snapshot_visibility_park_tests::spawn_settled_commit;
 
 /// The embedded store releases its directory lock when its background workers
 /// notice the drop, so a reopen right after `drop` may briefly see `Locked`.
@@ -105,8 +106,7 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         .insert_tx(&InnerValue::Str("later".into()), Some(&mut tx))
         .await
         .unwrap();
-    let (later_version, later_task) =
-        super::snapshot_visibility_park_tests::spawn_settled_commit(&repo, tx).await;
+    let (later_version, later_task) = spawn_settled_commit(&repo, tx).await;
     assert!(!later_task.is_finished());
     drop(later_snapshot);
     assert_eq!(active_version, gate.durable_watermark() + 1);
@@ -248,8 +248,7 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         .insert_tx(&InnerValue::Str("C".into()), Some(&mut tx))
         .await
         .unwrap();
-    let (later_version, later_task) =
-        super::snapshot_visibility_park_tests::spawn_settled_commit(&repo, tx).await;
+    let (later_version, later_task) = spawn_settled_commit(&repo, tx).await;
     within("drain orphan before ack", repo.drainer().drain_all(&repo))
         .await
         .unwrap();

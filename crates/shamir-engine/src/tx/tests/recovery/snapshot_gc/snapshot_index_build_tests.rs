@@ -6,8 +6,8 @@ use shamir_types::types::common::new_map;
 use shamir_types::types::value::InnerValue;
 
 use crate::tx::materialize::TEST_PRE_MATERIALIZE_REPO;
-use crate::tx::tests::post_wal_orphan_ordering_tests::fixture;
-use crate::tx::tests::snapshot_visibility_park_tests::spawn_settled_commit;
+use crate::tx::tests::drain::orphans::post_wal_orphan_ordering_tests::fixture;
+use crate::tx::tests::recovery::snapshot_gc::snapshot_visibility_park_tests::spawn_settled_commit;
 
 // Catches replacing the explicit allocation-high-water build pin with W:
 // v11 predates Building, so no dirty-set catchup can repair an omitted row.
