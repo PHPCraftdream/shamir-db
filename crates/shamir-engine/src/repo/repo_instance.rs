@@ -158,7 +158,7 @@ pub struct RepoInstance {
     fk_reverse_cache: Arc<FkReverseCache>,
     #[cfg(test)]
     pub(crate) table_init_hook:
-        Arc<arc_swap::ArcSwapOption<super::tests::table_init_retry_tests::TableInitHook>>,
+        Arc<arc_swap::ArcSwapOption<super::tests::identity::table_init_retry_tests::TableInitHook>>,
     /// Shared policy installed before recovery and observed by every clone.
     durability: Arc<arc_swap::ArcSwap<DurabilityPolicy>>,
     durability_metrics: Arc<DurabilityMetrics>,
