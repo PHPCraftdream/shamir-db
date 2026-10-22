@@ -5,7 +5,7 @@ use shamir_storage::error::{DbError, DbResult};
 use shamir_wal::WalEntryV2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::tx::drainer) enum Outcome {
+pub(in crate::tx::drain::drainer) enum Outcome {
     Repaired,
     /// The journal channel was FULL: the event was deferred into the
     /// repair-pending set (no gap, no failure). The drainer's repair-pending
@@ -15,7 +15,7 @@ pub(in crate::tx::drainer) enum Outcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::tx::drainer) enum GapReason {
+pub(in crate::tx::drain::drainer) enum GapReason {
     UnknownWAL,
     EnqueueFailed,
     WriterGap,
@@ -38,7 +38,7 @@ fn is_closed_writer(error: &DbError) -> bool {
 /// WAL-derived event repair. A checkpoint failure is retryable unless the
 /// existing changefeed boundary reports its exact closed-send sentinel. The
 /// sentinel is stringly typed because the existing production API does not expose a closed-writer type; backend errors are never parsed.
-pub(in crate::tx::drainer) async fn repair_event(
+pub(in crate::tx::drain::drainer) async fn repair_event(
     repo: &RepoInstance,
     entry: &WalEntryV2,
 ) -> DbResult<Outcome> {

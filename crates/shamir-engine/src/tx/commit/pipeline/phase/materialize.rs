@@ -14,7 +14,7 @@ use crate::tx::commit_phases::{
 use crate::tx::tx_outcome::MaterializationState;
 
 #[cfg(test)]
-pub(super) static TEST_PRE_MATERIALIZE_REPO: std::sync::OnceLock<String> =
+pub(in crate::tx) static TEST_PRE_MATERIALIZE_REPO: std::sync::OnceLock<String> =
     std::sync::OnceLock::new();
 
 /// Phases 5a–6 of the commit pipeline, run OUTSIDE `commit_lock` (P2b).
@@ -49,7 +49,7 @@ pub(super) static TEST_PRE_MATERIALIZE_REPO: std::sync::OnceLock<String> =
 /// Multi-table failure can leave some rows visible to latest-state readers.
 /// The shared version remains unsettled until orphan replay completes every
 /// visibility-bearing projection, so snapshots stay below that version.
-pub(super) async fn materialize(
+pub(in crate::tx) async fn materialize(
     tx: &mut TxContext,
     repo: &RepoInstance,
     version_guard: shamir_tx::VersionGuard,
@@ -254,7 +254,7 @@ pub(super) async fn materialize(
 
 /// Drainer derives events from available WAL evidence; only unknown/eventless
 /// entries or failed journal admission/persistence become GAPs.
-pub(super) fn settle_visible(
+pub(in crate::tx) fn settle_visible(
     repo: &RepoInstance,
     guard: shamir_tx::VersionGuard,
     prepared: Option<(
@@ -272,7 +272,7 @@ pub(super) fn settle_visible(
     }
 }
 
-pub(super) async fn apply_tracked_counter_phase(
+pub(in crate::tx) async fn apply_tracked_counter_phase(
     tx: &TxContext,
     repo: &RepoInstance,
     commit_version: u64,
@@ -304,7 +304,7 @@ pub(super) async fn apply_tracked_counter_phase(
 
 /// State carried from [`materialize`] to [`post_publish_cleanup`].
 /// Both run outside `commit_lock` (P2b).
-pub(super) struct PostPublishState {
+pub(in crate::tx) struct PostPublishState {
     pub tx_id: u64,
     pub commit_version: u64,
     /// True iff data/index projections and vector delta bookkeeping succeeded.
@@ -340,7 +340,7 @@ pub(super) struct PostPublishState {
 /// Marker writes do not settle in-memory visibility: inline success already
 /// settled Phase 6, while failed projections remain owned by orphan replay.
 /// They do not need serialisation against other committers.
-pub(super) async fn post_publish_cleanup(
+pub(in crate::tx) async fn post_publish_cleanup(
     state: PostPublishState,
     repo: &RepoInstance,
     gate: &RepoTxGate,
@@ -425,7 +425,7 @@ pub(super) async fn post_publish_cleanup(
 /// CRIT-2 (#436) test-injection seam: when set to `true`, force
 /// `interner_delta_safe_to_truncate` to return `Ok(false)` (unsafe),
 /// simulating an interner delta id that is NOT yet persisted. Mirrors
-/// the `FAIL_HISTORY_SEED_TX_ID` pattern in `recovery.rs` but is a
+/// the `FAIL_HISTORY_SEED_TX_ID` pattern in `recovery/v2.rs` but is a
 /// simple boolean latch because the regression test needs to gate the
 /// WHOLE A5 decision, not a single txn (the drainer's Phase C pass
 /// calls the gate once per entry; a static-atomic latch flips ALL of

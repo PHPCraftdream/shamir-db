@@ -78,7 +78,7 @@ use crate::tx::tx_outcome::MaterializationState;
 /// and `changefeed_event` are consumed. Returns the final
 /// [`MaterializationState`] for the caller's `TxOutcome`.
 #[inline]
-pub(super) async fn finalize_sync_post_publish(
+pub(in crate::tx) async fn finalize_sync_post_publish(
     tx: &TxContext,
     post_publish_state: PostPublishState,
     changefeed_event: Option<Arc<shamir_tx::ChangelogEvent>>,

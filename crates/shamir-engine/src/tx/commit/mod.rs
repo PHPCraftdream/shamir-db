@@ -1,5 +1,10 @@
-mod entry;
-mod legacy_and_lockfree;
+pub(crate) mod acknowledgement;
+pub(crate) mod pipeline;
+
+// The stage-B2 commit pipeline files (entry, legacy_and_lockfree and their
+// mod.rs) moved under `pipeline/phase/commit/`; the logical path
+// `crate::tx::commit` and every re-exported item below stay identical.
+pub(in crate::tx::commit) use pipeline::phase::commit::{entry, legacy_and_lockfree};
 
 #[cfg(test)]
 pub(crate) use crate::tx::ack::apply_backpressure;
@@ -11,8 +16,7 @@ pub(crate) use crate::tx::ack::{
 pub(crate) use entry::TEST_SYNCED_WAL_REPO;
 pub use entry::{commit_tx, wal_ops_from_tx, TxError};
 pub(in crate::tx) use entry::{
-    commit_tx_inner, commit_wal_durability, fire_post_wal_pre_publish_test_hook, maybe_crash,
-    wal_completion,
+    commit_tx_inner, commit_wal_durability, maybe_crash, wal_completion,
 };
 #[cfg(test)]
 pub(crate) use entry::{

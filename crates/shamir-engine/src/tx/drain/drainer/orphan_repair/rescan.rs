@@ -7,7 +7,7 @@ use shamir_wal::WalEntryV2;
 /// Re-scan the contiguous window prefix `[dur+1 ..= vis]` after a WAL reseed.
 /// Synchronous on purpose: the non-`Send` scc guard must never be live across
 /// the `.await` that follows in the drainer pass.
-pub(in crate::tx::drainer) fn rescan_window_prefix(
+pub(in crate::tx::drain::drainer) fn rescan_window_prefix(
     drainer: &Drainer,
     gate: &RepoTxGate,
     dur: u64,

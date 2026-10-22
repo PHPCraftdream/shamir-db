@@ -12,6 +12,8 @@ use std::sync::Arc;
 
 use super::RepoInstance;
 
+mod receipt_worker_impl;
+
 impl RepoInstance {
     /// cancel-safe: yes — `OnceCell::get_or_try_init` semantics. If
     /// cancellation occurs during init, the cell remains uninitialised

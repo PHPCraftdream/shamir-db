@@ -15,7 +15,7 @@ use crate::repo::RepoInstance;
 /// preparation time. The returned Arc is the SAME allocation used by the
 /// channel and later live broadcast (one allocation, as in the old emit).
 #[inline]
-pub(super) fn publish_journaled(
+pub(in crate::tx) fn publish_journaled(
     repo: &RepoInstance,
     guard: VersionGuard,
     prepared: Option<(Arc<ChangelogEvent>, Option<Arc<RepoChangefeed>>)>,

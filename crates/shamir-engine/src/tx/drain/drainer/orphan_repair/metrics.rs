@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use super::super::Drainer;
 
-pub(in crate::tx::drainer) fn record_orphan_failure(
+pub(in crate::tx::drain::drainer) fn record_orphan_failure(
     drainer: &Drainer,
     failed: &mut bool,
     error: impl std::fmt::Display,
@@ -31,21 +31,21 @@ pub(in crate::tx::drainer) fn record_orphan_failure(
 }
 
 #[derive(Default)]
-pub(in crate::tx::drainer) struct Metrics {
+pub(in crate::tx::drain::drainer) struct Metrics {
     repaired: AtomicU64,
     gaps: AtomicU64,
 }
 
 impl Metrics {
-    pub(in crate::tx::drainer) fn repaired(&self) {
+    pub(in crate::tx::drain::drainer) fn repaired(&self) {
         self.repaired.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(in crate::tx::drainer) fn gap(&self) {
+    pub(in crate::tx::drain::drainer) fn gap(&self) {
         self.gaps.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(in crate::tx::drainer) fn snapshot(&self) -> (u64, u64) {
+    pub(in crate::tx::drain::drainer) fn snapshot(&self) -> (u64, u64) {
         (
             self.repaired.load(Ordering::Relaxed),
             self.gaps.load(Ordering::Relaxed),

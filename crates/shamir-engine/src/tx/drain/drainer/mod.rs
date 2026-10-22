@@ -81,7 +81,6 @@ use shamir_wal::WalEntryV2;
 
 mod state;
 
-#[path = "../orphan_repair/mod.rs"]
 mod orphan_repair;
 
 pub use state::Drainer;

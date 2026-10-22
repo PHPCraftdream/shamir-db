@@ -3,7 +3,7 @@ use crate::repo::RepoInstance;
 use crate::tx::drainer::{Drainer, WalEntryV2};
 use shamir_storage::error::DbResult;
 
-pub(in crate::tx::drainer) async fn settle_event(
+pub(in crate::tx::drain::drainer) async fn settle_event(
     drainer: &Drainer,
     repo: &RepoInstance,
     entry: &WalEntryV2,

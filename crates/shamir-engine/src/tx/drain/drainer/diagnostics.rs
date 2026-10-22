@@ -25,7 +25,7 @@ impl Drainer {
         log::debug!("orphan journal repair totals: repaired={repaired}, gaps={gaps}");
     }
 
-    pub(in crate::tx::drainer) fn record_orphan_failure(
+    pub(in crate::tx::drain::drainer) fn record_orphan_failure(
         &self,
         failed: &mut bool,
         error: impl std::fmt::Display,

@@ -20,7 +20,7 @@ use crate::tx::materialize::interner_delta_safe_to_truncate;
 /// never fails `set`/`remove`/the default `transact`, so there is no
 /// natural way to trigger this path from the public API.
 ///
-/// Mirrors `recovery.rs`'s `FAIL_HISTORY_SEED_TX_ID` pattern, keyed here by
+/// Mirrors `recovery/v2.rs`'s `FAIL_HISTORY_SEED_TX_ID` pattern, keyed here by
 /// `table_id` instead of `txn_id` (this batch's own grouping key). Reset to
 /// 0 between tests to avoid cross-test bleed. `#[cfg(debug_assertions)]` so
 /// a `--release` build pays zero cost — the static is absent and the load
@@ -486,7 +486,7 @@ impl Drainer {
             // racing an undrained commit) while this entry's ops were still
             // in the drain window.
             //
-            // Mirror cold recovery instead (`recovery.rs`'s `replay_v2_op` /
+            // Mirror cold recovery instead (`recovery/v2.rs`'s `replay_v2_op` /
             // `seed_version_cache_for_entry`): resolve the table by token —
             // if it (or an MvccStore attached to it in the meantime) still
             // exists, write straight to its raw `data_store` (idempotent:
@@ -593,7 +593,7 @@ impl Drainer {
         // Phase B (index postings): per-table ONE `Store::transact` for
         // every table's accumulated IndexPut/IndexDel ops — was previously
         // one awaited `info_store().set`/`remove` PLUS one `table_by_token`
-        // resolve PER POSTING (`recovery.rs`'s `replay_v2_op`); an
+        // resolve PER POSTING (`recovery/v2.rs`'s `replay_v2_op`); an
         // index-heavy drain window paid E*T awaits instead of T.
         // ================================================================
 
