@@ -50,8 +50,7 @@ impl RepoInstance {
         policy: DurabilityPolicy,
     ) -> DbResult<Self> {
         #[cfg(test)]
-        let fixture =
-            crate::repo::tests::journal::recovery_gap_marker_tests::take_open_fixture(&name);
+        let fixture = crate::repo::tests::recovery_gap_marker_tests::take_open_fixture(&name);
         #[cfg(test)]
         let instance = match fixture {
             Some(instance) => instance,
