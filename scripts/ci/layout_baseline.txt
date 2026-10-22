@@ -6,9 +6,5 @@ dir crates/shamir-engine/src/repo 19
 dir crates/shamir-engine/src/repo/tests 21
 dir crates/shamir-engine/src/tx 21
 dir crates/shamir-engine/src/tx/tests 60
-dir crates/shamir-engine/src/tx/tests/ssi_phantom_tests 9
 file crates/shamir-engine/src/repo/repo_instance.rs 1967
 file crates/shamir-engine/src/tx/commit.rs 1183
-file crates/shamir-engine/src/tx/pre_commit.rs 2818
-file crates/shamir-engine/src/tx/tests/p1096_tx_aware_unique_check_tests.rs 1305
-file crates/shamir-engine/src/tx/tests/recovery_tests.rs 1725
