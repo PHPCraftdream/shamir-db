@@ -55,6 +55,7 @@ REQUIRED_JOBS = [
     "rustdoc",
     "engine-features",
     "test-discovery",
+    "node-binding",
 ]
 
 DRAFT_MESSAGE = "draft PR: full matrix not run, not merge-ready"

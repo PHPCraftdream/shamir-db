@@ -9,7 +9,7 @@
   "scripts": {
     "build:client-ts": "cd ../../crates/shamir-client-ts && npm ci && npm run build",
     "build:server": "cd ../.. && cargo build --release -p shamir-server",
-    "build:binding": "cd ../../crates/shamir-client-node && npm install && npx napi build --platform --release",
+    "build:binding": "cd ../../crates/shamir-client-node && npm ci && npm run build",
     "build": "npm run build:client-ts && npm run build:server && npm run build:binding",
     "test": "node e2e.test.js"
   },

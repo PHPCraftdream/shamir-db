@@ -19,14 +19,13 @@ name: ts-e2e-nightly
 #                 ubuntu-latest — pure TS + a Rust server build, no
 #                 platform-specific binding.
 #
-#  - `node-e2e` : the Node.js NATIVE binding (`shamir-client-node`, the napi
-#                 crate excluded from the Cargo workspace) driven through
+#  - `node-e2e` : the Node.js NATIVE binding (`shamir-client-node`, a regular
+#                 Cargo workspace member) driven through
 #                 `tests/e2e/`. windows-latest — see the job header for the
-#                 MSVC reasoning (short version: the checked-in
-#                 `crates/shamir-client-node/rust-toolchain.toml` pins
-#                 `x86_64-pc-windows-msvc`, matching CLAUDE.md's "MSVC-only
-#                 on Windows — built separately"; that is the established,
-#                 toolchain-pinned build path).
+#                 MSVC reasoning (short version: the MSVC target is the
+#                 established, primary napi build path on Windows,
+#                 matching CLAUDE.md's "MSVC-only on Windows — built
+#                 separately").
 #
 # WHY NIGHTLY, NOT PER-PR: each job builds a release `shamir-server` (the
 # `node-e2e` job ALSO builds the napi `.node`), which is far too slow for a
@@ -91,26 +90,27 @@ jobs:
   # WHY WINDOWS, NOT UBUNTU: napi-rs IS cross-platform in principle
   # (`shamir-client-node/package.json`'s `napi.targets` lists linux + macos +
   # windows triples, so the binding is DESIGNED to build everywhere). But the
-  # established, TOOLCHAIN-PINNED build path in THIS repo is Windows/MSVC:
+  # established, primary BUILD path in THIS repo is Windows/MSVC:
   #
-  #  - `crates/shamir-client-node/rust-toolchain.toml` pins
-  #    `targets = ["x86_64-pc-windows-msvc"]` with a comment that napi-rs on
-  #    Windows requires MSVC linkage (delay-load against `node.exe`). On an
-  #    ubuntu runner this file would make rustup cross-download the unused
-  #    windows-msvc rust-std and the linux napi build would be untested here.
-  #  - `CLAUDE.md` Workspace section: "napi-rs binding, MSVC-only on Windows
-  #    — built separately".
-  #  - The shipped prebuilt artifact in the crate is
-  #    `shamir-client.win32-x64-msvc.node`.
+  #  - `napi.targets` in `shamir-client-node/package.json` includes
+  #    `x86_64-pc-windows-msvc`, because napi-rs on Windows requires MSVC
+  #    linkage (delay-load against `node.exe`); the linux napi build would
+  #    be untested here.
+  #  - `CLAUDE.md` Workspace section: the binding is a regular workspace
+  #    member, MSVC-only on Windows (use msvc, not gnu).
+  #  - The shipped prebuilt artifact is
+  #    `native/shamir-client.win32-x64-msvc.node` in the crate.
   #  - `tests/e2e/README.md`'s steps assume the Windows/MSVC dev environment.
   #
   # The "MSVC-only on Windows" note is a Windows-BUILD-path constraint (when
   # on Windows, use msvc not gnu), not a "Windows-only ever" statement — but
   # until a linux napi build is explicitly validated, windows-latest is the
-  # conservative choice that matches the repo's checked-in toolchain pin and
+  # conservative choice that matches the repo's established MSVC build path
+  # and
   # runs the suite exactly as the repo's dev docs describe. windows-latest
-  # runners ship MSVC + the .NET framework napi-rs shells out to, so `napi
-  # build --platform --release` works with no extra setup. (If a future
+  # runners ship MSVC + the .NET framework napi-rs shells out to, so `npm
+  # run build` (napi build --platform --release, via
+  # tests/e2e/package.json) works with no extra setup. (If a future
   # decision validates the linux napi path, this job can move to ubuntu —
   # the cross-platform target list in package.json is the evidence it would
   # work; that's a separate follow-up.)
@@ -154,8 +154,10 @@ jobs:
       # `require('@shamir/client')` fails with MODULE_NOT_FOUND) +
       # build:server (`cargo build --release -p shamir-server`, producing
       # target/release/shamir-server.exe) + build:binding (`cd
-      # shamir-client-node && npm install && napi build --platform
-      # --release`, producing the .node binding), per tests/e2e/package.json.
+      # shamir-client-node && npm ci && npm run build` — napi build
+      # --platform --release --output-dir native --js index.js --dts
+      # index.d.ts — producing native/shamir-client.<triple>.node), per
+      # tests/e2e/package.json.
       # `npm test` then runs `node e2e.test.js`, which spawns the server and
       # drives the native binding through the full TLS+SCRAM+Batch flow. A
       # non-zero exit fails the job.

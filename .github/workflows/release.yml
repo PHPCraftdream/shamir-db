@@ -163,7 +163,7 @@ jobs:
   # e2e suite (`crates/shamir-client-ts/src/__tests__/**/e2e-*.test.ts`) are
   # intentionally NOT wired into this per-PR gate — both require a release
   # `shamir-server` build (and the napi one needs the MSVC-built
-  # `shamir-client-node` binding, excluded from the workspace), too heavy
+  # `shamir-client-node` binding, a regular workspace member), too heavy
   # for every PR. They now run on the scheduled nightly workflow
   # `.github/workflows/ts-e2e-nightly.yml` (cron + `workflow_dispatch`).
   # The pure-TS unit tests for `shamir-client-ts` ARE gated per-PR — see the

@@ -65,7 +65,12 @@ ALLOWED = (
 
 # Per-package extra allowances: {npm package name: (license id, ...)}.  Each
 # entry needs a comment naming the package, the license and why it is fine.
-EXCEPTIONS: dict[str, tuple[str, ...]] = {}
+EXCEPTIONS: dict[str, tuple[str, ...]] = {
+    # argparse 2.x (js-yaml dependency of the @napi-rs/cli build tooling in
+    # crates/shamir-client-node): `Python-2.0`, the permissive OSI-approved PSF
+    # license. Dev-only (never shipped in the published package); no runtime use.
+    "argparse": ("Python-2.0",),
+}
 
 _TOKEN = re.compile(r"\(|\)|[A-Za-z0-9][A-Za-z0-9.+\-]*")
 

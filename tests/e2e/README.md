@@ -36,7 +36,10 @@ npm run build       # builds @shamir/client's dist/ + shamir-server release + .n
    `package-lock.json`) is what makes `tsc` resolvable. Without it,
    a fresh clone hits `Cannot find module '.../shamir-client-ts/dist/index.js'`.
 2. `cargo build --release -p shamir-server` — produces `target/release/shamir-server[.exe]`
-3. `napi build --platform --release` — produces `crates/shamir-client-node/shamir-client.<triple>.node`
+3. `cd crates/shamir-client-node && npm ci && npm run build` —
+   `napi build --platform --release --output-dir native --js index.js
+   --dts index.d.ts` produces
+   `crates/shamir-client-node/native/shamir-client.<triple>.node`
 
 `shamir-client` (the napi binding) and `@shamir/client` (a pure-TypeScript
 package, no native code) are both published locally via `file:`

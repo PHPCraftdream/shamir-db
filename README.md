@@ -80,7 +80,7 @@ S.H.A.M.I.R. — однонодовая база данных на Rust в ст�
 
 ## 🏗️ Architecture
 
-Cargo workspace, layered from foundation upward. The default workspace currently contains 24 Rust crates; `shamir-client-node` is built separately with the MSVC toolchain and the TypeScript client is managed by npm.
+Cargo workspace, layered from foundation upward. The default workspace currently contains 25 Rust crates (including the `shamir-client-node` napi-rs binding) and the TypeScript client is managed by npm.
 
 ```
 crates/
