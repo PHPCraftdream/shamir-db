@@ -7797,3 +7797,9 @@ to_path = "crates/shamir-engine/src/tx/recovery/cold_reconcile/tests/reconcile_t
 to_item = "shamir-engine::lib::tx::recovery::cold_reconcile::tests::reconcile_tests::subprocess_crashes_during_reconcile_reopen_twice"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/cold_reconcile/tests/reconcile_tests.rs"
+item = "shamir-engine::lib::tx::cold_reconcile::tests::reconcile_tests::subprocess_crashes_during_reconcile_reopen_twice"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
