@@ -1,6 +1,3 @@
-#[cfg(feature = "fjall")]
-pub(super) use crate::tx::cold_reconcile::algorithm::reconcile_with_hook;
-
 mod classification_tests;
 mod ephemeral_cold_tests;
 #[cfg(feature = "fjall")]
