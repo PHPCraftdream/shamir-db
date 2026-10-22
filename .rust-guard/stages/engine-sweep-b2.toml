@@ -1,1 +1,424 @@
 base = "d9e258e23245ced1aca9f0d3300cbd40a3516da5"
+[[moved]]
+path = "crates/shamir-engine/src/repo/durability_policy/durability_policy/commit_policy.rs"
+item = "shamir-engine::lib::tx::commit::durability_completion::TEST_SYNCED_WAL_REPO"
+to_path = "crates/shamir-engine/src/repo/durability_policy/durability_policy/commit_policy.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::durability_completion::TEST_SYNCED_WAL_REPO"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/repo/durability_policy/durability_policy/commit_policy.rs"
+item = "shamir-engine::lib::tx::commit::durability_completion::commit_wal_durability"
+to_path = "crates/shamir-engine/src/repo/durability_policy/durability_policy/commit_policy.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::durability_completion::commit_wal_durability"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/repo/durability_policy/durability_policy/commit_policy.rs"
+item = "shamir-engine::lib::tx::commit::durability_completion::wal_completion"
+to_path = "crates/shamir-engine/src/repo/durability_policy/durability_policy/commit_policy.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::durability_completion::wal_completion"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::AsyncIndexTailHook"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::AsyncIndexTailHook"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::DEFAULT_MAX_TX_LIFETIME"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::DEFAULT_MAX_TX_LIFETIME"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::DbError::from"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::DbError::from"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::PostValidatePrePublishHook"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::PostValidatePrePublishHook"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::PostWalPrePublishHook"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::PostWalPrePublishHook"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::TEST_ASYNC_INDEX_TAIL_HOOK"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::TEST_ASYNC_INDEX_TAIL_HOOK"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::TEST_MAX_TX_LIFETIME_OVERRIDE"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::TEST_MAX_TX_LIFETIME_OVERRIDE"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::TEST_POST_VALIDATE_PRE_PUBLISH_HOOK"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::TEST_POST_VALIDATE_PRE_PUBLISH_HOOK"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::TEST_POST_WAL_PRE_PUBLISH_HOOK"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::TEST_POST_WAL_PRE_PUBLISH_HOOK"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::TxError"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::TxError"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::TxError::into_transaction_info"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::TxError::into_transaction_info"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::commit_tx"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::commit_tx"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::commit_tx_inner"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::commit_tx_inner"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::commit_tx_lockfree"
+to_path = "crates/shamir-engine/src/tx/commit/legacy_and_lockfree.rs"
+to_item = "shamir-engine::lib::tx::commit::legacy_and_lockfree::commit_tx_lockfree"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::effective_max_tx_lifetime"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::effective_max_tx_lifetime"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::fire_async_index_tail_test_hook"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::fire_async_index_tail_test_hook"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::fire_cancel_test_hook"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::fire_cancel_test_hook"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::fire_post_validate_pre_publish_test_hook"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::fire_post_validate_pre_publish_test_hook"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::maybe_crash"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::maybe_crash"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::release_pessimistic_locks"
+to_path = "crates/shamir-engine/src/tx/commit/legacy_and_lockfree.rs"
+to_item = "shamir-engine::lib::tx::commit::legacy_and_lockfree::release_pessimistic_locks"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::wal_ops_from_tx"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::wal_ops_from_tx"
+reason = "relocated by the layout sweep"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::AsyncIndexTailHook"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::AsyncIndexTailHook"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::DEFAULT_MAX_TX_LIFETIME"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::DEFAULT_MAX_TX_LIFETIME"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::PostValidatePrePublishHook"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::PostValidatePrePublishHook"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::PostWalPrePublishHook"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::PostWalPrePublishHook"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::TEST_ASYNC_INDEX_TAIL_HOOK"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::TEST_ASYNC_INDEX_TAIL_HOOK"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::TEST_MAX_TX_LIFETIME_OVERRIDE"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::TEST_MAX_TX_LIFETIME_OVERRIDE"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::TEST_POST_VALIDATE_PRE_PUBLISH_HOOK"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::TEST_POST_VALIDATE_PRE_PUBLISH_HOOK"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::TEST_POST_WAL_PRE_PUBLISH_HOOK"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::TEST_POST_WAL_PRE_PUBLISH_HOOK"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/repo/durability_policy/durability_policy/commit_policy.rs"
+item = "shamir-engine::lib::tx::commit::durability_completion::TEST_SYNCED_WAL_REPO"
+to_path = "crates/shamir-engine/src/repo/durability_policy/durability_policy/commit_policy.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::durability_completion::TEST_SYNCED_WAL_REPO"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::TxError"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::TxError"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::commit_tx"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::commit_tx"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::commit_tx_inner"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::commit_tx_inner"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::commit_tx_inner_legacy_async"
+to_path = "crates/shamir-engine/src/tx/commit/legacy_and_lockfree.rs"
+to_item = "shamir-engine::lib::tx::commit::legacy_and_lockfree::commit_tx_inner_legacy_async"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::commit_tx_lockfree"
+to_path = "crates/shamir-engine/src/tx/commit/legacy_and_lockfree.rs"
+to_item = "shamir-engine::lib::tx::commit::legacy_and_lockfree::commit_tx_lockfree"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/repo/durability_policy/durability_policy/commit_policy.rs"
+item = "shamir-engine::lib::tx::commit::durability_completion::commit_wal_durability"
+to_path = "crates/shamir-engine/src/repo/durability_policy/durability_policy/commit_policy.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::durability_completion::commit_wal_durability"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::effective_max_tx_lifetime"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::effective_max_tx_lifetime"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::fire_async_index_tail_test_hook"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::fire_async_index_tail_test_hook"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::fire_cancel_test_hook"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::fire_cancel_test_hook"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::fire_post_validate_pre_publish_test_hook"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::fire_post_validate_pre_publish_test_hook"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::fire_post_wal_pre_publish_test_hook"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::fire_post_wal_pre_publish_test_hook"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::DbError::from"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::DbError::from"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::TxError::into_transaction_info"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::TxError::into_transaction_info"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::maybe_crash"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::maybe_crash"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::release_pessimistic_locks"
+to_path = "crates/shamir-engine/src/tx/commit/legacy_and_lockfree.rs"
+to_item = "shamir-engine::lib::tx::commit::legacy_and_lockfree::release_pessimistic_locks"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/repo/durability_policy/durability_policy/commit_policy.rs"
+item = "shamir-engine::lib::tx::commit::durability_completion::wal_completion"
+to_path = "crates/shamir-engine/src/repo/durability_policy/durability_policy/commit_policy.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::durability_completion::wal_completion"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::wal_ops_from_tx"
+to_path = "crates/shamir-engine/src/tx/commit/entry.rs"
+to_item = "shamir-engine::lib::tx::commit::entry::wal_ops_from_tx"
+reason = "relocated by the layout sweep (signature tokens re-qualified)"
+owner = "@layout-sweep"
+
+[[removed]]
+path = "crates/shamir-engine/src/tx/commit.rs"
+item = "shamir-engine::lib::tx::commit::durability_completion"
+reason = "module declaration dissolved by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/tx/commit/entry.rs"
+item = "shamir-engine::lib::tx::commit::entry::durability_completion"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/tx/commit/mod.rs"
+item = "shamir-engine::lib::tx::commit::entry"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[added]]
+path = "crates/shamir-engine/src/tx/commit/mod.rs"
+item = "shamir-engine::lib::tx::commit::legacy_and_lockfree"
+reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
