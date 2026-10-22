@@ -13,6 +13,7 @@ use std::sync::Arc;
 use super::RepoInstance;
 
 mod follower_durability;
+mod receipt_worker_impl;
 mod write_domain_membership;
 
 impl RepoInstance {
