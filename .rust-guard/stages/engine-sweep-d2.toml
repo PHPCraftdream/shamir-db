@@ -1,1 +1,7 @@
 base = "4d2ef81654588e527b0e07bd60f7f7f7342a84c5"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/repo/instance/repo_instance.rs"
+item = "catalog"
+reason = "repo/mod.rs keeps the old crate::repo::visibility_observer path alive through a re-export of repo_instance::catalog::visibility_impl; the narrowest audience that compiles is pub(in crate::repo)"
+owner = "engine-sweep"
