@@ -1,0 +1,36 @@
+[package]
+name = "shamir-private-dir"
+version = "0.1.0-alpha.1"
+publish = false
+edition = "2021"
+description = "ShamirDB shared owner-private directory primitive — create/verify a directory only the current OS account can access (Unix mode 0700 / Windows protected one-ACE DACL)."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/PHPCraftdream/shamir-db"
+
+[target.'cfg(unix)'.dependencies]
+# Same version/features `shamir-wasm-host` uses — `geteuid` for the uid check.
+rustix = { version = "1.1.4", default-features = false, features = ["std", "process"] }
+
+[target.'cfg(windows)'.dependencies]
+# Raw Win32 FFI for the SDDL security descriptor, token user SID lookup and
+# DACL verification. Version pinned to the one already resolved elsewhere in
+# the workspace's dependency graph (see Cargo.lock) so this doesn't introduce
+# a second distinct `windows-sys` version.
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lib]
+# Doctests are banned project-wide (slow: recompile-per-example). Behavioural
+# coverage is in unit/integration tests under `src/tests/`.
+doctest = false
+
+[lints]
+workspace = true

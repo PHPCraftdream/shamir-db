@@ -40,6 +40,11 @@ wat = "=1.254.2"
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1.4", default-features = false, features = ["std", "process"] }
 
+# Windows disk tier (DEC-3 Q5-c): private-directory create/verify for
+# `<data_dir>/cache/wasm`, built on the shared crate's safe API.
+[target.'cfg(windows)'.dependencies]
+shamir-private-dir = { path = "../shamir-private-dir" }
+
 [dev-dependencies]
 argon2 = "0.5"
 

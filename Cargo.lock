@@ -3724,6 +3724,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "shamir-private-dir"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "rustix 1.1.4",
+ "tempfile",
+ "windows-sys 0.60.2",
+]
+
+[[package]]
 name = "shamir-query-builder"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -3880,10 +3889,10 @@ dependencies = [
 name = "shamir-transport-ipc"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "shamir-private-dir",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4015,6 +4024,7 @@ dependencies = [
  "sha2",
  "shamir-collections",
  "shamir-funclib",
+ "shamir-private-dir",
  "shamir-types",
  "tempfile",
  "thiserror 2.0.18",
