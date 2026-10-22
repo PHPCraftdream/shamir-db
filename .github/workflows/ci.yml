@@ -8,6 +8,10 @@ on:
     # ready_for_review is what starts the FULL tier when a draft is promoted.
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch: {}
+  # Weekly safety net: macOS cells run only here and on workflow_dispatch;
+  # pull_request and push runs skip them (CI-05).
+  schedule:
+    - cron: '17 3 * * 1'
 
 # A newer push to the same PR cancels the older (superseded) run so it stops
 # hogging the shared runner pool. Master pushes, scheduled and manual runs
@@ -165,7 +169,9 @@ jobs:
       - name: layout check
         run: python3 -I scripts/ci/check_layout.py
 
-  # Lint on every supported OS. Crucial for cross-platform correctness:
+  # Lint on ubuntu and windows on every PR (macOS joins on workflow_dispatch
+  # and the weekly schedule: CI-05, the macOS runner queue is the bottleneck).
+  # Crucial for cross-platform correctness:
   # `#[cfg(windows)]` / `#[cfg(target_os = "macos")]` branches (service
   # installers, runtime, signal handling) are ONLY compiled — and therefore
   # only linted — on the matching OS. An ubuntu-only clippy never saw them.
@@ -177,7 +183,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON(contains(fromJSON('["workflow_dispatch","schedule"]'), github.event_name) && '["ubuntu-latest","windows-latest","macos-latest"]' || '["ubuntu-latest","windows-latest"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
@@ -225,6 +231,8 @@ jobs:
   # default-plus cell, where defaults are on anyway and the unified
   # resolution legitimately equals the label.  Reduced-feature cells catch
   # missing `cfg` guards that the workspace-wide jobs unify away.
+  # Feature resolution is OS-independent, so PR runs use ubuntu only; the
+  # windows and macOS cells run on workflow_dispatch and the weekly schedule.
   engine-features:
     name: engine features (${{ matrix.cell.id }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -233,7 +241,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON(contains(fromJSON('["workflow_dispatch","schedule"]'), github.event_name) && '["ubuntu-latest","windows-latest","macos-latest"]' || '["ubuntu-latest"]') }}
         cell:
           - { id: no-default, flags: "--no-default-features" }
           - { id: fjall, flags: "--no-default-features --features fjall" }
@@ -322,7 +330,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON(contains(fromJSON('["workflow_dispatch","schedule"]'), github.event_name) && '["ubuntu-latest","windows-latest","macos-latest"]' || '["ubuntu-latest","windows-latest"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
@@ -399,7 +407,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON(contains(fromJSON('["workflow_dispatch","schedule"]'), github.event_name) && '["ubuntu-latest","windows-latest","macos-latest"]' || '["ubuntu-latest","windows-latest"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
@@ -746,7 +754,7 @@ jobs:
   # Runs only when .rust-guard/stages.toml has an active campaign whose
   # packages the diff touches (scripts/ci/rust_guard_select.py); with
   # `campaigns = []` the selection step prints a notice and the job
-  # passes (no-op). Full tier on ubuntu + windows + macos; the merge-gate
+  # passes (no-op). Full tier on ubuntu + windows (macOS on dispatch/schedule); the merge-gate
   # wiring arrives with the aggregate-gate chunk.
   test-discovery:
     name: test discovery (${{ matrix.os }}, ${{ matrix.config.id }})
@@ -756,7 +764,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON(contains(fromJSON('["workflow_dispatch","schedule"]'), github.event_name) && '["ubuntu-latest","windows-latest","macos-latest"]' || '["ubuntu-latest","windows-latest"]') }}
         config:
           - { id: default, flags: "" }
           - { id: test-util-fts, flags: "--features test-util,fts_indexed_long" }

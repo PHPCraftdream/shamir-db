@@ -400,11 +400,15 @@ CI is segmented into two tiers to keep the shared runner pool responsive
   diff cannot be bounded (lockfile, toolchain, `.github/`, scripts, …) and
   to fmt-only for docs-only diffs.
 * **FULL tier — the merge gate.** `gh pr ready` (ready_for_review), master
-  pushes and `workflow_dispatch` run the full matrix (fmt, clippy ×3 OS,
-  test ×3, integration ×3, ts-unit, cooldown, `deny`, loom) plus the path-gated
-  numa workflow (opt-in QEMU tier). The `deny` job (cargo deny + npm licences)
-  always reports but skips its work when no dependency input changed since
-  the base. Windows/macOS-only failures surface only here, at ready.
+  pushes and `workflow_dispatch` run the full matrix (fmt, clippy ×2 OS,
+  test ×2, integration ×2 (ubuntu, windows), engine feature cells on ubuntu,
+  ts-unit, cooldown, `deny`, loom) plus the path-gated numa workflow (opt-in
+  QEMU tier). The `deny` job (cargo deny + npm licences) always reports but
+  skips its work when no dependency input changed since the base. Windows-only
+  failures surface here, at ready. The macOS cells (and the windows/macOS
+  engine feature cells) run only on `workflow_dispatch` and a weekly schedule
+  (CI-05: the macOS runner queue was the merge bottleneck), so a macOS-only
+  failure surfaces there, not at ready.
 * All three workflows cancel superseded PR runs via `concurrency`.
 * Force the full tier on a draft: `gh workflow run ci.yml --ref <branch>`.
 
