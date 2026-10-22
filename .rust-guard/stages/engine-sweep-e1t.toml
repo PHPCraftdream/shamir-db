@@ -1,4 +1,4 @@
-base = "99654c15fafaa6b0a5242e5ac5fe9ce36c020b2f"
+base = "543e4c275aad2bc228fa59c78238468448d57ccb"
 
 [[moved]]
 path = "crates/shamir-engine/src/tx/tests/a8_interner_delta_tests.rs"
