@@ -52,14 +52,28 @@ async fn hybrid_reopen_starts_a_new_lineage_and_keeps_no_table_data() {
     drop(table);
     drop(group);
     drop(repo);
-    let reopened = RepoInstance::from_factory_with_durability(
-        "hybrid-policy".into(),
-        BoxRepoFactory::hybrid(path),
-        vec![TableConfig::new("items")],
-        policy,
-    )
-    .await
-    .unwrap();
+    // The first incarnation's background tasks (drain loop) hold the fjall
+    // directory lock until they next run and observe the owner gone; on a
+    // current-thread runtime that happens only once we yield. Retry the open
+    // while the lock is still being released (bounded: 5 s).
+    let mut attempts = 0;
+    let reopened = loop {
+        match RepoInstance::from_factory_with_durability(
+            "hybrid-policy".into(),
+            BoxRepoFactory::hybrid(path.clone()),
+            vec![TableConfig::new("items")],
+            policy,
+        )
+        .await
+        {
+            Ok(repo) => break repo,
+            Err(err) if attempts < 250 && err.to_string().contains("Locked") => {
+                attempts += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(err) => panic!("reopen failed after {attempts} retries: {err}"),
+        }
+    };
     // PR #160 lineage fence: hybrid repositories mint a NEW lineage at every
     // process start (nothing survives a restart), so the reopened identity
     // must differ from the first incarnation's.
