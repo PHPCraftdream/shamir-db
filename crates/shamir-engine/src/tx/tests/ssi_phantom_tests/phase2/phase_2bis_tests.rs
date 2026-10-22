@@ -17,7 +17,7 @@ use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
 use crate::tx::CommitError;
 
-use super::helpers::{make_repo, test_bound_key, test_index_id, test_posting_key};
+use super::super::helpers::{make_repo, test_bound_key, test_index_id, test_posting_key};
 
 /// THE Step 4 proof. A Serializable tx2 arms a predicate dependency covering
 /// `age >= 30` on the "age" index. A concurrent committer (tx1) writes a
