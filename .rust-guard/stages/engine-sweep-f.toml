@@ -1,4 +1,5 @@
 base = "10089d5c6eaec6918c37fb2748fe775dfe445002"
+
 [[moved]]
 path = "crates/shamir-engine/src/lib.rs"
 item = "shamir-engine::lib::meta"
@@ -56,246 +57,6 @@ reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
 [[moved]]
-path = "crates/shamir-engine/src/meta/namespace.rs"
-item = "shamir-engine::lib::meta::namespace::MetaKey"
-to_path = "crates/shamir-engine/src/repo/meta/namespace.rs"
-to_item = "shamir-engine::lib::repo::meta::namespace::MetaKey"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/namespace.rs"
-item = "shamir-engine::lib::meta::namespace::MetaKey::as_record_id"
-to_path = "crates/shamir-engine/src/repo/meta/namespace.rs"
-to_item = "shamir-engine::lib::repo::meta::namespace::MetaKey::as_record_id"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/namespace.rs"
-item = "shamir-engine::lib::meta::namespace::MetaKey::tag"
-to_path = "crates/shamir-engine/src/repo/meta/namespace.rs"
-to_item = "shamir-engine::lib::repo::meta::namespace::MetaKey::tag"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/recovery_marker.rs"
-item = "shamir-engine::lib::meta::recovery_marker::convert"
-to_path = "crates/shamir-engine/src/repo/meta/recovery_marker.rs"
-to_item = "shamir-engine::lib::repo::meta::recovery_marker::convert"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/recovery_marker.rs"
-item = "shamir-engine::lib::meta::recovery_marker::load_last_committed"
-to_path = "crates/shamir-engine/src/repo/meta/recovery_marker.rs"
-to_item = "shamir-engine::lib::repo::meta::recovery_marker::load_last_committed"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/recovery_marker.rs"
-item = "shamir-engine::lib::meta::recovery_marker::load_next_tx_id_snapshot"
-to_path = "crates/shamir-engine/src/repo/meta/recovery_marker.rs"
-to_item = "shamir-engine::lib::repo::meta::recovery_marker::load_next_tx_id_snapshot"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/recovery_marker.rs"
-item = "shamir-engine::lib::meta::recovery_marker::load_u64"
-to_path = "crates/shamir-engine/src/repo/meta/recovery_marker.rs"
-to_item = "shamir-engine::lib::repo::meta::recovery_marker::load_u64"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/recovery_marker.rs"
-item = "shamir-engine::lib::meta::recovery_marker::save_last_committed"
-to_path = "crates/shamir-engine/src/repo/meta/recovery_marker.rs"
-to_item = "shamir-engine::lib::repo::meta::recovery_marker::save_last_committed"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/recovery_marker.rs"
-item = "shamir-engine::lib::meta::recovery_marker::save_last_committed_flushed"
-to_path = "crates/shamir-engine/src/repo/meta/recovery_marker.rs"
-to_item = "shamir-engine::lib::repo::meta::recovery_marker::save_last_committed_flushed"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/recovery_marker.rs"
-item = "shamir-engine::lib::meta::recovery_marker::save_next_tx_id_snapshot"
-to_path = "crates/shamir-engine/src/repo/meta/recovery_marker.rs"
-to_item = "shamir-engine::lib::repo::meta::recovery_marker::save_next_tx_id_snapshot"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/recovery_marker.rs"
-item = "shamir-engine::lib::meta::recovery_marker::save_u64"
-to_path = "crates/shamir-engine/src/repo/meta/recovery_marker.rs"
-to_item = "shamir-engine::lib::repo::meta::recovery_marker::save_u64"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/bookmark.rs"
-item = "shamir-engine::lib::meta::repl::bookmark::load_clean_horizon"
-to_path = "crates/shamir-engine/src/repo/meta/repl/bookmark.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::bookmark::load_clean_horizon"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/bookmark.rs"
-item = "shamir-engine::lib::meta::repl::bookmark::load_fence_record"
-to_path = "crates/shamir-engine/src/repo/meta/repl/bookmark.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::bookmark::load_fence_record"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/bookmark.rs"
-item = "shamir-engine::lib::meta::repl::bookmark::load_replication_bookmark"
-to_path = "crates/shamir-engine/src/repo/meta/repl/bookmark.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::bookmark::load_replication_bookmark"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/bookmark.rs"
-item = "shamir-engine::lib::meta::repl::bookmark::save_fence_record_v3_aware"
-to_path = "crates/shamir-engine/src/repo/meta/repl/bookmark.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::bookmark::save_fence_record_v3_aware"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/bookmark_v3.rs"
-item = "shamir-engine::lib::meta::repl::bookmark_v3::BookmarkV3"
-to_path = "crates/shamir-engine/src/repo/meta/repl/bookmark_v3.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::bookmark_v3::BookmarkV3"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/bookmark_v3.rs"
-item = "shamir-engine::lib::meta::repl::bookmark_v3::FollowerBookmarkState"
-to_path = "crates/shamir-engine/src/repo/meta/repl/bookmark_v3.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::bookmark_v3::FollowerBookmarkState"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/bookmark_v3.rs"
-item = "shamir-engine::lib::meta::repl::bookmark_v3::classify_follower_bookmark"
-to_path = "crates/shamir-engine/src/repo/meta/repl/bookmark_v3.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::bookmark_v3::classify_follower_bookmark"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/bookmark_v3.rs"
-item = "shamir-engine::lib::meta::repl::bookmark_v3::codec_error"
-to_path = "crates/shamir-engine/src/repo/meta/repl/bookmark_v3.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::bookmark_v3::codec_error"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/bookmark_v3.rs"
-item = "shamir-engine::lib::meta::repl::bookmark_v3::decode_bookmark_v3"
-to_path = "crates/shamir-engine/src/repo/meta/repl/bookmark_v3.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::bookmark_v3::decode_bookmark_v3"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/bookmark_v3.rs"
-item = "shamir-engine::lib::meta::repl::bookmark_v3::encode_bookmark_v3"
-to_path = "crates/shamir-engine/src/repo/meta/repl/bookmark_v3.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::bookmark_v3::encode_bookmark_v3"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/bookmark_v3.rs"
-item = "shamir-engine::lib::meta::repl::bookmark_v3::key"
-to_path = "crates/shamir-engine/src/repo/meta/repl/bookmark_v3.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::bookmark_v3::key"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/bookmark_v3.rs"
-item = "shamir-engine::lib::meta::repl::bookmark_v3::load_bookmark_v3"
-to_path = "crates/shamir-engine/src/repo/meta/repl/bookmark_v3.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::bookmark_v3::load_bookmark_v3"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/bookmark_v3.rs"
-item = "shamir-engine::lib::meta::repl::bookmark_v3::read_strict_record"
-to_path = "crates/shamir-engine/src/repo/meta/repl/bookmark_v3.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::bookmark_v3::read_strict_record"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/bookmark_v3.rs"
-item = "shamir-engine::lib::meta::repl::bookmark_v3::receipt_pointer_resolves"
-to_path = "crates/shamir-engine/src/repo/meta/repl/bookmark_v3.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::bookmark_v3::receipt_pointer_resolves"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/bookmark_v3.rs"
-item = "shamir-engine::lib::meta::repl::bookmark_v3::refusal_reason"
-to_path = "crates/shamir-engine/src/repo/meta/repl/bookmark_v3.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::bookmark_v3::refusal_reason"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/bookmark_v3.rs"
-item = "shamir-engine::lib::meta::repl::bookmark_v3::save_bookmark_v3"
-to_path = "crates/shamir-engine/src/repo/meta/repl/bookmark_v3.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::bookmark_v3::save_bookmark_v3"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/bookmark_v3.rs"
-item = "shamir-engine::lib::meta::repl::bookmark_v3::sniff_version"
-to_path = "crates/shamir-engine/src/repo/meta/repl/bookmark_v3.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::bookmark_v3::sniff_version"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/fence_record.rs"
-item = "shamir-engine::lib::meta::repl::fence_record::FenceRecord"
-to_path = "crates/shamir-engine/src/repo/meta/repl/fence_record.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::fence_record::FenceRecord"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/gate_provenance.rs"
-item = "shamir-engine::lib::meta::repl::gate_provenance::with_follower_provenance"
-to_path = "crates/shamir-engine/src/repo/meta/repl/gate_provenance.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::gate_provenance::with_follower_provenance"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
 path = "crates/shamir-engine/src/meta/repl/mod.rs"
 item = "shamir-engine::lib::meta::repl::bookmark"
 to_path = "crates/shamir-engine/src/repo/meta/repl/mod.rs"
@@ -336,134 +97,6 @@ reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
 [[moved]]
-path = "crates/shamir-engine/src/meta/repl/receipt.rs"
-item = "shamir-engine::lib::meta::repl::receipt::MAX_RECEIPT_BYTES"
-to_path = "crates/shamir-engine/src/repo/meta/repl/receipt.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::receipt::MAX_RECEIPT_BYTES"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/receipt.rs"
-item = "shamir-engine::lib::meta::repl::receipt::MAX_RECEIPT_EVENTS"
-to_path = "crates/shamir-engine/src/repo/meta/repl/receipt.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::receipt::MAX_RECEIPT_EVENTS"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/receipt.rs"
-item = "shamir-engine::lib::meta::repl::receipt::MAX_RECEIPT_OPS"
-to_path = "crates/shamir-engine/src/repo/meta/repl/receipt.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::receipt::MAX_RECEIPT_OPS"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/receipt.rs"
-item = "shamir-engine::lib::meta::repl::receipt::ReceiptBinding"
-to_path = "crates/shamir-engine/src/repo/meta/repl/receipt.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::receipt::ReceiptBinding"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/receipt.rs"
-item = "shamir-engine::lib::meta::repl::receipt::ReceiptCounterDelta"
-to_path = "crates/shamir-engine/src/repo/meta/repl/receipt.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::receipt::ReceiptCounterDelta"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/receipt.rs"
-item = "shamir-engine::lib::meta::repl::receipt::ReceiptOp"
-to_path = "crates/shamir-engine/src/repo/meta/repl/receipt.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::receipt::ReceiptOp"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/receipt.rs"
-item = "shamir-engine::lib::meta::repl::receipt::ReceiptPhase"
-to_path = "crates/shamir-engine/src/repo/meta/repl/receipt.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::receipt::ReceiptPhase"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/receipt.rs"
-item = "shamir-engine::lib::meta::repl::receipt::ReceiptTimestamp"
-to_path = "crates/shamir-engine/src/repo/meta/repl/receipt.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::receipt::ReceiptTimestamp"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/receipt.rs"
-item = "shamir-engine::lib::meta::repl::receipt::ReceiptVersionMapping"
-to_path = "crates/shamir-engine/src/repo/meta/repl/receipt.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::receipt::ReceiptVersionMapping"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/receipt.rs"
-item = "shamir-engine::lib::meta::repl::receipt::ReplicationReceipt"
-to_path = "crates/shamir-engine/src/repo/meta/repl/receipt.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::receipt::ReplicationReceipt"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/receipt.rs"
-item = "shamir-engine::lib::meta::repl::receipt::decode_receipt"
-to_path = "crates/shamir-engine/src/repo/meta/repl/receipt.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::receipt::decode_receipt"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/receipt.rs"
-item = "shamir-engine::lib::meta::repl::receipt::encode_receipt"
-to_path = "crates/shamir-engine/src/repo/meta/repl/receipt.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::receipt::encode_receipt"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/receipt.rs"
-item = "shamir-engine::lib::meta::repl::receipt::load_outstanding_receipt"
-to_path = "crates/shamir-engine/src/repo/meta/repl/receipt.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::receipt::load_outstanding_receipt"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/receipt.rs"
-item = "shamir-engine::lib::meta::repl::receipt::receipt_id"
-to_path = "crates/shamir-engine/src/repo/meta/repl/receipt.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::receipt::receipt_id"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/receipt.rs"
-item = "shamir-engine::lib::meta::repl::receipt::receipt_key"
-to_path = "crates/shamir-engine/src/repo/meta/repl/receipt.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::receipt::receipt_key"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/receipt.rs"
-item = "shamir-engine::lib::meta::repl::receipt::validate"
-to_path = "crates/shamir-engine/src/repo/meta/repl/receipt.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::receipt::validate"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
 path = "crates/shamir-engine/src/meta/repl/tests/bookmark_refusal_tests.rs"
 item = "shamir-engine::lib::meta::repl::tests::bookmark_refusal_tests::adoption_never_overwrites_a_refused_record"
 to_path = "crates/shamir-engine/src/repo/meta/repl/tests/bookmark_refusal_tests.rs"
@@ -476,14 +109,6 @@ path = "crates/shamir-engine/src/meta/repl/tests/bookmark_refusal_tests.rs"
 item = "shamir-engine::lib::meta::repl::tests::bookmark_refusal_tests::adoption_preserves_bookmark_clean_horizon_and_receipt"
 to_path = "crates/shamir-engine/src/repo/meta/repl/tests/bookmark_refusal_tests.rs"
 to_item = "shamir-engine::lib::repo::meta::repl::tests::bookmark_refusal_tests::adoption_preserves_bookmark_clean_horizon_and_receipt"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/tests/bookmark_refusal_tests.rs"
-item = "shamir-engine::lib::meta::repl::tests::bookmark_refusal_tests::assert_refused"
-to_path = "crates/shamir-engine/src/repo/meta/repl/tests/bookmark_refusal_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::tests::bookmark_refusal_tests::assert_refused"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -516,14 +141,6 @@ path = "crates/shamir-engine/src/meta/repl/tests/bookmark_refusal_tests.rs"
 item = "shamir-engine::lib::meta::repl::tests::bookmark_refusal_tests::fresh_store_classifies_fresh_and_adopts_v3_baseline"
 to_path = "crates/shamir-engine/src/repo/meta/repl/tests/bookmark_refusal_tests.rs"
 to_item = "shamir-engine::lib::repo::meta::repl::tests::bookmark_refusal_tests::fresh_store_classifies_fresh_and_adopts_v3_baseline"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/tests/bookmark_refusal_tests.rs"
-item = "shamir-engine::lib::meta::repl::tests::bookmark_refusal_tests::legacy_fixtures"
-to_path = "crates/shamir-engine/src/repo/meta/repl/tests/bookmark_refusal_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::tests::bookmark_refusal_tests::legacy_fixtures"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -713,14 +330,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/meta/repl/tests/receipt_tests.rs"
-item = "shamir-engine::lib::meta::repl::tests::receipt_tests::full_receipt"
-to_path = "crates/shamir-engine/src/repo/meta/repl/tests/receipt_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::repl::tests::receipt_tests::full_receipt"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repl/tests/receipt_tests.rs"
 item = "shamir-engine::lib::meta::repl::tests::receipt_tests::receipt_id_is_deterministic_and_separating"
 to_path = "crates/shamir-engine/src/repo/meta/repl/tests/receipt_tests.rs"
 to_item = "shamir-engine::lib::repo::meta::repl::tests::receipt_tests::receipt_id_is_deterministic_and_separating"
@@ -756,158 +365,6 @@ path = "crates/shamir-engine/src/meta/repl/tests/receipt_tests.rs"
 item = "shamir-engine::lib::meta::repl::tests::receipt_tests::size_bound_constants_are_sane"
 to_path = "crates/shamir-engine/src/repo/meta/repl/tests/receipt_tests.rs"
 to_item = "shamir-engine::lib::repo::meta::repl::tests::receipt_tests::size_bound_constants_are_sane"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repo_identity.rs"
-item = "shamir-engine::lib::meta::repo_identity::LifecycleState"
-to_path = "crates/shamir-engine/src/repo/meta/repo_identity.rs"
-to_item = "shamir-engine::lib::repo::meta::repo_identity::LifecycleState"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repo_identity.rs"
-item = "shamir-engine::lib::meta::repo_identity::RepoIdentity"
-to_path = "crates/shamir-engine/src/repo/meta/repo_identity.rs"
-to_item = "shamir-engine::lib::repo::meta::repo_identity::RepoIdentity"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repo_identity.rs"
-item = "shamir-engine::lib::meta::repo_identity::RepoIdentity::bump"
-to_path = "crates/shamir-engine/src/repo/meta/repo_identity.rs"
-to_item = "shamir-engine::lib::repo::meta::repo_identity::RepoIdentity::bump"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repo_identity.rs"
-item = "shamir-engine::lib::meta::repo_identity::RepoIdentity::load_or_create"
-to_path = "crates/shamir-engine/src/repo/meta/repo_identity.rs"
-to_item = "shamir-engine::lib::repo::meta::repo_identity::RepoIdentity::load_or_create"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repo_identity.rs"
-item = "shamir-engine::lib::meta::repo_identity::RepoIdentity::load_record"
-to_path = "crates/shamir-engine/src/repo/meta/repo_identity.rs"
-to_item = "shamir-engine::lib::repo::meta::repo_identity::RepoIdentity::load_record"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repo_identity.rs"
-item = "shamir-engine::lib::meta::repo_identity::RepoIdentity::new_lineage_id"
-to_path = "crates/shamir-engine/src/repo/meta/repo_identity.rs"
-to_item = "shamir-engine::lib::repo::meta::repo_identity::RepoIdentity::new_lineage_id"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repo_identity.rs"
-item = "shamir-engine::lib::meta::repo_identity::RepoIdentity::save_record"
-to_path = "crates/shamir-engine/src/repo/meta/repo_identity.rs"
-to_item = "shamir-engine::lib::repo::meta::repo_identity::RepoIdentity::save_record"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repo_identity.rs"
-item = "shamir-engine::lib::meta::repo_identity::RepoIdentity::save_record_inner"
-to_path = "crates/shamir-engine/src/repo/meta/repo_identity.rs"
-to_item = "shamir-engine::lib::repo::meta::repo_identity::RepoIdentity::save_record_inner"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repo_identity.rs"
-item = "shamir-engine::lib::meta::repo_identity::SKIP_ARMING_FLUSH_FOR_TEST"
-to_path = "crates/shamir-engine/src/repo/meta/repo_identity.rs"
-to_item = "shamir-engine::lib::repo::meta::repo_identity::SKIP_ARMING_FLUSH_FOR_TEST"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repo_identity.rs"
-item = "shamir-engine::lib::meta::repo_identity::SKIP_BUMP_FLUSH_FOR_TEST"
-to_path = "crates/shamir-engine/src/repo/meta/repo_identity.rs"
-to_item = "shamir-engine::lib::repo::meta::repo_identity::SKIP_BUMP_FLUSH_FOR_TEST"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repo_identity.rs"
-item = "shamir-engine::lib::meta::repo_identity::SKIP_CLEAN_FLUSH_FOR_TEST"
-to_path = "crates/shamir-engine/src/repo/meta/repo_identity.rs"
-to_item = "shamir-engine::lib::repo::meta::repo_identity::SKIP_CLEAN_FLUSH_FOR_TEST"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repo_identity.rs"
-item = "shamir-engine::lib::meta::repo_identity::SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST"
-to_path = "crates/shamir-engine/src/repo/meta/repo_identity.rs"
-to_item = "shamir-engine::lib::repo::meta::repo_identity::SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repo_identity.rs"
-item = "shamir-engine::lib::meta::repo_identity::ensure_armed"
-to_path = "crates/shamir-engine/src/repo/meta/repo_identity.rs"
-to_item = "shamir-engine::lib::repo::meta::repo_identity::ensure_armed"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repo_identity.rs"
-item = "shamir-engine::lib::meta::repo_identity::load_lifecycle_record"
-to_path = "crates/shamir-engine/src/repo/meta/repo_identity.rs"
-to_item = "shamir-engine::lib::repo::meta::repo_identity::load_lifecycle_record"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repo_identity.rs"
-item = "shamir-engine::lib::meta::repo_identity::load_state"
-to_path = "crates/shamir-engine/src/repo/meta/repo_identity.rs"
-to_item = "shamir-engine::lib::repo::meta::repo_identity::load_state"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repo_identity.rs"
-item = "shamir-engine::lib::meta::repo_identity::mark_clean"
-to_path = "crates/shamir-engine/src/repo/meta/repo_identity.rs"
-to_item = "shamir-engine::lib::repo::meta::repo_identity::mark_clean"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repo_identity.rs"
-item = "shamir-engine::lib::meta::repo_identity::requires_unclean_bump"
-to_path = "crates/shamir-engine/src/repo/meta/repo_identity.rs"
-to_item = "shamir-engine::lib::repo::meta::repo_identity::requires_unclean_bump"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/repo_identity.rs"
-item = "shamir-engine::lib::meta::repo_identity::save_lifecycle_record_inner"
-to_path = "crates/shamir-engine/src/repo/meta/repo_identity.rs"
-to_item = "shamir-engine::lib::repo::meta::repo_identity::save_lifecycle_record_inner"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/envelope_tests.rs"
-item = "shamir-engine::lib::meta::tests::envelope_tests::Sample"
-to_path = "crates/shamir-engine/src/repo/meta/tests/envelope_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::envelope_tests::Sample"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -961,185 +418,9 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/meta/tests/follower_durability_tests.rs"
-item = "shamir-engine::lib::meta::tests::follower_durability_tests::info"
-to_path = "crates/shamir-engine/src/repo/meta/tests/follower_durability_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::follower_durability_tests::info"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/follower_durability_tests.rs"
 item = "shamir-engine::lib::meta::tests::follower_durability_tests::versioned_record_keeps_upstream_bookmark_and_local_j_distinct"
 to_path = "crates/shamir-engine/src/repo/meta/tests/follower_durability_tests.rs"
 to_item = "shamir-engine::lib::repo::meta::tests::follower_durability_tests::versioned_record_keeps_upstream_bookmark_and_local_j_distinct"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::DurableSnapshot"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::DurableSnapshot"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::DurableSnapshot::get"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::DurableSnapshot::get"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::DurableSnapshot::insert"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::DurableSnapshot::insert"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::DurableSnapshot::iter_range_stream"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::DurableSnapshot::iter_range_stream"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::DurableSnapshot::iter_range_stream_reverse"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::DurableSnapshot::iter_range_stream_reverse"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::DurableSnapshot::iter_stream"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::DurableSnapshot::iter_stream"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::DurableSnapshot::remove"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::DurableSnapshot::remove"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::DurableSnapshot::scan_prefix_stream"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::DurableSnapshot::scan_prefix_stream"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::DurableSnapshot::set"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::DurableSnapshot::set"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::FlushStore"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::FlushStore"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::FlushStore::crash"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::FlushStore::crash"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::FlushStore::crash_image"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::FlushStore::crash_image"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::FlushStore::flush"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::FlushStore::flush"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::FlushStore::get"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::FlushStore::get"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::FlushStore::insert"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::FlushStore::insert"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::FlushStore::iter_range_stream"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::FlushStore::iter_range_stream"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::FlushStore::iter_range_stream_reverse"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::FlushStore::iter_range_stream_reverse"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::FlushStore::iter_stream"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::FlushStore::iter_stream"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::FlushStore::remove"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::FlushStore::remove"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::FlushStore::scan_prefix_stream"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::FlushStore::scan_prefix_stream"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::FlushStore::set"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::FlushStore::set"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -1225,46 +506,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::disk_crash::durable_open"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::disk_crash::durable_open"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::disk_crash::durable_policy"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::disk_crash::durable_policy"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::disk_crash::reseed_open"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::disk_crash::reseed_open"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::disk_crash::reseed_policy"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::disk_crash::reseed_policy"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::disk_crash::runtime"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::disk_crash::runtime"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
 item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::epoch_bump_is_atomic_single_key"
 to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
 to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::epoch_bump_is_atomic_single_key"
@@ -1292,14 +533,6 @@ path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
 item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::requires_unclean_bump_truth_table"
 to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
 to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::requires_unclean_bump_truth_table"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::reseed_repo"
-to_path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::reseed_repo"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -1409,14 +642,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/meta/tests/namespace_tests.rs"
-item = "shamir-engine::lib::meta::tests::namespace_tests::ALL"
-to_path = "crates/shamir-engine/src/repo/meta/tests/namespace_tests.rs"
-to_item = "shamir-engine::lib::repo::meta::tests::namespace_tests::ALL"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/meta/tests/namespace_tests.rs"
 item = "shamir-engine::lib::meta::tests::namespace_tests::record_id_is_system"
 to_path = "crates/shamir-engine/src/repo/meta/tests/namespace_tests.rs"
 to_item = "shamir-engine::lib::repo::meta::tests::namespace_tests::record_id_is_system"
@@ -1488,326 +713,6 @@ reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
 [[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::DrainCatchUpResult"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::DrainCatchUpResult"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::DRAIN_PASS_CAP"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::DRAIN_PASS_CAP"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::apply_shadow_entries"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::apply_shadow_entries"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::complete_finalisation_step"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::complete_finalisation_step"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::complete_finalisation_step_admitted"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::complete_finalisation_step_admitted"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::debug_check_admission"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::debug_check_admission"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::drain_shadow_log"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::drain_shadow_log"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::drain_until_caught_up"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::drain_until_caught_up"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::drain_until_caught_up_admitted"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::drain_until_caught_up_admitted"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::final_drain_and_commit"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::final_drain_and_commit"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::final_drain_and_commit_admitted"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::final_drain_and_commit_admitted"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::finalisation_progress"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::finalisation_progress"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::load_state"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::load_state"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::lock_finalisation"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::lock_finalisation"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::mark_cutover_ready"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::mark_cutover_ready"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::mark_cutover_ready_admitted"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::mark_cutover_ready_admitted"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::migration_id"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::migration_id"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::new"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::new"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::persist_state"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::persist_state"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::persist_state_admitted"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::persist_state_admitted"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::phase"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::phase"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::rollback"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::rollback"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::rollback_admitted"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::rollback_admitted"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::run_snapshot"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::run_snapshot"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::run_snapshot_admitted"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::run_snapshot_admitted"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::shadow_lag"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::shadow_lag"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::state"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::state"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::state_key"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::state_key"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::take_migration_freeze"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::take_migration_freeze"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::take_migration_freeze_admitted"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::take_migration_freeze_admitted"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::targets_table"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::targets_table"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::verify_committed_record_count"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::verify_committed_record_count"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::verify_record_count"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::verify_record_count"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::with_domains"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::with_domains"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationCoordinator::with_migration_freeze"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoordinator::with_migration_freeze"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationPhase"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationPhase"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationPhase::fmt"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationPhase::fmt"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationState"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationState"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/coordinator.rs"
-item = "shamir-engine::lib::migration::coordinator::MigrationState::new"
-to_path = "crates/shamir-engine/src/db_instance/migration/coordinator.rs"
-to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationState::new"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
 path = "crates/shamir-engine/src/migration/mod.rs"
 item = "shamir-engine::lib::migration::coordinator"
 to_path = "crates/shamir-engine/src/db_instance/migration/mod.rs"
@@ -1832,354 +737,10 @@ reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
 [[moved]]
-path = "crates/shamir-engine/src/migration/shadow_key.rs"
-item = "shamir-engine::lib::migration::shadow_key::ID_LEN_BYTES"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_key.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_key::ID_LEN_BYTES"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_key.rs"
-item = "shamir-engine::lib::migration::shadow_key::LSN_BYTES"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_key.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_key::LSN_BYTES"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_key.rs"
-item = "shamir-engine::lib::migration::shadow_key::PREFIX"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_key.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_key::PREFIX"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_key.rs"
-item = "shamir-engine::lib::migration::shadow_key::ShadowKey"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_key.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_key::ShadowKey"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_key.rs"
-item = "shamir-engine::lib::migration::shadow_key::ShadowKey::new"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_key.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_key::ShadowKey::new"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_key.rs"
-item = "shamir-engine::lib::migration::shadow_key::ShadowKey::parse_lsn"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_key.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_key::ShadowKey::parse_lsn"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_key.rs"
-item = "shamir-engine::lib::migration::shadow_key::ShadowKey::scan_prefix"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_key.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_key::ShadowKey::scan_prefix"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_key.rs"
-item = "shamir-engine::lib::migration::shadow_key::ShadowKey::to_bytes"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_key.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_key::ShadowKey::to_bytes"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_key.rs"
-item = "shamir-engine::lib::migration::shadow_key::ShadowKey::to_record_key"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_key.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_key::ShadowKey::to_record_key"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_log.rs"
-item = "shamir-engine::lib::migration::shadow_log::MigrationShadowLog"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_log.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_log::MigrationShadowLog"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_log.rs"
-item = "shamir-engine::lib::migration::shadow_log::MigrationShadowLog::append"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_log.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_log::MigrationShadowLog::append"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_log.rs"
-item = "shamir-engine::lib::migration::shadow_log::MigrationShadowLog::append_batch"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_log.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_log::MigrationShadowLog::append_batch"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_log.rs"
-item = "shamir-engine::lib::migration::shadow_log::MigrationShadowLog::current_lsn"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_log.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_log::MigrationShadowLog::current_lsn"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_log.rs"
-item = "shamir-engine::lib::migration::shadow_log::MigrationShadowLog::entry_key"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_log.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_log::MigrationShadowLog::entry_key"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_log.rs"
-item = "shamir-engine::lib::migration::shadow_log::MigrationShadowLog::key_prefix"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_log.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_log::MigrationShadowLog::key_prefix"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_log.rs"
-item = "shamir-engine::lib::migration::shadow_log::MigrationShadowLog::key_prefix_static"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_log.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_log::MigrationShadowLog::key_prefix_static"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_log.rs"
-item = "shamir-engine::lib::migration::shadow_log::MigrationShadowLog::new"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_log.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_log::MigrationShadowLog::new"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_log.rs"
-item = "shamir-engine::lib::migration::shadow_log::MigrationShadowLog::next_lsn"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_log.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_log::MigrationShadowLog::next_lsn"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_log.rs"
-item = "shamir-engine::lib::migration::shadow_log::MigrationShadowLog::parse_lsn_from_key"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_log.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_log::MigrationShadowLog::parse_lsn_from_key"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_log.rs"
-item = "shamir-engine::lib::migration::shadow_log::MigrationShadowLog::purge"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_log.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_log::MigrationShadowLog::purge"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_log.rs"
-item = "shamir-engine::lib::migration::shadow_log::MigrationShadowLog::read_from"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_log.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_log::MigrationShadowLog::read_from"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_log.rs"
-item = "shamir-engine::lib::migration::shadow_log::MigrationShadowLog::recover"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_log.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_log::MigrationShadowLog::recover"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_log.rs"
-item = "shamir-engine::lib::migration::shadow_log::MigrationShadowLog::store"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_log.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_log::MigrationShadowLog::store"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_log.rs"
-item = "shamir-engine::lib::migration::shadow_log::READ_FROM_PAGE_CAP"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_log.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_log::READ_FROM_PAGE_CAP"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_log.rs"
-item = "shamir-engine::lib::migration::shadow_log::SHADOW_LOG_VERSION"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_log.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_log::SHADOW_LOG_VERSION"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_log.rs"
-item = "shamir-engine::lib::migration::shadow_log::ShadowEntry"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_log.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_log::ShadowEntry"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_log.rs"
-item = "shamir-engine::lib::migration::shadow_log::ShadowOp"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_log.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_log::ShadowOp"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_log.rs"
-item = "shamir-engine::lib::migration::shadow_log::decode_entry"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_log.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_log::decode_entry"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/shadow_log.rs"
-item = "shamir-engine::lib::migration::shadow_log::encode_entry"
-to_path = "crates/shamir-engine/src/db_instance/migration/shadow_log.rs"
-to_item = "shamir-engine::lib::db_instance::migration::shadow_log::encode_entry"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/coordinator_tests.rs"
-item = "shamir-engine::lib::migration::tests::coordinator_tests::BatchCall"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/coordinator_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::coordinator_tests::BatchCall"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/coordinator_tests.rs"
-item = "shamir-engine::lib::migration::tests::coordinator_tests::CallCounts"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/coordinator_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::coordinator_tests::CallCounts"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/coordinator_tests.rs"
-item = "shamir-engine::lib::migration::tests::coordinator_tests::CountingStore"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/coordinator_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::coordinator_tests::CountingStore"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/coordinator_tests.rs"
-item = "shamir-engine::lib::migration::tests::coordinator_tests::CountingStore::get"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/coordinator_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::coordinator_tests::CountingStore::get"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/coordinator_tests.rs"
-item = "shamir-engine::lib::migration::tests::coordinator_tests::CountingStore::insert"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/coordinator_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::coordinator_tests::CountingStore::insert"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/coordinator_tests.rs"
-item = "shamir-engine::lib::migration::tests::coordinator_tests::CountingStore::iter_stream"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/coordinator_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::coordinator_tests::CountingStore::iter_stream"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/coordinator_tests.rs"
-item = "shamir-engine::lib::migration::tests::coordinator_tests::CountingStore::remove"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/coordinator_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::coordinator_tests::CountingStore::remove"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/coordinator_tests.rs"
-item = "shamir-engine::lib::migration::tests::coordinator_tests::CountingStore::remove_many"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/coordinator_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::coordinator_tests::CountingStore::remove_many"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/coordinator_tests.rs"
-item = "shamir-engine::lib::migration::tests::coordinator_tests::CountingStore::scan_prefix_stream"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/coordinator_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::coordinator_tests::CountingStore::scan_prefix_stream"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/coordinator_tests.rs"
-item = "shamir-engine::lib::migration::tests::coordinator_tests::CountingStore::set"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/coordinator_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::coordinator_tests::CountingStore::set"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/coordinator_tests.rs"
-item = "shamir-engine::lib::migration::tests::coordinator_tests::CountingStore::set_many"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/coordinator_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::coordinator_tests::CountingStore::set_many"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
 path = "crates/shamir-engine/src/migration/tests/coordinator_tests.rs"
 item = "shamir-engine::lib::migration::tests::coordinator_tests::TestStream"
 to_path = "crates/shamir-engine/src/db_instance/migration/tests/coordinator_tests.rs"
 to_item = "shamir-engine::lib::db_instance::migration::tests::coordinator_tests::TestStream"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/coordinator_tests.rs"
-item = "shamir-engine::lib::migration::tests::coordinator_tests::assert_lcg_shadow_model"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/coordinator_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::coordinator_tests::assert_lcg_shadow_model"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/coordinator_tests.rs"
-item = "shamir-engine::lib::migration::tests::coordinator_tests::assert_same_key_sequence"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/coordinator_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::coordinator_tests::assert_same_key_sequence"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/coordinator_tests.rs"
-item = "shamir-engine::lib::migration::tests::coordinator_tests::assert_shadow_replay"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/coordinator_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::coordinator_tests::assert_shadow_replay"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -2233,22 +794,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/migration/tests/coordinator_tests.rs"
-item = "shamir-engine::lib::migration::tests::coordinator_tests::lcg_next"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/coordinator_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::coordinator_tests::lcg_next"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/coordinator_tests.rs"
-item = "shamir-engine::lib::migration::tests::coordinator_tests::make_stores"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/coordinator_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::coordinator_tests::make_stores"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/coordinator_tests.rs"
 item = "shamir-engine::lib::migration::tests::coordinator_tests::phase_transitions_enforced"
 to_path = "crates/shamir-engine/src/db_instance/migration/tests/coordinator_tests.rs"
 to_item = "shamir-engine::lib::db_instance::migration::tests::coordinator_tests::phase_transitions_enforced"
@@ -2260,14 +805,6 @@ path = "crates/shamir-engine/src/migration/tests/coordinator_tests.rs"
 item = "shamir-engine::lib::migration::tests::coordinator_tests::rollback_before_commit"
 to_path = "crates/shamir-engine/src/db_instance/migration/tests/coordinator_tests.rs"
 to_item = "shamir-engine::lib::db_instance::migration::tests::coordinator_tests::rollback_before_commit"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/coordinator_tests.rs"
-item = "shamir-engine::lib::migration::tests::coordinator_tests::seed_src"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/coordinator_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::coordinator_tests::seed_src"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -2353,14 +890,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/migration/tests/cutover_guard_tests.rs"
-item = "shamir-engine::lib::migration::tests::cutover_guard_tests::fixture"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/cutover_guard_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::cutover_guard_tests::fixture"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/cutover_guard_tests.rs"
 item = "shamir-engine::lib::migration::tests::cutover_guard_tests::residual_lag_rejects_cutover_and_draining_remains_retryable"
 to_path = "crates/shamir-engine/src/db_instance/migration/tests/cutover_guard_tests.rs"
 to_item = "shamir-engine::lib::db_instance::migration::tests::cutover_guard_tests::residual_lag_rejects_cutover_and_draining_remains_retryable"
@@ -2436,78 +965,6 @@ path = "crates/shamir-engine/src/migration/tests/shadow_key_tests.rs"
 item = "shamir-engine::lib::migration::tests::shadow_key_tests::scan_prefix_length_prefixes_id"
 to_path = "crates/shamir-engine/src/db_instance/migration/tests/shadow_key_tests.rs"
 to_item = "shamir-engine::lib::db_instance::migration::tests::shadow_key_tests::scan_prefix_length_prefixes_id"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/shadow_log_tests.rs"
-item = "shamir-engine::lib::migration::tests::shadow_log_tests::RangeCountingStore"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/shadow_log_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::shadow_log_tests::RangeCountingStore"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/shadow_log_tests.rs"
-item = "shamir-engine::lib::migration::tests::shadow_log_tests::RangeCountingStore::get"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/shadow_log_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::shadow_log_tests::RangeCountingStore::get"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/shadow_log_tests.rs"
-item = "shamir-engine::lib::migration::tests::shadow_log_tests::RangeCountingStore::insert"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/shadow_log_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::shadow_log_tests::RangeCountingStore::insert"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/shadow_log_tests.rs"
-item = "shamir-engine::lib::migration::tests::shadow_log_tests::RangeCountingStore::iter_range_stream"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/shadow_log_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::shadow_log_tests::RangeCountingStore::iter_range_stream"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/shadow_log_tests.rs"
-item = "shamir-engine::lib::migration::tests::shadow_log_tests::RangeCountingStore::iter_stream"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/shadow_log_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::shadow_log_tests::RangeCountingStore::iter_stream"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/shadow_log_tests.rs"
-item = "shamir-engine::lib::migration::tests::shadow_log_tests::RangeCountingStore::remove"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/shadow_log_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::shadow_log_tests::RangeCountingStore::remove"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/shadow_log_tests.rs"
-item = "shamir-engine::lib::migration::tests::shadow_log_tests::RangeCountingStore::scan_prefix_stream"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/shadow_log_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::shadow_log_tests::RangeCountingStore::scan_prefix_stream"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/shadow_log_tests.rs"
-item = "shamir-engine::lib::migration::tests::shadow_log_tests::RangeCountingStore::set"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/shadow_log_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::shadow_log_tests::RangeCountingStore::set"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/migration/tests/shadow_log_tests.rs"
-item = "shamir-engine::lib::migration::tests::shadow_log_tests::RangeCountingStore::set_many"
-to_path = "crates/shamir-engine/src/db_instance/migration/tests/shadow_log_tests.rs"
-to_item = "shamir-engine::lib::db_instance::migration::tests::shadow_log_tests::RangeCountingStore::set_many"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -4151,384 +2608,6 @@ to_item = "shamir-engine::lib::db_instance::migration::coordinator::MigrationCoo
 reason = "relocated by the layout sweep (signature tokens re-qualified)"
 owner = "@layout-sweep"
 
-[[removed]]
-path = "crates/shamir-engine/src/lib.rs"
-item = "shamir-engine::lib::meta"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/lib.rs"
-item = "shamir-engine::lib::migration"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/meta/mod.rs"
-item = "shamir-engine::lib::meta::envelope"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/meta/mod.rs"
-item = "shamir-engine::lib::meta::namespace"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/meta/mod.rs"
-item = "shamir-engine::lib::meta::recovery_marker"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/meta/mod.rs"
-item = "shamir-engine::lib::meta::repl"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/meta/mod.rs"
-item = "shamir-engine::lib::meta::repo_identity"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/meta/mod.rs"
-item = "shamir-engine::lib::meta::tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/meta/repl/mod.rs"
-item = "shamir-engine::lib::meta::repl::bookmark"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/meta/repl/mod.rs"
-item = "shamir-engine::lib::meta::repl::bookmark_v3"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/meta/repl/mod.rs"
-item = "shamir-engine::lib::meta::repl::fence_record"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/meta/repl/mod.rs"
-item = "shamir-engine::lib::meta::repl::gate_provenance"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/meta/repl/mod.rs"
-item = "shamir-engine::lib::meta::repl::receipt"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/meta/repl/mod.rs"
-item = "shamir-engine::lib::meta::repl::tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/meta/repl/tests/mod.rs"
-item = "shamir-engine::lib::meta::repl::tests::bookmark_refusal_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/meta/repl/tests/mod.rs"
-item = "shamir-engine::lib::meta::repl::tests::bookmark_v3_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/meta/repl/tests/mod.rs"
-item = "shamir-engine::lib::meta::repl::tests::receipt_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests::disk_crash"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/mod.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::lifecycle_record_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/meta/tests/lifecycle/mod.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle::recovery_marker_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/meta/tests/mod.rs"
-item = "shamir-engine::lib::meta::tests::envelope_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/meta/tests/mod.rs"
-item = "shamir-engine::lib::meta::tests::follower_durability_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/meta/tests/mod.rs"
-item = "shamir-engine::lib::meta::tests::lifecycle"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/meta/tests/mod.rs"
-item = "shamir-engine::lib::meta::tests::namespace_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/meta/tests/mod.rs"
-item = "shamir-engine::lib::meta::tests::repl_bookmark_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/migration/mod.rs"
-item = "shamir-engine::lib::migration::coordinator"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/migration/mod.rs"
-item = "shamir-engine::lib::migration::shadow_key"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/migration/mod.rs"
-item = "shamir-engine::lib::migration::shadow_log"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/migration/mod.rs"
-item = "shamir-engine::lib::migration::tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/migration/tests/mod.rs"
-item = "shamir-engine::lib::migration::tests::coordinator_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/migration/tests/mod.rs"
-item = "shamir-engine::lib::migration::tests::cutover_guard_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/migration/tests/mod.rs"
-item = "shamir-engine::lib::migration::tests::shadow_key_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/migration/tests/mod.rs"
-item = "shamir-engine::lib::migration::tests::shadow_log_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/db_instance/migration/mod.rs"
-item = "shamir-engine::lib::db_instance::migration::coordinator"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/db_instance/migration/mod.rs"
-item = "shamir-engine::lib::db_instance::migration::shadow_key"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/db_instance/migration/mod.rs"
-item = "shamir-engine::lib::db_instance::migration::shadow_log"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/db_instance/migration/tests/mod.rs"
-item = "shamir-engine::lib::db_instance::migration::tests::coordinator_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/db_instance/migration/tests/mod.rs"
-item = "shamir-engine::lib::db_instance::migration::tests::cutover_guard_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/db_instance/migration/tests/mod.rs"
-item = "shamir-engine::lib::db_instance::migration::tests::shadow_key_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/db_instance/migration/tests/mod.rs"
-item = "shamir-engine::lib::db_instance::migration::tests::shadow_log_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/db_instance/mod.rs"
-item = "shamir-engine::lib::db_instance::migration"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/meta/mod.rs"
-item = "shamir-engine::lib::repo::meta::envelope"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/meta/mod.rs"
-item = "shamir-engine::lib::repo::meta::namespace"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/meta/mod.rs"
-item = "shamir-engine::lib::repo::meta::recovery_marker"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/meta/mod.rs"
-item = "shamir-engine::lib::repo::meta::repl"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/meta/mod.rs"
-item = "shamir-engine::lib::repo::meta::repo_identity"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/meta/repl/mod.rs"
-item = "shamir-engine::lib::repo::meta::repl::bookmark"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/meta/repl/mod.rs"
-item = "shamir-engine::lib::repo::meta::repl::bookmark_v3"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/meta/repl/mod.rs"
-item = "shamir-engine::lib::repo::meta::repl::fence_record"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/meta/repl/mod.rs"
-item = "shamir-engine::lib::repo::meta::repl::gate_provenance"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/meta/repl/mod.rs"
-item = "shamir-engine::lib::repo::meta::repl::receipt"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/meta/repl/tests/mod.rs"
-item = "shamir-engine::lib::repo::meta::repl::tests::bookmark_refusal_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/meta/repl/tests/mod.rs"
-item = "shamir-engine::lib::repo::meta::repl::tests::bookmark_v3_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/meta/repl/tests/mod.rs"
-item = "shamir-engine::lib::repo::meta::repl::tests::receipt_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/lifecycle_record_tests.rs"
-item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests::disk_crash"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/mod.rs"
-item = "shamir-engine::lib::repo::meta::tests::lifecycle::lifecycle_record_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/meta/tests/lifecycle/mod.rs"
-item = "shamir-engine::lib::repo::meta::tests::lifecycle::recovery_marker_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/meta/tests/mod.rs"
-item = "shamir-engine::lib::repo::meta::tests::envelope_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/meta/tests/mod.rs"
-item = "shamir-engine::lib::repo::meta::tests::follower_durability_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/meta/tests/mod.rs"
-item = "shamir-engine::lib::repo::meta::tests::lifecycle"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/meta/tests/mod.rs"
-item = "shamir-engine::lib::repo::meta::tests::namespace_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/meta/tests/mod.rs"
-item = "shamir-engine::lib::repo::meta::tests::repl_bookmark_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/mod.rs"
-item = "shamir-engine::lib::repo::meta"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
 [[moved]]
 path = "crates/shamir-engine/src/meta/mod.rs"
 item = "shamir-engine::lib::meta::tests"
@@ -4551,4 +2630,112 @@ item = "shamir-engine::lib::migration::tests"
 to_path = "crates/shamir-engine/src/repo/meta/repl/mod.rs"
 to_item = "shamir-engine::lib::repo::meta::repl::tests"
 reason = "relocated by the layout sweep (one of several same-named test helpers)"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/lib.rs"
+item = "shamir-engine::lib::index"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/meta/repl/mod.rs"
+item = "shamir-engine::lib::meta::repl::tests"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::accessors"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::barriers"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::diagnostics"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::operations"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::transactions"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/drain/drainer/orphan_repair/mod.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::tests"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/recovery/cold_reconcile/lifecycle/mod.rs"
+item = "shamir-engine::lib::tx::recovery::cold_reconcile::lifecycle::tests"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/recovery/cold_reconcile/mod.rs"
+item = "shamir-engine::lib::tx::recovery::cold_reconcile::tests"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/recovery/cold_reconcile/tests/mod.rs"
+item = "shamir-engine::lib::tx::recovery::cold_reconcile::tests::classification_tests"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/recovery/cold_reconcile/tests/mod.rs"
+item = "shamir-engine::lib::tx::recovery::cold_reconcile::tests::ephemeral_cold_tests"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/recovery/cold_reconcile/tests/mod.rs"
+item = "shamir-engine::lib::tx::recovery::cold_reconcile::tests::follower_cold_tests"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/recovery/cold_reconcile/tests/mod.rs"
+item = "shamir-engine::lib::tx::recovery::cold_reconcile::tests::helpers"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/recovery/cold_reconcile/tests/mod.rs"
+item = "shamir-engine::lib::tx::recovery::cold_reconcile::tests::receipt_recovery_tests"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/recovery/cold_reconcile/tests/mod.rs"
+item = "shamir-engine::lib::tx::recovery::cold_reconcile::tests::reconcile_tests"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/replication/follower_durability/mod.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::tests"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/replication/follower_durability/receipt/mod.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
 owner = "@layout-sweep"
