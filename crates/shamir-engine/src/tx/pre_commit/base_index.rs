@@ -9,7 +9,7 @@ use crate::repo::RepoInstance;
 use crate::tx::commit::TxError;
 
 /// P0-2 (#958): base_index `IndexManager` (regular + unique) ops-plan
-/// re-derivation after stage. Mirrors [`rederive_index2_ops_post_stage`]'s
+/// re-derivation after stage. Mirrors [`rederive_index2_ops_post_stage`](super::index2::rederive_index2_ops_post_stage)'s
 /// shape for the base_index index family: a tx that staged before a base_index
 /// index (regular OR unique) was created carries zero ops for the new
 /// index in `tx.index_write_set` — a permanently missing posting (regular)

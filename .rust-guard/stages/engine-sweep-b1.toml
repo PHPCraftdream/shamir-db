@@ -1,155 +1,4 @@
 base = "0ac830f9766f03bf7949827d831d15132f4f1f7b"
-[[moved]]
-path = "crates/shamir-engine/src/tx/pre_commit.rs"
-item = "shamir-engine::lib::tx::pre_commit::PostPrelockPreMaterializeHook"
-to_path = "crates/shamir-engine/src/tx/pre_commit/claims.rs"
-to_item = "shamir-engine::lib::tx::pre_commit::claims::PostPrelockPreMaterializeHook"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/pre_commit.rs"
-item = "shamir-engine::lib::tx::pre_commit::REPO_INTERNER_SCOPE"
-to_path = "crates/shamir-engine/src/tx/pre_commit/claims.rs"
-to_item = "shamir-engine::lib::tx::pre_commit::claims::REPO_INTERNER_SCOPE"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/pre_commit.rs"
-item = "shamir-engine::lib::tx::pre_commit::RederivePreTxReadFailHook"
-to_path = "crates/shamir-engine/src/tx/pre_commit/index2.rs"
-to_item = "shamir-engine::lib::tx::pre_commit::index2::RederivePreTxReadFailHook"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/pre_commit.rs"
-item = "shamir-engine::lib::tx::pre_commit::RederivePreTxReadFailHook::arm"
-to_path = "crates/shamir-engine/src/tx/pre_commit/index2.rs"
-to_item = "shamir-engine::lib::tx::pre_commit::index2::RederivePreTxReadFailHook::arm"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/pre_commit.rs"
-item = "shamir-engine::lib::tx::pre_commit::RederivePreTxReadFailHook::take_injected"
-to_path = "crates/shamir-engine/src/tx/pre_commit/index2.rs"
-to_item = "shamir-engine::lib::tx::pre_commit::index2::RederivePreTxReadFailHook::take_injected"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/pre_commit.rs"
-item = "shamir-engine::lib::tx::pre_commit::TEST_POST_PRELOCK_PRE_MATERIALIZE_HOOK"
-to_path = "crates/shamir-engine/src/tx/pre_commit/claims.rs"
-to_item = "shamir-engine::lib::tx::pre_commit::claims::TEST_POST_PRELOCK_PRE_MATERIALIZE_HOOK"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/pre_commit.rs"
-item = "shamir-engine::lib::tx::pre_commit::TEST_REDERIVE_PRE_TX_READ_FAILURE"
-to_path = "crates/shamir-engine/src/tx/pre_commit/index2.rs"
-to_item = "shamir-engine::lib::tx::pre_commit::index2::TEST_REDERIVE_PRE_TX_READ_FAILURE"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/pre_commit.rs"
-item = "shamir-engine::lib::tx::pre_commit::claim_write_set"
-to_path = "crates/shamir-engine/src/tx/pre_commit/claims.rs"
-to_item = "shamir-engine::lib::tx::pre_commit::claims::claim_write_set"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/pre_commit.rs"
-item = "shamir-engine::lib::tx::pre_commit::fire_post_prelock_pre_materialize_test_hook"
-to_path = "crates/shamir-engine/src/tx/pre_commit/claims.rs"
-to_item = "shamir-engine::lib::tx::pre_commit::claims::fire_post_prelock_pre_materialize_test_hook"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/pre_commit.rs"
-item = "shamir-engine::lib::tx::pre_commit::is_vector_backend"
-to_path = "crates/shamir-engine/src/tx/pre_commit/index2.rs"
-to_item = "shamir-engine::lib::tx::pre_commit::index2::is_vector_backend"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/pre_commit.rs"
-item = "shamir-engine::lib::tx::pre_commit::pre_commit_locked_validate"
-to_path = "crates/shamir-engine/src/tx/pre_commit/locked.rs"
-to_item = "shamir-engine::lib::tx::pre_commit::locked::pre_commit_locked_validate"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/pre_commit.rs"
-item = "shamir-engine::lib::tx::pre_commit::pre_commit_prelock"
-to_path = "crates/shamir-engine/src/tx/pre_commit/prelock.rs"
-to_item = "shamir-engine::lib::tx::pre_commit::prelock::pre_commit_prelock"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/pre_commit.rs"
-item = "shamir-engine::lib::tx::pre_commit::read_pre_tx_bytes"
-to_path = "crates/shamir-engine/src/tx/pre_commit/index2.rs"
-to_item = "shamir-engine::lib::tx::pre_commit::index2::read_pre_tx_bytes"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/pre_commit.rs"
-item = "shamir-engine::lib::tx::pre_commit::record_staged_op"
-to_path = "crates/shamir-engine/src/tx/pre_commit/stale_value.rs"
-to_item = "shamir-engine::lib::tx::pre_commit::stale_value::record_staged_op"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/pre_commit.rs"
-item = "shamir-engine::lib::tx::pre_commit::rederive_base_index_ops_post_stage"
-to_path = "crates/shamir-engine/src/tx/pre_commit/base_index.rs"
-to_item = "shamir-engine::lib::tx::pre_commit::base_index::rederive_base_index_ops_post_stage"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/pre_commit.rs"
-item = "shamir-engine::lib::tx::pre_commit::rederive_index2_ops_post_stage"
-to_path = "crates/shamir-engine/src/tx/pre_commit/index2.rs"
-to_item = "shamir-engine::lib::tx::pre_commit::index2::rederive_index2_ops_post_stage"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/pre_commit.rs"
-item = "shamir-engine::lib::tx::pre_commit::rederive_stale_value_ops_post_stage"
-to_path = "crates/shamir-engine/src/tx/pre_commit/stale_value.rs"
-to_item = "shamir-engine::lib::tx::pre_commit::stale_value::rederive_stale_value_ops_post_stage"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/pre_commit.rs"
-item = "shamir-engine::lib::tx::pre_commit::retract_stale_provenance_ops"
-to_path = "crates/shamir-engine/src/tx/pre_commit/index2.rs"
-to_item = "shamir-engine::lib::tx::pre_commit::index2::retract_stale_provenance_ops"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/pre_commit.rs"
-item = "shamir-engine::lib::tx::pre_commit::stamp_index2_ops_provenance"
-to_path = "crates/shamir-engine/src/tx/pre_commit/index2.rs"
-to_item = "shamir-engine::lib::tx::pre_commit::index2::stamp_index2_ops_provenance"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/tx/tests/p1096_tx_aware_unique_check_tests.rs"
@@ -164,38 +13,6 @@ path = "crates/shamir-engine/src/tx/tests/p1096_tx_aware_unique_check_tests.rs"
 item = "shamir-engine::lib::tx::tests::p1096_tx_aware_unique_check_tests::insert_tx_many_bytes_after_delete_reclaim_succeeds"
 to_path = "crates/shamir-engine/src/tx/tests/p1096_tx_aware_unique_check_tests/bytes_update.rs"
 to_item = "shamir-engine::lib::tx::tests::p1096_tx_aware_unique_check_tests::bytes_update::insert_tx_many_bytes_after_delete_reclaim_succeeds"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/tests/p1096_tx_aware_unique_check_tests.rs"
-item = "shamir-engine::lib::tx::tests::p1096_tx_aware_unique_check_tests::key_id"
-to_path = "crates/shamir-engine/src/tx/tests/p1096_tx_aware_unique_check_tests/support.rs"
-to_item = "shamir-engine::lib::tx::tests::p1096_tx_aware_unique_check_tests::support::key_id"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/tests/p1096_tx_aware_unique_check_tests.rs"
-item = "shamir-engine::lib::tx::tests::p1096_tx_aware_unique_check_tests::make_repo"
-to_path = "crates/shamir-engine/src/tx/tests/p1096_tx_aware_unique_check_tests/support.rs"
-to_item = "shamir-engine::lib::tx::tests::p1096_tx_aware_unique_check_tests::support::make_repo"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/tests/p1096_tx_aware_unique_check_tests.rs"
-item = "shamir-engine::lib::tx::tests::p1096_tx_aware_unique_check_tests::record_with_str"
-to_path = "crates/shamir-engine/src/tx/tests/p1096_tx_aware_unique_check_tests/support.rs"
-to_item = "shamir-engine::lib::tx::tests::p1096_tx_aware_unique_check_tests::support::record_with_str"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/tests/p1096_tx_aware_unique_check_tests.rs"
-item = "shamir-engine::lib::tx::tests::p1096_tx_aware_unique_check_tests::record_with_two_str"
-to_path = "crates/shamir-engine/src/tx/tests/p1096_tx_aware_unique_check_tests/support.rs"
-to_item = "shamir-engine::lib::tx::tests::p1096_tx_aware_unique_check_tests::support::record_with_two_str"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -695,30 +512,6 @@ to_item = "shamir-engine::lib::tx::pre_commit::index2::RederivePreTxReadFailHook
 reason = "relocated by the layout sweep (signature tokens re-qualified)"
 owner = "@layout-sweep"
 
-[[removed]]
-path = "crates/shamir-engine/src/tx/tests/ssi_phantom_tests/mod.rs"
-item = "shamir-engine::lib::tx::tests::ssi_phantom_tests::perf233_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/tx/tests/ssi_phantom_tests/mod.rs"
-item = "shamir-engine::lib::tx::tests::ssi_phantom_tests::phase_2bis_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/tx/tests/ssi_phantom_tests/mod.rs"
-item = "shamir-engine::lib::tx::tests::ssi_phantom_tests::predicate_capture_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/tx/tests/ssi_phantom_tests/mod.rs"
-item = "shamir-engine::lib::tx::tests::ssi_phantom_tests::update_phantom_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
 [[added]]
 path = "crates/shamir-engine/src/tx/pre_commit/mod.rs"
 item = "shamir-engine::lib::tx::pre_commit::base_index"
@@ -797,26 +590,26 @@ item = "shamir-engine::lib::tx::tests::ssi_phantom_tests::predicate"
 reason = "module declaration created by the layout sweep; its items are declared separately"
 owner = "@layout-sweep"
 
-[[added]]
-path = "crates/shamir-engine/src/tx/tests/ssi_phantom_tests/phase2/mod.rs"
-item = "shamir-engine::lib::tx::tests::ssi_phantom_tests::phase2::perf233_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
+[[changed]]
+path = "crates/shamir-engine/src/tx/pre_commit.rs"
+item = "shamir-engine::lib::tx::pre_commit::PreCommit"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
 owner = "@layout-sweep"
 
-[[added]]
-path = "crates/shamir-engine/src/tx/tests/ssi_phantom_tests/phase2/mod.rs"
-item = "shamir-engine::lib::tx::tests::ssi_phantom_tests::phase2::phase_2bis_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
+[[changed]]
+path = "crates/shamir-engine/src/tx/pre_commit.rs"
+item = "shamir-engine::lib::tx::pre_commit::PreLockResult"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
 owner = "@layout-sweep"
 
-[[added]]
-path = "crates/shamir-engine/src/tx/tests/ssi_phantom_tests/predicate/mod.rs"
-item = "shamir-engine::lib::tx::tests::ssi_phantom_tests::predicate::predicate_capture_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
+[[changed]]
+path = "crates/shamir-engine/src/tx/pre_commit.rs"
+item = "shamir-engine::lib::tx::pre_commit::ValidatedPreCommit"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
 owner = "@layout-sweep"
 
-[[added]]
-path = "crates/shamir-engine/src/tx/tests/ssi_phantom_tests/predicate/mod.rs"
-item = "shamir-engine::lib::tx::tests::ssi_phantom_tests::predicate::update_phantom_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
+[[changed]]
+path = "crates/shamir-engine/src/tx/pre_commit.rs"
+item = "shamir-engine::lib::tx::pre_commit::pre_commit_locked"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
 owner = "@layout-sweep"

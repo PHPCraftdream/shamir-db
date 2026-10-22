@@ -86,7 +86,7 @@ pub(super) async fn read_pre_tx_bytes(
 /// F-50 (#869, spike) — Phase 2.7 worker: re-derive index2 posting ops for
 /// backends registered AFTER each touched table's stage-time snapshot.
 ///
-/// Invoked from [`pre_commit_prelock`] AFTER Phase 2.5's barrier locks are
+/// Invoked from [`pre_commit_prelock`](super::prelock::pre_commit_prelock) AFTER Phase 2.5's barrier locks are
 /// acquired and BEFORE Phase 4's WAL begin. See that call site's comment for
 /// the crash-safety ordering constraints.
 ///

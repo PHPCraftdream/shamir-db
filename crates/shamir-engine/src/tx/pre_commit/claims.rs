@@ -221,9 +221,9 @@ pub(in crate::tx) struct PreCommit {
     pub(in crate::tx) durability_failed: bool,
 }
 
-/// Outcome of [`pre_commit_prelock`]: per-table uwl_guards acquired in
+/// Outcome of [`pre_commit_prelock`](super::prelock::pre_commit_prelock): per-table uwl_guards acquired in
 /// sorted token order OUTSIDE the commit_lock. These are passed into
-/// [`pre_commit_locked`] and then through to `materialize`.
+/// [`pre_commit_locked`](super::locked::pre_commit_locked) and then through to `materialize`.
 ///
 /// F-48b (#867): `drain_guards` carries one `WriterDrainGuard` per table in
 /// `tx.write_set` whose Phase 2.5 `needs_write_barrier()` read `false` (the
