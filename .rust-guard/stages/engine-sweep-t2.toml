@@ -143,6 +143,7 @@ path = "crates/shamir-engine/src/table/tests/write/record_mutation/execution/sha
 item = "setup_table_with_users"
 reason = "test fixture shared by sibling test modules after the table/tests split; compiled only under cfg(test)"
 owner = "@layout-sweep"
+
 [[moved]]
 path = "crates/shamir-engine/src/table/tests/and_range_extraction_tests.rs"
 item = "shamir-engine::lib::table::tests::and_range_extraction_tests::and_range_extraction_byte_identical_full_scan"
@@ -12695,12 +12696,6 @@ to_item = "shamir-engine::lib::table::tests::behavior::query_parity::version_par
 reason = "relocated by the layout sweep (one of several same-named test helpers)"
 owner = "@layout-sweep"
 
-[[removed]]
-path = "crates/shamir-engine/src/table/tests/filtered_ann_tests.rs"
-item = "shamir-engine::lib::table::tests::filtered_ann_tests::make_repo"
-reason = "duplicate test helper consolidated by the layout sweep"
-owner = "@layout-sweep"
-
 [[moved]]
 path = "crates/shamir-engine/src/table/tests/degraded_index_count_tests.rs"
 item = "shamir-engine::lib::table::tests::degraded_index_count_tests::make_stores"
@@ -12787,12 +12782,6 @@ item = "shamir-engine::lib::table::tests::r0c_registry_atomicity_and_namespace_t
 to_path = "crates/shamir-engine/src/table/tests/index_lifecycle/registry/r0c_registry_atomicity_and_namespace_tests.rs"
 to_item = "shamir-engine::lib::table::tests::index_lifecycle::registry::r0c_registry_atomicity_and_namespace_tests::make_stores"
 reason = "relocated by the layout sweep (one of several same-named test helpers)"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/table/tests/p997_hash_rename_durability_tests.rs"
-item = "shamir-engine::lib::table::tests::p997_hash_rename_durability_tests::make_stores"
-reason = "duplicate test helper consolidated by the layout sweep"
 owner = "@layout-sweep"
 
 [[moved]]
@@ -12955,12 +12944,6 @@ to_item = "shamir-engine::lib::table::tests::index_lifecycle::ddl_barrier::schem
 reason = "relocated by the layout sweep (one of several same-named test helpers)"
 owner = "@layout-sweep"
 
-[[removed]]
-path = "crates/shamir-engine/src/table/tests/p997_hash_rename_durability_tests.rs"
-item = "shamir-engine::lib::table::tests::p997_hash_rename_durability_tests::record_with_str"
-reason = "duplicate test helper consolidated by the layout sweep"
-owner = "@layout-sweep"
-
 [[moved]]
 path = "crates/shamir-engine/src/table/tests/f50_step2_index_lifecycle_tests.rs"
 item = "shamir-engine::lib::table::tests::f50_step2_index_lifecycle_tests::vector_index_op"
@@ -12977,24 +12960,11 @@ to_item = "shamir-engine::lib::table::tests::index_lifecycle::index_build::index
 reason = "relocated by the layout sweep (one of several same-named test helpers)"
 owner = "@layout-sweep"
 
-[[removed]]
-path = "crates/shamir-engine/src/table/tests/filtered_ann_tests.rs"
-item = "shamir-engine::lib::table::tests::filtered_ann_tests::vector_index_op"
-reason = "duplicate test helper consolidated by the layout sweep"
-owner = "@layout-sweep"
 [[moved]]
 path = "crates/shamir-engine/src/table/tests/filtered_ann_tests.rs"
 item = "shamir-engine::lib::table::tests::filtered_ann_tests::bare_vector_similarity_still_works"
 to_path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/shared/filtered_ann_tests.rs"
 to_item = "shamir-engine::lib::table::tests::read::vector::filtered_ann::shared::filtered_ann_tests::bare_vector_similarity_still_works"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/filtered_ann_tests.rs"
-item = "shamir-engine::lib::table::tests::filtered_ann_tests::embeddings_in_order"
-to_path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/shared/filtered_ann_tests.rs"
-to_item = "shamir-engine::lib::table::tests::read::vector::filtered_ann::shared::filtered_ann_tests::embeddings_in_order"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -13008,49 +12978,9 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/table/tests/filtered_ann_tests.rs"
-item = "shamir-engine::lib::table::tests::filtered_ann_tests::setup_two_cluster"
-to_path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/shared/filtered_ann_tests.rs"
-to_item = "shamir-engine::lib::table::tests::read::vector::filtered_ann::shared::filtered_ann_tests::setup_two_cluster"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/filtered_ann_tests.rs"
-item = "shamir-engine::lib::table::tests::filtered_ann_tests::tags_in_order"
-to_path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/shared/filtered_ann_tests.rs"
-to_item = "shamir-engine::lib::table::tests::read::vector::filtered_ann::shared::filtered_ann_tests::tags_in_order"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/filtered_ann_tests.rs"
 item = "shamir-engine::lib::table::tests::filtered_ann_tests::vector_index_op"
 to_path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/shared/filtered_ann_tests.rs"
 to_item = "shamir-engine::lib::table::tests::read::vector::filtered_ann::shared::filtered_ann_tests::vector_index_op"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/index2_empty_result_tests.rs"
-item = "shamir-engine::lib::table::tests::index2_empty_result_tests::field_id"
-to_path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/shared/filtered_ann_tests.rs"
-to_item = "shamir-engine::lib::table::tests::read::vector::filtered_ann::shared::filtered_ann_tests::field_id"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/index2_empty_result_tests.rs"
-item = "shamir-engine::lib::table::tests::index2_empty_result_tests::vec_record"
-to_path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/shared/filtered_ann_tests.rs"
-to_item = "shamir-engine::lib::table::tests::read::vector::filtered_ann::shared::filtered_ann_tests::vec_record"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/p997_hash_rename_durability_tests.rs"
-item = "shamir-engine::lib::table::tests::p997_hash_rename_durability_tests::key_id"
-to_path = "crates/shamir-engine/src/table/tests/index_lifecycle/recovery/rename/hash_rename/shared/p997_hash_rename_durability_tests.rs"
-to_item = "shamir-engine::lib::table::tests::index_lifecycle::recovery::rename::hash_rename::shared::p997_hash_rename_durability_tests::key_id"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -13072,118 +13002,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/table/tests/p997_hash_rename_durability_tests.rs"
-item = "shamir-engine::lib::table::tests::p997_hash_rename_durability_tests::rename_entry"
-to_path = "crates/shamir-engine/src/table/tests/index_lifecycle/recovery/rename/hash_rename/shared/p997_hash_rename_durability_tests.rs"
-to_item = "shamir-engine::lib::table::tests::index_lifecycle::recovery::rename::hash_rename::shared::p997_hash_rename_durability_tests::rename_entry"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/p997_hash_rename_durability_tests.rs"
-item = "shamir-engine::lib::table::tests::p997_hash_rename_durability_tests::seed_table_with_regular_index"
-to_path = "crates/shamir-engine/src/table/tests/index_lifecycle/recovery/rename/hash_rename/shared/p997_hash_rename_durability_tests.rs"
-to_item = "shamir-engine::lib::table::tests::index_lifecycle::recovery::rename::hash_rename::shared::p997_hash_rename_durability_tests::seed_table_with_regular_index"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/p997_hash_rename_durability_tests.rs"
-item = "shamir-engine::lib::table::tests::p997_hash_rename_durability_tests::seed_table_with_unique_index"
-to_path = "crates/shamir-engine/src/table/tests/index_lifecycle/recovery/rename/hash_rename/shared/p997_hash_rename_durability_tests.rs"
-to_item = "shamir-engine::lib::table::tests::index_lifecycle::recovery::rename::hash_rename::shared::p997_hash_rename_durability_tests::seed_table_with_unique_index"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/write_exec_tests.rs"
-item = "shamir-engine::lib::table::tests::write_exec_tests::delete_via_tx"
-to_path = "crates/shamir-engine/src/table/tests/write/record_mutation/execution/shared/write_exec_tests.rs"
-to_item = "shamir-engine::lib::table::tests::write::record_mutation::execution::shared::write_exec_tests::delete_via_tx"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/write_exec_tests.rs"
-item = "shamir-engine::lib::table::tests::write_exec_tests::insert_via_tx"
-to_path = "crates/shamir-engine/src/table/tests/write/record_mutation/execution/shared/write_exec_tests.rs"
-to_item = "shamir-engine::lib::table::tests::write::record_mutation::execution::shared::write_exec_tests::insert_via_tx"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/write_exec_tests.rs"
-item = "shamir-engine::lib::table::tests::write_exec_tests::set_via_tx"
-to_path = "crates/shamir-engine/src/table/tests/write/record_mutation/execution/shared/write_exec_tests.rs"
-to_item = "shamir-engine::lib::table::tests::write::record_mutation::execution::shared::write_exec_tests::set_via_tx"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/write_exec_tests.rs"
-item = "shamir-engine::lib::table::tests::write_exec_tests::setup_empty_table"
-to_path = "crates/shamir-engine/src/table/tests/write/record_mutation/execution/shared/write_exec_tests.rs"
-to_item = "shamir-engine::lib::table::tests::write::record_mutation::execution::shared::write_exec_tests::setup_empty_table"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/write_exec_tests.rs"
-item = "shamir-engine::lib::table::tests::write_exec_tests::setup_table_with_users"
-to_path = "crates/shamir-engine/src/table/tests/write/record_mutation/execution/shared/write_exec_tests.rs"
-to_item = "shamir-engine::lib::table::tests::write::record_mutation::execution::shared::write_exec_tests::setup_table_with_users"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/write_exec_tests.rs"
-item = "shamir-engine::lib::table::tests::write_exec_tests::update_via_tx"
-to_path = "crates/shamir-engine/src/table/tests/write/record_mutation/execution/shared/write_exec_tests.rs"
-to_item = "shamir-engine::lib::table::tests::write::record_mutation::execution::shared::write_exec_tests::update_via_tx"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/write_exec_tests.rs"
-item = "shamir-engine::lib::table::tests::write_exec_tests::delete_via_tx"
-to_path = "crates/shamir-engine/src/table/tests/write/record_mutation/execution/shared/write_exec_tests.rs"
-to_item = "shamir-engine::lib::table::tests::write::record_mutation::execution::shared::write_exec_tests::delete_via_tx"
-reason = "relocated by the layout sweep (signature tokens re-qualified)"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/filtered_ann_tests.rs"
-item = "shamir-engine::lib::table::tests::filtered_ann_tests::embeddings_in_order"
-to_path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/shared/filtered_ann_tests.rs"
-to_item = "shamir-engine::lib::table::tests::read::vector::filtered_ann::shared::filtered_ann_tests::embeddings_in_order"
-reason = "relocated by the layout sweep (signature tokens re-qualified)"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/index2_empty_result_tests.rs"
-item = "shamir-engine::lib::table::tests::index2_empty_result_tests::field_id"
-to_path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/shared/filtered_ann_tests.rs"
-to_item = "shamir-engine::lib::table::tests::read::vector::filtered_ann::shared::filtered_ann_tests::field_id"
-reason = "relocated by the layout sweep (signature tokens re-qualified)"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/write_exec_tests.rs"
-item = "shamir-engine::lib::table::tests::write_exec_tests::insert_via_tx"
-to_path = "crates/shamir-engine/src/table/tests/write/record_mutation/execution/shared/write_exec_tests.rs"
-to_item = "shamir-engine::lib::table::tests::write::record_mutation::execution::shared::write_exec_tests::insert_via_tx"
-reason = "relocated by the layout sweep (signature tokens re-qualified)"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/p997_hash_rename_durability_tests.rs"
-item = "shamir-engine::lib::table::tests::p997_hash_rename_durability_tests::key_id"
-to_path = "crates/shamir-engine/src/table/tests/index_lifecycle/recovery/rename/hash_rename/shared/p997_hash_rename_durability_tests.rs"
-to_item = "shamir-engine::lib::table::tests::index_lifecycle::recovery::rename::hash_rename::shared::p997_hash_rename_durability_tests::key_id"
-reason = "relocated by the layout sweep (signature tokens re-qualified)"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/p997_hash_rename_durability_tests.rs"
 item = "shamir-engine::lib::table::tests::p997_hash_rename_durability_tests::load_regular_rename_tombstone"
 to_path = "crates/shamir-engine/src/table/tests/index_lifecycle/recovery/rename/hash_rename/shared/p997_hash_rename_durability_tests.rs"
 to_item = "shamir-engine::lib::table::tests::index_lifecycle::recovery::rename::hash_rename::shared::p997_hash_rename_durability_tests::load_regular_rename_tombstone"
@@ -13200,14 +13018,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/table/tests/p997_hash_rename_durability_tests.rs"
-item = "shamir-engine::lib::table::tests::p997_hash_rename_durability_tests::rename_entry"
-to_path = "crates/shamir-engine/src/table/tests/index_lifecycle/recovery/rename/hash_rename/shared/p997_hash_rename_durability_tests.rs"
-to_item = "shamir-engine::lib::table::tests::index_lifecycle::recovery::rename::hash_rename::shared::p997_hash_rename_durability_tests::rename_entry"
-reason = "relocated by the layout sweep (signature tokens re-qualified)"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/p997_hash_rename_durability_tests.rs"
 item = "shamir-engine::lib::table::tests::p997_hash_rename_durability_tests::seed_regular_rename_tombstone"
 to_path = "crates/shamir-engine/src/table/tests/index_lifecycle/recovery/rename/hash_rename/shared/p997_hash_rename_durability_tests.rs"
 to_item = "shamir-engine::lib::table::tests::index_lifecycle::recovery::rename::hash_rename::shared::p997_hash_rename_durability_tests::seed_regular_rename_tombstone"
@@ -13216,81 +13026,9 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/table/tests/p997_hash_rename_durability_tests.rs"
-item = "shamir-engine::lib::table::tests::p997_hash_rename_durability_tests::seed_table_with_regular_index"
-to_path = "crates/shamir-engine/src/table/tests/index_lifecycle/recovery/rename/hash_rename/shared/p997_hash_rename_durability_tests.rs"
-to_item = "shamir-engine::lib::table::tests::index_lifecycle::recovery::rename::hash_rename::shared::p997_hash_rename_durability_tests::seed_table_with_regular_index"
-reason = "relocated by the layout sweep (signature tokens re-qualified)"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/p997_hash_rename_durability_tests.rs"
-item = "shamir-engine::lib::table::tests::p997_hash_rename_durability_tests::seed_table_with_unique_index"
-to_path = "crates/shamir-engine/src/table/tests/index_lifecycle/recovery/rename/hash_rename/shared/p997_hash_rename_durability_tests.rs"
-to_item = "shamir-engine::lib::table::tests::index_lifecycle::recovery::rename::hash_rename::shared::p997_hash_rename_durability_tests::seed_table_with_unique_index"
-reason = "relocated by the layout sweep (signature tokens re-qualified)"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/p997_hash_rename_durability_tests.rs"
 item = "shamir-engine::lib::table::tests::p997_hash_rename_durability_tests::seed_unique_rename_tombstone"
 to_path = "crates/shamir-engine/src/table/tests/index_lifecycle/recovery/rename/hash_rename/shared/p997_hash_rename_durability_tests.rs"
 to_item = "shamir-engine::lib::table::tests::index_lifecycle::recovery::rename::hash_rename::shared::p997_hash_rename_durability_tests::seed_unique_rename_tombstone"
-reason = "relocated by the layout sweep (signature tokens re-qualified)"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/write_exec_tests.rs"
-item = "shamir-engine::lib::table::tests::write_exec_tests::set_via_tx"
-to_path = "crates/shamir-engine/src/table/tests/write/record_mutation/execution/shared/write_exec_tests.rs"
-to_item = "shamir-engine::lib::table::tests::write::record_mutation::execution::shared::write_exec_tests::set_via_tx"
-reason = "relocated by the layout sweep (signature tokens re-qualified)"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/write_exec_tests.rs"
-item = "shamir-engine::lib::table::tests::write_exec_tests::setup_empty_table"
-to_path = "crates/shamir-engine/src/table/tests/write/record_mutation/execution/shared/write_exec_tests.rs"
-to_item = "shamir-engine::lib::table::tests::write::record_mutation::execution::shared::write_exec_tests::setup_empty_table"
-reason = "relocated by the layout sweep (signature tokens re-qualified)"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/write_exec_tests.rs"
-item = "shamir-engine::lib::table::tests::write_exec_tests::setup_table_with_users"
-to_path = "crates/shamir-engine/src/table/tests/write/record_mutation/execution/shared/write_exec_tests.rs"
-to_item = "shamir-engine::lib::table::tests::write::record_mutation::execution::shared::write_exec_tests::setup_table_with_users"
-reason = "relocated by the layout sweep (signature tokens re-qualified)"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/filtered_ann_tests.rs"
-item = "shamir-engine::lib::table::tests::filtered_ann_tests::setup_two_cluster"
-to_path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/shared/filtered_ann_tests.rs"
-to_item = "shamir-engine::lib::table::tests::read::vector::filtered_ann::shared::filtered_ann_tests::setup_two_cluster"
-reason = "relocated by the layout sweep (signature tokens re-qualified)"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/filtered_ann_tests.rs"
-item = "shamir-engine::lib::table::tests::filtered_ann_tests::tags_in_order"
-to_path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/shared/filtered_ann_tests.rs"
-to_item = "shamir-engine::lib::table::tests::read::vector::filtered_ann::shared::filtered_ann_tests::tags_in_order"
-reason = "relocated by the layout sweep (signature tokens re-qualified)"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/write_exec_tests.rs"
-item = "shamir-engine::lib::table::tests::write_exec_tests::update_via_tx"
-to_path = "crates/shamir-engine/src/table/tests/write/record_mutation/execution/shared/write_exec_tests.rs"
-to_item = "shamir-engine::lib::table::tests::write::record_mutation::execution::shared::write_exec_tests::update_via_tx"
-reason = "relocated by the layout sweep (signature tokens re-qualified)"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/table/tests/index2_empty_result_tests.rs"
-item = "shamir-engine::lib::table::tests::index2_empty_result_tests::vec_record"
-to_path = "crates/shamir-engine/src/table/tests/read/vector/filtered_ann/shared/filtered_ann_tests.rs"
-to_item = "shamir-engine::lib::table::tests::read::vector::filtered_ann::shared::filtered_ann_tests::vec_record"
 reason = "relocated by the layout sweep (signature tokens re-qualified)"
 owner = "@layout-sweep"
 
@@ -13328,4 +13066,86 @@ owner = "@layout-sweep"
 path = "crates/shamir-engine/src/table/tests/write/record_mutation/execution/shared/mod.rs"
 item = "shamir-engine::lib::table::tests::write::record_mutation::execution::shared::write_exec_tests"
 reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/repo/tests/hybrid_table_open_tests.rs"
+item = "shamir-engine::lib::repo::tests::hybrid_table_open_tests::vector_index_does_not_resurrect_after_restart"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/tests/filtered_ann_tests.rs"
+item = "shamir-engine::lib::table::tests::filtered_ann_tests::Pcg"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/tests/filtered_ann_tests.rs"
+item = "shamir-engine::lib::table::tests::filtered_ann_tests::commit_cluster"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/tests/p997_hash_rename_durability_tests.rs"
+item = "shamir-engine::lib::table::tests::p997_hash_rename_durability_tests::load_regular_rename_tombstone"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/tests/p997_hash_rename_durability_tests.rs"
+item = "shamir-engine::lib::table::tests::p997_hash_rename_durability_tests::load_unique_rename_tombstone"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/tests/p997_hash_rename_durability_tests.rs"
+item = "shamir-engine::lib::table::tests::p997_hash_rename_durability_tests::seed_regular_rename_tombstone"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/table/tests/p997_hash_rename_durability_tests.rs"
+item = "shamir-engine::lib::table::tests::p997_hash_rename_durability_tests::seed_unique_rename_tombstone"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/tests/doctor_tests.rs"
+item = "shamir-engine::lib::table::tests::doctor_tests::execute_update_leaves_table_consistent_on_success"
+to_path = "crates/shamir-engine/src/table/tests/table_core/manager/doctor_tests.rs"
+to_item = "shamir-engine::lib::table::tests::table_core::manager::doctor_tests::execute_update_leaves_table_consistent_on_success"
+reason = "relocated by the layout sweep (call path imported with use)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/tests/doctor_tests.rs"
+item = "shamir-engine::lib::table::tests::doctor_tests::execute_delete_leaves_table_consistent_on_success"
+to_path = "crates/shamir-engine/src/table/tests/table_core/manager/doctor_tests.rs"
+to_item = "shamir-engine::lib::table::tests::table_core::manager::doctor_tests::execute_delete_leaves_table_consistent_on_success"
+reason = "relocated by the layout sweep (call path imported with use)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/tests/stale_index_tests.rs"
+item = "shamir-engine::lib::table::tests::stale_index_tests::test_stale_index_entry_skipped_in_lookup_records_via_index"
+to_path = "crates/shamir-engine/src/table/tests/index_lifecycle/index_build/index_state/stale_index_tests.rs"
+to_item = "shamir-engine::lib::table::tests::index_lifecycle::index_build::index_state::stale_index_tests::test_stale_index_entry_skipped_in_lookup_records_via_index"
+reason = "relocated by the layout sweep (call path imported with use)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/tests/tx_scan_overlay_tests.rs"
+item = "shamir-engine::lib::table::tests::tx_scan_overlay_tests::update_matches_staged_insert_index_arm"
+to_path = "crates/shamir-engine/src/table/tests/write/transaction/tx_scan_overlay_tests.rs"
+to_item = "shamir-engine::lib::table::tests::write::transaction::tx_scan_overlay_tests::update_matches_staged_insert_index_arm"
+reason = "relocated by the layout sweep (call path imported with use)"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/table/tests/tx_scan_overlay_tests.rs"
+item = "shamir-engine::lib::table::tests::tx_scan_overlay_tests::delete_matches_staged_insert_index_arm"
+to_path = "crates/shamir-engine/src/table/tests/write/transaction/tx_scan_overlay_tests.rs"
+to_item = "shamir-engine::lib::table::tests::write::transaction::tx_scan_overlay_tests::delete_matches_staged_insert_index_arm"
+reason = "relocated by the layout sweep (call path imported with use)"
 owner = "@layout-sweep"
