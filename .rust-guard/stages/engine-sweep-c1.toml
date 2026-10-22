@@ -29,285 +29,6 @@ path = "crates/shamir-engine/src/tx/tests/drainer_tests/support.rs"
 item = "transfer_pending"
 reason = "test support helper shared by the drainer test parts after the split; compiled only under cfg(test)"
 owner = "@layout-sweep"
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::DEFAULT_WINDOW_HIGH_WATERMARK"
-to_path = "crates/shamir-engine/src/tx/drainer/state.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::DEFAULT_WINDOW_HIGH_WATERMARK"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::clear_index_applied"
-to_path = "crates/shamir-engine/src/tx/drainer/window.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::window::Drainer::clear_index_applied"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::counter_applied"
-to_path = "crates/shamir-engine/src/tx/drainer/window.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::window::Drainer::counter_applied"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::default"
-to_path = "crates/shamir-engine/src/tx/drainer/state.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::Drainer::default"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::drain_all"
-to_path = "crates/shamir-engine/src/tx/drainer/truncate.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::truncate::Drainer::drain_all"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::drain_step"
-to_path = "crates/shamir-engine/src/tx/drainer/drain_step.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::drain_step::Drainer::drain_step"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::drained_total"
-to_path = "crates/shamir-engine/src/tx/drainer/window.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::window::Drainer::drained_total"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::enrich_diagnostics"
-to_path = "crates/shamir-engine/src/tx/drainer/diagnostics.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::diagnostics::Drainer::enrich_diagnostics"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::index_applied_inline"
-to_path = "crates/shamir-engine/src/tx/drainer/window.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::window::Drainer::index_applied_inline"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::mark_counter_applied"
-to_path = "crates/shamir-engine/src/tx/drainer/window.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::window::Drainer::mark_counter_applied"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::mark_index_applied"
-to_path = "crates/shamir-engine/src/tx/drainer/window.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::window::Drainer::mark_index_applied"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::offer"
-to_path = "crates/shamir-engine/src/tx/drainer/window.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::window::Drainer::offer"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::offer_dropped_total"
-to_path = "crates/shamir-engine/src/tx/drainer/window.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::window::Drainer::offer_dropped_total"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::posting_superseded"
-to_path = "crates/shamir-engine/src/tx/drainer/window.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::window::Drainer::posting_superseded"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::posting_version_for_test"
-to_path = "crates/shamir-engine/src/tx/drainer/window.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::window::Drainer::posting_version_for_test"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::prune_index_applied"
-to_path = "crates/shamir-engine/src/tx/drainer/window.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::window::Drainer::prune_index_applied"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::record_orphan_failure_for_test"
-to_path = "crates/shamir-engine/src/tx/drainer/diagnostics.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::diagnostics::Drainer::record_orphan_failure_for_test"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::record_orphan_table_failure"
-to_path = "crates/shamir-engine/src/tx/drainer/diagnostics.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::diagnostics::Drainer::record_orphan_table_failure"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::record_posting_applied"
-to_path = "crates/shamir-engine/src/tx/drainer/window.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::window::Drainer::record_posting_applied"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::recover_calls"
-to_path = "crates/shamir-engine/src/tx/drainer/diagnostics.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::diagnostics::Drainer::recover_calls"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::remember_index_keys"
-to_path = "crates/shamir-engine/src/tx/drainer/window.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::window::Drainer::remember_index_keys"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::replay_lock_for_test"
-to_path = "crates/shamir-engine/src/tx/drainer/window.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::window::Drainer::replay_lock_for_test"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::seed_from_recover"
-to_path = "crates/shamir-engine/src/tx/drainer/window.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::window::Drainer::seed_from_recover"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::set_window_high_watermark"
-to_path = "crates/shamir-engine/src/tx/drainer/window.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::window::Drainer::set_window_high_watermark"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::settle_and_truncate"
-to_path = "crates/shamir-engine/src/tx/drainer/truncate.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::truncate::Drainer::settle_and_truncate"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::spawn"
-to_path = "crates/shamir-engine/src/tx/drainer/truncate.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::truncate::Drainer::spawn"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::wake"
-to_path = "crates/shamir-engine/src/tx/drainer/window.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::window::Drainer::wake"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::window_depth"
-to_path = "crates/shamir-engine/src/tx/drainer/window.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::window::Drainer::window_depth"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::window_entry"
-to_path = "crates/shamir-engine/src/tx/drainer/window.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::window::Drainer::window_entry"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::window_high_watermark"
-to_path = "crates/shamir-engine/src/tx/drainer/window.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::window::Drainer::window_high_watermark"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::window_keys"
-to_path = "crates/shamir-engine/src/tx/drainer/window.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::window::Drainer::window_keys"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::window_len"
-to_path = "crates/shamir-engine/src/tx/drainer/window.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::window::Drainer::window_len"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::Drainer::window_remove_for_test"
-to_path = "crates/shamir-engine/src/tx/drainer/window.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::window::Drainer::window_remove_for_test"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::FAIL_INDEX_BATCH_TABLE_ID"
-to_path = "crates/shamir-engine/src/tx/drainer/drain_step.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::drain_step::FAIL_INDEX_BATCH_TABLE_ID"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/drainer.rs"
-item = "shamir-engine::lib::tx::drainer::apply_interner_delta"
-to_path = "crates/shamir-engine/src/tx/drainer/drain_step.rs"
-to_item = "shamir-engine::lib::tx::drainer::state::drain_step::apply_interner_delta"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/tx/tests/drainer_tests.rs"
@@ -471,14 +192,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/tx/tests/drainer_tests.rs"
-item = "shamir-engine::lib::tx::tests::drainer_tests::make_repo"
-to_path = "crates/shamir-engine/src/tx/tests/drainer_tests/support.rs"
-to_item = "shamir-engine::lib::tx::tests::drainer_tests::support::make_repo"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/tests/drainer_tests.rs"
 item = "shamir-engine::lib::tx::tests::drainer_tests::offer_backpressure_check_uses_atomic_depth_not_tree_walk"
 to_path = "crates/shamir-engine/src/tx/tests/drainer_tests/window_tests.rs"
 to_item = "shamir-engine::lib::tx::tests::drainer_tests::window_tests::offer_backpressure_check_uses_atomic_depth_not_tree_walk"
@@ -503,25 +216,9 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/tx/tests/drainer_tests.rs"
-item = "shamir-engine::lib::tx::tests::drainer_tests::rid"
-to_path = "crates/shamir-engine/src/tx/tests/drainer_tests/support.rs"
-to_item = "shamir-engine::lib::tx::tests::drainer_tests::support::rid"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/tests/drainer_tests.rs"
 item = "shamir-engine::lib::tx::tests::drainer_tests::seed_from_recover_populates_window_with_inflight_entries"
 to_path = "crates/shamir-engine/src/tx/tests/drainer_tests/window_tests.rs"
 to_item = "shamir-engine::lib::tx::tests::drainer_tests::window_tests::seed_from_recover_populates_window_with_inflight_entries"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/tests/drainer_tests.rs"
-item = "shamir-engine::lib::tx::tests::drainer_tests::seed_inflight_put"
-to_path = "crates/shamir-engine/src/tx/tests/drainer_tests/support.rs"
-to_item = "shamir-engine::lib::tx::tests::drainer_tests::support::seed_inflight_put"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -570,14 +267,6 @@ path = "crates/shamir-engine/src/tx/tests/drainer_tests.rs"
 item = "shamir-engine::lib::tx::tests::drainer_tests::ticket_written_and_acked_replay_data_and_mark_lazy_pull_gap"
 to_path = "crates/shamir-engine/src/tx/tests/drainer_tests/ticket_tests.rs"
 to_item = "shamir-engine::lib::tx::tests::drainer_tests::ticket_tests::ticket_written_and_acked_replay_data_and_mark_lazy_pull_gap"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/tx/tests/drainer_tests.rs"
-item = "shamir-engine::lib::tx::tests::drainer_tests::transfer_pending"
-to_path = "crates/shamir-engine/src/tx/tests/drainer_tests/support.rs"
-to_item = "shamir-engine::lib::tx::tests::drainer_tests::support::transfer_pending"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -1005,4 +694,42 @@ owner = "@layout-sweep"
 path = "crates/shamir-engine/src/tx/tests/drainer_tests/mod.rs"
 item = "shamir-engine::lib::tx::tests::drainer_tests::window_tests"
 reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/drainer.rs"
+item = "shamir-engine::lib::tx::drainer::Drainer"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/drainer.rs"
+item = "shamir-engine::lib::tx::drainer::Drainer::new"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/drainer.rs"
+item = "shamir-engine::lib::tx::drainer::Drainer::record_orphan_failure"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/drainer.rs"
+item = "shamir-engine::lib::tx::drainer::orphan_repair"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/tests/drainer_tests.rs"
+item = "shamir-engine::lib::tx::tests::drainer_tests::seed_inflight_entry"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[moved]]
+path = "crates/shamir-engine/src/tx/drainer.rs"
+item = "shamir-engine::lib::tx::drainer::orphan_repair"
+to_path = "crates/shamir-engine/src/tx/drainer/mod.rs"
+to_item = "shamir-engine::lib::tx::drainer::orphan_repair"
+reason = "logical mount re-anchored when drainer.rs became drainer/mod.rs"
 owner = "@layout-sweep"
