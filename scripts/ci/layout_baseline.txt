@@ -1,4 +1,3 @@
 # layout baseline: current violations of the layout limits
 # format: dir <path> <n> | file <path> <n>; maintained by check_layout.py
 dir crates/shamir-engine/src 12
-dir crates/shamir-engine/src/tx 21
