@@ -5591,3 +5591,21 @@ path = "crates/shamir-engine/src/tx/tests/mod.rs"
 item = "shamir-engine::lib::tx::tests::journal_publish_order_tests"
 reason = "signature tokens re-qualified or body adjusted for the new module location"
 owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/tests/post_wal_cancel_tests.rs"
+item = "shamir-engine::lib::tx::tests::post_wal_cancel_tests::post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_control"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/tests/post_wal_orphan_ordering_tests.rs"
+item = "shamir-engine::lib::tx::tests::post_wal_orphan_ordering_tests::post_wal_panic_same_record_later_writer_posting_survives_drain"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/tests/post_wal_orphan_replay_tests.rs"
+item = "shamir-engine::lib::tx::tests::post_wal_orphan_replay_tests::orphan_postings_are_key_scoped_and_survive_backpressure_and_pruning"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
