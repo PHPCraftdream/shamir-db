@@ -53,6 +53,7 @@ FULL_OK = NEEDS(
     rustdoc="success",
     engine__features="success",
     test__discovery="success",
+    node__binding="success",
 )
 
 DRAFT_OK = NEEDS(
@@ -70,6 +71,7 @@ DRAFT_OK = NEEDS(
     rustdoc="skipped",
     engine__features="skipped",
     test__discovery="skipped",
+    node__binding="skipped",
 )
 
 READY = dict(event="pull_request", draft=False)
@@ -191,7 +193,7 @@ class EvaluateTests(unittest.TestCase):
 
     def test_required_jobs_list_excludes_fast_tier_only_job(self):
         self.assertNotIn("engine-features-fast", mgc.REQUIRED_JOBS)
-        self.assertEqual(len(mgc.REQUIRED_JOBS), 14)
+        self.assertEqual(len(mgc.REQUIRED_JOBS), 15)
         self.assertIn("deny", mgc.REQUIRED_JOBS)
 
 
