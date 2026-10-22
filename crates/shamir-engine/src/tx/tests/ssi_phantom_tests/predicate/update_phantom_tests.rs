@@ -12,7 +12,7 @@ use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
 use crate::tx::CommitError;
 
-use super::helpers::{make_repo, test_bound_key, test_posting_key};
+use super::super::helpers::{make_repo, test_bound_key, test_posting_key};
 
 /// Tx1 arms a predicate `age >= 30`. A concurrent committer (tx_upd)
 /// UPDATEs an existing row from age=4 → age=35, emitting a new sorted-index

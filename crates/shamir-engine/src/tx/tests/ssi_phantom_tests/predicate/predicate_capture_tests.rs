@@ -4,7 +4,7 @@
 //! `TableScan` predicate dependencies into `TxContext::predicate_set`, and that
 //! concurrent inserts into captured ranges actually abort.
 
-use super::helpers::make_repo;
+use super::super::helpers::make_repo;
 use shamir_tx::IsolationLevel;
 
 /// SortedIndexManager::lookup_range_tx records an IndexRange predicate dep
