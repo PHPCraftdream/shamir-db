@@ -281,3 +281,45 @@ path = "crates/shamir-engine/src/tx/tests/recovery_tests.rs"
 item = "shamir-engine::lib::tx::tests::recovery_tests::reopen_disk_repo"
 reason = "signature tokens re-qualified or body adjusted for the new module location"
 owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/tests/recovery_tests.rs"
+item = "shamir-engine::lib::tx::tests::recovery_tests::c5_implicit_insert_new_field_recovers_with_preserved_id"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/tests/recovery_tests.rs"
+item = "shamir-engine::lib::tx::tests::recovery_tests::f3_file_wal_process_crash_recovery_replays_committed_tx"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/tests/recovery_tests.rs"
+item = "shamir-engine::lib::tx::tests::recovery_tests::f3_file_wal_replay_is_idempotent"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/tests/recovery_tests.rs"
+item = "shamir-engine::lib::tx::tests::recovery_tests::f4b_nontx_insert_crash_recovery"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/tests/recovery_tests.rs"
+item = "shamir-engine::lib::tx::tests::recovery_tests::replay_inflight_v2_from_simulated_partial_commit_state"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/tests/recovery_tests.rs"
+item = "shamir-engine::lib::tx::tests::recovery_tests::stage_i_cross_table_shared_interner_id"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/tx/tests/recovery_tests.rs"
+item = "shamir-engine::lib::tx::tests::recovery_tests::stage_i_repo_scope_interner_delta_recovers"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
