@@ -1,1 +1,31 @@
 base = "0ac830f9766f03bf7949827d831d15132f4f1f7b"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/tx/tests/drainer_tests/support.rs"
+item = "make_repo"
+reason = "test support helper shared by the drainer test parts after the split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/tx/tests/drainer_tests/support.rs"
+item = "rid"
+reason = "test support helper shared by the drainer test parts after the split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/tx/tests/drainer_tests/support.rs"
+item = "seed_inflight_put"
+reason = "test support helper shared by the drainer test parts after the split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/tx/tests/drainer_tests/support.rs"
+item = "seed_inflight_entry"
+reason = "test support helper shared by the drainer test parts after the split; compiled only under cfg(test)"
+owner = "@layout-sweep"
+
+[[allow_widen]]
+path = "crates/shamir-engine/src/tx/tests/drainer_tests/support.rs"
+item = "transfer_pending"
+reason = "test support helper shared by the drainer test parts after the split; compiled only under cfg(test)"
+owner = "@layout-sweep"
