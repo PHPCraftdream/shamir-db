@@ -161,7 +161,7 @@ tightening (open `0o777` → enforced) are still in progress — see G10.
 dst_engine + dst_path?)`, `commit_migration(id)`, `rollback_migration(id)`,
 `migration_status(id)`. This is **storage-engine migration** (move a table to a
 different engine/repo online, with shadow log + cutover —
-`shamir-engine/src/migration/`), NOT schema migration. All four ops carry `hmac`.
+`shamir-engine/src/db_instance/migration/`), NOT schema migration. All four ops carry `hmac`.
 
 ### 1.7 Temporal / retention
 

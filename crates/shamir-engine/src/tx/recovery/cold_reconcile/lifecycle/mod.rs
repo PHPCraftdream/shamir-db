@@ -30,5 +30,4 @@ pub(crate) use worker::WorkerLease;
 pub(crate) use worker::{spawn_worker, FailClosedResource};
 
 #[cfg(test)]
-#[path = "tests/mod.rs"]
 mod tests;

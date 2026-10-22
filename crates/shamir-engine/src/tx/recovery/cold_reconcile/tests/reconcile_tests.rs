@@ -3,7 +3,7 @@ use crate::repo::{BoxRepoFactory, RepoFactory, RepoInstance};
 use crate::table::TableConfig;
 use crate::tx::clean_horizon::checkpoint::test_seam;
 
-use super::reconcile_with_hook;
+use crate::tx::cold_reconcile::algorithm::reconcile_with_hook;
 use crate::tx::drainer::Drainer;
 use bytes::Bytes;
 use shamir_query_builder::write::doc;

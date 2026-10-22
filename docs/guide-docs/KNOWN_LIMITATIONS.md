@@ -811,7 +811,7 @@ artifact).
   lasts); legacy peers omitting lineage/epoch
   identity are refused (`MissingIdentity`) and never adopted. Sources:
   `crates/shamir-server/src/replication/identity_fence/mod.rs`,
-  `crates/shamir-engine/src/meta/repo_identity.rs`,
+  `crates/shamir-engine/src/repo/meta/repo_identity.rs`,
   `crates/shamir-engine/src/repo/durability_policy/`.
 - **Duplicate loops and bookmark crash risk.** Two subscriptions for the
   same `(db, repo)` start two loops; bookmark advancement is not atomic.

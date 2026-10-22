@@ -11,12 +11,11 @@ index maintenance).
 ```
 shamir-engine/src/
 ├── lib.rs
-├── README.md
-├── LAYERS.md                 # short note: где живёт интернер и почему
-├── db_instance/              # DbInstance — repos within one DB
-├── repo/                     # RepoInstance + BoxRepo + BoxRepoFactory (7 backends)
+├── db_instance/              # DbInstance — repos within one DB (+ storage-engine migration)
+├── repo/                     # RepoInstance + BoxRepo + BoxRepoFactory (7 backends) + repo meta records
 ├── table/                    # TableManager + Table (low-level CRUD) + interner / counter / read+write executors
-├── index/                    # IndexManager + IndexInfo + IndexDefinition + IndexRecordKey
+├── tx/                       # transaction pipeline: preparation, commit, drain, recovery, replication
+├── validator/                # write validation
 └── query/                    # SDBQL query layer
     ├── batch/                # BatchPlanner + execute_batch + $query reference resolver
     ├── read/                 # parser + exec pipeline (DTOs re-exported from shamir-query-types)
@@ -110,8 +109,8 @@ concurrently. Reads use index scans automatically when `where` is `Eq` / `In`
 on an indexed field; otherwise full scan.
 
 For the `BatchRequest`/`QueryValue` query format see
-[`query/batch/README.md`](query/batch/README.md) and
-[`query/README.md`](query/README.md).
+[`query/batch/README.md`](../src/query/batch/README.md) and
+[`query/README.md`](../src/query/README.md).
 
 ## Concurrency
 

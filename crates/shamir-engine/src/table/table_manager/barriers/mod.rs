@@ -2,9 +2,8 @@
 //! `WriteBarrierGuard` (engine sweep T1, W4; split from the tail of
 //! `table_manager.rs`).
 //!
-//! Mounted as a child tree of `table_manager` via `#[path]` from
-//! `table_manager.rs`, so every file here can see `TableManager`'s
-//! private/`pub(super)` fields.
+//! Declared as a child tree of `table_manager` in `table_manager.rs`, so
+//! every file here can see `TableManager`'s private/`pub(super)` fields.
 
 mod ddl_barriers;
 pub(super) mod guard;
