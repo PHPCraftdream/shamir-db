@@ -315,7 +315,7 @@ async fn p1098_all_four_call_sites_follow_correct_ordering_pattern() {
 /// #1098 — genuine concurrency-level reproduction via a test-only pause
 /// seam, deterministic (no timing luck), mirroring the established
 /// `PostPrelockPreMaterializeHook`/F-48b pattern used elsewhere in this
-/// codebase (`crate::tx::tests::tx_commit_writer_drain_tests`).
+/// codebase (`crate::tx::tests::commit::detach::tx_commit_writer_drain_tests`).
 ///
 /// Setup: record `A{email:"x"}` exists DURABLY before any unique index is
 /// created (so no constraint applies to it). A concurrent `INSERT

@@ -7,7 +7,7 @@ use super::super::repair::repair_event;
 use super::super::repair::{GapReason, Outcome};
 use crate::repo::{BoxRepoFactory, RepoInstance};
 use crate::table::TableConfig;
-use crate::tx::tests::post_wal_orphan_ordering_tests::fixture;
+use crate::tx::tests::drain::orphans::post_wal_orphan_ordering_tests::fixture;
 
 fn entry_without_event(version: u64) -> WalEntryV2 {
     WalEntryV2::new(version, 0, Vec::new()).with_commit_version(version)

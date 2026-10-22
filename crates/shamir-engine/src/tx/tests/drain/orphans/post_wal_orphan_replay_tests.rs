@@ -4,7 +4,8 @@ use shamir_types::types::value::InnerValue;
 
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
-use crate::tx::tests::post_wal_orphan_ordering_tests::{fixture, panic_post_wal};
+use crate::tx::tests::drain::orphans::post_wal_orphan_ordering_tests::{fixture, panic_post_wal};
+use crate::tx::tests::recovery::snapshot_gc::snapshot_visibility_park_tests::spawn_settled_commit;
 
 fn posting(key: &Bytes, value: &'static [u8]) -> IndexWriteOp {
     IndexWriteOp::SetPosting {
@@ -128,8 +129,7 @@ async fn orphan_postings_are_key_scoped_and_survive_backpressure_and_pruning() {
             owner: None,
         },
     ));
-    let (later, later_task) =
-        super::snapshot_visibility_park_tests::spawn_settled_commit(&repo, tx).await;
+    let (later, later_task) = spawn_settled_commit(&repo, tx).await;
     assert!(!later_task.is_finished());
     drop(snapshot);
     assert!(later > orphan);

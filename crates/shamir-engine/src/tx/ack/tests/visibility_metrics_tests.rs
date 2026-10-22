@@ -18,7 +18,7 @@ use shamir_types::types::value::InnerValue;
 
 use crate::query::batch::receipts::commit_implicit;
 use crate::tx::commit::acknowledge_known_outcome;
-use crate::tx::tests::post_wal_orphan_ordering_tests::fixture;
+use crate::tx::tests::drain::orphans::post_wal_orphan_ordering_tests::fixture;
 use crate::tx::{CommitError, MaterializationState, TxOutcome};
 
 const BOUNDED: VisibilityWait = VisibilityWait::Bounded { timeout_ms: 17 };

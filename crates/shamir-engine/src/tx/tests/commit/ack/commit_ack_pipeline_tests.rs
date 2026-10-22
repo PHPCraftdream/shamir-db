@@ -21,7 +21,7 @@ use crate::tx::commit::{
     AsyncIndexTailHook, TxError, TEST_ASYNC_INDEX_TAIL_HOOK, TEST_SYNCED_WAL_REPO,
 };
 use crate::tx::materialize::TEST_PRE_MATERIALIZE_REPO;
-use crate::tx::tests::post_wal_orphan_ordering_tests::fixture;
+use crate::tx::tests::drain::orphans::post_wal_orphan_ordering_tests::fixture;
 use crate::tx::MaterializationState;
 
 const STATUS: VisibilityWait = VisibilityWait::Bounded { timeout_ms: 0 };

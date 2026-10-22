@@ -2,7 +2,7 @@ use crate::repo::{BoxRepoFactory, DurabilityPolicy, RepoInstance};
 use crate::table::TableConfig;
 use crate::tx::clean_horizon::checkpoint::test_seam;
 use crate::tx::drainer::Drainer;
-use crate::tx::tests::truncation_tests::shamirwal_seg_count;
+use crate::tx::tests::drain::truncation::truncation_tests::shamirwal_seg_count;
 use shamir_tx::IsolationLevel;
 use shamir_types::types::value::InnerValue;
 

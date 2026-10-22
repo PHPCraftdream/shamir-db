@@ -10,7 +10,7 @@ use shamir_tx::IsolationLevel;
 use shamir_types::types::value::InnerValue;
 
 use crate::tx::commit::{acknowledge_known_outcome, TxError};
-use crate::tx::tests::post_wal_orphan_ordering_tests::fixture;
+use crate::tx::tests::drain::orphans::post_wal_orphan_ordering_tests::fixture;
 use crate::tx::{MaterializationState, TxOutcome};
 
 const BOUNDED: VisibilityWait = VisibilityWait::Bounded { timeout_ms: 17 };

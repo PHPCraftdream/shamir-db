@@ -51,7 +51,7 @@ const ASYNC_INJECT_TX_ID: u64 = 7_100_001;
 /// Borrow the process-global Phase-5c injection lock from the defer-tests
 /// module so async-mode + sync-mode injection tests don't clobber each
 /// other's arm windows when running in parallel.
-use super::commit_phase5_defer_tests::PHASE_5C_INJECT_LOCK;
+use crate::tx::tests::commit::publication::commit_phase5_defer_tests::PHASE_5C_INJECT_LOCK;
 
 /// (a) Data is immediately visible after an async-mode commit (no
 /// `background.join()`): read-your-own-writes on DATA holds because

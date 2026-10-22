@@ -7,7 +7,8 @@ use shamir_types::types::value::InnerValue;
 
 use crate::tx::tx_outcome::MaterializationState;
 
-use super::post_wal_orphan_ordering_tests::fixture;
+use crate::tx::tests::drain::orphans::post_wal_orphan_ordering_tests::fixture;
+use crate::tx::tests::recovery::snapshot_gc::snapshot_visibility_park_tests::spawn_settled_commit;
 
 // Red by construction: the unbounded engine read returns B while A still
 // prevents the completion watermark from reaching either version.
@@ -43,8 +44,7 @@ async fn parked_commit_hides_later_journal_event(name: &str, visibility: CommitV
             && tx_b.footprint_tokens.is_empty(),
         "B must not acquire the commit lock held by AsyncIndex A",
     );
-    let (version_b, task_b) =
-        super::snapshot_visibility_park_tests::spawn_settled_commit(&repo, tx_b).await;
+    let (version_b, task_b) = spawn_settled_commit(&repo, tx_b).await;
     assert_eq!(version_b, version_a + 1);
     for _ in 0..10_000 {
         if feed.last_persisted_version() >= version_b {
