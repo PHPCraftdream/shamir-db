@@ -5,7 +5,7 @@ use shamir_types::types::value::InnerValue;
 
 use crate::table::TableConfig;
 
-use super::helpers::make_repo;
+use super::super::helpers::make_repo;
 
 /// PERF-233 — non-tx insert WITHOUT an active Serializable tx must NOT write
 /// to the commit_write_log (footprint is suppressed by the early-return guard).
