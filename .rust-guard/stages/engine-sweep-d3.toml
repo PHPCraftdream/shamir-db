@@ -1,27 +1,4 @@
 base = "99654c15fafaa6b0a5242e5ac5fe9ce36c020b2f"
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/bounded_journal_read_tests.rs"
-item = "shamir-engine::lib::repo::tests::bounded_journal_read_tests::JournalFixture"
-to_path = "crates/shamir-engine/src/repo/tests/journal/bounded_journal_read_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::journal::bounded_journal_read_tests::JournalFixture"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/bounded_journal_read_tests.rs"
-item = "shamir-engine::lib::repo::tests::bounded_journal_read_tests::JournalFixture::put"
-to_path = "crates/shamir-engine/src/repo/tests/journal/bounded_journal_read_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::journal::bounded_journal_read_tests::JournalFixture::put"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/bounded_journal_read_tests.rs"
-item = "shamir-engine::lib::repo::tests::bounded_journal_read_tests::JournalFixture::range_from"
-to_path = "crates/shamir-engine/src/repo/tests/journal/bounded_journal_read_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::journal::bounded_journal_read_tests::JournalFixture::range_from"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/repo/tests/bounded_journal_read_tests.rs"
@@ -44,22 +21,6 @@ path = "crates/shamir-engine/src/repo/tests/bounded_journal_read_tests.rs"
 item = "shamir-engine::lib::repo::tests::bounded_journal_read_tests::confirmed_bound_covers_empty_versions_and_legacy_page_matches"
 to_path = "crates/shamir-engine/src/repo/tests/journal/bounded_journal_read_tests.rs"
 to_item = "shamir-engine::lib::repo::tests::journal::bounded_journal_read_tests::confirmed_bound_covers_empty_versions_and_legacy_page_matches"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/bounded_journal_read_tests.rs"
-item = "shamir-engine::lib::repo::tests::bounded_journal_read_tests::event"
-to_path = "crates/shamir-engine/src/repo/tests/journal/bounded_journal_read_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::journal::bounded_journal_read_tests::event"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/bounded_journal_read_tests.rs"
-item = "shamir-engine::lib::repo::tests::bounded_journal_read_tests::fixture"
-to_path = "crates/shamir-engine/src/repo/tests/journal/bounded_journal_read_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::journal::bounded_journal_read_tests::fixture"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -100,22 +61,6 @@ path = "crates/shamir-engine/src/repo/tests/bounded_journal_read_tests.rs"
 item = "shamir-engine::lib::repo::tests::bounded_journal_read_tests::real_range_failure_is_error_but_legacy_read_still_returns_gap"
 to_path = "crates/shamir-engine/src/repo/tests/journal/bounded_journal_read_tests.rs"
 to_item = "shamir-engine::lib::repo::tests::journal::bounded_journal_read_tests::real_range_failure_is_error_but_legacy_read_still_returns_gap"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/bounded_journal_read_tests.rs"
-item = "shamir-engine::lib::repo::tests::bounded_journal_read_tests::seed"
-to_path = "crates/shamir-engine/src/repo/tests/journal/bounded_journal_read_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::journal::bounded_journal_read_tests::seed"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/bounded_journal_read_tests.rs"
-item = "shamir-engine::lib::repo::tests::bounded_journal_read_tests::settlement_releases_wait"
-to_path = "crates/shamir-engine/src/repo/tests/journal/bounded_journal_read_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::journal::bounded_journal_read_tests::settlement_releases_wait"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -169,14 +114,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/repo/tests/changelog_gap_marker_tests.rs"
-item = "shamir-engine::lib::repo::tests::changelog_gap_marker_tests::instance_with_marker"
-to_path = "crates/shamir-engine/src/repo/tests/journal/changelog_gap_marker_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::journal::changelog_gap_marker_tests::instance_with_marker"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/changelog_gap_marker_tests.rs"
 item = "shamir-engine::lib::repo::tests::changelog_gap_marker_tests::malformed_marker_initializes_with_conservative_gap"
 to_path = "crates/shamir-engine/src/repo/tests/journal/changelog_gap_marker_tests.rs"
 to_item = "shamir-engine::lib::repo::tests::journal::changelog_gap_marker_tests::malformed_marker_initializes_with_conservative_gap"
@@ -196,94 +133,6 @@ path = "crates/shamir-engine/src/repo/tests/changelog_gap_marker_tests.rs"
 item = "shamir-engine::lib::repo::tests::changelog_gap_marker_tests::zero_marker_initializes_with_conservative_gap"
 to_path = "crates/shamir-engine/src/repo/tests/journal/changelog_gap_marker_tests.rs"
 to_item = "shamir-engine::lib::repo::tests::journal::changelog_gap_marker_tests::zero_marker_initializes_with_conservative_gap"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/changelog_store_tests.rs"
-item = "shamir-engine::lib::repo::tests::changelog_store_tests::RangeItemCountingStore"
-to_path = "crates/shamir-engine/src/repo/tests/journal/changelog_store_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::journal::changelog_store_tests::RangeItemCountingStore"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/changelog_store_tests.rs"
-item = "shamir-engine::lib::repo::tests::changelog_store_tests::RangeItemCountingStore::get"
-to_path = "crates/shamir-engine/src/repo/tests/journal/changelog_store_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::journal::changelog_store_tests::RangeItemCountingStore::get"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/changelog_store_tests.rs"
-item = "shamir-engine::lib::repo::tests::changelog_store_tests::RangeItemCountingStore::insert"
-to_path = "crates/shamir-engine/src/repo/tests/journal/changelog_store_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::journal::changelog_store_tests::RangeItemCountingStore::insert"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/changelog_store_tests.rs"
-item = "shamir-engine::lib::repo::tests::changelog_store_tests::RangeItemCountingStore::items_yielded"
-to_path = "crates/shamir-engine/src/repo/tests/journal/changelog_store_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::journal::changelog_store_tests::RangeItemCountingStore::items_yielded"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/changelog_store_tests.rs"
-item = "shamir-engine::lib::repo::tests::changelog_store_tests::RangeItemCountingStore::iter_range_stream"
-to_path = "crates/shamir-engine/src/repo/tests/journal/changelog_store_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::journal::changelog_store_tests::RangeItemCountingStore::iter_range_stream"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/changelog_store_tests.rs"
-item = "shamir-engine::lib::repo::tests::changelog_store_tests::RangeItemCountingStore::iter_stream"
-to_path = "crates/shamir-engine/src/repo/tests/journal/changelog_store_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::journal::changelog_store_tests::RangeItemCountingStore::iter_stream"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/changelog_store_tests.rs"
-item = "shamir-engine::lib::repo::tests::changelog_store_tests::RangeItemCountingStore::new"
-to_path = "crates/shamir-engine/src/repo/tests/journal/changelog_store_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::journal::changelog_store_tests::RangeItemCountingStore::new"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/changelog_store_tests.rs"
-item = "shamir-engine::lib::repo::tests::changelog_store_tests::RangeItemCountingStore::remove"
-to_path = "crates/shamir-engine/src/repo/tests/journal/changelog_store_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::journal::changelog_store_tests::RangeItemCountingStore::remove"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/changelog_store_tests.rs"
-item = "shamir-engine::lib::repo::tests::changelog_store_tests::RangeItemCountingStore::scan_prefix_stream"
-to_path = "crates/shamir-engine/src/repo/tests/journal/changelog_store_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::journal::changelog_store_tests::RangeItemCountingStore::scan_prefix_stream"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/changelog_store_tests.rs"
-item = "shamir-engine::lib::repo::tests::changelog_store_tests::RangeItemCountingStore::set"
-to_path = "crates/shamir-engine/src/repo/tests/journal/changelog_store_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::journal::changelog_store_tests::RangeItemCountingStore::set"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/changelog_store_tests.rs"
-item = "shamir-engine::lib::repo::tests::changelog_store_tests::TestStream"
-to_path = "crates/shamir-engine/src/repo/tests/journal/changelog_store_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::journal::changelog_store_tests::TestStream"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -313,14 +162,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/repo/tests/clean_horizon_tests.rs"
-item = "shamir-engine::lib::repo::tests::clean_horizon_tests::commit"
-to_path = "crates/shamir-engine/src/repo/tests/journal/clean_horizon_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::journal::clean_horizon_tests::commit"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/clean_horizon_tests.rs"
 item = "shamir-engine::lib::repo::tests::clean_horizon_tests::gap_without_j_recertifies_idempotently_and_bad_j_refuses_recovery"
 to_path = "crates/shamir-engine/src/repo/tests/journal/clean_horizon_tests.rs"
 to_item = "shamir-engine::lib::repo::tests::journal::clean_horizon_tests::gap_without_j_recertifies_idempotently_and_bad_j_refuses_recovery"
@@ -337,33 +178,9 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/repo/tests/clean_horizon_tests.rs"
-item = "shamir-engine::lib::repo::tests::clean_horizon_tests::j"
-to_path = "crates/shamir-engine/src/repo/tests/journal/clean_horizon_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::journal::clean_horizon_tests::j"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/clean_horizon_tests.rs"
 item = "shamir-engine::lib::repo::tests::clean_horizon_tests::legacy_certifies_once_and_metadata_never_enters_ranges"
 to_path = "crates/shamir-engine/src/repo/tests/journal/clean_horizon_tests.rs"
 to_item = "shamir-engine::lib::repo::tests::journal::clean_horizon_tests::legacy_certifies_once_and_metadata_never_enters_ranges"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/clean_horizon_tests.rs"
-item = "shamir-engine::lib::repo::tests::clean_horizon_tests::open"
-to_path = "crates/shamir-engine/src/repo/tests/journal/clean_horizon_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::journal::clean_horizon_tests::open"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/clean_horizon_tests.rs"
-item = "shamir-engine::lib::repo::tests::clean_horizon_tests::stop_writer"
-to_path = "crates/shamir-engine/src/repo/tests/journal/clean_horizon_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::journal::clean_horizon_tests::stop_writer"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -385,25 +202,9 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/repo/tests/hybrid_repo_tests.rs"
-item = "shamir-engine::lib::repo::tests::hybrid_repo_tests::build_hybrid"
-to_path = "crates/shamir-engine/src/repo/tests/core/hybrid_repo_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::core::hybrid_repo_tests::build_hybrid"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/hybrid_repo_tests.rs"
 item = "shamir-engine::lib::repo::tests::hybrid_repo_tests::changelog_store_never_reaches_disk_tier"
 to_path = "crates/shamir-engine/src/repo/tests/core/hybrid_repo_tests.rs"
 to_item = "shamir-engine::lib::repo::tests::core::hybrid_repo_tests::changelog_store_never_reaches_disk_tier"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/hybrid_repo_tests.rs"
-item = "shamir-engine::lib::repo::tests::hybrid_repo_tests::classified_key"
-to_path = "crates/shamir-engine/src/repo/tests/core/hybrid_repo_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::core::hybrid_repo_tests::classified_key"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -481,14 +282,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/repo/tests/hybrid_repo_tests.rs"
-item = "shamir-engine::lib::repo::tests::hybrid_repo_tests::old_merge_oracle"
-to_path = "crates/shamir-engine/src/repo/tests/core/hybrid_repo_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::core::hybrid_repo_tests::old_merge_oracle"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/hybrid_repo_tests.rs"
 item = "shamir-engine::lib::repo::tests::hybrid_repo_tests::store_delete_on_info_name_removes_from_both_tiers"
 to_path = "crates/shamir-engine/src/repo/tests/core/hybrid_repo_tests.rs"
 to_item = "shamir-engine::lib::repo::tests::core::hybrid_repo_tests::store_delete_on_info_name_removes_from_both_tiers"
@@ -545,25 +338,9 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/repo/tests/hybrid_table_open_tests.rs"
-item = "shamir-engine::lib::repo::tests::hybrid_table_open_tests::interned_row"
-to_path = "crates/shamir-engine/src/repo/tests/core/hybrid_table_open_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::core::hybrid_table_open_tests::interned_row"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/hybrid_table_open_tests.rs"
 item = "shamir-engine::lib::repo::tests::hybrid_table_open_tests::interner_resolves_same_field_to_same_id_after_restart"
 to_path = "crates/shamir-engine/src/repo/tests/core/hybrid_table_open_tests.rs"
 to_item = "shamir-engine::lib::repo::tests::core::hybrid_table_open_tests::interner_resolves_same_field_to_same_id_after_restart"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/hybrid_table_open_tests.rs"
-item = "shamir-engine::lib::repo::tests::hybrid_table_open_tests::open_table"
-to_path = "crates/shamir-engine/src/repo/tests/core/hybrid_table_open_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::core::hybrid_table_open_tests::open_table"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -753,38 +530,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/repo/tests/per_table_mvcc_token_names_deadlock_tests.rs"
-item = "shamir-engine::lib::repo::tests::per_table_mvcc_token_names_deadlock_tests::HAMMERS"
-to_path = "crates/shamir-engine/src/repo/tests/lifecycle/per_table_mvcc_token_names_deadlock_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::lifecycle::per_table_mvcc_token_names_deadlock_tests::HAMMERS"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/per_table_mvcc_token_names_deadlock_tests.rs"
-item = "shamir-engine::lib::repo::tests::per_table_mvcc_token_names_deadlock_tests::ITERS"
-to_path = "crates/shamir-engine/src/repo/tests/lifecycle/per_table_mvcc_token_names_deadlock_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::lifecycle::per_table_mvcc_token_names_deadlock_tests::ITERS"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/per_table_mvcc_token_names_deadlock_tests.rs"
-item = "shamir-engine::lib::repo::tests::per_table_mvcc_token_names_deadlock_tests::TABLES"
-to_path = "crates/shamir-engine/src/repo/tests/lifecycle/per_table_mvcc_token_names_deadlock_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::lifecycle::per_table_mvcc_token_names_deadlock_tests::TABLES"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/per_table_mvcc_token_names_deadlock_tests.rs"
-item = "shamir-engine::lib::repo::tests::per_table_mvcc_token_names_deadlock_tests::ddl_hammer"
-to_path = "crates/shamir-engine/src/repo/tests/lifecycle/per_table_mvcc_token_names_deadlock_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::lifecycle::per_table_mvcc_token_names_deadlock_tests::ddl_hammer"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/per_table_mvcc_token_names_deadlock_tests.rs"
 item = "shamir-engine::lib::repo::tests::per_table_mvcc_token_names_deadlock_tests::make_instance"
 to_path = "crates/shamir-engine/src/repo/tests/lifecycle/per_table_mvcc_token_names_deadlock_tests.rs"
 to_item = "shamir-engine::lib::repo::tests::lifecycle::per_table_mvcc_token_names_deadlock_tests::make_instance"
@@ -801,14 +546,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/repo/tests/per_table_mvcc_token_names_deadlock_tests.rs"
-item = "shamir-engine::lib::repo::tests::per_table_mvcc_token_names_deadlock_tests::per_table_mvcc_reader_hammer"
-to_path = "crates/shamir-engine/src/repo/tests/lifecycle/per_table_mvcc_token_names_deadlock_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::lifecycle::per_table_mvcc_token_names_deadlock_tests::per_table_mvcc_reader_hammer"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/per_table_mvcc_token_names_deadlock_tests.rs"
 item = "shamir-engine::lib::repo::tests::per_table_mvcc_token_names_deadlock_tests::table_by_token_if_live_still_non_instantiating"
 to_path = "crates/shamir-engine/src/repo/tests/lifecycle/per_table_mvcc_token_names_deadlock_tests.rs"
 to_item = "shamir-engine::lib::repo::tests::lifecycle::per_table_mvcc_token_names_deadlock_tests::table_by_token_if_live_still_non_instantiating"
@@ -820,14 +557,6 @@ path = "crates/shamir-engine/src/repo/tests/per_table_mvcc_token_names_deadlock_
 item = "shamir-engine::lib::repo::tests::per_table_mvcc_token_names_deadlock_tests::token_names_concurrent_ddl_reads_no_deadlock"
 to_path = "crates/shamir-engine/src/repo/tests/lifecycle/per_table_mvcc_token_names_deadlock_tests.rs"
 to_item = "shamir-engine::lib::repo::tests::lifecycle::per_table_mvcc_token_names_deadlock_tests::token_names_concurrent_ddl_reads_no_deadlock"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/per_table_mvcc_token_names_deadlock_tests.rs"
-item = "shamir-engine::lib::repo::tests::per_table_mvcc_token_names_deadlock_tests::token_names_reader_hammer"
-to_path = "crates/shamir-engine/src/repo/tests/lifecycle/per_table_mvcc_token_names_deadlock_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::lifecycle::per_table_mvcc_token_names_deadlock_tests::token_names_reader_hammer"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -1025,14 +754,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/repo/tests/repl_bookmark_tests.rs"
-item = "shamir-engine::lib::repo::tests::repl_bookmark_tests::bookmark_key"
-to_path = "crates/shamir-engine/src/repo/tests/identity/repl_bookmark_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::identity::repl_bookmark_tests::bookmark_key"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/repl_bookmark_tests.rs"
 item = "shamir-engine::lib::repo::tests::repl_bookmark_tests::bookmark_survives_reopen"
 to_path = "crates/shamir-engine/src/repo/tests/identity/repl_bookmark_tests.rs"
 to_item = "shamir-engine::lib::repo::tests::identity::repl_bookmark_tests::bookmark_survives_reopen"
@@ -1057,33 +778,9 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/repo/tests/repl_bookmark_tests.rs"
-item = "shamir-engine::lib::repo::tests::repl_bookmark_tests::mem_repo"
-to_path = "crates/shamir-engine/src/repo/tests/identity/repl_bookmark_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::identity::repl_bookmark_tests::mem_repo"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/repl_bookmark_tests.rs"
-item = "shamir-engine::lib::repo::tests::repl_bookmark_tests::open_disk"
-to_path = "crates/shamir-engine/src/repo/tests/identity/repl_bookmark_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::identity::repl_bookmark_tests::open_disk"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/repl_bookmark_tests.rs"
 item = "shamir-engine::lib::repo::tests::repl_bookmark_tests::v3_projection_reads_the_written_record"
 to_path = "crates/shamir-engine/src/repo/tests/identity/repl_bookmark_tests.rs"
 to_item = "shamir-engine::lib::repo::tests::identity::repl_bookmark_tests::v3_projection_reads_the_written_record"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/repl_bookmark_tests.rs"
-item = "shamir-engine::lib::repo::tests::repl_bookmark_tests::write_bytes"
-to_path = "crates/shamir-engine/src/repo/tests/identity/repl_bookmark_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::identity::repl_bookmark_tests::write_bytes"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -1132,14 +829,6 @@ path = "crates/shamir-engine/src/repo/tests/repo_identity_tests.rs"
 item = "shamir-engine::lib::repo::tests::repo_identity_tests::cloned_handles_serialize_create_and_bump"
 to_path = "crates/shamir-engine/src/repo/tests/identity/repo_identity_tests.rs"
 to_item = "shamir-engine::lib::repo::tests::identity::repo_identity_tests::cloned_handles_serialize_create_and_bump"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/repo_identity_tests.rs"
-item = "shamir-engine::lib::repo::tests::repo_identity_tests::handle"
-to_path = "crates/shamir-engine/src/repo/tests/identity/repo_identity_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::identity::repo_identity_tests::handle"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -1212,14 +901,6 @@ path = "crates/shamir-engine/src/repo/tests/repo_instance_tests.rs"
 item = "shamir-engine::lib::repo::tests::repo_instance_tests::add_table_twice_is_idempotent_for_token_lookup"
 to_path = "crates/shamir-engine/src/repo/tests/core/repo_instance_tests.rs"
 to_item = "shamir-engine::lib::repo::tests::core::repo_instance_tests::add_table_twice_is_idempotent_for_token_lookup"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/repo_instance_tests.rs"
-item = "shamir-engine::lib::repo::tests::repo_instance_tests::create_membuffer_wrapped_instance"
-to_path = "crates/shamir-engine/src/repo/tests/core/repo_instance_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::core::repo_instance_tests::create_membuffer_wrapped_instance"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -1433,14 +1114,6 @@ owner = "@layout-sweep"
 
 [[moved]]
 path = "crates/shamir-engine/src/repo/tests/repo_tx_accessors_tests.rs"
-item = "shamir-engine::lib::repo::tests::repo_tx_accessors_tests::make_repo"
-to_path = "crates/shamir-engine/src/repo/tests/core/repo_tx_accessors_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::core::repo_tx_accessors_tests::make_repo"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/repo_tx_accessors_tests.rs"
 item = "shamir-engine::lib::repo::tests::repo_tx_accessors_tests::repo_name_stored"
 to_path = "crates/shamir-engine/src/repo/tests/core/repo_tx_accessors_tests.rs"
 to_item = "shamir-engine::lib::repo::tests::core::repo_tx_accessors_tests::repo_name_stored"
@@ -1580,14 +1253,6 @@ path = "crates/shamir-engine/src/repo/tests/table_init_retry_tests.rs"
 item = "shamir-engine::lib::repo::tests::table_init_retry_tests::setup_failure_retries_with_coherent_mvcc"
 to_path = "crates/shamir-engine/src/repo/tests/identity/table_init_retry_tests.rs"
 to_item = "shamir-engine::lib::repo::tests::table_init_retry_tests::setup_failure_retries_with_coherent_mvcc"
-reason = "relocated by the layout sweep"
-owner = "@layout-sweep"
-
-[[moved]]
-path = "crates/shamir-engine/src/repo/tests/visibility_observer_tests.rs"
-item = "shamir-engine::lib::repo::tests::visibility_observer_tests::STATUS"
-to_path = "crates/shamir-engine/src/repo/tests/identity/visibility_observer_tests.rs"
-to_item = "shamir-engine::lib::repo::tests::identity::visibility_observer_tests::STATUS"
 reason = "relocated by the layout sweep"
 owner = "@layout-sweep"
 
@@ -1951,222 +1616,6 @@ to_item = "shamir-engine::lib::repo::tests::identity::repl_bookmark_tests::write
 reason = "relocated by the layout sweep (signature tokens re-qualified)"
 owner = "@layout-sweep"
 
-[[removed]]
-path = "crates/shamir-engine/src/repo/tests/mod.rs"
-item = "shamir-engine::lib::repo::tests::bounded_journal_read_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/repo/tests/mod.rs"
-item = "shamir-engine::lib::repo::tests::box_repo_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/repo/tests/mod.rs"
-item = "shamir-engine::lib::repo::tests::changelog_gap_marker_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/repo/tests/mod.rs"
-item = "shamir-engine::lib::repo::tests::changelog_store_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/repo/tests/mod.rs"
-item = "shamir-engine::lib::repo::tests::clean_horizon_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/repo/tests/mod.rs"
-item = "shamir-engine::lib::repo::tests::current_version_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/repo/tests/mod.rs"
-item = "shamir-engine::lib::repo::tests::hybrid_repo_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/repo/tests/mod.rs"
-item = "shamir-engine::lib::repo::tests::hybrid_table_open_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/repo/tests/mod.rs"
-item = "shamir-engine::lib::repo::tests::per_table_mvcc_attach_collision_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/repo/tests/mod.rs"
-item = "shamir-engine::lib::repo::tests::per_table_mvcc_token_names_deadlock_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/repo/tests/mod.rs"
-item = "shamir-engine::lib::repo::tests::prealloc_bounds_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/repo/tests/mod.rs"
-item = "shamir-engine::lib::repo::tests::prepare_seed_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/repo/tests/mod.rs"
-item = "shamir-engine::lib::repo::tests::repl_bookmark_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/repo/tests/mod.rs"
-item = "shamir-engine::lib::repo::tests::repo_config_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/repo/tests/mod.rs"
-item = "shamir-engine::lib::repo::tests::repo_identity_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/repo/tests/mod.rs"
-item = "shamir-engine::lib::repo::tests::repo_instance_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/repo/tests/mod.rs"
-item = "shamir-engine::lib::repo::tests::repo_tx_accessors_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[removed]]
-path = "crates/shamir-engine/src/repo/tests/mod.rs"
-item = "shamir-engine::lib::repo::tests::visibility_observer_tests"
-reason = "module declaration dissolved by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/tests/core/mod.rs"
-item = "shamir-engine::lib::repo::tests::core::box_repo_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/tests/core/mod.rs"
-item = "shamir-engine::lib::repo::tests::core::hybrid_repo_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/tests/core/mod.rs"
-item = "shamir-engine::lib::repo::tests::core::hybrid_table_open_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/tests/core/mod.rs"
-item = "shamir-engine::lib::repo::tests::core::repo_config_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/tests/core/mod.rs"
-item = "shamir-engine::lib::repo::tests::core::repo_instance_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/tests/core/mod.rs"
-item = "shamir-engine::lib::repo::tests::core::repo_tx_accessors_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/tests/identity/mod.rs"
-item = "shamir-engine::lib::repo::tests::identity::repl_bookmark_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/tests/identity/mod.rs"
-item = "shamir-engine::lib::repo::tests::identity::repo_identity_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/tests/identity/mod.rs"
-item = "shamir-engine::lib::repo::tests::identity::visibility_observer_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/tests/journal/mod.rs"
-item = "shamir-engine::lib::repo::tests::journal::bounded_journal_read_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/tests/journal/mod.rs"
-item = "shamir-engine::lib::repo::tests::journal::changelog_gap_marker_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/tests/journal/mod.rs"
-item = "shamir-engine::lib::repo::tests::journal::changelog_store_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/tests/journal/mod.rs"
-item = "shamir-engine::lib::repo::tests::journal::clean_horizon_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/tests/journal/mod.rs"
-item = "shamir-engine::lib::repo::tests::journal::prealloc_bounds_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/tests/lifecycle/mod.rs"
-item = "shamir-engine::lib::repo::tests::lifecycle::current_version_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/tests/lifecycle/mod.rs"
-item = "shamir-engine::lib::repo::tests::lifecycle::per_table_mvcc_attach_collision_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/tests/lifecycle/mod.rs"
-item = "shamir-engine::lib::repo::tests::lifecycle::per_table_mvcc_token_names_deadlock_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
-[[added]]
-path = "crates/shamir-engine/src/repo/tests/lifecycle/mod.rs"
-item = "shamir-engine::lib::repo::tests::lifecycle::prepare_seed_tests"
-reason = "module declaration created by the layout sweep; its items are declared separately"
-owner = "@layout-sweep"
-
 [[added]]
 path = "crates/shamir-engine/src/repo/tests/mod.rs"
 item = "shamir-engine::lib::repo::tests::core"
@@ -2189,4 +1638,16 @@ owner = "@layout-sweep"
 path = "crates/shamir-engine/src/repo/tests/mod.rs"
 item = "shamir-engine::lib::repo::tests::lifecycle"
 reason = "module declaration created by the layout sweep; its items are declared separately"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/repo/tests/mod.rs"
+item = "shamir-engine::lib::repo::tests::recovery_gap_marker_tests"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
+owner = "@layout-sweep"
+
+[[changed]]
+path = "crates/shamir-engine/src/repo/tests/mod.rs"
+item = "shamir-engine::lib::repo::tests::table_init_retry_tests"
+reason = "signature tokens re-qualified or body adjusted for the new module location"
 owner = "@layout-sweep"
