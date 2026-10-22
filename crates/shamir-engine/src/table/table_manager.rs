@@ -17,6 +17,9 @@ use shamir_storage::types::Store;
 // see its private/`pub(super)` fields — that is what makes the
 // line-budget-driven move of the admitted twins out of this file legal
 // without widening visibility. Same pattern as `repo/journal/changelog_store.rs`.
+// The `#[path]` attributes stay: these files live deep inside
+// `table_manager/admission/`, which is not where ordinary child-module
+// resolution (`table_manager/<name>.rs`) would look for them.
 #[path = "table_manager/admission/domain/barrier/admitted_ops.rs"]
 mod admitted_ops;
 #[path = "table_manager/admission/views/read_only_views.rs"]
@@ -36,18 +39,15 @@ mod write_domain_rename_admitted;
 // tx-staging split of the former `table_manager_tx_ops.rs`, the diagnostics
 // files (`doctor.rs` / `degraded_index_count.rs`) and the guard/tokenizer
 // tail split out of this file now live under `table_manager/`. They are
-// mounted HERE so they stay CHILD modules of `table_manager` and keep
+// declared HERE so they stay CHILD modules of `table_manager` and keep
 // private/`pub(super)` field access — same pattern as the admission mounts
-// above.
-#[path = "table_manager/accessors/mod.rs"]
+// above. (Engine sweep F: these `#[path]` attributes are REDUNDANT — plain
+// child resolution for `table_manager.rs` already looks in
+// `table_manager/<name>/mod.rs` — and were dropped.)
 pub(in crate::table) mod accessors;
-#[path = "table_manager/barriers/mod.rs"]
 mod barriers;
-#[path = "table_manager/diagnostics/mod.rs"]
 pub mod diagnostics;
-#[path = "table_manager/operations/mod.rs"]
 pub(in crate::table) mod operations;
-#[path = "table_manager/transactions/mod.rs"]
 pub(in crate::table) mod transactions;
 
 // Kept name re-export: `WriteBarrierGuard` used to be defined in this file;
