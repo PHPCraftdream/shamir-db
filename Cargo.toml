@@ -4,16 +4,14 @@
 members = ["crates/*", "vendor/hnsw_rs"]
 resolver = "2"
 
-# napi-rs cdylib needs the MSVC toolchain on Windows (it delay-loads
-# Node-API symbols from `node.exe` via `delayimp.lib`, which the
-# build script only wires up for `x86_64-pc-windows-msvc`). Excluded
-# from default workspace ops so `cargo build` / `cargo test` on the
-# host's `windows-gnu` toolchain don't fail trying to link `libnode.dll`.
-# Build it explicitly via `cargo build -p shamir-client-node` (its own
-# `rust-toolchain.toml` pins MSVC) or `napi build` from `npm`.
+# `shamir-client-node` (napi-rs cdylib) needs the MSVC toolchain on Windows
+# (it delay-loads Node-API symbols from `node.exe` via `delayimp.lib`, which
+# the build script only wires up for `x86_64-pc-windows-msvc`); on a host
+# running the `windows-gnu` toolchain, build it explicitly via
+# `cargo build -p shamir-client-node` or `napi build` from `npm`.
 # `shamir-client-ts` is a pure-TypeScript package (no Cargo.toml); exclude it
 # so the `crates/*` glob doesn't try to load it as a workspace member.
-exclude = ["crates/shamir-client-node", "crates/shamir-client-ts", "tools/rust-guard"]
+exclude = ["crates/shamir-client-ts", "tools/rust-guard"]
 
 [workspace.dependencies]
 # Published on crates.io (https://crates.io/crates/captrack, repo
@@ -57,9 +55,9 @@ debug = "line-tables-only"
 lto = "fat"
 # `opt-level = 3` (speed) instead of `"z"` (size). This is a server-
 # side database — binary size barely matters, throughput on hot
-# loops (filter eval, projection, codec) does. shamir-client-node
-# has its own `[profile.release] opt-level = "z"` because it ships
-# as a JS-bundled native module.
+# loops (filter eval, projection, codec) does. The Node binding
+# (shamir-client-node) overrides size settings per-package below
+# because it ships as a JS-bundled native module.
 opt-level = 3
 codegen-units = 14
 incremental = false
@@ -88,6 +86,13 @@ strip = true
 # a client's point of view. `panic = "unwind"` restores the isolation this
 # code already assumes and is written to rely on.
 panic = "unwind"
+
+# shamir-client-node ships as a JS-bundled native module: size beats speed
+# there, unlike the rest of the server.
+[profile.release.package.shamir-client-node]
+opt-level = "z"
+codegen-units = 1
+strip = true
 
 # `cargo bench` uses this profile by default. Inherits from release
 # but DROPS `lto = "fat"` — that single flag was 80%+ of the

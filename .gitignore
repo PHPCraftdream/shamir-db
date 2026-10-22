@@ -26,8 +26,7 @@ tools/rust-guard/target/
 **/node_modules/
 
 # Node binding build artefacts
-crates/shamir-client-node/package-lock.json
-crates/shamir-client-node/*.node
+crates/shamir-client-node/native/*.node
 tests/e2e/package-lock.json
 examples/*/target/
 examples/*/Cargo.lock
@@ -37,8 +36,6 @@ server-cert.pem
 # Per-run test-capture scratch (CLAUDE.md: `./scripts/test.sh > run.log`).
 # Never tracked — agents freely overwrite/delete it.
 /run.log
-crates/shamir-client-node/target/
-crates/shamir-client-node/Cargo.lock
 devrust.cargo-target-bench/
 .cargo-target-bench/
 /bench-run.log
