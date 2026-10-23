@@ -40,6 +40,19 @@
 # appears under load; tune up if cores are idle and it's slower than needed.
 wasm-heavy = { max-threads = 4 }
 
+# Disk-durable shamir-db tests (Synced commits, durable repo trees, clean-horizon
+# reopen) fsync fjall's journal on every commit AND on shutdown. Windows
+# FlushFileBuffers on a hosted runner's shared virtual disk flushes the whole
+# volume cache, so concurrent fsync-heavy test processes slow each other
+# down super-linearly: in the failing Windows lib run (#1378) the four tests
+# running side by side (test-threads = 4) all took 11-37 s instead of 4-10 s,
+# and two of them blew the 15 s clean-shutdown flush budget
+# ("clean shutdown timed out during flush", stage `flush_buffers` of the
+# `system` repo). Serialising exactly these tests removes the cross-test
+# fsync contention at its source; the shutdown budget and the durability
+# semantics stay untouched.
+fsync-heavy = { max-threads = 1 }
+
 [profile.default]
 # Print every test result as it completes, with the binary name.
 # This is the single most important feature: a stalled run shows the
@@ -136,9 +149,18 @@ slow-timeout = { period = "10s", terminate-after = 6 }   # Argon2-bound; kill at
 filter = "package(shamir-db) and binary(functions)"
 test-group = "wasm-heavy"
 
+# Serialise the disk-durable shamir-db tests (see the fsync-heavy group above).
+[[profile.default.overrides]]
+filter = "package(shamir-db) and test(/(durability_policy_tests|durability_levels_tests|durable_repo_tests|clean_horizon_tests)::/)"
+test-group = "fsync-heavy"
+
 [[profile.ci.overrides]]
 filter = "package(shamir-db) and binary(functions)"
 test-group = "wasm-heavy"
+
+[[profile.ci.overrides]]
+filter = "package(shamir-db) and test(/(durability_policy_tests|durability_levels_tests|durable_repo_tests|clean_horizon_tests)::/)"
+test-group = "fsync-heavy"
 
 # ============================================================================
 # Stress profile — the INVERSE of [profile.ci]. Used by the nightly
