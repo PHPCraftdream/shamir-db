@@ -580,6 +580,14 @@ jobs:
         if: steps.deps.outputs.rust == 'true'
       - run: python3 -I scripts/ci/gates/npm_licenses_check.py
         if: steps.deps.outputs.npm == 'true'
+      # Native-code allowlist gate (docs/native-code.md): fails when a crate
+      # that compiles C/C++/asm enters the built graph outside the allowlist,
+      # or when a previously removed native crate (ring, zstd-sys, ...) comes
+      # back. Needs cargo for the read-only `cargo tree` queries, so it runs
+      # under the same condition as `cargo deny check` (any Cargo.toml/lock /
+      # deny.toml / ci.yml change; manual dispatch always runs it).
+      - run: python3 -I scripts/ci/gates/native_code_check.py
+        if: steps.deps.outputs.rust == 'true'
 
   # F-80 (#907) — loom model-checker gate for the WriterDrainBarrier
   # interleaving contract (F-56, #882). This is the proof mechanism
