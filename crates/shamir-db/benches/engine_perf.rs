@@ -1,6 +1,8 @@
 use std::hint::black_box;
 use std::sync::Arc;
 include!("bench_allocator.rs");
+#[path = "engine_perf/boot_k_functions.rs"]
+mod boot_k;
 #[path = "engine_perf/common.rs"]
 mod common;
 use bench_scale_tool::Harness;
@@ -973,5 +975,7 @@ fn main() {
         }
     }
 
+    // ── boot_k_functions: persistent catalogue reopen; helper owns cells ──
+    boot_k::register_cells(&mut h);
     h.run();
 }
