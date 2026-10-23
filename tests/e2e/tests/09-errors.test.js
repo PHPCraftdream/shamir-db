@@ -1,60 +1,44 @@
 /**
- * Typed wire-error surface (Finding 2.1) — `DbResponse::Error { code, message }`
- * is mapped by the SDK into a `ClientError::Db { code, message }`, whose Display
- * is `db error [code]: message`. The napi binding surfaces this via the JS
- * error's `.message`.
+ * Typed wire-error surface — the napi binding's wrapper maps every
+ * `DbResponse::Error { code, message }` the server returns into a
+ * `ShamirDbError` carrying `.code` and `.retryable` (see
+ * `crates/shamir-client-node/js/wrapper.js`).
  *
- * NOTE (Finding 2.1, node-binding scope): a first-class typed `.code`/
- * `.retryable` PROPERTY on the native binding's error is blocked on napi-rs 2.x
- * (its `Status` is a fixed enum, and the `#[napi]` async signatures are wired to
- * `Result<T, Error<Status>>`), so callers of the NATIVE binding still recover
- * the code from the message tag. The TS ws-client (the primary SDK) DOES expose
- * a fully-typed `ShamirDbError { code, retryable }` (see
- * `shamir-client-ts/src/core/support/errors.ts`, covered by
- * `src/core/__tests__/client.test.ts`). This e2e therefore parses the code out
- * of the message and classifies it against the SAME shared retryable table the
- * TS SDK uses, proving the code round-trips end-to-end from the server.
+ * These assertions go through the PUBLIC `shamir-client` package: the shared
+ * `ctx.client` connected by the orchestrator (`e2e.test.js`) IS a
+ * `shamir-client` `ShamirClient`, so a real server error round-trips the
+ * typed surface end-to-end. Queries are built with the typed query builder
+ * from the TS SDK (`@shamir/client`), exactly as in the neighbouring tests.
  */
 
 'use strict';
 
+const { ShamirDbError, isRetryableCode } = require('shamir-client');
 const { Query, filter } = require('@shamir/client');
 
-// Mirror of the TS SDK's RETRYABLE_ERROR_CODES (core/errors.ts) so this
-// binding-level e2e can classify a code without importing the TS module.
-const RETRYABLE = new Set([
-  'timeout',
-  'lock_timeout',
-  'tx_conflict',
-  'read_only_replica',
-]);
-
-/** Recover the typed server code from the `db error [code]: message` string. */
-function codeOf(err) {
-  const m = /db error \[([a-z_]+)\]/.exec(err.message);
-  return m ? m[1] : undefined;
-}
-
 module.exports = async function ({ client, test, assertThrows, assert }) {
-  test('unknown_db code round-trips and classifies as non-retryable', async () => {
+  test('unknown_db surfaces as ShamirDbError with code and retryable=false', async () => {
     const err = await assertThrows(() =>
       client.execute('nonexistent_db_xyz', {
         id: 'q',
         queries: { x: Query.from('whatever').build() },
       })
     );
-    const code = codeOf(err);
     assert(
-      code === 'unknown_db',
-      `expected code 'unknown_db', got code=${code} message=${err.message}`
+      err instanceof ShamirDbError,
+      `expected ShamirDbError, got ${err && err.constructor && err.constructor.name}`
     );
     assert(
-      RETRYABLE.has(code) === false,
-      `unknown_db must classify as non-retryable`
+      err.code === 'unknown_db',
+      `expected code 'unknown_db', got code=${err.code}`
+    );
+    assert(
+      err.retryable === false,
+      `unknown_db must be non-retryable, got retryable=${err.retryable}`
     );
   });
 
-  test('validation error: $query reference to unknown alias', async () => {
+  test('non-retryable validation error is a typed ShamirDbError', async () => {
     const err = await assertThrows(() =>
       client.execute('default', {
         id: 'bad-ref',
@@ -70,29 +54,36 @@ module.exports = async function ({ client, test, assertThrows, assert }) {
         },
       })
     );
-    const code = codeOf(err);
+    assert(err instanceof ShamirDbError, 'expected typed ShamirDbError');
     assert(
-      code === 'validation' || /Unknown alias/i.test(err.message),
-      `expected validation/Unknown alias in: ${err.message}`
+      err.code === 'validation' || /Unknown alias/i.test(err.message),
+      `expected validation/Unknown alias, got code=${err.code} message=${err.message}`
     );
-    if (code !== undefined) {
-      assert(
-        RETRYABLE.has(code) === false,
-        `validation must classify as non-retryable`
-      );
+    assert(
+      err.retryable === false,
+      `validation must be non-retryable, got code=${err.code}`
+    );
+  });
+
+  test('isRetryableCode matches the wrapper retryable table', () => {
+    for (const code of ['timeout', 'lock_timeout', 'tx_conflict', 'read_only_replica']) {
+      assert(isRetryableCode(code) === true, `${code} must be retryable`);
+    }
+    for (const code of ['unknown_db', 'validation', 'permission_denied', 'not_found', 'user_exists']) {
+      assert(isRetryableCode(code) === false, `${code} must be non-retryable`);
     }
   });
 
-  test('typed code is recoverable on a real failure', async () => {
-    const err = await assertThrows(() =>
-      client.execute('definitely_no_such_db_42', {
-        id: 'q',
-        queries: { x: Query.from('whatever').build() },
-      })
-    );
-    assert(
-      codeOf(err) === 'unknown_db',
-      `expected typed unknown_db code, got: ${err.message}`
-    );
+  test('success path: typed query through the public package resolves', async () => {
+    const resp = await client.execute('default', {
+      id: 'ok-read',
+      queries: {
+        dbs: Query.from('__databases')
+          .where(filter.eq('name', 'default'))
+          .build(),
+      },
+    });
+    const recs = resp.results.dbs.records;
+    assert(recs.length >= 1, 'expected at least the default database');
   });
 };

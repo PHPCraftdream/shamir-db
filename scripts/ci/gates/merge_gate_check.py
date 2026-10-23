@@ -48,12 +48,14 @@ REQUIRED_JOBS = [
     "integration",
     "ts-unit",
     "cooldown",
+    "deny",
     "loom-model",
     "source-integrity",
     "rust-guard-selftest",
     "rustdoc",
     "engine-features",
     "test-discovery",
+    "node-binding",
 ]
 
 DRAFT_MESSAGE = "draft PR: full matrix not run, not merge-ready"

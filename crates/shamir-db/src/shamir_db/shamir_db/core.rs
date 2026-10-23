@@ -261,8 +261,22 @@ impl ShamirDb {
         let admin_user_locks = Arc::new(DashMap::with_hasher(THasher::default()));
         let group_member_locks = Arc::new(DashMap::with_hasher(THasher::default()));
         let active_migrations = Arc::new(DashMap::with_hasher(THasher::default()));
-        let wasm_engine =
-            Arc::new(WasmEngine::new().map_err(|e| DbError::Function(e.to_string()))?);
+        // DEC-3 Q5: reuse compiled wasm modules from an on-disk cache when
+        // a data root exists. The disk tier is private-directory-verified
+        // on Unix and Windows alike (DEC-3 Q5-c); any distrust degrades to
+        // an uncached engine, logged at warn.
+        let wasm_engine = {
+            if let Some(root) = &data_root {
+                // Path contract: pass the DATA directory; the cache store
+                // derives `<data>/cache/wasm` itself.
+                Arc::new(
+                    WasmEngine::with_compile_cache(root.clone())
+                        .map_err(|e| DbError::Function(e.to_string()))?,
+                )
+            } else {
+                Arc::new(WasmEngine::new().map_err(|e| DbError::Function(e.to_string()))?)
+            }
+        };
         let functions = Arc::new(FunctionRegistry::with_builtins());
         let globals = Arc::new(GlobalVars::new());
         globals.seed_env(&policy);
@@ -438,11 +452,13 @@ impl ShamirDb {
                     continue;
                 }
             };
-            match WasmFunction::from_binary(
+            match WasmFunction::from_binary_blocking(
                 shamir.wasm_engine.clone(),
                 &wasm_bytes,
                 WasmLimits::default(),
-            ) {
+            )
+            .await
+            {
                 Ok(wf) => {
                     if shamir.functions.register(&name, Arc::new(wf)).is_err() {
                         log::warn!(
@@ -539,11 +555,13 @@ impl ShamirDb {
                     continue;
                 }
             };
-            match WasmFunction::from_binary(
+            match WasmFunction::from_binary_blocking(
                 shamir.wasm_engine.clone(),
                 &wasm_bytes,
                 WasmLimits::default(),
-            ) {
+            )
+            .await
+            {
                 Ok(wf) => {
                     // Wrap in WasmRecordValidator — the registry stores
                     // Arc<dyn RecordValidator> since Phase 0.

@@ -35,7 +35,7 @@ The same `RecordKey` type keys *every* store behind the one `Store` trait
 | Index prefix scans | **9 B** prefix | `index_record_key.rs:95-101` |
 | WAL active markers | `"__wal_active_" ‖ BE u64` = **21 B** | `crates/shamir-wal/src/active_key.rs:15-39` |
 | Vector-index snapshots | arbitrary strings (`"{ks}.manifest"`, `"{ks}.g{gen}.sidecar"`, `"{ks}.delta."`) | `crates/shamir-index/src/vector/snapshot.rs:164-168,1162` |
-| Migration shadow keys | typed wrapper → Bytes | `crates/shamir-engine/src/migration/shadow_key.rs:38` |
+| Migration shadow keys | typed wrapper → Bytes | `crates/shamir-engine/src/db_instance/migration/shadow_key.rs:38` |
 | Info/meta stores | system `RecordId` (16 B, zero-prefix) | `recovery_marker.rs:49-67`, `validator/persistence.rs:28-40`, `buffer_config.rs:20` |
 | Tests | 0-byte, 2-byte, 42-byte keys explicitly | `crates/shamir-tx/src/tests/staging_store_tests.rs:184-186` |
 

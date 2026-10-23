@@ -240,7 +240,8 @@ impl WasmFunction {
         let wasm_bytes = wat::parse_str(wat)
             .map_err(|e| FunctionError::Compute(format!("WAT parse error: {e}")))?;
         verify_wasm_module(&wasm_bytes)?;
-        let module = Module::new(engine.engine(), wat)
+        let module = engine
+            .compile(&wasm_bytes)
             .map_err(|e| FunctionError::Compute(format!("WAT compile error: {e}")))?;
         let instance_pre = build_instance_pre(&engine, &module)?;
         Ok(Self {
@@ -278,7 +279,8 @@ impl WasmFunction {
         limits: WasmLimits,
     ) -> FnResult<Self> {
         verify_wasm_module(wasm_or_cwasm_bytes)?;
-        let module = Module::from_binary(engine.engine(), wasm_or_cwasm_bytes)
+        let module = engine
+            .compile(wasm_or_cwasm_bytes)
             .map_err(|e| FunctionError::Compute(format!("WASM compile error: {e}")))?;
         let instance_pre = build_instance_pre(&engine, &module)?;
         Ok(Self {
@@ -287,6 +289,41 @@ impl WasmFunction {
             limits,
         })
     }
+    /// Async counterpart of [`WasmFunction::from_binary`].
+    ///
+    /// Cranelift compilation takes tens to hundreds of milliseconds of pure
+    /// CPU; async callers on the tokio runtime must not run it inline on a
+    /// worker thread. This moves the (identical) synchronous
+    /// [`WasmFunction::from_binary`] pipeline — sanitizer, compile,
+    /// instantiation — onto `tokio::task::spawn_blocking`. Behaviour and
+    /// error values are identical to `from_binary`, except that a panic or
+    /// cancellation inside the blocking task maps to
+    /// [`FunctionError::Compute`] (`blocking compile join failure: …`).
+    pub async fn from_binary_blocking(
+        engine: Arc<WasmEngine>,
+        wasm_or_cwasm_bytes: &[u8],
+        limits: WasmLimits,
+    ) -> FnResult<Self> {
+        let wasm = wasm_or_cwasm_bytes.to_vec();
+        run_compile_blocking(move || Self::from_binary(engine, &wasm, limits)).await
+    }
+}
+
+/// Run a CPU-bound compile step on tokio's blocking thread pool.
+///
+/// Shared by [`WasmFunction::from_binary_blocking`] (and unit tests):
+/// moves the closure onto `tokio::task::spawn_blocking` and maps a
+/// `JoinError` (panic or cancellation of the blocking task) to
+/// [`FunctionError::Compute`], the same variant a failed compile produces,
+/// so callers keep a single error type.
+pub(crate) async fn run_compile_blocking<F, T>(f: F) -> FnResult<T>
+where
+    F: FnOnce() -> FnResult<T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| FunctionError::Compute(format!("blocking compile join failure: {e}")))?
 }
 
 // ── Host-import helpers ──────────────────────────────────────────────

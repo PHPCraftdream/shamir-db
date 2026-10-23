@@ -1,76 +1,24 @@
 name: supply-chain
 
-# Automated supply-chain gate (audit C1).
+# Scheduled supply-chain jobs (audit C1). The per-push / per-PR policy gate
+# (`cargo deny check`: licenses, bans, sources, advisories, plus the npm licence
+# check) moved into ci.yml as the `deny` job so it is part of the aggregate
+# `merge gate (required)`; this workflow keeps only the jobs that run on a
+# schedule or on demand:
 #
-# Three jobs on different cadences:
+#  - `audit` (weekly + manual): RUSTSEC advisories are published continuously
+#    and independently of this repo's commits, so a dependency that was clean
+#    when merged can become advisory-flagged weeks later. `cargo audit` and
+#    `cargo deny check advisories` overlap intentionally.
 #
-#  - `deny` runs when the dependency graph or the policy changed: a push to
-#    master or a PR that touches a Cargo.toml, Cargo.lock or deny.toml (plus
-#    the weekly schedule and on demand). The npm side has the same trigger
-#    shape in `npm-licenses.yml`. `cargo deny check` is fast (no
-#    compile), hermetic (consults Cargo.lock + deny.toml), and catches the
-#    push-time regressions: a newly-unsatisfiable license expression, a yanked
-#    crate entering the tree, a duplicate-version explosion, or a
-#    not-yet-known-registry/git source. It also runs the advisory-db check, so
-#    a dependency bump that pulls in a crate with a *known* RUSTSEC at PR time
-#    fails here.
+#  - `exceptions-expiry` (weekly + manual): reports expiring or expired
+#    cooldown exceptions (cooldown-exceptions.toml).
 #
-#  - `audit` runs on a SCHEDULE (weekly) AND on demand (`workflow_dispatch`).
-#    RUSTSEC advisories are published continuously and independently of this
-#    repo's commits — a dep that was clean when merged can become advisory-flagged
-#    weeks later with no code change here. A weekly cadence balances signal
-#    freshness against advisory-db churn/noise (daily would fire on many
-#    advisories that get withdrawn or that don't apply to our locked versions);
-#    the manual trigger lets a maintainer run it immediately after a published
-#    advisory that's relevant to us. `cargo audit` and `cargo deny check
-#    advisories` overlap intentionally — audit is the RustSec-ecosystem-native
-#    tool, deny is the policy gate; running both on schedule is cheap belt-and-
-#    braces.
-#
-#  - `sbom` generates a CycloneDX SBOM on demand (`workflow_dispatch` only).
-#    Per release-audit report 03 finding P7 (capability-matrix row 7c): the
-#    license/advisory *gating* above is strong, but no machine-readable SBOM
-#    artifact was produced. This job closes that gap. It runs `cargo cyclonedx`
-#    which emits one `<crate-name>.cdx.json` per workspace member, next to
-#    each crate's Cargo.toml (per-crate dependency trees, which is strictly
-#    more information than a single merged SBOM), then uploads them as a
-#    GitHub Actions build artifact.
-#
-#    Cadence: `workflow_dispatch`-only for on-demand/scheduled SBOM
-#    generation. Release-tag SBOMs (`v*` tag push) are now produced by the
-#    dedicated release pipeline in `.github/workflows/release.yml`, whose
-#    `sbom` job mirrors this one's pinned cargo-cyclonedx recipe (0.5.9,
-#    CycloneDX 1.5, per-crate `*.cdx.json`) so the GitHub Release can attach
-#    them in the same run (`needs:` cannot span separately-triggered
-#    workflows, and widening THIS file's `on.push` to `tags: ['v*']` would
-#    also make the `deny` job run on every release tag for no release value).
-#    This job is retained for between-release / on-demand SBOM generation.
+#  - `sbom` (manual): generates a CycloneDX SBOM per workspace member. Release-
+#    tag SBOMs are produced by `.github/workflows/release.yml`, whose `sbom`
+#    job mirrors this one's pinned cargo-cyclonedx recipe.
 
 on:
-  # Push to master is path-gated exactly like a PR: the license/bans/sources
-  # outcome depends only on the manifests, the lockfile and deny.toml, so a
-  # push that touches none of them since the previous master tip cannot change
-  # it and does not queue the job. Every push that does touch them (including
-  # one that bypassed a PR) still runs it. The weekly schedule below is the
-  # time-decoupled advisory re-scan and stays unconditional.
-  push:
-    branches: [master]
-    paths:
-      - '**/Cargo.toml'
-      - 'Cargo.lock'
-      - 'deny.toml'
-      - '.github/workflows/supply-chain.yml'
-  pull_request:
-    branches: [master]
-    # ready_for_review starts the run when a draft is promoted. Path-gated:
-    # a PR that cannot change the dependency graph does not queue these jobs
-    # (a filtered PR does not start the workflow at all — intended).
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - '**/Cargo.toml'
-      - 'Cargo.lock'
-      - 'deny.toml'
-      - '.github/workflows/supply-chain.yml'
   schedule:
     # Sundays 03:17 UTC — picked off the top/bottom of the hour to ease load on
     # the shared GitHub Actions runner pool. Weekly matches the dependabot
@@ -88,7 +36,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
-# Least-privilege default. The three jobs (deny/audit/sbom) only read the repo
+# Least-privilege default. The three jobs (audit/sbom/exceptions-expiry) only read the repo
 # and run offline cargo checks / SBOM generation. `sbom` uploads a workflow-run
 # artifact, which works under this scope (same pattern as release.yml's
 # build/sbom jobs) — no `actions: write` exception needed.
@@ -96,30 +44,6 @@ permissions:
   contents: read
 
 jobs:
-  # Per-push/per-PR policy gate: licenses, bans, sources, AND advisories.
-  # Runs against the committed Cargo.lock + deny.toml.
-  deny:
-    name: cargo deny check
-    runs-on: ubuntu-latest
-    # Draft pushes are covered by the fast tier in ci.yml, not here.
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      # `cargo deny check` needs a Cargo.lock to resolve the graph; it does not
-      # need a Rust toolchain to *check*, but `cargo-deny` shells out to cargo
-      # for metadata, so we install the toolchain pinned by rust-toolchain.toml.
-      - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
-      - name: Install cargo-deny
-        # Pinned: `--locked` only pins cargo-deny's OWN Cargo.lock during
-        # its build, not which version gets installed. `--version` pins the
-        # exact crates.io release (same convention as the cargo-cooldown pin
-        # in ci.yml). When upgrading, bump the version here.
-        run: cargo install --locked --version 0.20.2 cargo-deny
-      - name: cargo deny check
-        # No `--locked` on deny itself; the lockfile is consulted read-only.
-        # All four check categories run so a single job is the gate.
-        run: cargo deny check
-
   # Periodic advisory scan. Scheduled + manual only (not per-push) because the
   # advisory database evolves independently of commits — running it on every PR
   # would flap the gate on advisories that don't touch our locked versions.
@@ -134,7 +58,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
       - name: Install cargo-audit
-        # Pinned: same rationale as cargo-deny above.
+        # Pinned: `--version` pins the exact crates.io release (`--locked` only pins
+        # cargo-audit's own lockfile).
         run: cargo install --locked --version 0.22.2 cargo-audit
       # `--file Cargo.lock` pins the scan to the committed lockfile (no network
       # resolution). `--ignore` is intentionally absent here — every advisory
@@ -157,7 +82,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
       - name: Install cargo-cyclonedx
-        # Pinned: same rationale as cargo-deny above.
+        # Pinned: `--version` pins the exact crates.io release (`--locked` only pins
+        # cargo-audit's own lockfile).
         run: cargo install --locked --version 0.5.9 cargo-cyclonedx
       # `-f json` emits CycloneDX JSON (widely consumed by SBOM tooling).
       # `--spec-version 1.5` is the latest CycloneDX spec. The tool produces
@@ -173,3 +99,15 @@ jobs:
           name: sbom-cyclonedx-${{ github.run_id }}
           path: crates/*/*.cdx.json
           if-no-files-found: error
+
+  # Weekly reconciliation of the cooldown exceptions (cooldown-exceptions.toml):
+  # fails on an expired or unused entry and warns in the last week before
+  # expiry, so a version that matured is cleaned up even without a PR touching
+  # the lockfile. Policy: /cooldown.toml.
+  exceptions-expiry:
+    name: cooldown exceptions expiry
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - run: python3 -I scripts/ci/gates/dependency_admission_check.py --expiry-only

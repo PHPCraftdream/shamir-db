@@ -8,6 +8,10 @@ on:
     # ready_for_review is what starts the FULL tier when a draft is promoted.
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch: {}
+  # Weekly safety net: macOS cells run only here and on workflow_dispatch;
+  # pull_request and push runs skip them (CI-05).
+  schedule:
+    - cron: '17 3 * * 1'
 
 # A newer push to the same PR cancels the older (superseded) run so it stops
 # hogging the shared runner pool. Master pushes, scheduled and manual runs
@@ -165,7 +169,9 @@ jobs:
       - name: layout check
         run: python3 -I scripts/ci/check_layout.py
 
-  # Lint on every supported OS. Crucial for cross-platform correctness:
+  # Lint on ubuntu and windows on every PR (macOS joins on workflow_dispatch
+  # and the weekly schedule: CI-05, the macOS runner queue is the bottleneck).
+  # Crucial for cross-platform correctness:
   # `#[cfg(windows)]` / `#[cfg(target_os = "macos")]` branches (service
   # installers, runtime, signal handling) are ONLY compiled — and therefore
   # only linted — on the matching OS. An ubuntu-only clippy never saw them.
@@ -177,7 +183,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON(contains(fromJSON('["workflow_dispatch","schedule"]'), github.event_name) && '["ubuntu-latest","windows-latest","macos-latest"]' || '["ubuntu-latest","windows-latest"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
@@ -225,6 +231,8 @@ jobs:
   # default-plus cell, where defaults are on anyway and the unified
   # resolution legitimately equals the label.  Reduced-feature cells catch
   # missing `cfg` guards that the workspace-wide jobs unify away.
+  # Feature resolution is OS-independent, so PR runs use ubuntu only; the
+  # windows and macOS cells run on workflow_dispatch and the weekly schedule.
   engine-features:
     name: engine features (${{ matrix.cell.id }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -233,7 +241,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON(contains(fromJSON('["workflow_dispatch","schedule"]'), github.event_name) && '["ubuntu-latest","windows-latest","macos-latest"]' || '["ubuntu-latest"]') }}
         cell:
           - { id: no-default, flags: "--no-default-features" }
           - { id: fjall, flags: "--no-default-features --features fjall" }
@@ -322,7 +330,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON(contains(fromJSON('["workflow_dispatch","schedule"]'), github.event_name) && '["ubuntu-latest","windows-latest","macos-latest"]' || '["ubuntu-latest","windows-latest"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
@@ -382,7 +390,7 @@ jobs:
   # e2e suite (`crates/shamir-client-ts/src/__tests__/**/e2e-*.test.ts`) are
   # intentionally NOT wired into this per-PR gate — both require a release
   # `shamir-server` build (and the napi one needs the MSVC-built
-  # `shamir-client-node` binding, excluded from the workspace), too heavy
+  # `shamir-client-node` binding, a regular workspace member), too heavy
   # for every PR. They now run on the scheduled nightly workflow
   # `.github/workflows/ts-e2e-nightly.yml` (cron + `workflow_dispatch`).
   # The pure-TS unit tests for `shamir-client-ts` ARE gated per-PR — see the
@@ -399,7 +407,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON(contains(fromJSON('["workflow_dispatch","schedule"]'), github.event_name) && '["ubuntu-latest","windows-latest","macos-latest"]' || '["ubuntu-latest","windows-latest"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
@@ -477,12 +485,15 @@ jobs:
         if: steps.ts_changes.outputs.changed != 'false'
         working-directory: crates/shamir-client-ts
 
-  # Supply-chain cooldown gate (RFC 3923, fail-closed) — fails the PR if
-  # resolving the workspace would pull a crate version younger than 30 days
-  # (config: /cooldown.toml). The `--locked` flags above keep the other jobs on
-  # the committed Cargo.lock; THIS job catches a PR that introduces a too-fresh
-  # dependency. Native cargo support is pending, so we use the cargo-cooldown
-  # subcommand. `check` restores the original lock if enforcement fails.
+  # Dependency admission gate (RFC 3923 cooldown, fail-closed; policy:
+  # /cooldown.toml, DEC-3 Q4). Fails the PR when it admits a registry version
+  # younger than 30 days (present in the head Cargo.lock, absent from the
+  # protected base) without an exact, unexpired entry in
+  # /cooldown-exceptions.toml, and fails on any unused or expired entry. The
+  # `--locked` flags above keep the other jobs on the committed Cargo.lock;
+  # THIS job catches a PR that introduces a too-fresh dependency. Stdlib Python,
+  # no toolchain: crates.io publication times and the RustSec advisory database
+  # are read over the network and any failure to read them fails the job.
   cooldown:
     name: dependency cooldown (30d)
     runs-on: ubuntu-latest
@@ -490,19 +501,85 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Select the protected base
+        id: base
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            # Master push (squash merge): the previous master tip is the base.
+            base=$(git rev-parse HEAD^1)
+          else
+            git fetch --no-tags origin master
+            base=$(git merge-base origin/master HEAD)
+          fi
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
+      - name: Fetch the RustSec advisory database
+        run: git clone --depth 1 https://github.com/rustsec/advisory-db "$RUNNER_TEMP/advisory-db"
+      - name: Check admissions against the exceptions
+        run: >
+          python3 -I scripts/ci/gates/dependency_admission_check.py
+          --base-ref "${{ steps.base.outputs.sha }}"
+          --advisory-db "$RUNNER_TEMP/advisory-db"
+
+  # Dependency licence + advisory gate (cargo deny, and the npm licence check).
+  # The job ALWAYS reports on a ready PR / master push / dispatch so that the
+  # aggregate `merge gate (required)` (and a required-check rule) is satisfiable
+  # on every change; the WORK is skipped inside the job when no dependency input
+  # changed since the base (owner requirement: licence checks only when the
+  # dependencies were updated). Advisories that appear against an UNCHANGED
+  # lock are caught by the weekly `audit` job in supply-chain.yml. The base is
+  # the merge base on a PR and the previous master tip on a push; a manual
+  # dispatch always runs everything.
+  deny:
+    name: cargo deny check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Detect dependency changes
+        id: deps
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            echo "npm=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            base=$(git rev-parse HEAD^1)
+          else
+            git fetch --no-tags origin master
+            base=$(git merge-base origin/master HEAD)
+          fi
+          changed=$(git diff --name-only "$base" HEAD)
+          if echo "$changed" | grep -Eq '(^|/)Cargo\.(toml|lock)$|^deny\.toml$|^cooldown(-exceptions)?\.toml$|^\.github/workflows/ci\.yml$'; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "rust=false" >> "$GITHUB_OUTPUT"
+            echo "no Rust dependency input changed since $base: cargo deny skipped"
+          fi
+          if echo "$changed" | grep -Eq '(^|/)package(-lock)?\.json$|^scripts/ci/gates/npm_licenses_check\.py$|^\.github/workflows/ci\.yml$'; then
+            echo "npm=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "npm=false" >> "$GITHUB_OUTPUT"
+            echo "no npm dependency input changed since $base: npm licence gate skipped"
+          fi
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
-      # Pinned: an unpinned supply-chain-freshness tool silently changing
-      # behavior between CI runs is exactly the kind of drift a "cooldown"
-      # gate exists to prevent for the WORKSPACE's dependencies — it would
-      # be inconsistent to leave the gate tool itself unpinned. `--locked`
-      # only pins cargo-cooldown's OWN internal Cargo.lock during its build,
-      # NOT which published version gets installed (same misconception
-      # corrected for cargo-nextest in the nextest pin above). `--version`
-      # pins the exact crates.io release. When upgrading, bump the version
-      # here to match.
-      - run: cargo install --locked --version 0.3.4 cargo-cooldown
-      - run: cargo cooldown check
+        if: steps.deps.outputs.rust == 'true'
+      # Prebuilt, version-pinned binary (same install action and pin as nextest).
+      - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af  # v2.87.11
+        if: steps.deps.outputs.rust == 'true'
+        with:
+          tool: cargo-deny@0.20.2
+      # No `--locked` on deny itself; the lockfile is consulted read-only. All
+      # four check categories (advisories, bans, licenses, sources) run.
+      - run: cargo deny check
+        if: steps.deps.outputs.rust == 'true'
+      - run: python3 -I scripts/ci/gates/npm_licenses_check.py
+        if: steps.deps.outputs.npm == 'true'
 
   # F-80 (#907) — loom model-checker gate for the WriterDrainBarrier
   # interleaving contract (F-56, #882). This is the proof mechanism
@@ -625,7 +702,8 @@ jobs:
             scope_args=()
             IFS=',' read -ra scope_dirs <<< "$dirs"
             for dir in "${scope_dirs[@]}"; do scope_args+=(--scope "$dir"); done
-            "$guard" structure --repo . --changed-since "$MERGE_BASE" "${scope_args[@]}"
+            "$guard" structure --repo . --changed-since "$MERGE_BASE" "${scope_args[@]}" \
+              --delta "$delta"
             if "$guard" conservation --repo . \
               --base "$MERGE_BASE" --head HEAD \
               --packages "$pkgs" --delta "$delta"
@@ -676,7 +754,7 @@ jobs:
   # Runs only when .rust-guard/stages.toml has an active campaign whose
   # packages the diff touches (scripts/ci/rust_guard_select.py); with
   # `campaigns = []` the selection step prints a notice and the job
-  # passes (no-op). Full tier on ubuntu + windows + macos; the merge-gate
+  # passes (no-op). Full tier on ubuntu + windows (macOS on dispatch/schedule); the merge-gate
   # wiring arrives with the aggregate-gate chunk.
   test-discovery:
     name: test discovery (${{ matrix.os }}, ${{ matrix.config.id }})
@@ -686,7 +764,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON(contains(fromJSON('["workflow_dispatch","schedule"]'), github.event_name) && '["ubuntu-latest","windows-latest","macos-latest"]' || '["ubuntu-latest","windows-latest"]') }}
         config:
           - { id: default, flags: "" }
           - { id: test-util-fts, flags: "--features test-util,fts_indexed_long" }
@@ -861,6 +939,77 @@ jobs:
       - run: cargo fmt --manifest-path tools/rust-guard/Cargo.toml -- --check
       - run: cargo clippy --manifest-path tools/rust-guard/Cargo.toml --all-targets --locked -- -D warnings
 
+  # DEC-3 Q2-b: the Node native binding (`shamir-client`, napi-rs cdylib in
+  # crates/shamir-client-node). Proves the package BUILD is reproducible and
+  # CONSUMABLE: `npm ci` + `npm run build:debug` (napi build --platform
+  # --output-dir native --js index.js --dts index.d.ts) must not
+  # drift the generated `native/index.js` / `native/index.d.ts`, the packed
+  # tarball must install into a clean consumer directory whose `require`
+  # exports the class and the typed error as functions, and the published
+  # `.d.ts` must typecheck an external consumer (tests/e2e/packaging/
+  # consumer.ts) under `tsc --noEmit`. windows-latest: the binding is
+  # windows-first (x86_64-pc-windows-msvc is the primary napi target) and
+  # the clippy matrix already covers the Rust side cross-platform. Full
+  # tier only (same `if` shape as the other gating jobs). The e2e suites
+  # that EXERCISE the binding against a live server live in
+  # `.github/workflows/ts-e2e-nightly.yml` (cron + `workflow_dispatch`).
+  node-binding:
+    name: node binding (shamir-client)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          # Node 22 = active LTS; satisfies the binding's `>=18` engines
+          # floor (same pin as the ts-unit job). npm cache keyed on the
+          # binding lockfile so `npm ci` below stays reproducible.
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: crates/shamir-client-node/package-lock.json
+      - name: npm ci (binding)
+        working-directory: crates/shamir-client-node
+        run: npm ci
+      - name: napi build (debug)
+        working-directory: crates/shamir-client-node
+        run: npm run build:debug
+      - name: generated-file drift check
+        working-directory: crates/shamir-client-node
+        run: git diff --exit-code -- native/index.js native/index.d.ts
+      - name: npm pack (tarball into runner temp)
+        working-directory: crates/shamir-client-node
+        shell: bash
+        run: npm pack --pack-destination "$RUNNER_TEMP"
+      # Consume the packed tarball exactly like an external user: fresh
+      # directory, plain `npm install <tarball>`, then require the package.
+      # typescript + @types/node are installed INTO THE CONSUMER DIRECTORY
+      # (pinned, like the binding's own devDeps): a tarball consumer never
+      # gets devDependencies, so the binding's `npm ci` tree cannot provide
+      # a tsc binary here — and the typecheck must resolve 'shamir-client'
+      # from THIS node_modules, which only an install beside the sources
+      # achieves (see the tsc step below).
+      - name: install tarball + consumer smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/consumer"
+          cd "$RUNNER_TEMP/consumer"
+          npm install "$RUNNER_TEMP/shamir-client-0.1.0.tgz" typescript@7.0.2 @types/node@22.20.4
+          node -e "const m = require('shamir-client'); if (typeof m.ShamirClient !== 'function') { throw new Error('ShamirClient is not a function'); } if (typeof m.ShamirDbError !== 'function') { throw new Error('ShamirDbError is not a function'); } console.log('consumer smoke OK');"
+      # Copy the consumer source + tsconfig next to the consumer's
+      # node_modules so Node16 module resolution finds the installed
+      # 'shamir-client' — then typecheck with `tsc --noEmit`.
+      - name: tsc --noEmit (packaging consumer)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/consumer/pkg"
+          cp tests/e2e/packaging/consumer.ts tests/e2e/packaging/tsconfig.json "$RUNNER_TEMP/consumer/pkg/"
+          cd "$RUNNER_TEMP/consumer"
+          npx tsc --noEmit -p pkg/tsconfig.json
+
 # CI-03b deliverable 4: the aggregate merge gate — the ONE required check.
 # `if: always()` + full `needs:` so it evaluates even when jobs were
 # skipped, and the stdlib script scripts/ci/gates/merge_gate_check.py
@@ -878,7 +1027,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [fast, fmt, clippy, test, integration, ts-unit, cooldown, loom-model, source-integrity, rust-guard-selftest, rustdoc, engine-features, test-discovery]
+    needs: [fast, fmt, clippy, test, integration, ts-unit, cooldown, deny, loom-model, source-integrity, rust-guard-selftest, rustdoc, engine-features, test-discovery, node-binding]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - env:

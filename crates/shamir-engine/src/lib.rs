@@ -10,10 +10,24 @@
 
 pub mod db_instance;
 pub use shamir_wasm_host as function;
-pub mod index;
+pub mod index {
+    pub use shamir_index::base_index::index_definition;
+    pub use shamir_index::base_index::index_info;
+    pub use shamir_index::base_index::index_info_item;
+    pub use shamir_index::base_index::index_keys;
+    pub use shamir_index::base_index::index_manager;
+    pub use shamir_index::base_index::index_manager_unique;
+    pub use shamir_index::base_index::index_record_key;
+    pub use shamir_index::base_index::index_status;
+    pub use shamir_index::base_index::sorted_index_definition;
+    pub use shamir_index::base_index::sorted_index_manager;
+    pub use shamir_index::base_index::write_barrier_flags;
+}
+// Compatibility paths: `shamir_engine::migration` moved to `db_instance::migration`.
+pub use db_instance::migration;
+// Compatibility path: `shamir_engine::meta` moved to `repo::meta`.
+pub use repo::meta;
 pub use shamir_index as index2;
-pub mod meta;
-pub mod migration;
 pub mod query;
 pub mod repo;
 pub mod table;

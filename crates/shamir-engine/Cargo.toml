@@ -7,6 +7,12 @@ description = "ShamirDB engine — DbInstance / RepoInstance / TableManager / In
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+# F-56 (#882): concurrency model checker for the `WriterDrainBarrier` primitive.
+# A regular dependency that ONLY the `loom` feature turns on, so normal builds
+# and tests do not compile loom (nor its `generator` helper, which builds
+# C/assembly). The `#[cfg(loom)]` module in `writer_drain_barrier.rs` is
+# compiled away from every other build -- see its doc for the opt-in command.
+loom = { version = "0.7", optional = true }
 shamir-types = { path = "../shamir-types" }
 shamir-collections = { path = "../shamir-collections" }
 # Backends inherit `shamir-storage`'s feature set — the engine doesn't
@@ -95,7 +101,7 @@ test-util = []
 # dependency tree stays out of its own loom code paths. Run with:
 #   cargo test -p shamir-engine --features loom --lib \
 #       table::writer_drain_barrier::loom_model
-loom = []
+loom = ["dep:loom"]
 
 [target.'cfg(unix)'.dev-dependencies]
 dhat = "0.3"
@@ -114,13 +120,6 @@ memory-stats = "1.2"
 # Tests build queries via the typed query builder instead of raw wire values.
 # query-builder depends only on query-types/types — no cycle on engine.
 shamir-query-builder = { path = "../shamir-query-builder" }
-# F-56 (#882): concurrency model checker for the `WriterDrainBarrier` primitive.
-# Used ONLY under `RUSTFLAGS="--cfg loom"` (the `#[cfg(loom)]` module in
-# `writer_drain_barrier.rs` is compiled away from every normal build, so the
-# loom tests never run under `./scripts/test.sh`). It IS compiled once for the
-# package's test target (cached thereafter) — see the module doc for the exact
-# opt-in command and its (honestly-scoped) coverage.
-loom = "0.7"
 # (No dev-dep cycle on shamir-db. The two tests that needed the
 # `ShamirDb` facade — `admin_tests.rs`, `auth_tests.rs` — moved to
 # `crates/shamir-db/tests/` as integration tests instead. Keeping the
@@ -129,6 +128,7 @@ loom = "0.7"
 
 [[bench]]
 name = "keyset_seek"
+path = "benches/backend/keyset_seek.rs"
 harness = false
 # Benches that call the test-only raw TableManager handles (`*_for_test`)
 # must opt into the feature (see permission_check above):
@@ -136,44 +136,54 @@ required-features = ["test-util"]
 
 [[bench]]
 name = "cursor_pages_depth"
+path = "benches/query_reads/ordering/cursor_pages_depth.rs"
 harness = false
 required-features = ["test-util"]
 
 [[bench]]
 name = "interner_concurrent"
+path = "benches/storage_concurrency/buffers_and_interner/interner_concurrent.rs"
 harness = false
 
 [[bench]]
 name = "interner_cold_growth"
+path = "benches/storage_concurrency/buffers_and_interner/interner_cold_growth.rs"
 harness = false
 
 [[bench]]
 name = "membuffer_concurrent"
+path = "benches/storage_concurrency/buffers_and_interner/membuffer_concurrent.rs"
 harness = false
 
 [[bench]]
 name = "filter_eval"
+path = "benches/query_reads/filtering/filter_eval.rs"
 harness = false
 
 [[bench]]
 name = "cond_expr_eval"
+path = "benches/query_reads/filtering/cond_expr_eval.rs"
 harness = false
 
 [[bench]]
 name = "group_by_keys"
+path = "benches/query_reads/selection/group_by_keys.rs"
 harness = false
 
 [[bench]]
 name = "distinct"
+path = "benches/query_reads/ordering/distinct.rs"
 harness = false
 
 [[bench]]
 name = "select_pipeline"
+path = "benches/query_reads/selection/select_pipeline.rs"
 harness = false
 required-features = ["test-util"]
 
 [[bench]]
 name = "permission_check"
+path = "benches/query_writes/batch_ops/permission_check.rs"
 harness = false
 # SessionPermissions (test-only RBAC scaffolding) is gated behind
 # `cfg(any(test, feature = "test-util"))` — this bench is a separate,
@@ -183,128 +193,156 @@ required-features = ["test-util"]
 
 [[bench]]
 name = "membuffer_pump"
+path = "benches/storage_concurrency/buffers_and_interner/membuffer_pump.rs"
 harness = false
 
 [[bench]]
 name = "vector_search"
+path = "benches/vector_search/vector_search.rs"
 harness = false
 
 [[bench]]
 name = "fts_indexed"
+path = "benches/backend/fts_indexed.rs"
 harness = false
 required-features = ["test-util"]
 
 [[bench]]
 name = "order_by_pipeline"
+path = "benches/query_reads/ordering/order_by_pipeline.rs"
 harness = false
 
 [[bench]]
 name = "streaming_topk"
+path = "benches/query_reads/selection/streaming_topk.rs"
 harness = false
 required-features = ["test-util"]
 
 [[bench]]
 name = "select_projection"
+path = "benches/query_reads/selection/select_projection.rs"
 harness = false
 
 [[bench]]
 name = "tx_pipeline"
+path = "benches/storage_concurrency/transactions/tx_pipeline.rs"
 harness = false
 required-features = ["test-util"]
 
 [[bench]]
 name = "tx_aware_reads"
+path = "benches/storage_concurrency/transactions/tx_aware_reads.rs"
 harness = false
 required-features = ["test-util"]
 
 [[bench]]
 name = "replication_apply"
+path = "benches/durability/replication_apply.rs"
 harness = false
 
 [[bench]]
 name = "tx_concurrent"
+path = "benches/storage_concurrency/transactions/tx_concurrent.rs"
 harness = false
 
 [[bench]]
 name = "wasm_invoke"
+path = "benches/backend/wasm_invoke.rs"
 harness = false
 
 [[bench]]
 name = "durable_concurrent_commit"
+path = "benches/durability/durable_concurrent_commit.rs"
 harness = false
 required-features = ["fjall"]
 
 [[bench]]
 name = "drain_throughput"
+path = "benches/durability/drain_throughput.rs"
 harness = false
 required-features = ["fjall"]
 
 [[bench]]
 name = "backend_matrix"
+path = "benches/backend/backend_matrix.rs"
 harness = false
 required-features = ["fjall"]
 
 [[bench]]
 name = "read_path_matrix"
+path = "benches/query_reads/ordering/read_path_matrix.rs"
 harness = false
 required-features = ["test-util"]
 
 [[bench]]
 name = "drain_cost_vs_depth"
+path = "benches/durability/drain_cost_vs_depth.rs"
 harness = false
 required-features = ["fjall"]
 
 [[bench]]
 name = "filtered_vector_search"
+path = "benches/vector_search/filtered_vector_search.rs"
 harness = false
 
 [[bench]]
 name = "vector_bulk_compaction"
+path = "benches/vector_search/vector_bulk_compaction.rs"
 harness = false
 
 [[bench]]
 name = "quantization_f32_vs_sq8"
+path = "benches/vector_search/quantization_f32_vs_sq8.rs"
 harness = false
 
 [[bench]]
 name = "batch_stage_parallelism"
+path = "benches/query_writes/batch_ops/batch_stage_parallelism.rs"
 harness = false
 required-features = ["test-util"]
 
 [[bench]]
 name = "when_skip_eval"
+path = "benches/query_reads/filtering/when_skip_eval.rs"
 harness = false
 required-features = ["test-util"]
 
 [[bench]]
 name = "for_each_eval"
+path = "benches/query_writes/batch_ops/for_each_eval.rs"
 harness = false
 required-features = ["test-util"]
 
 [[bench]]
 name = "fk_cascade_index"
+path = "benches/query_writes/constraints/fk_cascade_index.rs"
 harness = false
 required-features = ["test-util"]
 
 [[bench]]
 name = "f78_writer_latency"
+path = "benches/durability/f78_writer_latency.rs"
 harness = false
 
 [[bench]]
 name = "f80_writer_drain_overhead"
+path = "benches/durability/f80_writer_drain_overhead.rs"
 harness = false
 
 [[bench]]
 name = "p1099_touched_probe"
+path = "benches/query_writes/constraints/p1099_touched_probe.rs"
 harness = false
 
 [[bench]]
 name = "p1107_stale_value_gate"
+path = "benches/query_writes/constraints/p1107_stale_value_gate.rs"
 harness = false
 required-features = ["test-util"]
 
 [[bench]]
 name = "p1108_released_unique_growth"
+path = "benches/query_writes/constraints/p1108_released_unique_growth.rs"
 harness = false
 required-features = ["test-util"]
 

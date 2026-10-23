@@ -27,16 +27,20 @@ You are an engineer on **S.H.A.M.I.R.** — a production-grade, self-contained, 
 
 ### 📦 Workspace
 
-`Cargo.toml` declares `members = ["crates/*"]` and excludes `shamir-client-node`
-(napi-rs binding, MSVC-only on Windows — built separately). The default
-workspace ships **23 crates**:
+`Cargo.toml` declares `members = ["crates/*", "vendor/hnsw_rs"]` and excludes
+`shamir-client-ts` (pure TypeScript, no `Cargo.toml` — kept out so the
+`crates/*` glob doesn't try to load it). The default workspace ships
+**26 crates** under `crates/` (including the `shamir-client-node` napi-rs
+binding, a regular member; MSVC-only on Windows) plus the vendored
+`vendor/hnsw_rs` member:
 
 `shamir-collections`, `shamir-types`, `shamir-storage`, `shamir-query-types`,
 `shamir-query-builder`, `shamir-query-builder-macros`, `shamir-engine`,
 `shamir-funclib`, `shamir-wal`, `shamir-tx`, `shamir-db`, `shamir-connect`,
-`shamir-server`, `shamir-transport-tcp`, `shamir-transport-ws`,
-`shamir-client`, `shamir-sdk`, `shamir-sdk-macros`, `shamir-tunables`,
-`shamir-wasm-host`, `shamir-index`, `shamir-numa`, `shamir-bench-utils`.
+`shamir-server`, `shamir-transport-ipc`, `shamir-transport-tcp`,
+`shamir-transport-ws`, `shamir-client`, `shamir-client-node`, `shamir-sdk`,
+`shamir-sdk-macros`, `shamir-tunables`, `shamir-wasm-host`, `shamir-index`,
+`shamir-numa`, `shamir-private-dir`, `shamir-bench-utils`.
 
 Prefer `--workspace` flags in CI and scripts. Local pre-push checks are
 scoped to the touched crates (`-p <crate>`) — see "Compile / build / test
@@ -400,10 +404,15 @@ CI is segmented into two tiers to keep the shared runner pool responsive
   diff cannot be bounded (lockfile, toolchain, `.github/`, scripts, …) and
   to fmt-only for docs-only diffs.
 * **FULL tier — the merge gate.** `gh pr ready` (ready_for_review), master
-  pushes and `workflow_dispatch` run the full matrix (fmt, clippy ×3 OS,
-  test ×3, integration ×3, ts-unit, cooldown, loom) plus the path-gated
-  numa and supply-chain workflows. Windows/macOS-only failures surface only
-  here, at ready.
+  pushes and `workflow_dispatch` run the full matrix (fmt, clippy ×2 OS,
+  test ×2, integration ×2 (ubuntu, windows), engine feature cells on ubuntu,
+  ts-unit, cooldown, `deny`, loom) plus the path-gated numa workflow (opt-in
+  QEMU tier). The `deny` job (cargo deny + npm licences) always reports but
+  skips its work when no dependency input changed since the base. Windows-only
+  failures surface here, at ready. The macOS cells (and the windows/macOS
+  engine feature cells) run only on `workflow_dispatch` and a weekly schedule
+  (CI-05: the macOS runner queue was the merge bottleneck), so a macOS-only
+  failure surfaces there, not at ready.
 * All three workflows cancel superseded PR runs via `concurrency`.
 * Force the full tier on a draft: `gh workflow run ci.yml --ref <branch>`.
 
@@ -451,7 +460,9 @@ self-tests run in the `rust-guard self-test` job, CI only):
 * `structure` — AST rules on the PR's changed files: no logic in
   `mod.rs`, no inline `#[cfg(test)]` modules, no local `use`, no impl
   outside `.rust-guard/owned_impl.toml`'s owner modules, no visibility
-  widening or new `#[allow]` vs the merge base.
+  widening or new `#[allow]` vs the merge base. During a campaign the
+  active delta file also carries the per-item `[[allow_widen]]` /
+  `[[allow]]` declarations for this gate.
 * `conservation` — per active campaign (`.rust-guard/stages.toml`,
   normally empty = no-op): every item survives between revisions, or the
   change is declared in the campaign's delta file.
@@ -486,6 +497,12 @@ and `#[ignore]` changes are never declarable**.
   newly ignored, empty list, blocked comparison all fail); campaign-gated
   through
   `scripts/ci/rust_guard_select.py`, a no-op pass with no active campaign.
+* `node-binding` (full tier, windows-latest) — builds the `shamir-client`
+  napi binding (`npm ci` + `npm run build:debug`), checks the generated
+  `native/index.js`/`index.d.ts` for drift, packs the tarball and installs
+  it into a clean consumer directory (require-smoke for `ShamirClient` /
+  `ShamirDbError`), then `tsc --noEmit`-typechecks
+  `tests/e2e/packaging/consumer.ts` against the published `.d.ts`.
 * `merge-gate` — `merge gate (required)`, `if: always()`, `needs:` every
   gating job; the ONE required branch-protection check, decided by
   `scripts/ci/gates/merge_gate_check.py` from `toJSON(needs)`. Failure or
