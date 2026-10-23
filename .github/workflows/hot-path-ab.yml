@@ -18,10 +18,15 @@ on:
         options: [hosted, dedicated]
         default: hosted
       operation:
-        description: Comparison or separate candidate-count calibration (human review)
+        description: Comparison, candidate-count calibration, or candidate-only warm/cold disk-cache ratio decision
         type: choice
-        options: [compare, calibrate]
+        options: [compare, calibrate, ratio]
         default: compare
+      pairs:
+        description: Paired invocations per ratio cell (ratio operation only); 10 = borderline confirmation
+        type: choice
+        options: ['5', '10']
+        default: '5'
   pull_request:
     paths:
       - 'scripts/bench/bench_ab*'
@@ -81,7 +86,8 @@ jobs:
         run: |
           python3 control/scripts/bench/bench_ab.py prepare \
             --baseline "$AB_BASELINE" --candidate-env REQUESTED_CANDIDATE --mode "$AB_MODE" \
-            --operation "$AB_OPERATION" --output "$RUNNER_TEMP/bench-ab"
+            --operation "$AB_OPERATION" --pairs "${{ inputs.pairs || '5' }}" \
+            --output "$RUNNER_TEMP/bench-ab"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ steps.plan.outputs.base_sha }}

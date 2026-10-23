@@ -2,6 +2,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 
@@ -221,6 +222,46 @@ class MetadataResolutionTests(unittest.TestCase):
         self.assertEqual(ab.validate_sha(value), value)
         with self.assertRaises(ValueError):
             ab.validate_sha(value + "0")
+
+class RatioTests(unittest.TestCase):
+    def test_ratio_verdict_boundary_precedence(self):
+        verdict = lambda r: ab.ratio_verdict(r, 0.8, [0.7, 0.9])
+        self.assertEqual(verdict(0.69), "pays")
+        self.assertEqual(verdict(0.699999), "pays")
+        self.assertEqual(verdict(0.7), "borderline")
+        self.assertEqual(verdict(0.75), "borderline")
+        self.assertEqual(verdict(0.8), "borderline")
+        self.assertEqual(verdict(0.81), "does-not-pay")
+        self.assertEqual(verdict(0.9), "does-not-pay")
+        self.assertEqual(verdict(0.91), "does-not-pay")
+
+    def test_ratio_stats_known_values(self):
+        samples = {"cold": [400.0, 600.0, 1000.0, 1000.0, 1200.0],
+                   "warm": [500.0, 500.0, 500.0, 900.0, 100.0]}
+        self.assertEqual(ab.ratio_stats(samples), (1000.0, 500.0, 0.5))
+
+    def test_manifest_parses_ratio_pairs(self):
+        ratios = ab.load_manifest(SCRIPT.with_suffix(".toml"))["ratios"]
+        self.assertEqual(len(ratios), 4)
+        self.assertTrue(all(r["threshold"] == 0.8 and r["borderline"] == [0.7, 0.9]
+                            for r in ratios))
+        self.assertIn(("wasm_invoke", "compile_cold/fn64", "compile_warm/fn64"),
+                      [(r["bench"], r["cold"], r["warm"]) for r in ratios])
+
+    def test_ratio_baseline_note_states_it_is_not_measured(self):
+        self.assertIn("neither built nor measured", ab.baseline_note("ratio"))
+        self.assertIsNone(ab.baseline_note("compare"))
+
+    def test_ratio_substring_collision_guard(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bench_ab.toml"
+            text = SCRIPT.with_suffix(".toml").read_text()
+            broken = text.replace('cells = ["compile_cold/fn64",',
+                                  'cells = ["compile_cold/fn64", "compile_cold/fn640",', 1)
+            self.assertNotEqual(text, broken)
+            path.write_text(broken)
+            with self.assertRaisesRegex(ValueError, "compile_cold/fn64"):
+                ab.load_manifest(path)
 
 
 if __name__ == "__main__":
