@@ -29,11 +29,9 @@ fjall  = ["shamir-storage/fjall",  "shamir-engine/fjall"]
 #
 #   cargo bench -p shamir-db --features bench-sefer          # sefer defaults
 #   cargo bench -p shamir-db --features bench-sefer-tuned    # sefer + LargeCacheConfig
-#   cargo bench -p shamir-db --features bench-mimalloc       # mimalloc
 #   cargo bench -p shamir-db                                 # system
 bench-sefer       = ["dep:sefer-alloc"]
 bench-sefer-tuned = ["dep:sefer-alloc"]
-bench-mimalloc    = ["dep:mimalloc"]
 
 [dependencies]
 # StreamExt for the migration finalisation scan (admin_migration.rs); already in the
@@ -78,9 +76,8 @@ tokio-rustls = "0.26"
 # tree, and `ring` (C + assembly) is gone.
 rcgen        = { version = "0.13", default-features = false, features = ["pem", "aws_lc_rs"] }
 
-# Bench allocator options (optional — gated by bench-sefer / bench-mimalloc features).
+# Bench allocator options (optional — gated by bench-sefer features).
 sefer-alloc = { version = "0.2.1", features = ["production"], optional = true }
-mimalloc    = { version = "0.1", default-features = false, optional = true }
 captrack = { workspace = true }
 
 [dev-dependencies]
