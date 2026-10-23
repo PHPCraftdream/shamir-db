@@ -3,9 +3,13 @@
 # Run locally:   cargo install --locked cargo-deny && cargo deny check
 # CI:            .github/workflows/supply-chain.yml (push to master / PR that touches
 #                a Cargo.toml, Cargo.lock or this file; weekly schedule; on demand)
-#                The npm lockfiles are gated by .github/workflows/npm-licenses.yml with
-#                the SAME allow-list (scripts/ci/gates/npm_licenses_check.py: keep the
+#                the npm lockfiles are gated by the `deny` job of
+#                .github/workflows/ci.yml with the SAME allow-list
+#                (scripts/ci/gates/npm_licenses_check.py: keep the
 #                two lists in sync when a license is added here).
+#                Native C/C++/asm dependencies are gated separately by
+#                scripts/ci/gates/native_code_check.py — the allowlist
+#                and the rationale live in docs/native-code.md.
 #
 # The allow-lists below were derived from the ACTUAL license tree of this
 # workspace (extracted via `cargo metadata`), not copied blindly. Every license

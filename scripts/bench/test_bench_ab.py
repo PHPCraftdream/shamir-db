@@ -1,5 +1,6 @@
 """Canned-data tests only; run by the PR selftest job, never benchmark code."""
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -194,6 +195,32 @@ class ManifestTests(unittest.TestCase):
                       "$(echo master)", "-" + ab.BASELINE]:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 ab.validate_sha(value)
+
+
+class MetadataResolutionTests(unittest.TestCase):
+    def test_nested_bench_paths_resolved_from_metadata(self):
+        meta = {"packages": [{"name": "shamir-engine", "targets": [
+            {"name": "group_by_keys", "kind": ["bench"],
+             "src_path": "/r/crates/shamir-engine/benches/query_reads/selection/group_by_keys.rs"},
+            {"name": "lib", "kind": ["lib"], "src_path": "/r/src/lib.rs"}]}]}
+        targets = ab.bench_targets_from_metadata(json.dumps(meta))
+        src = "/r/crates/shamir-engine/benches/query_reads/selection/group_by_keys.rs"
+        self.assertEqual(targets[("shamir-engine", "group_by_keys")], Path(src))
+        self.assertNotIn(("shamir-engine", "lib"), targets)
+
+    def test_missing_bench_resolves_to_none_and_is_unsupported(self):
+        maps = {"A": {("shamir-engine", "tx_pipeline"): Path("/r/a.rs")}, "B": {}}
+        bench = {"crate": "shamir-engine", "bench": "tx_pipeline"}
+        self.assertEqual(ab.resolve_bench_sources(bench, maps, ["A", "B"]),
+                         [Path("/r/a.rs"), None])
+        self.assertEqual(ab.resolve_bench_sources(bench, {"A": {}, "B": {}}, ["A", "B"]),
+                         [None, None])
+
+    def test_baseline_validation_accepts_any_full_sha(self):
+        value = "0123456789abcdef0123456789abcdef01234567"
+        self.assertEqual(ab.validate_sha(value), value)
+        with self.assertRaises(ValueError):
+            ab.validate_sha(value + "0")
 
 
 if __name__ == "__main__":

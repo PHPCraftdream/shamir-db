@@ -3,6 +3,11 @@ name: hot-path-ab
 on:
   workflow_dispatch:
     inputs:
+      baseline:
+        description: Baseline full lowercase 40-hex SHA; must be an ancestor of master
+        type: string
+        required: false
+        default: e11064772960e06c24b97379ea637335a286382e
       candidate:
         description: Trusted full lowercase SHA; blank resolves master once
         type: string
@@ -49,6 +54,7 @@ jobs:
     runs-on: ${{ inputs.runner == 'dedicated' && fromJSON('["self-hosted","linux","shamir-bench"]') || 'ubuntu-24.04' }}
     timeout-minutes: 120
     env:
+      AB_BASELINE: ${{ inputs.baseline }}
       REQUESTED_CANDIDATE: ${{ inputs.candidate }}
       AB_MODE: ${{ inputs.runner }}
       AB_OPERATION: ${{ inputs.operation }}
@@ -61,6 +67,10 @@ jobs:
           path: control
           fetch-depth: 0
           persist-credentials: false
+      - name: Validate baseline input
+        run: |
+          echo "$AB_BASELINE" | grep -Eq '^[0-9a-f]{40}$' || { echo "baseline must be a full lowercase 40-hex SHA" >&2; exit 1; }
+          git -C control merge-base --is-ancestor "$AB_BASELINE" refs/remotes/origin/master || { echo "baseline must be an ancestor of master" >&2; exit 1; }
       - name: Require standard-library TOML support
         run: python3 -c 'import sys; assert sys.version_info >= (3, 11), "Install Python 3.11+ on the dedicated runner"'
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a # copied from ci.yml
@@ -70,7 +80,7 @@ jobs:
         id: plan
         run: |
           python3 control/scripts/bench/bench_ab.py prepare \
-            --candidate-env REQUESTED_CANDIDATE --mode "$AB_MODE" \
+            --baseline "$AB_BASELINE" --candidate-env REQUESTED_CANDIDATE --mode "$AB_MODE" \
             --operation "$AB_OPERATION" --output "$RUNNER_TEMP/bench-ab"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
