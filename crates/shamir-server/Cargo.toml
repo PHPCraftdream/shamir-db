@@ -26,13 +26,11 @@ path = "src/main.rs"
 #
 #   cargo bench -p shamir-server --features bench-sefer          # sefer defaults
 #   cargo bench -p shamir-server --features bench-sefer-tuned    # sefer + LargeCacheConfig
-#   cargo bench -p shamir-server --features bench-mimalloc       # mimalloc
 #   cargo bench -p shamir-server                                 # system
 [features]
 test-util = ["shamir-db/test-util"]
 bench-sefer       = []
 bench-sefer-tuned = []
-bench-mimalloc    = ["dep:mimalloc"]
 
 [dependencies]
 shamir-connect = { path = "../shamir-connect", features = ["server", "client", "durable-fjall"] }
@@ -129,9 +127,6 @@ tempfile = "3"
 # +22% on db_handler_rps" note was measured at opt-level=0 (debug) and does
 # not hold at release opt levels.
 sefer-alloc = { version = "0.2.1", features = ["production"] }
-# Dev-only bench alternative — see the `[features]` bench allocator switch
-# above. Not used by the production `shamir-server` bin.
-mimalloc = { version = "0.1", default-features = false, optional = true }
 
 # Observability HTTP server (/healthz /readyz /metrics /info).
 # Versions chosen to share a single `metrics` recorder with `metrics-process` —
