@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Manual CI-only paired benchmarks; no third-party Python dependencies."""
+"""Manual, advisory CI-only paired benchmarks; NOT part of the merge gate.
+
+This tool is dispatched by hand via .github/workflows/hot-path-ab.yml
+(workflow_dispatch on master only); it never gates merges. Bench fixtures are
+located through `cargo metadata --no-deps` bench targets (src_path), so nested
+bench source layouts resolve; a fixture absent on either revision is reported
+unsupported. The baseline revision is a workflow input (full 40-hex SHA that
+must be an ancestor of master); no third-party Python dependencies."""
 import argparse
 import hashlib
 import json
@@ -35,6 +42,30 @@ def load(path):
 
 def git(repo, *args):
     return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
+
+
+def bench_targets_from_metadata(text):
+    """Map (package, bench-target name) -> resolved src_path from metadata JSON."""
+    targets = {}
+    for package in json.loads(text)["packages"]:
+        for target in package["targets"]:
+            if "bench" in target["kind"]:
+                targets[package["name"], target["name"]] = Path(target["src_path"])
+    return targets
+
+
+def bench_targets(repo):
+    """Resolve this revision's bench fixtures through cargo metadata."""
+    text = subprocess.check_output(["cargo", "metadata", "--no-deps",
+                                    "--format-version", "1"],
+                                   cwd=str(repo), text=True)
+    return bench_targets_from_metadata(text)
+
+
+def resolve_bench_sources(bench, maps, repos):
+    """Resolved fixture path per side, in repos order; None when absent there."""
+    key = (bench["crate"], bench["bench"])
+    return [maps[side].get(key) for side in repos]
 
 
 def validate_sha(value):
@@ -183,8 +214,6 @@ def prepare(args):
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=True)
     validate_sha(args.baseline)
-    if args.baseline != BASELINE:
-        raise ValueError("Baseline is fixed by the reviewed experiment")
     # Read this trusted ref exactly once. The workflow fetches master, not fork refs.
     master = validate_sha(git(ROOT, "rev-parse", "refs/remotes/origin/master"))
     candidate = validate_sha(os.environ.get(args.candidate_env, "") or master)
@@ -263,19 +292,21 @@ def run(args):
             shutil.copyfile(out / "iterations.txt", repo / "bench-iters.txt")
         selected = []
         result["selected"] = selected
+        # Resolve each side's fixture paths separately: a bench absent or moved
+        # on one revision is unsupported, never silently cross-read.
+        maps = {side: bench_targets(repo) for side, repo in repos.items()}
         for bench in sorted(plan["manifest"]["benches"], key=lambda b: b["rank"]):
             name = bench["bench"]
             if bench.get("coverage_only"):
                 result["unsupported"].append({"cell": name + "::future fixtures",
                                               "reason": "Optional snapshot/vector or rejecting-sink family needs reviewed frozen adapters and explicit cell/count selection"})
                 continue
-            paths = [repo / "crates" / bench["crate"] / "benches" / (name + ".rs")
-                     for repo in repos.values()]
+            paths = resolve_bench_sources(bench, maps, repos)
             cells = bench["cells"]
             # Never overlay candidate production code on A. A differing measurement
             # fixture needs a separately reviewed frozen adapter, outside this helper.
             reason = None
-            if not all(p.is_file() for p in paths):
+            if not all(path is not None and path.is_file() for path in paths):
                 reason = "Benchmark fixture absent on one or both immutable revisions"
             elif digest(paths[0]) != digest(paths[1]):
                 reason = "Fixture source differs; no reviewed frozen cross-revision adapter"
