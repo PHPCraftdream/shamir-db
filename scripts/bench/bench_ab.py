@@ -14,8 +14,8 @@ verdict precedence: a pair ratio > its threshold -> does-not-pay; otherwise a
 ratio within the borderline range [low, high] (and not > threshold) ->
 borderline (needs one 10-pair confirmation); otherwise (ratio < low) -> pays.
 The run decision evaluates ratio_verdict on the LARGEST pair ratio. Order of
-operations: (1) dispatch calibrate to produce iteration counts for the new
-cells, (2) a human commits bench-iters.txt, (3) dispatch ratio."""
+operations: (1) dispatch calibrate with scope=ratios (candidate revision only)
+to produce iteration counts for the new cells, (2) a human commits bench-iters.txt, (3) dispatch ratio."""
 import argparse
 import hashlib
 import json
@@ -304,7 +304,8 @@ def prepare(args):
             "manifest": manifest, "counts": counts, "scale": manifest["scale"],
             "manifest_digest": digest(out / "bench_ab.toml"),
             "iteration_digest": digest(out / "iterations.txt"), "suite": "owed-small",
-            "pairs": args.pairs, "baseline_note": baseline_note(args.operation)}
+            "pairs": args.pairs, "baseline_note": baseline_note(args.operation),
+            "scope": args.scope}
     save(out / "plan.json", plan)
     if os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
@@ -361,7 +362,10 @@ def run(args):
             if git(repo, "rev-parse", "HEAD") != expected_sha:
                 raise ValueError("Checkout identity mismatch")
             shutil.copyfile(out / "iterations.txt", repo / "bench-iters.txt")
-        ratio = plan["operation"] == "ratio"
+        # Ratio runs and ratio-scoped calibration touch the candidate revision
+        # and the manifest's ratio cells only (new cells have no baseline twin).
+        ratio = plan["operation"] == "ratio" or (
+            plan["operation"] == "calibrate" and plan.get("scope") == "ratios")
         ratio_cells = {}
         if ratio:
             for entry in plan["manifest"]["ratios"]:
@@ -422,7 +426,7 @@ def run(args):
         binaries = {}
         # Finish ALL A and B release builds before any warmup or timed process.
         for side, repo in repos.items():
-            if plan["operation"] == "ratio" and side == "A":
+            if ratio and side == "A":
                 continue
             side_env = {**env, "CARGO_TARGET_DIR": str(targets[side])}
             for crate, name in sorted({(b["crate"], b["bench"]) for b in selected}):
@@ -634,6 +638,9 @@ def main():
     p.add_argument("--operation", choices=("compare", "calibrate", "ratio"),
                    default="compare")
     p.add_argument("--pairs", type=int, choices=(5, 10), default=5)
+    p.add_argument("--scope", choices=("all", "ratios"), default="all",
+                   help="calibrate only: 'ratios' calibrates just the manifest's ratio cells "
+                        "on the candidate revision (cells new to the candidate)")
     p.add_argument("--output", type=Path, required=True)
     p = sub.add_parser("run")
     for name in ("plan", "a", "b", "target-root"):

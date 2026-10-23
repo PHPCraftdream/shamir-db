@@ -22,6 +22,11 @@ on:
         type: choice
         options: [compare, calibrate, ratio]
         default: compare
+      scope:
+        description: Calibration scope (calibrate only); ratios = just the ratio cells, candidate revision only
+        type: choice
+        options: [all, ratios]
+        default: all
       pairs:
         description: Paired invocations per ratio cell (ratio operation only); 10 = borderline confirmation
         type: choice
@@ -86,7 +91,7 @@ jobs:
         run: |
           python3 control/scripts/bench/bench_ab.py prepare \
             --baseline "$AB_BASELINE" --candidate-env REQUESTED_CANDIDATE --mode "$AB_MODE" \
-            --operation "$AB_OPERATION" --pairs "${{ inputs.pairs || '5' }}" \
+            --operation "$AB_OPERATION" --pairs "${{ inputs.pairs || '5' }}" --scope "${{ inputs.scope || 'all' }}" \
             --output "$RUNNER_TEMP/bench-ab"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
