@@ -2,7 +2,6 @@
 //
 //   cargo bench -p shamir-server --features bench-sefer          # sefer defaults
 //   cargo bench -p shamir-server --features bench-sefer-tuned    # sefer + production LargeCacheConfig
-//   cargo bench -p shamir-server --features bench-mimalloc       # mimalloc
 //   cargo bench -p shamir-server                                 # system default
 
 #[cfg(all(feature = "bench-sefer", not(feature = "bench-sefer-tuned")))]
@@ -19,7 +18,3 @@ static GLOBAL: sefer_alloc::SeferAlloc = sefer_alloc::SeferAlloc::with_config({
         .decay_rate_percent(25)
         .mode(sefer_alloc::LargeCacheMode::Lazy)
 });
-
-#[cfg(feature = "bench-mimalloc")]
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
