@@ -6,7 +6,16 @@ This tool is dispatched by hand via .github/workflows/hot-path-ab.yml
 located through `cargo metadata --no-deps` bench targets (src_path), so nested
 bench source layouts resolve; a fixture absent on either revision is reported
 unsupported. The baseline revision is a workflow input (full 40-hex SHA that
-must be an ancestor of master); no third-party Python dependencies."""
+must be an ancestor of master); no third-party Python dependencies.
+
+The `ratio` operation decides candidate-only whether a disk-cache tier pays:
+ratio = median(warm ns)/median(cold ns) per pair, candidate revision only;
+verdict precedence: a pair ratio > its threshold -> does-not-pay; otherwise a
+ratio within the borderline range [low, high] (and not > threshold) ->
+borderline (needs one 10-pair confirmation); otherwise (ratio < low) -> pays.
+The run decision evaluates ratio_verdict on the LARGEST pair ratio. Order of
+operations: (1) dispatch calibrate to produce iteration counts for the new
+cells, (2) a human commits bench-iters.txt, (3) dispatch ratio."""
 import argparse
 import hashlib
 import json
@@ -109,6 +118,37 @@ def load_manifest(path):
         for mode in ("hosted", "dedicated"):
             if not 0 < thresholds[mode] < 100:
                 raise ValueError("Invalid margin")
+    ratios = []
+    seen_ratios = set()
+    cells_by_bench = {}
+    for bench in manifest["benches"]:
+        cells_by_bench.setdefault(bench["bench"], set()).update(bench["cells"])
+    for entry in manifest.get("ratios", []):
+        bench, cold, warm = entry.get("bench"), entry.get("cold"), entry.get("warm")
+        if not all(isinstance(x, str) and x for x in (bench, cold, warm)) or cold == warm:
+            raise ValueError("Invalid ratio pair selection")
+        threshold = entry.get("threshold")
+        if type(threshold) is not float or not 0 < threshold < 1:
+            raise ValueError("Invalid ratio threshold")
+        borderline = entry.get("borderline")
+        if not isinstance(borderline, list) or len(borderline) != 2 or \
+                not all(type(x) is float for x in borderline) or \
+                not 0 < borderline[0] <= threshold <= borderline[1] < 1:
+            raise ValueError("Invalid ratio borderline range")
+        bench_cells = cells_by_bench.get(bench, set())
+        if cold not in bench_cells or warm not in bench_cells:
+            raise ValueError(f"Ratio pair references unknown cell: {bench}")
+        # The harness filters by substring, so a strict-substring sibling cell
+        # would make parse_output's exact-set check ambiguous.
+        for cell in bench_cells:
+            if cell != cold and cold in cell or cell != warm and warm in cell:
+                raise ValueError(f"Ratio cell is a strict substring of another cell: {bench}: {cold}/{warm} vs {cell}")
+        triple = (bench, cold, warm)
+        if triple in seen_ratios:
+            raise ValueError("Duplicate ratio pair")
+        seen_ratios.add(triple)
+        ratios.append(entry)
+    manifest["ratios"] = ratios
     return manifest
 
 
@@ -140,9 +180,13 @@ def preflight_cell(bench, cell, sources, counts, operation):
 
 def unmeasured_rows(result):
     measured = {cell["key"] for cell in result["cells"]}
+    for pair in result.get("ratios", []):
+        measured.update((pair["cold_key"], pair["warm_key"]))
     reason = "; ".join(result["errors"]) or (
         "Calibration only; no comparison observations" if
         result.get("plan", {}).get("operation") == "calibrate" else
+        "Ratio run needs committed calibration counts and complete paired observations" if
+        result.get("plan", {}).get("operation") == "ratio" else
         "Build/run did not produce complete paired observations")
     return [{"cell": cell["key"], "reason": reason}
             for cell in result.get("selected", []) if cell["key"] not in measured]
@@ -197,6 +241,32 @@ def paired(a, b, margin):
             "change_pct": change, "spread_pct": spread, "pairs": 5, "status": status}
 
 
+def ratio_verdict(ratio, threshold, borderline):
+    """Owner bench policy, exact precedence on a pair (or the largest) ratio:
+    ratio > threshold -> does-not-pay; borderline[0] <= ratio <= borderline[1]
+    (and not > threshold) -> borderline needing a 10-pair confirmation;
+    otherwise ratio < borderline[0] -> pays."""
+    if ratio > threshold:
+        return "does-not-pay"
+    if borderline[0] <= ratio <= borderline[1]:
+        return "borderline"
+    return "pays"
+
+
+def baseline_note(operation):
+    if operation != "ratio":
+        return None
+    return ("Ratio builds and measures the candidate revision only; the baseline input is "
+            "validated as an ancestor of master but neither built nor measured.")
+
+
+def ratio_stats(samples):
+    """(cold median ns, warm median ns, warm/cold) from per-pair samples."""
+    cold_ns = statistics.median(samples["cold"])
+    warm_ns = statistics.median(samples["warm"])
+    return cold_ns, warm_ns, warm_ns / cold_ns
+
+
 def policy(batches, mode):
     if mode == "dedicated" and len(batches) != 2:
         return "inconclusive"
@@ -233,7 +303,8 @@ def prepare(args):
             "operation": args.operation, "batches": 2 if args.mode == "dedicated" else 1,
             "manifest": manifest, "counts": counts, "scale": manifest["scale"],
             "manifest_digest": digest(out / "bench_ab.toml"),
-            "iteration_digest": digest(out / "iterations.txt"), "suite": "owed-small"}
+            "iteration_digest": digest(out / "iterations.txt"), "suite": "owed-small",
+            "pairs": args.pairs, "baseline_note": baseline_note(args.operation)}
     save(out / "plan.json", plan)
     if os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
@@ -268,7 +339,7 @@ def execute(argv, cwd, env, prefix, timeout):
 def run(args):
     out = args.plan.resolve().parent
     plan = load(args.plan)
-    result = {"plan": plan, "cells": [], "errors": [], "complete": False,
+    result = {"plan": plan, "cells": [], "ratios": [], "errors": [], "complete": False,
               "unsupported": list(plan["manifest"]["unsupported"])}
     save(out / "results.json", result)
     try:
@@ -290,6 +361,11 @@ def run(args):
             if git(repo, "rev-parse", "HEAD") != expected_sha:
                 raise ValueError("Checkout identity mismatch")
             shutil.copyfile(out / "iterations.txt", repo / "bench-iters.txt")
+        ratio = plan["operation"] == "ratio"
+        ratio_cells = {}
+        if ratio:
+            for entry in plan["manifest"]["ratios"]:
+                ratio_cells.setdefault(entry["bench"], []).append(entry)
         selected = []
         result["selected"] = selected
         # Resolve each side's fixture paths separately: a bench absent or moved
@@ -306,7 +382,14 @@ def run(args):
             # Never overlay candidate production code on A. A differing measurement
             # fixture needs a separately reviewed frozen adapter, outside this helper.
             reason = None
-            if not all(path is not None and path.is_file() for path in paths):
+            if ratio:
+                # Ratio runs the candidate binary only; the baseline side is
+                # neither resolved nor digest-compared against it.
+                if not cells:
+                    reason = "No explicit reviewed cell/source selection for optional future fixture"
+                elif paths[1] is None or not paths[1].is_file():
+                    reason = "Benchmark fixture absent on one or both immutable revisions"
+            elif not all(path is not None and path.is_file() for path in paths):
                 reason = "Benchmark fixture absent on one or both immutable revisions"
             elif digest(paths[0]) != digest(paths[1]):
                 reason = "Fixture source differs; no reviewed frozen cross-revision adapter"
@@ -316,15 +399,18 @@ def run(args):
                 for cell in cells or ["future fixture"]:
                     result["unsupported"].append({"cell": name + "::" + cell, "reason": reason})
                 continue
-            sources = [path.read_text() for path in paths]
+            sources = [path.read_text() for path in ([paths[1]] if ratio else paths)]
             for cell in cells:
+                if ratio and cell not in {c for entry in ratio_cells.get(name, [])
+                                          for c in (entry["cold"], entry["warm"])}:
+                    continue
                 key = name + "::" + cell
                 reason = preflight_cell(bench, cell, sources, plan["counts"], plan["operation"])
                 if reason:
                     result["unsupported"].append({"cell": key, "reason": reason})
                     continue
                 selected.append({**bench, "cell": cell, "key": key,
-                                 "fixture_digest": digest(paths[0])})
+                                 "fixture_digest": digest(paths[1] if ratio else paths[0])})
         result["selected"] = selected
         for side, repo in repos.items():
             metadata[side] = {"source_sha": git(repo, "rev-parse", "HEAD"),
@@ -336,6 +422,8 @@ def run(args):
         binaries = {}
         # Finish ALL A and B release builds before any warmup or timed process.
         for side, repo in repos.items():
+            if plan["operation"] == "ratio" and side == "A":
+                continue
             side_env = {**env, "CARGO_TARGET_DIR": str(targets[side])}
             for crate, name in sorted({(b["crate"], b["bench"]) for b in selected}):
                 text = execute(["cargo", "bench", "--locked", "--profile=release", "--no-run",
@@ -352,6 +440,8 @@ def run(args):
         save(out / "results.json", result)
         for index, bench in enumerate(selected):
             key, name, cell = bench["key"], bench["bench"], bench["cell"]
+            if plan["operation"] == "ratio":
+                continue
             if plan["operation"] == "calibrate":
                 text = execute([binaries["B", name], "--calibrate", "1", key], repos["B"], env,
                                out / f"calibrate-{index}", 600)
@@ -393,6 +483,59 @@ def run(args):
             result["cells"].append({**bench, "batches": observations, "status": status,
                                     "actual_iters": expected[cell], "scale": plan["scale"]})
             save(out / "results.json", result)
+        if plan["operation"] == "ratio":
+            selected_keys = {item["key"] for item in selected}
+            for index, entry in enumerate(plan["manifest"]["ratios"]):
+                name = entry["bench"]
+                sides = {"cold": entry["cold"], "warm": entry["warm"]}
+                if not {name + "::" + cell for cell in sides.values()} <= selected_keys:
+                    # Preflight dropped a cell (missing count / unsupported registration).
+                    result["unsupported"].append(
+                        {"cell": name + "::" + entry["cold"] + " vs " + entry["warm"],
+                         "reason": "Ratio cell excluded by preflight (calibrate first)"})
+                    continue
+                # Same substring-filtered cached-count scaling as compare; the
+                # manifest collision guard makes the filter unambiguous.
+                expected = {tier: {k.split("::", 1)[1]: n * plan["scale"]
+                                   for k, n in plan["counts"].items()
+                                   if k.startswith(name + "::") and name + "::" + cell in k}
+                            for tier, cell in sides.items()}
+                samples = {"cold": [], "warm": []}
+                for pair in range(-1, plan["pairs"]):
+                    order = ("cold", "warm") if pair < 0 or pair % 2 == 0 else ("warm", "cold")
+                    for tier in order:
+                        cell = sides[tier]
+                        key = name + "::" + cell
+                        if digest(repos["B"] / "bench-iters.txt") != plan["iteration_digest"]:
+                            raise ValueError("Iteration digest changed before invocation")
+                        text = execute([binaries["B", name], "--scale", str(plan["scale"]), key],
+                                       repos["B"], env,
+                                       out / f"ratio-{index}-pair-{pair}-{tier}", 600)
+                        if digest(repos["B"] / "bench-iters.txt") != plan["iteration_digest"]:
+                            raise ValueError("Iteration digest changed after invocation")
+                        rows = parse_output(text, expected[tier])
+                        if pair >= 0:
+                            samples[tier].append(rows[cell]["ns"])
+                cold_ns, warm_ns, pair_ratio = ratio_stats(samples)
+                result["ratios"].append(
+                    {"bench": name, "cold_key": name + "::" + entry["cold"],
+                     "warm_key": name + "::" + entry["warm"],
+                     "threshold": entry["threshold"], "borderline": entry["borderline"],
+                     "cold_ns": cold_ns, "warm_ns": warm_ns, "ratio": pair_ratio,
+                     "pairs": plan["pairs"],
+                     "verdict": ratio_verdict(pair_ratio, entry["threshold"],
+                                              entry["borderline"]),
+                     "observations": samples})
+                save(out / "results.json", result)
+            # The owner decision reads the worst (largest) pair ratio; that
+            # pair's own threshold/borderline defines the pass/fail boundary.
+            if not result["ratios"]:
+                raise ValueError("No ratio pair could be measured; calibrate the new cells first")
+            largest = max(result["ratios"], key=lambda item: item["ratio"])
+            result["decision"] = {
+                "ratio": largest["ratio"],
+                "verdict": ratio_verdict(largest["ratio"], largest["threshold"],
+                                         largest["borderline"])}
         if plan["operation"] == "calibrate":
             shutil.copyfile(repos["B"] / "bench-iters.txt", out / "candidate-iterations.txt")
             load_counts(out / "candidate-iterations.txt")
@@ -436,6 +579,22 @@ def report(args):
         lines.append(f"| {item['cell']} | — | — | — | — | 0 | unmeasured: {item['reason']} |")
     for item in result["unsupported"]:
         lines.append(f"| {item['cell']} | — | — | — | — | 0 | unsupported: {item['reason']} |")
+    if result.get("ratios"):
+        lines += ["", "## Warm/cold disk-cache ratio (candidate only)",
+                  "ratio = median(warm ns)/median(cold ns) per pair, candidate revision only; "
+                  "verdict precedence: a pair ratio > its threshold -> does-not-pay; otherwise a "
+                  "ratio within the borderline range [low, high] (and not > threshold) -> borderline "
+                  "(needs one 10-pair confirmation); otherwise (ratio < low) -> pays.", "",
+                  "| Cell pair | Cold median ns | Warm median ns | Ratio | Pairs | Verdict |",
+                  "|---|---:|---:|---:|---:|---|"]
+        for pair in result["ratios"]:
+            lines.append(f"| {pair['bench']}: {pair['cold_key'].split('::', 1)[1]} vs "
+                         f"{pair['warm_key'].split('::', 1)[1]} | {pair['cold_ns']:.2f} | "
+                         f"{pair['warm_ns']:.2f} | {pair['ratio']:.4f} | {pair['pairs']} | "
+                         f"{pair['verdict']} |")
+        decision = result.get("decision")
+        if decision:
+            lines += ["", f"Decision: {decision['verdict']} (largest ratio {decision['ratio']:.4f})"]
     lines += ["", "## Measurement failures"] + result["errors"]
     lines += ["", result.get("calibration", ""), "## Validation still required in real dispatch",
               "Common locked release builds, harness/runtime compatibility, useful timed intervals,",
@@ -456,6 +615,9 @@ def verdict(args):
         return 1
     if result["plan"]["operation"] == "calibrate":
         return 0
+    if result["plan"]["operation"] == "ratio":
+        # Advisory: the ratio decision is read from the report, never gates.
+        return 0
     if result["plan"]["mode"] == "dedicated":
         if any(c["status"] == "flagged" for c in result["cells"]):
             return 2
@@ -469,7 +631,9 @@ def main():
     p.add_argument("--baseline", default=BASELINE)
     p.add_argument("--candidate-env", default="REQUESTED_CANDIDATE")
     p.add_argument("--mode", choices=("hosted", "dedicated"), default="hosted")
-    p.add_argument("--operation", choices=("compare", "calibrate"), default="compare")
+    p.add_argument("--operation", choices=("compare", "calibrate", "ratio"),
+                   default="compare")
+    p.add_argument("--pairs", type=int, choices=(5, 10), default=5)
     p.add_argument("--output", type=Path, required=True)
     p = sub.add_parser("run")
     for name in ("plan", "a", "b", "target-root"):

@@ -139,6 +139,61 @@ optional = true
 [benches.source_prerequisites]
 "disjoint_tables/n_1" = ['let levels: &\[usize\] = if wide \{ &\[1, 8, 32\] \} else \{ &\[1\] \};', 'for\s+&n\s+in\s+levels\s*\{\s*let ctr = Arc::new\(AtomicU64::new\(0\)\);\s*h\.bench_batched_async\(\s*&format!\("disjoint_tables/n_\{n\}"\)']
 "same_table/n_1" = ['let levels: &\[usize\] = if wide \{ &\[1, 8, 32\] \} else \{ &\[1\] \};', 'for\s+&n\s+in\s+levels\s*\{\s*let ctr = Arc::new\(AtomicU64::new\(0\)\);\s*h\.bench_batched_async\(\s*&format!\("same_table/n_\{n\}"\)']
+[[benches]]
+rank = 7
+crate = "shamir-engine"
+bench = "wasm_invoke"
+class = "cpu"
+cells = ["compile_cold/fn64", "compile_cold/fn256", "compile_warm/fn64", "compile_warm/fn256"]
+optional = true
+# Reviewed unconditional loop + exact registration calls in wasm_invoke.rs.
+[benches.source_prerequisites]
+"compile_cold/fn64" = ['for\s+&n\s+in\s+&\[\s*64usize\s*,\s*256usize\s*\]', 'h\.bench_batched\(\s*&format!\("compile_cold/fn\{n\}"\)']
+"compile_cold/fn256" = ['for\s+&n\s+in\s+&\[\s*64usize\s*,\s*256usize\s*\]', 'h\.bench_batched\(\s*&format!\("compile_cold/fn\{n\}"\)']
+"compile_warm/fn64" = ['for\s+&n\s+in\s+&\[\s*64usize\s*,\s*256usize\s*\]', 'h\.bench_batched\(\s*&format!\("compile_warm/fn\{n\}"\)']
+"compile_warm/fn256" = ['for\s+&n\s+in\s+&\[\s*64usize\s*,\s*256usize\s*\]', 'h\.bench_batched\(\s*&format!\("compile_warm/fn\{n\}"\)']
+
+[[benches]]
+rank = 7
+crate = "shamir-db"
+bench = "engine_perf"
+class = "io"
+cells = ["boot_k_functions/cold/16", "boot_k_functions/cold/64", "boot_k_functions/warm/16", "boot_k_functions/warm/64"]
+optional = true
+# The bench target source wires a helper module; the reviewed anchors are the
+# #[path] include and the unconditional register_cells call in engine_perf.rs.
+[benches.source_prerequisites]
+"boot_k_functions/cold/16" = ['#\[\s*path\s*=\s*"engine_perf/boot_k_functions\.rs"\]', 'boot_k::register_cells\(&mut h\);']
+"boot_k_functions/cold/64" = ['#\[\s*path\s*=\s*"engine_perf/boot_k_functions\.rs"\]', 'boot_k::register_cells\(&mut h\);']
+"boot_k_functions/warm/16" = ['#\[\s*path\s*=\s*"engine_perf/boot_k_functions\.rs"\]', 'boot_k::register_cells\(&mut h\);']
+"boot_k_functions/warm/64" = ['#\[\s*path\s*=\s*"engine_perf/boot_k_functions\.rs"\]', 'boot_k::register_cells\(&mut h\);']
+
+# Owner bench policy: the disk-cache tier pays only if the median WARM time
+# over the median COLD time, within one revision, stays below the threshold.
+[[ratios]]
+bench = "wasm_invoke"
+cold = "compile_cold/fn64"
+warm = "compile_warm/fn64"
+threshold = 0.8
+borderline = [0.7, 0.9]
+[[ratios]]
+bench = "wasm_invoke"
+cold = "compile_cold/fn256"
+warm = "compile_warm/fn256"
+threshold = 0.8
+borderline = [0.7, 0.9]
+[[ratios]]
+bench = "engine_perf"
+cold = "boot_k_functions/cold/16"
+warm = "boot_k_functions/warm/16"
+threshold = 0.8
+borderline = [0.7, 0.9]
+[[ratios]]
+bench = "engine_perf"
+cold = "boot_k_functions/cold/64"
+warm = "boot_k_functions/warm/64"
+threshold = 0.8
+borderline = [0.7, 0.9]
 
 # Future fixture targets require explicit reviewed cells and source prerequisites.
 [[benches]]
