@@ -149,17 +149,20 @@ impl WasmEngine {
     /// entire point of epoch interruption (it is what lets a CPU-bound guest be
     /// pre-empted when neither fuel nor the cooperative `timeout` can).
     ///
-    /// `Engine` is internally reference-counted (cheap to clone). The thread
-    /// runs for the process lifetime; engines here are long-lived singletons,
-    /// so leaking one background ticker per engine is acceptable and matches
-    /// wasmtime's documented epoch-ticker pattern.
+    /// The thread holds only an `EngineWeak` (wasmtime's documented
+    /// epoch-ticker pattern) and exits on the first tick after the last
+    /// strong `Engine` is dropped, so short-lived engines (tests, benches)
+    /// neither leak a ticker thread nor keep their allocator alive.
     fn spawn_epoch_ticker(engine: &Engine) {
-        let engine = engine.clone();
+        let weak = engine.weak();
         std::thread::Builder::new()
             .name("wasm-epoch-ticker".into())
             .spawn(move || loop {
                 std::thread::sleep(Self::EPOCH_TICK);
-                engine.increment_epoch();
+                match weak.upgrade() {
+                    Some(engine) => engine.increment_epoch(),
+                    None => break,
+                }
             })
             .ok();
     }
