@@ -92,7 +92,7 @@ where
 
 pub(super) async fn fresh_db() -> Arc<ShamirDb> {
     let shamir = Arc::new(ShamirDb::init_memory().await.expect("init"));
-    shamir.create_db("bench").await;
+    shamir.create_db("bench").await.expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     shamir.add_repo("bench", cfg).await.expect("add_repo");
@@ -105,7 +105,7 @@ pub(super) async fn fresh_db_fjall(path: &std::path::Path) -> Arc<ShamirDb> {
 
 async fn fresh_db_with(factory: BoxRepoFactory) -> Arc<ShamirDb> {
     let shamir = Arc::new(ShamirDb::init_memory().await.expect("init"));
-    shamir.create_db("bench").await;
+    shamir.create_db("bench").await.expect("create_db");
     let cfg = RepoConfig::new("main", factory).add_table(TableConfig::new("users"));
     shamir.add_repo("bench", cfg).await.expect("add_repo");
     shamir

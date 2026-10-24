@@ -116,7 +116,7 @@ async fn setup() -> ShamirDb {
     let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("main").tables(["users"]));
@@ -339,7 +339,7 @@ async fn default_stamp_survives_durable_reopen() {
         let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        db.create_db("testdb").await;
+        db.create_db("testdb").await.expect("create_db");
         let mut b = Batch::new();
         b.id(1);
         b.create_repo("cr", ddl::create_repo("main").tables(["users"]));

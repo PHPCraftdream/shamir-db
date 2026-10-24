@@ -48,7 +48,7 @@ async fn close_discards_queued_feed_events_and_leaves_healthy_receiver() {
 #[tokio::test]
 async fn persisted_quarantine_flip_revokes_idle_receiver_without_post_flip_write() {
     let db = ShamirDb::init(SystemStoreConfig::InMemory).await.unwrap();
-    let instance = db.create_db("testdb").await;
+    let instance = db.create_db("testdb").await.expect("create_db");
     instance
         .add_repo(
             RepoConfig::new("main", BoxRepoFactory::in_memory())
@@ -200,7 +200,7 @@ async fn quarantine_cache_replace_clears_persisted_removal_but_keeps_pending_fai
 #[tokio::test]
 async fn marking_after_profile_removal_quarantines_exactly_bound_destination() {
     let db = ShamirDb::init(SystemStoreConfig::InMemory).await.unwrap();
-    let instance = db.create_db("testdb").await;
+    let instance = db.create_db("testdb").await.expect("create_db");
     instance
         .add_repo(
             RepoConfig::new("main", BoxRepoFactory::in_memory())

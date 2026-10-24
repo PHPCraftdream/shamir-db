@@ -29,7 +29,7 @@ use crate::ShamirDb;
 /// (mirrors the layout used by the existing execute tests).
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let db = shamir.create_db("testdb").await;
+    let db = shamir.create_db("testdb").await.expect("create_db");
 
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));

@@ -90,7 +90,10 @@ async fn build_handler() -> ShamirDbHandler {
     let alice = Actor::User(principal64([0xAB; 16]));
     let bob = Actor::User(principal64_from_username("bob"));
 
-    shamir.create_db_as("app", alice.clone()).await;
+    shamir
+        .create_db_as("app", alice.clone())
+        .await
+        .expect("create_db");
 
     // alice-owned repo.
     let cfg_main =
@@ -382,7 +385,10 @@ async fn long_poll_empty_tail_does_not_hang() {
 async fn leader_epoch_carried_on_all_responses() {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64([0xAB; 16]));
-    shamir.create_db_as("app", owner.clone()).await;
+    shamir
+        .create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir.add_repo_as("app", cfg, owner).await.unwrap();

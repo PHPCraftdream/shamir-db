@@ -12,8 +12,8 @@ impl ShamirDb {
     ///
     /// Delegates to [`DbInstance::create_table`] (the same path that lazily
     /// instantiates the `TableManager` on first access) and then records the
-    /// table in the system store. Persistence is best-effort: a failed
-    /// catalogue write is logged, not propagated, mirroring `add_repo`.
+    /// table in the system store. A failed catalogue write propagates
+    /// (RV-DB-6540DC7B).
     pub async fn add_table(
         &self,
         db_name: &str,
@@ -52,8 +52,8 @@ impl ShamirDb {
         db.create_table_checked_with_config(repo_name, config)
             .await?;
 
-        if let Err(e) = self
-            .system_store
+        // Propagation per RV-DB-6540DC7B.
+        self.system_store
             .save_table(
                 db_name,
                 repo_name,
@@ -61,16 +61,7 @@ impl ShamirDb {
                 enable_indexes,
                 &ResourceMeta::owned_enforced(actor),
             )
-            .await
-        {
-            log::warn!(
-                "shamir_db::add_table: failed to persist table catalogue '{}/{}/{}': {}",
-                db_name,
-                repo_name,
-                table_name,
-                e
-            );
-        }
+            .await?;
 
         Ok(())
     }
@@ -91,18 +82,16 @@ impl ShamirDb {
         // Always clear the catalogue entry (idempotent), even if the
         // in-memory table was already gone, so a stale record can't
         // resurrect the table on the next open.
+        // Catalogue persistence failures propagate; a missing row stays an
+        // idempotent no-op (the clear is documented idempotent).
         if let Err(e) = self
             .system_store
             .remove_table(db_name, repo_name, table_name)
             .await
         {
-            log::warn!(
-                "shamir_db::drop_table: failed to remove table catalogue '{}/{}/{}': {}",
-                db_name,
-                repo_name,
-                table_name,
-                e
-            );
+            if !matches!(e, DbError::NotFound(_)) {
+                return Err(e);
+            }
         }
 
         Ok(removed)
@@ -319,34 +308,12 @@ impl ShamirDb {
         //    between the two leaves the new table resolvable on reboot;
         //    a stale `(db, repo, from)` row resurrects nothing because
         //    the live registration under `from` is already gone.
-        if let Err(e) = self
-            .system_store
+        self.system_store
             .save_table(db_name, repo_name, to, enable_indexes, &existing_meta)
-            .await
-        {
-            log::warn!(
-                "shamir_db::rename_table: failed to persist new catalogue row \
-                 '{}/{}/{}': {}",
-                db_name,
-                repo_name,
-                to,
-                e
-            );
-        }
-        if let Err(e) = self
-            .system_store
+            .await?;
+        self.system_store
             .remove_table(db_name, repo_name, from)
-            .await
-        {
-            log::warn!(
-                "shamir_db::rename_table: failed to remove old catalogue row \
-                 '{}/{}/{}': {}",
-                db_name,
-                repo_name,
-                from,
-                e
-            );
-        }
+            .await?;
 
         // F-68 (#895) cluster D / task #124: exit timestamp, paired with the
         // "enter" log above.

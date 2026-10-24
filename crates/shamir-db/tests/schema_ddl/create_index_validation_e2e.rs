@@ -23,7 +23,7 @@ use shamir_query_builder::ddl;
 /// Create an in-memory DB + repo with a single `docs` table.
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let db = shamir.create_db("testdb").await;
+    let db = shamir.create_db("testdb").await.expect("create_db");
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("docs"));
     db.add_repo(repo_config).await.unwrap();

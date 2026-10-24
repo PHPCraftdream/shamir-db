@@ -37,7 +37,7 @@ pub(crate) fn session_key(session: &Session) -> [u8; 32] {
 
 pub(crate) async fn make_db_with_table(db: &str, table: &str) -> Arc<ShamirDb> {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
-    shamir.create_db(db).await;
+    shamir.create_db(db).await.expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new(table));
     shamir.add_repo(db, cfg).await.expect("add repo");

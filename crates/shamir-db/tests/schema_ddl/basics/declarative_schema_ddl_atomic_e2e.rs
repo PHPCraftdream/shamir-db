@@ -92,7 +92,7 @@ async fn read_schema(db: &ShamirDb, db_name: &str, table: &str) -> QueryValue {
 }
 
 async fn setup(db: &ShamirDb) {
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("main").tables(["users"]));

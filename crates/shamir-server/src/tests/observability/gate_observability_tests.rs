@@ -87,7 +87,7 @@ async fn operator_status_uses_lazy_age_and_clears_when_visibility_advances() {
 #[tokio::test]
 async fn scrape_samples_current_open_registry_without_background_polling() {
     let db = ShamirDb::init_memory().await.unwrap();
-    let instance = db.create_db("diagnostics-db").await;
+    let instance = db.create_db("diagnostics-db").await.expect("create_db");
     let recorder = PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
     instance

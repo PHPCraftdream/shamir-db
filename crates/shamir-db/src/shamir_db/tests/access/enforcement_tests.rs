@@ -13,7 +13,7 @@ use shamir_types::access::{Action, Actor, Mode, ResourceMeta, ResourcePath};
 #[tokio::test]
 async fn system_actor_bypasses_all() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let config =
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     shamir.add_repo("testdb", config).await.unwrap();
@@ -59,7 +59,7 @@ async fn system_actor_bypasses_all() {
 #[tokio::test]
 async fn owner_can_read_write_mode_700() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let config =
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     shamir.add_repo("testdb", config).await.unwrap();
@@ -124,7 +124,7 @@ async fn owner_can_read_write_mode_700() {
 #[tokio::test]
 async fn group_member_authorized_via_group_bits() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let config =
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     shamir.add_repo("testdb", config).await.unwrap();
@@ -182,7 +182,7 @@ async fn group_member_authorized_via_group_bits() {
 #[tokio::test]
 async fn traversal_denied_without_execute_on_ancestor() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let config =
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     shamir.add_repo("testdb", config).await.unwrap();
@@ -227,7 +227,7 @@ async fn traversal_denied_without_execute_on_ancestor() {
 #[tokio::test]
 async fn traversal_allows_when_ancestors_grant_execute() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let config =
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     shamir.add_repo("testdb", config).await.unwrap();
@@ -277,7 +277,7 @@ async fn traversal_allows_when_ancestors_grant_execute() {
 #[tokio::test]
 async fn open_default_allows_any_user() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let config =
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     shamir.add_repo("testdb", config).await.unwrap();
@@ -325,7 +325,7 @@ async fn open_default_allows_any_user() {
 #[tokio::test]
 async fn manage_denied_for_non_owner() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
 
     let db_meta = ResourceMeta {
         owner: Actor::User(10),
@@ -365,7 +365,7 @@ async fn manage_denied_for_non_owner() {
 #[tokio::test]
 async fn record_enforcement_inherits_table_meta() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let config =
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     shamir.add_repo("testdb", config).await.unwrap();

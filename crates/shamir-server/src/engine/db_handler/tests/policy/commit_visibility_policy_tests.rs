@@ -36,7 +36,9 @@ async fn fixture() -> (Arc<ShamirDbHandler>, Arc<Session>) {
     ));
     let db = ShamirDb::init_memory().await.unwrap();
     let actor = Actor::User(principal64(session.user_id));
-    db.create_db_as("app", actor.clone()).await;
+    db.create_db_as("app", actor.clone())
+        .await
+        .expect("create_db");
     db.add_repo_as(
         "app",
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items")),

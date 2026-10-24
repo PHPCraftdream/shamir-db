@@ -43,7 +43,9 @@ async fn committed_fixture(
 ) -> (ShamirDbHandler, Vec<ChangelogEvent>) {
     let db = ShamirDb::init_memory().await.expect("init memory db");
     let owner = Actor::User(principal64([0xAB; 16]));
-    db.create_db_as("app", owner.clone()).await;
+    db.create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     let config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     db.add_repo_as("app", config, owner.clone())

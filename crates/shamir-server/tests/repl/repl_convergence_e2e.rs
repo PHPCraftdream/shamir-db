@@ -94,7 +94,10 @@ const TABLE: &str = "items";
 async fn build_db() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64_from_username(OWNER));
-    shamir.create_db_as(DB, owner.clone()).await;
+    shamir
+        .create_db_as(DB, owner.clone())
+        .await
+        .expect("create_db");
     let cfg = RepoConfig::new(REPO, BoxRepoFactory::in_memory()).add_table(TableConfig::new(TABLE));
     shamir.add_repo_as(DB, cfg, owner).await.expect("add repo");
     shamir

@@ -75,7 +75,7 @@ async fn warn_line_emitted_when_query_exceeds_threshold() {
     // 2. Build a handler with `threshold_us = 1` — basically every batch
     // will exceed it (each takes at least a few microseconds).
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
-    shamir.create_db("prod").await;
+    shamir.create_db("prod").await.expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir.add_repo("prod", cfg).await.expect("add repo");
@@ -164,7 +164,7 @@ async fn no_warn_when_threshold_is_zero() {
     let _guard = tracing::subscriber::set_default(subscriber);
 
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
-    shamir.create_db("prod").await;
+    shamir.create_db("prod").await.expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir.add_repo("prod", cfg).await.expect("add repo");

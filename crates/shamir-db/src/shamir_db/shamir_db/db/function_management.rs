@@ -286,17 +286,16 @@ impl ShamirDb {
         )
         .await
         .map_err(|e| DbError::Function(e.to_string()))?;
+        // Durable removal FIRST (RV-DB-6540DC7B): a persistence error on
+        // this PREWRITE delete propagates and leaves the live binding
+        // intact, so a retry still sees the artifact. (A remove that
+        // commits and then fails at flush can also surface here; no
+        // restart-visibility guarantee is claimed for that case.) Builtins
+        // have no durable row — the delete matches nothing and succeeds
+        // idempotently.
+        self.system_store.remove_function(name).await?;
         let existed = self.functions.remove(name);
         let _ = self.function_meta.remove(name);
-        // Best-effort catalogue removal — ignore if there was no durable record
-        // (e.g. builtins don't have one).
-        if let Err(e) = self.system_store.remove_function(name).await {
-            log::warn!(
-                "shamir_db::drop_function: failed to remove '{}' from catalogue: {}",
-                name,
-                e
-            );
-        }
         Ok(existed)
     }
 
@@ -336,10 +335,11 @@ impl ShamirDb {
         }
 
         // If there was a durable record, re-key it, preserving the
-        // existing owner/group/mode.
+        // existing owner/group/mode. Write the durable new record BEFORE
+        // removing the old one (a crash between the two leaves the new row
+        // resolvable and the old row inert).
         if let Some(mut rec) = old_record {
             let existing_meta = ResourceMeta::from_record(&rec);
-            self.system_store.remove_function(from).await?;
             if let shamir_types::types::value::QueryValue::Map(ref mut map) = rec {
                 map.insert(
                     "name".to_string(),
@@ -349,6 +349,7 @@ impl ShamirDb {
             self.system_store
                 .save_function(to, &rec, &existing_meta)
                 .await?;
+            self.system_store.remove_function(from).await?;
         }
 
         Ok(())
@@ -473,10 +474,10 @@ impl ShamirDb {
     ///
     /// Guards: `from` must exist; `to` must be free (no record at `to` itself
     /// nor any descendant of `to`). The migration is collected before any
-    /// mutation, then applied remove-old / save-new, so no partial state is
-    /// left if a write fails mid-way (the destination guard already guarantees
-    /// the target subtree is empty, so writes cannot collide with surviving
-    /// old keys).
+    /// mutation, then applied save-new / remove-old, so a crash mid-way
+    /// leaves the new row resolvable and the old row inert (the destination
+    /// guard already guarantees the target subtree is empty, so writes
+    /// cannot collide with surviving old keys).
     pub async fn rename_function_folder_as(
         &self,
         from: &[String],
@@ -567,15 +568,17 @@ impl ShamirDb {
             migrations.push((path, new_key, new_rec, meta));
         }
 
-        // Apply: remove old keys first, then save new records with preserved
-        // meta. The destination guard already guaranteed no key collisions.
-        for (old_key, _, _, _) in &migrations {
-            self.system_store.remove_function_folder(old_key).await?;
-        }
+        // Apply: save new records with preserved meta first, then remove old
+        // keys (a crash between the two leaves the new row resolvable and the
+        // old row inert). The destination guard already guaranteed no
+        // collisions.
         for (_, new_key, new_rec, meta) in &migrations {
             self.system_store
                 .save_function_folder(new_key, new_rec, meta)
                 .await?;
+        }
+        for (old_key, _, _, _) in &migrations {
+            self.system_store.remove_function_folder(old_key).await?;
         }
 
         Ok(())

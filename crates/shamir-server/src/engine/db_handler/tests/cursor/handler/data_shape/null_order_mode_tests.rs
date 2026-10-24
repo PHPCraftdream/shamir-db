@@ -57,7 +57,10 @@ async fn build_handler_with_nullable_scores(
 ) -> ShamirDbHandler {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64([0xAB; 16]));
-    shamir.create_db_as("app", owner.clone()).await;
+    shamir
+        .create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir
@@ -151,7 +154,10 @@ async fn null_order_by_value_asc_is_not_silently_dropped() {
 async fn missing_order_by_field_is_not_silently_dropped() {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64([0xAB; 16]));
-    shamir.create_db_as("app", owner.clone()).await;
+    shamir
+        .create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir
@@ -285,7 +291,10 @@ async fn null_probe_regression_non_null_column_stays_keyset() {
 async fn nan_order_by_value_forces_offset_mode_no_loss() {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64([0xAB; 16]));
-    shamir.create_db_as("app", owner.clone()).await;
+    shamir
+        .create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir

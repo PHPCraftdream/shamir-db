@@ -23,7 +23,7 @@ use shamir_server::db_handler::ShamirDbHandler;
 /// so a bare db suffices.
 pub(crate) async fn make_db_with_user(db: &str, _username: &str) -> Arc<ShamirDb> {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
-    shamir.create_db(db).await;
+    shamir.create_db(db).await.expect("create_db");
     Arc::new(shamir)
 }
 
@@ -143,7 +143,7 @@ async fn revoke_role_with_wrong_hmac_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chmod_without_hmac_rejected() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
@@ -168,7 +168,7 @@ async fn chmod_without_hmac_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chmod_with_wrong_hmac_rejected() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
@@ -196,7 +196,7 @@ async fn chmod_with_wrong_hmac_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chmod_with_correct_hmac_accepted() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
@@ -227,7 +227,7 @@ async fn chmod_with_correct_hmac_accepted() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chown_without_hmac_rejected() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
@@ -252,7 +252,7 @@ async fn chown_without_hmac_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chown_with_wrong_hmac_rejected() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
@@ -280,7 +280,7 @@ async fn chown_with_wrong_hmac_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chown_with_correct_hmac_accepted() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
@@ -310,7 +310,7 @@ async fn chown_with_correct_hmac_accepted() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chgrp_without_hmac_rejected() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     // Task #561 §2: chgrp now validates the group id unconditionally, so
     // target a real (created) group — the test's point is the HMAC gate, not
     // the group's existence.
@@ -339,7 +339,7 @@ async fn chgrp_without_hmac_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chgrp_with_wrong_hmac_rejected() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     // Task #561 §2: chgrp now validates the group id unconditionally, so
     // target a real (created) group — the test's point is the HMAC gate, not
     // the group's existence.
@@ -371,7 +371,7 @@ async fn chgrp_with_wrong_hmac_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chgrp_with_correct_hmac_accepted() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     // Task #561 §2: chgrp now validates the group id unconditionally, so
     // target a real (created) group — the test's point is the HMAC gate, not
     // the group's existence.

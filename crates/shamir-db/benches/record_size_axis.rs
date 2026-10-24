@@ -89,7 +89,7 @@ fn sizes() -> &'static [(usize, &'static str)] {
 /// Fresh in-memory ShamirDb with one repo + one table named `TABLE`.
 async fn fresh_db() -> Arc<ShamirDb> {
     let shamir = Arc::new(ShamirDb::init_memory().await.expect("init"));
-    shamir.create_db(DB).await;
+    shamir.create_db(DB).await.expect("create_db");
     let cfg = RepoConfig::new(REPO, BoxRepoFactory::in_memory()).add_table(TableConfig::new(TABLE));
     shamir.add_repo(DB, cfg).await.expect("add_repo");
     shamir
