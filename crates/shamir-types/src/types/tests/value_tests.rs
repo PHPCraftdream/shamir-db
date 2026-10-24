@@ -525,8 +525,9 @@ mod tests {
     fn test_f64_neg_zero_hash() {
         let p = UserValue::F64(0.0);
         let n = UserValue::F64(-0.0);
-        // Different bit patterns → different hashes
-        assert_ne!(calculate_hash(&p), calculate_hash(&n));
+        // `==` folds -0.0 into +0.0, so Hash must agree (RV-FUNCLIB-5FA455F7).
+        assert_eq!(p, n);
+        assert_eq!(calculate_hash(&p), calculate_hash(&n));
     }
 
     #[test]
