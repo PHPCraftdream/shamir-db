@@ -18,6 +18,9 @@ use shamir_connect::server::session::SessionStore;
 
 use shamir_transport_ws::browser::BrowserOriginPolicy;
 
+use shamir_db::access::Actor;
+use shamir_db::ShamirDb;
+
 use crate::connection::ConnectionContext;
 use crate::server::boot_error::BootError;
 use crate::server_meta::ServerMetaStore;
@@ -202,4 +205,31 @@ pub(super) fn log_bootstrap_outcome(name: &str, outcome: &BootstrapOutcome) {
         server_secret: [0u8; 32],
         lockout_secret: [0u8; 32],
     };
+}
+
+/// Boot-owned step: idempotently ensure the `default` database exists and
+/// return its live instance.
+///
+/// On the first boot this runs `create_db_as_checked`, whose catalogue
+/// persist failure PROPAGATES (RV-DB-6540DC7B: boot must not continue with
+/// a `default` db whose durable row failed to save — the checked creation
+/// persists BEFORE publishing the live registration, so a failed call
+/// leaves no false-success live default either). On every subsequent boot
+/// `ShamirDb::init` already loaded `default` from the system store and the
+/// existing instance is returned untouched.
+pub(super) async fn ensure_default_database(
+    shamir: &Arc<ShamirDb>,
+) -> Result<shamir_db::engine::db_instance::db_instance::DbInstance, BootError> {
+    if !shamir.has_db("default") {
+        shamir
+            .create_db_as_checked("default", Actor::System)
+            .await
+            .map_err(|e| BootError::ShamirDbInit(format!("create_db default: {e}")))?;
+    }
+    // Cannot miss after the branch above: create_db_as_checked registers
+    // the instance before returning Ok, and has_db(true) implies a live
+    // registration.
+    shamir
+        .get_db("default")
+        .ok_or_else(|| BootError::ShamirDbInit("default db missing after ensure".into()))
 }

@@ -25,7 +25,7 @@ const OTHER: u64 = 99;
 
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let mut b = Batch::new();
     b.id("s");
     b.op(
@@ -369,7 +369,7 @@ async fn drop_repo_gated_by_store_delete() {
 #[tokio::test]
 async fn drop_db_gated_by_database_delete() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("dropme").await;
+    shamir.create_db("dropme").await.expect("create_db");
 
     // Restrict database "dropme".
     let mut b = Batch::new();
@@ -746,7 +746,7 @@ async fn drop_table_if_exists_denies_unauthorized_on_existing_table() {
 #[tokio::test]
 async fn drop_db_if_exists_denies_unauthorized_on_existing_db() {
     let shamir = setup().await;
-    shamir.create_db("victim").await;
+    shamir.create_db("victim").await.expect("create_db");
 
     // Restrict "victim" to OWNER / 0o700.
     let mut b = Batch::new();

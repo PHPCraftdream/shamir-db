@@ -44,7 +44,7 @@ use crate::common::{
 /// can read `messages` but is denied `secrets`.
 async fn make_db_one_repo_split_acl(db: &str, repo: &str) -> Arc<ShamirDb> {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
-    shamir.create_db(db).await;
+    shamir.create_db(db).await.expect("create_db");
     let cfg = RepoConfig::new(repo, BoxRepoFactory::in_memory())
         .add_table(TableConfig::new("messages"))
         .add_table(TableConfig::new("secrets"));

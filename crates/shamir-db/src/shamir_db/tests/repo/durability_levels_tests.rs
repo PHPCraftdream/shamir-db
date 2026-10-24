@@ -38,7 +38,7 @@ async fn synced_batch_survives_immediate_drop() {
         let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        shamir.create_db("appdb").await;
+        shamir.create_db("appdb").await.expect("create_db");
 
         let config = RepoConfig::new("data", BoxRepoFactory::fjall(&repo_path))
             .add_table(TableConfig::new("items"));
@@ -98,7 +98,7 @@ async fn buffered_batch_executes_successfully() {
     let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .unwrap();
-    shamir.create_db("appdb").await;
+    shamir.create_db("appdb").await.expect("create_db");
 
     let config = RepoConfig::new("data", BoxRepoFactory::fjall(&repo_path))
         .add_table(TableConfig::new("items"));

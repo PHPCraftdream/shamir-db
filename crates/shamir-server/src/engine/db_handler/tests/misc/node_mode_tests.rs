@@ -63,7 +63,10 @@ async fn build_handler(mode: NodeMode) -> ShamirDbHandler {
     // `session_actor` computes for `alice_session()` above — so the
     // non-superuser session is the recorded owner and the gate admits her.
     let owner = Actor::User(principal64([0xAB; 16]));
-    shamir.create_db_as("app", owner.clone()).await;
+    shamir
+        .create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir

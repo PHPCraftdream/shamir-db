@@ -47,7 +47,7 @@ fn user_session_b() -> Session {
 
 async fn make_db_with_table(db: &str, repo: &str, table: &str) -> Arc<ShamirDb> {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
-    shamir.create_db(db).await;
+    shamir.create_db(db).await.expect("create_db");
     let cfg = RepoConfig::new(repo, BoxRepoFactory::in_memory()).add_table(TableConfig::new(table));
     shamir.add_repo(db, cfg).await.expect("add repo");
     // G.4c: new objects default to enforced (0o700, System). These tests run
