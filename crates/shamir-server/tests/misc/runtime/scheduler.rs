@@ -13,7 +13,9 @@ use shamir_connect::server::lockout::{
     FailureOutcome, InMemoryLockoutStore, LockoutStore, PairKey,
 };
 use shamir_connect::server::rate_limit::{InMemoryRateLimiter, RateDecision, RateLimiter};
-use shamir_connect::server::resume::{ConsumedCounterStore, InMemoryConsumedCounters};
+use shamir_connect::server::resume::{
+    AdvanceOutcome, ConsumedCounterStore, InMemoryConsumedCounters,
+};
 use shamir_connect::server::rotation::ServerIdentityState;
 use shamir_connect::server::session::SessionStore;
 use shamir_server::scheduler::{Scheduler, SchedulerConfig, SchedulerInputs};
@@ -37,8 +39,8 @@ impl ConsumedCounterStore for CountingCounterStore {
         _user_id: &[u8; 16],
         _family_id: &[u8; limits::TICKET_FAMILY_ID_BYTES],
         _new_counter: u64,
-    ) -> bool {
-        true
+    ) -> AdvanceOutcome {
+        AdvanceOutcome::Accepted
     }
 
     fn gc(&self, _now_ns: u64) {

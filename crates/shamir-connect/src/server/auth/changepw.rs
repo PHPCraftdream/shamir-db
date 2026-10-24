@@ -31,18 +31,9 @@ pub struct ChangePwChallengeView {
     pub kdf_params: KdfParams,
 }
 
-/// Client → server `changePassword` body.
-#[derive(Debug, Clone)]
-pub struct ChangePwRequest {
-    /// SCRAM proof recovered from the OLD password.
-    pub client_proof_old: [u8; 32],
-    /// New per-user salt (CSPRNG).
-    pub new_salt: [u8; limits::SALT_BYTES],
-    /// New stored_key = SHA256(HMAC(new_salted_pw, "Client Key")).
-    pub new_stored_key: [u8; 32],
-    /// New server_key = HMAC(new_salted_pw, "Server Key").
-    pub new_server_key: [u8; 32],
-}
+// Moved to common so the standalone `client` feature builds without
+// server code (RV-CONNECT-FED6910E); path preserved via re-export.
+pub use crate::common::wire::ChangePwRequest;
 
 /// New material to persist after a successful change.
 pub struct ChangePwApply {
