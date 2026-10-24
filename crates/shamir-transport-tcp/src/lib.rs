@@ -5,6 +5,8 @@
 //! `ClientHandshake`) is handled by the `shamir-connect` crate; this crate
 //! only deals with bytes-on-the-wire concerns.
 
+#![forbid(unsafe_code)]
+
 pub mod framing;
 pub mod listener;
 pub mod tls;
