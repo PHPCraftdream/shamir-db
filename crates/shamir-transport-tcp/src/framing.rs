@@ -90,11 +90,8 @@ pub async fn read_frame<R: AsyncRead + Unpin>(
 /// frames seen so far. Use [`Vec::shrink_to_fit`] periodically if memory is
 /// a concern.
 ///
-/// Implementation: `unsafe set_len` after `reserve` lets us skip the
-/// zero-fill (`Vec::resize(_, 0)` would zero-init via the generic
-/// per-element loop, which is slower than memset for `u8`). Safety: we
-/// allocate `len` bytes of capacity, then `read_exact` fully overwrites
-/// them — uninitialized bytes are never observed by safe code.
+/// The buffer is zero-filled via `resize(_, 0)` before reading, so no
+/// uninitialized byte can ever enter its live length.
 pub async fn read_frame_into<R: AsyncRead + Unpin>(
     reader: &mut R,
     max_frame_size: usize,
@@ -115,22 +112,10 @@ pub async fn read_frame_into<R: AsyncRead + Unpin>(
     }
 
     buf.clear();
-    // SAFETY: `reserve(len)` ensured `capacity >= len`. `set_len(len)`
-    // exposes uninitialized bytes — we IMMEDIATELY pass `&mut buf[..]` to
-    // `read_exact` which fully overwrites all `len` bytes or returns
-    // `Err`. The uninit bytes are never read by safe code: on success the
-    // buffer is fully initialized; on error we never observe `&buf[..]`
-    // (the function returns the error directly without exposing `buf`).
-    buf.reserve(len);
-    #[allow(clippy::uninit_vec)] // see SAFETY comment above
-    unsafe {
-        buf.set_len(len);
-    }
+    // Zero-fill the full frame length before reading: no uninitialized byte
+    // can enter the live length, even on error or cancellation.
+    buf.resize(len, 0);
     if let Err(e) = reader.read_exact(buf).await {
-        // On error reset len so the caller doesn't see uninit bytes.
-        // (This is defense-in-depth; the function returns Err so the
-        // caller shouldn't access buf, but truncating to 0 ensures even
-        // a misuse can't read uninitialized memory through the buffer.)
         buf.clear();
         return Err(e.into());
     }
