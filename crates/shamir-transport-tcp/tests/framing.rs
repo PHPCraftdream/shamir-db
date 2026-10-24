@@ -147,7 +147,7 @@ async fn read_frame_into_close_returns_peer_close() {
     assert!(matches!(err, FrameError::PeerClose));
 }
 
-/// Optim #1: oversized declaration is rejected before any unsafe set_len.
+/// Optim #1: oversized declaration is rejected before the buffer is resized.
 #[tokio::test]
 async fn read_frame_into_rejects_oversized() {
     let (mut a, mut b) = duplex(16);
@@ -195,11 +195,11 @@ async fn write_frame_into_round_trip_reuses_buffer() {
 // Run with:
 //   cargo +nightly miri test -p shamir-transport-tcp read_frame_into_miri
 //
-// They vet the `unsafe set_len` path in `read_frame_into`:
+// They vet the buffer-fill path in `read_frame_into`:
 //   • happy path  — fully-initialized bytes reach the caller.
 //   • error path  — truncated payload → `UnexpectedEof` → buf left empty.
 
-/// Happy-path: bytes written through `unsafe set_len` are provably initialized.
+/// Happy-path: bytes read into the zero-filled buffer are initialized.
 #[test]
 fn read_frame_into_miri_roundtrip_no_io_driver() {
     // Current-thread runtime WITHOUT .enable_io() — mio Selector never created.
