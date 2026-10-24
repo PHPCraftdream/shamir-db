@@ -120,5 +120,5 @@ name = "integration_username_precis"
 path = "tests/identity/integration_username_precis.rs"
 [[test]]
 name = "rv_feature_fed6910e_client_only"
-path = "tests/client/rv_feature_fed6910e_client_only_surface.rs"
+path = "tests/lifecycle/rv_feature_fed6910e_client_only_surface.rs"
 
