@@ -6,6 +6,7 @@
 
 mod bindings;
 pub(crate) mod compile_cache;
+mod fuel;
 mod wasm_engine;
 mod wasm_function;
 mod wasm_sanitizer;
@@ -21,6 +22,12 @@ pub use wasm_sanitizer::{verify_wasm_module, SANCTIONED_HOST_IMPORTS};
 /// [`wasmtime::Linker::iter`].
 #[cfg(test)]
 pub(crate) use wasm_function::test_linker_and_store;
+
+/// Test-only re-export: lets `tests::wasm::fuel::*` attach and read the
+/// per-invocation fuel-lease observer (including its `lease_raii_probe`
+/// helper for the reservation token's refund/defuse discipline).
+#[cfg(test)]
+pub(crate) use fuel::FuelObserver;
 
 /// Test-only re-export: lets `tests::runtime::compile_tests` exercise the
 /// `JoinError` mapping path of [`WasmFunction::from_binary_blocking`] by
