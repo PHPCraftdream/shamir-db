@@ -19,7 +19,7 @@ async fn bounded_journal_wrappers_distinguish_missing_and_present_repo() {
             .unwrap(),
         None,
     );
-    db.create_db("journal-db").await;
+    db.create_db("journal-db").await.expect("create_db");
     assert!(db
         .read_changelog_bounded("journal-db", "missing-repo", 1, 10)
         .await

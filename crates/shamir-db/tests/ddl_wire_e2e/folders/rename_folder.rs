@@ -120,7 +120,7 @@ async fn rename_function_folder_nested_rekeys_descendants() {
 #[tokio::test]
 async fn rename_function_folder_preserves_resource_meta() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     shamir.add_repo("testdb", repo_config).await.unwrap();

@@ -16,7 +16,7 @@ use shamir_query_builder::Query;
 
 async fn setup_shamir() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let db = shamir.create_db("testdb").await;
+    let db = shamir.create_db("testdb").await.expect("create_db");
 
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
@@ -227,7 +227,7 @@ async fn test_drop_index_via_query() {
 #[tokio::test]
 async fn test_ddl_then_dml_pipeline() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("app").await;
+    shamir.create_db("app").await.expect("create_db");
 
     // Step 1: Create repo with tables
     let mut b = Batch::new();

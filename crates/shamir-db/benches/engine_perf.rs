@@ -654,7 +654,7 @@ fn main() {
     {
         let shamir = rt.block_on(async {
             let s = Arc::new(ShamirDb::init_memory().await.unwrap());
-            s.create_db("bench").await;
+            s.create_db("bench").await.expect("create_db");
             let cfg = RepoConfig::new("main", BoxRepoFactory::in_memory())
                 .add_table(TableConfig::new("users"));
             s.add_repo("bench", cfg).await.unwrap();
@@ -702,7 +702,7 @@ fn main() {
             &id,
             move || async move {
                 let s = Arc::new(ShamirDb::init_memory().await.unwrap());
-                s.create_db("bench").await;
+                s.create_db("bench").await.expect("create_db");
                 let cfg = RepoConfig::new("main", BoxRepoFactory::in_memory())
                     .add_table(TableConfig::new("items"));
                 s.add_repo("bench", cfg).await.unwrap();

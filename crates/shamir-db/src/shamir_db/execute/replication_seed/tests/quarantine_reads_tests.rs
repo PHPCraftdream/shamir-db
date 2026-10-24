@@ -23,7 +23,7 @@ use crate::{DbError, ShamirDb};
 /// "users" table).
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let db = shamir.create_db("testdb").await;
+    let db = shamir.create_db("testdb").await.expect("create_db");
     db.add_repo(
         RepoConfig::new("main", BoxRepoFactory::in_memory())
             .add_table(crate::engine::table::TableConfig::new("users")),
@@ -174,7 +174,7 @@ async fn t3_describe_and_status_stay_readable() {
 #[tokio::test]
 async fn t4_every_admin_action_including_drop_is_refused_while_quarantined() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let db = shamir.create_db("testdb").await;
+    let db = shamir.create_db("testdb").await.expect("create_db");
     // No tables here: the seed image carries the `users` inventory.
     db.add_repo(RepoConfig::new("main", BoxRepoFactory::in_memory()))
         .await
@@ -258,7 +258,7 @@ async fn t6_quarantine_survives_restart() {
         let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        shamir.create_db("testdb").await;
+        shamir.create_db("testdb").await.expect("create_db");
         // Durable repo, persisted via the facade so the boot reload finds the
         // catalogue row. No inline tables: the installed seed image carries
         // the `users` table (writer registration + catalogue write).
@@ -699,7 +699,7 @@ pub(crate) mod recovery {
 #[tokio::test]
 async fn t13_replacement_seed_rebinds_quarantined_row_then_resume() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let db = shamir.create_db("testdb").await;
+    let db = shamir.create_db("testdb").await.expect("create_db");
     // No tables on `main`: the seed image carries them. `side` is an
     // unrelated, always-readable repo.
     db.add_repo(RepoConfig::new("main", BoxRepoFactory::in_memory()))
@@ -782,7 +782,7 @@ async fn t14_bound_destination_stays_refused_after_profile_drop_and_reopen() {
         let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        shamir.create_db("testdb").await;
+        shamir.create_db("testdb").await.expect("create_db");
         shamir
             .add_repo(
                 "testdb",
@@ -851,7 +851,7 @@ async fn t15_replacement_rebind_survives_reopen_and_resume_requires_full_recover
         let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        shamir.create_db("testdb").await;
+        shamir.create_db("testdb").await.expect("create_db");
         // No inline tables: the installed seed image carries the `users`
         // inventory.
         shamir

@@ -12,5 +12,8 @@ mod audit;
 mod helpers;
 mod launch;
 
+#[cfg(test)]
+mod tests;
+
 pub use audit::audit_store_b_vs_directory;
 pub use launch::ServerLauncher;

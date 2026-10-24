@@ -148,7 +148,7 @@ async fn auto_now_timestamps_not_restamped_on_durable_reopen() {
         let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        db.create_db("testdb").await;
+        db.create_db("testdb").await.expect("create_db");
         let mut b = Batch::new();
         b.id(1);
         b.create_repo("cr", ddl::create_repo("main").tables(["events"]));
@@ -264,7 +264,7 @@ async fn default_before_one_of_check_passes_when_default_is_valid() {
     let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("main").tables(["events"]));
@@ -340,7 +340,7 @@ async fn default_before_one_of_check_rejects_when_default_is_invalid() {
     let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("main").tables(["events"]));

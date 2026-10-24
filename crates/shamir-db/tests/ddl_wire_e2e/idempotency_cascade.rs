@@ -25,7 +25,7 @@ use crate::helpers::*;
 async fn create_table_then_insert_via_after_non_tx() {
     // Setup: db + repo (no "items" table yet).
     let db = ShamirDb::init_memory().await.unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
     let repo_config = RepoConfig::new("main", BoxRepoFactory::in_memory());
     db.add_repo("testdb", repo_config).await.unwrap();
 
@@ -137,7 +137,7 @@ async fn create_table_with_if_not_exists_idempotent() {
 #[tokio::test]
 async fn create_db_with_if_not_exists_idempotent() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("bootstrap").await;
+    shamir.create_db("bootstrap").await.expect("create_db");
 
     let mut b = Batch::new();
     b.id("cd");
@@ -168,7 +168,7 @@ async fn create_db_with_if_not_exists_idempotent() {
 #[tokio::test]
 async fn create_repo_with_if_not_exists_idempotent() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
 
     let mut b = Batch::new();
     b.id("cr");
@@ -225,8 +225,8 @@ async fn drop_db_with_repos_no_cascade_fails() {
 #[tokio::test]
 async fn drop_db_with_cascade_succeeds() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("bootstrap").await;
-    shamir.create_db("target_db").await;
+    shamir.create_db("bootstrap").await.expect("create_db");
+    shamir.create_db("target_db").await.expect("create_db");
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir.add_repo("target_db", repo_config).await.unwrap();
@@ -551,7 +551,7 @@ async fn drop_index_if_exists_missing_table_is_noop() {
 #[tokio::test]
 async fn drop_db_if_exists_nonexistent_is_noop() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("bootstrap").await;
+    shamir.create_db("bootstrap").await.expect("create_db");
 
     let mut b = Batch::new();
     b.id("dd");

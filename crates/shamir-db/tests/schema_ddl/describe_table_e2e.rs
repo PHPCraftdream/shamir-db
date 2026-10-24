@@ -31,7 +31,7 @@ fn result_map(resp: &shamir_db::query::BatchResponse, alias: &str) -> QueryValue
 #[tokio::test]
 async fn describe_table_returns_all_sections() {
     let db = ShamirDb::init_memory().await.unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
 
     // 1. Create repo + table.
     let mut b = Batch::new();

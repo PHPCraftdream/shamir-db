@@ -68,7 +68,10 @@ async fn build_handler(
 ) -> ShamirDbHandler {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64([0xAB; 16]));
-    shamir.create_db_as("app", owner.clone()).await;
+    shamir
+        .create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir

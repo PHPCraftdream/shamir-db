@@ -77,7 +77,7 @@ async fn create_function_folder_idempotent() {
 #[tokio::test]
 async fn create_function_folder_meta_owner_is_actor() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let repo_config = RepoConfig::new("main", BoxRepoFactory::in_memory());
     shamir.add_repo("testdb", repo_config).await.unwrap();
     // G.4c: open the db so the user actor can traverse it to reach the
@@ -123,7 +123,7 @@ async fn function_folder_meta_survives_reopen() {
     // (in-memory doesn't truly survive, but we confirm resource_meta
     // reads from the catalogue, not ephemeral state).
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let repo_config = RepoConfig::new("main", BoxRepoFactory::in_memory());
     shamir.add_repo("testdb", repo_config).await.unwrap();
 

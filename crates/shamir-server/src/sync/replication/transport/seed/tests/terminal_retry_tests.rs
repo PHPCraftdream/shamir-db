@@ -203,7 +203,10 @@ async fn persistent_follower(meta: std::path::PathBuf) -> Arc<ShamirDb> {
     );
     let owner =
         shamir_db::access::Actor::User(shamir_db::access::principal64_from_username("alice"));
-    follower.create_db_as("app", owner.clone()).await;
+    follower
+        .create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     for repo in ["main", "other"] {
         let cfg = shamir_db::engine::repo::RepoConfig::new(
             repo,

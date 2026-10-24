@@ -249,6 +249,14 @@ impl ShamirDb {
             .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
             .clone();
         let _group_guard = group_lock.lock().await;
+        // Existence guard under the group lock — root auth path returns
+        // before any existence check.
+        if self.system_store.load_group(group_id).await?.is_none() {
+            return Err(DbError::NotFound(format!(
+                "group id {} not found",
+                group_id
+            )));
+        }
         self.system_store.add_group_member(group_id, user_id).await
     }
 
@@ -281,6 +289,14 @@ impl ShamirDb {
             .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
             .clone();
         let _group_guard = group_lock.lock().await;
+        // Existence guard under the group lock — root auth path returns
+        // before any existence check.
+        if self.system_store.load_group(group_id).await?.is_none() {
+            return Err(DbError::NotFound(format!(
+                "group id {} not found",
+                group_id
+            )));
+        }
         self.system_store
             .remove_group_member(group_id, user_id)
             .await

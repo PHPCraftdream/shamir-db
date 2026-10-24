@@ -46,7 +46,7 @@ async fn read_op_passes_without_hmac() {
 async fn create_table_passes_without_hmac() {
     // CREATE is non-destructive — gate must not apply.
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("prod").await;
+    shamir.create_db("prod").await.expect("create_db");
     let cfg = RepoConfig::new("main", BoxRepoFactory::in_memory());
     shamir.add_repo("prod", cfg).await.unwrap();
     let handler = ShamirDbHandler::new(Arc::new(shamir));

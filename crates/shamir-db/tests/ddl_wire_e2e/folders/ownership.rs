@@ -19,7 +19,7 @@ async fn owner_on_create_db_user_actor() {
     // enforced (0o700, System), so open the bootstrap db so the user actor can
     // traverse it to reach the Create path. The bootstrap db is setup-only;
     // the SUBJECT is the user-created "owned_db".
-    shamir.create_db("bootstrap").await;
+    shamir.create_db("bootstrap").await.expect("create_db");
     shamir
         .set_resource_meta(
             &ResourcePath::database("bootstrap"),
@@ -77,7 +77,7 @@ async fn owner_on_create_db_system_actor() {
     let shamir = ShamirDb::init_memory().await.unwrap();
 
     // System-initiated create → owner stays System.
-    shamir.create_db("sys_db").await;
+    shamir.create_db("sys_db").await.expect("create_db");
 
     let meta = shamir
         .resource_meta(&ResourcePath::database("sys_db"))
@@ -99,7 +99,7 @@ async fn owner_on_create_repo_user_actor() {
 
     // Create db first (as system — we only care about the repo). G.4c: open
     // the db so the user actor can traverse it to reach the Create path.
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     shamir
         .set_resource_meta(
             &ResourcePath::database("testdb"),
@@ -136,7 +136,7 @@ async fn owner_on_create_table_user_actor() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     let user_actor = Actor::User(7);
 
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let repo_config = RepoConfig::new("main", BoxRepoFactory::in_memory());
     shamir.add_repo("testdb", repo_config).await.unwrap();
     // G.4c: open db + repo ancestors so the user actor can traverse them to
@@ -179,7 +179,7 @@ async fn owner_on_create_function_user_actor() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     let user_actor = Actor::User(13);
 
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let repo_config = RepoConfig::new("main", BoxRepoFactory::in_memory());
     shamir.add_repo("testdb", repo_config).await.unwrap();
     // G.4c: open db + repo ancestors so the user actor can traverse them.
@@ -220,7 +220,7 @@ async fn owner_on_create_function_user_actor() {
 async fn owner_on_create_function_system_stays_system() {
     let shamir = ShamirDb::init_memory().await.unwrap();
 
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let repo_config = RepoConfig::new("main", BoxRepoFactory::in_memory());
     shamir.add_repo("testdb", repo_config).await.unwrap();
 

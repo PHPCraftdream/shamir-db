@@ -17,7 +17,7 @@ use shamir_types::types::value::QueryValue;
 async fn test_create_db_persists() {
     let shamir = ShamirDb::init_memory().await.unwrap();
 
-    shamir.create_db("production").await;
+    shamir.create_db("production").await.expect("create_db");
     assert!(shamir.has_db("production"));
 
     // Verify persisted in system store
@@ -29,7 +29,7 @@ async fn test_create_db_persists() {
 async fn test_remove_db_removes_from_system_store() {
     let shamir = ShamirDb::init_memory().await.unwrap();
 
-    shamir.create_db("temp").await;
+    shamir.create_db("temp").await.expect("create_db");
     shamir.remove_db("temp").await.unwrap();
 
     let dbs = shamir.system_store().load_databases().await.unwrap();
@@ -39,7 +39,7 @@ async fn test_remove_db_removes_from_system_store() {
 #[tokio::test]
 async fn test_add_repo_persists() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("production").await;
+    shamir.create_db("production").await.expect("create_db");
 
     let config = RepoConfig::new("users_db", BoxRepoFactory::in_memory())
         .add_table(TableConfig::new("users"));
@@ -54,7 +54,7 @@ async fn test_add_repo_persists() {
 #[tokio::test]
 async fn test_remove_repo_removes_from_system_store() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("production").await;
+    shamir.create_db("production").await.expect("create_db");
 
     let config = RepoConfig::new("temp_repo", BoxRepoFactory::in_memory());
     shamir.add_repo("production", config).await.unwrap();
@@ -98,7 +98,7 @@ async fn test_settings_persistence() {
 #[tokio::test]
 async fn test_multiple_repos_persist() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("production").await;
+    shamir.create_db("production").await.expect("create_db");
 
     let config1 = RepoConfig::new("users_db", BoxRepoFactory::in_memory())
         .add_table(TableConfig::new("users"));
@@ -171,7 +171,7 @@ async fn table_catalogue_survives_restart() {
         let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        shamir.create_db("production").await;
+        shamir.create_db("production").await.expect("create_db");
 
         // `fjall_raw` (unbuffered): writes are durable on return and the
         // store releases synchronously on drop, so the repo store is
@@ -233,7 +233,7 @@ async fn table_added_after_repo_survives_restart() {
         let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        shamir.create_db("production").await;
+        shamir.create_db("production").await.expect("create_db");
 
         // Repo created with NO inline tables (fjall_raw for synchronous
         // release on drop).
@@ -280,7 +280,7 @@ async fn dropped_table_does_not_resurrect_after_restart() {
         let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        shamir.create_db("production").await;
+        shamir.create_db("production").await.expect("create_db");
 
         let config = RepoConfig::new("data", BoxRepoFactory::fjall_raw(repo_path.clone()))
             .add_table(TableConfig::new("keep"))
@@ -312,7 +312,7 @@ async fn dropped_table_does_not_resurrect_after_restart() {
 #[tokio::test]
 async fn table_catalogue_records_are_persisted() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("production").await;
+    shamir.create_db("production").await.expect("create_db");
 
     let config = RepoConfig::new("data", BoxRepoFactory::in_memory())
         .add_table(TableConfig::new("users"))

@@ -31,7 +31,9 @@ async fn bounded_startup_default_applies_and_pending_reservation_shrinks_then_re
     ));
     let db = ShamirDb::init_memory().await.unwrap();
     let actor = Actor::User(principal64(session.user_id));
-    db.create_db_as("app", actor.clone()).await;
+    db.create_db_as("app", actor.clone())
+        .await
+        .expect("create_db");
     db.add_repo_as(
         "app",
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items")),

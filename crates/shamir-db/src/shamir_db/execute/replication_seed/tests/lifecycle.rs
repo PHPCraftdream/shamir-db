@@ -24,7 +24,7 @@ impl ResumeProbe for Probe {
 
 pub(super) async fn home(complete: bool) -> ShamirDb {
     let home = ShamirDb::init_memory().await.unwrap();
-    home.create_db("app").await;
+    home.create_db("app").await.expect("create_db");
     home.add_repo("app", RepoConfig::new("main", BoxRepoFactory::in_memory()))
         .await
         .unwrap();

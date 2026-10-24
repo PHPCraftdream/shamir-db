@@ -105,7 +105,7 @@ fn no_rules() -> Vec<shamir_engine::validator::schema::FieldRule> {
 /// no I/O fault-injection seam.
 async fn db_without_tables() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     shamir
 }
 
@@ -557,7 +557,7 @@ async fn alter_replace_artifact_keeps_new_artifact_on_success() {
 #[tokio::test]
 async fn fk_cache_reflects_restored_state_after_rolled_back_alter_elsewhere_in_repo() {
     let db = ShamirDb::init_memory().await.unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
 
     // Real repo with a real FK: employees.dept_id -> departments.dept_id,
     // on_delete = Restrict.

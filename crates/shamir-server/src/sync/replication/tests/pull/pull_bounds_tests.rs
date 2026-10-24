@@ -10,7 +10,7 @@ use crate::replication::source::ReplSource;
 
 async fn quarantined_source() -> (ShamirDb, InProcessReplSource) {
     let db = ShamirDb::init_memory().await.unwrap();
-    db.create_db("app").await;
+    db.create_db("app").await.expect("create_db");
     db.add_repo("app", RepoConfig::new("main", BoxRepoFactory::in_memory()))
         .await
         .unwrap();
@@ -62,7 +62,9 @@ async fn in_process_hello_refuses_quarantined_subscription_before_advertising_re
 async fn maximum_pull_limit_on_empty_journal_returns_bounded_payload() {
     let db = ShamirDb::init_memory().await.unwrap();
     let owner = Actor::User(principal64([0xAB; 16]));
-    db.create_db_as("app", owner.clone()).await;
+    db.create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     db.add_repo_as(
         "app",
         RepoConfig::new("main", BoxRepoFactory::in_memory()),

@@ -52,7 +52,7 @@ fn owner() -> Actor {
 
 async fn build_db(tables: &[&str], indexed: bool) -> ShamirDb {
     let db = ShamirDb::init_memory().await.expect("init memory database");
-    db.create_db_as("app", owner()).await;
+    db.create_db_as("app", owner()).await.expect("create_db");
     let mut config = RepoConfig::new("main", BoxRepoFactory::in_memory());
     for table in tables {
         let table = TableConfig::new(*table);

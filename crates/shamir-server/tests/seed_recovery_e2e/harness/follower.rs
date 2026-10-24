@@ -31,7 +31,7 @@ use super::wire;
 /// `recovery_gap_consumer_tests::open`).
 pub async fn fresh_in_memory() -> ShamirDb {
     let follower = ShamirDb::init_memory().await.expect("follower init");
-    follower.create_db(wire::DB).await;
+    follower.create_db(wire::DB).await.expect("create_db");
     let mut config = RepoConfig::new(wire::REPO, BoxRepoFactory::in_memory());
     for table in wire::TABLES {
         config = config.add_table(TableConfig::new(table));

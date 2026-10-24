@@ -51,7 +51,7 @@ async fn fk_autocommit_accepts_existing_rejects_missing() {
     let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
 
     // Create repo with parent + child tables.
     let mut b = Batch::new();

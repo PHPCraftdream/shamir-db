@@ -80,7 +80,7 @@ impl ShamirFunction for RunBatchProc {
 
 async fn setup_shamir() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     shamir
 }
 

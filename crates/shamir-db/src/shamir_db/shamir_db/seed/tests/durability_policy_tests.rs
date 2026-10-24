@@ -68,7 +68,7 @@ async fn default_policy_reads_back_buffered() {
         shamir.durability_policy().wal_commit(),
         WalCommitTier::Buffered
     );
-    shamir.create_db("appdb").await;
+    shamir.create_db("appdb").await.expect("create_db");
     shamir
         .add_repo(
             "appdb",
@@ -103,7 +103,7 @@ async fn synced_policy_reaches_repo_and_acks_fsynced() {
         ShamirDb::init_with_durability(SystemStoreConfig::Fjall(sys_path), synced_policy())
             .await
             .unwrap();
-    shamir.create_db("appdb").await;
+    shamir.create_db("appdb").await.expect("create_db");
     shamir
         .add_repo(
             "appdb",
@@ -177,7 +177,7 @@ async fn mem_repo_synced_policy_commits_recoverably() {
     let shamir = ShamirDb::init_with_durability(SystemStoreConfig::InMemory, synced_policy())
         .await
         .unwrap();
-    shamir.create_db("appdb").await;
+    shamir.create_db("appdb").await.expect("create_db");
     shamir
         .add_repo(
             "appdb",
@@ -223,7 +223,7 @@ async fn boot_reopen_inherits_policy_and_recovered_prefix() {
         ShamirDb::init_with_durability(SystemStoreConfig::Fjall(meta.clone()), synced_policy())
             .await
             .unwrap();
-    shamir.create_db("appdb").await;
+    shamir.create_db("appdb").await.expect("create_db");
     shamir
         .add_repo(
             "appdb",
@@ -284,7 +284,7 @@ async fn mem_policy_warning_is_once_per_open_not_per_commit() {
     let shamir = ShamirDb::init_with_durability(SystemStoreConfig::InMemory, synced_policy())
         .await
         .unwrap();
-    shamir.create_db("appdb").await;
+    shamir.create_db("appdb").await.expect("create_db");
     shamir
         .add_repo(
             "appdb",

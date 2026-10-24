@@ -20,7 +20,7 @@ use shamir_server::db_handler::{DbResponse, ShamirDbHandler};
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_user_without_hmac_rejected() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
@@ -45,7 +45,7 @@ async fn create_user_without_hmac_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_user_with_wrong_hmac_rejected() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 

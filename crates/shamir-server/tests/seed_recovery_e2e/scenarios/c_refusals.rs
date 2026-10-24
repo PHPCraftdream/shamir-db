@@ -106,7 +106,7 @@ async fn fixture() -> Fixture {
 /// identity, not on the publication lookup).
 async fn recreated_leader() -> ShamirDb {
     let leader = ShamirDb::init_memory().await.expect("fresh leader");
-    leader.create_db(wire::DB).await;
+    leader.create_db(wire::DB).await.expect("create_db");
     let mut config = RepoConfig::new(wire::REPO, BoxRepoFactory::in_memory());
     for table in wire::TABLES {
         config = config.add_table(TableConfig::new(table));
@@ -311,7 +311,7 @@ async fn seed_e2e_c_existing_ordinary_destination_refused_body() {
 
     // An ordinary (non-seed) destination: db app / repo main with data.
     let ordinary = follower::open_home(&dir).await;
-    ordinary.create_db(wire::DB).await;
+    ordinary.create_db(wire::DB).await.expect("create_db");
     let mut config = RepoConfig::new(wire::REPO, BoxRepoFactory::fjall_raw(dir.join("repo-main")));
     for table in wire::TABLES {
         config = config.add_table(TableConfig::new(table));

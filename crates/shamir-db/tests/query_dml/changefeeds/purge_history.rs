@@ -26,7 +26,7 @@ use shamir_query_types::admin::PurgeScope;
 /// repo (in-memory engine) and a single `users` table.
 async fn setup_shamir() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let db = shamir.create_db("testdb").await;
+    let db = shamir.create_db("testdb").await.expect("create_db");
     // Must use keep_history retention so old versions are NOT vacuumed on write.
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));

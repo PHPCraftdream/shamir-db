@@ -22,7 +22,7 @@ use shamir_query_types::batch::BatchError;
 /// In-memory ShamirDb with `testdb/{main,side}`, each with a `users` table.
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let testdb = shamir.create_db("testdb").await;
+    let testdb = shamir.create_db("testdb").await.expect("create_db");
     for repo in ["main", "side"] {
         testdb
             .add_repo(

@@ -16,6 +16,7 @@ impl SystemStore {
         record: &QueryValue,
         meta: &ResourceMeta,
     ) -> DbResult<()> {
+        self.catalogue_write_fault_gate()?;
         let mut rec = record.clone();
         meta.inject_into(&mut rec);
         let table = self.table(TABLE_DATABASES).await?;
@@ -31,6 +32,7 @@ impl SystemStore {
 
     /// Remove database metadata.
     pub async fn remove_database(&self, name: &str) -> DbResult<()> {
+        self.catalogue_write_fault_gate()?;
         let table = self.table(TABLE_DATABASES).await?;
         let op = crate::query::write::DeleteOp {
             delete_from: crate::query::TableRef::new(TABLE_DATABASES),
@@ -73,6 +75,7 @@ impl SystemStore {
         meta: &ResourceMeta,
         durability: Option<&shamir_query_types::durability::DurabilityOverride>,
     ) -> DbResult<()> {
+        self.catalogue_write_fault_gate()?;
         let record = crate::shamir_db::repo_durability::repository_record(
             db_name, repo_name, engine, path, meta, durability,
         );
@@ -99,6 +102,7 @@ impl SystemStore {
 
     /// Remove repository metadata.
     pub async fn remove_repository(&self, db_name: &str, repo_name: &str) -> DbResult<()> {
+        self.catalogue_write_fault_gate()?;
         let table = self.table(TABLE_REPOSITORIES).await?;
         let op = crate::query::write::DeleteOp {
             delete_from: crate::query::TableRef::new(TABLE_REPOSITORIES),
@@ -177,6 +181,7 @@ impl SystemStore {
         enable_indexes: bool,
         meta: &ResourceMeta,
     ) -> DbResult<()> {
+        self.catalogue_write_fault_gate()?;
         let mut m = new_map();
         m.insert("db_name".to_string(), QueryValue::Str(db_name.to_string()));
         m.insert(
@@ -223,6 +228,7 @@ impl SystemStore {
         repo_name: &str,
         table_name: &str,
     ) -> DbResult<()> {
+        self.catalogue_write_fault_gate()?;
         let table = self.table(TABLE_TABLES).await?;
         let op = crate::query::write::DeleteOp {
             delete_from: crate::query::TableRef::new(TABLE_TABLES),
@@ -403,6 +409,7 @@ impl SystemStore {
 
     /// Persist a replacement table catalogue record (for `set_resource_meta`).
     pub async fn save_table_meta(&self, record: &QueryValue) -> DbResult<()> {
+        self.catalogue_write_fault_gate()?;
         let db_name = record
             .get("db_name")
             .and_then(|v| v.as_str())

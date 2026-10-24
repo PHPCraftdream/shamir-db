@@ -104,7 +104,7 @@ fn rejection_code(code: &str, stop: bool) -> QueryValue {
 /// In-memory ShamirDb with `testdb/main/users` table.
 async fn setup_db() -> ShamirDb {
     let db = ShamirDb::init_memory().await.unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     db.add_repo("testdb", repo_config).await.unwrap();
@@ -797,7 +797,7 @@ async fn wasm_validator_kind_survives_reopen_roundtrip() {
         let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        db.create_db("testdb").await;
+        db.create_db("testdb").await.expect("create_db");
         let repo_config = RepoConfig::new("main", BoxRepoFactory::fjall(repo_path.clone()))
             .add_table(TableConfig::new("users"));
         db.add_repo("testdb", repo_config).await.unwrap();

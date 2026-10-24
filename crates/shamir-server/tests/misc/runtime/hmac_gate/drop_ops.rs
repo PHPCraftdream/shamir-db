@@ -143,8 +143,8 @@ async fn drop_table_tag_bound_to_target_table() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn drop_db_without_hmac_rejected() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
-    shamir.create_db("victim").await;
+    shamir.create_db("scratch").await.expect("create_db");
+    shamir.create_db("victim").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
@@ -173,8 +173,8 @@ async fn drop_db_with_correct_hmac_accepted() {
     // can target any db; we route the batch through `scratch` so the
     // lookup succeeds, and drop `victim` inside the op.
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
-    shamir.create_db("victim").await;
+    shamir.create_db("scratch").await.expect("create_db");
+    shamir.create_db("victim").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
@@ -282,7 +282,7 @@ async fn drop_index_with_correct_hmac_accepted() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn drop_user_requires_hmac() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 

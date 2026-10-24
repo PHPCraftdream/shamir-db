@@ -108,7 +108,7 @@ async fn setup_with_parent_index(sys_path: std::path::PathBuf) -> ShamirDb {
     let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
 
     // Create repo with both tables.
     let mut b = Batch::new();
@@ -233,7 +233,7 @@ async fn fk_without_index_rejected_at_ddl() {
     let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
 
     // Create repo with tables but NO index on departments.dept_id.
     let mut b = Batch::new();

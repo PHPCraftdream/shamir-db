@@ -16,6 +16,7 @@ impl SystemStore {
         record: &QueryValue,
         meta: &ResourceMeta,
     ) -> DbResult<()> {
+        self.catalogue_write_fault_gate()?;
         let mut rec = record.clone();
         meta.inject_into(&mut rec);
         let table = self.table(TABLE_FUNCTIONS).await?;
@@ -33,6 +34,7 @@ impl SystemStore {
 
     /// Remove a function catalogue entry by name.
     pub async fn remove_function(&self, name: &str) -> DbResult<()> {
+        self.catalogue_write_fault_gate()?;
         let table = self.table(TABLE_FUNCTIONS).await?;
         let op = crate::query::write::DeleteOp {
             delete_from: crate::query::TableRef::new(TABLE_FUNCTIONS),
@@ -114,6 +116,7 @@ impl SystemStore {
         members: &[u64],
         owner: u64,
     ) -> DbResult<()> {
+        self.catalogue_write_fault_gate()?;
         let members_list: Vec<QueryValue> =
             members.iter().map(|&m| QueryValue::Int(m as i64)).collect();
         let mut m = new_map();
@@ -174,24 +177,20 @@ impl SystemStore {
     /// through unchanged (task #552) — adding a member must not touch
     /// ownership.
     pub async fn add_group_member(&self, group_id: u64, user_id: u64) -> DbResult<()> {
-        let rec = self.load_group(group_id).await?;
+        let rec = self
+            .load_group(group_id)
+            .await?
+            .ok_or_else(|| DbError::NotFound(format!("group id {} not found", group_id)))?;
         let mut members: Vec<u64> = rec
-            .as_ref()
-            .and_then(|r| r.get("members"))
+            .get("members")
             .and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
             .unwrap_or_default();
         if !members.contains(&user_id) {
             members.push(user_id);
         }
-        let name = rec
-            .as_ref()
-            .and_then(|r| r.get("name"))
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let owner = rec
-            .as_ref()
-            .and_then(ResourceMeta::owner_field)
+        let name = rec.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+        let owner = ResourceMeta::owner_field(&rec)
             .unwrap_or(Actor::System)
             .to_owner_id();
         self.save_group(group_id, name, &members, owner).await
@@ -204,22 +203,18 @@ impl SystemStore {
     /// through unchanged (task #552) — removing a member must not touch
     /// ownership.
     pub async fn remove_group_member(&self, group_id: u64, user_id: u64) -> DbResult<()> {
-        let rec = self.load_group(group_id).await?;
+        let rec = self
+            .load_group(group_id)
+            .await?
+            .ok_or_else(|| DbError::NotFound(format!("group id {} not found", group_id)))?;
         let mut members: Vec<u64> = rec
-            .as_ref()
-            .and_then(|r| r.get("members"))
+            .get("members")
             .and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
             .unwrap_or_default();
         members.retain(|&m| m != user_id);
-        let name = rec
-            .as_ref()
-            .and_then(|r| r.get("name"))
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let owner = rec
-            .as_ref()
-            .and_then(ResourceMeta::owner_field)
+        let name = rec.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+        let owner = ResourceMeta::owner_field(&rec)
             .unwrap_or(Actor::System)
             .to_owner_id();
         self.save_group(group_id, name, &members, owner).await

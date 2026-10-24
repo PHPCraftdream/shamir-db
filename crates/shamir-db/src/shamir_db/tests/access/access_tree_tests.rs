@@ -61,7 +61,7 @@ async fn access_tree_structure_meta_and_principals() {
         .await
         .unwrap()
         .with_principal_resolver(Arc::new(MockAliceResolver));
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let config =
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     shamir.add_repo("testdb", config).await.unwrap();
@@ -126,7 +126,7 @@ async fn access_tree_structure_meta_and_principals() {
 #[tokio::test]
 async fn access_tree_depth_caps_the_hierarchy() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let config =
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("t"));
     shamir.add_repo("testdb", config).await.unwrap();
@@ -156,7 +156,7 @@ async fn access_tree_dispatch_admin_gate_denies_non_admin() {
     use crate::query::batch::{BatchError, BatchRequest, BatchResponse};
 
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let config =
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("t"));
     shamir.add_repo("testdb", config).await.unwrap();
@@ -193,8 +193,8 @@ async fn access_tree_dispatch_admin_gate_denies_non_admin() {
 #[tokio::test]
 async fn access_tree_db_filter_scopes_to_one_database() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("alpha").await;
-    shamir.create_db("beta").await;
+    shamir.create_db("alpha").await.expect("create_db");
+    shamir.create_db("beta").await.expect("create_db");
     let cfg_a =
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("t"));
     shamir.add_repo("alpha", cfg_a).await.unwrap();

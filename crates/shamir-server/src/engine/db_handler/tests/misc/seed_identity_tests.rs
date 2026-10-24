@@ -29,7 +29,7 @@ async fn hello_pull_identity_and_true_certified_interval_both_sources() {
         store.flush().await.unwrap();
     }
     let db = ShamirDb::init_memory().await.unwrap();
-    db.create_db("app").await;
+    db.create_db("app").await.expect("create_db");
     db.add_repo(
         "app",
         RepoConfig::new("main", BoxRepoFactory::fjall_raw(directory.path())),

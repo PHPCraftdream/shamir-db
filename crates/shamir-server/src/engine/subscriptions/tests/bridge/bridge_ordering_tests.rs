@@ -414,7 +414,7 @@ impl PushSink for SnapshotSink {
 #[tokio::test(start_paused = true)]
 async fn snapshot_handoff_uses_pre_query_cut_and_preserves_ready_order() {
     let db = Arc::new(ShamirDb::init_memory().await.unwrap());
-    db.create_db("test_db").await;
+    db.create_db("test_db").await.expect("create_db");
     let config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     db.add_repo("test_db", config).await.unwrap();
@@ -649,7 +649,7 @@ async fn progress_wait_does_not_block_another_repository() {
 #[tokio::test]
 async fn many_real_bridges_reuse_filters_and_resume_inclusively() {
     let db = Arc::new(ShamirDb::init_memory().await.unwrap());
-    db.create_db("test_db").await;
+    db.create_db("test_db").await.expect("create_db");
     let config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     db.add_repo("test_db", config).await.unwrap();

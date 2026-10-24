@@ -22,7 +22,7 @@ use crate::replication_seed::{verify, Manifest};
 #[cfg(unix)]
 async fn fixture() -> ShamirDb {
     let db = ShamirDb::init_memory().await.unwrap();
-    db.create_db("app").await;
+    db.create_db("app").await.expect("create_db");
     db.add_repo("app", RepoConfig::new("main", BoxRepoFactory::in_memory()))
         .await
         .unwrap();

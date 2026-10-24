@@ -15,6 +15,7 @@ impl SystemStore {
         record: &QueryValue,
         meta: &ResourceMeta,
     ) -> DbResult<()> {
+        self.catalogue_write_fault_gate()?;
         let mut rec = record.clone();
         meta.inject_into(&mut rec);
         let table = self.table(TABLE_VALIDATORS).await?;
@@ -32,6 +33,7 @@ impl SystemStore {
 
     /// Remove a validator catalogue entry by name.
     pub async fn remove_validator(&self, name: &str) -> DbResult<()> {
+        self.catalogue_write_fault_gate()?;
         let table = self.table(TABLE_VALIDATORS).await?;
         let op = crate::query::write::DeleteOp {
             delete_from: crate::query::TableRef::new(TABLE_VALIDATORS),
@@ -106,6 +108,7 @@ impl SystemStore {
         record: &QueryValue,
         meta: &ResourceMeta,
     ) -> DbResult<()> {
+        self.catalogue_write_fault_gate()?;
         let mut rec = record.clone();
         meta.inject_into(&mut rec);
         let table = self.table(TABLE_FUNCTION_FOLDERS).await?;
@@ -123,6 +126,7 @@ impl SystemStore {
 
     /// Remove a function folder catalogue entry by path key.
     pub async fn remove_function_folder(&self, path_key: &str) -> DbResult<()> {
+        self.catalogue_write_fault_gate()?;
         let table = self.table(TABLE_FUNCTION_FOLDERS).await?;
         let op = crate::query::write::DeleteOp {
             delete_from: crate::query::TableRef::new(TABLE_FUNCTION_FOLDERS),

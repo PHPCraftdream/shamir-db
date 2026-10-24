@@ -13,12 +13,12 @@ async fn test_shamir_db_creation() {
 async fn test_create_db() {
     let shamir = ShamirDb::init_memory().await.unwrap();
 
-    let _db = shamir.create_db("production").await;
+    let _db = shamir.create_db("production").await.expect("create_db");
     assert_eq!(shamir.db_count(), 1);
     assert!(shamir.has_db("production"));
 
     // Creating same db again returns existing
-    let _db2 = shamir.create_db("production").await;
+    let _db2 = shamir.create_db("production").await.expect("create_db");
     assert_eq!(shamir.db_count(), 1);
 }
 
@@ -29,7 +29,7 @@ async fn test_get_db() {
     // Get non-existent returns None
     assert!(shamir.get_db("production").is_none());
 
-    shamir.create_db("production").await;
+    shamir.create_db("production").await.expect("create_db");
     assert!(shamir.get_db("production").is_some());
 }
 
@@ -37,11 +37,11 @@ async fn test_get_db() {
 async fn test_create_db_idempotent() {
     let shamir = ShamirDb::init_memory().await.unwrap();
 
-    shamir.create_db("production").await;
+    shamir.create_db("production").await.expect("create_db");
     assert_eq!(shamir.db_count(), 1);
 
     // Creating again doesn't duplicate
-    shamir.create_db("production").await;
+    shamir.create_db("production").await.expect("create_db");
     assert_eq!(shamir.db_count(), 1);
 }
 
@@ -51,9 +51,9 @@ async fn test_list_dbs() {
 
     assert_eq!(shamir.list_dbs().len(), 0);
 
-    shamir.create_db("production").await;
-    shamir.create_db("test").await;
-    shamir.create_db("dev").await;
+    shamir.create_db("production").await.expect("create_db");
+    shamir.create_db("test").await.expect("create_db");
+    shamir.create_db("dev").await.expect("create_db");
 
     let dbs = shamir.list_dbs();
     assert_eq!(dbs.len(), 3);
@@ -66,7 +66,7 @@ async fn test_list_dbs() {
 async fn test_remove_db() {
     let shamir = ShamirDb::init_memory().await.unwrap();
 
-    shamir.create_db("production").await;
+    shamir.create_db("production").await.expect("create_db");
     assert_eq!(shamir.db_count(), 1);
 
     // Remove existing
@@ -91,7 +91,7 @@ async fn test_remove_system_db_forbidden() {
 #[tokio::test]
 async fn test_shamir_db_clone_shares_state() {
     let shamir1 = ShamirDb::init_memory().await.unwrap();
-    shamir1.create_db("production").await;
+    shamir1.create_db("production").await.expect("create_db");
 
     let shamir2 = shamir1.clone();
 
@@ -101,7 +101,7 @@ async fn test_shamir_db_clone_shares_state() {
     assert!(shamir2.has_db("production"));
 
     // Mutations are shared
-    shamir2.create_db("test").await;
+    shamir2.create_db("test").await.expect("create_db");
     assert_eq!(shamir1.db_count(), 2);
     assert!(shamir1.has_db("test"));
 }
@@ -113,7 +113,7 @@ async fn test_shamir_db_clone_shares_state() {
 #[tokio::test]
 async fn test_db_with_repo_and_table() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let db = shamir.create_db("production").await;
+    let db = shamir.create_db("production").await.expect("create_db");
 
     // Configure repo with table
     let config = RepoConfig::new("users_db", BoxRepoFactory::in_memory())
@@ -130,8 +130,8 @@ async fn test_db_with_repo_and_table() {
 async fn test_multiple_dbs_isolation() {
     let shamir = ShamirDb::init_memory().await.unwrap();
 
-    let db1 = shamir.create_db("production").await;
-    let db2 = shamir.create_db("test").await;
+    let db1 = shamir.create_db("production").await.expect("create_db");
+    let db2 = shamir.create_db("test").await.expect("create_db");
 
     // Configure each db independently
     db1.add_repo(
@@ -164,7 +164,7 @@ async fn test_multiple_dbs_isolation() {
 #[tokio::test]
 async fn test_shamir_db_index_api() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let db = shamir.create_db("production").await;
+    let db = shamir.create_db("production").await.expect("create_db");
 
     db.add_repo(
         RepoConfig::new("users_db", BoxRepoFactory::in_memory())
@@ -191,7 +191,7 @@ async fn test_shamir_db_index_api() {
 #[tokio::test]
 async fn test_remove_repo_from_shamir_db() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("production").await;
+    shamir.create_db("production").await.expect("create_db");
 
     let config = RepoConfig::new("users_db", BoxRepoFactory::in_memory())
         .add_table(TableConfig::new("users"));
@@ -218,7 +218,7 @@ async fn test_remove_repo_from_shamir_db() {
 #[tokio::test]
 async fn test_get_table_shortcut() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("production").await;
+    shamir.create_db("production").await.expect("create_db");
 
     let config = RepoConfig::new("users_db", BoxRepoFactory::in_memory())
         .add_table(TableConfig::new("users"));
@@ -250,7 +250,7 @@ async fn test_get_table_shortcut() {
 #[tokio::test]
 async fn test_db_instance_get_repo() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let db = shamir.create_db("production").await;
+    let db = shamir.create_db("production").await.expect("create_db");
 
     let config = RepoConfig::new("users_db", BoxRepoFactory::in_memory())
         .add_table(TableConfig::new("users"));
@@ -269,7 +269,7 @@ async fn test_db_instance_get_repo() {
 #[tokio::test]
 async fn test_db_instance_remove_repo() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let db = shamir.create_db("production").await;
+    let db = shamir.create_db("production").await.expect("create_db");
 
     let config = RepoConfig::new("users_db", BoxRepoFactory::in_memory())
         .add_table(TableConfig::new("users"));

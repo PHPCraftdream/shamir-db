@@ -67,8 +67,14 @@ impl ShamirAdminExecutor {
             ));
         }
         self.shamir
-            .create_db_as(&op.create_db, self.actor.clone())
-            .await;
+            .create_db_as_checked(&op.create_db, self.actor.clone())
+            .await
+            .map_err(|e| {
+                err_code(
+                    "persist_failed",
+                    format!("failed to persist database '{}': {}", op.create_db, e),
+                )
+            })?;
         Ok(admin_result(mpack!({
             "created": true,
             "existed": false,
@@ -161,6 +167,10 @@ impl ShamirAdminExecutor {
                     ));
                 }
                 // Cascade: remove every repo (and its tables) first.
+                // Per-table drop errors are collected (every drop is
+                // attempted); the removal steps below run only if none
+                // failed.
+                let mut table_failures: Vec<String> = Vec::new();
                 for repo_name in &repos {
                     // Remove tables within each repo. B1 fix (round 5):
                     // tables belong to the database being DROPPED
@@ -169,11 +179,21 @@ impl ShamirAdminExecutor {
                     // tables here was master data loss.
                     if let Ok(tables) = db.list_tables(repo_name) {
                         for table_name in &tables {
-                            let _ = self
+                            if let Err(e) = self
                                 .shamir
                                 .drop_table_cleaning_validators(&op.drop_db, repo_name, table_name)
-                                .await;
+                                .await
+                            {
+                                table_failures.push(format!(
+                                    "{}/{}/{}: {}",
+                                    op.drop_db, repo_name, table_name, e
+                                ));
+                            }
                         }
+                    }
+                    if !table_failures.is_empty() {
+                        // Skip repo removal when its table drops failed.
+                        break;
                     }
                     // S5c-X PR8b-2: the binding guard's typed refusal must
                     // propagate before the database row is removed. The
@@ -184,6 +204,16 @@ impl ShamirAdminExecutor {
                         .remove_repo_locked(&op.drop_db, repo_name, &_control)
                         .await
                         .map_err(repl_guard_error_to_batch)?;
+                }
+                if !table_failures.is_empty() {
+                    return Err(err_code(
+                        "cascade_drop_failed",
+                        format!(
+                            "cannot drop database '{}': cascade table drops failed: {}",
+                            op.drop_db,
+                            table_failures.join("; ")
+                        ),
+                    ));
                 }
             }
         }
@@ -475,16 +505,32 @@ impl ShamirAdminExecutor {
                             ),
                         ));
                     }
-                    // Cascade: remove every table first.
+                    // Cascade: remove every table first, collecting per-
+                    // table errors (every drop is attempted); the repo
+                    // removal below runs only if none failed.
+                    let mut table_failures: Vec<String> = Vec::new();
                     for table_name in &tables {
-                        let _ = self
+                        if let Err(e) = self
                             .shamir
                             .drop_table_cleaning_validators(
                                 &self.db_name,
                                 &op.drop_repo,
                                 table_name,
                             )
-                            .await;
+                            .await
+                        {
+                            table_failures.push(format!("{}/{}: {}", self.db_name, table_name, e));
+                        }
+                    }
+                    if !table_failures.is_empty() {
+                        return Err(err_code(
+                            "cascade_drop_failed",
+                            format!(
+                                "cannot drop repository '{}': cascade table drops failed: {}",
+                                op.drop_repo,
+                                table_failures.join("; ")
+                            ),
+                        ));
                     }
                 }
             }

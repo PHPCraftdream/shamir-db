@@ -24,7 +24,7 @@ use shamir_query_types::admin::Retention;
 /// repo (in-memory engine) and a single `users` table.
 async fn setup_shamir() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let db = shamir.create_db("testdb").await;
+    let db = shamir.create_db("testdb").await.expect("create_db");
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     db.add_repo(repo_config).await.unwrap();

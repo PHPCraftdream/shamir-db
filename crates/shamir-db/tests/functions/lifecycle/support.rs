@@ -97,7 +97,7 @@ pub(crate) async fn compile_or_skip(db: &ShamirDb, name: &str, source: &str) -> 
 /// and a table "people" ready for inserts/queries.
 pub(crate) async fn setup_db_with_people_table() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
 
     let mut b = Batch::new();
     b.id("setup");

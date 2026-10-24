@@ -28,7 +28,7 @@ use shamir_query_builder::write::{delete, insert, update};
 /// In-memory ShamirDb with db "testdb", repo "main", table "users".
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
 
     let mut b = Batch::new();
     b.id("setup");

@@ -383,7 +383,7 @@ fn open_cells() -> Vec<MatrixCell> {
 /// not-found fallback).
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir.add_repo("testdb", config).await.unwrap();

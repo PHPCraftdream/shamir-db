@@ -23,7 +23,7 @@ async fn setup() -> ShamirDb {
     // `execute` resolves the target db before dispatching admin ops; the
     // repl catalogue itself lives in the `system` repo, but the call needs a
     // valid db context.
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     shamir
 }
 

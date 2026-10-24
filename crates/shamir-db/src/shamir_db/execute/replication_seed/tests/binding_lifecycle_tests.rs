@@ -24,7 +24,7 @@ use crate::{DbError, ShamirDb};
 /// a `users` table.
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let db = shamir.create_db("testdb").await;
+    let db = shamir.create_db("testdb").await.expect("create_db");
     for repo in ["main", "side"] {
         db.add_repo(
             RepoConfig::new(repo, BoxRepoFactory::in_memory())
@@ -33,7 +33,7 @@ async fn setup() -> ShamirDb {
         .await
         .unwrap();
     }
-    let otherdb = shamir.create_db("otherdb").await;
+    let otherdb = shamir.create_db("otherdb").await.expect("create_db");
     otherdb
         .add_repo(
             RepoConfig::new("main", BoxRepoFactory::in_memory())

@@ -57,7 +57,7 @@ async fn build_bare_handler() -> (Arc<ShamirDbHandler>, Arc<Session>) {
 /// already created and `count` records inserted.
 async fn build_loaded_handler(count: usize) -> (Arc<ShamirDbHandler>, Arc<Session>) {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("prod").await;
+    shamir.create_db("prod").await.expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     shamir.add_repo("prod", cfg).await.unwrap();

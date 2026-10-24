@@ -44,7 +44,9 @@ async fn visibility_wire_authorization_overrides_and_legacy_gate() {
     let stranger = session([2; 16]);
     let db = ShamirDb::init_memory().await.unwrap();
     let actor = Actor::User(principal64(owner.user_id));
-    db.create_db_as("app", actor.clone()).await;
+    db.create_db_as("app", actor.clone())
+        .await
+        .expect("create_db");
     db.add_repo_as(
         "app",
         RepoConfig::new("main", BoxRepoFactory::in_memory()),
@@ -117,7 +119,9 @@ async fn configured_zero_as_of_budget_reaches_real_server_execution() {
     let owner = session([1; 16]);
     let db = ShamirDb::init_memory().await.unwrap();
     let actor = Actor::User(principal64(owner.user_id));
-    db.create_db_as("app", actor.clone()).await;
+    db.create_db_as("app", actor.clone())
+        .await
+        .expect("create_db");
     db.add_repo_as(
         "app",
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items")),
@@ -175,7 +179,9 @@ async fn interactive_as_of_timeout_preserves_handle_and_structured_fields() {
     let owner = session([1; 16]);
     let db = ShamirDb::init_memory().await.unwrap();
     let actor = Actor::User(principal64(owner.user_id));
-    db.create_db_as("app", actor.clone()).await;
+    db.create_db_as("app", actor.clone())
+        .await
+        .expect("create_db");
     db.add_repo_as(
         "app",
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items")),
@@ -237,7 +243,9 @@ async fn configured_nonzero_budget_times_out_at_server_read_seam() {
     let owner = session([1; 16]);
     let db = ShamirDb::init_memory().await.unwrap();
     let actor = Actor::User(principal64(owner.user_id));
-    db.create_db_as("app", actor.clone()).await;
+    db.create_db_as("app", actor.clone())
+        .await
+        .expect("create_db");
     db.add_repo_as(
         "app",
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items")),

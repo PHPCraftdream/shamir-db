@@ -57,7 +57,9 @@ fn batch_response(response: DbResponse) -> BatchResponse {
 async fn fixture(enabled: bool) -> (ShamirDbHandler, ShamirDbHandler) {
     let db = ShamirDb::init_memory().await.expect("init");
     let owner = Actor::User(principal64([0xAB; 16]));
-    db.create_db_as("app", owner.clone()).await;
+    db.create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     db.add_repo_as(
         "app",
         RepoConfig::new("main", BoxRepoFactory::in_memory())

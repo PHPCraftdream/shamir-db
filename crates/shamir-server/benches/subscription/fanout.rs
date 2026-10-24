@@ -117,7 +117,10 @@ fn execute_built(db: &str, batch: BatchRequest) -> DbRequest {
 async fn make_db_one_repo(db: &str, repo: &str, table: &str) -> Arc<ShamirDb> {
     let shamir = ShamirDb::init_memory().await.unwrap();
     let bench_user = Actor::User(principal64([0xAB; 16]));
-    shamir.create_db_as(db, bench_user.clone()).await;
+    shamir
+        .create_db_as(db, bench_user.clone())
+        .await
+        .expect("create_db");
     let cfg = RepoConfig::new(repo, BoxRepoFactory::in_memory()).add_table(TableConfig::new(table));
     shamir.add_repo_as(db, cfg, bench_user).await.unwrap();
     Arc::new(shamir)

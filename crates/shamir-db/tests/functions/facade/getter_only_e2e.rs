@@ -79,7 +79,7 @@ impl ShamirFunction for TableReader {
 /// here so traversal-Execute does not mask the table-level setuid behaviour.
 async fn setup_with_secrets() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
 
     let mut b = Batch::new();
     b.id("setup");

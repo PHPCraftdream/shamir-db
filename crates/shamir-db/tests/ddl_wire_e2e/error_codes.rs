@@ -15,8 +15,8 @@ use crate::helpers::*;
 #[tokio::test]
 async fn error_code_exists_create_db_duplicate() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("bootstrap").await;
-    shamir.create_db("dup_db").await;
+    shamir.create_db("bootstrap").await.expect("create_db");
+    shamir.create_db("dup_db").await.expect("create_db");
 
     let mut b = Batch::new();
     b.id(1);

@@ -110,7 +110,7 @@ async fn ddl_set_table_schema_persists_and_validates() {
     let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
         .await
         .unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
 
     // Create a durable repo + table via wire DDL.
     let mut b = Batch::new();
@@ -182,7 +182,7 @@ async fn ddl_schema_survives_reopen() {
         let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        db.create_db("testdb").await;
+        db.create_db("testdb").await.expect("create_db");
 
         let mut b = Batch::new();
         b.id(1);
@@ -253,7 +253,7 @@ async fn ddl_expected_version_conflict() {
     let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
         .await
         .unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
 
     let mut b = Batch::new();
     b.id(1);
@@ -319,7 +319,7 @@ async fn ddl_add_remove_get_schema() {
     let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
         .await
         .unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
 
     let mut b = Batch::new();
     b.id(1);
@@ -437,7 +437,7 @@ async fn ddl_phase_b_through_reopen() {
         let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        db.create_db("testdb").await;
+        db.create_db("testdb").await.expect("create_db");
 
         let mut b = Batch::new();
         b.id(1);

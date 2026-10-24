@@ -18,7 +18,7 @@ use shamir_types::access::{Actor, Mode, PermClass, ResourceMeta, ResourcePath};
 #[tokio::test]
 async fn database_resource_meta_defaults_to_enforced() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
 
     let meta = shamir
         .resource_meta(&ResourcePath::database("testdb"))
@@ -34,7 +34,7 @@ async fn database_resource_meta_defaults_to_enforced() {
 #[tokio::test]
 async fn store_resource_meta_defaults_to_enforced() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let config = RepoConfig::new("data", BoxRepoFactory::in_memory());
     shamir.add_repo("testdb", config).await.unwrap();
 
@@ -52,7 +52,7 @@ async fn store_resource_meta_defaults_to_enforced() {
 #[tokio::test]
 async fn table_resource_meta_defaults_to_enforced() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let config =
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     shamir.add_repo("testdb", config).await.unwrap();
@@ -76,7 +76,7 @@ async fn table_resource_meta_defaults_to_enforced() {
 #[tokio::test]
 async fn set_database_meta_round_trip() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
 
     let custom = ResourceMeta {
         owner: Actor::User(42),
@@ -100,7 +100,7 @@ async fn set_database_meta_round_trip() {
 #[tokio::test]
 async fn set_store_meta_round_trip() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let config = RepoConfig::new("data", BoxRepoFactory::in_memory());
     shamir.add_repo("testdb", config).await.unwrap();
 
@@ -126,7 +126,7 @@ async fn set_store_meta_round_trip() {
 #[tokio::test]
 async fn set_table_meta_round_trip() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let config =
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     shamir.add_repo("testdb", config).await.unwrap();
@@ -180,7 +180,7 @@ async fn set_function_namespace_meta_round_trip() {
 #[tokio::test]
 async fn record_inherits_table_meta() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let config =
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     shamir.add_repo("testdb", config).await.unwrap();
@@ -207,7 +207,7 @@ async fn record_inherits_table_meta() {
 #[tokio::test]
 async fn index_inherits_table_meta() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let config =
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     shamir.add_repo("testdb", config).await.unwrap();
@@ -455,7 +455,7 @@ async fn rename_group_missing_is_not_found() {
 #[tokio::test]
 async fn rename_group_does_not_break_resource_group_ref() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
 
     let gid = shamir.create_group("devs").await.unwrap();
 
@@ -507,7 +507,7 @@ async fn resource_meta_survives_reopen() {
         let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        shamir.create_db("testdb").await;
+        shamir.create_db("testdb").await.expect("create_db");
         let config = RepoConfig::new("data", BoxRepoFactory::in_memory())
             .add_table(TableConfig::new("users"));
         shamir.add_repo("testdb", config).await.unwrap();
@@ -576,7 +576,7 @@ async fn groups_survive_reopen() {
 #[tokio::test]
 async fn mode_helpers_on_real_meta() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
 
     let meta = ResourceMeta {
         owner: Actor::User(1),
@@ -771,7 +771,7 @@ async fn shamir_with_failing_databases_table(
 #[tokio::test]
 async fn resource_meta_fails_closed_on_storage_error() {
     let (shamir, fault) = shamir_with_failing_databases_table().await;
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
 
     // Sanity: unarmed, the normal round-trip still works (Ok(Some(..))).
     let meta = shamir
@@ -798,7 +798,7 @@ async fn resource_meta_fails_closed_on_storage_error() {
 #[tokio::test]
 async fn authorize_access_denies_when_resource_meta_errors() {
     let (shamir, fault) = shamir_with_failing_databases_table().await;
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
 
     // Under the OLD fail-open code, a database whose meta read errors would
     // collapse to ResourceMeta::default() == open() (owner=System,

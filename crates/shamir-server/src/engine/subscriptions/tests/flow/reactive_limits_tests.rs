@@ -55,7 +55,7 @@ async fn reactive_batch_honours_restrictive_query_limits() {
     // The reactive wrapper is executed against a real database; create it so
     // `execute_as` reaches the planner (where the query-limit check lives)
     // rather than failing early on "database not found".
-    db.create_db("test_db").await;
+    db.create_db("test_db").await.expect("create_db");
     let change = dummy_change();
     let sb = sub_batch();
 

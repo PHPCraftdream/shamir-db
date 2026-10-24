@@ -380,12 +380,7 @@ impl ServerLauncher {
         // Idempotent: on the first boot the database+repo are created; on
         // every subsequent boot `ShamirDb::init` already loaded them from
         // the system store, so we skip and just use them.
-        if !shamir.has_db("default") {
-            let _ = shamir.create_db("default").await;
-        }
-        let default_db = shamir
-            .get_db("default")
-            .expect("default db must exist after create_db");
+        let default_db = super::helpers::ensure_default_database(&shamir).await?;
         if !default_db.has_repo("main") {
             let factory = BoxRepoFactory::fjall(&default_main_path);
             shamir

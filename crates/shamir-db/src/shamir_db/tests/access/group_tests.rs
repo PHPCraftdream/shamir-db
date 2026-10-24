@@ -579,3 +579,57 @@ async fn resolve_group_id_rejects_out_of_range_id() {
 // is implemented at the wire dispatcher (`admin_access.rs`), not on
 // `ShamirDb::add_group_member`/`remove_group_member` themselves, so it's
 // exercised end-to-end through `ShamirDb::execute` there instead of here.
+
+// ============================================================================
+// RV-DB-E301E1EF — no phantom group record for membership ops on a missing
+// group.
+//
+// Pre-fix, `SystemStore::add_group_member` / `remove_group_member` treated a
+// missing group as "empty members list" and `save_group`-ed a brand-new
+// phantom record under the bogus id, and the `*_as` wrappers returned Ok.
+// The fix returns `DbError::NotFound` and never writes.
+// ============================================================================
+
+#[tokio::test]
+async fn rv_db_e301e1ef_remove_member_of_missing_group_fails_without_phantom() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+
+    let result = shamir
+        .remove_group_member_as(999_999, 1, &Actor::System)
+        .await;
+    assert!(
+        matches!(&result, Err(DbError::NotFound(_))),
+        "RV-DB-E301E1EF: removing from a missing group must be DbError::NotFound, got {result:?}"
+    );
+
+    let phantom = shamir
+        .system_store()
+        .load_group(999_999)
+        .await
+        .expect("load_group must not fail");
+    assert!(
+        phantom.is_none(),
+        "RV-DB-E301E1EF: a failed member removal must not write a phantom group record"
+    );
+}
+
+#[tokio::test]
+async fn rv_db_e301e1ef_add_member_of_missing_group_fails_without_phantom() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+
+    let result = shamir.add_group_member_as(999_999, 1, &Actor::System).await;
+    assert!(
+        matches!(&result, Err(DbError::NotFound(_))),
+        "RV-DB-E301E1EF: adding to a missing group must be DbError::NotFound, got {result:?}"
+    );
+
+    let phantom = shamir
+        .system_store()
+        .load_group(999_999)
+        .await
+        .expect("load_group must not fail");
+    assert!(
+        phantom.is_none(),
+        "RV-DB-E301E1EF: a failed member add must not write a phantom group record"
+    );
+}

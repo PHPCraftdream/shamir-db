@@ -93,7 +93,10 @@ async fn build_handler() -> ShamirDbHandler {
     // Actor::User(principal64([0xAB; 16])) and needs ownership to pass the gate —
     // stamp the bench db/repo/table with that same actor via the `_as` variants.
     let bench_user = Actor::User(principal64([0xAB; 16]));
-    shamir.create_db_as("app", bench_user.clone()).await;
+    shamir
+        .create_db_as("app", bench_user.clone())
+        .await
+        .expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir

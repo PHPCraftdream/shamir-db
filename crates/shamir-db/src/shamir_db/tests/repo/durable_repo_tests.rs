@@ -43,7 +43,7 @@ async fn wire_created_repo_is_durable_across_reopen() {
         let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        shamir.create_db("appdb").await;
+        shamir.create_db("appdb").await.expect("create_db");
 
         let mut b = Batch::new();
         b.id(1);
@@ -106,7 +106,7 @@ async fn explicit_in_memory_repo_is_ephemeral() {
         let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        shamir.create_db("appdb").await;
+        shamir.create_db("appdb").await.expect("create_db");
 
         let mut b = Batch::new();
         b.id(1);
@@ -163,7 +163,7 @@ async fn durable_repo_file_mirrors_db_repo_tree() {
     let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
         .await
         .unwrap();
-    shamir.create_db("appdb").await;
+    shamir.create_db("appdb").await.expect("create_db");
 
     let mut b = Batch::new();
     b.id(1);

@@ -94,7 +94,9 @@ fn alice_replicator_session() -> Session {
 async fn build_handler() -> Arc<ShamirDbHandler> {
     let db = ShamirDb::init_memory().await.expect("init database");
     let alice = Actor::User(principal64([0xAB; 16]));
-    db.create_db_as("app", alice.clone()).await;
+    db.create_db_as("app", alice.clone())
+        .await
+        .expect("create_db");
     db.add_repo_as(
         "app",
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items")),

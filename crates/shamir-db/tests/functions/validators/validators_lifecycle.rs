@@ -314,7 +314,7 @@ async fn validators_persist_across_reopen() {
 /// and a validator "v1".
 async fn setup_with_table() -> ShamirDb {
     let db = ShamirDb::init_memory().await.unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     db.add_repo("testdb", repo_config).await.unwrap();

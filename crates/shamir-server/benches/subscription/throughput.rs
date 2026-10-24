@@ -104,7 +104,10 @@ async fn make_db_one_repo(db: &str, repo: &str, table: &str) -> Arc<ShamirDb> {
     // above is a regular ("alice") session, not a superuser, so it resolves to
     // Actor::User(principal64([0xAB; 16])) and needs ownership to pass the gate.
     let bench_user = Actor::User(principal64([0xAB; 16]));
-    shamir.create_db_as(db, bench_user.clone()).await;
+    shamir
+        .create_db_as(db, bench_user.clone())
+        .await
+        .expect("create_db");
     let cfg = RepoConfig::new(repo, BoxRepoFactory::in_memory()).add_table(TableConfig::new(table));
     shamir.add_repo_as(db, cfg, bench_user).await.unwrap();
     Arc::new(shamir)

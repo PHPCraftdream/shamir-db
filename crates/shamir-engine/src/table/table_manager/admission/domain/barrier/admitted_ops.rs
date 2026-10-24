@@ -46,8 +46,9 @@ impl TableManager {
     /// THIS table's write barrier (bit `REGULAR_INDEX_CREATE` — the same
     /// single `ddl_admission` mutex backs every bit) exactly like the
     /// previous facade code, then drops the raw primitives' contents.
-    /// Individual drop failures are ignored, exactly as before: the table is
-    /// about to be removed entirely.
+    /// Individual drop failures are logged and otherwise tolerated
+    /// (degraded-cleanup semantics unchanged): the table is about to be
+    /// removed entirely.
     pub async fn drop_all_indexes_for_table_removal_admitted(
         &self,
         permit: &RepoWritePermit,
@@ -66,7 +67,11 @@ impl TableManager {
             .map(|d| d.name_interned)
             .collect();
         for id in regular_ids {
-            let _ = self.index_manager_ref().drop_index(id, None, None).await;
+            if let Err(e) = self.index_manager_ref().drop_index(id, None, None).await {
+                log::warn!(
+                    "drop_all_indexes_for_table_removal: failed to drop regular index {id}: {e}"
+                );
+            }
         }
         // base_index unique indexes.
         let unique_ids: Vec<u64> = self
@@ -75,10 +80,15 @@ impl TableManager {
             .map(|d| d.name_interned)
             .collect();
         for id in unique_ids {
-            let _ = self
+            if let Err(e) = self
                 .index_manager_ref()
                 .drop_unique_index(id, None, None)
-                .await;
+                .await
+            {
+                log::warn!(
+                    "drop_all_indexes_for_table_removal: failed to drop unique index {id}: {e}"
+                );
+            }
         }
         // Sorted indexes.
         let sorted_ids: Vec<u64> = self
@@ -88,12 +98,26 @@ impl TableManager {
             .map(|d| d.name_interned)
             .collect();
         for id in sorted_ids {
-            let _ = self.sorted_indexes().drop_index(id, None, None).await;
+            if let Err(e) = self.sorted_indexes().drop_index(id, None, None).await {
+                log::warn!(
+                    "drop_all_indexes_for_table_removal: failed to drop sorted index {id}: {e}"
+                );
+            }
         }
         // index2 registry — remove all backends.
         let backends = self.index2_registry().all_backends().await;
         for b in &backends {
-            let _ = self.index2_registry().remove_by_id(b.descriptor().id).await;
+            if self
+                .index2_registry()
+                .remove_by_id(b.descriptor().id)
+                .await
+                .is_none()
+            {
+                log::warn!(
+                    "drop_all_indexes_for_table_removal: failed to drop index2 backend {} (not found)",
+                    b.descriptor().id
+                );
+            }
         }
         Ok(())
     }

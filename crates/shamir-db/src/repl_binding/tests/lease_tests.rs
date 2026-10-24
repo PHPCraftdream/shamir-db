@@ -28,7 +28,7 @@ use crate::ShamirDb;
 /// `binding_lifecycle_tests::setup`, trimmed to what these tests touch).
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let db = shamir.create_db("testdb").await;
+    let db = shamir.create_db("testdb").await.expect("create_db");
     db.add_repo(
         RepoConfig::new("main", BoxRepoFactory::in_memory())
             .add_table(crate::engine::table::TableConfig::new("users")),

@@ -32,7 +32,7 @@ use shamir_query_builder::Query;
 /// `repositories` catalogue — needed for rename completeness checks.
 async fn setup_shamir() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let _ = shamir.create_db("testdb").await;
+    let _ = shamir.create_db("testdb").await.expect("create_db");
 
     // Create `main` via DDL so its row lands in the persisted `repositories`
     // catalogue (setup_db's `db.add_repo` bypasses the catalogue).
@@ -284,7 +284,7 @@ async fn rename_db_survives_durable_reopen() {
         let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        let _ = shamir.create_db("olddb").await;
+        let _ = shamir.create_db("olddb").await.expect("create_db");
 
         let mut b = Batch::new();
         b.id(1);
@@ -408,7 +408,7 @@ async fn rename_db_refuses_source_absent() {
 #[tokio::test]
 async fn rename_db_refuses_destination_exists() {
     let shamir = setup_shamir().await;
-    let _ = shamir.create_db("target").await;
+    let _ = shamir.create_db("target").await.expect("create_db");
 
     let mut b = Batch::new();
     b.id(1);
