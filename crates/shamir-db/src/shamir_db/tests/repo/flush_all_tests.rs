@@ -42,7 +42,7 @@ async fn buffered_commit_survives_graceful_flush_all() {
         let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        shamir.create_db("appdb").await;
+        shamir.create_db("appdb").await.expect("create_db");
 
         let config = RepoConfig::new("data", BoxRepoFactory::fjall(&repo_path))
             .add_table(TableConfig::new("items"));
@@ -95,7 +95,7 @@ async fn buffered_commit_survives_graceful_flush_all() {
 #[tokio::test]
 async fn flush_all_is_safe_on_in_memory_home() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
 
     let config =
         RepoConfig::new("scratch", BoxRepoFactory::in_memory()).add_table(TableConfig::new("tmp"));

@@ -82,7 +82,7 @@ fn row(frame: &PushEnvelope) -> Row {
 
 async fn database() -> Arc<ShamirDb> {
     let db = Arc::new(ShamirDb::init_memory().await.unwrap());
-    db.create_db("test_db").await;
+    db.create_db("test_db").await.expect("create_db");
     db.add_repo(
         "test_db",
         RepoConfig::new("main", BoxRepoFactory::in_memory())

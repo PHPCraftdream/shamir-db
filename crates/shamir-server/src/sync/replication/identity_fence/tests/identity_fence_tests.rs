@@ -99,7 +99,10 @@ pub(super) async fn build_memory() -> ShamirDb {
 pub(super) async fn build_factory(factory: BoxRepoFactory) -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64_from_username("alice"));
-    shamir.create_db_as("app", owner.clone()).await;
+    shamir
+        .create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     let cfg = RepoConfig::new("main", factory).add_table(TableConfig::new("items"));
     shamir
         .add_repo_as("app", cfg, owner)

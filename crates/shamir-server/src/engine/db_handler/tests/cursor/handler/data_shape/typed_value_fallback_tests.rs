@@ -36,7 +36,10 @@ async fn build_handler_with_dec_scores(
 ) -> ShamirDbHandler {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64([0xAB; 16]));
-    shamir.create_db_as("app", owner.clone()).await;
+    shamir
+        .create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir
@@ -69,7 +72,10 @@ async fn build_handler_with_big_scores(
 ) -> ShamirDbHandler {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64([0xAB; 16]));
-    shamir.create_db_as("app", owner.clone()).await;
+    shamir
+        .create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir
@@ -117,7 +123,10 @@ async fn build_handler_with_bin_scores(
 ) -> ShamirDbHandler {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64([0xAB; 16]));
-    shamir.create_db_as("app", owner.clone()).await;
+    shamir
+        .create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir
@@ -350,7 +359,10 @@ async fn bin_order_by_value_now_forces_offset_mode_no_silent_drop() {
 async fn list_order_by_value_now_forces_offset_mode_no_silent_drop() {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64([0xAB; 16]));
-    shamir.create_db_as("app", owner.clone()).await;
+    shamir
+        .create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir
@@ -429,7 +441,10 @@ async fn list_order_by_value_now_forces_offset_mode_no_silent_drop() {
 async fn str_order_by_regression_still_uses_real_keyset_seek() {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64([0xAB; 16]));
-    shamir.create_db_as("app", owner.clone()).await;
+    shamir
+        .create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir
@@ -513,7 +528,10 @@ async fn str_order_by_regression_still_uses_real_keyset_seek() {
 async fn bool_order_by_regression_uses_real_keyset_seek() {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64([0xAB; 16]));
-    shamir.create_db_as("app", owner.clone()).await;
+    shamir
+        .create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir
@@ -643,7 +661,10 @@ async fn int_order_by_regression_still_uses_real_keyset_seek() {
 async fn f64_order_by_regression_paginates_correctly_via_offset() {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64([0xAB; 16]));
-    shamir.create_db_as("app", owner.clone()).await;
+    shamir
+        .create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir
@@ -734,7 +755,10 @@ async fn f64_order_by_regression_paginates_correctly_via_offset() {
 async fn schema_typed_int_required_order_by_uses_keyset_mode() {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64([0xAB; 16]));
-    shamir.create_db_as("app", owner.clone()).await;
+    shamir
+        .create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir
@@ -814,7 +838,10 @@ async fn schema_typed_int_required_order_by_uses_keyset_mode() {
 async fn schema_typed_f64_order_by_still_forces_offset_mode() {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64([0xAB; 16]));
-    shamir.create_db_as("app", owner.clone()).await;
+    shamir
+        .create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir

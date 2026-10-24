@@ -32,7 +32,7 @@ async fn setup(sys_path: std::path::PathBuf) -> ShamirDb {
     let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
 
     let mut b = Batch::new();
     b.id(1);

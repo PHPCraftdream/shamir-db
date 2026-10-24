@@ -55,7 +55,9 @@ fn session() -> Session {
 async fn handler(cap: QueryLimitsCap) -> ShamirDbHandler {
     let db = ShamirDb::init_memory().await.expect("init");
     let owner = Actor::User(principal64([0xAB; 16]));
-    db.create_db_as("app", owner.clone()).await;
+    db.create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     db.add_repo_as(
         "app",
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items")),

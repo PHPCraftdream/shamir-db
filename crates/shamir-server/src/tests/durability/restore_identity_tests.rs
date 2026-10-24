@@ -9,7 +9,7 @@ use crate::restore::{consume_restore_marker, restore, write_restore_marker};
 async fn restore_all_repos_once_retry_receipt_and_future_repo() {
     let directory = tempfile::TempDir::new().unwrap();
     let db = ShamirDb::init_memory().await.unwrap();
-    db.create_db("app").await;
+    db.create_db("app").await.expect("create_db");
     for name in ["one", "two"] {
         db.add_repo("app", RepoConfig::new(name, BoxRepoFactory::in_memory()))
             .await
@@ -60,7 +60,7 @@ async fn restore_all_repos_once_retry_receipt_and_future_repo() {
 async fn corrupt_restore_marker_refused_without_bump() {
     let directory = tempfile::TempDir::new().unwrap();
     let db = ShamirDb::init_memory().await.unwrap();
-    db.create_db("app").await;
+    db.create_db("app").await.expect("create_db");
     db.add_repo("app", RepoConfig::new("main", BoxRepoFactory::in_memory()))
         .await
         .unwrap();

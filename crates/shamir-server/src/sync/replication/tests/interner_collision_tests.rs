@@ -68,7 +68,7 @@ fn owner() -> Actor {
 
 async fn database() -> ShamirDb {
     let db = ShamirDb::init_memory().await.unwrap();
-    db.create_db_as("app", owner()).await;
+    db.create_db_as("app", owner()).await.expect("create_db");
     db.add_repo_as(
         "app",
         RepoConfig::new("main", BoxRepoFactory::in_memory())

@@ -19,6 +19,7 @@ async fn setup() -> ShamirDb {
     db.enable_experimental_migration_api();
     db.create_db("testdb")
         .await
+        .expect("create_db")
         .add_repo(
             RepoConfig::new("src", BoxRepoFactory::in_memory()).add_table(TableConfig::new("docs")),
         )

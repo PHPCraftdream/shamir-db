@@ -39,7 +39,7 @@ use shamir_types::types::value::QueryValue;
 /// In-memory ShamirDb with `testdb/main/users` table.
 async fn setup_db() -> ShamirDb {
     let db = ShamirDb::init_memory().await.unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     db.add_repo("testdb", repo_config).await.unwrap();
@@ -321,7 +321,7 @@ async fn boot_tolerates_native_validator_row() {
         let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        db.create_db("testdb").await;
+        db.create_db("testdb").await.expect("create_db");
 
         // Use a Fjall-backed repo so table info-twin (bindings) persist.
         // `fjall_raw`: the default MemBuffer wrapper buffers the info-twin
@@ -403,7 +403,7 @@ async fn boot_native_validator_re_register_works() {
         let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        db.create_db("testdb").await;
+        db.create_db("testdb").await.expect("create_db");
         // `fjall_raw`: the default MemBuffer wrapper buffers the info-twin
         // write (the validator binding) and does not flush on drop, so the
         // reopen below could miss it (#1236).
@@ -679,7 +679,7 @@ async fn unresolved_native_artifacts_lists_unregistered_after_reopen() {
         let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        db.create_db("testdb").await;
+        db.create_db("testdb").await.expect("create_db");
         // `fjall_raw`: the default MemBuffer wrapper buffers the info-twin
         // write (the validator binding) and does not flush on drop, so the
         // reopen below could miss it (#1236).

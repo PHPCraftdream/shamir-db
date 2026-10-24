@@ -64,7 +64,7 @@ fn session_key(session: &Session) -> [u8; 32] {
 
 async fn make_db(db: &str) -> Arc<ShamirDb> {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
-    shamir.create_db(db).await;
+    shamir.create_db(db).await.expect("create_db");
     Arc::new(shamir)
 }
 

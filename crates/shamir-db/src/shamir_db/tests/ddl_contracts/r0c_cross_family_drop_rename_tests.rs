@@ -27,7 +27,7 @@ use crate::ShamirDb;
 /// simulating a pre-existing cross-family collision.
 async fn setup_with_collision() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir.add_repo("testdb", repo_config).await.unwrap();

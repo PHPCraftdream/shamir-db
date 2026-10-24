@@ -58,7 +58,7 @@ pub(crate) fn user_session() -> Session {
 
 pub(crate) async fn make_db_one_repo(db: &str, repo: &str, table: &str) -> Arc<ShamirDb> {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
-    shamir.create_db(db).await;
+    shamir.create_db(db).await.expect("create_db");
     let cfg = RepoConfig::new(repo, BoxRepoFactory::in_memory()).add_table(TableConfig::new(table));
     shamir.add_repo(db, cfg).await.expect("add repo");
     // G.4c: new objects default to enforced (0o700, System). These tests run
@@ -92,7 +92,7 @@ pub(crate) async fn make_db_two_repos(
     table_b: &str,
 ) -> Arc<ShamirDb> {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
-    shamir.create_db(db).await;
+    shamir.create_db(db).await.expect("create_db");
     let cfg_a =
         RepoConfig::new(repo_a, BoxRepoFactory::in_memory()).add_table(TableConfig::new(table_a));
     shamir.add_repo(db, cfg_a).await.expect("add repo a");

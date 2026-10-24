@@ -17,7 +17,7 @@ use shamir_types::types::value::QueryValue;
 
 async fn setup_memory() -> ShamirDb {
     let db = ShamirDb::init_memory().await.unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
     db
 }
 
@@ -93,7 +93,7 @@ async fn create_with_override_describe_and_restart_reload() {
     let db = ShamirDb::init(SystemStoreConfig::Fjall(system_path.clone()))
         .await
         .unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
 
     let override_policy = DurabilityOverride {
         wal_commit: Some(WalCommitTier::Synced),
@@ -373,7 +373,7 @@ async fn hybrid_repo_accepts_durability_override() {
     let db = ShamirDb::init(SystemStoreConfig::Fjall(system_path))
         .await
         .unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
     let mut batch = Batch::new();
     batch.id(1);
     batch.create_repo(
@@ -414,7 +414,7 @@ async fn alter_repo_synced_commit_has_recoverable_prefix_after_return() {
     let db = ShamirDb::init(SystemStoreConfig::Fjall(data_root.join("system.redb")))
         .await
         .unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
     let mut batch = Batch::new();
     batch.id(1);
     batch.create_repo("create", ddl::create_repo("r1").engine("fjall"));
