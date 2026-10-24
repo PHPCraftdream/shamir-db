@@ -161,9 +161,9 @@ pub fn register(reg: &mut ScalarRegistry) {
                 // that succeeded in `seen`.
                 //
                 // Semantics: uses `QueryValue`'s existing `Hash`/`Eq` impls
-                // (`Value<Key>` hand-hashes floats via `f.to_bits()`). That is
-                // consistent with `Eq` for the canonical bit-pattern NaN case
-                // and matches the legacy `==` behaviour for every other variant.
+                // (`Value<Key>` hand-hashes floats, canonicalizing NaN
+                // payloads and -0.0 to +0.0 so equal floats hash equally).
+                // That matches the legacy `==` behaviour for every variant.
                 let mut out: Vec<QueryValue> = Vec::with_capacity(arr.len());
                 let mut seen = new_fx_set_wc(arr.len());
                 for e in arr {

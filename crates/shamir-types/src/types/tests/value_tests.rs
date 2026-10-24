@@ -525,8 +525,9 @@ mod tests {
     fn test_f64_neg_zero_hash() {
         let p = UserValue::F64(0.0);
         let n = UserValue::F64(-0.0);
-        // Different bit patterns → different hashes
-        assert_ne!(calculate_hash(&p), calculate_hash(&n));
+        // `==` folds -0.0 into +0.0, so Hash must agree (RV-FUNCLIB-5FA455F7).
+        assert_eq!(p, n);
+        assert_eq!(calculate_hash(&p), calculate_hash(&n));
     }
 
     #[test]
@@ -704,6 +705,52 @@ mod tests {
                 assert_eq!(v, &UserValue::Big(BigInt::from(u64::MAX)));
             }
             other => panic!("expected Map, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rv_funclib_5fa455f7_hash_matches_eq_for_float_specials() {
+        // a == b must imply hash(a) == hash(b) for ±0.0 and NaN payloads,
+        // scalar and nested in List / Set / Map.
+        let zeros = [0.0f64, -0.0f64];
+        assert!(zeros[0] == zeros[1]);
+        assert_eq!(
+            calculate_hash(&UserValue::F64(zeros[0])),
+            calculate_hash(&UserValue::F64(zeros[1]))
+        );
+
+        let nan_a = f64::from_bits(0x7ff8_0000_0000_0001);
+        let nan_b = f64::from_bits(0xfff8_0000_dead_beef);
+        assert!(nan_a.is_nan() && nan_b.is_nan());
+        assert_eq!(
+            calculate_hash(&UserValue::F64(nan_a)),
+            calculate_hash(&UserValue::F64(nan_b))
+        );
+
+        let nest = |v: UserValue| {
+            let mut m = new_map();
+            m.insert("k".to_string(), v.clone());
+            let mut s = new_set();
+            s.insert(v.clone());
+            vec![
+                UserValue::List(vec![v.clone()]),
+                UserValue::Set(s),
+                UserValue::Map(m),
+            ]
+        };
+        for (a, b) in nest(UserValue::F64(0.0))
+            .into_iter()
+            .zip(nest(UserValue::F64(-0.0)))
+        {
+            assert_eq!(a, b);
+            assert_eq!(calculate_hash(&a), calculate_hash(&b));
+        }
+        for (a, b) in nest(UserValue::F64(nan_a))
+            .into_iter()
+            .zip(nest(UserValue::F64(nan_b)))
+        {
+            assert_eq!(a, b);
+            assert_eq!(calculate_hash(&a), calculate_hash(&b));
         }
     }
 }

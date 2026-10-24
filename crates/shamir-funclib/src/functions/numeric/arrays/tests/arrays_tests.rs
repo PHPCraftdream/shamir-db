@@ -443,3 +443,20 @@ fn min_max_cross_type_elements() {
         QueryValue::Str("x".into())
     );
 }
+
+#[test]
+fn rv_funclib_5fa455f7_distinct_folds_negative_zero() {
+    let r = reg();
+    let out = r
+        .call(
+            "distinct",
+            &[list(vec![QueryValue::F64(0.0), QueryValue::F64(-0.0)])],
+        )
+        .unwrap();
+    let elems = match &out {
+        QueryValue::List(items) => items.len(),
+        other => panic!("expected list, got {other:?}"),
+    };
+    assert_eq!(elems, 1);
+    assert_eq!(out, list(vec![QueryValue::F64(0.0)]));
+}
