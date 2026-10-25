@@ -210,6 +210,7 @@ pub async fn wait_until<F, Fut>(
             accept_new_host: true,
             trusted_pin: None,
             connect_timeout: Some(Duration::from_secs(15)),
+            handshake_timeout: None,
             request_timeout: Some(Duration::from_secs(35)),
         })
         .await

@@ -209,6 +209,7 @@ async fn fetch_online(args: &AccessTreeArgs, addr: &str) -> anyhow::Result<Query
         trusted_pin: None,
         // Interactive admin CLI — keep the prior unbounded-wait behaviour.
         connect_timeout: None,
+        handshake_timeout: None,
         request_timeout: None,
     })
     .await

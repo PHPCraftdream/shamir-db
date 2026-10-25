@@ -40,6 +40,15 @@ export interface ConnectOptions {
   password: string;
   acceptNewHost?: boolean;
   trustedPin?: Buffer;
+  /** Deadline (ms) for the TCP connect attempt. */
+  connectTimeoutMs?: number;
+  /**
+   * Deadline (ms) for the WHOLE connect: DNS resolution, TCP, TLS and
+   * SCRAM. Omitted = unbounded (prior behaviour).
+   */
+  handshakeTimeoutMs?: number;
+  /** Deadline (ms) for each request/response call, from the moment the call starts. */
+  requestTimeoutMs?: number;
 }
 
 /**
