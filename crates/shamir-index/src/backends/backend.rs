@@ -337,9 +337,17 @@ pub trait IndexBackend: Send + Sync {
         _info_store: &Arc<dyn Store>,
         _vecs: &[(RecordId, Vec<f32>)],
         _deleted: &[RecordId],
-    ) -> Result<(), IndexError> {
-        Ok(())
+    ) -> Result<Option<u64>, IndexError> {
+        Ok(None)
     }
+
+    /// P0 delta-prune (brief 164): acknowledge that delta chunk `idx`'s
+    /// mutations reached the live graph. Advances the backend's contiguous
+    /// applied prefix — the boundary snapshot tasks sample for
+    /// `manifest.delta_applied_upto` and pruning. A chunk that is never
+    /// acknowledged (pending or failed graph promote) stays replayable and
+    /// is never pruned. Default no-op: only backends with a delta log care.
+    fn mark_delta_applied(&self, _idx: u64) {}
 
     /// V2.3 (#402) — check whether the accumulated delta-log mutations have
     /// crossed the snapshot threshold and, if so, kick off a single-flight

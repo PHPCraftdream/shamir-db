@@ -452,12 +452,14 @@ const DELTA_CHUNK_IDX_WIDTH: usize = 10;
 
 /// One vector mutation captured by the delta-log. Phase 5d translates the
 /// tx's `staged_vectors` slice into `Upsert` ops and (on a tx that deleted a
-/// vector-backed row) emits `Delete`. Each op is applied to the live graph
-/// BEFORE the chunk is appended (the chunk is the durable echo of an
-/// already-applied in-memory mutation), so the in-graph and on-disk states
-/// never diverge in a way that loses data: a crash between the in-memory
-/// apply and the chunk append drops the chunk, and the next restart sees a
-/// graph without that mutation (acceptable — the mutation was never durable).
+/// vector-backed row) emits `Delete`. P0 delta-prune (brief 164) — ordering
+/// correction: the chunk is appended BEFORE the graph apply (the engine's
+/// delta half runs pre-publish; the HNSW promote runs post-lock), so a chunk
+/// may exist while its mutation has NOT yet reached any dumped graph. The
+/// snapshot prune boundary is therefore the backend's contiguous APPLIED
+/// prefix (`IndexBackend::mark_delta_applied`), never the allocation
+/// counter: a snapshot that pruned by allocation order could drop a chunk
+/// whose vector never made it into the dumped graph and lose it on restart.
 /// A crash AFTER the chunk append but BEFORE the next snapshot sees the
 /// mutation replayed on restart.
 #[derive(Clone, Serialize, Deserialize)]
