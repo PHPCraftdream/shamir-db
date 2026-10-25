@@ -24,8 +24,8 @@
 /// | [`Ctx::http_fetch`] | [`Result<HttpResponse>`](crate::HttpResponse) | Egress HTTP via allowlist |
 /// | [`Ctx::http_get`] | [`Result<HttpResponse>`](crate::HttpResponse) | Convenience GET wrapper |
 /// | [`Ctx::http_post`] | [`Result<HttpResponse>`](crate::HttpResponse) | Convenience POST wrapper |
-/// | [`Ctx::global_get`] | `Option<Value>` | Read a process-lifetime global variable |
-/// | [`Ctx::global_set`] | `()` | Write a process-lifetime global variable |
+/// | [`Ctx::global_get`] | `Result<Option<Value>>` | Read a process-lifetime global variable |
+/// | [`Ctx::global_set`] | `Result<()>` | Write a process-lifetime global variable |
 ///
 /// # Examples
 ///
@@ -65,14 +65,14 @@ impl Ctx {
         Self { _private: () }
     }
 
-    /// Read a global variable. Returns `None` if absent.
-    pub fn global_get(&self, key: &str) -> Option<crate::Value> {
+    /// Read a global variable. Returns `Ok(None)` if absent.
+    pub fn global_get(&self, key: &str) -> crate::Result<Option<crate::Value>> {
         crate::host_imports::global_get(key)
     }
 
     /// Set a global variable.
-    pub fn global_set(&self, key: &str, value: crate::Value) {
-        crate::host_imports::global_set(key, value);
+    pub fn global_set(&self, key: &str, value: crate::Value) -> crate::Result<()> {
+        crate::host_imports::global_set(key, value)
     }
 
     /// Invoke another registered function by name.
@@ -82,8 +82,9 @@ impl Ctx {
     ///
     /// If the callee is not found, the recursion depth limit is exceeded,
     /// or the callee itself errors, the host traps and the current function
-    /// fails with a `Compute` error.
-    pub fn call(&self, name: &str, args: crate::Value) -> crate::Value {
+    /// fails with a `Compute` error. A codec failure decoding the callee's
+    /// response is returned as an `Err` with the decode cause.
+    pub fn call(&self, name: &str, args: crate::Value) -> crate::Result<crate::Value> {
         crate::host_imports::call(name, args)
     }
 
@@ -114,7 +115,7 @@ impl Ctx {
     /// - `[true, { status, headers, body }]` → `Ok(HttpResponse)`
     /// - `[false, "error message"]` → `Err(Error)`
     pub fn http_fetch(&self, req: crate::HttpRequest) -> crate::Result<crate::HttpResponse> {
-        let raw = crate::host_imports::http_fetch(&req.to_value());
+        let raw = crate::host_imports::http_fetch(&req.to_value())?;
         crate::http::decode_fetch_envelope(&raw)
     }
 
@@ -146,12 +147,12 @@ impl Batch {
     }
 
     /// Write a value into the batch scratchpad.
-    pub fn put(&self, key: &str, value: crate::Value) {
-        crate::host_imports::batch_put(key, value);
+    pub fn put(&self, key: &str, value: crate::Value) -> crate::Result<()> {
+        crate::host_imports::batch_put(key, value)
     }
 
-    /// Read a value from the batch scratchpad. Returns `None` if absent.
-    pub fn get(&self, key: &str) -> Option<crate::Value> {
+    /// Read a value from the batch scratchpad. Returns `Ok(None)` if absent.
+    pub fn get(&self, key: &str) -> crate::Result<Option<crate::Value>> {
         crate::host_imports::batch_get(key)
     }
 }

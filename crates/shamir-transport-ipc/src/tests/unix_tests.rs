@@ -80,3 +80,34 @@ async fn rv_transport_ipc_3c21f8fa_failed_chmod_removes_socket_file() {
     assert!(rebound.is_ok(), "re-bind after cleanup must succeed");
     drop(rebound);
 }
+
+/// RV-TRANSPORT-IPC-07D10AFD: bind-on-existing-path semantics pin — a
+/// second `bind` on a LIVE listener's path must fail, must NOT clobber the
+/// existing socket file, and the original listener must keep serving.
+#[tokio::test]
+async fn rv_transport_ipc_07d10afd_bind_existing_path_fails_without_clobbering() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("shamir-test.sock");
+    let mut listener = IpcListener::bind(&path).await.expect("first bind");
+
+    let second = IpcListener::bind(&path).await;
+    assert!(
+        second.is_err(),
+        "bind on an existing live socket path must fail"
+    );
+    assert!(
+        path.exists(),
+        "the failed bind must not remove the original socket file"
+    );
+
+    // The original listener still serves clients after the collision.
+    let server = tokio::spawn(async move {
+        let mut stream = listener.accept().await.expect("accept");
+        let mut buf = [0u8; 4];
+        stream.read_exact(&mut buf).await.expect("server read");
+        assert_eq!(&buf, b"ping");
+    });
+    let mut client = crate::connect(&path).await.expect("client connect");
+    client.write_all(b"ping").await.expect("client write");
+    server.await.expect("server task");
+}

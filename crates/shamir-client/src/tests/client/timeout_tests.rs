@@ -11,13 +11,11 @@
 //! of a live server: the request-side test drives a `oneshot` that the
 //! "server" (the test) simply never resolves.
 
-use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
-use shamir_collections::TFxMap;
 use tokio::sync::oneshot;
 
-use crate::client::{await_pending_response, connect_tcp, PendingMap};
+use crate::client::{await_pending_response, connect_tcp, Lifecycle};
 use crate::error::ClientError;
 
 /// A guaranteed-unroutable private black-hole address: TCP `connect` to it
@@ -25,8 +23,8 @@ use crate::error::ClientError;
 /// bounded `connect_timeout` is the only thing that unblocks the caller.
 const BLACKHOLE: &str = "10.255.255.1:9";
 
-fn make_pending() -> PendingMap {
-    Arc::new(StdMutex::new(TFxMap::default()))
+fn make_state() -> Lifecycle {
+    Lifecycle::new()
 }
 
 // ─── connect_timeout ─────────────────────────────────────────────────────────
@@ -85,18 +83,18 @@ async fn connect_none_preserves_unbounded_wait() {
 /// pending entry so the map does not leak a dead sender.
 #[tokio::test]
 async fn request_timeout_fires_and_cleans_pending() {
-    let pending = make_pending();
+    let state = make_state();
     let rid: u32 = 7;
     // Register a waiter but NEVER send on `tx` (simulate a server that
     // accepts the connection but never answers this rid). We keep `tx` alive
     // in the map, otherwise the receiver would resolve with
     // `ConnectionClosed` instead of timing out.
     let (tx, rx) = oneshot::channel::<Result<Vec<u8>, ClientError>>();
-    pending.lock().unwrap().insert(rid, tx);
+    state.pending.lock().unwrap().map.insert(rid, tx);
 
     let budget = Duration::from_millis(200);
     let start = Instant::now();
-    let res = await_pending_response(rx, Some(budget), &pending, rid).await;
+    let res = await_pending_response(rx, Some(budget), &state, rid).await;
     let elapsed = start.elapsed();
 
     assert!(
@@ -109,7 +107,7 @@ async fn request_timeout_fires_and_cleans_pending() {
     );
     // The orphaned pending entry must have been removed on timeout.
     assert!(
-        !pending.lock().unwrap().contains_key(&rid),
+        !state.pending.lock().unwrap().map.contains_key(&rid),
         "timed-out request left a dead sender in the pending map"
     );
 }
@@ -121,12 +119,12 @@ async fn request_timeout_fires_and_cleans_pending() {
 /// same future with the payload (the response path is unaffected).
 #[tokio::test]
 async fn request_none_preserves_unbounded_wait_then_delivers() {
-    let pending = make_pending();
+    let state = make_state();
     let rid: u32 = 3;
     let (tx, rx) = oneshot::channel::<Result<Vec<u8>, ClientError>>();
-    pending.lock().unwrap().insert(rid, tx);
+    state.pending.lock().unwrap().map.insert(rid, tx);
 
-    let fut = await_pending_response(rx, None, &pending, rid);
+    let fut = await_pending_response(rx, None, &state, rid);
     tokio::pin!(fut);
 
     // 1) With no response yet, the None-await must remain pending: the
@@ -139,9 +137,11 @@ async fn request_none_preserves_unbounded_wait_then_delivers() {
 
     // 2) Now deliver a response; the same (still-pending) future must resolve
     //    with the payload — the unbounded path still works end-to-end.
-    let sender = pending
+    let sender = state
+        .pending
         .lock()
         .unwrap()
+        .map
         .remove(&rid)
         .expect("sender present");
     sender
@@ -159,26 +159,28 @@ async fn request_none_preserves_unbounded_wait_then_delivers() {
 /// answered before the deadline: the payload is returned normally.
 #[tokio::test]
 async fn request_timeout_generous_delivers_normally() {
-    let pending = make_pending();
+    let state = make_state();
     let rid: u32 = 11;
     let (tx, rx) = oneshot::channel::<Result<Vec<u8>, ClientError>>();
-    pending.lock().unwrap().insert(rid, tx);
+    state.pending.lock().unwrap().map.insert(rid, tx);
 
     // Answer shortly after the await starts, well within the generous budget.
     let deliver = {
-        let pending = pending.clone();
+        let state = state.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(20)).await;
-            let sender = pending
+            let sender = state
+                .pending
                 .lock()
                 .unwrap()
+                .map
                 .remove(&rid)
                 .expect("sender present");
             sender.send(Ok(b"ok".to_vec())).expect("send");
         })
     };
 
-    let out = await_pending_response(rx, Some(Duration::from_secs(5)), &pending, rid)
+    let out = await_pending_response(rx, Some(Duration::from_secs(5)), &state, rid)
         .await
         .expect("payload");
     assert_eq!(out, b"ok");
