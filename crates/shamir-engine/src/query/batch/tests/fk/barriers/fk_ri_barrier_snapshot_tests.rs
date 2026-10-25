@@ -23,7 +23,7 @@ async fn explicit_snapshot_restrict_race_closed_via_ri_barrier() {
     b.id(1);
     b.insert(
         "ins_parent",
-        write::insert("parent").row(doc().set("id", 1).set("name", "Alice")),
+        write::insert("parent").row(doc().set("id", 1).unwrap().set("name", "Alice").unwrap()),
     );
     execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
         .await
@@ -36,7 +36,13 @@ async fn explicit_snapshot_restrict_race_closed_via_ri_barrier() {
     wb.id("writer");
     wb.insert(
         "ins_child_race",
-        write::insert("child").row(doc().set("parent_id", 1).set("label", "race")),
+        write::insert("child").row(
+            doc()
+                .set("parent_id", 1)
+                .unwrap()
+                .set("label", "race")
+                .unwrap(),
+        ),
     );
     *resolver.writer.lock().await = Some(InjectedWriter {
         req: wb.build(),
@@ -133,7 +139,7 @@ async fn quiescent_explicit_snapshot_restrict_delete_does_not_spuriously_abort()
         b.id(1);
         b.insert(
             "ins_parent",
-            write::insert("parent").row(doc().set("id", 1).set("name", "Alice")),
+            write::insert("parent").row(doc().set("id", 1).unwrap().set("name", "Alice").unwrap()),
         );
         execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
             .await
@@ -227,7 +233,7 @@ async fn run_explicit_snapshot_delete_race(action: FkAction, writer_parent_id: i
     b.id(1);
     b.insert(
         "ins_parent",
-        write::insert("parent").row(doc().set("id", 1).set("name", "Alice")),
+        write::insert("parent").row(doc().set("id", 1).unwrap().set("name", "Alice").unwrap()),
     );
     execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
         .await
@@ -242,7 +248,9 @@ async fn run_explicit_snapshot_delete_race(action: FkAction, writer_parent_id: i
         write::insert("child").row(
             doc()
                 .set("parent_id", writer_parent_id)
-                .set("label", "race"),
+                .unwrap()
+                .set("label", "race")
+                .unwrap(),
         ),
     );
     *resolver.writer.lock().await = Some(InjectedWriter {
@@ -359,7 +367,7 @@ async fn explicit_snapshot_on_update_race_closed_via_ri_barrier() {
     b.id(1);
     b.insert(
         "ins_parent",
-        write::insert("parent").row(doc().set("id", 1).set("name", "Alice")),
+        write::insert("parent").row(doc().set("id", 1).unwrap().set("name", "Alice").unwrap()),
     );
     execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
         .await
@@ -379,7 +387,13 @@ async fn explicit_snapshot_on_update_race_closed_via_ri_barrier() {
     wb.id("writer");
     wb.insert(
         "ins_child_race",
-        write::insert("child").row(doc().set("parent_id", 999).set("label", "race")),
+        write::insert("child").row(
+            doc()
+                .set("parent_id", 999)
+                .unwrap()
+                .set("label", "race")
+                .unwrap(),
+        ),
     );
     *resolver.writer.lock().await = Some(InjectedWriter {
         req: wb.build(),
@@ -401,7 +415,7 @@ async fn explicit_snapshot_on_update_race_closed_via_ri_barrier() {
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 1))
-            .set(doc().set("id", 2)),
+            .set(doc().set("id", 2).unwrap()),
     )
     .unwrap();
     let exec_resp = execute_in_open_tx(
@@ -471,7 +485,7 @@ async fn quiescent_explicit_snapshot_cascade_delete_does_not_spuriously_abort() 
         b.id(1);
         b.insert(
             "ins_parent",
-            write::insert("parent").row(doc().set("id", 1).set("name", "Alice")),
+            write::insert("parent").row(doc().set("id", 1).unwrap().set("name", "Alice").unwrap()),
         );
         execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
             .await
@@ -527,7 +541,7 @@ async fn quiescent_explicit_snapshot_set_null_delete_does_not_spuriously_abort()
         b.id(1);
         b.insert(
             "ins_parent",
-            write::insert("parent").row(doc().set("id", 1).set("name", "Alice")),
+            write::insert("parent").row(doc().set("id", 1).unwrap().set("name", "Alice").unwrap()),
         );
         execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
             .await
@@ -583,7 +597,7 @@ async fn quiescent_explicit_snapshot_on_update_does_not_spuriously_abort() {
         b.id(1);
         b.insert(
             "ins_parent",
-            write::insert("parent").row(doc().set("id", 1).set("name", "Alice")),
+            write::insert("parent").row(doc().set("id", 1).unwrap().set("name", "Alice").unwrap()),
         );
         execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
             .await
@@ -602,7 +616,7 @@ async fn quiescent_explicit_snapshot_on_update_does_not_spuriously_abort() {
             "upd_parent",
             write::update("parent")
                 .where_(filter::eq("id", 1))
-                .set(doc().set("id", 2)),
+                .set(doc().set("id", 2).unwrap()),
         )
         .unwrap();
         let exec_resp = execute_in_open_tx(

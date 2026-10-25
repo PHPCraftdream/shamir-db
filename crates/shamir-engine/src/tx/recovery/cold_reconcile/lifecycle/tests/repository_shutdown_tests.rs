@@ -259,7 +259,8 @@ async fn never_installed_worker_flushes_and_checkpoints_committed_horizon() {
     );
     let table = repo.get_table("items").await.unwrap();
     let interner = table.interner().get().await.unwrap();
-    let value = query_value_to_inner(&doc().set("name", "value").build(), interner).unwrap();
+    let value =
+        query_value_to_inner(&doc().set("name", "value").unwrap().build(), interner).unwrap();
     let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     table.insert_tx(&value, Some(&mut tx)).await.unwrap();
     repo.commit_tx(tx).await.unwrap();

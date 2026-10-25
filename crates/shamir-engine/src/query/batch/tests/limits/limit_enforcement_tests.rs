@@ -105,7 +105,10 @@ async fn limit_enforcement_loop_rejects_before_first_iteration() {
         max_iterations: usize::MAX,
         ..BatchLimits::default()
     });
-    body.insert("ins", insert("users").row(doc().set("name", "unexpected")));
+    body.insert(
+        "ins",
+        insert("users").row(doc().set("name", "unexpected").unwrap()),
+    );
     let mut batch = Batch::new();
     batch.limits(BatchLimits {
         max_iterations: 2,

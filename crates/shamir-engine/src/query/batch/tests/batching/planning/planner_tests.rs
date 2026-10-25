@@ -377,7 +377,13 @@ fn test_plan_insert_operation() {
     b.id(1);
     b.insert(
         "insert_user",
-        write::insert("users").row(doc().set("name", "Alice").set("email", "alice@example.com")),
+        write::insert("users").row(
+            doc()
+                .set("name", "Alice")
+                .unwrap()
+                .set("email", "alice@example.com")
+                .unwrap(),
+        ),
     );
     let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
@@ -401,7 +407,7 @@ fn test_plan_update_operation() {
                 "user_id",
                 users.first().field("id"),
             ))
-            .set(doc().set("status", "processed")),
+            .set(doc().set("status", "processed").unwrap()),
     )
     .unwrap();
     let request = b.build();
@@ -424,8 +430,8 @@ fn test_plan_set_operation() {
     b.try_upsert(
         "set_user",
         write::upsert("users")
-            .key(doc().set("id", users.first().field("id")).build())
-            .value(doc().set("status", "updated").build()),
+            .key(doc().set("id", users.first().field("id")).unwrap().build())
+            .value(doc().set("status", "updated").unwrap().build()),
     )
     .unwrap();
     let request = b.build();
@@ -473,11 +479,13 @@ fn test_plan_set_with_value_reference() {
     b.try_upsert(
         "set_target",
         write::upsert("target_table")
-            .key(doc().set("id", 1).build())
+            .key(doc().set("id", 1).unwrap().build())
             .value(
                 doc()
                     .set("name", source.first().field("name"))
+                    .unwrap()
                     .set("status", "copied")
+                    .unwrap()
                     .build(),
             ),
     )
@@ -500,7 +508,9 @@ fn test_plan_insert_with_value_reference() {
         write::insert("orders").row(
             doc()
                 .set("user_id", user.first().field("id"))
-                .set("product", "Widget"),
+                .unwrap()
+                .set("product", "Widget")
+                .unwrap(),
         ),
     );
     let request = b.build();
@@ -519,13 +529,19 @@ fn test_plan_mixed_read_and_write() {
     b.query("products", Query::from("products"));
     b.insert(
         "insert_order",
-        write::insert("orders").row(doc().set("user_id", 1).set("product_id", 1)),
+        write::insert("orders").row(
+            doc()
+                .set("user_id", 1)
+                .unwrap()
+                .set("product_id", 1)
+                .unwrap(),
+        ),
     );
     b.try_update(
         "update_inventory",
         write::update("inventory")
             .where_(shamir_query_builder::filter::eq("product_id", 1))
-            .set(doc().set("quantity", 0)),
+            .set(doc().set("quantity", 0).unwrap()),
     )
     .unwrap();
     let request = b.build();
@@ -541,7 +557,7 @@ fn test_plan_update_without_filter() {
     b.id(1);
     b.try_update(
         "update_all",
-        write::update("users").set(doc().set("status", "active")),
+        write::update("users").set(doc().set("status", "active").unwrap()),
     )
     .unwrap();
     let request = b.build();
@@ -557,20 +573,20 @@ fn test_plan_write_operations_serialization() {
     b.id(1);
     b.insert(
         "insert",
-        write::insert("users").row(doc().set("name", "Test")),
+        write::insert("users").row(doc().set("name", "Test").unwrap()),
     );
     b.try_update(
         "update",
         write::update("users")
             .where_(shamir_query_builder::filter::eq("name", "Test"))
-            .set(doc().set("name", "Updated")),
+            .set(doc().set("name", "Updated").unwrap()),
     )
     .unwrap();
     b.try_upsert(
         "set",
         write::upsert("users")
-            .key(doc().set("id", 1).build())
-            .value(doc().set("name", "Set").build()),
+            .key(doc().set("id", 1).unwrap().build())
+            .value(doc().set("name", "Set").unwrap().build()),
     )
     .unwrap();
     b.try_delete(
@@ -596,7 +612,10 @@ fn test_after_orders_into_later_stage() {
     let mut b = Batch::new();
     b.id(1);
     let a = b.create_table("a", ddl::create_table("users").repo("main"));
-    let rows = b.insert("b", write::insert("users").row(doc().set("name", "Alice")));
+    let rows = b.insert(
+        "b",
+        write::insert("users").row(doc().set("name", "Alice").unwrap()),
+    );
     b.after(&rows, &a);
     let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
@@ -711,7 +730,10 @@ fn edge_provenance_pure_after_is_explicit() {
     let mut b = Batch::new();
     b.id(1);
     let a = b.create_table("a", ddl::create_table("users").repo("main"));
-    let rows = b.insert("b", write::insert("users").row(doc().set("name", "Alice")));
+    let rows = b.insert(
+        "b",
+        write::insert("users").row(doc().set("name", "Alice").unwrap()),
+    );
     b.after(&rows, &a);
     let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();

@@ -68,8 +68,8 @@ async fn user_scalar_in_where_filter() {
     b.op_silent(
         "ins",
         insert("users")
-            .row(doc().set("name", "alice").set("age", 30))
-            .row(doc().set("name", "bob").set("age", 25)),
+            .row(doc().set("name", "alice").unwrap().set("age", 30).unwrap())
+            .row(doc().set("name", "bob").unwrap().set("age", 25).unwrap()),
     );
     run(&shamir, b).await;
 
@@ -117,7 +117,10 @@ async fn trusted_pure_scalar_backs_functional_index() {
     // Insert a record BEFORE creating the index.
     let mut b = Batch::new();
     b.id(1);
-    b.op_silent("ins", insert("users").row(doc().set("name", "alice")));
+    b.op_silent(
+        "ins",
+        insert("users").row(doc().set("name", "alice").unwrap()),
+    );
     run(&shamir, b).await;
 
     // Create a functional index backed by the trusted_pure scalar.
@@ -141,7 +144,10 @@ async fn trusted_pure_scalar_backs_functional_index() {
     // FunctionalBackend eval path with IndexExpr::Scalar).
     let mut b = Batch::new();
     b.id(1);
-    b.op_silent("ins2", insert("users").row(doc().set("name", "bob")));
+    b.op_silent(
+        "ins2",
+        insert("users").row(doc().set("name", "bob").unwrap()),
+    );
     run(&shamir, b).await;
 
     // Query using Computed filter to probe the functional index.
@@ -241,7 +247,10 @@ async fn builtin_functional_index_survives_reopen() {
 
         let mut b = Batch::new();
         b.id(2);
-        b.op_silent("ins", insert("users").row(doc().set("name", "Alice")));
+        b.op_silent(
+            "ins",
+            insert("users").row(doc().set("name", "Alice").unwrap()),
+        );
         run(&shamir, b).await;
     }
 
@@ -251,7 +260,10 @@ async fn builtin_functional_index_survives_reopen() {
     // Insert another record (exercises FunctionalBackend eval on reopen).
     let mut b = Batch::new();
     b.id(3);
-    b.op_silent("ins", insert("users").row(doc().set("name", "Bob")));
+    b.op_silent(
+        "ins",
+        insert("users").row(doc().set("name", "Bob").unwrap()),
+    );
     let req = b.to_request_via_msgpack();
     let result = shamir.execute("testdb", &req).await;
     assert!(
@@ -325,7 +337,10 @@ async fn user_scalar_index_fails_closed_before_re_register() {
 
         let mut b = Batch::new();
         b.id(2);
-        b.op_silent("ins", insert("users").row(doc().set("name", "alice")));
+        b.op_silent(
+            "ins",
+            insert("users").row(doc().set("name", "alice").unwrap()),
+        );
         run(&shamir, b).await;
     }
 
@@ -337,7 +352,10 @@ async fn user_scalar_index_fails_closed_before_re_register() {
     // return a loud error, NOT silently produce a Null index key.
     let mut b = Batch::new();
     b.id(3);
-    b.op_silent("ins", insert("users").row(doc().set("name", "bob")));
+    b.op_silent(
+        "ins",
+        insert("users").row(doc().set("name", "bob").unwrap()),
+    );
     let req = b.to_request_via_msgpack();
     let result = shamir.execute("testdb", &req).await;
 
@@ -394,7 +412,10 @@ async fn user_scalar_index_works_after_re_register() {
 
         let mut b = Batch::new();
         b.id(2);
-        b.op_silent("ins", insert("users").row(doc().set("name", "alice")));
+        b.op_silent(
+            "ins",
+            insert("users").row(doc().set("name", "alice").unwrap()),
+        );
         run(&shamir, b).await;
     }
 
@@ -419,7 +440,10 @@ async fn user_scalar_index_works_after_re_register() {
     // Now insert should work.
     let mut b = Batch::new();
     b.id(3);
-    b.op_silent("ins", insert("users").row(doc().set("name", "bob")));
+    b.op_silent(
+        "ins",
+        insert("users").row(doc().set("name", "bob").unwrap()),
+    );
     let req = b.to_request_via_msgpack();
     let result = shamir.execute("testdb", &req).await;
     assert!(
@@ -511,8 +535,8 @@ async fn builtin_scalar_resolves_with_empty_user_layer() {
     b.op_silent(
         "ins",
         insert("users")
-            .row(doc().set("name", "ALICE"))
-            .row(doc().set("name", "alice")),
+            .row(doc().set("name", "ALICE").unwrap())
+            .row(doc().set("name", "alice").unwrap()),
     );
     run(&shamir, b).await;
 

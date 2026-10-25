@@ -20,7 +20,7 @@ fn when_sets_field_on_entry() {
     let cond = filter::eq("active", true);
     let guarded = b.insert(
         "maybe_insert",
-        write::insert("users").row(doc().set("name", "Alice")),
+        write::insert("users").row(doc().set("name", "Alice").unwrap()),
     );
     b.when(&guarded, cond.clone());
     let _ = &flag;
@@ -40,7 +40,7 @@ fn when_wire_serialization_round_trips() {
     let cond = filter::eq("active", true);
     let guarded = b.insert(
         "maybe_insert",
-        write::insert("users").row(doc().set("name", "Alice")),
+        write::insert("users").row(doc().set("name", "Alice").unwrap()),
     );
     b.when(&guarded, cond);
 
@@ -61,7 +61,7 @@ fn when_absent_is_omitted_from_wire() {
     let mut b = Batch::new();
     b.insert(
         "unconditional",
-        write::insert("users").row(doc().set("name", "Bob")),
+        write::insert("users").row(doc().set("name", "Bob").unwrap()),
     );
 
     let qv = b.build().to_query_value().unwrap();
@@ -82,7 +82,7 @@ fn try_build_catches_unknown_alias_inside_when() {
     let mut b = Batch::new();
     let guarded = b.insert(
         "maybe_insert",
-        write::insert("users").row(doc().set("name", "Alice")),
+        write::insert("users").row(doc().set("name", "Alice").unwrap()),
     );
     let bad_ref = Filter::Eq {
         field: vec!["x".to_string()],
@@ -110,7 +110,7 @@ fn try_build_catches_self_reference_inside_when() {
     let mut b = Batch::new();
     let guarded = b.insert(
         "maybe_insert",
-        write::insert("users").row(doc().set("name", "Alice")),
+        write::insert("users").row(doc().set("name", "Alice").unwrap()),
     );
     let self_ref = Filter::Eq {
         field: vec!["x".to_string()],
@@ -139,7 +139,7 @@ fn try_build_accepts_when_referencing_known_alias() {
     };
     let guarded = b.insert(
         "maybe_insert",
-        write::insert("users").row(doc().set("name", "Alice")),
+        write::insert("users").row(doc().set("name", "Alice").unwrap()),
     );
     b.when(&guarded, cond);
 
@@ -161,17 +161,17 @@ fn switch_generates_complementary_when_filters_for_two_cases_and_default() {
             (
                 "vip_email",
                 case1.clone(),
-                write::insert("emails").row(doc().set("kind", "vip")),
+                write::insert("emails").row(doc().set("kind", "vip").unwrap()),
             ),
             (
                 "regular_email",
                 case2.clone(),
-                write::insert("emails").row(doc().set("kind", "regular")),
+                write::insert("emails").row(doc().set("kind", "regular").unwrap()),
             ),
         ],
         (
             "newbie_email",
-            write::insert("emails").row(doc().set("kind", "newbie")),
+            write::insert("emails").row(doc().set("kind", "newbie").unwrap()),
         ),
     );
 
@@ -221,11 +221,11 @@ fn switch_single_case_plus_default_generates_simple_complementary_guards() {
         vec![(
             "when_active",
             case1.clone(),
-            write::insert("log").row(doc().set("msg", "active")),
+            write::insert("log").row(doc().set("msg", "active").unwrap()),
         )],
         (
             "when_inactive",
-            write::insert("log").row(doc().set("msg", "inactive")),
+            write::insert("log").row(doc().set("msg", "inactive").unwrap()),
         ),
     );
     assert_eq!(handles.len(), 2);
@@ -263,27 +263,27 @@ fn switch_four_cases_plus_default_accumulates_full_not_or_chain() {
             (
                 "vip_email",
                 case1.clone(),
-                write::insert("emails").row(doc().set("kind", "vip")),
+                write::insert("emails").row(doc().set("kind", "vip").unwrap()),
             ),
             (
                 "regular_email",
                 case2.clone(),
-                write::insert("emails").row(doc().set("kind", "regular")),
+                write::insert("emails").row(doc().set("kind", "regular").unwrap()),
             ),
             (
                 "trial_email",
                 case3.clone(),
-                write::insert("emails").row(doc().set("kind", "trial")),
+                write::insert("emails").row(doc().set("kind", "trial").unwrap()),
             ),
             (
                 "guest_email",
                 case4.clone(),
-                write::insert("emails").row(doc().set("kind", "guest")),
+                write::insert("emails").row(doc().set("kind", "guest").unwrap()),
             ),
         ],
         (
             "default_email",
-            write::insert("emails").row(doc().set("kind", "default")),
+            write::insert("emails").row(doc().set("kind", "default").unwrap()),
         ),
     );
 
@@ -379,11 +379,11 @@ fn switch_entries_participate_in_try_build_validation() {
         vec![(
             "when_active",
             filter::eq("active", true),
-            write::insert("emails").row(doc().set("kind", "active")),
+            write::insert("emails").row(doc().set("kind", "active").unwrap()),
         )],
         (
             "when_inactive",
-            write::insert("emails").row(doc().set("kind", "inactive")),
+            write::insert("emails").row(doc().set("kind", "inactive").unwrap()),
         ),
     );
 

@@ -265,7 +265,7 @@ async fn intermediate_write_is_charged_before_transaction_commit() {
         if transactional {
             batch.transactional();
         }
-        batch.op_silent("write", insert("sink").row(doc().set("id", 7)));
+        batch.op_silent("write", insert("sink").row(doc().set("id", 7).unwrap()));
         let request = batch.build();
         let scope = ExecScope::root_with_result_size(&request.limits, true);
         let version = resolver.0.current_commit_version().await.unwrap();

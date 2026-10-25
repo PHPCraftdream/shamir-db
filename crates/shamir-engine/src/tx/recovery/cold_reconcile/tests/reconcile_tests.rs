@@ -96,6 +96,7 @@ async fn seeded_retention_repo(path: &std::path::Path, action: RetentionOverflow
             .unwrap();
         let user_record = doc()
             .set("payload", format!("row-{i}-{}", "x".repeat(512)))
+            .unwrap()
             .build();
         let table = repo.get_table("items").await.unwrap();
         let interner = table.interner().get().await.unwrap();
@@ -230,7 +231,7 @@ fn reconcile_crash_child_entrypoint() {
             .expect("open live-commit child repo");
             repo.disable_background_drainer_for_test();
             let table = repo.get_table("items").await.unwrap();
-            let user_record = doc().set("payload", "crash-row").build();
+            let user_record = doc().set("payload", "crash-row").unwrap().build();
             let interner = table.interner().get().await.unwrap();
             let record = query_value_to_inner(&user_record, interner).unwrap();
             let (mut tx, _guard) = repo

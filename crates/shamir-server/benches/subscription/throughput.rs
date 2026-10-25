@@ -230,7 +230,9 @@ async fn run_iter(mut state: IterState) {
             insert("messages").row(
                 doc! { "_id" => format!("k{i}") }
                     .set("thread_id", 42_i64)
-                    .set("body", format!("msg-{i}")),
+                    .unwrap()
+                    .set("body", format!("msg-{i}"))
+                    .unwrap(),
             ),
         );
         let _ = state

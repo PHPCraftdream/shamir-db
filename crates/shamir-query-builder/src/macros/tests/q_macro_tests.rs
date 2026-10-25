@@ -448,7 +448,13 @@ fn q_insert_single_row() {
         "age" => 30
     });
     let from_builder = write::insert("users")
-        .row(write::doc().set("name", "Alice").set("age", 30))
+        .row(
+            write::doc()
+                .set("name", "Alice")
+                .unwrap()
+                .set("age", 30)
+                .unwrap(),
+        )
         .build();
     assert_same_wire_value(&from_macro, &from_builder);
 }
@@ -463,8 +469,20 @@ fn q_insert_multiple_rows() {
         "age" => 25
     });
     let from_builder = write::insert("users")
-        .row(write::doc().set("name", "Alice").set("age", 30))
-        .row(write::doc().set("name", "Bob").set("age", 25))
+        .row(
+            write::doc()
+                .set("name", "Alice")
+                .unwrap()
+                .set("age", 30)
+                .unwrap(),
+        )
+        .row(
+            write::doc()
+                .set("name", "Bob")
+                .unwrap()
+                .set("age", 25)
+                .unwrap(),
+        )
         .build();
     assert_same_wire_value(&from_macro, &from_builder);
 }
@@ -481,7 +499,9 @@ fn q_insert_with_computed_field() {
         .row(
             write::doc()
                 .set("email", "Alice@X.COM")
-                .set("email_norm", func("strings/lower", [col("email")])),
+                .unwrap()
+                .set("email_norm", func("strings/lower", [col("email")]))
+                .unwrap(),
         )
         .build();
     assert_same_wire_value(&from_macro, &from_builder);
@@ -493,7 +513,7 @@ fn q_insert_repo_qualified() {
         "name" => "Alice"
     });
     let from_builder = write::Insert::with_repo("main", "users")
-        .row(write::doc().set("name", "Alice"))
+        .row(write::doc().set("name", "Alice").unwrap())
         .build();
     assert_same_wire_value(&from_macro, &from_builder);
 }
@@ -508,7 +528,7 @@ fn q_update_with_complex_where() {
     )
     .unwrap();
     let from_builder = write::update("users")
-        .set(write::doc().set("tier", "gold"))
+        .set(write::doc().set("tier", "gold").unwrap())
         .where_(filter_mod::and([
             filter_mod::gt("total", 1000),
             filter_mod::not(filter_mod::is_null("email")),
@@ -522,7 +542,7 @@ fn q_update_with_complex_where() {
 fn q_update_without_where() {
     let from_macro = q!(update users set { "active" => false }).unwrap();
     let from_builder = write::update("users")
-        .set(write::doc().set("active", false))
+        .set(write::doc().set("active", false).unwrap())
         .build()
         .unwrap();
     assert_same_wire_value(&from_macro, &from_builder);
@@ -562,8 +582,8 @@ fn q_upsert_key_value() {
     )
     .unwrap();
     let from_builder = write::upsert("cache")
-        .key(write::doc().set("id", "k1"))
-        .value(write::doc().set("v", 42))
+        .key(write::doc().set("id", "k1").unwrap())
+        .value(write::doc().set("v", 42).unwrap())
         .build()
         .unwrap();
     assert_same_wire_value(&from_macro, &from_builder);
@@ -582,7 +602,7 @@ fn q_write_composes_into_batch() {
     batch_builder.insert(
         "a",
         write::insert("users")
-            .row(write::doc().set("name", "Alice"))
+            .row(write::doc().set("name", "Alice").unwrap())
             .build(),
     );
 
@@ -689,7 +709,13 @@ fn q_insert_trailing_comma() {
         "age" => 30,
     });
     let from_builder = write::insert("users")
-        .row(write::doc().set("name", "Alice").set("age", 30))
+        .row(
+            write::doc()
+                .set("name", "Alice")
+                .unwrap()
+                .set("age", 30)
+                .unwrap(),
+        )
         .build();
     assert_same_wire_value(&from_macro, &from_builder);
 }

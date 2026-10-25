@@ -95,7 +95,8 @@ pub(in super::super) fn run(h: &mut Harness) {
         seed.id(1);
         seed.insert(
             "ins_parent",
-            write::insert("bench_parent").row(doc().set("id", 1).set("name", "seed")),
+            write::insert("bench_parent")
+                .row(doc().set("id", 1).unwrap().set("name", "seed").unwrap()),
         );
         let resolver = FkChildBenchResolver { repo: repo.clone() };
         execute_batch(&seed.build(), &resolver, None, None, Actor::System, "bench")
@@ -158,7 +159,9 @@ pub(in super::super) fn run(h: &mut Harness) {
                                 write::insert("bench_child").row(
                                     doc()
                                         .set("parent_id", 1)
-                                        .set("label", format!("v_{}_{}", base, i)),
+                                        .unwrap()
+                                        .set("label", format!("v_{}_{}", base, i))
+                                        .unwrap(),
                                 ),
                             );
                         }

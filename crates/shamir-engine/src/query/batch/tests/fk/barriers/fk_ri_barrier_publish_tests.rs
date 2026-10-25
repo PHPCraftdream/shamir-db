@@ -69,7 +69,7 @@ async fn run_concurrent_publish_during_commit_window_delete(
     b.id(1);
     b.insert(
         "ins_parent",
-        write::insert("parent").row(doc().set("id", 1).set("name", "Alice")),
+        write::insert("parent").row(doc().set("id", 1).unwrap().set("name", "Alice").unwrap()),
     );
     execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
         .await
@@ -145,7 +145,13 @@ async fn run_concurrent_publish_during_commit_window_delete(
     wb.id("writer");
     wb.insert(
         "ins_child_race",
-        write::insert("child").row(doc().set("parent_id", 1).set("label", "race")),
+        write::insert("child").row(
+            doc()
+                .set("parent_id", 1)
+                .unwrap()
+                .set("label", "race")
+                .unwrap(),
+        ),
     );
     let writer_resolver = TxTestResolver { repo: repo.clone() };
     let writer_task = tokio::spawn(async move {
@@ -292,7 +298,7 @@ async fn run_concurrent_publish_during_commit_window_on_update() -> ConcurrentPu
     b.id(1);
     b.insert(
         "ins_parent",
-        write::insert("parent").row(doc().set("id", 1).set("name", "Alice")),
+        write::insert("parent").row(doc().set("id", 1).unwrap().set("name", "Alice").unwrap()),
     );
     execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
         .await
@@ -320,7 +326,7 @@ async fn run_concurrent_publish_during_commit_window_on_update() -> ConcurrentPu
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 1))
-            .set(doc().set("id", 2)),
+            .set(doc().set("id", 2).unwrap()),
     )
     .unwrap();
     let exec_resp = execute_in_open_tx(
@@ -363,7 +369,13 @@ async fn run_concurrent_publish_during_commit_window_on_update() -> ConcurrentPu
     wb.id("writer");
     wb.insert(
         "ins_child_race",
-        write::insert("child").row(doc().set("parent_id", 999).set("label", "race")),
+        write::insert("child").row(
+            doc()
+                .set("parent_id", 999)
+                .unwrap()
+                .set("label", "race")
+                .unwrap(),
+        ),
     );
     let writer_resolver = TxTestResolver { repo: repo.clone() };
     let writer_task = tokio::spawn(async move {

@@ -767,7 +767,7 @@ async fn pessimistic_batch_timeout_releases_level3_locks_for_subsequent_tx() {
         QueryEntry {
             op: BatchOp::Update(
                 write::update("users")
-                    .set(doc().set("v", 10_i64))
+                    .set(doc().set("v", 10_i64).unwrap())
                     .where_(filter::eq("k", 1_i64))
                     .build()
                     .unwrap(),
@@ -854,7 +854,7 @@ async fn pessimistic_batch_timeout_releases_level3_locks_for_subsequent_tx() {
         QueryEntry {
             op: BatchOp::Update(
                 write::update("users")
-                    .set(doc().set("v", 99_i64))
+                    .set(doc().set("v", 99_i64).unwrap())
                     .where_(filter::eq("k", 1_i64))
                     .build()
                     .unwrap(),
