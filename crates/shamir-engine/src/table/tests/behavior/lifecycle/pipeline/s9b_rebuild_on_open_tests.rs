@@ -171,15 +171,15 @@ async fn s9b_current_marker_skips_repair() {
     assert!(t1.verify().await.unwrap().is_healthy());
     drop(t1);
 
-    // Reopen — marker stays 2, table stays healthy.
+    // Reopen — marker stays current, table stays healthy.
     let t2 = TableManager::create("t".into(), Arc::clone(&data), Arc::clone(&info))
         .await
         .unwrap();
 
     assert_eq!(
         load_legacy_index_version(&info).await.unwrap(),
-        2,
-        "marker must stay 2 when already current"
+        LEGACY_INDEX_FORMAT_VERSION,
+        "marker must stay current when already current"
     );
     assert!(
         t2.verify().await.unwrap().is_healthy(),

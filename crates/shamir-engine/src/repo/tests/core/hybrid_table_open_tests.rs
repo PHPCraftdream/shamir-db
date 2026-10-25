@@ -344,7 +344,7 @@ async fn create_does_not_error_or_panic_across_restart() {
         .await
         .unwrap();
     assert_eq!(
-        stamped_after, 2,
+        stamped_after, LEGACY_INDEX_FORMAT_VERSION,
         "marker survives restart and stays current — no wasted repair() re-stamp"
     );
 
