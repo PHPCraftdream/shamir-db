@@ -30,6 +30,14 @@ pub enum MetaError {
     Encode(String),
 }
 
+/// Leading header fields only — deserialized first so a future version
+/// reports `UnsupportedVersion`, not a misleading payload decode error.
+#[derive(Deserialize)]
+struct MetaEnvelopeHeader {
+    magic: [u8; 4],
+    version: u16,
+}
+
 impl<T> MetaEnvelope<T>
 where
     T: Serialize + for<'de> Deserialize<'de>,
@@ -52,17 +60,21 @@ where
     }
 
     pub fn open(bytes: &[u8]) -> Result<T, MetaError> {
-        let env: MetaEnvelope<T> =
+        // Header-first so a future version reports UnsupportedVersion,
+        // not a misleading payload Decode under today's schema.
+        let header: MetaEnvelopeHeader =
             bincode::deserialize(bytes).map_err(|e| MetaError::Decode(e.to_string()))?;
-        if env.magic != ENVELOPE_MAGIC {
+        if header.magic != ENVELOPE_MAGIC {
             return Err(MetaError::BadMagic {
                 expected: ENVELOPE_MAGIC,
-                got: env.magic,
+                got: header.magic,
             });
         }
-        if env.version != ENVELOPE_VERSION {
-            return Err(MetaError::UnsupportedVersion(env.version));
+        if header.version != ENVELOPE_VERSION {
+            return Err(MetaError::UnsupportedVersion(header.version));
         }
+        let env: MetaEnvelope<T> =
+            bincode::deserialize(bytes).map_err(|e| MetaError::Decode(e.to_string()))?;
         Ok(env.payload)
     }
 }

@@ -157,4 +157,24 @@ pub mod instance_defaults {
     /// V4.2 (#408) — minimum live vector count to trigger compaction. Tiny
     /// indexes (< 1000 live) are not worth the rebuild cost.
     pub const VECTOR_COMPACTION_MIN_LIVE: usize = 1000;
+
+    /// Env var name honoured at startup for `VECTOR_SNAPSHOT_DELTA_THRESHOLD`.
+    pub const VECTOR_SNAPSHOT_DELTA_THRESHOLD_ENV: &str = "SHAMIR_VECTOR_SNAPSHOT_DELTA_THRESHOLD";
+
+    /// Pure so tests can cover the parse policy without touching process-global
+    /// env: trimmed u64 parse, else fall back to the compiled-in default.
+    pub fn parse_vector_snapshot_delta_threshold(raw: Option<&str>) -> u64 {
+        raw.and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(VECTOR_SNAPSHOT_DELTA_THRESHOLD)
+    }
+
+    /// Startup read of the snapshot-delta-threshold override; keeps the env
+    /// name in one place so the doc claim and the read cannot diverge.
+    pub fn vector_snapshot_delta_threshold() -> u64 {
+        parse_vector_snapshot_delta_threshold(
+            std::env::var(VECTOR_SNAPSHOT_DELTA_THRESHOLD_ENV)
+                .ok()
+                .as_deref(),
+        )
+    }
 }

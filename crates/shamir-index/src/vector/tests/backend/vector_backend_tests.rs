@@ -49,6 +49,35 @@ fn make_backend(interner: &Interner) -> VectorBackend {
     VectorBackend::new(desc, vec![intern(interner, "embedding")], adapter)
 }
 
+/// RV-TUNABLES-A3D3695D: PRODUCTION construction (`VectorBackend::new`) must
+/// honour the documented `SHAMIR_VECTOR_SNAPSHOT_DELTA_THRESHOLD` startup
+/// override; an unset/garbage value falls back to the compiled-in default.
+/// Fails if backend initialisation goes back to the compiled-in constant or
+/// the env helper stops reading the variable. (Tests run one per process
+/// under nextest, so the process-global env write cannot leak.)
+#[tokio::test]
+async fn rv_tunables_a3d3695d_backend_new_reads_snapshot_threshold_env() {
+    use shamir_tunables::instance_defaults::{
+        VECTOR_SNAPSHOT_DELTA_THRESHOLD, VECTOR_SNAPSHOT_DELTA_THRESHOLD_ENV,
+    };
+    let i = Interner::new();
+
+    std::env::set_var(VECTOR_SNAPSHOT_DELTA_THRESHOLD_ENV, "1234");
+    assert_eq!(make_backend(&i).snapshot_threshold_for_test(), 1234);
+
+    std::env::set_var(VECTOR_SNAPSHOT_DELTA_THRESHOLD_ENV, "not-a-number");
+    assert_eq!(
+        make_backend(&i).snapshot_threshold_for_test(),
+        VECTOR_SNAPSHOT_DELTA_THRESHOLD
+    );
+
+    std::env::remove_var(VECTOR_SNAPSHOT_DELTA_THRESHOLD_ENV);
+    assert_eq!(
+        make_backend(&i).snapshot_threshold_for_test(),
+        VECTOR_SNAPSHOT_DELTA_THRESHOLD
+    );
+}
+
 #[tokio::test]
 async fn insert_and_search() {
     let i = Interner::new();
