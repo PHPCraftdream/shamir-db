@@ -9,7 +9,10 @@ use std::task::{Context, Poll};
 
 use tokio::io::{AsyncRead, AsyncWriteExt, ReadBuf};
 
-use crate::framing::{read_frame_into, FrameError, MAX_FRAME_SIZE_DEFAULT};
+use crate::framing::{
+    read_frame_into, write_frame, write_frame_into, write_frame_prereserved, FrameError,
+    MAX_FRAME_SIZE_DEFAULT,
+};
 
 /// Serves a 4-byte length prefix, then records whether the destination
 /// slice it is handed for the payload is all zeroes before writing into it.
@@ -136,4 +139,48 @@ async fn rv_client_d4d604ca_cancelled_partial_read_leaves_only_peer_bytes_and_ze
         .await
         .expect("reuse after cancel");
     assert_eq!(buf, b"fresh");
+}
+
+/// Regression test for card RV-TRANSPORT-TCP-3A576732: a zero-length payload
+/// passed to the framing writers used to silently emit a 4-byte zero length
+/// on the wire, which readers interpret as the graceful-close sentinel. All
+/// writers must reject empty payloads with [`FrameError::EmptyPayload`]
+/// instead of encoding them.
+#[tokio::test]
+async fn rv_transport_tcp_3a576732_empty_write_rejected_not_close_sentinel() {
+    let (mut tx, mut rx) = tokio::io::duplex(64);
+    let err = write_frame(&mut tx, b"").await.expect_err("write_frame");
+    match err {
+        FrameError::EmptyPayload => {}
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    let mut scratch = Vec::with_capacity(64);
+    let err = write_frame_into(&mut tx, b"", &mut scratch)
+        .await
+        .expect_err("write_frame_into");
+    match err {
+        FrameError::EmptyPayload => {}
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    let err = write_frame_prereserved(&mut tx, &[0, 0, 0, 0])
+        .await
+        .expect_err("write_frame_prereserved");
+    match err {
+        FrameError::EmptyPayload => {}
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    // Nothing may have been written to the wire: the read side must see EOF
+    // with zero bytes (dropping `tx` closes it).
+    drop(tx);
+    let mut sink = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut rx, &mut sink)
+        .await
+        .expect("read_to_end");
+    assert!(
+        sink.is_empty(),
+        "writers emitted bytes for an empty payload"
+    );
 }

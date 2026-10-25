@@ -111,3 +111,125 @@ async fn rv_transport_ipc_eff55124_aborted_accept_leaves_listener_usable() {
 
     server_handle.await.expect("server task");
 }
+
+/// RV-TRANSPORT-IPC-07D10AFD: driving `accept` through an injected
+/// replacement-creation failure must return the error AND leave the
+/// listener usable — the pending instance is restored, so the next
+/// `accept` still serves a real client.
+#[tokio::test]
+async fn rv_transport_ipc_07d10afd_accept_error_keeps_listener_usable() {
+    let name = test_pipe_name("07d10afd");
+    let mut listener = IpcListener::bind(&name).await.expect("bind");
+
+    let err = listener
+        .accept_with(|_, _| Err(std::io::Error::other("injected create failure")))
+        .await
+        .expect_err("injected failure must propagate");
+    assert_eq!(
+        err.to_string(),
+        "injected create failure",
+        "the injected error must surface verbatim"
+    );
+
+    // The restored pending instance must still serve a client.
+    let client_name = name.clone();
+    let server = tokio::spawn(async move {
+        let mut stream = listener.accept().await.expect("accept after error");
+        let mut buf = [0u8; 4];
+        stream.read_exact(&mut buf).await.expect("server read");
+        assert_eq!(&buf, b"ping");
+    });
+    let mut client = ClientOptions::new()
+        .open(&client_name)
+        .expect("open client");
+    client.write_all(b"ping").await.expect("client write");
+    server.await.expect("server task");
+}
+
+/// RV-TRANSPORT-IPC-466D0307: after a first client consumed the sole
+/// pending instance, a second `connect` must retry on ERROR_PIPE_BUSY and
+/// succeed once the server's `accept` rotates in a fresh instance —
+/// instead of surfacing the BUSY error.
+#[tokio::test]
+async fn rv_transport_ipc_466d0307_connect_retries_on_pipe_busy() {
+    let name = test_pipe_name("466d0307");
+    let mut listener = IpcListener::bind(&name).await.expect("bind");
+
+    // Consume the sole pending instance; the server has not called
+    // `accept` yet, so the pipe namespace is now empty. The client writes
+    // so the server's first accept (against this already-connected
+    // instance) completes deterministically.
+    let mut first = ClientOptions::new().open(&name).expect("first client");
+    first.write_all(b"ping").await.expect("first client write");
+
+    // Precondition: with the sole instance consumed and no `accept` yet, a
+    // raw (non-retrying) open MUST see ERROR_PIPE_BUSY — this is the window
+    // the retry loop closes.
+    let busy = ClientOptions::new()
+        .open(&name)
+        .expect_err("no pending instance: raw open must fail");
+    assert_eq!(busy.raw_os_error(), Some(231), "expected ERROR_PIPE_BUSY");
+
+    // Server: wait for the signal, then accept twice — the first accept
+    // completes instantly against the already-connected first instance and
+    // rotates in the fresh one the retrying client will land on.
+    let (sig_tx, sig_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        sig_rx.await.expect("signal channel");
+        let mut stream = listener.accept().await.expect("first accept");
+        let mut buf = [0u8; 4];
+        stream.read_exact(&mut buf).await.expect("first read");
+        let mut stream = listener.accept().await.expect("second accept");
+        stream.write_all(b"pong").await.expect("second write");
+    });
+
+    let retrying = tokio::spawn(async move {
+        let mut client = crate::connect(&name).await.expect("retrying connect");
+        client.write_all(b"ping").await.expect("client write");
+        let mut buf = [0u8; 4];
+        client.read_exact(&mut buf).await.expect("client read");
+        assert_eq!(&buf, b"pong");
+    });
+
+    // Single-threaded runtime: this yield runs the retrying client up to its
+    // first BUSY retry (it yields inside `connect`) BEFORE the server may
+    // rotate in a replacement, so the client provably hit BUSY first.
+    tokio::task::yield_now().await;
+    sig_tx.send(()).expect("receiver alive");
+
+    server.await.expect("server task");
+    retrying.await.expect("retrying client task");
+}
+
+/// RV-TRANSPORT-IPC-4E8BE4FD: lifecycle pin — while a listener is live, a
+/// second `bind` on the same name must fail (`first_pipe_instance`), and
+/// after the listener is dropped (all handles released) the same name must
+/// be bindable again.
+#[tokio::test]
+async fn rv_transport_ipc_4e8be4fd_drop_releases_pipe_name_for_rebind() {
+    let name = test_pipe_name("4e8be4fd");
+    let listener = IpcListener::bind(&name).await.expect("first bind");
+
+    assert!(
+        IpcListener::bind(&name).await.is_err(),
+        "second live bind on the same pipe name must fail"
+    );
+
+    drop(listener);
+
+    let mut rebound = IpcListener::bind(&name)
+        .await
+        .expect("rebind after drop must succeed");
+    let client_name = name.clone();
+    let server = tokio::spawn(async move {
+        let mut stream = rebound.accept().await.expect("accept on rebound");
+        let mut buf = [0u8; 4];
+        stream.read_exact(&mut buf).await.expect("server read");
+        assert_eq!(&buf, b"ping");
+    });
+    let mut client = ClientOptions::new()
+        .open(&client_name)
+        .expect("open client on rebound");
+    client.write_all(b"ping").await.expect("client write");
+    server.await.expect("server task");
+}

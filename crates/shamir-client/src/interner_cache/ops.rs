@@ -23,7 +23,7 @@ use serde_bytes::ByteBuf;
 use shamir_collections::TFxMap;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
-use shamir_query_types::batch::{BatchOp, BatchRequest, BatchResponse, ResultEncoding};
+use shamir_query_types::batch::{BatchOp, BatchRequest, BatchResponse, QueryEntry, ResultEncoding};
 use shamir_query_types::filter::{Filter, FilterValue};
 use shamir_query_types::read::{QueryRecord, QueryResult};
 use shamir_query_types::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
@@ -350,6 +350,31 @@ impl Client {
         db: &str,
         mut batch: BatchRequest,
     ) -> Result<BatchResponse, ClientError> {
+        // P1 guard (finding: caller-supplied Id encoding) — PREFLIGHT: this
+        // runs BEFORE any per-repo collection and BEFORE every network call,
+        // so a batch with uncached fields can never emit interner-touch
+        // requests (or any other traffic) before the typed rejection. A caller
+        // who EXPLICITLY set `batch.result_encoding = Id` on a batch carrying
+        // `$query`/`$param` refs must not be silently re-sent — under Id
+        // encoding the referenced intermediate becomes an opaque
+        // `QueryRecord::IdBytes` whose `as_value()` is `Null`, so ref
+        // path-resolution breaks (see
+        // `shamir-query-types … query_record.rs` IdBytes handling). Refuse
+        // loudly, naming the FIRST ref-bearing alias (TMap = IndexMap,
+        // insertion order is deterministic). We never rewrite the
+        // caller's explicit encoding.
+        if batch.result_encoding == ResultEncoding::Id {
+            if let Some((alias, _)) = batch
+                .queries
+                .iter()
+                .find(|(_, entry)| query_entry_has_refs(entry))
+            {
+                return Err(ClientError::IdEncodingWithRefs {
+                    alias: alias.clone(),
+                });
+            }
+        }
+
         // Collect field names per repo (write ops only — INSERT/SET/UPDATE).
         // Each repo gets ONE aggregated touch. The repo is read straight off
         // each op's table-ref. TFxMap = HashMap with the workspace THasher
@@ -387,6 +412,8 @@ impl Client {
         // records_idmsgpack and request Id result encoding for transparent
         // server-side pass-through. v1 path: send batch unchanged.
         if self.server_query_version() >= 2 {
+            // (The P1 Id-encoding guard above runs unconditionally at the top
+            // of this function, before any network activity.)
             for entry in batch.queries.values_mut() {
                 if let BatchOp::Insert(ref mut op) = entry.op {
                     let fm = self
@@ -511,7 +538,16 @@ fn qv_has_fn_marker(v: &QueryValue) -> bool {
 ///
 /// Mirrors the TS client's `batchHasRefs`.
 pub(crate) fn batch_has_refs(batch: &BatchRequest) -> bool {
-    batch.queries.values().any(|entry| op_has_refs(&entry.op))
+    batch.queries.values().any(query_entry_has_refs)
+}
+
+/// `true` if a single [`QueryEntry`] carries a `$query`/`$param` ref —
+/// either in its op (RV-CLIENT-5212ED16) or in its `when` guard, which is
+/// evaluated against an empty synthetic record and can legally hold a
+/// `$query` ref to an earlier alias's result. A ref-bearing guard resolves
+/// missing data if that result was encoded as opaque IdBytes.
+fn query_entry_has_refs(entry: &QueryEntry) -> bool {
+    entry.when.as_ref().is_some_and(filter_has_refs) || op_has_refs(&entry.op)
 }
 
 /// `true` if a single [`BatchOp`] carries a `$query`/`$param` ref or a
@@ -527,6 +563,12 @@ fn op_has_refs(op: &BatchOp) -> bool {
         // (its `bind` map + inner queries reference the outer scope), so treat
         // any sub-batch as ref-bearing unconditionally.
         BatchOp::Batch(_) => true,
+        // A ForEach loop is data-dependent like a sub-batch: its `over`
+        // expression can be a `$query` ref to an earlier alias (RV-CLIENT-
+        // 5212ED16) and its body executes K times against name-keyed values.
+        BatchOp::ForEach(fe) => {
+            fv_has_refs(&fe.over) || fe.batch.queries.values().any(query_entry_has_refs)
+        }
         _ => false,
     }
 }
@@ -557,6 +599,11 @@ fn filter_has_refs(f: &Filter) -> bool {
                     .as_ref()
                     .is_some_and(|args| args.iter().any(fv_has_refs))
         }
+        // Value-vs-value comparison (RV-CLIENT-236DAD0A): both operands are
+        // independently resolved via `$query`/`$param`/`$fn`/literal — the
+        // ONLY comparison shape meaningful inside a `when` guard. Either
+        // operand can carry a ref to an earlier alias's result.
+        Filter::ValueCompare { left, right, .. } => fv_has_refs(left) || fv_has_refs(right),
         // Pattern / null / existence / index-accel operators carry no
         // FilterValue positions that can hold a $query / $param ref.
         _ => false,

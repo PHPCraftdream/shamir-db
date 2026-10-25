@@ -73,6 +73,27 @@ pub struct ResumeInit {
     pub binding_mode: u8,
 }
 
+/// Client → server OPTIONAL resume preamble (RV-CLIENT-DE75ADDD): asks the
+/// server to prove its pinned Ed25519 identity BEFORE the bearer ticket is
+/// disclosed. Distinguished from `ResumeInit` / `AuthInit` by its 1-field
+/// positional msgpack shape.
+#[derive(Serialize, Deserialize)]
+pub struct ResumeProofInit {
+    #[serde(with = "serde_bytes")]
+    pub client_nonce: Vec<u8>,
+}
+
+/// Server → client answer to [`ResumeProofInit`]: the CURRENT identity pub
+/// key plus an Ed25519 signature over
+/// `RESUME_PROOF_V1 || client_nonce || tls_exporter`.
+#[derive(Serialize, Deserialize)]
+pub struct ResumeProofOkWire {
+    #[serde(with = "serde_bytes")]
+    pub server_pub_key: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub signature: Vec<u8>,
+}
+
 /// Server → client response for a successful resume.
 /// A subset of `AuthOk` — the client already has the server's Ed25519
 /// pub-key and signature from the original SCRAM handshake.
