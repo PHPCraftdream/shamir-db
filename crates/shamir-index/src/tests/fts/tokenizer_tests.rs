@@ -233,3 +233,29 @@ fn build_tokenizer_full_french() {
     let tokens = t.tokenize("chats");
     assert!(!tokens.is_empty(), "French stemmer should produce output");
 }
+
+// RV-INDEX-A570106D: non-ASCII uppercase was left Borrowed (unfolded)
+// by the ASCII-byte predicate.
+#[test]
+fn rv_index_a570106d_whitespace_folds_non_ascii_upper() {
+    let t = WhitespaceTokenizer;
+    let tokens = t.tokenize("Москва москва");
+    assert_eq!(tokens, vec!["москва", "москва"]);
+    assert!(
+        matches!(tokens[0], Cow::Owned(_)),
+        "first token must be folded (Owned)"
+    );
+}
+
+#[test]
+fn rv_index_a570106d_full_folds_non_ascii_upper() {
+    let t = FullTokenizer::new(StemLanguage::Greek, false, false);
+    let tokens = t.tokenize("Αθήνα αθήνα");
+    assert_eq!(tokens.len(), 2);
+    assert_eq!(tokens[0], tokens[1]);
+    assert_eq!(tokens[0], tokens[0].to_lowercase());
+
+    let t = FullTokenizer::new(StemLanguage::Russian, false, false);
+    let tokens = t.tokenize("Москва");
+    assert_eq!(tokens, vec!["москва"]);
+}

@@ -51,16 +51,7 @@ pub struct WhitespaceTokenizer;
 impl Tokenizer for WhitespaceTokenizer {
     fn tokenize<'a>(&self, text: &'a str) -> Vec<Cow<'a, str>> {
         text.split_whitespace()
-            .map(|word| {
-                if word
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || !b.is_ascii_alphabetic())
-                {
-                    Cow::Borrowed(word)
-                } else {
-                    Cow::Owned(word.to_lowercase())
-                }
-            })
+            .map(|word| lowercase_cow(word))
             .collect()
     }
 }
@@ -274,14 +265,7 @@ impl Tokenizer for FullTokenizer {
     fn tokenize<'a>(&self, text: &'a str) -> Vec<Cow<'a, str>> {
         let mut out = Vec::with_capacity(4);
         for word in text.split_whitespace() {
-            let lowered: Cow<'a, str> = if word
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || !b.is_ascii_alphabetic())
-            {
-                Cow::Borrowed(word)
-            } else {
-                Cow::Owned(word.to_lowercase())
-            };
+            let lowered: Cow<'a, str> = lowercase_cow(word);
             if let Some(sw) = self.stopwords {
                 if sw.contains(lowerd_str(&lowered)) {
                     continue;
