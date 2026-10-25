@@ -1,9 +1,10 @@
 //! Background maintenance tasks for [`VectorBackend`]: the V2.3 (#402)
-//! single-flight background snapshot (dump + generation flip + prune) and
-//! the V4.2 (#408) background HNSW compaction.
+//! single-flight background snapshot (dump + generation flip + prune), the
+//! V4.2 (#408) background HNSW compaction, and the P0 index promote-order
+//! turnstile (stage L3b) — promotion IS maintenance.
 
 use crate::backend::IndexError;
-use crate::vector::adapter::VectorAdapter;
+use crate::vector::adapter::{VectorAdapter, VectorError};
 use crate::vector::hnsw_adapter::HnswAdapter;
 use crate::vector::snapshot::{self, SnapshotError, SnapshotManifest};
 use crate::vector::vector_backend::backend::VectorBackend;
@@ -18,7 +19,7 @@ use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::Notify;
+use tokio::sync::{oneshot, Notify};
 
 /// Resets the single-flight `snapshot_in_flight` flag on drop, so the flag is
 /// cleared whether the background snapshot task returns `Ok`, returns `Err`, or
@@ -163,6 +164,8 @@ impl VectorBackend {
         let seed = boundary.max(stored_hwm).saturating_add(1);
         self.next_delta_idx.store(seed, Ordering::Release);
         self.applied_prefix.store(seed, Ordering::Release);
+        // P0 index promote order: the turn starts beside the prefix seed.
+        self.promote_turn.store(seed, Ordering::Release);
         Ok(())
     }
 
@@ -208,6 +211,54 @@ impl VectorBackend {
     /// task AND the compaction trigger; a revert here to
     /// `Arc::clone(&self.next_delta_idx)` (the old allocation counter) breaks
     /// every prune-boundary regression test, including the post-compaction one.
+    /// Get a clone of the adapter Arc for async use across await points.
+    /// V3.2: used by the engine to access `HnswAdapter::search_prefilter` /
+    /// `search_cofilter` via `adapter.as_hnsw_adapter()`.
+    ///
+    /// # Raw-adapter boundary (F8)
+    /// This hands out the raw adapter, BYPASSING the compaction gate:
+    /// mutations performed through the returned Arc do NOT participate in
+    /// the cutover protocol (no lease, no mirror, no RID claim). Callers
+    /// must not mutate through it while a compaction generation may be
+    /// armed. Current callers are engine READ paths and tests mutating only
+    /// while idle. A write-path facade over this accessor is explicitly
+    /// deferred (documented boundary only this round).
+    pub fn adapter_arc(&self) -> Arc<dyn VectorAdapter> {
+        Arc::clone(&self.adapter.load_full().adapter)
+    }
+
+    /// V4.2 (#408) — lower compaction thresholds for testing.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn set_compaction_thresholds_for_test(&self, ratio: f64, min_live: usize) {
+        self.compaction_ratio_threshold
+            .store(ratio.to_bits(), Ordering::Release);
+        self.compaction_min_live
+            .store(min_live as u64, Ordering::Release);
+    }
+
+    /// V4.2 (#408) — read compaction in-flight flag. Test-only.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn compaction_in_flight_for_test(&self) -> bool {
+        self.compaction_in_flight.load(Ordering::Acquire)
+    }
+
+    /// V4.2 (#408) — replace the whole routing slot. Test-only arming hook
+    /// (tests build an `AdapterSlot::armed` and store it here).
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn set_slot_for_test(&self, slot: AdapterSlot) {
+        self.adapter.store(Arc::new(slot));
+    }
+
+    /// V4.2 (#408) — current routing slot. Test-only inspection.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn slot_for_test(&self) -> Arc<AdapterSlot> {
+        self.adapter.load_full()
+    }
+
     pub(super) fn prune_boundary(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.applied_prefix)
     }
@@ -544,4 +595,190 @@ pub(crate) async fn run_background_compaction(
     }
 
     Ok(())
+}
+
+// ============================================================================
+// P0 index promote order (stage L3b) — the per-backend promote turnstile.
+//
+// `promote_turn` is the delta chunk index currently holding (or next to
+// hold) the turn; a ticket enters when the turn equals its own index and
+// releases on `Drop` by parking its index in `turn_finished`, from which
+// the turn advances across the contiguous finished run. Lock-free: one
+// Acquire load + a CAS per transition and a `notify_waiters()` per advance
+// — no mutex. Under same-table contention promotes on this backend run ONE
+// at a time in chunk order; uncontended the cost is a load + CAS.
+// ============================================================================
+
+pub(super) fn ve(e: VectorError) -> IndexError {
+    IndexError::Backend(e.to_string())
+}
+
+impl VectorBackend {
+    /// Test seam (stage L3b): arm the one-shot fired when a promote has to
+    /// WAIT at the turnstile; the test owns the receiver. Cross-crate (the
+    /// engine's promote-order tests) — same `#[doc(hidden)] pub` precedent
+    /// as `snapshot_now`. ALWAYS compiled (round-2 finding 3): the engine's
+    /// tests link this crate WITHOUT `cfg(test)`, so the seam must not be
+    /// cfg-gated. Arm order: store the sender, THEN raise `turn_wait_armed`
+    /// (Release) so the contended wait never fires a `None` slot.
+    #[doc(hidden)]
+    pub fn arm_promote_turn_wait_hook_for_test(&self, tx: oneshot::Sender<()>) {
+        self.turn_wait_tx.store(Some(Arc::new(tx)));
+        self.turn_wait_armed.store(true, Ordering::Release);
+    }
+
+    /// Fire the turn-wait seam once, if armed. No `cfg(test)`: consulted on
+    /// the already-slow contended wait path only (see `turn_wait`); the
+    /// uncontended path never touches it. The test must hold ONLY the
+    /// receiver, so the Arc's refcount is 1 and `try_unwrap` succeeds.
+    fn fire_promote_turn_wait(&self) {
+        if self.turn_wait_armed.load(Ordering::Acquire)
+            && self.turn_wait_armed.swap(false, Ordering::AcqRel)
+        {
+            if let Some(tx) = self.turn_wait_tx.swap(None) {
+                if let Ok(tx) = Arc::try_unwrap(tx) {
+                    let _ = tx.send(());
+                }
+            }
+        }
+    }
+
+    /// Wait until delta chunk `idx` is this backend's promote turn.
+    ///
+    /// Enable-before-check (RV finding 3): the `Notified` future is created
+    /// and enabled BEFORE the turn/skip conditions are re-checked, so a
+    /// release that races the check cannot be missed and a waiter parks
+    /// until the turn actually moves. There is NO permit forwarding: the
+    /// release side wakes every current waiter with `notify_waiters()`
+    /// exactly once per advance.
+    pub(super) async fn turn_wait(&self, idx: u64) {
+        loop {
+            let notified = self.turn_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let t = self.promote_turn.load(Ordering::Acquire);
+            if t >= idx {
+                // Our turn (or defensively, already past it).
+                return;
+            }
+            // Skip a turn whose ticket released without promoting.
+            if self.turn_finished.remove_sync(&t)
+                && self
+                    .promote_turn
+                    .compare_exchange(t, t + 1, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+            {
+                self.turn_notify.notify_waiters();
+            }
+            // Cross-crate test seam (round-2 finding 3): always-compiled,
+            // contended-path-only — one acquire load per wait iteration (the
+            // read-modify-write runs only when the hook is armed).
+            self.fire_promote_turn_wait();
+            notified.await;
+        }
+    }
+
+    /// Release chunk `idx`'s turn (ticket `Drop` / explicit release):
+    /// finished-set insert + advance across the contiguous finished run +
+    /// one `notify_waiters()` per advance.
+    pub(super) fn turn_release(&self, idx: u64) {
+        let _ = self.turn_finished.insert_sync(idx, ());
+        loop {
+            let t = self.promote_turn.load(Ordering::Acquire);
+            if !self.turn_finished.remove_sync(&t) {
+                return;
+            }
+            if self
+                .promote_turn
+                .compare_exchange(t, t + 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                self.turn_notify.notify_waiters();
+            }
+        }
+    }
+
+    /// Apply this chunk's deletes + inserts as ONE ordered unit inside the
+    /// turn - a single `enter_write` lease, so no later ticket's
+    /// delete/insert half can interleave between ours. Compaction mirroring
+    /// (claims, ghost-race guard, target mirroring) runs inside the turn.
+    pub(super) async fn promote_graph_in_turn(
+        &self,
+        vecs: &[(RecordId, Vec<f32>)],
+        deleted: &[RecordId],
+    ) -> Result<(), IndexError> {
+        let mut lease = self.enter_write().await;
+        let target = lease.target().cloned();
+        if let Some(t) = &target {
+            let rids = deleted
+                .iter()
+                .copied()
+                .chain(vecs.iter().map(|(rid, _)| *rid));
+            if !lease.claim_rids(rids) {
+                t.fail("overlapping mutation to the same RID inside one generation".into());
+            }
+        }
+        for &rid in deleted {
+            if let Some(t) = &target {
+                // Ghost-race guard ordering + insert_sync: see `plan_update`.
+                if let Some(hnsw) = t.adapter.as_hnsw_adapter() {
+                    if let Some(ref del_rids) = hnsw.compaction_deleted_rids {
+                        let _ = del_rids.insert_sync(rid, ());
+                    }
+                }
+            }
+            lease.slot().adapter.delete(rid).await.map_err(ve)?;
+            if let Some(t) = &target {
+                t.mirror_delete(rid).await;
+            }
+        }
+        let res = lease.slot().adapter.apply_committed_vectors(vecs).await;
+        res.map_err(ve)?;
+        if let Some(t) = &target {
+            t.mirror_committed(vecs).await;
+        }
+        lease.finish();
+        Ok(())
+    }
+}
+
+/// Append-local drop guard for a reserved delta chunk index (RV finding 1).
+///
+/// `append_vector_delta` reserves `idx` with a `fetch_add` and then AWAITS
+/// the store write. If the append future is DROPPED mid-await (commit
+/// cancelled) the ticket is never minted — without this guard the reserved
+/// index is never released into the turnstile and every later chunk waits
+/// forever. Armed immediately after the `fetch_add`, disarmed at both
+/// explicit exits (failed write: mark-applied + release + Err; success: the
+/// engine's ticket owns the turn from there). Dropping while still armed
+/// releases the TURN for `idx` (so later chunks proceed) but does NOT mark
+/// the chunk applied — a cancelled write may or may not have landed, so
+/// conservatively the applied prefix stays below it and the chunk key stays
+/// replayable.
+pub(super) struct DeltaReservationGuard<'a> {
+    backend: &'a VectorBackend,
+    idx: u64,
+    disarmed: bool,
+}
+
+impl<'a> DeltaReservationGuard<'a> {
+    pub(super) fn arm(backend: &'a VectorBackend, idx: u64) -> Self {
+        Self {
+            backend,
+            idx,
+            disarmed: false,
+        }
+    }
+
+    pub(super) fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for DeltaReservationGuard<'_> {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            self.backend.turn_release(self.idx);
+        }
+    }
 }

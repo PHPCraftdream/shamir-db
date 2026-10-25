@@ -4,4 +4,5 @@
 pub mod id_remap;
 pub mod layered_interner;
 pub mod metrics;
+pub mod promote_ticket;
 pub mod types;
