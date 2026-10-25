@@ -57,12 +57,12 @@ use tokio::sync::{Mutex, OnceCell};
 pub struct InternerManager {
     info_store: Arc<dyn Store>,
     interner: Arc<OnceCell<Interner>>,
-    /// Number of entries in the interner the last time `persist`
-    /// actually wrote a chunk. Compared against `interner.len()` on
-    /// each `persist()` call to skip no-op writes. Also identifies the
-    /// "lower bound" of the delta to write on the next persist —
-    /// because ids are dense 1..len, the entries with id in
-    /// `(last_persisted_len, cur_len]` are exactly the new ones.
+    /// Highest persisted interned ID (the cursor `entries_after` scans
+    /// above), seeded at hydration from the highest hydrated ID, not the
+    /// tuple count. Compared against the interner's ID high-water
+    /// (`generation()`) on each `persist()` call to skip no-op writes.
+    /// Also identifies the "lower bound" of the delta to write on the
+    /// next persist.
     last_persisted_len: Arc<AtomicUsize>,
     /// Index of the next chunk record to write. Initialised from
     /// `scan_prefix_stream` at boot (= number of existing chunks). Only
@@ -209,12 +209,17 @@ impl InternerManager {
                     }
                 }
 
-                // Seed both atomics so the first `persist()` after boot
-                // writes the right chunk index and only emits the true
-                // delta (= zero, since on-disk == in-memory at this
-                // point).
-                let total = entries.len();
-                last_persisted_len.store(total, Ordering::Release);
+                // Seed the persistence cursor from the highest hydrated
+                // ID, not the hydrated tuple count: chunks may contain
+                // duplicate recaptures and the id space may hold
+                // permanent gaps (leaked raced touch_ind reservations),
+                // so `entries.len()` can exceed the real id high-water
+                // mark and would make the first `persist()` after boot
+                // skip a newly allocated mapping above the cursor
+                // (RV-TYPES-2A1AB215).
+                let high_water =
+                    entries.iter().map(|(key, _)| key.id()).max().unwrap_or(0) as usize;
+                last_persisted_len.store(high_water, Ordering::Release);
                 next_chunk_idx.store(chunk_count, Ordering::Release);
 
                 Ok(Interner::with_state(entries))
@@ -271,9 +276,8 @@ impl InternerManager {
     /// from the persisted chunks without the WAL.
     ///
     /// This is `last_persisted_len` expressed as an id upper bound.
-    /// Interner ids are 1-based and dense, so `last_persisted_len`
-    /// (which tracks the highest gap-free index in the reverse vec
-    /// that was written to a chunk) IS the highest persisted id.
+    /// The cursor is id-based: it is the highest persisted interned ID
+    /// (gap ids carry no mapping, so claiming them persisted is safe).
     ///
     /// # Durability guarantee (post-CRIT-2 / #436)
     ///
@@ -305,10 +309,16 @@ impl InternerManager {
     /// that cost is O(delta), not O(total dictionary size).
     pub async fn persist(&self) -> DbResult<()> {
         let interner = self.get().await?;
-        let cur_len = interner.len();
+        // Compare against the interner's ID high-water (highest
+        // allocated id), not `len()`: with permanent gaps or
+        // duplicate-recapture history the distinct-name count can
+        // equal the id cursor while a genuinely new mapping is still
+        // pending, and the equality would skip persisting it
+        // (RV-TYPES-2A1AB215).
+        let cur_hwm = interner.generation() as usize;
         let last = self.last_persisted_len.load(Ordering::Acquire);
-        if cur_len == last {
-            // Interner hasn't grown — disk copy is already current.
+        if cur_hwm == last {
+            // No id above the cursor — disk copy is already current.
             return Ok(());
         }
 
@@ -320,7 +330,7 @@ impl InternerManager {
         // Re-check under the lock — another persist may have raced us
         // and already written the same delta.
         let last = self.last_persisted_len.load(Ordering::Acquire);
-        if interner.len() == last {
+        if interner.generation() as usize == last {
             drop(guard);
             return Ok(());
         }

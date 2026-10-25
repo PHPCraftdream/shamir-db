@@ -398,3 +398,60 @@ async fn persist_fails_when_backing_store_set_fails() {
         "a failed persist() must not advance last_persisted_len"
     );
 }
+
+/// RV-TYPES-2A1AB215 regression: hydration must seed the persistence
+/// cursor from the highest persisted ID, not from the hydrated tuple
+/// count. Chunks [(1,a),(3,c)], [(3,c)], [(3,c)] hydrate 4 tuples but
+/// max ID 3; seeding the cursor at 4 made the first persist() after
+/// reopen scan only IDs > 4 and silently skip the freshly allocated
+/// id-4 mapping, so a second reopen lost it.
+#[tokio::test]
+async fn rv_types_2a1ab215_hydrated_cursor_uses_max_id_not_tuple_count() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+    // Three chunks with a duplicate-recapture history and a permanent
+    // gap at id 2: 4 tuples total, max ID 3.
+    let chunks: Vec<Vec<(InternerKey, UserKey)>> = vec![
+        vec![
+            (InternerKey::new(1), UserKey::from_str("a")),
+            (InternerKey::new(3), UserKey::from_str("c")),
+        ],
+        vec![(InternerKey::new(3), UserKey::from_str("c"))],
+        vec![(InternerKey::new(3), UserKey::from_str("c"))],
+    ];
+    for (idx, chunk) in chunks.iter().enumerate() {
+        let tag = format!("i.d{:09}", idx);
+        store
+            .set(
+                RecordId::system(&tag).to_bytes().into(),
+                bincode::to_bytes(chunk).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    // First reopen: the cursor must be the max hydrated ID (3), not
+    // the tuple count (4).
+    let manager1 = InternerManager::new(Arc::clone(&store));
+    let interner1 = manager1.get().await.unwrap();
+    assert_eq!(
+        manager1.persisted_high_water(),
+        3,
+        "hydration must seed the cursor from the max persisted ID, not the tuple count"
+    );
+
+    // Allocate a fresh mapping above the hydrated cursor and persist.
+    let touch = interner1.touch_ind("delta").unwrap();
+    assert_eq!(touch.key().id(), 4);
+    manager1.persist().await.unwrap();
+
+    // Second reopen: the id-4 mapping must resolve. On the unfixed
+    // code persist() skipped it (cursor 4 → scan starts at id 5) and
+    // this lookup returns None.
+    let manager2 = InternerManager::new(store);
+    let interner2 = manager2.get().await.unwrap();
+    let got = interner2
+        .get_str(&InternerKey::new(4))
+        .expect("id 4 must be persisted and resolve after reopen");
+    assert_eq!(&*got, "delta");
+}
