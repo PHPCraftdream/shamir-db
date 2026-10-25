@@ -2,6 +2,7 @@
 //! single-flight background snapshot (dump + generation flip + prune) and
 //! the V4.2 (#408) background HNSW compaction.
 
+use crate::backend::IndexError;
 use crate::vector::adapter::VectorAdapter;
 use crate::vector::hnsw_adapter::HnswAdapter;
 use crate::vector::snapshot::{self, SnapshotError, SnapshotManifest};
@@ -45,11 +46,18 @@ impl Drop for SnapshotFlightGuard {
 /// we downcast to `&HnswAdapter` inside (the Arc outlives the dump). The
 /// `dump_snapshot_with_gen` call runs `file_dump` under `spawn_blocking`, so
 /// no borrow is held across the flip's `transact`.
+///
+/// P0 delta-prune (brief 164): `applied_prefix` is the contiguous APPLIED
+/// prefix owned by the backend (`mark_delta_applied`), NOT the allocation
+/// counter `next_delta_idx`. It is sampled BEFORE the dump and that exact
+/// sampled value is used for BOTH `manifest.delta_applied_upto` and the
+/// prune bound — a chunk whose graph promote has not acknowledged it yet
+/// (pending or failed) stays replayable and is never pruned.
 pub(super) async fn run_background_snapshot(
     info_store: &Arc<dyn Store>,
     keyspace: &str,
     adapter_arc: &Arc<dyn VectorAdapter>,
-    next_delta_idx: &AtomicU64,
+    applied_prefix: &AtomicU64,
 ) -> Result<(), SnapshotError> {
     // The caller guaranteed the adapter is an HnswAdapter (checked before
     // spawn). Downcast once; hold the borrow for the dump below.
@@ -68,12 +76,15 @@ pub(super) async fn run_background_snapshot(
         };
     let new_gen = old_gen.wrapping_add(1);
 
-    // The new snapshot absorbs every delta chunk written so far (indices
-    // `0..next_delta_idx`). We capture the HWM BEFORE the dump so concurrent
-    // Phase 5d appends (which bump `next_delta_idx`) land in chunks that
-    // survive the flip's prune and are replayed on the next restart.
-    // `delta_applied_upto` = number of absorbed chunks = `next_delta_idx`.
-    let new_delta_applied_upto = next_delta_idx.load(Ordering::Acquire);
+    // The new snapshot absorbs every delta chunk the graph has APPLIED so
+    // far (indices `0..applied_prefix`). The boundary is sampled BEFORE the
+    // dump and the exact sampled value drives both the manifest and the
+    // prune, so a chunk appended concurrently (or promoted into a graph the
+    // dump cannot see yet) always survives the flip and replays on restart.
+    // Sampling `next_delta_idx` here instead would prune chunks whose
+    // mutations have not reached the dumped graph — data loss on restart
+    // (P0, brief 164).
+    let new_delta_applied_upto = applied_prefix.load(Ordering::Acquire);
 
     // Dump the new generation. `dump_snapshot_with_gen` writes the chunks +
     // sidecar + a manifest for `new_gen` (with `delta_applied_upto = 0`). The
@@ -119,6 +130,132 @@ pub(super) async fn run_background_snapshot(
         new_delta_applied_upto,
     )
     .await
+}
+
+impl VectorBackend {
+    /// RV-INDEX-2F3CBCA3 on the rebuild fallback: the rebuilt graph comes
+    /// from the data store, but `next_delta_idx` must still start above the
+    /// persisted absorption boundary and any surviving chunk, or the next
+    /// `append_delta` lands below the boundary and is skipped by replay.
+    /// A scan error is propagated (never defaulted to 0).
+    /// P0 delta-prune: the applied prefix seeds alongside it — the fallback
+    /// replayed/rebuilt the whole graph, so every surviving chunk is applied.
+    pub(super) async fn seed_delta_idx_for_fallback(
+        &self,
+        index_name: &str,
+        info_store: &Arc<dyn Store>,
+        keyspace: &str,
+        manifest: Option<&SnapshotManifest>,
+    ) -> Result<(), IndexError> {
+        let stored_hwm = snapshot::highest_delta_index(info_store, keyspace)
+            .await
+            .map_err(|e| {
+                IndexError::Backend(format!(
+                    "delta HWM scan failed for index {} (keyspace {}): {} —                      refusing to seed next_delta_idx below the surviving chunks",
+                    index_name, keyspace, e
+                ))
+            })?;
+        // Fresh index (no manifest, no chunks): keep the constructor seed.
+        if manifest.is_none() && stored_hwm == 0 {
+            return Ok(());
+        }
+        let boundary = manifest.map_or(0, |m| m.delta_applied_upto);
+        let seed = boundary.max(stored_hwm).saturating_add(1);
+        self.next_delta_idx.store(seed, Ordering::Release);
+        self.applied_prefix.store(seed, Ordering::Release);
+        Ok(())
+    }
+
+    /// P0 delta-prune (brief 164): acknowledge delta chunk `idx` as applied
+    /// to the live graph and advance the contiguous applied prefix across
+    /// the acknowledged run. Out-of-order acknowledgements park in
+    /// `applied_set` until the prefix reaches them; a permanently failed
+    /// (never acknowledged) promotion leaves its chunk un-pruned and
+    /// replayable forever — the boundary simply stays below it.
+    /// Lock-free: `scc::TreeIndex` + a `fetch_update`-style CAS loop on the
+    /// prefix (no mutex on this hot path).
+    pub(super) fn ack_delta_applied(&self, idx: u64) {
+        if idx < self.applied_prefix.load(Ordering::Acquire) {
+            return; // already inside the contiguous prefix
+        }
+        let _ = self.applied_set.insert_sync(idx, ());
+        loop {
+            let p = self.applied_prefix.load(Ordering::Acquire);
+            if !self.applied_set.contains(&p) {
+                return;
+            }
+            if self
+                .applied_prefix
+                .compare_exchange(p, p + 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                self.applied_set.remove_sync(&p);
+            }
+        }
+    }
+
+    /// Contiguous applied prefix (observability): the count of leading delta
+    /// chunks acknowledged as applied to the live graph — exactly the value
+    /// the next snapshot samples as its prune boundary.
+    pub fn applied_prefix(&self) -> u64 {
+        self.applied_prefix.load(Ordering::Acquire)
+    }
+
+    /// The prune boundary handed to EVERY background snapshot — the
+    /// production spawn (`trigger_snapshot_check`) AND the inline seam
+    /// ([`Self::snapshot_now`]). Single source of truth so the inline
+    /// snapshot exercises exactly the same boundary wiring as the spawned
+    /// task AND the compaction trigger; a revert here to
+    /// `Arc::clone(&self.next_delta_idx)` (the old allocation counter) breaks
+    /// every prune-boundary regression test, including the post-compaction one.
+    pub(super) fn prune_boundary(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.applied_prefix)
+    }
+
+    /// Inline variant of `trigger_snapshot_check` (test/administration
+    /// seam): run the background-snapshot body against the CURRENT adapter,
+    /// with the SAME coordination as the spawned path — skipped (no-op
+    /// `Ok`) while a compaction is in flight, single-flight via
+    /// `snapshot_in_flight` (a second concurrent call is a no-op `Ok`), and
+    /// the flight guard is cleared on every exit. The prune bound is
+    /// [`Self::prune_boundary`] — the contiguous applied prefix.
+    #[doc(hidden)]
+    pub async fn snapshot_now(&self, info_store: &Arc<dyn Store>) -> Result<(), SnapshotError> {
+        if self.compaction_in_flight.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if self
+            .snapshot_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Ok(());
+        }
+        let _flight_guard = SnapshotFlightGuard(Arc::clone(&self.snapshot_in_flight));
+        let adapter_arc = Arc::clone(&self.adapter.load_full().adapter);
+        let keyspace = self.snapshot_keyspace();
+        let applied_prefix = self.prune_boundary();
+        run_background_snapshot(info_store, &keyspace, &adapter_arc, &applied_prefix).await
+    }
+
+    /// Test-only handles for driving `run_background_compaction` directly:
+    /// `(delta_count, applied_prefix, snapshot_in_flight, fail_next_backfill)`.
+    #[cfg(test)]
+    pub(crate) fn compaction_task_inputs_for_test(
+        &self,
+    ) -> (
+        Arc<AtomicU64>,
+        Arc<AtomicU64>,
+        Arc<AtomicBool>,
+        Arc<AtomicBool>,
+    ) {
+        (
+            Arc::clone(&self.delta_count),
+            self.prune_boundary(),
+            Arc::clone(&self.snapshot_in_flight),
+            Arc::clone(&self.fail_next_backfill),
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -175,7 +312,7 @@ impl VectorBackend {
         let published = Arc::clone(&self.published);
         let compaction_in_flight = Arc::clone(&self.compaction_in_flight);
         let delta_count = Arc::clone(&self.delta_count);
-        let next_delta_idx = Arc::clone(&self.next_delta_idx);
+        let applied_prefix = self.prune_boundary();
         let snapshot_in_flight = Arc::clone(&self.snapshot_in_flight);
         #[cfg(test)]
         let fail_next_backfill = Arc::clone(&self.fail_next_backfill);
@@ -192,7 +329,7 @@ impl VectorBackend {
                 &info_store,
                 &keyspace,
                 &delta_count,
-                &next_delta_idx,
+                &applied_prefix,
                 &snapshot_in_flight,
                 #[cfg(test)]
                 &fail_next_backfill,
@@ -243,7 +380,7 @@ pub(crate) async fn run_background_compaction(
     info_store: &Arc<dyn Store>,
     keyspace: &str,
     delta_count: &Arc<AtomicU64>,
-    next_delta_idx: &Arc<AtomicU64>,
+    applied_prefix: &Arc<AtomicU64>,
     snapshot_in_flight: &Arc<AtomicBool>,
     #[cfg(test)] fail_next_backfill: &AtomicBool,
     #[cfg(test)] hooks: Option<Arc<CompactionHooks>>,
@@ -384,12 +521,12 @@ pub(crate) async fn run_background_compaction(
         let info_store = Arc::clone(info_store);
         let keyspace = keyspace.to_string();
         let adapter_for_snap = Arc::clone(&new_adapter_arc);
-        let next_delta_idx = Arc::clone(next_delta_idx);
+        let applied_prefix = Arc::clone(applied_prefix);
         let delta_count = Arc::clone(delta_count);
         tokio::spawn(async move {
             let _flight_guard = flight_guard;
             let res =
-                run_background_snapshot(&info_store, &keyspace, &adapter_for_snap, &next_delta_idx)
+                run_background_snapshot(&info_store, &keyspace, &adapter_for_snap, &applied_prefix)
                     .await;
             match res {
                 Ok(()) => {

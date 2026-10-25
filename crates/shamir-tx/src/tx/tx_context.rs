@@ -99,6 +99,14 @@ pub struct ReleasedUniqueCache {
     pub walked_len: usize,
 }
 
+/// P0 delta-prune (brief 164): a queued graph-promote acknowledgement. The
+/// engine's Phase 5d DELTA half records one per appended delta chunk; the
+/// GRAPH half (`promote_vectors`) calls it only after the chunk's mutations
+/// reached the live graph. The callee advances the vector backend's
+/// contiguous applied prefix (`IndexBackend::mark_delta_applied`) — the only
+/// boundary that authorises snapshot delta pruning.
+pub type VectorDeltaAck = std::sync::Arc<dyn Fn() + Send + Sync>;
+
 /// Per-transaction state bundle.
 ///
 /// Holds all mutable state accumulated during a transaction:
@@ -419,6 +427,17 @@ pub struct TxContext {
     /// unique indexes touched — the `has_unique_indexes()` gate at every
     /// call site keeps this a zero-overhead field otherwise).
     pub released_unique_cache: TFxMap<u64, ReleasedUniqueCache>,
+
+    /// P0 delta-prune (brief 164): per-table pending vector-delta
+    /// acknowledgements, recorded by the Phase 5d DELTA half (one
+    /// [`VectorDeltaAck`] per successfully appended chunk) and drained by the
+    /// GRAPH half (`promote_vectors`) only after
+    /// `apply_staged_vector_deletes` + `apply_staged_vectors` succeeded for
+    /// that table. A tx whose graph promote never runs (or fails) leaves its
+    /// chunk un-acked → the chunk stays replayable and is never pruned.
+    /// Interior-mutable (`scc::HashMap`) because `promote_vectors` holds
+    /// `&TxContext`; empty for txs that never touch vector indexes.
+    pub vector_delta_acks: scc::HashMap<u64, Vec<VectorDeltaAck>, THasher>,
 }
 
 impl TxContext {
@@ -462,6 +481,7 @@ impl TxContext {
             implicit: false,
             locked_keys: scc::HashMap::with_hasher(THasher::default()),
             released_unique_cache: TFxMap::default(),
+            vector_delta_acks: scc::HashMap::with_hasher(THasher::default()),
         }
     }
 
