@@ -10,10 +10,14 @@ use rust_decimal::Decimal;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
+use shamir_types::record_view::scalar_ref_cmp;
+use shamir_types::record_view::ScalarRef;
 use shamir_types::types::common::{new_map_wc, new_set_wc};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use smallvec::SmallVec;
+use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 fn intern(i: &Interner, s: &str) -> u64 {
@@ -375,5 +379,256 @@ async fn rv_index_56a505f0_dec_big_bin_hash_distinctly() {
             assert!(!s.contains(&rid2), "rid2 must NOT be found (hash collapse)");
         }
         _ => panic!("expected Set"),
+    }
+}
+
+fn make_num_rec(interner: &Interner, n: InnerValue) -> InnerValue {
+    let mut m = new_map_wc(1);
+    m.insert(InternerKey::new(intern(interner, "n")), n);
+    InnerValue::Map(m)
+}
+
+fn make_numeric_backend(interner: &Interner, store: Arc<dyn Store>) -> FunctionalBackend {
+    let expr = IndexExpr::Field(vec![intern(interner, "n")]);
+    let desc = IndexDescriptor::new(
+        2,
+        "n_idx",
+        intern(interner, "n_idx"),
+        SmallVec::new(),
+        IndexKind::Functional(Box::new(crate::kind::FunctionalConfig {
+            expr: expr.clone(),
+        })),
+    );
+    FunctionalBackend::new(desc, expr, store)
+}
+
+async fn numeric_lookup(backend: &FunctionalBackend, probe: &InnerValue) -> BTreeSet<RecordId> {
+    let hash = FunctionalBackend::hash_value(probe);
+    match backend
+        .lookup(IndexQuery::Point {
+            keys: smallvec::smallvec![hash.to_vec()],
+        })
+        .await
+        .unwrap()
+    {
+        IndexResult::Set(s) => s,
+        _ => panic!("expected Set"),
+    }
+}
+
+/// RV-FUNCLIB-5FA455F7: pins the BACKEND-LEVEL union semantics (one
+/// Point lookup per IN member, results unioned) that any functional IN
+/// planning would compose from. The functional planner path today serves
+/// only `eq` single-value Point probes (read_planner.rs `Filter::Computed`);
+/// the union-of-probes pattern mirrors the regular-index planner's In arm
+/// (read_planner.rs `try_plan_index_scan`).
+#[tokio::test]
+async fn rv_funclib_5fa455f7_functional_in_probe_union_matches_scan() {
+    let corpus: &[InnerValue] = &[
+        InnerValue::Int(0),
+        InnerValue::F64(0.0),
+        InnerValue::F64(-0.0),
+        InnerValue::Int(1),
+        InnerValue::F64(1.0),
+        InnerValue::F64(f64::NAN),
+        InnerValue::Int(9007199254740992),
+        InnerValue::F64(9007199254740992.0),
+        InnerValue::Int(i64::MAX),
+        InnerValue::Int(i64::MIN),
+        InnerValue::F64(9.3e18),
+    ];
+    let as_scalar = |v: &InnerValue| match v {
+        InnerValue::Int(i) => ScalarRef::Int(*i),
+        InnerValue::F64(f) => ScalarRef::F64(*f),
+        _ => unreachable!("corpus holds only numeric leaves"),
+    };
+    let interner = Interner::new();
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let backend = make_numeric_backend(&interner, Arc::clone(&store));
+    let mut indexed = Vec::with_capacity(corpus.len());
+    for leaf in corpus {
+        let rid = RecordId::new();
+        let rec = make_num_rec(&interner, leaf.clone());
+        let ops = backend.plan_insert(rid, &rec).await.unwrap();
+        apply_index_ops(&ops, &store, &backend).await.unwrap();
+        if !ops.is_empty() {
+            indexed.push((rid, leaf));
+        }
+    }
+    let in_sets: Vec<Vec<InnerValue>> = vec![
+        vec![InnerValue::Int(1), InnerValue::F64(-0.0)],
+        vec![InnerValue::F64(1.0), InnerValue::F64(f64::NAN)],
+        vec![
+            InnerValue::Int(9007199254740992),
+            InnerValue::F64(9007199254740992.0),
+        ],
+        vec![InnerValue::Int(i64::MAX), InnerValue::F64(9.3e18)],
+    ];
+    for (set_i, set) in in_sets.iter().enumerate() {
+        let mut union: BTreeSet<RecordId> = BTreeSet::new();
+        for probe in set {
+            union.extend(numeric_lookup(&backend, probe).await);
+        }
+        let expected: BTreeSet<RecordId> = indexed
+            .iter()
+            .filter(|(_, leaf)| {
+                set.iter()
+                    .any(|probe| scalar_ref_cmp(as_scalar(probe), leaf) == Some(Ordering::Equal))
+            })
+            .map(|(rid, _)| *rid)
+            .collect();
+        assert_eq!(
+            union, expected,
+            "IN set #{set_i}: union of per-value probes must equal the scan-filter oracle"
+        );
+    }
+}
+
+/// RV-FUNCLIB-5FA455F7: update/delete lifecycle on one rid across NaN
+/// transitions — canonical hash equality (Int(1) vs F64(1.0)) must be a
+/// no-op on the update path, and NaN claims/removes no posting.
+#[tokio::test]
+async fn rv_funclib_5fa455f7_functional_nan_update_delete_lifecycle() {
+    let interner = Interner::new();
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let backend = make_numeric_backend(&interner, Arc::clone(&store));
+    let rid = RecordId::new();
+
+    let rec_int1 = make_num_rec(&interner, InnerValue::Int(1));
+    let rec_nan = make_num_rec(&interner, InnerValue::F64(f64::NAN));
+    let rec_two = make_num_rec(&interner, InnerValue::F64(2.0));
+    let rec_f64_one = make_num_rec(&interner, InnerValue::F64(1.0));
+
+    let ops = backend.plan_insert(rid, &rec_int1).await.unwrap();
+    apply_index_ops(&ops, &store, &backend).await.unwrap();
+
+    // Int(1) -> NaN: exactly one RemovePosting for the old key.
+    let ops = backend.plan_update(rid, &rec_int1, &rec_nan).await.unwrap();
+    assert_eq!(ops.len(), 1);
+    assert!(matches!(ops[0], IndexWriteOp::RemovePosting { .. }));
+    apply_index_ops(&ops, &store, &backend).await.unwrap();
+    assert!(numeric_lookup(&backend, &InnerValue::Int(1))
+        .await
+        .is_empty());
+
+    // NaN -> F64(2.0): exactly one SetPosting.
+    let ops = backend.plan_update(rid, &rec_nan, &rec_two).await.unwrap();
+    assert_eq!(ops.len(), 1);
+    assert!(matches!(ops[0], IndexWriteOp::SetPosting { .. }));
+    apply_index_ops(&ops, &store, &backend).await.unwrap();
+    assert!(numeric_lookup(&backend, &InnerValue::F64(2.0))
+        .await
+        .contains(&rid));
+
+    // NaN -> NaN: empty.
+    assert!(backend
+        .plan_update(rid, &rec_nan, &rec_nan)
+        .await
+        .unwrap()
+        .is_empty());
+    // Int(1) -> Int(1) (equal hash): empty.
+    assert!(backend
+        .plan_update(rid, &rec_int1, &rec_int1)
+        .await
+        .unwrap()
+        .is_empty());
+    // Int(1) -> F64(1.0) (canonical hash equality): empty — the parity
+    // invariant on the update path.
+    assert!(backend
+        .plan_update(rid, &rec_int1, &rec_f64_one)
+        .await
+        .unwrap()
+        .is_empty());
+
+    // plan_delete on a NaN-valued record: empty (nothing to remove).
+    assert!(backend.plan_delete(rid, &rec_nan).await.unwrap().is_empty());
+
+    // Delete the live F64(2.0) record; afterwards NO probe finds the rid.
+    let ops = backend.plan_delete(rid, &rec_two).await.unwrap();
+    apply_index_ops(&ops, &store, &backend).await.unwrap();
+    for probe in [
+        InnerValue::Int(1),
+        InnerValue::F64(1.0),
+        InnerValue::F64(2.0),
+        InnerValue::F64(f64::NAN),
+    ] {
+        assert!(
+            !numeric_lookup(&backend, &probe).await.contains(&rid),
+            "probe {probe:?} must not find the deleted rid"
+        );
+    }
+}
+
+/// RV-FUNCLIB-5FA455F7 (D1-S1): functional-index probes must match the
+/// scan-filter oracle for mixed numeric values — canonical hash_inner
+/// (Int<->F64 parity, -0.0 -> 0) on BOTH the posting and the probe side,
+/// and NaN claims no posting at all.
+#[tokio::test]
+async fn rv_funclib_5fa455f7_functional_numeric_probe_parity() {
+    let corpus: &[InnerValue] = &[
+        InnerValue::Int(0),
+        InnerValue::F64(0.0),
+        InnerValue::F64(-0.0),
+        InnerValue::Int(1),
+        InnerValue::F64(1.0),
+        InnerValue::F64(1.5),
+        InnerValue::F64(f64::NAN),
+        InnerValue::Int(9007199254740993),   // 2^53 + 1
+        InnerValue::Int(9007199254740992),   // 2^53
+        InnerValue::F64(9007199254740992.0), // 2^53, exactly representable
+        InnerValue::Int(i64::MAX),
+        InnerValue::Int(i64::MIN),
+        InnerValue::F64(9.3e18), // > 2^63: keeps the bit key, equals no Int
+    ];
+    let as_scalar = |v: &InnerValue| match v {
+        InnerValue::Int(i) => ScalarRef::Int(*i),
+        InnerValue::F64(f) => ScalarRef::F64(*f),
+        _ => unreachable!("corpus holds only numeric leaves"),
+    };
+
+    let interner = Interner::new();
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let backend = make_numeric_backend(&interner, Arc::clone(&store));
+
+    let mut indexed = Vec::with_capacity(corpus.len());
+    for leaf in corpus {
+        let rid = RecordId::new();
+        let rec = make_num_rec(&interner, leaf.clone());
+        let ops = backend.plan_insert(rid, &rec).await.unwrap();
+        // NaN claims no posting: plan_insert returns no ops for it.
+        if matches!(leaf, InnerValue::F64(f) if f.is_nan()) {
+            assert!(ops.is_empty(), "NaN must produce no posting ops");
+            continue;
+        }
+        apply_index_ops(&ops, &store, &backend).await.unwrap();
+        indexed.push((rid, leaf));
+    }
+
+    for probe in [
+        InnerValue::Int(0),
+        InnerValue::F64(0.0),
+        InnerValue::F64(-0.0),
+        InnerValue::Int(1),
+        InnerValue::F64(1.0),
+        InnerValue::F64(1.5),
+        InnerValue::F64(f64::NAN),
+        InnerValue::Int(9007199254740993),
+        InnerValue::Int(9007199254740992),
+        InnerValue::F64(9007199254740992.0),
+        InnerValue::Int(i64::MAX),
+        InnerValue::Int(i64::MIN),
+        InnerValue::F64(9.3e18),
+        InnerValue::F64(1.7976931348623157e308),
+    ] {
+        let found = numeric_lookup(&backend, &probe).await;
+        let expected: BTreeSet<RecordId> = indexed
+            .iter()
+            .filter(|(_, leaf)| scalar_ref_cmp(as_scalar(&probe), leaf) == Some(Ordering::Equal))
+            .map(|(rid, _)| *rid)
+            .collect();
+        assert_eq!(
+            found, expected,
+            "probe {probe:?} membership must equal the scan-filter oracle"
+        );
     }
 }
