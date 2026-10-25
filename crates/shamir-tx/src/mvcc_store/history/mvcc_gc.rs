@@ -4,6 +4,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use futures::StreamExt;
 use shamir_collections::TFxMap;
 use shamir_storage::error::DbResult;
+use shamir_storage::types::KvOp;
 use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 
 use super::super::ts_key;
@@ -109,12 +110,15 @@ impl MvccStore {
                     // Audit 2.1: capture the commit ts BEFORE we remove the
                     // ts_key, so the ts-index entry can be pruned in lockstep.
                     let ts = self.lookup_ts(deferred).await;
-                    // Physically delete the previously-deferred version.
+                    // RV-TX-088DE4B5: one batched transact instead of two
+                    // individual removals on the write hot path.
                     let _ = self
                         .history
-                        .remove_no_flag(encode_version_key(key, deferred).into())
+                        .transact(vec![
+                            KvOp::Remove(encode_version_key(key, deferred).into()),
+                            KvOp::Remove(ts_key(deferred).into()),
+                        ])
                         .await;
-                    let _ = self.history.remove_no_flag(ts_key(deferred).into()).await;
                     if let Some(ts) = ts {
                         self.ts_index_remove(ts, deferred);
                     }
@@ -216,6 +220,10 @@ impl MvccStore {
         //                                                       unknown ts → keep)
         //   AND version < min_alive                           (sacred snapshot floor)
         //   AND Some(version) != anchor                       (single anchor)
+        let mut removals: Vec<KvOp> = Vec::new();
+        // In-memory side effects, applied after the removal batch is
+        // attempted (best-effort — the transact result is discarded).
+        let mut reclaimed: Vec<(u64, Option<u64>)> = Vec::new();
         for (idx, (version, phys_key)) in entries.iter().enumerate() {
             // C1 SACRED: never reclaim the current version.
             if *version == cur_v {
@@ -231,15 +239,22 @@ impl MvccStore {
                     continue;
                 }
             }
-            // (age cap) newer than the cutoff (or unknown ts) → keep.
-            if let Some(cutoff) = age_cutoff_ms {
-                let ts = self.lookup_ts(*version).await;
-                match ts {
-                    Some(t) if t < cutoff => { /* older than cutoff → age drops it */ }
+            // (age cap) newer than the cutoff (or unknown ts) → keep. The
+            // fetched ts is reused for the index prune below — one lookup
+            // per version (RV-TX-088DE4B5: no duplicated ts get).
+            let reclaimed_ts: Option<u64> = match age_cutoff_ms {
+                Some(cutoff) => match self.lookup_ts(*version).await {
+                    Some(t) if t < cutoff => Some(t),
                     _ => continue, // unknown ts OR within age window → keep
-                }
-            }
+                },
+                // Count-only reclaim: sacred/anchor checks run BEFORE the
+                // lookup so kept versions cost no ts get.
+                None if *version >= min_alive || Some(*version) == anchor => continue,
+                None => self.lookup_ts(*version).await,
+            };
             // (sacred floor) pinned by a live snapshot → keep.
+            // (already applied in the count-only arm above; repeated for the
+            // age arm where the lookup had to happen first.)
             if *version >= min_alive {
                 continue;
             }
@@ -248,12 +263,18 @@ impl MvccStore {
                 continue;
             }
             // All caps agree + not protected → reclaim the version AND its ts.
-            // Audit 2.1: capture the ts first so the ts-index prunes in lockstep.
-            let reclaimed_ts = self.lookup_ts(*version).await;
-            let _ = self.history.remove_no_flag(phys_key.clone().into()).await;
-            let _ = self.history.remove_no_flag(ts_key(*version).into()).await;
+            // RV-TX-088DE4B5: batch data+ts removals into ONE transact
+            // (best-effort — a vacuum failure must not fail the write).
+            removals.push(KvOp::Remove(phys_key.clone().into()));
+            removals.push(KvOp::Remove(ts_key(*version).into()));
+            reclaimed.push((*version, reclaimed_ts));
+        }
+        if !removals.is_empty() {
+            let _ = self.history.transact(removals).await;
+        }
+        for (version, reclaimed_ts) in reclaimed {
             if let Some(ts) = reclaimed_ts {
-                self.ts_index_remove(ts, *version);
+                self.ts_index_remove(ts, version);
             }
             // P1c: drop the same (key, version) from the overlay in lockstep so
             // the overlay never serves a value that history just reclaimed.
@@ -263,8 +284,8 @@ impl MvccStore {
             // it here would lose committed data. Such a version is also a
             // superseded-history candidate that simply isn't in history yet;
             // the real overlay-GC on durable_watermark advance is P1e.
-            if *version <= self.gate.durable_watermark() {
-                self.overlay.remove(key, *version);
+            if version <= self.gate.durable_watermark() {
+                self.overlay.remove(key, version);
             }
         }
 
