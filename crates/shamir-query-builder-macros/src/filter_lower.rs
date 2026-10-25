@@ -348,8 +348,7 @@ fn collect_field_segments(expr: &Expr, out: &mut Vec<String>) -> syn::Result<()>
         }
         _ => Err(syn::Error::new_spanned(
             expr,
-            "filter!: LHS of comparison must be a field name (ident) or \
-             dotted field path (e.g. `address.city`)",
+            "filter!: expected a field name (ident) or dotted field path (e.g. `address.city`)",
         )),
     }
 }
