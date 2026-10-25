@@ -6,7 +6,8 @@
 //! which performs de-interning using the shared interner dictionary.
 //!
 //! Value bytes are copied **verbatim** from the source record via
-//! [`RecordView::field_value_bytes`] — no decode, no re-encode.
+//! [`FieldIndex::value_bytes`](crate::record_view::FieldIndex::value_bytes) — one index build (one top-level pass), then
+//! O(1) probes per selected id (not O(1) overall) — no decode, no re-encode.
 //!
 //! # Use case
 //! `SELECT a, c` over a wide record: the engine projects only the requested
@@ -28,7 +29,7 @@ use bytes::Bytes;
 /// ids appear in `selected_ids`, in `selected_ids` order.
 ///
 /// For each id in `selected_ids`:
-/// - If the field is present in `view` (via [`RecordView::field_value_bytes`]),
+/// - If the field is present in `view` (via [`FieldIndex::value_bytes`](crate::record_view::FieldIndex::value_bytes)),
 ///   emit: the key as `InternerKey::serialize` (msgpack bin, same as the storage
 ///   codec) + the value bytes **verbatim** from the source record.
 /// - If the field is absent, it is silently skipped.
@@ -59,8 +60,12 @@ pub fn record_view_to_id_msgpack(
     // projection widths (1-20 fields).
     let mut pairs: Vec<(KeyBytes, &[u8])> = Vec::with_capacity(selected_ids.len());
 
+    // Build the offset index ONCE (O(fields)) so each selected id is an O(1)
+    // probe instead of a full rescan. (RV-TYPES-93D11F4F)
+    let index = view.index();
+
     for id in selected_ids {
-        if let Some(val_bytes) = view.field_value_bytes(id.clone()) {
+        if let Some(val_bytes) = index.value_bytes(id.clone()) {
             pairs.push((encode_key(id), val_bytes));
         }
         // Absent ids: silently skip (per spec).

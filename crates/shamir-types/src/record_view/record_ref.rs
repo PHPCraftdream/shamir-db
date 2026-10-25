@@ -336,13 +336,14 @@ impl RecordRef for RecordView<'_> {
     }
 
     fn for_each_field(&self, f: &mut dyn FnMut(InternerKey, InnerValue)) {
-        for (key, _val) in self.fields() {
-            // Materialize each value via value_bytes_at with a single-segment path.
-            let k = key.clone();
-            if let Some(iv) = self.materialize_at(&[key]) {
-                f(k, iv);
+        // Single-pass byte walk (O(fields)) + per-field decode — replaces the
+        // old fields() + materialize_at re-scan (O(fields²)). Malformed values
+        // are silently skipped, as before. (RV-TYPES-1C6C4F54)
+        self.for_each_field_bytes(&mut |key, bytes| {
+            if let Ok(iv) = InnerValue::from_bytes(bytes) {
+                f(key, iv);
             }
-        }
+        });
     }
 
     fn to_query_value(&self, interner: &Interner) -> QueryValue {

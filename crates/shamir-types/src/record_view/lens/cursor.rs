@@ -1,5 +1,28 @@
 use super::RecordViewError;
 
+// Test-only deterministic traversal accounting — counts skip_value/read_bin_len
+// invocations per thread so tests can bound scan work without timing.
+#[cfg(test)]
+thread_local! {
+    static SCAN_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+#[inline]
+pub(crate) fn bump_scan() {
+    SCAN_STEPS.with(|c| c.set(c.get() + 1));
+}
+
+#[cfg(test)]
+pub(crate) fn reset_scan_steps() {
+    SCAN_STEPS.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn scan_steps() -> u64 {
+    SCAN_STEPS.with(|c| c.get())
+}
+
 // ---------------------------------------------------------------------------
 // Interned-key encoding — matches `InternerKey::serialize` (variable-width LE)
 // and `eval_bytes::interned_key_bytes` exactly.
@@ -89,6 +112,8 @@ pub(super) fn read_map_len(buf: &[u8], pos: &mut usize) -> Result<usize, RecordV
 /// as msgpack `bin`).
 #[inline]
 pub(super) fn read_bin_len(buf: &[u8], pos: &mut usize) -> Result<usize, RecordViewError> {
+    #[cfg(test)]
+    bump_scan();
     let start = *pos;
     let m = read_u8(buf, pos)?;
     match m {
