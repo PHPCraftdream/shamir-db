@@ -730,3 +730,170 @@ async fn committed_tx_multi_table_hnsw_vectors_each_searchable() {
         );
     }
 }
+/// Part F (P0 delta-prune, brief 164): a FAILED post-lock graph promote
+/// (`FAIL_VECTOR_PROMOTE_TX_ID`) must NEVER acknowledge its delta chunk.
+///
+/// Row 1 commits successfully first: the HNSW graph gains its entry point
+/// (the vendored dump fails with "entry point not initialized" on an empty
+/// graph) and chunk 0 is acknowledged. Row 2 then commits with the promote
+/// failure injected: its chunk 1 is appended but never acknowledged, so a
+/// later snapshot absorbs only chunk 0 (`delta_applied_upto == 1`), keeps
+/// chunk 1 on disk, and a restart replays it over the snapshot — the
+/// failed row's vector is recovered.
+///
+/// Revert analysis: reverting `prune_boundary` (the single source both the
+/// spawned snapshot and the inline seam use) back to the allocation
+/// counter makes the snapshot jump `delta_applied_upto` to 2, pruning
+/// chunk 1 — the manifest and chunk-key assertions fail and the restart
+/// loses the vector. Erroneously acknowledging the failed promote makes
+/// the prefix assertions fail first.
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn rv_index_l3_delta_prune_failed_promote_never_acks_chunk() {
+    let repo = make_repo();
+    repo.add_table_for_test(TableConfig::new("vecs"));
+    let tbl = repo.get_table("vecs").await.unwrap();
+    tbl.create_index_v2(&vector_index_op()).await.unwrap();
+
+    let emb_id = field_id(&tbl, "embedding").await;
+    let info_store = tbl.info_store_for_test();
+
+    let backends = tbl.index2_registry().all_backends().await;
+    let backend: &shamir_index::vector::vector_backend::VectorBackend = backends
+        .iter()
+        .find_map(|b| {
+            b.as_any()
+                .downcast_ref::<shamir_index::vector::vector_backend::VectorBackend>()
+        })
+        .expect("the table must own a VectorBackend");
+
+    // Row 1: successful commit. The graph now has an entry point and the
+    // promote acknowledged chunk 0.
+    let (mut tx, guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let _rid0 = tbl
+        .insert_tx(&vec_record(emb_id, &[1.0, 0.0, 0.0]), Some(&mut tx))
+        .await
+        .unwrap();
+    let outcome = repo.commit_tx(tx).await;
+    drop(guard);
+    let outcome = outcome.expect("the first commit must succeed");
+    assert_eq!(outcome.materialization, MaterializationState::Complete);
+    assert_eq!(
+        backend.applied_prefix(),
+        1,
+        "the successful promote must have acknowledged chunk 0"
+    );
+
+    // Row 2: inject the post-lock promote failure.
+    let (mut tx, guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let rid1 = tbl
+        .insert_tx(&vec_record(emb_id, &[0.0, 1.0, 0.0]), Some(&mut tx))
+        .await
+        .unwrap();
+    let inject_tx_id = tx.tx_id.0;
+    assert!(inject_tx_id != 0, "tx_id must be assigned");
+
+    FAIL_VECTOR_PROMOTE_TX_ID.store(inject_tx_id, Ordering::SeqCst);
+    let outcome = repo.commit_tx(tx).await;
+    FAIL_VECTOR_PROMOTE_TX_ID.store(0, Ordering::SeqCst);
+    drop(guard);
+
+    let outcome = outcome.expect("commit must succeed even when the post-lock promote fails");
+    assert_eq!(
+        outcome.materialization,
+        MaterializationState::Complete,
+        "a failed post-lock promote must NOT defer the tx (III.5)"
+    );
+
+    // The failed promote must NOT have acknowledged chunk 1.
+    assert_eq!(
+        backend.applied_prefix(),
+        1,
+        "a failed graph promote must never acknowledge its delta chunk"
+    );
+
+    // Exactly two durable chunks (indices 0 and 1).
+    let id = shamir_index::backend::IndexBackend::descriptor(backend).id;
+    let keyspace = format!("__vec_snap__{}", id);
+    assert_eq!(
+        shamir_index::vector::snapshot::highest_delta_index(&info_store, &keyspace)
+            .await
+            .unwrap(),
+        1,
+        "two delta chunks must be on disk"
+    );
+    let chunk_key1 = shamir_storage::types::RecordKey::from(bytes::Bytes::from(format!(
+        "{keyspace}.delta.0000000001"
+    )));
+    assert!(
+        info_store.get(chunk_key1.clone()).await.is_ok(),
+        "the unacked chunk must exist on disk"
+    );
+
+    // A later snapshot: the boundary stays at the acknowledged prefix, so
+    // chunk 0 is absorbed+pruned and the unacked chunk 1 SURVIVES the flip.
+    backend.snapshot_now(&info_store).await.unwrap();
+    assert_eq!(
+        backend.applied_prefix(),
+        1,
+        "the failed promote's chunk stays unacknowledged across a snapshot"
+    );
+    let m = shamir_index::vector::snapshot::read_manifest(&info_store, &keyspace)
+        .await
+        .unwrap();
+    assert_eq!(
+        m.delta_applied_upto, 1,
+        "the manifest must absorb only the acked chunk 0"
+    );
+    assert!(
+        info_store.get(chunk_key1).await.is_ok(),
+        "the unacked chunk must survive the snapshot flip (old code pruned it)"
+    );
+
+    // Restart: a fresh backend over the same store replays chunk 1 over the
+    // snapshot; the failed row's vector is recovered and searchable.
+    let desc = shamir_index::backend::IndexBackend::descriptor(backend).clone();
+    let adapter: Arc<dyn shamir_index::vector::adapter::VectorAdapter> =
+        Arc::new(shamir_index::vector::hnsw_adapter::HnswAdapter::new(
+            3,
+            shamir_index::kind::VectorMetric::Cosine,
+            shamir_index::vector::hnsw_adapter::HnswConfig {
+                max_elements: 100_000,
+                m: 16,
+                ef_construction: 200,
+                ef_search: 50,
+                ..Default::default()
+            },
+        ));
+    let restarted =
+        shamir_index::vector::vector_backend::VectorBackend::new(desc, vec![emb_id], adapter);
+    shamir_index::backend::IndexBackend::restore_on_open(
+        &restarted,
+        Arc::clone(&info_store),
+        tbl.data_store_for_test().clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        shamir_index::backend::IndexBackend::rebuild_count(&restarted),
+        0,
+        "restart must take the snapshot+delta path"
+    );
+    let r = shamir_index::backend::IndexBackend::lookup(
+        &restarted,
+        IndexQuery::Vector {
+            vec: vec![0.0, 1.0, 0.0],
+            k: 1,
+            opts: crate::index2::vector::SearchOpts::default(),
+        },
+    )
+    .await
+    .unwrap();
+    match r {
+        IndexResult::Ranked(ranked) => assert_eq!(
+            ranked[0].0, rid1,
+            "the failed row's vector must be recovered by delta replay on restart"
+        ),
+        _ => panic!("expected Ranked result"),
+    }
+}
