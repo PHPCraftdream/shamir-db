@@ -42,7 +42,9 @@ pub use model::runtime::registry;
 pub use model::runtime::state;
 pub use model::runtime::write_ops;
 
-pub use backends::backend::{FtsMode, IndexBackend, IndexError, IndexQuery, IndexResult};
+pub use backends::backend::{
+    promote_ticket, FtsMode, IndexBackend, IndexError, IndexQuery, IndexResult,
+};
 pub use backends::build_backend::{build_index2_backend, build_index2_backend_with_resolver};
 pub use model::descriptor::IndexDescriptor;
 pub use model::kind::{

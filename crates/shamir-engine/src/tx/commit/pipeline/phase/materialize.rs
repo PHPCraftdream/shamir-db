@@ -15,7 +15,10 @@ use crate::tx::commit_phases::{
 use crate::tx::tx_outcome::MaterializationState;
 
 #[cfg(test)]
-use super::commit_phases::{FAIL_VECTOR_DELTA_TX_ID, FAIL_VECTOR_PROMOTE_TX_ID};
+use super::commit_phases::{
+    FAIL_VECTOR_DELTA_TX_ID, FAIL_VECTOR_PROMOTE_ONCE_REMAINING, FAIL_VECTOR_PROMOTE_ONCE_TX_ID,
+    FAIL_VECTOR_PROMOTE_TX_ID,
+};
 
 #[cfg(test)]
 pub(in crate::tx) static TEST_PRE_MATERIALIZE_REPO: std::sync::OnceLock<String> =
@@ -507,6 +510,7 @@ pub(crate) async fn apply_vector_graph_batch(
     vecs: &[(shamir_types::types::record_id::RecordId, Vec<f32>)],
     deleted: &[shamir_types::types::record_id::RecordId],
     _tx_id: u64,
+    tickets: &[shamir_tx::VectorPromoteTicket],
 ) -> Result<(), DbError> {
     // Test-only failure injection: simulate a persistent post-lock HNSW
     // graph-promote error for a specific tx so the III.5 contract (a failed
@@ -521,6 +525,96 @@ pub(crate) async fn apply_vector_graph_batch(
         return Err(DbError::Internal(format!(
             "injected Phase 5d (hnsw graph promote) failure for tx {_tx_id}"
         )));
+    }
+
+    // P0 index promote order (stage L3b, round-2 finding 1 restructure): with
+    // per-backend tickets from the DELTA half, promote through the turnstile
+    // — wait_turn BEFORE the backend's `enter_write`, deletes + inserts as
+    // ONE ordered unit inside the turn, turn released ONLY after the ticket's
+    // bounded retry loop finishes (success or persistent failure).
+    //
+    // DEADLOCK-FREEDOM INDUCTION ARGUMENT (round-2 finding 2, precise form).
+    // Fix ONE global total order on every (table token, backend descriptor
+    // id) pair: `apply_vector_delta_phase` collects its insert ∪ delete-only
+    // tokens into one sorted Vec (ascending token) and
+    // `apply_vector_delta_batch` iterates each table's backends sorted by
+    // descriptor id, so RESERVATIONS follow the order; `promote_vectors`
+    // merges its insert ∪ delete-only tokens into the same sorted Vec, so
+    // PROMOTION visits the identical order. Every tx therefore reserves and
+    // promotes its pairs in one global total order.
+    //   RESERVATIONS DO BLOCK: an unreleased reserved index keeps the
+    //   backend's `promote_turn` below every LATER index on that backend, so
+    //   a tx holding reservations on later pairs can block other txs while
+    //   it waits. Acyclicity therefore rests on the global order alone:
+    //   every tx visits its pairs in the same total order (B, idx) and
+    //   releases each pair's turn (after its bounded retry loop) before
+    //   waiting for the next.
+    //   NO CYCLE: suppose txs wait in a cycle. Let B be the smallest
+    //   backend (in the global order) any cycle member is waiting on, and
+    //   among the waiters on B take the one with the smallest idx k. It
+    //   waits for an unreleased earlier index j < k on B held by a tx Y.
+    //   Y has not released j, so Y has not finished pair (B, j): Y is either
+    //   promoting it (bounded, then releases - not waiting) or waiting for
+    //   an earlier pair, i.e. on a backend <= B; B is the smallest any
+    //   cycle member waits on, so that wait is on B with an idx < j < k,
+    //   contradicting the choice of k. Hence no wait cycle.
+    //
+    // A FAILED attempt must NEVER release the ticket before the retry loop
+    // ends (round-2 finding 1): releasing (or dropping) a ticket whose
+    // promote failed and then re-invoking the apply would retry on a
+    // CONSUMED ticket whose `promote` used to answer a phantom `Ok(())`,
+    // turning a real adapter failure into an acknowledged, prunable chunk.
+    // The ticket stays ACTIVE across all attempts (the apply is idempotent —
+    // last-write-wins on the adapter); `release_turn` runs only after the
+    // loop, then the outcome propagates. Never release a ticket whose
+    // promote failed before the loop ends.
+    if !tickets.is_empty() {
+        for t in tickets {
+            t.wait_turn().await;
+            let mut res = Err(DbError::Internal(
+                "hnsw ordered promote: no attempt run".into(),
+            ));
+            for _ in 0..MATERIALIZE_ATTEMPTS.max(1) {
+                // Round-2 finding 1 test injection: fail an attempt at the
+                // APPLY level, INSIDE the ticket loop (after `wait_turn`,
+                // before `promote`) while the turn is still HELD — the
+                // in-loop retry re-runs and succeeds. Mirrors the
+                // `FAIL_PHASE_5A_TRANSIENT_REMAINING` remaining-failures
+                // pattern so only the armed tx's first attempts fail.
+                #[cfg(test)]
+                if _tx_id != 0
+                    && FAIL_VECTOR_PROMOTE_ONCE_TX_ID.load(std::sync::atomic::Ordering::SeqCst)
+                        == _tx_id
+                    && FAIL_VECTOR_PROMOTE_ONCE_REMAINING
+                        .fetch_update(
+                            std::sync::atomic::Ordering::SeqCst,
+                            std::sync::atomic::Ordering::SeqCst,
+                            |r| if r > 0 { Some(r - 1) } else { None },
+                        )
+                        .is_ok()
+                {
+                    res = Err(DbError::Internal(format!(
+                        "injected TRANSIENT Phase 5d (hnsw graph promote) \
+                         failure for tx {_tx_id}"
+                    )));
+                    continue;
+                }
+                res = t
+                    .promote(vecs, deleted)
+                    .await
+                    .map_err(|e| DbError::Internal(format!("hnsw ordered promote at commit: {e}")));
+                if res.is_ok() {
+                    break;
+                }
+            }
+            // Release THIS ticket's turn only AFTER its retry loop finished,
+            // before touching the next one: no unreleased turn is ever held
+            // across a wait (see induction above). Explicit release consumes
+            // the ticket, so its Drop cannot double-release.
+            t.release_turn();
+            res?;
+        }
+        return Ok(());
     }
 
     if let Some(tbl) = repo.table_by_token(token).await? {
@@ -566,7 +660,7 @@ pub(crate) async fn apply_vector_delta_batch(
     vecs: &[(shamir_types::types::record_id::RecordId, Vec<f32>)],
     deleted: &[shamir_types::types::record_id::RecordId],
     _tx_id: u64,
-) -> Result<Vec<VectorDeltaAck>, DbError> {
+) -> Result<(Vec<VectorDeltaAck>, Vec<shamir_tx::VectorPromoteTicket>), DbError> {
     // Test-only failure injection (#426, VR-4 variant A): simulate a
     // persistent PRE-publish delta-append error for a specific tx so the
     // Deferred-failure contract (a failed delta append surfaces as
@@ -583,9 +677,17 @@ pub(crate) async fn apply_vector_delta_batch(
     }
 
     let mut acks: Vec<VectorDeltaAck> = Vec::new();
+    let mut tickets: Vec<shamir_tx::VectorPromoteTicket> = Vec::new();
     if let Some(tbl) = repo.table_by_token(token).await? {
         let info_store = tbl.info_store().clone();
-        for backend in tbl.index2_registry().all_backends().await {
+        // P0 index promote order (RV finding 2a): iterate the table's
+        // backends in the GLOBAL TOTAL ORDER (ascending descriptor id), not
+        // the registry's iteration order — the ticket vec minted below (and
+        // consumed by `apply_vector_graph_batch`) must be identical in every
+        // transaction, or two txs can wait in opposite orders and deadlock.
+        let mut backends = tbl.index2_registry().all_backends().await;
+        backends.sort_by_key(|b| shamir_index::IndexBackend::descriptor(b.as_ref()).id);
+        for backend in backends {
             // V2.3 (#402) — durable delta-log append + snapshot trigger.
             // The delta chunk captures the vectors just promoted AND the
             // deletes just tombstoned so a restart replays both over the
@@ -619,8 +721,12 @@ pub(crate) async fn apply_vector_delta_batch(
                 // which is what makes the chunk prunable.
                 let b = Arc::clone(&backend);
                 acks.push(Arc::new(move || b.mark_delta_applied(idx)));
+                // P0 index promote order: the Drop-guard turnstile ticket.
+                // Minted synchronously after the await — no cancellation
+                // window can drop a reserved chunk without its ticket.
+                tickets.push(shamir_index::promote_ticket(Arc::clone(&backend), idx));
             }
         }
     }
-    Ok(acks)
+    Ok((acks, tickets))
 }

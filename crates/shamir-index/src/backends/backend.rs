@@ -14,7 +14,46 @@ use smallvec::SmallVec;
 use std::any::Any;
 use std::collections::BTreeSet;
 use std::ops::Bound;
+use std::pin::Pin;
 use std::sync::Arc;
+
+/// P0 index promote order: mint a ticket binding `backend` to chunk `idx`.
+/// A free generic fn so the trait default stays object-safe (no `Self:
+/// Sized` bound that would exclude it from the `dyn` vtable).
+pub fn promote_ticket(backend: Arc<dyn IndexBackend>, idx: u64) -> shamir_tx::VectorPromoteTicket {
+    shamir_tx::VectorPromoteTicket::new(BackendPromoteTurn { backend, idx })
+}
+
+/// P0 index promote order: type-erased adapter binding a backend to one
+/// chunk index; the engine holds it via `shamir_tx::VectorPromoteTicket`.
+struct BackendPromoteTurn {
+    backend: Arc<dyn IndexBackend>,
+    idx: u64,
+}
+
+#[async_trait]
+impl shamir_tx::VectorPromoteTurn for BackendPromoteTurn {
+    fn wait_turn<'a>(&'a self) -> Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(self.backend.wait_promote_turn(self.idx))
+    }
+
+    fn promote<'a>(
+        &'a self,
+        vecs: &'a [(RecordId, Vec<f32>)],
+        deleted: &'a [RecordId],
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async {
+            self.backend
+                .promote_graph_batch(vecs, deleted)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    fn release_turn(&self) {
+        self.backend.release_promote_turn(self.idx);
+    }
+}
 
 #[derive(Debug)]
 pub enum IndexQuery {
@@ -341,6 +380,29 @@ pub trait IndexBackend: Send + Sync {
         Ok(None)
     }
 
+    /// P0 index promote order (stage L3b): wait until delta chunk `idx` is
+    /// this backend's promote turn. No-op for backends without a delta log.
+    async fn wait_promote_turn(&self, _idx: u64) {}
+
+    /// P0 index promote order: release chunk `idx`'s promote turn
+    /// (finished-set insert + advance + notify). Sync so a ticket `Drop`
+    /// can call it; releasing does NOT acknowledge the chunk.
+    fn release_promote_turn(&self, _idx: u64) {}
+
+    /// P0 index promote order: apply this chunk's vector deletes + inserts
+    /// as ONE ordered unit inside the turn (single write lease, compaction
+    /// mirroring included). No-op for backends without a live graph.
+    async fn promote_graph_batch(
+        &self,
+        _vecs: &[(RecordId, Vec<f32>)],
+        _deleted: &[RecordId],
+    ) -> Result<(), IndexError> {
+        Ok(())
+    }
+
+    /// P0 index promote order: wrap this backend + chunk index into a
+    /// Drop-guard [`shamir_tx::VectorPromoteTicket`]. `append_vector_delta`
+    /// hands one back per successfully reserved chunk index.
     /// P0 delta-prune (brief 164): acknowledge that delta chunk `idx`'s
     /// mutations reached the live graph. Advances the backend's contiguous
     /// applied prefix — the boundary snapshot tasks sample for
