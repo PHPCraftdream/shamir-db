@@ -3369,6 +3369,7 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "indexmap",
  "rustc-hash 2.1.2",
+ "serde_json",
 ]
 
 [[package]]

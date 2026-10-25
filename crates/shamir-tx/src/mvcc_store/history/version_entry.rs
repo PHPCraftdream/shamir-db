@@ -124,7 +124,9 @@ impl StreamingGroupByState {
         hist_val: Bytes,
         include_tombstones: bool,
     ) {
-        // shift_remove keeps remaining keys for the overlay-only drain phase.
+        // shift_remove keeps remaining keys for the overlay-only drain phase
+        // (order-preserving but O(N) per removal — the overlay is the bounded
+        // small side, see TMap docs).
         let winner = match overlay.shift_remove(&key) {
             // Overlay version strictly newer than history → overlay wins.
             // Versions are globally unique so equality never occurs; if it did,

@@ -5,6 +5,10 @@
 //! dependency-light leaf (`indexmap` + `rustc-hash` only) so guest-facing
 //! crates (query DTOs, builder) can reuse the exact same types as the
 //! host without pulling the heavy `shamir-types` graph.
+//!
+//! Contract notes: removal is asymmetric (`swap_remove` is O(1) but reorders;
+//! `shift_remove` preserves order but is O(N)); serde duplicate keys keep the
+//! first position with the last value winning (see `TMap` docs).
 
 #![allow(clippy::disallowed_types)]
 
@@ -16,10 +20,36 @@ use std::hash::{BuildHasherDefault, Hash};
 
 pub type THasher = BuildHasherDefault<FxHasher>;
 
-/// Ordered map that maintains insertion order for predictable iteration
+/// Ordered map that maintains insertion order for predictable iteration.
+///
+/// # Removal asymmetry
+///
+/// - `swap_remove` is O(1) but moves the last element into the vacated slot
+///   (relative order of the remaining entries is not preserved).
+/// - `shift_remove` preserves the relative order of the remaining entries but
+///   is O(N): every later entry shifts. Repeated `shift_remove` over N keys is
+///   O(N^2) — on hot paths prefer `swap_remove` when survivor order does not
+///   matter, or batch/build the map anew.
+///
+/// # Serde wire contract
+///
+/// `Deserialize` on input with duplicate keys keeps the FIRST insertion
+/// position but the LAST value wins (IndexMap `insert` semantics);
+/// serialization emits entries in insertion order. TMap-backed protocol
+/// fields therefore have a deterministic wire contract: duplicate key ⇒
+/// last value, first position.
 pub type TMap<K, V> = IndexMap<K, V, THasher>;
 
-/// Ordered set that maintains insertion order for predictable iteration
+/// Ordered set that maintains insertion order for predictable iteration.
+///
+/// Removal is asymmetric: `swap_remove` is O(1) but moves the last element
+/// into the vacated slot (order not preserved); `shift_remove` preserves the
+/// relative order of the remaining entries but is O(N). Repeated
+/// `shift_remove` over N elements is O(N^2) — prefer `swap_remove` on hot
+/// paths when survivor order does not matter.
+///
+/// Serde: serialization emits elements in insertion order; duplicates in
+/// deserialization input are ignored after the first occurrence.
 pub type TSet<T> = IndexSet<T, THasher>;
 
 pub fn new_map<K: Eq + Hash, V>() -> TMap<K, V> {
@@ -61,3 +91,6 @@ pub fn new_fx_set<T: Eq + Hash>() -> TFxSet<T> {
 pub fn new_fx_set_wc<T: Eq + Hash>(capacity: usize) -> TFxSet<T> {
     HashSet::with_capacity_and_hasher(capacity, THasher::default())
 }
+
+#[cfg(test)]
+mod tests;
