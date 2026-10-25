@@ -171,6 +171,16 @@ impl<'a> ServerHandshake<'a> {
         })
     }
 
+    /// Effective KDF params for this challenge — a known user's STORED
+    /// params when present, otherwise the server default (spec §13.5).
+    /// The handshake budget (spec §8 `HANDSHAKE_TIMEOUT = max(15s,
+    /// kdf_time × 5)`) is derived from the `time` field of THESE params,
+    /// not from the listener default, so the deadline always covers the
+    /// proof window the client was actually told to run.
+    pub fn effective_kdf_params(&self) -> KdfParams {
+        self.effective_kdf
+    }
+
     /// Wire view of the `challenge` sent to the client.
     pub fn challenge(&self) -> ChallengeView {
         let salt = match &self.user_record {

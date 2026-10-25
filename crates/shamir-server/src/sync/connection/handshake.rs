@@ -2,6 +2,8 @@
 //! session-resume fast-path.
 
 use std::net::SocketAddr;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -61,6 +63,47 @@ fn audit_emit(
         Vec::new(),
         now_ns,
     );
+}
+
+/// Test-only clock seam (RV-SERVER-17329FC9): when non-zero, this value
+/// replaces the real clock for the in-handshake timestamps, letting tests
+/// advance time deterministically between authentication start and proof
+/// arrival. Zero means "real clock"; the static does not exist outside
+/// `cfg(test)`, so production behaviour is untouched.
+#[cfg(test)]
+pub(crate) static CLOCK_OVERRIDE_NS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// The in-handshake clock: real time in production, the pinned
+/// `CLOCK_OVERRIDE_NS` value in tests when one is set.
+fn now_unix_nanos() -> u64 {
+    #[cfg(test)]
+    {
+        let pinned = CLOCK_OVERRIDE_NS.load(Ordering::Relaxed);
+        if pinned != 0 {
+            return pinned;
+        }
+    }
+    UnixNanos::now().as_u64()
+}
+
+/// Spec §8 `HANDSHAKE_TIMEOUT = max(15s, kdf_time × 5)` — the absolute
+/// budget for the post-`auth_init` handshake (challenge → proof → auth
+/// decision). `kdf_time` MUST be the EFFECTIVE challenge time — a known
+/// user's stored KDF time, else the listener default
+/// (`ServerHandshake::effective_kdf_params`).
+pub(crate) fn handshake_budget(kdf_time: u32) -> Duration {
+    Duration::from_secs(15).max(Duration::from_secs(u64::from(kdf_time) * 5))
+}
+
+/// Best-effort terminal close with a FIXED grace: a backpressured
+/// transport (e.g. a WS close handshake that never completes) must not
+/// retain the connection task — and the admission guards that live until
+/// it returns — past this bound (RV-TRANSPORT-TCP-B5244FA2). The result
+/// is intentionally ignored: shutdown is advisory.
+async fn bounded_shutdown<F: Framer>(framer: &mut F) {
+    const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+    let _ = tokio::time::timeout(SHUTDOWN_GRACE, framer.shutdown()).await;
 }
 
 fn prefix_8(sid: &[u8; 32]) -> [u8; 8] {
@@ -207,7 +250,10 @@ async fn run_handshake<F: Framer>(
     };
 
     // 2. Lockout pre-check (silent reject — same wire as auth_failed).
-    let now_ns = UnixNanos::now().as_u64();
+    // RV-SERVER-17329FC9: `mut` — re-captured after the awaited proof read
+    // (see the `ProofOutcome::Accepted` arm) so the bootstrap-TTL gate below
+    // is evaluated at proof time, not at authentication-start time.
+    let mut now_ns = now_unix_nanos();
     let uhash = username_hash(&ctx.secrets.lockout_secret, username.as_bytes());
     let pair: PairKey = (subnet, uhash);
     if ctx.lockout.is_locked_out(pair, now_ns) {
@@ -261,6 +307,18 @@ async fn run_handshake<F: Framer>(
         Err(_) => return Err(HandshakeError::Policy),
     };
 
+    // RV-TRANSPORT-TCP-B5244FA2: the WHOLE post-challenge handshake —
+    // challenge write, proof read, verify, bootstrap gate/rotation,
+    // auth_ok write — runs under ONE spec §8 budget derived from the
+    // EFFECTIVE challenge KDF (a known user's STORED kdf time, else the
+    // listener default), so the deadline always covers the proof window
+    // the client was actually told to run. The pre-challenge steps above
+    // are synchronous (no await) and the first-frame read is bounded by
+    // `auth_init_timeout`, so this wrap bounds the entire unauthenticated
+    // lifetime. On elapse the inner future is dropped (releasing the
+    // framer borrow) and the caller's error path closes the connection.
+    let budget = handshake_budget(hs.effective_kdf_params().time);
+    tokio::time::timeout(budget, async {
     // 4. Send challenge.
     let ch = hs.challenge();
     let bytes = match rmp_serde::to_vec(&wire::Challenge {
@@ -287,6 +345,12 @@ async fn run_handshake<F: Framer>(
     //    proof bytes are ~40; the 16 MiB post-auth ceiling MUST NOT be
     //    reachable before the proof is verified.
     let mut proof_frame_buf = Vec::new();
+    // RV-TRANSPORT-TCP-B5244FA2: this proof read — after the challenge was
+    // sent — had NO deadline of its own before the fix; it is bounded by
+    // the WHOLE-handshake budget wrap around this function tail (a single
+    // spec §8 deadline covering challenge → proof → decision, so a stalled
+    // proof can never outlive it). Terminal shutdown is bounded separately
+    // by `bounded_shutdown` in `handle_connection`.
     if framer
         .read_frame_into(MAX_PRE_AUTH_FRAME, &mut proof_frame_buf)
         .await
@@ -354,7 +418,16 @@ async fn run_handshake<F: Framer>(
     };
 
     let auth_ok: AuthOkView = match outcome {
-        ProofOutcome::Accepted(ok) => *ok,
+        ProofOutcome::Accepted(ok) => {
+            // RV-SERVER-17329FC9: the proof read above awaited an untrusted,
+            // potentially unbounded client delay (Argon2id alone is ~2s).
+            // Re-capture the clock HERE so the bootstrap-token TTL decision
+            // (and everything downstream: lockout registration, session
+            // grant, ticket issue) is judged at proof time, not at the
+            // stale authentication-start timestamp.
+            now_ns = now_unix_nanos();
+            *ok
+        }
         ProofOutcome::Rejected => {
             // Register the failure and APPLY the resulting per-pair
             // exponential backoff (spec §5.2.5 NORMATIVE, NEW-2). The
@@ -651,6 +724,15 @@ async fn run_handshake<F: Framer>(
     }
 
     Ok(auth_ok.session_id)
+    })
+    .await
+    .unwrap_or_else(|_elapsed| {
+        tracing::info!(
+            budget_ms = budget.as_millis() as u64,
+            "handshake budget exceeded (slow-loris post-challenge)",
+        );
+        Err(HandshakeError::Io)
+    })
 }
 
 /// Top-level entry — drive a single accepted connection through the
@@ -696,7 +778,7 @@ pub async fn handle_connection<F>(
             );
             record_auth_attempt("rate_limited");
             // Best-effort drop — peer hasn't sent anything yet.
-            framer.shutdown().await;
+            bounded_shutdown(&mut framer).await;
             return;
         }
     }
@@ -719,7 +801,7 @@ pub async fn handle_connection<F>(
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
             tracing::debug!(?e, "first frame read failed");
-            framer.shutdown().await;
+            bounded_shutdown(&mut framer).await;
             return;
         }
         Err(_elapsed) => {
@@ -728,7 +810,7 @@ pub async fn handle_connection<F>(
                 ?subnet,
                 "first frame timeout (slow-loris)",
             );
-            framer.shutdown().await;
+            bounded_shutdown(&mut framer).await;
             return;
         }
     }
@@ -759,7 +841,7 @@ pub async fn handle_connection<F>(
             }
             Err(_) => {
                 record_auth_attempt("bad_proof");
-                framer.shutdown().await;
+                bounded_shutdown(&mut framer).await;
                 return;
             }
         }
@@ -817,7 +899,11 @@ pub async fn handle_connection<F>(
                 if pad > Duration::ZERO {
                     tokio::time::sleep(pad).await;
                 }
-                framer.shutdown().await;
+                // RV-TRANSPORT-TCP-B5244FA2: bounded so a backpressured
+                // transport cannot retain the connection task (and the
+                // admission guards that live until it returns) after the
+                // handshake is already over.
+                bounded_shutdown(&mut framer).await;
                 return;
             }
         }
