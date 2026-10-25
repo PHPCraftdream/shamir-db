@@ -14,6 +14,8 @@
 //! Database-access helpers (`db()`, `repo()`, `store()`) arrive in a later
 //! slice.
 
+#[cfg(test)]
+use crate::wasm::FuelObserver;
 use shamir_collections::{TFxSet, THasher};
 use shamir_types::access::Actor;
 use shamir_types::types::value::QueryValue;
@@ -303,14 +305,15 @@ pub struct FnCtx {
     net: Option<Arc<dyn NetGateway>>,
     secret_grants: Arc<TFxSet<String>>,
     actor: Actor,
-    /// Shared remaining-fuel counter for the aggregate cross-Store fuel
-    /// budget (task #612). `None` in a fresh top-level `FnCtx` — the
-    /// top-level Store creation in `WasmFunction::call` lazily seeds it
-    /// from `WasmLimits::fuel` on first use and threads the SAME `Arc`
-    /// through every nested `ctx.call` (via `host_call.rs`'s child `FnCtx`
-    /// construction), so instruction consumption across the WHOLE fan-out
-    /// draws down from one shared budget instead of resetting per Store.
-    fuel_budget: Option<Arc<std::sync::atomic::AtomicI64>>,
+    /// Shared FREE-capacity pool of the exclusive fuel-lease accounting
+    /// (P0.1): consumption leaves the pool at reservation time; unused fuel
+    /// is refunded on settlement. NOT "remaining fuel including outstanding
+    /// Store leases".
+    fuel_budget: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Test-only observability of the fuel-lease protocol (P0.1), threaded
+    /// parent→child exactly like the fuel pool itself.
+    #[cfg(test)]
+    fuel_observer: Option<Arc<FuelObserver>>,
 }
 
 impl FnCtx {
@@ -330,6 +333,8 @@ impl FnCtx {
             secret_grants: Arc::new(TFxSet::default()),
             actor: Actor::System,
             fuel_budget: None,
+            #[cfg(test)]
+            fuel_observer: None,
         }
     }
 
@@ -346,6 +351,8 @@ impl FnCtx {
             secret_grants: Arc::new(TFxSet::default()),
             actor: Actor::System,
             fuel_budget: None,
+            #[cfg(test)]
+            fuel_observer: None,
         }
     }
 
@@ -405,7 +412,7 @@ impl FnCtx {
     /// Builder: attach a shared aggregate fuel-budget counter (task #612).
     /// Used internally by `host_call.rs` to thread the SAME counter into a
     /// nested call's `FnCtx` — do not call this from outside `shamir-wasm-host`.
-    pub(crate) fn with_fuel_budget(mut self, budget: Arc<std::sync::atomic::AtomicI64>) -> Self {
+    pub(crate) fn with_fuel_budget(mut self, budget: Arc<std::sync::atomic::AtomicU64>) -> Self {
         self.fuel_budget = Some(budget);
         self
     }
@@ -413,8 +420,22 @@ impl FnCtx {
     /// The aggregate fuel-budget counter, if one has been seeded (always
     /// `Some` once a top-level `WasmFunction::call` has run at least once
     /// for this ctx chain).
-    pub(crate) fn fuel_budget(&self) -> Option<&Arc<std::sync::atomic::AtomicI64>> {
+    pub(crate) fn fuel_budget(&self) -> Option<&Arc<std::sync::atomic::AtomicU64>> {
         self.fuel_budget.as_ref()
+    }
+
+    /// Test-only: attach the per-invocation fuel-lease observer, threaded
+    /// into every nested child `FnCtx` by `host_call`.
+    #[cfg(test)]
+    pub(crate) fn with_fuel_observer(mut self, observer: Arc<FuelObserver>) -> Self {
+        self.fuel_observer = Some(observer);
+        self
+    }
+
+    /// Test-only: the per-invocation fuel-lease observer, if attached.
+    #[cfg(test)]
+    pub(crate) fn fuel_observer(&self) -> Option<&Arc<FuelObserver>> {
+        self.fuel_observer.as_ref()
     }
 
     /// The actor that initiated this invocation.

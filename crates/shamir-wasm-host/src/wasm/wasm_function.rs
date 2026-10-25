@@ -55,23 +55,24 @@
 //! WALL-CLOCK deadline (`tokio::time::timeout`) bounding the TOTAL time of a
 //! request across every nested `ctx.call`.
 //!
-//! RESOLVED (task #612, follow-up to task #495 scope-down): an AGGREGATE
-//! cross-Store fuel budget is now threaded through `host_call.rs` via a
-//! shared `Arc<AtomicI64>` remaining-fuel counter on `FnCtx`
-//! (`fuel_budget`). The top-level `WasmFunction::call` (depth 0) lazily
-//! seeds the counter from `WasmLimits::fuel`; every nested Store draws its
-//! `set_fuel` grant from the SAME counter (capped at `limits.fuel` per
-//! Store as defense-in-depth) and debits actually-consumed fuel back into
-//! it on every exit path. So a guest that recurses via `ctx.call` can no
-//! longer execute N × `limits.fuel` instructions across N nested Stores —
-//! the aggregate instruction count across the whole fan-out is bounded by
-//! one shared budget, same as wall-clock + epoch already bound total time.
+//! Exclusive fuel-lease accounting (P0.1, invariant `B = F + ΣRᵢ + C`): the
+//! shared counter threaded via `host_call.rs` is the FREE-capacity pool.
+//! Each Store leases (reserves) its fuel from the pool BEFORE it becomes
+//! executable; when a level suspends in a nested host call its executable
+//! fuel is revoked and the unused capacity released so the child can lease
+//! it; on settlement the Store refunds whatever remains unused. A suspended
+//! ancestor retains no executable fuel, and the aggregate instruction count
+//! across the whole `ctx.call` fan-out is bounded by one shared budget —
+//! same as wall-clock + epoch already bound total time.
 
 use super::bindings::batch::{host_batch_get, host_batch_put};
 use super::bindings::call::host_call;
 use super::bindings::db::{host_db_execute, host_db_get, host_db_insert, host_db_query};
 use super::bindings::globals::{host_global_get, host_global_set};
 use super::bindings::http::host_http_fetch;
+#[cfg(test)]
+use super::fuel::FuelObserver;
+use super::fuel::{pool_refund, FuelLease};
 use super::wasm_engine::{WasmEngine, WasmLimits};
 use super::wasm_sanitizer::verify_wasm_module;
 use crate::gateway::db_gateway::DbGateway;
@@ -85,6 +86,7 @@ use async_trait::async_trait;
 use shamir_collections::TFxSet;
 use shamir_types::access::Actor;
 use shamir_types::types::value::QueryValue;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use wasmtime::{InstancePre, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
 
@@ -115,10 +117,23 @@ pub(crate) struct HostState {
     /// Env-var names this function may read via `global_get("env.X")`.
     /// Non-`env.` globals are ungated; a denied secret looks absent.
     pub(super) secret_grants: Arc<TFxSet<String>>,
-    /// Shared aggregate fuel-budget counter (task #612) — threaded through
-    /// `host_call.rs` into every nested `FnCtx` so instruction consumption
-    /// across the whole `ctx.call` fan-out draws down from one counter.
-    pub(super) fuel_budget: Arc<std::sync::atomic::AtomicI64>,
+    /// Exclusive fuel-lease accounting (P0.1): shared FREE-capacity pool.
+    /// Consumption leaves the pool at reservation time; unused fuel is
+    /// refunded on settlement.
+    pub(super) fuel_pool: Arc<AtomicU64>,
+    /// Fuel installed in this Store for the CURRENT segment (the lease
+    /// amount `set_fuel` last installed); 0 while suspended in a nested
+    /// host call. Segment consumption = baseline − `get_fuel()`.
+    pub(super) fuel_baseline: AtomicU64,
+    /// This Store's OWN remaining per-Store ceiling (effective limit minus
+    /// this Store's own consumption; NOT reduced by nested children).
+    pub(super) own_cap_left: AtomicU64,
+    /// Test-only per-invocation fuel-lease observability (P0.1).
+    #[cfg(test)]
+    pub(super) observer: Option<Arc<FuelObserver>>,
+    /// Test-only: this Store's identity in the invocation's observer.
+    #[cfg(test)]
+    pub(super) store_id: u64,
 }
 
 /// Test-only: build a bare [`Store`] wrapping a minimal [`HostState`] plus
@@ -145,7 +160,13 @@ pub(crate) fn test_linker_and_store(
         repo: String::new(),
         net: None,
         secret_grants: Arc::new(TFxSet::default()),
-        fuel_budget: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        fuel_pool: Arc::new(AtomicU64::new(0)),
+        fuel_baseline: AtomicU64::new(0),
+        own_cap_left: AtomicU64::new(0),
+        #[cfg(test)]
+        observer: None,
+        #[cfg(test)]
+        store_id: 0,
     };
     let store = Store::new(engine.engine(), state);
     Ok((linker, store))
@@ -462,26 +483,31 @@ impl ShamirFunction for WasmFunction {
         let net = ctx.net_gateway().cloned();
         let secret_grants = ctx.secret_grants().clone();
 
-        // Aggregate cross-Store fuel budget (task #612). `None` at depth 0
-        // (fresh top-level `FnCtx`) — lazily seed it from `limits.fuel`. Every
-        // nested `ctx.call` thread the SAME `Arc` through (see host_call.rs),
-        // so instruction consumption across the whole fan-out draws down
-        // from one shared counter instead of resetting per Store.
-        let fuel_budget = ctx
-            .fuel_budget()
-            .cloned()
-            .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicI64::new(limits.fuel as i64)));
-
-        let remaining = fuel_budget.load(std::sync::atomic::Ordering::Relaxed);
-        if remaining <= 0 {
-            return Err(FunctionError::Compute(
-                "aggregate fuel budget exhausted across nested calls".into(),
-            ));
+        // RV-WASM-HOST-2E9CF487: `WasmLimits::fuel` is a public u64 and the
+        // shared accounting is FULL-u64 end to end — no i64 cast, no clamp.
+        let effective_limit = limits.fuel;
+        #[cfg(test)]
+        let observer = ctx.fuel_observer().cloned();
+        // Exclusive fuel-lease accounting (P0.1): the shared counter is FREE
+        // capacity. Consumption leaves the pool at reservation time; unused fuel
+        // is refunded on settlement.
+        let fuel_pool = ctx.fuel_budget().cloned().unwrap_or_else(|| {
+            let seeded = Arc::new(AtomicU64::new(effective_limit));
+            #[cfg(test)]
+            if let Some(obs) = observer.as_ref() {
+                obs.record_seed(effective_limit);
+            }
+            seeded
+        });
+        // Reserve BEFORE the fuel becomes executable (RV-WASM-HOST-6F709AC2):
+        // the lease is removed from the pool up-front, so an in-flight nested
+        // chain can never draw more than the aggregate budget in total. The
+        // RAII [`FuelLease`] refunds the reservation even if the install
+        // below fails.
+        let lease = FuelLease::take(&fuel_pool, effective_limit);
+        if lease.amount() == 0 {
+            return Err(FunctionError::AggregateFuelExhausted);
         }
-        // Still bounded above by this call's own per-Store ceiling — a single
-        // nested call can never draw MORE than its normal quota even if the
-        // shared budget has generous headroom left (defense-in-depth).
-        let grant = (remaining as u64).min(limits.fuel);
 
         // NOTE: we no longer use spawn_blocking. With async_support enabled
         // the entire execution runs on the tokio runtime; Wasmtime suspends
@@ -506,13 +532,36 @@ impl ShamirFunction for WasmFunction {
             repo,
             net,
             secret_grants,
-            fuel_budget: fuel_budget.clone(),
+            fuel_pool: fuel_pool.clone(),
+            fuel_baseline: AtomicU64::new(lease.amount()),
+            own_cap_left: AtomicU64::new(effective_limit),
+            #[cfg(test)]
+            observer: observer.clone(),
+            #[cfg(test)]
+            store_id: 0,
         };
         let mut store: Store<HostState> = Store::new(engine.engine(), state);
         store.limiter(|s| &mut s.limits as &mut dyn wasmtime::ResourceLimiter);
-        store
-            .set_fuel(grant)
-            .map_err(|e| FunctionError::Compute(e.to_string()))?;
+        // Fail closed: the [`FuelLease`] token refunds the reservation before
+        // the error propagates (drop on the early-return path).
+        let granted = match store.set_fuel(lease.amount()) {
+            Ok(()) => lease.consume(),
+            Err(e) => {
+                drop(lease);
+                return Err(FunctionError::Compute(e.to_string()));
+            }
+        };
+        store.data().fuel_baseline.store(granted, Ordering::Relaxed);
+        #[cfg(test)]
+        if let Some(obs) = observer.as_ref() {
+            let store_id = obs.next_store_id();
+            store.data_mut().store_id = store_id;
+            // Actual fuel observed right after the install: the record
+            // pairs RESERVATION vs INSTALLED, so a clamp/cast bug in the
+            // install path is visible per Store.
+            let actual = store.get_fuel().unwrap_or(0);
+            obs.record_install(store_id, granted, actual, effective_limit);
+        }
 
         // Per-Store epoch deadline: trap the guest once the engine epoch has
         // advanced past `ceil(deadline / EPOCH_TICK)` ticks. This pre-empts a
@@ -523,117 +572,196 @@ impl ShamirFunction for WasmFunction {
         let deadline_ticks = (deadline.as_millis() as u64).div_ceil(tick_ms).max(1);
         store.set_epoch_deadline(deadline_ticks);
 
-        // Wrap the instantiate/call/decode body in an async block that
-        // borrows `store` (not moves it), so fuel consumption can be read
-        // off `store` AFTER the block regardless of which path it exits by
-        // (success or any of its early `?`/`return Err` points) — the
-        // aggregate fuel budget must be debited exactly once per `call`, on
-        // every exit path (task #612).
+        // Wrap the instantiate/call body in an async block. The Store is
+        // owned by `AccountedStore`, whose `Drop`/`settle` refunds the
+        // Store's remaining fuel to the free pool exactly once, on every
+        // exit path (success, any early `?`/`Err`, or cancellation of the
+        // returned future, RV-WASM-HOST-8AFCE04E).
         let result: FnResult<QueryValue> = async {
-            let instance = self
-                .instance_pre
-                .instantiate_async(&mut store)
-                .await
-                .map_err(|e| FunctionError::Compute(format!("instantiation failed: {e}")))?;
-
-            let memory = instance
-                .get_memory(&mut store, "memory")
-                .ok_or_else(|| FunctionError::Compute("missing export `memory`".into()))?;
-
-            let alloc_fn = instance
-                .get_typed_func::<i32, i32>(&mut store, "shamir_alloc")
-                .map_err(|e| {
-                    FunctionError::Compute(format!("missing export `shamir_alloc`: {e}"))
-                })?;
-
-            let call_fn = instance
-                .get_typed_func::<(i32, i32), i64>(&mut store, "shamir_call")
-                .map_err(|e| {
-                    FunctionError::Compute(format!("missing export `shamir_call`: {e}"))
-                })?;
-
-            let input_len = i32::try_from(input.len())
-                .map_err(|_| FunctionError::Compute("input too large for i32 length".into()))?;
-
-            // Allocate space for input in guest memory.
-            let in_ptr = alloc_fn
-                .call_async(&mut store, input_len)
-                .await
-                .map_err(|e| map_wasm_error(e, "shamir_alloc"))?;
-            if in_ptr < 0 {
-                return Err(FunctionError::Compute(
-                    "shamir_alloc returned negative pointer".into(),
-                ));
-            }
-            let in_ptr_u = in_ptr as usize;
-            let in_end = in_ptr_u.saturating_add(input.len());
-            if in_end > memory.data_size(&store) {
-                return Err(FunctionError::Compute(
-                    "shamir_alloc pointer outside memory bounds".into(),
-                ));
-            }
-
-            // Write input msgpack into guest memory.
-            memory.data_mut(&mut store)[in_ptr_u..in_end].copy_from_slice(&input);
-
-            // Call the guest function. At the top level (depth 0) bound the TOTAL
-            // wall-clock of the request — spanning every nested `ctx.call` — with
-            // a `timeout`. Nested invocations (depth > 0) run inside this future,
-            // so a single top-level deadline covers the whole fan-out; re-arming
-            // it per nested Store would multiply the effective budget. Epoch
-            // interruption handles the pure-CPU case even when the future never
-            // yields to let the `timeout` fire.
-            let call_future = call_fn.call_async(&mut store, (in_ptr, input_len));
-            let packed = if depth == 0 {
-                match tokio::time::timeout(deadline, call_future).await {
-                    Ok(res) => res.map_err(|e| map_wasm_error(e, "shamir_call"))?,
-                    Err(_) => {
-                        return Err(FunctionError::Compute(format!(
-                            "wasm request exceeded wall-clock deadline ({}s)",
-                            deadline.as_secs_f64()
-                        )));
-                    }
-                }
-            } else {
-                call_future
-                    .await
-                    .map_err(|e| map_wasm_error(e, "shamir_call"))?
+            let mut accounted = AccountedStore {
+                pool: fuel_pool.clone(),
+                store: Some(store),
+                settled: false,
+                #[cfg(test)]
+                observer,
             };
+            let raw: FnResult<Vec<u8>> = async {
+                let store = accounted.store();
+                let instance = self
+                    .instance_pre
+                    .instantiate_async(&mut *store)
+                    .await
+                    .map_err(|e| map_wasm_error(e, "instantiation failed"))?;
 
-            // Unpack the result pointer/length.
-            let out_ptr = ((packed as u64) >> 32) as usize;
-            let out_len = (packed & 0xFFFF_FFFF) as u32 as usize;
-            let out_end = out_ptr.saturating_add(out_len);
-            if out_end > memory.data_size(&store) {
-                return Err(FunctionError::Compute(
-                    "result pointer outside memory bounds".into(),
-                ));
+                let memory = instance
+                    .get_memory(&mut *store, "memory")
+                    .ok_or_else(|| FunctionError::Compute("missing export `memory`".into()))?;
+
+                let alloc_fn = instance
+                    .get_typed_func::<i32, i32>(&mut *store, "shamir_alloc")
+                    .map_err(|e| {
+                        FunctionError::Compute(format!("missing export `shamir_alloc`: {e}"))
+                    })?;
+
+                let call_fn = instance
+                    .get_typed_func::<(i32, i32), i64>(&mut *store, "shamir_call")
+                    .map_err(|e| {
+                        FunctionError::Compute(format!("missing export `shamir_call`: {e}"))
+                    })?;
+
+                let input_len = i32::try_from(input.len())
+                    .map_err(|_| FunctionError::Compute("input too large for i32 length".into()))?;
+
+                // Allocate space for input in guest memory.
+                let in_ptr = alloc_fn
+                    .call_async(&mut *store, input_len)
+                    .await
+                    .map_err(|e| map_wasm_error(e, "shamir_alloc"))?;
+                if in_ptr < 0 {
+                    return Err(FunctionError::Compute(
+                        "shamir_alloc returned negative pointer".into(),
+                    ));
+                }
+                let in_ptr_u = in_ptr as usize;
+                let in_end = in_ptr_u.saturating_add(input.len());
+                if in_end > memory.data_size(&*store) {
+                    return Err(FunctionError::Compute(
+                        "shamir_alloc pointer outside memory bounds".into(),
+                    ));
+                }
+
+                // Write input msgpack into guest memory.
+                memory.data_mut(&mut *store)[in_ptr_u..in_end].copy_from_slice(&input);
+
+                // Call the guest function. At the top level (depth 0) bound the TOTAL
+                // wall-clock of the request — spanning every nested `ctx.call` — with
+                // a `timeout`. Nested invocations (depth > 0) run inside this future,
+                // so a single top-level deadline covers the whole fan-out; re-arming
+                // it per nested Store would multiply the effective budget. Epoch
+                // interruption handles the pure-CPU case even when the future never
+                // yields to let the `timeout` fire.
+                let call_future = call_fn.call_async(&mut *store, (in_ptr, input_len));
+                let packed = if depth == 0 {
+                    match tokio::time::timeout(deadline, call_future).await {
+                        Ok(res) => res.map_err(|e| map_wasm_error(e, "shamir_call"))?,
+                        Err(_) => {
+                            return Err(FunctionError::Compute(format!(
+                                "wasm request exceeded wall-clock deadline ({}s)",
+                                deadline.as_secs_f64()
+                            )));
+                        }
+                    }
+                } else {
+                    call_future
+                        .await
+                        .map_err(|e| map_wasm_error(e, "shamir_call"))?
+                };
+
+                // Unpack the result pointer/length.
+                let out_ptr = ((packed as u64) >> 32) as usize;
+                let out_len = (packed & 0xFFFF_FFFF) as u32 as usize;
+                let out_end = out_ptr.saturating_add(out_len);
+                if out_end > memory.data_size(&*store) {
+                    return Err(FunctionError::Compute(
+                        "result pointer outside memory bounds".into(),
+                    ));
+                }
+
+                let out = memory.data(&*store)[out_ptr..out_end].to_vec();
+                Ok(out)
             }
-
-            let out = memory.data(&store)[out_ptr..out_end].to_vec();
-
+            .await;
+            let out = raw?;
             QueryValue::from_bytes(&out)
                 .map_err(|e| FunctionError::Compute(format!("result decode error: {e}")))
+            // `accounted` drops here on every path (success, `?`, or future
+            // cancellation) and settles (refunds unused fuel) exactly once.
         }
         .await;
-
-        // Debit actually-consumed fuel from the aggregate budget — exactly
-        // once, on every exit path (success or error) of the block above.
-        let remaining_after = store.get_fuel().unwrap_or(0);
-        let consumed = grant.saturating_sub(remaining_after);
-        fuel_budget.fetch_sub(consumed as i64, std::sync::atomic::Ordering::Relaxed);
 
         result
     }
 }
 
-pub(super) fn map_wasm_error(e: wasmtime::Error, context: &str) -> FunctionError {
-    let msg = e.to_string();
-    if msg.contains("fuel") {
-        FunctionError::Compute("fuel exhausted".into())
-    } else if msg.contains("epoch") {
-        FunctionError::Compute("wasm guest interrupted (wall-clock deadline exceeded)".into())
-    } else {
-        FunctionError::Compute(format!("{context} trap: {msg}"))
+/// Exclusive fuel lease together with the Store it is installed in
+/// (P0.1 exclusive-lease design). The lease left the pool at reservation
+/// time, so settlement refunds ONLY the Store's remaining fuel — consumed
+/// fuel was already charged. `Drop` runs on success, error, and
+/// cancellation of the call future alike (RV-WASM-HOST-8AFCE04E), and is
+/// idempotent.
+struct AccountedStore {
+    pool: Arc<AtomicU64>,
+    store: Option<Store<HostState>>,
+    settled: bool,
+    #[cfg(test)]
+    observer: Option<Arc<FuelObserver>>,
+}
+
+impl AccountedStore {
+    fn store(&mut self) -> &mut Store<HostState> {
+        self.store.as_mut().expect("store present until settle")
     }
+
+    /// Refund the Store's remaining fuel to the free pool exactly once.
+    fn settle(&mut self) {
+        if self.settled {
+            return;
+        }
+        if let Some(store) = self.store.as_mut() {
+            let baseline = store.data().fuel_baseline.load(Ordering::Relaxed);
+            let remaining = store.get_fuel().unwrap_or(0);
+            let spent = baseline.saturating_sub(remaining);
+            let _ = store.set_fuel(0);
+            // Settlement owns this Store's closing bookkeeping: reset the
+            // segment baseline to 0 and charge the final segment against
+            // the Store's OWN remaining cap.
+            store.data().fuel_baseline.store(0, Ordering::Relaxed);
+            let cap = store.data().own_cap_left.load(Ordering::Relaxed);
+            store
+                .data()
+                .own_cap_left
+                .store(cap.saturating_sub(spent), Ordering::Relaxed);
+            pool_refund(&self.pool, remaining);
+            #[cfg(test)]
+            if let Some(obs) = self.observer.as_ref() {
+                // Observe the REAL fuel after the clear (must be 0) and
+                // record this Store's final segment consumption.
+                let after = store.get_fuel().unwrap_or(0);
+                obs.record_settle(store.data().store_id, baseline, remaining, after);
+            }
+        }
+        self.settled = true;
+    }
+}
+
+impl Drop for AccountedStore {
+    fn drop(&mut self) {
+        self.settle();
+    }
+}
+
+/// Map a surfaced [`wasmtime::Error`] onto the typed [`FunctionError`].
+pub(super) fn map_wasm_error(e: wasmtime::Error, context: &str) -> FunctionError {
+    // Typed classification (P0.2): a nested `FunctionError` wrapped by
+    // `host_call` via `wasmtime::Error::new` is recovered by downcast — fuel
+    // / interrupt / aggregate causes survive the boundary WITHOUT
+    // stringification. Wasmtime traps are classified off the downcastable
+    // `wasmtime::Trap`, not matched on message text.
+    if let Some(nested) = e.downcast_ref::<FunctionError>() {
+        return match nested {
+            FunctionError::FuelExhausted => FunctionError::FuelExhausted,
+            FunctionError::AggregateFuelExhausted => FunctionError::AggregateFuelExhausted,
+            FunctionError::Interrupted => FunctionError::Interrupted,
+            // Ordinary compute-class failures stay string-classified.
+            other => FunctionError::Compute(format!("{context}: {other}")),
+        };
+    }
+    if let Some(trap) = e.downcast_ref::<wasmtime::Trap>() {
+        return match trap {
+            wasmtime::Trap::OutOfFuel => FunctionError::FuelExhausted,
+            wasmtime::Trap::Interrupt => FunctionError::Interrupted,
+            _ => FunctionError::Compute(format!("{context} trap: {e}")),
+        };
+    }
+    FunctionError::Compute(format!("{context} trap: {e}"))
 }
