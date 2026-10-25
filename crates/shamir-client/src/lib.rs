@@ -43,7 +43,7 @@ pub use client::subscription;
 pub use client::subscription::SubscriptionHandle;
 pub use client::{Client, ConnectLocalOptions, ConnectOptions, ResumeOptions};
 pub mod visibility;
-pub use error::ClientError;
+pub use error::{ClientError, CloseCause};
 pub use interner_cache::{FieldMap, InternerCacheRegistry};
 pub use receipts::{extract_receipts, reconcile_receipts, AliasReceipt, RepoObservation};
 pub use shamir_query_types::admin::ChangesSinceResponse;
