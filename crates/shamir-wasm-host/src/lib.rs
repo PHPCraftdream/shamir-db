@@ -29,7 +29,10 @@ pub use builtin::{
     builtin_aggs, builtin_scalars, Argon2idFunction, CreateFunctionOptions, FunctionMeta, Security,
     Visibility,
 };
-pub use compile::{compile_rust_source, compile_rust_source_with_timeout, WASM_COMPILE_TIMEOUT};
+pub use compile::{
+    compile_rust_source, compile_rust_source_blocking, compile_rust_source_with_timeout,
+    WASM_COMPILE_TIMEOUT,
+};
 pub use gateway::{
     check_url_allowed, check_url_allowed_resolved, DbGateway, EnvPolicy, HttpRequest, HttpResponse,
     NetGateway, ResolvedPin,
