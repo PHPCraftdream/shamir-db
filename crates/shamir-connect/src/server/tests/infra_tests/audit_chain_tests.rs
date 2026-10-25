@@ -1,5 +1,6 @@
 use crate::server::audit_chain::{
     canonical_bytes, AuditAppender, AuditChain, AuditChainWriter, AuditEntry, AuditError,
+    RETAINED_ENTRIES,
 };
 use std::sync::Arc;
 
@@ -284,4 +285,35 @@ fn canonical_bytes_byte_exact_for_fixture() {
 
     // Last 32 bytes = prev_hmac (zeros here).
     assert_eq!(&bytes[bytes.len() - 32..], &[0u8; 32]);
+}
+
+/// RV-CONNECT-8A65768F: the in-memory retained Vec must be bounded. The
+/// HMAC chain, `checkpoint()` and the durable appender are unaffected by
+/// retention, so appending far more than [`RETAINED_ENTRIES`]
+/// events must leave `snapshot()` capped at the most recent window — not
+/// grow without bound.
+#[test]
+fn rv_audit_8a65768f_snapshot_window_is_bounded() {
+    let c = AuditChain::new(key());
+    let total = (RETAINED_ENTRIES as u64) + 100;
+    for i in 0..total {
+        append_event(&c, i);
+    }
+
+    let entries = c.snapshot();
+    assert!(
+        entries.len() <= RETAINED_ENTRIES,
+        "retained window must be bounded at {}, got {}",
+        RETAINED_ENTRIES,
+        entries.len()
+    );
+    // The retained window holds the MOST RECENT entries: last seq and
+    // chain/checkpoint state must reflect every append.
+    assert_eq!(entries.last().map(|e| e.seq), Some(total));
+    let (next_seq, _) = c.checkpoint();
+    assert_eq!(next_seq, total + 1);
+    // The retained suffix is itself a valid HMAC sub-chain tail.
+    for pair in entries.windows(2) {
+        assert_eq!(pair[1].prev_hmac, pair[0].hmac);
+    }
 }

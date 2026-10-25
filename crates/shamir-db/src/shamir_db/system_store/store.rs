@@ -67,6 +67,10 @@ pub enum SystemStoreConfig {
 #[derive(Clone)]
 pub struct SystemStore {
     db: DbInstance,
+    /// Test seam: a 1-indexed countdown — `arm(n)` makes the n-th SUBSEQUENT
+    /// gated catalogue write fail (see `catalogue_write_fault_gate`); armed by
+    /// catalogue fault-injection tests.
+    catalogue_write_faults: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Build a `QueryValue::Map` with a single string-keyed entry (for simple
@@ -121,7 +125,45 @@ impl SystemStore {
         // DbInstance recovers/certifies before exposing the system repo.
         db.add_repo_with_durability(repo_config, policy).await?;
 
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            catalogue_write_faults: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        })
+    }
+
+    /// Arm the catalogue write-fault seam: the n-th subsequent gated
+    /// catalogue write operation (1-indexed countdown over EVERY gated
+    /// write, not per-call) fails with `DbError::Internal`. Test-only.
+    ///
+    /// Gated `#[cfg(any(test, feature = "test-util"))]` with `#[doc(hidden)]`
+    /// (RV-DB-6540DC7B follow-up): shamir-server's dev-dependency enables
+    /// `shamir-db/test-util`, so its bootstrap-failure tests arm the seam on
+    /// `shamir.system_store()`. Production default features never see it —
+    /// no default-featured public API is widened.
+    #[cfg(any(test, feature = "test-util"))]
+    #[doc(hidden)]
+    pub fn arm_catalogue_write_fault(&self, n: usize) {
+        self.catalogue_write_faults
+            .store(n, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Consulted by every catalogue write below; the armed countdown reaches
+    /// 1 on the armed write and fails it (arm(n) ⇒ the n-th write fails).
+    pub(crate) fn catalogue_write_fault_gate(&self) -> DbResult<()> {
+        let remaining = self
+            .catalogue_write_faults
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if remaining == 0 {
+            return Ok(());
+        }
+        self.catalogue_write_faults
+            .store(remaining - 1, std::sync::atomic::Ordering::SeqCst);
+        if remaining == 1 {
+            return Err(DbError::Internal(
+                "injected catalogue write failure".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Drain the system repo's inflight WAL tail into `history` and flush its

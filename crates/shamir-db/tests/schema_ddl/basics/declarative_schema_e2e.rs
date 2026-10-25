@@ -43,7 +43,7 @@ use shamir_types::types::value::QueryValue;
 /// In-memory ShamirDb with `testdb/main/users` table.
 async fn setup_db() -> ShamirDb {
     let db = ShamirDb::init_memory().await.unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     db.add_repo("testdb", repo_config).await.unwrap();
@@ -53,7 +53,7 @@ async fn setup_db() -> ShamirDb {
 /// In-memory ShamirDb with `testdb/main/users` AND `testdb/main/posts`.
 async fn setup_db_two_tables() -> ShamirDb {
     let db = ShamirDb::init_memory().await.unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
     let repo_config = RepoConfig::new("main", BoxRepoFactory::in_memory())
         .add_table(TableConfig::new("users"))
         .add_table(TableConfig::new("posts"));

@@ -96,6 +96,18 @@ pub async fn dispatch_request<H: RequestHandler + ?Sized, F: Fn(&[u8; 16]) -> u6
         )));
     }
 
+    // Post-auth per-session request-rate gate — same choke point the
+    // view path enforces; owned dispatch must not bypass it.
+    if session
+        .check_post_auth_rate_limit(crate::common::time::UnixNanos::now().as_u64())
+        .is_some()
+    {
+        return Ok(DispatchOutcome::Error(ErrorEnvelope::new(
+            envelope.request_id,
+            "rate_limited",
+        )));
+    }
+
     // Application-level dispatch — async, no blocking bridge needed.
     match handler.handle(&session, &envelope.req, conn).await {
         Ok(res_bytes) => Ok(DispatchOutcome::Response(ResponseEnvelope::ok(

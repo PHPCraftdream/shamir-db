@@ -42,7 +42,9 @@ use super::super::super::registry::SubscriptionRegistry;
 async fn database() -> ShamirDb {
     let db = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64([0xAB; 16]));
-    db.create_db_as("app", owner.clone()).await;
+    db.create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     db.add_repo_as("app", cfg, owner).await.expect("add repo");
@@ -145,7 +147,9 @@ fn row_id(frame: &PushEnvelope) -> String {
 pub(super) async fn bridge_database() -> Arc<ShamirDb> {
     let db = Arc::new(ShamirDb::init_memory().await.expect("init shamir"));
     let owner = Actor::User(principal64([0xAB; 16]));
-    db.create_db_as("app", owner.clone()).await;
+    db.create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     db.add_repo_as("app", cfg, owner).await.expect("add repo");

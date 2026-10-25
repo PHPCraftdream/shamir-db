@@ -53,7 +53,7 @@ use std::sync::Arc;
 /// degraded deployment shape: §1/§3's user-target checks are no-ops here.
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir.add_repo("testdb", repo_config).await.unwrap();
@@ -68,7 +68,7 @@ async fn setup_with_resolver() -> ShamirDb {
         .await
         .unwrap()
         .with_principal_resolver(Arc::new(MockResolver));
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir.add_repo("testdb", repo_config).await.unwrap();

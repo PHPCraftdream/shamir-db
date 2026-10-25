@@ -280,7 +280,7 @@ async fn net_grants_narrower_than_db_allowlist_denies_outside_host() {
 #[tokio::test]
 async fn create_function_with_empty_net_grants_via_wire_gets_no_egress() {
     let mut db = ShamirDb::init_memory().await.unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
     db.set_net_allowlist(vec!["allowed.example.com".to_string()]);
 
     let mut b = Batch::new();

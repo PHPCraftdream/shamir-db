@@ -214,7 +214,7 @@ fn maintenance_catalogue_cap_refuses_before_complete_loaders() {
 #[tokio::test]
 async fn sorted_registry_exports_full_descriptors_and_rows() {
     let source = ShamirDb::init_memory().await.unwrap();
-    source.create_db("app").await;
+    source.create_db("app").await.expect("create_db");
     source
         .add_repo("app", RepoConfig::new("main", BoxRepoFactory::in_memory()))
         .await
@@ -272,7 +272,7 @@ async fn sorted_registry_exports_full_descriptors_and_rows() {
 #[tokio::test]
 async fn index2_registry_exports_full_descriptors_and_rows() {
     let source = ShamirDb::init_memory().await.unwrap();
-    source.create_db("app").await;
+    source.create_db("app").await.expect("create_db");
     source
         .add_repo("app", RepoConfig::new("main", BoxRepoFactory::in_memory()))
         .await
@@ -369,7 +369,7 @@ fn assert_index_artifact<T: serde::Serialize>(
 #[tokio::test]
 async fn descriptor_set_over_budget_refuses_without_truncating() {
     let source = ShamirDb::init_memory().await.unwrap();
-    source.create_db("app").await;
+    source.create_db("app").await.expect("create_db");
     source
         .add_repo("app", RepoConfig::new("main", BoxRepoFactory::in_memory()))
         .await

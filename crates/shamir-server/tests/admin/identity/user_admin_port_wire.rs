@@ -101,7 +101,7 @@ async fn build_handler_with_ports() -> (ShamirDbHandler, Arc<FjallUserDirectory>
     let user_dir = Arc::new(FjallUserDirectory::open(tmp.path().join("u.redb")).unwrap());
     let db = ShamirDb::init_memory().await.expect("init shamir");
     // Create the "scratch" database so batch dispatch can target it.
-    db.create_db("scratch").await;
+    db.create_db("scratch").await.expect("create_db");
     // Inject the identity-seam ports BEFORE wrapping in Arc.
     let (port, resolver) = DirectoryPorts::new(user_dir.clone(), fast_kdf()).into_trait_objects();
     let db = db
@@ -123,7 +123,7 @@ async fn build_handler_with_ports() -> (ShamirDbHandler, Arc<FjallUserDirectory>
 /// Build a handler WITHOUT ports (for testing absent-resolver behavior).
 async fn build_handler_without_ports() -> ShamirDbHandler {
     let db = ShamirDb::init_memory().await.expect("init shamir");
-    db.create_db("scratch").await;
+    db.create_db("scratch").await.expect("create_db");
     ShamirDbHandler::new(Arc::new(db))
 }
 

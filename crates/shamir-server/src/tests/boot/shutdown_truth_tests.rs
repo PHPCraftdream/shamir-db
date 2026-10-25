@@ -81,7 +81,7 @@ fn unclean_shutdown_increments_counter_once_and_clean_does_not() {
 #[tokio::test]
 async fn failed_checkpoint_names_only_failed_repository() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let db = shamir.create_db("app").await;
+    let db = shamir.create_db("app").await.expect("create_db");
     for name in ["good", "bad"] {
         db.add_repo(RepoConfig::new(name, BoxRepoFactory::in_memory()))
             .await
@@ -112,7 +112,7 @@ async fn failed_checkpoint_names_only_failed_repository() {
 #[tokio::test(start_paused = true)]
 async fn shared_budget_exhaustion_is_unclean() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let db = shamir.create_db("app").await;
+    let db = shamir.create_db("app").await.expect("create_db");
     db.add_repo(RepoConfig::new("parked", BoxRepoFactory::in_memory()))
         .await
         .unwrap();
@@ -136,7 +136,7 @@ fn clean_report_writes_j_and_hard_reopen_certifies_nothing() {
         .unwrap();
     let h = runtime.block_on(async {
         let shamir = ShamirDb::init_memory().await.unwrap();
-        let db = shamir.create_db("app").await;
+        let db = shamir.create_db("app").await.expect("create_db");
         db.add_repo(
             RepoConfig::new("clean", BoxRepoFactory::fjall_raw(&path))
                 .add_table(TableConfig::new("items")),

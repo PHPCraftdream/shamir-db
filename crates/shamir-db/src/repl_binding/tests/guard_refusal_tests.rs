@@ -20,7 +20,7 @@ use crate::ShamirDb;
 /// (users table) — `otherdb` is the populated-unrelated control.
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let testdb = shamir.create_db("testdb").await;
+    let testdb = shamir.create_db("testdb").await.expect("create_db");
     testdb
         .add_repo(
             RepoConfig::new("main", BoxRepoFactory::in_memory())
@@ -28,7 +28,7 @@ async fn setup() -> ShamirDb {
         )
         .await
         .unwrap();
-    let otherdb = shamir.create_db("otherdb").await;
+    let otherdb = shamir.create_db("otherdb").await.expect("create_db");
     otherdb
         .add_repo(
             RepoConfig::new("main", BoxRepoFactory::in_memory())
@@ -90,7 +90,7 @@ async fn create_profile_and_subscription(shamir: &ShamirDb, sub: &str, profile: 
 #[tokio::test]
 async fn drop_db_cascade_from_session_db_spares_session_db() {
     let shamir = setup().await;
-    let sessdb = shamir.create_db("sessdb").await;
+    let sessdb = shamir.create_db("sessdb").await.expect("create_db");
     sessdb
         .add_repo(
             RepoConfig::new("main", BoxRepoFactory::in_memory())
@@ -98,7 +98,7 @@ async fn drop_db_cascade_from_session_db_spares_session_db() {
         )
         .await
         .unwrap();
-    let destdb = shamir.create_db("destdb").await;
+    let destdb = shamir.create_db("destdb").await.expect("create_db");
     destdb
         .add_repo(
             RepoConfig::new("main", BoxRepoFactory::in_memory())

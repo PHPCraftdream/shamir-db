@@ -108,7 +108,7 @@ fn one_row_insert(i: usize) -> shamir_db::query::batch::BatchRequest {
 /// `seed_commits()` independent commits so the journal has ≥ depth events.
 async fn seeded_journal() -> Arc<ShamirDb> {
     let shamir = Arc::new(ShamirDb::init_memory().await.expect("init"));
-    shamir.create_db(DB).await;
+    shamir.create_db(DB).await.expect("create_db");
     let cfg = RepoConfig::new(REPO, BoxRepoFactory::in_memory()).add_table(TableConfig::new(TABLE));
     shamir.add_repo(DB, cfg).await.expect("add_repo");
 

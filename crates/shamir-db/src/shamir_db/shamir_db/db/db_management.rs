@@ -31,53 +31,84 @@ impl ShamirDb {
     /// // attribution for whoever actually issued the request. Every
     /// // wire-reachable admin dispatcher already goes through
     /// // `execute_as(real_actor, ...)` -> `handle_create_db` ->
-    /// // `create_db_as(name, real_actor)`, never this bare wrapper. This
-    /// // function exists ONLY for offline/CLI tooling and test setup that
-    /// // legitimately runs as the system principal — grep every call site
-    /// // before adding a new one from request-handling code.
-    /// // `#[doc(hidden)]` (not `pub(crate)`): narrowing visibility would
-    /// // break 50+ integration test files (a separate compiled crate) and
-    /// // shamir-server's legitimate boot-time `create_db` call in
-    /// // `server_launcher.rs` — hiding from public rustdoc/API discovery
-    /// // is the achievable P2 mitigation here (task #606).
+    /// // `create_db_as_checked(name, real_actor)`, never this bare
+    /// // wrapper. This function exists ONLY for offline/CLI tooling and
+    /// // test setup that legitimately runs as the system principal —
+    /// // grep every call site before adding a new one from
+    /// // request-handling code.
     #[doc(hidden)]
-    pub async fn create_db(&self, name: &str) -> DbInstance {
+    pub async fn create_db(&self, name: &str) -> DbResult<DbInstance> {
         self.create_db_as(name, Actor::System).await
     }
 
     /// Like `create_db` but stamps the new database's owner as `actor`
-    /// instead of `System`. Mode stays `0o777` (open).
-    pub async fn create_db_as(&self, name: &str, actor: Actor) -> DbInstance {
-        let db = DbInstance::new();
-        self.dbs.insert(name.to_string(), db.clone());
+    /// instead of `System`. Mode stays `0o777` (open). Creation is
+    /// idempotent for an already-live name (the existing instance is
+    /// returned untouched); a NEW name is persisted to the catalogue
+    /// BEFORE its live registration is published, so a catalogue save
+    /// failure propagates and leaves no live registration behind
+    /// (RV-DB-6540DC7B); this is the same contract as
+    /// [`create_db_as_checked`](Self::create_db_as_checked).
+    pub async fn create_db_as(&self, name: &str, actor: Actor) -> DbResult<DbInstance> {
+        self.create_db_as_checked(name, actor).await
+    }
 
+    /// Catalogue-persist-fallible database creation (RV-DB-6540DC7B):
+    /// serialized against concurrent creators and the rename/drop
+    /// lifecycle via the replication-control lock; idempotent for an
+    /// already-live name (the original instance is returned with its
+    /// repo/scalar state and durable ownership untouched — no catalogue
+    /// write is attempted); for a NEW name the catalogue persist happens
+    /// BEFORE the live registration is published, so a save failure
+    /// propagates and leaves neither a live registration nor a
+    /// published-over-writer hazard. This contract makes NO claim that
+    /// an arbitrary failure leaves the durable row absent — a save that
+    /// commits and then fails at flush can leave the row behind while
+    /// still returning Err; the injected-fault tests exercise the
+    /// failure BEFORE the write (the prewrite catalogue gate).
+    pub async fn create_db_as_checked(&self, name: &str, actor: Actor) -> DbResult<DbInstance> {
+        // Round 2 (A6) lifecycle interlock: serialize the existence check,
+        // the catalogue persist, and the live publish against concurrent
+        // creators and the rename/drop lifecycle (which all take the same
+        // replication-control lock). Lock order is safe: the only place a
+        // guard is held while entering here is `handle_create_db`, which
+        // holds `db_create_lock` and acquires THIS lock after it
+        // (db_create_lock → replication_control); no code path takes the
+        // locks in the reverse order, so no inversion/deadlock.
+        let _control = self.lock_replication_control().await;
+
+        // Idempotent duplicate: return the ORIGINAL live instance.
+        // `get_db` clones the Arc out of the DashMap (no guard held across
+        // the awaits below); the catalogue is deliberately NOT rewritten,
+        // so the original owner/durable row stay untouched.
+        if let Some(existing) = self.get_db(name) {
+            return Ok(existing);
+        }
+
+        let db = DbInstance::new();
         let created_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-
-        // Persist to system store
-        {
-            let mut m = shamir_types::types::common::new_map();
-            m.insert(
-                "name".to_string(),
-                shamir_types::types::value::QueryValue::Str(name.to_string()),
-            );
-            m.insert(
-                "created_at".to_string(),
-                shamir_types::types::value::QueryValue::Int(created_at as i64),
-            );
-            let record = shamir_types::types::value::QueryValue::Map(m);
-            if let Err(e) = self
-                .system_store
-                .save_database(name, &record, &ResourceMeta::owned_enforced(actor))
-                .await
-            {
-                log::warn!("shamir_db::create_db: failed to persist '{}': {}", name, e);
-            }
-        }
-
-        db
+        let mut m = shamir_types::types::common::new_map();
+        m.insert(
+            "name".to_string(),
+            shamir_types::types::value::QueryValue::Str(name.to_string()),
+        );
+        m.insert(
+            "created_at".to_string(),
+            shamir_types::types::value::QueryValue::Int(created_at as i64),
+        );
+        let record = shamir_types::types::value::QueryValue::Map(m);
+        // Persist FIRST, publish second: a failed save propagates before
+        // any live registration exists, so there is nothing to roll back
+        // and no concurrent creator can observe (or delete through a
+        // rollback) an unrelated registration.
+        self.system_store
+            .save_database(name, &record, &ResourceMeta::owned_enforced(actor))
+            .await?;
+        self.dbs.insert(name.to_string(), db.clone());
+        Ok(db)
     }
 
     pub async fn remove_db(&self, name: &str) -> DbResult<bool> {
@@ -108,13 +139,9 @@ impl ShamirDb {
         let removed = self.dbs.remove(name).is_some();
 
         if removed {
-            if let Err(e) = self.system_store.remove_database(name).await {
-                log::warn!(
-                    "shamir_db::remove_db: failed to remove '{}' from system store: {}",
-                    name,
-                    e
-                );
-            }
+            // RV-DB-6540DC7B: a failed catalogue removal must surface — returning
+            // Ok(true) would claim a drop that did not complete.
+            self.system_store.remove_database(name).await?;
         }
 
         Ok(removed)
@@ -223,24 +250,10 @@ impl ShamirDb {
             m.insert("name".to_string(), QueryValue::Str(to.to_string()));
         }
         let db_meta = ResourceMeta::from_record(&old_db_rec);
-        if let Err(e) = self
-            .system_store
+        self.system_store
             .save_database(to, &new_db_rec, &db_meta)
-            .await
-        {
-            log::warn!(
-                "shamir_db::rename_db: failed to persist new database row '{}': {}",
-                to,
-                e
-            );
-        }
-        if let Err(e) = self.system_store.remove_database(from).await {
-            log::warn!(
-                "shamir_db::rename_db: failed to remove old database row '{}': {}",
-                from,
-                e
-            );
-        }
+            .await?;
+        self.system_store.remove_database(from).await?;
 
         // ── (3) Re-key all child catalogue rows carrying `db_name` ────
         // (3a) repositories: load all, filter by db_name==from, re-key.
@@ -272,8 +285,7 @@ impl ShamirDb {
 
             // Write-new-before-remove-old; `path` is preserved verbatim
             // (key invariant γ — physical location is unchanged).
-            if let Err(e) = self
-                .system_store
+            self.system_store
                 .save_repository(
                     to,
                     &repo_name,
@@ -282,23 +294,10 @@ impl ShamirDb {
                     &repo_meta,
                     repo_durability.as_ref(),
                 )
-                .await
-            {
-                log::warn!(
-                    "shamir_db::rename_db: failed to persist new repository row '{}/{}': {}",
-                    to,
-                    repo_name,
-                    e
-                );
-            }
-            if let Err(e) = self.system_store.remove_repository(from, &repo_name).await {
-                log::warn!(
-                    "shamir_db::rename_db: failed to remove old repository row '{}/{}': {}",
-                    from,
-                    repo_name,
-                    e
-                );
-            }
+                .await?;
+            self.system_store
+                .remove_repository(from, &repo_name)
+                .await?;
         }
 
         // (3b) tables: load all, filter by db_name==from, re-key via
@@ -345,28 +344,10 @@ impl ShamirDb {
                 .to_string();
 
             // Write-new-before-remove-old.
-            if let Err(e) = self.system_store.save_table_meta(&new_rec).await {
-                log::warn!(
-                    "shamir_db::rename_db: failed to persist new table row '{}/{}/{}': {}",
-                    to,
-                    repo_name,
-                    table_name,
-                    e
-                );
-            }
-            if let Err(e) = self
-                .system_store
+            self.system_store.save_table_meta(&new_rec).await?;
+            self.system_store
                 .remove_table(from, &repo_name, &table_name)
-                .await
-            {
-                log::warn!(
-                    "shamir_db::rename_db: failed to remove old table row '{}/{}/{}': {}",
-                    from,
-                    repo_name,
-                    table_name,
-                    e
-                );
-            }
+                .await?;
         }
 
         Ok(())
@@ -463,31 +444,22 @@ impl ShamirDb {
             )
             .await
         {
-            // A Some override carries an explicit persistence contract.
-            // Any failed upsert/flush path is terminal for this CREATE: roll
-            // back both registry and possible catalogue residue.
-            if durability.is_some() {
-                db.remove_repo(&repo_name).await;
-                if let Err(cleanup_error) = self
-                    .system_store
-                    .remove_repository(db_name, &repo_name)
-                    .await
-                {
-                    log::warn!(
-                        "shamir_db::add_repo: failed to roll back catalogue '{}/{}' after durability persist failure: {}",
-                        db_name,
-                        repo_name,
-                        cleanup_error
-                    );
-                }
-                return Err(e);
+            // RV-DB-6540DC7B: any persist failure rolls back and propagates —
+            // never report a CREATE that did not durably complete.
+            db.remove_repo(&repo_name).await;
+            if let Err(cleanup_error) = self
+                .system_store
+                .remove_repository(db_name, &repo_name)
+                .await
+            {
+                log::warn!(
+                    "shamir_db::add_repo: failed to roll back catalogue '{}/{}' after durability persist failure: {}",
+                    db_name,
+                    repo_name,
+                    cleanup_error
+                );
             }
-            log::warn!(
-                "shamir_db::add_repo: failed to persist '{}/{}': {}",
-                db_name,
-                repo_name,
-                e
-            );
+            return Err(e);
         }
 
         // Persist the inline table catalogue so these tables are re-created
@@ -499,47 +471,37 @@ impl ShamirDb {
                 .save_table(db_name, &repo_name, table_name, *enable_indexes, &meta)
                 .await
             {
-                if durability.is_some() {
-                    // An explicit override is an atomic CREATE contract:
-                    // failed inline catalogue persistence must not return
-                    // success with a live repo that won't reload correctly.
-                    db.remove_repo(&repo_name).await;
-                    for (persisted_name, _) in &inline_tables {
-                        if let Err(cleanup_error) = self
-                            .system_store
-                            .remove_table(db_name, &repo_name, persisted_name)
-                            .await
-                        {
-                            log::warn!(
-                                "shamir_db::add_repo: failed to roll back table catalogue '{}/{}/{}': {}",
-                                db_name,
-                                repo_name,
-                                persisted_name,
-                                cleanup_error
-                            );
-                        }
-                    }
+                // RV-DB-6540DC7B: failed inline catalogue persistence must not
+                // return success with a live repo that won't reload correctly.
+                db.remove_repo(&repo_name).await;
+                for (persisted_name, _) in &inline_tables {
                     if let Err(cleanup_error) = self
                         .system_store
-                        .remove_repository(db_name, &repo_name)
+                        .remove_table(db_name, &repo_name, persisted_name)
                         .await
                     {
                         log::warn!(
-                            "shamir_db::add_repo: failed to roll back catalogue '{}/{}': {}",
+                            "shamir_db::add_repo: failed to roll back table catalogue '{}/{}/{}': {}",
                             db_name,
                             repo_name,
+                            persisted_name,
                             cleanup_error
                         );
                     }
-                    return Err(e);
                 }
-                log::warn!(
-                    "shamir_db::add_repo: failed to persist table catalogue '{}/{}/{}': {}",
-                    db_name,
-                    repo_name,
-                    table_name,
-                    e
-                );
+                if let Err(cleanup_error) = self
+                    .system_store
+                    .remove_repository(db_name, &repo_name)
+                    .await
+                {
+                    log::warn!(
+                        "shamir_db::add_repo: failed to roll back catalogue '{}/{}': {}",
+                        db_name,
+                        repo_name,
+                        cleanup_error
+                    );
+                }
+                return Err(e);
             }
         }
 
@@ -571,18 +533,11 @@ impl ShamirDb {
         if let Some(db) = self.get_db(db_name) {
             let removed = db.remove_repo(repo_name).await;
             if removed {
-                if let Err(e) = self
-                    .system_store
+                // RV-DB-6540DC7B: a failed catalogue removal must surface —
+                // returning Ok(true) would claim a drop that did not complete.
+                self.system_store
                     .remove_repository(db_name, repo_name)
-                    .await
-                {
-                    log::warn!(
-                        "shamir_db::remove_repo: failed to remove '{}/{}' from system store: {}",
-                        db_name,
-                        repo_name,
-                        e
-                    );
-                }
+                    .await?;
             }
             Ok(removed)
         } else {
@@ -678,9 +633,10 @@ impl ShamirDb {
         // 2. Persist the new repo catalogue row FIRST so a crash between
         //    the two writes leaves the new repo resolvable on reboot; a
         //    stale (db, from) row resurrects nothing because the live
-        //    registration under `from` is already gone.
-        if let Err(e) = self
-            .system_store
+        //    registration under `from` is already gone. Catalogue
+        //    persistence failures propagate (RV-DB-6540DC7B) —
+        //    write-new-before-remove-old stays.
+        self.system_store
             .save_repository(
                 db_name,
                 to,
@@ -689,23 +645,8 @@ impl ShamirDb {
                 &existing_meta,
                 existing_durability.as_ref(),
             )
-            .await
-        {
-            log::warn!(
-                "shamir_db::rename_repo: failed to persist new catalogue row '{}/{}': {}",
-                db_name,
-                to,
-                e
-            );
-        }
-        if let Err(e) = self.system_store.remove_repository(db_name, from).await {
-            log::warn!(
-                "shamir_db::rename_repo: failed to remove old catalogue row '{}/{}': {}",
-                db_name,
-                from,
-                e
-            );
-        }
+            .await?;
+        self.system_store.remove_repository(db_name, from).await?;
 
         // 3. Re-key every child table's catalogue row: load the old row,
         //    write a new one under `(db, to, table)` preserving meta +
@@ -723,34 +664,13 @@ impl ShamirDb {
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
                     let table_meta = ResourceMeta::from_record(&rec);
-                    if let Err(e) = self
-                        .system_store
+                    // RV-DB-6540DC7B: persistence failures propagate.
+                    self.system_store
                         .save_table(db_name, to, table_name, enable_indexes, &table_meta)
-                        .await
-                    {
-                        log::warn!(
-                            "shamir_db::rename_repo: failed to persist new table catalogue \
-                             row '{}/{}/{}': {}",
-                            db_name,
-                            to,
-                            table_name,
-                            e
-                        );
-                    }
-                    if let Err(e) = self
-                        .system_store
+                        .await?;
+                    self.system_store
                         .remove_table(db_name, from, table_name)
-                        .await
-                    {
-                        log::warn!(
-                            "shamir_db::rename_repo: failed to remove old table catalogue \
-                             row '{}/{}/{}': {}",
-                            db_name,
-                            from,
-                            table_name,
-                            e
-                        );
-                    }
+                        .await?;
                 }
                 Ok(None) => {
                     log::warn!(
@@ -761,16 +681,7 @@ impl ShamirDb {
                         table_name
                     );
                 }
-                Err(e) => {
-                    log::warn!(
-                        "shamir_db::rename_repo: failed to load table catalogue \
-                         '{}/{}/{}': {}",
-                        db_name,
-                        from,
-                        table_name,
-                        e
-                    );
-                }
+                Err(e) => return Err(e),
             }
         }
 

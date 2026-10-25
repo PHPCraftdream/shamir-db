@@ -27,7 +27,7 @@ use crate::ShamirDb;
 /// and a `users` table. Returns the ShamirDb handle.
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let db = shamir.create_db("testdb").await;
+    let db = shamir.create_db("testdb").await.expect("create_db");
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     db.add_repo(repo_config).await.unwrap();
@@ -201,7 +201,7 @@ async fn setup_durable(sys_path: std::path::PathBuf) -> ShamirDb {
     let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
 
     // Create repo via the wire protocol so it is persisted in the catalogue.
     use shamir_query_builder::ddl;

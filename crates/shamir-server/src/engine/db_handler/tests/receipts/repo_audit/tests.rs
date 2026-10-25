@@ -51,7 +51,9 @@ fn session(superuser: bool, user_id: [u8; 16]) -> Session {
 async fn fixture() -> (ShamirDbHandler, Arc<MemoryAppender>, Session) {
     let db = ShamirDb::init_memory().await.unwrap();
     let owner = Actor::User(principal64([3; 16]));
-    db.create_db_as("app", owner.clone()).await;
+    db.create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     db.add_repo_as(
         "app",
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items")),
