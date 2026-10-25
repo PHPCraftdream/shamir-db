@@ -608,8 +608,8 @@ async fn watchdog_no_warnings_for_normal_ops() {
     b.insert(
         "insert",
         shamir_query_builder::write::insert("users")
-            .row(doc().set("name", "Alice").set("age", 30))
-            .row(doc().set("name", "Bob").set("age", 25)),
+            .row(doc().set("name", "Alice").unwrap().set("age", 30).unwrap())
+            .row(doc().set("name", "Bob").unwrap().set("age", 25).unwrap()),
     );
     let seed_req = b.build();
     execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")

@@ -29,7 +29,7 @@ async fn test_query_runner_none_tx_insert_and_read() {
     b.id(1);
     b.insert(
         "ins",
-        write::insert("users").row(doc().set("name", "Eve").set("age", 28)),
+        write::insert("users").row(doc().set("name", "Eve").unwrap().set("age", 28).unwrap()),
     );
     let insert_req = b.build();
     let insert_entry = insert_req.queries.get("ins").unwrap().clone();
@@ -104,8 +104,11 @@ async fn insert_returning_id_encoding_yields_id_bytes() {
         write::insert("users").row(
             doc()
                 .set("name", "Alice")
+                .unwrap()
                 .set("age", 30_i64)
-                .set("city", "NYC"),
+                .unwrap()
+                .set("city", "NYC")
+                .unwrap(),
         ),
     );
     let insert_req = b.build();
@@ -181,7 +184,13 @@ async fn insert_returning_id_vs_name_encoding_parity() {
     b.id(10);
     b.insert(
         "ins",
-        write::insert("users").row(doc().set("name", "Bob").set("score", 99_i64)),
+        write::insert("users").row(
+            doc()
+                .set("name", "Bob")
+                .unwrap()
+                .set("score", 99_i64)
+                .unwrap(),
+        ),
     );
     let req = b.build();
     let entry = req.queries.get("ins").unwrap().clone();
@@ -218,7 +227,13 @@ async fn insert_returning_id_vs_name_encoding_parity() {
     b2.id(11);
     b2.insert(
         "ins",
-        write::insert("users").row(doc().set("name", "Bob").set("score", 99_i64)),
+        write::insert("users").row(
+            doc()
+                .set("name", "Bob")
+                .unwrap()
+                .set("score", 99_i64)
+                .unwrap(),
+        ),
     );
     let req2 = b2.build();
     let entry2 = req2.queries.get("ins").unwrap().clone();

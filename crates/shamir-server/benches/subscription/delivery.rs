@@ -325,7 +325,9 @@ async fn seed_table(
             insert(table).row(
                 doc! { "_id" => format!("k{i}") }
                     .set("thread_id", (i as i64) % 16)
-                    .set("body", format!("seed-{i}")),
+                    .unwrap()
+                    .set("body", format!("seed-{i}"))
+                    .unwrap(),
             ),
         );
         let _ = handler
@@ -449,8 +451,11 @@ async fn reactive_setup() -> ReactiveIterState {
         wb.id((i as u64) + 1);
         wb.insert(
             "ins",
-            insert("threads")
-                .row(doc! { "_id" => format!("t{i}") }.set("title", format!("thread-{i}"))),
+            insert("threads").row(
+                doc! { "_id" => format!("t{i}") }
+                    .set("title", format!("thread-{i}"))
+                    .unwrap(),
+            ),
         );
         let _ = handler
             .handle(&s, &encode(&execute_built("app", wb.build())), &conn_seed)
@@ -499,7 +504,9 @@ async fn reactive_routine(mut state: ReactiveIterState) {
             insert("messages").row(
                 doc! { "_id" => format!("m{i}") }
                     .set("thread_id", (i as i64) % 8)
-                    .set("body", format!("reactive-{i}")),
+                    .unwrap()
+                    .set("body", format!("reactive-{i}"))
+                    .unwrap(),
             ),
         );
         let _ = state

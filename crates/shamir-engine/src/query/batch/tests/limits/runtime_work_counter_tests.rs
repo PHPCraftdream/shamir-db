@@ -50,7 +50,7 @@ async fn setup() -> Resolver {
     let mut seed = Batch::new();
     seed.insert(
         "seed",
-        insert("source").rows((0..10).map(|id| doc().set("id", id))),
+        insert("source").rows((0..10).map(|id| doc().set("id", id).unwrap())),
     );
     execute_batch_unchecked(&seed.build(), &resolver, None, None, Actor::System, "test")
         .await
@@ -72,7 +72,10 @@ async fn rows(resolver: &Resolver, table: &str) -> usize {
 
 fn nested(cap: u64, transactional: bool) -> BatchRequest {
     let mut leaf = Batch::new();
-    leaf.insert("write", insert("sink").row(doc().set("id", param("inner"))));
+    leaf.insert(
+        "write",
+        insert("sink").row(doc().set("id", param("inner")).unwrap()),
+    );
     let mut body = Batch::new();
     let src = body.query("src", Query::from("source"));
     body.for_each("inner", src.column("id"), "inner", leaf.build());
@@ -162,7 +165,10 @@ async fn dynamic_precheck_rejects_before_iteration_zero_without_charging() {
     let mut nested_body = Batch::new();
     nested_body.query("read", Query::from("source"));
     let mut body = Batch::new();
-    let write = body.insert("write", insert("sink").row(doc().set("id", param("row"))));
+    let write = body.insert(
+        "write",
+        insert("sink").row(doc().set("id", param("row")).unwrap()),
+    );
     let nested = body.sub_batch_no_bind("nested", nested_body.build());
     body.after(&nested, &write);
     let mut batch = Batch::new();
@@ -369,7 +375,7 @@ async fn interactive_commit_does_not_charge_or_check_execution_budget() {
         max_total_work: 1,
         ..BatchLimits::default()
     });
-    batch.insert("write", insert("sink").row(doc().set("id", 42)));
+    batch.insert("write", insert("sink").row(doc().set("id", 42).unwrap()));
     let request = batch.build();
     let scope = ExecScope::root(&request.limits);
     let mut plan =

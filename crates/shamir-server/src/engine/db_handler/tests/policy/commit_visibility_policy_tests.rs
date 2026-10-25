@@ -78,7 +78,7 @@ fn writes(wait: Option<VisibilityWait>, transactional: bool) -> BatchRequest {
     }
     batch.insert(
         "written",
-        Insert::with_repo("main", "items").row(doc().set("name", "receipt")),
+        Insert::with_repo("main", "items").row(doc().set("name", "receipt").unwrap()),
     );
     batch.build()
 }
@@ -288,7 +288,7 @@ async fn recursive_body_invalid_overrides_fail_closed_before_writes() {
             // A write preceding the invalid subtree must never execute.
             outer.insert(
                 "first",
-                Insert::with_repo("main", "items").row(doc().set("name", "first")),
+                Insert::with_repo("main", "items").row(doc().set("name", "first").unwrap()),
             );
             outer.sub_batch_no_bind("nested", middle.build());
             invalid(send(&handler, &session, execute(outer.build())).await);

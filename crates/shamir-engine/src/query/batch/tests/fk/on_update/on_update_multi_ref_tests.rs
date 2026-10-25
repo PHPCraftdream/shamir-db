@@ -74,21 +74,33 @@ async fn on_update_cascade_two_child_tables_same_ref_field() {
         &resolver,
         "iu",
         "users",
-        doc().set("id", 5).set("name", "alice"),
+        doc().set("id", 5).unwrap().set("name", "alice").unwrap(),
     )
     .await;
     insert_row(
         &resolver,
         "io",
         "orders",
-        doc().set("oid", 1).set("user_id", 5).set("total", 100),
+        doc()
+            .set("oid", 1)
+            .unwrap()
+            .set("user_id", 5)
+            .unwrap()
+            .set("total", 100)
+            .unwrap(),
     )
     .await;
     insert_row(
         &resolver,
         "is",
         "sessions",
-        doc().set("sid", 1).set("user_id", 5).set("token", "t1"),
+        doc()
+            .set("sid", 1)
+            .unwrap()
+            .set("user_id", 5)
+            .unwrap()
+            .set("token", "t1")
+            .unwrap(),
     )
     .await;
 
@@ -99,7 +111,7 @@ async fn on_update_cascade_two_child_tables_same_ref_field() {
         "upd_user",
         write::update("users")
             .where_(filter::eq("id", 5))
-            .set(doc().set("id", 7)),
+            .set(doc().set("id", 7).unwrap()),
     )
     .unwrap();
     let req = b.build();
@@ -176,7 +188,7 @@ async fn on_update_cascade_two_fk_fields_same_ref_field() {
         &resolver,
         "iu",
         "users",
-        doc().set("id", 5).set("name", "alice"),
+        doc().set("id", 5).unwrap().set("name", "alice").unwrap(),
     )
     .await;
     insert_row(
@@ -185,9 +197,13 @@ async fn on_update_cascade_two_fk_fields_same_ref_field() {
         "messages",
         doc()
             .set("mid", 1)
+            .unwrap()
             .set("sender_id", 5)
+            .unwrap()
             .set("receiver_id", 5)
-            .set("body", "hi"),
+            .unwrap()
+            .set("body", "hi")
+            .unwrap(),
     )
     .await;
 
@@ -198,7 +214,7 @@ async fn on_update_cascade_two_fk_fields_same_ref_field() {
         "upd_user",
         write::update("users")
             .where_(filter::eq("id", 5))
-            .set(doc().set("id", 7)),
+            .set(doc().set("id", 7).unwrap()),
     )
     .unwrap();
     let req = b.build();
@@ -274,7 +290,7 @@ async fn on_update_restrict_fires_even_when_sharing_ref_field_with_cascade() {
         &resolver,
         "iu",
         "users",
-        doc().set("id", 5).set("name", "alice"),
+        doc().set("id", 5).unwrap().set("name", "alice").unwrap(),
     )
     .await;
     // The RESTRICT child still references the old id=5 → update must be rejected.
@@ -282,7 +298,13 @@ async fn on_update_restrict_fires_even_when_sharing_ref_field_with_cascade() {
         &resolver,
         "irc",
         "restrict_child",
-        doc().set("rid", 1).set("user_id", 5).set("note", "refs-5"),
+        doc()
+            .set("rid", 1)
+            .unwrap()
+            .set("user_id", 5)
+            .unwrap()
+            .set("note", "refs-5")
+            .unwrap(),
     )
     .await;
 
@@ -293,7 +315,7 @@ async fn on_update_restrict_fires_even_when_sharing_ref_field_with_cascade() {
         "upd_user",
         write::update("users")
             .where_(filter::eq("id", 5))
-            .set(doc().set("id", 7)),
+            .set(doc().set("id", 7).unwrap()),
     )
     .unwrap();
     let req = b.build();
@@ -357,14 +379,14 @@ async fn on_update_cascade_single_fk_non_regression() {
         &resolver,
         "iu1",
         "users",
-        doc().set("id", 5).set("name", "alice"),
+        doc().set("id", 5).unwrap().set("name", "alice").unwrap(),
     )
     .await;
     insert_row(
         &resolver,
         "iu2",
         "users",
-        doc().set("id", 6).set("name", "bob"),
+        doc().set("id", 6).unwrap().set("name", "bob").unwrap(),
     )
     .await;
     // order refs 5 (should be re-keyed); order refs 9 (should be untouched).
@@ -372,14 +394,26 @@ async fn on_update_cascade_single_fk_non_regression() {
         &resolver,
         "io1",
         "orders",
-        doc().set("oid", 1).set("user_id", 5).set("v", "a"),
+        doc()
+            .set("oid", 1)
+            .unwrap()
+            .set("user_id", 5)
+            .unwrap()
+            .set("v", "a")
+            .unwrap(),
     )
     .await;
     insert_row(
         &resolver,
         "io2",
         "orders",
-        doc().set("oid", 2).set("user_id", 9).set("v", "b"),
+        doc()
+            .set("oid", 2)
+            .unwrap()
+            .set("user_id", 9)
+            .unwrap()
+            .set("v", "b")
+            .unwrap(),
     )
     .await;
 
@@ -390,7 +424,7 @@ async fn on_update_cascade_single_fk_non_regression() {
         "upd_user",
         write::update("users")
             .where_(filter::eq("id", 5))
-            .set(doc().set("id", 7)),
+            .set(doc().set("id", 7).unwrap()),
     )
     .unwrap();
     let req = b.build();
@@ -456,7 +490,7 @@ async fn on_update_cascade_int_parent_f64_child_coercion() {
         &resolver,
         "ip",
         "parent",
-        doc().set("id", 5_i64).set("name", "P5"),
+        doc().set("id", 5_i64).unwrap().set("name", "P5").unwrap(),
     )
     .await;
     insert_row(
@@ -465,8 +499,11 @@ async fn on_update_cascade_int_parent_f64_child_coercion() {
         "child",
         doc()
             .set("cid", 50_i64)
+            .unwrap()
             .set("parent_id", 5.0_f64)
-            .set("label", "c"),
+            .unwrap()
+            .set("label", "c")
+            .unwrap(),
     )
     .await;
 
@@ -478,7 +515,7 @@ async fn on_update_cascade_int_parent_f64_child_coercion() {
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 5_i64))
-            .set(doc().set("id", 7_i64)),
+            .set(doc().set("id", 7_i64).unwrap()),
     )
     .unwrap();
     let req = b.build();

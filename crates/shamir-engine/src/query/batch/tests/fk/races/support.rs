@@ -309,7 +309,7 @@ pub(super) async fn seed_parent(resolver: &RaceInjectingResolver, id: i64) {
     b.id(1);
     b.insert(
         "ins_parent",
-        write::insert("parent").row(doc().set("id", id).set("name", "Alice")),
+        write::insert("parent").row(doc().set("id", id).unwrap().set("name", "Alice").unwrap()),
     );
     execute_batch(&b.build(), resolver, None, None, Actor::System, "test")
         .await
@@ -328,7 +328,13 @@ pub(super) async fn arm_child_writer(
     wb.id("writer");
     wb.insert(
         "ins_child_race",
-        write::insert("child").row(doc().set("parent_id", parent_id).set("label", "race")),
+        write::insert("child").row(
+            doc()
+                .set("parent_id", parent_id)
+                .unwrap()
+                .set("label", "race")
+                .unwrap(),
+        ),
     );
     *resolver.writer.lock().await = Some(InjectedWriter {
         req: wb.build(),
@@ -350,7 +356,7 @@ pub(super) async fn rekey_parent(
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", from))
-            .set(doc().set("id", to)),
+            .set(doc().set("id", to).unwrap()),
     )
     .unwrap();
     execute_batch(&b.build(), resolver, None, None, Actor::System, "test").await

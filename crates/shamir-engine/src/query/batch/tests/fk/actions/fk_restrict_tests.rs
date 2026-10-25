@@ -100,7 +100,7 @@ async fn restrict_rejects_parent_delete_when_child_exists() {
     b.id(1);
     b.insert(
         "ins_parent",
-        write::insert("parent").row(doc().set("id", 1).set("name", "Alice")),
+        write::insert("parent").row(doc().set("id", 1).unwrap().set("name", "Alice").unwrap()),
     );
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -113,7 +113,13 @@ async fn restrict_rejects_parent_delete_when_child_exists() {
     b.id(2);
     b.insert(
         "ins_child",
-        write::insert("child").row(doc().set("parent_id", 1).set("label", "x")),
+        write::insert("child").row(
+            doc()
+                .set("parent_id", 1)
+                .unwrap()
+                .set("label", "x")
+                .unwrap(),
+        ),
     );
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -163,7 +169,7 @@ async fn restrict_allows_parent_delete_after_child_removed() {
     b.id(1);
     b.insert(
         "ins",
-        write::insert("parent").row(doc().set("id", 1).set("name", "Alice")),
+        write::insert("parent").row(doc().set("id", 1).unwrap().set("name", "Alice").unwrap()),
     );
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -175,7 +181,13 @@ async fn restrict_allows_parent_delete_after_child_removed() {
     b.id(2);
     b.insert(
         "ins",
-        write::insert("child").row(doc().set("parent_id", 1).set("label", "x")),
+        write::insert("child").row(
+            doc()
+                .set("parent_id", 1)
+                .unwrap()
+                .set("label", "x")
+                .unwrap(),
+        ),
     );
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -230,7 +242,7 @@ async fn no_action_fk_allows_parent_delete() {
     b.id(1);
     b.insert(
         "ins",
-        write::insert("parent").row(doc().set("id", 1).set("name", "Alice")),
+        write::insert("parent").row(doc().set("id", 1).unwrap().set("name", "Alice").unwrap()),
     );
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -242,7 +254,13 @@ async fn no_action_fk_allows_parent_delete() {
     b.id(2);
     b.insert(
         "ins",
-        write::insert("child").row(doc().set("parent_id", 1).set("label", "x")),
+        write::insert("child").row(
+            doc()
+                .set("parent_id", 1)
+                .unwrap()
+                .set("label", "x")
+                .unwrap(),
+        ),
     );
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -280,7 +298,7 @@ async fn unreferenced_parent_deletes_fine() {
     b.id(1);
     b.insert(
         "ins",
-        write::insert("parent").row(doc().set("id", 1).set("name", "Alice")),
+        write::insert("parent").row(doc().set("id", 1).unwrap().set("name", "Alice").unwrap()),
     );
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -322,7 +340,13 @@ async fn restrict_blocks_delete_with_int_parent_f64_child_coercion() {
     b.id(1);
     b.insert(
         "ins_parent",
-        write::insert("parent").row(doc().set("id", 1_i64).set("name", "Alice")),
+        write::insert("parent").row(
+            doc()
+                .set("id", 1_i64)
+                .unwrap()
+                .set("name", "Alice")
+                .unwrap(),
+        ),
     );
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -334,7 +358,13 @@ async fn restrict_blocks_delete_with_int_parent_f64_child_coercion() {
     b.id(2);
     b.insert(
         "ins_child",
-        write::insert("child").row(doc().set("parent_id", 1.0_f64).set("label", "x")),
+        write::insert("child").row(
+            doc()
+                .set("parent_id", 1.0_f64)
+                .unwrap()
+                .set("label", "x")
+                .unwrap(),
+        ),
     );
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -431,8 +461,11 @@ async fn self_referential_restrict_blocks_delete_when_subordinate_exists() {
         write::insert("employees").row(
             doc()
                 .set("id", 1_i64)
+                .unwrap()
                 .set("name", "CEO")
-                .set("manager_id", QueryValue::Null),
+                .unwrap()
+                .set("manager_id", QueryValue::Null)
+                .unwrap(),
         ),
     );
     let req = b.build();
@@ -448,8 +481,11 @@ async fn self_referential_restrict_blocks_delete_when_subordinate_exists() {
         write::insert("employees").row(
             doc()
                 .set("id", 2_i64)
+                .unwrap()
                 .set("name", "Sub")
-                .set("manager_id", 1_i64),
+                .unwrap()
+                .set("manager_id", 1_i64)
+                .unwrap(),
         ),
     );
     let req = b.build();
@@ -501,7 +537,7 @@ async fn transactional_delete_child_then_parent_succeeds_under_restrict() {
     b.id(1);
     b.insert(
         "ins_parent",
-        write::insert("parent").row(doc().set("id", 1).set("name", "Alice")),
+        write::insert("parent").row(doc().set("id", 1).unwrap().set("name", "Alice").unwrap()),
     );
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -512,7 +548,13 @@ async fn transactional_delete_child_then_parent_succeeds_under_restrict() {
     b.id(2);
     b.insert(
         "ins_child",
-        write::insert("child").row(doc().set("parent_id", 1).set("label", "x")),
+        write::insert("child").row(
+            doc()
+                .set("parent_id", 1)
+                .unwrap()
+                .set("label", "x")
+                .unwrap(),
+        ),
     );
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -561,8 +603,11 @@ async fn self_referential_restrict_allows_delete_when_no_subordinates() {
         write::insert("employees").row(
             doc()
                 .set("id", 1_i64)
+                .unwrap()
                 .set("name", "CEO")
-                .set("manager_id", QueryValue::Null),
+                .unwrap()
+                .set("manager_id", QueryValue::Null)
+                .unwrap(),
         ),
     );
     let req = b.build();
@@ -611,7 +656,7 @@ async fn restrict_blocks_on_middle_value_among_several_deduped_parents() {
         b.id(id);
         b.insert(
             "ins",
-            write::insert("parent").row(doc().set("id", id).set("name", name)),
+            write::insert("parent").row(doc().set("id", id).unwrap().set("name", name).unwrap()),
         );
         execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
             .await
@@ -627,7 +672,13 @@ async fn restrict_blocks_on_middle_value_among_several_deduped_parents() {
         b.id(cid + 1000);
         b.insert(
             "ins",
-            write::insert("child").row(doc().set("parent_id", 20).set("label", label)),
+            write::insert("child").row(
+                doc()
+                    .set("parent_id", 20)
+                    .unwrap()
+                    .set("label", label)
+                    .unwrap(),
+            ),
         );
         execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
             .await

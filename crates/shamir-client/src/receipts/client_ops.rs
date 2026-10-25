@@ -12,6 +12,7 @@ use shamir_query_types::wire::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION
 
 use super::alias_receipt::AliasReceipt;
 use super::extract::extract_receipts;
+use crate::error::client_batch_error;
 use crate::interner_cache::InternerCacheRegistry;
 use crate::{Client, ClientError};
 
@@ -145,7 +146,7 @@ where
     let response = send(DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
         db: db.to_string(),
-        batch: batch.build(),
+        batch: batch.try_build().map_err(client_batch_error)?,
     })
     .await?;
     match response {

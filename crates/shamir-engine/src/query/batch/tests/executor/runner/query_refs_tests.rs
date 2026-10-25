@@ -25,9 +25,27 @@ async fn test_dependent_query_ref() {
     b.op_silent(
         "seed",
         write::insert("users")
-            .row(doc().set("name", "Alice").set("status", "active"))
-            .row(doc().set("name", "Bob").set("status", "inactive"))
-            .row(doc().set("name", "Carol").set("status", "active")),
+            .row(
+                doc()
+                    .set("name", "Alice")
+                    .unwrap()
+                    .set("status", "active")
+                    .unwrap(),
+            )
+            .row(
+                doc()
+                    .set("name", "Bob")
+                    .unwrap()
+                    .set("status", "inactive")
+                    .unwrap(),
+            )
+            .row(
+                doc()
+                    .set("name", "Carol")
+                    .unwrap()
+                    .set("status", "active")
+                    .unwrap(),
+            ),
     );
     let seed_req = b.build();
     execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
@@ -100,9 +118,27 @@ async fn query_ref_does_not_resolve_under_id_encoding() {
     b.op_silent(
         "seed",
         write::insert("users")
-            .row(doc().set("name", "Alice").set("status", "active"))
-            .row(doc().set("name", "Bob").set("status", "inactive"))
-            .row(doc().set("name", "Carol").set("status", "active")),
+            .row(
+                doc()
+                    .set("name", "Alice")
+                    .unwrap()
+                    .set("status", "active")
+                    .unwrap(),
+            )
+            .row(
+                doc()
+                    .set("name", "Bob")
+                    .unwrap()
+                    .set("status", "inactive")
+                    .unwrap(),
+            )
+            .row(
+                doc()
+                    .set("name", "Carol")
+                    .unwrap()
+                    .set("status", "active")
+                    .unwrap(),
+            ),
     );
     let seed_req = b.build();
     execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
@@ -167,8 +203,20 @@ async fn after_only_dep_does_not_resolve_query_ref() {
     b.op_silent(
         "seed",
         write::insert("users")
-            .row(doc().set("name", "Alice").set("status", "active"))
-            .row(doc().set("name", "Bob").set("status", "inactive")),
+            .row(
+                doc()
+                    .set("name", "Alice")
+                    .unwrap()
+                    .set("status", "active")
+                    .unwrap(),
+            )
+            .row(
+                doc()
+                    .set("name", "Bob")
+                    .unwrap()
+                    .set("status", "inactive")
+                    .unwrap(),
+            ),
     );
     let seed_req = b.build();
     execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
@@ -188,7 +236,13 @@ async fn after_only_dep_does_not_resolve_query_ref() {
     let active = b.query("active", Query::from("users").where_eq("status", "active"));
     let marker = b.op_silent(
         "marker",
-        write::insert("users").row(doc().set("name", "Marker").set("status", "marker")),
+        write::insert("users").row(
+            doc()
+                .set("name", "Marker")
+                .unwrap()
+                .set("status", "marker")
+                .unwrap(),
+        ),
     );
     b.after(&marker, &active);
 

@@ -116,7 +116,8 @@ fn flush_all_persists_detached_post_wal_tail() {
         let repo = db.get_repo(REPO).unwrap();
         let table = repo.get_table("items").await.unwrap();
         let interner = table.interner_for_test().get().await.unwrap();
-        let value = query_value_to_inner(&doc().set("name", "durable").build(), interner).unwrap();
+        let value =
+            query_value_to_inner(&doc().set("name", "durable").unwrap().build(), interner).unwrap();
         let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
         let rid = table.insert_tx(&value, Some(&mut tx)).await.unwrap();
         hook.armed.store(true, Ordering::Release);
@@ -154,7 +155,7 @@ fn flush_all_persists_detached_post_wal_tail() {
         let interner = table.interner_for_test().get().await.unwrap();
         assert_eq!(
             inner_value_to_query_value(&reopened, interner).unwrap(),
-            doc().set("name", "durable").build()
+            doc().set("name", "durable").unwrap().build()
         );
     });
     drop(runtime);
@@ -183,7 +184,8 @@ fn quiescence_timeout_leaves_j_absent_and_hard_reopen_certifies() {
         let table = repo.get_table("items").await.unwrap();
         let interner = table.interner_for_test().get().await.unwrap();
         let value =
-            query_value_to_inner(&doc().set("name", "late-tail").build(), interner).unwrap();
+            query_value_to_inner(&doc().set("name", "late-tail").unwrap().build(), interner)
+                .unwrap();
         let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
         let rid = table.insert_tx(&value, Some(&mut tx)).await.unwrap();
         hook.armed.store(true, Ordering::Release);
@@ -253,7 +255,7 @@ fn quiescence_timeout_leaves_j_absent_and_hard_reopen_certifies() {
         let interner = table.interner_for_test().get().await.unwrap();
         assert_eq!(
             inner_value_to_query_value(&reopened, interner).unwrap(),
-            doc().set("name", "late-tail").build()
+            doc().set("name", "late-tail").unwrap().build()
         );
     });
     drop(runtime);
@@ -273,7 +275,8 @@ async fn detached_tail_in_memory() {
     let repo = shamir.get_db("app").unwrap().get_repo(REPO).unwrap();
     let table = repo.get_table("items").await.unwrap();
     let interner = table.interner_for_test().get().await.unwrap();
-    let value = query_value_to_inner(&doc().set("name", "survivor").build(), interner).unwrap();
+    let value =
+        query_value_to_inner(&doc().set("name", "survivor").unwrap().build(), interner).unwrap();
     let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     let rid = table.insert_tx(&value, Some(&mut tx)).await.unwrap();
     repo.repo_wal().await.unwrap();
@@ -319,7 +322,8 @@ async fn flush_all_warns_and_continues_past_wedged_tail() {
     let repo = shamir.get_db("app").unwrap().get_repo(REPO).unwrap();
     let table = repo.get_table("items").await.unwrap();
     let interner = table.interner_for_test().get().await.unwrap();
-    let value = query_value_to_inner(&doc().set("name", "wedged").build(), interner).unwrap();
+    let value =
+        query_value_to_inner(&doc().set("name", "wedged").unwrap().build(), interner).unwrap();
     let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     let rid = table.insert_tx(&value, Some(&mut tx)).await.unwrap();
     hook.armed.store(true, Ordering::Release);

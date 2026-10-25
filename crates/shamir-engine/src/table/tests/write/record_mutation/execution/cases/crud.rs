@@ -13,7 +13,13 @@ async fn test_execute_insert_single() {
     let (table, repo) = setup_empty_table().await;
 
     let op = write::insert("users")
-        .row(doc().set("name", "Alice").set("age", 30_i64))
+        .row(
+            doc()
+                .set("name", "Alice")
+                .unwrap()
+                .set("age", 30_i64)
+                .unwrap(),
+        )
         .build();
 
     let result = insert_via_tx(&repo, &table, &op, true).await.unwrap();
@@ -41,9 +47,27 @@ async fn test_execute_insert_multiple() {
     let (table, repo) = setup_empty_table().await;
 
     let op = write::insert("users")
-        .row(doc().set("name", "Alice").set("age", 30_i64))
-        .row(doc().set("name", "Bob").set("age", 25_i64))
-        .row(doc().set("name", "Carol").set("age", 35_i64))
+        .row(
+            doc()
+                .set("name", "Alice")
+                .unwrap()
+                .set("age", 30_i64)
+                .unwrap(),
+        )
+        .row(
+            doc()
+                .set("name", "Bob")
+                .unwrap()
+                .set("age", 25_i64)
+                .unwrap(),
+        )
+        .row(
+            doc()
+                .set("name", "Carol")
+                .unwrap()
+                .set("age", 35_i64)
+                .unwrap(),
+        )
         .build();
 
     let result = insert_via_tx(&repo, &table, &op, true).await.unwrap();
@@ -77,7 +101,7 @@ async fn test_execute_update_with_filter() {
     // Update active users: set status = "premium"
     let op = write::update("users")
         .where_(filter::eq("status", "active"))
-        .set(doc().set("status", "premium"))
+        .set(doc().set("status", "premium").unwrap())
         .build()
         .unwrap();
 
@@ -98,7 +122,7 @@ async fn test_execute_update_returns_changed() {
 
     let op = write::update("users")
         .where_(filter::eq("status", "active"))
-        .set(doc().set("status", "premium"))
+        .set(doc().set("status", "premium").unwrap())
         .returning(UpdateReturnMode::Changed)
         .build()
         .unwrap();
@@ -125,7 +149,7 @@ async fn test_execute_update_no_match() {
 
     let op = write::update("users")
         .where_(filter::eq("status", "deleted"))
-        .set(doc().set("status", "active"))
+        .set(doc().set("status", "active").unwrap())
         .build()
         .unwrap();
 
@@ -140,7 +164,7 @@ async fn test_execute_update_all_records() {
 
     // No where clause — update all
     let op = write::update("users")
-        .set(doc().set("verified", true))
+        .set(doc().set("verified", true).unwrap())
         .returning(UpdateReturnMode::All)
         .build()
         .unwrap();
@@ -164,7 +188,7 @@ async fn test_execute_update_unchanged_mode() {
     // Set status = "active" on active users — no actual change
     let op = write::update("users")
         .where_(filter::eq("status", "active"))
-        .set(doc().set("status", "active"))
+        .set(doc().set("status", "active").unwrap())
         .returning(UpdateReturnMode::Unchanged)
         .build()
         .unwrap();

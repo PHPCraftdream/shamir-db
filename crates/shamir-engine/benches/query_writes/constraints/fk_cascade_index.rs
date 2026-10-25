@@ -218,11 +218,23 @@ async fn build_fixture(n: usize, with_index: bool) -> FkBenchResolver {
     seed.id(1);
     seed.insert(
         "p1",
-        write::insert("parent").row(doc().set("id", 1_i64).set("name", "cascade_target")),
+        write::insert("parent").row(
+            doc()
+                .set("id", 1_i64)
+                .unwrap()
+                .set("name", "cascade_target")
+                .unwrap(),
+        ),
     );
     seed.insert(
         "p2",
-        write::insert("parent").row(doc().set("id", 2_i64).set("name", "survivor")),
+        write::insert("parent").row(
+            doc()
+                .set("id", 2_i64)
+                .unwrap()
+                .set("name", "survivor")
+                .unwrap(),
+        ),
     );
     execute_batch(&seed.build(), &resolver, None, None, Actor::System, "bench")
         .await

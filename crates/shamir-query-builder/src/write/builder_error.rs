@@ -40,6 +40,12 @@ pub enum BuilderError {
     /// [`crate::ddl::AlterSubscriptionBuilder::build`] was called with no
     /// terminal action (`.pause()` / `.resume()` / `.set_profile()`).
     MissingAction,
+    /// [`crate::write::Doc::set`] could not convert the supplied
+    /// [`FilterValue`](shamir_query_types::filter::FilterValue) into a
+    /// `QueryValue` — nesting beyond `MAX_FILTER_DEPTH`, or a codec failure
+    /// in the expression-marker msgpack round-trip fallback
+    /// (RV-QUERY-BUILDER-20D9732A).
+    FieldValueCodec(String),
 }
 
 impl std::fmt::Display for BuilderError {
@@ -71,6 +77,10 @@ impl std::fmt::Display for BuilderError {
                 f,
                 "AlterSubscriptionBuilder::build() requires a terminal action — call .pause() / \
                  .resume() / .set_profile(_) before .build()"
+            ),
+            BuilderError::FieldValueCodec(detail) => write!(
+                f,
+                "Doc::set() could not convert the field value to a QueryValue: {detail}"
             ),
         }
     }

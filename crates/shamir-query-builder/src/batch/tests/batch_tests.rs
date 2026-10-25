@@ -226,7 +226,7 @@ fn batch_durability_buffered() {
 #[test]
 fn insert_entry() {
     let mut b = Batch::new();
-    let ins = write::insert("users").row(doc().set("name", "Alice"));
+    let ins = write::insert("users").row(doc().set("name", "Alice").unwrap());
     b.insert("ins", ins);
     let req = b.build();
     let qv = req.to_query_value().unwrap();
@@ -239,7 +239,7 @@ fn update_entry() {
     let mut b = Batch::new();
     let upd = write::update("users")
         .where_(filter::eq("id", 1))
-        .set(doc().set("name", "Bob"));
+        .set(doc().set("name", "Bob").unwrap());
     b.try_update("upd", upd).unwrap();
     let req = b.build();
     let qv = req.to_query_value().unwrap();
@@ -251,7 +251,7 @@ fn upsert_entry() {
     let mut b = Batch::new();
     let ups = write::upsert("cache")
         .key(shamir_types::mpack!("k1"))
-        .value(doc().set("v", 42));
+        .value(doc().set("v", 42).unwrap());
     b.try_upsert("ups", ups).unwrap();
     let req = b.build();
     let qv = req.to_query_value().unwrap();
@@ -281,7 +281,9 @@ fn query_ref_in_write_doc_via_set_expr() {
         write::insert("orders").row(
             doc()
                 .set("product", "widget")
-                .set("user_id", users.row(0).field("id")),
+                .unwrap()
+                .set("user_id", users.row(0).field("id"))
+                .unwrap(),
         ),
     );
     let req = b.build();
@@ -576,7 +578,7 @@ fn handle_alias_bare() {
 #[test]
 fn into_batch_op_insert_op() {
     use crate::batch::IntoBatchOp;
-    let op = write::insert("t").row(doc().set("a", 1)).build();
+    let op = write::insert("t").row(doc().set("a", 1).unwrap()).build();
     let batch_op = op.into_batch_op();
     match batch_op {
         shamir_query_types::batch::BatchOp::Insert(_) => {}
@@ -589,7 +591,7 @@ fn into_batch_op_update_op() {
     use crate::batch::IntoBatchOp;
     let op = write::update("t")
         .where_(filter::eq("id", 1))
-        .set(doc().set("x", 2))
+        .set(doc().set("x", 2).unwrap())
         .build()
         .unwrap();
     let batch_op = op.into_batch_op();
@@ -604,7 +606,7 @@ fn into_batch_op_set_op() {
     use crate::batch::IntoBatchOp;
     let op = write::upsert("t")
         .key(shamir_types::mpack!("k"))
-        .value(doc().set("v", 1))
+        .value(doc().set("v", 1).unwrap())
         .build()
         .unwrap();
     let batch_op = op.into_batch_op();
