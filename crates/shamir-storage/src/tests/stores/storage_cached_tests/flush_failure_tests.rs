@@ -9,12 +9,20 @@ use bytes::Bytes;
 use futures::stream::Stream;
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
-/// A `Store` wrapper whose `set`/`remove` always fail, simulating a backing
-/// store that goes unavailable. `get`/`iter_stream`/`scan_prefix_stream`
-/// delegate normally so `CachedStore::new_async`'s initial load still works.
+use std::sync::{Arc, Mutex};
+use tokio::sync::{oneshot, Notify};
+
+/// 10 s outer bound: ONLY a hang detector, never part of the protocol.
+const HANG: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A `Store` wrapper whose `set`/`remove` fail AFTER parking on `gate` (so
+/// the owner's early async ack is observably delivered to the caller before
+/// the failure publishes), simulating a backing store that goes
+/// unavailable. `get`/`iter_stream`/`scan_prefix_stream` delegate normally
+/// so `CachedStore::new_async`'s initial load still works.
 struct FailingStore {
     inner: Arc<dyn Store>,
+    gate: Arc<Notify>,
 }
 
 #[async_trait]
@@ -24,6 +32,7 @@ impl Store for FailingStore {
     }
 
     async fn set(&self, _key: RecordKey, _value: Bytes) -> DbResult<bool> {
+        self.gate.notified().await;
         Err(DbError::Storage("simulated backing-store failure".into()))
     }
 
@@ -32,6 +41,7 @@ impl Store for FailingStore {
     }
 
     async fn remove(&self, _key: RecordKey) -> DbResult<bool> {
+        self.gate.notified().await;
         Err(DbError::Storage("simulated backing-store failure".into()))
     }
 
@@ -53,6 +63,27 @@ impl Store for FailingStore {
     }
 }
 
+/// Runs `op` against the store on a spawned task and returns its result
+/// only after the owner's reply was OBSERVABLY delivered to a caller (the
+/// spawned caller sent it back over a oneshot) — the gated backing failure
+/// stays parked until the test releases the gate.
+async fn ack_observably<T: Send + 'static>(
+    store: Arc<CachedStore>,
+    op: impl FnOnce(Arc<CachedStore>) -> Pin<Box<dyn std::future::Future<Output = DbResult<T>> + Send>>
+        + Send
+        + 'static,
+) -> DbResult<T> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let r = op(store.clone()).await;
+        let _ = tx.send(r);
+    });
+    tokio::time::timeout(HANG, rx)
+        .await
+        .expect("async ack not delivered before the gated failure")
+        .expect("caller dropped ack channel")
+}
+
 /// A background `set` failure must surface as an `Err` from the NEXT
 /// `flush()` call — not be silently swallowed into an `Ok(())`. The cache
 /// itself still holds the value (write-behind semantics unchanged); only
@@ -60,44 +91,66 @@ impl Store for FailingStore {
 #[tokio::test]
 async fn test_async_flush_surfaces_background_set_failure() {
     let plain_inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
-    let failing_inner = Arc::new(FailingStore { inner: plain_inner }) as Arc<dyn Store>;
-    let cached = CachedStore::new_async(failing_inner).await.unwrap();
+    let gate = Arc::new(Notify::new());
+    let failing_inner = Arc::new(FailingStore {
+        inner: plain_inner,
+        gate: gate.clone(),
+    }) as Arc<dyn Store>;
+    let cached = Arc::new(CachedStore::new_async(failing_inner).await.unwrap());
 
     let key = RecordKey::from_slice(b"will-fail");
     // The synchronous part of `set` (cache upsert + enqueue) succeeds —
-    // only the background write to `inner` fails.
-    cached
-        .set(key.clone(), Bytes::from_static(b"v"))
-        .await
-        .unwrap();
+    // only the background write to `inner` fails. The failure is gated so
+    // the early async ack is OBSERVABLY delivered (oneshot from the spawned
+    // caller) before the error publishes, per the async-ack contract.
+    let k2 = key.clone();
+    let ack = ack_observably(cached.clone(), |s| {
+        Box::pin(async move { s.set(k2, Bytes::from_static(b"v")).await })
+    })
+    .await;
+    ack.expect("async ack must succeed before the gated backing failure");
 
     // Cache already has the value (write-behind: visible immediately).
     assert!(cached.cache().peek_with(&key, |_, _| ()).is_some());
 
+    // Release the gated backing failure: the background write now fails
+    // terminally, before flush() runs.
+    gate.notify_one();
     let flush_result = cached.flush().await;
     assert!(
         flush_result.is_err(),
         "flush() must report the background write failure, not silently succeed"
     );
 
-    // The error is reported exactly once: a second flush() with no new
-    // writes since must succeed (nothing pending, nothing to report).
+    // ROUND 4 (RV-STORAGE-e70a0ddc) supersedes the old consume-once rule: a
+    // background write failure is now STICKY-TERMINAL, so this second
+    // flush() must ALSO report Err (previously it expected Ok after the
+    // error was "cleared"). The cache mirror itself is still intact.
     cached
         .flush()
         .await
-        .expect("error must be cleared after being reported once");
+        .expect_err("sticky terminal failure must persist across flush() calls");
 }
 
 /// Same as above, for the `remove` path.
 #[tokio::test]
 async fn test_async_flush_surfaces_background_remove_failure() {
     let plain_inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
-    let failing_inner = Arc::new(FailingStore { inner: plain_inner }) as Arc<dyn Store>;
-    let cached = CachedStore::new_async(failing_inner).await.unwrap();
+    let gate = Arc::new(Notify::new());
+    let failing_inner = Arc::new(FailingStore {
+        inner: plain_inner,
+        gate: gate.clone(),
+    }) as Arc<dyn Store>;
+    let cached = Arc::new(CachedStore::new_async(failing_inner).await.unwrap());
 
     let key = RecordKey::from_slice(b"remove-will-fail");
-    cached.remove(key).await.unwrap();
+    let ack = ack_observably(cached.clone(), |s| {
+        Box::pin(async move { s.remove(key.clone()).await })
+    })
+    .await;
+    ack.expect("async ack must succeed before the gated backing failure");
 
+    gate.notify_one();
     let flush_result = cached.flush().await;
     assert!(
         flush_result.is_err(),
@@ -111,18 +164,27 @@ async fn test_async_flush_surfaces_background_remove_failure() {
 #[tokio::test]
 async fn test_async_flush_surfaces_background_failure_via_dyn_store() {
     let plain_inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
-    let failing_inner = Arc::new(FailingStore { inner: plain_inner }) as Arc<dyn Store>;
+    let gate = Arc::new(Notify::new());
+    let failing_inner = Arc::new(FailingStore {
+        inner: plain_inner,
+        gate: gate.clone(),
+    }) as Arc<dyn Store>;
     let cached_concrete = Arc::new(CachedStore::new_async(failing_inner).await.unwrap());
     let cached_dyn: Arc<dyn Store> = cached_concrete.clone();
 
-    cached_dyn
-        .set(
-            RecordKey::from_slice(b"dyn-will-fail"),
-            Bytes::from_static(b"v"),
-        )
-        .await
-        .unwrap();
+    let ack = ack_observably(cached_concrete.clone(), |s| {
+        Box::pin(async move {
+            s.set(
+                RecordKey::from_slice(b"dyn-will-fail"),
+                Bytes::from_static(b"v"),
+            )
+            .await
+        })
+    })
+    .await;
+    ack.expect("async ack must succeed before the gated backing failure");
 
+    gate.notify_one();
     assert!(
         cached_dyn.flush().await.is_err(),
         "Store::flush via dyn dispatch must also surface the background failure"
@@ -140,11 +202,17 @@ async fn test_async_flush_surfaces_background_failure_via_dyn_store() {
 // ============================================================================
 
 /// A `Store` wrapper whose `set` fails for exactly one designated key and
-/// counts `flush()` calls that reach it. Everything else delegates.
+/// counts `flush()` calls that reach it. The failing `set` parks on a
+/// oneshot release BEFORE returning Err, so the owner's early async ack
+/// is observably delivered first (the test releases only after observing
+/// the ack) — without the gate the ack/terminal-publication race could
+/// make the caller's ack Err nondeterministically. Everything else
+/// delegates.
 struct PartialFailStore {
     inner: Arc<dyn Store>,
     fail_key: RecordKey,
     flush_called: Arc<std::sync::atomic::AtomicBool>,
+    fail_release_rx: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
 }
 
 #[async_trait]
@@ -155,6 +223,10 @@ impl Store for PartialFailStore {
 
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
         if key == self.fail_key {
+            let release = { self.fail_release_rx.lock().unwrap().take() };
+            if let Some(rx) = release {
+                let _ = rx.await;
+            }
             return Err(DbError::Storage("simulated failure for this key".into()));
         }
         self.inner.set(key, value).await
@@ -201,42 +273,69 @@ async fn test_async_flush_runs_inner_flush_despite_background_failure() {
     let plain_inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
     let flush_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let fail_key = RecordKey::from_slice(b"will-fail");
+    let (release_tx, release_rx) = oneshot::channel();
     let partial_fail_inner = Arc::new(PartialFailStore {
         inner: plain_inner.clone(),
         fail_key: fail_key.clone(),
         flush_called: flush_called.clone(),
+        fail_release_rx: Arc::new(Mutex::new(Some(release_rx))),
     }) as Arc<dyn Store>;
-    let cached = CachedStore::new_async(partial_fail_inner).await.unwrap();
+    let cached = Arc::new(CachedStore::new_async(partial_fail_inner).await.unwrap());
 
-    // One background write fails...
-    cached
-        .set(fail_key.clone(), Bytes::from_static(b"v"))
+    // One background write fails — but ONLY after the test observes the
+    // async ack over a oneshot (the failure is parked behind the release
+    // oneshot), so the ack here is deterministically Ok. Independent
+    // revert caught: an owner that acks only after the backing await (or
+    // an unguarded immediate failure racing the ack) makes this ack Err
+    // or hang.
+    let (ack_tx, ack_rx) = oneshot::channel();
+    {
+        let cached = cached.clone();
+        let fail_key = fail_key.clone();
+        tokio::spawn(async move {
+            let r = cached.set(fail_key, Bytes::from_static(b"v")).await;
+            let _ = ack_tx.send(r);
+        });
+    }
+    let ack = tokio::time::timeout(HANG, ack_rx)
         .await
-        .unwrap();
-    // ...but a second, different write must still succeed in the background.
+        .expect("async ack hung")
+        .expect("caller dropped ack channel");
+    ack.expect("async ack must succeed before the gated backing failure");
+
+    // Cache already has the value (write-behind: visible immediately).
+    assert!(cached.cache().peek_with(&fail_key, |_, _| ()).is_some());
+
+    // Release the gated backing failure and await the sticky publication
+    // deterministically before any further command.
+    release_tx.send(()).expect("release oneshot closed");
+    tokio::time::timeout(HANG, cached.await_health_terminal_for_tests())
+        .await
+        .expect("background write failure never published");
+
+    // ROUND 4 (RV-STORAGE-e70a0ddc): a background write failure is
+    // sticky-terminal, so the previously-expected "second, different write
+    // must still succeed" is no longer possible — the store is terminally
+    // failed and rejects every subsequent command.
     let ok_key = RecordKey::from_slice(b"will-succeed");
     cached
         .set(ok_key.clone(), Bytes::from_static(b"ok"))
         .await
-        .unwrap();
+        .expect_err("store must be terminally failed after the background write failure");
 
-    // flush() must surface the background failure...
+    // flush() must surface the sticky failure...
     assert!(
         cached.flush().await.is_err(),
-        "flush() must still report the background failure"
+        "flush() must still report the terminal background failure"
     );
 
-    // ...but inner.flush() must have run regardless -- the regression this
-    // test guards against is an early `?` on the background-error branch
-    // that skipped it entirely.
+    // ...but inner.flush() must have run regardless (post-mortem direct
+    // attempt) -- the regression this test guards against is a silent skip
+    // of the inner durability op entirely.
     assert!(
         flush_called.load(Ordering::SeqCst),
         "inner.flush() must run even when a background write failed -- \
          skipping it silently drops every OTHER buffered write, not just \
          the one that failed"
     );
-
-    // And the successfully-written key actually landed in inner.
-    let got = plain_inner.get(ok_key).await.unwrap();
-    assert_eq!(got.as_ref(), b"ok");
 }

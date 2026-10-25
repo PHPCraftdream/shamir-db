@@ -98,9 +98,9 @@ async fn test_cached_store_async_pending_writes() {
             .unwrap();
     }
 
-    // Should have some pending writes
-    let pending = cached.pending_writes();
-    assert!(pending > 0); // Might have completed already
+    // ROUND 4 (RV-STORAGE-e70a0ddc): `pending_writes` is telemetry only and
+    // the FIFO owner acks BEFORE awaiting each backing write, so by the time
+    // the last ack returns the counter may already be 0 — no `> 0` assert.
 
     // Flush and wait for completion
     cached.flush().await.unwrap();
