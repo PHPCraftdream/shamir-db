@@ -47,6 +47,11 @@ shamir-private-dir = { path = "../shamir-private-dir" }
 
 [dev-dependencies]
 argon2 = "0.5"
+# DEV-ONLY: `test-util` enables paused time (`start_paused`/`advance()`)
+# for the deterministic wall-clock-deadline regression. Same tokio
+# package+version as the main dependency — features unify, `Cargo.lock`
+# is unchanged.
+tokio = { version = "1.49.0", features = ["test-util"] }
 
 [lib]
 doctest = false

@@ -1,7 +1,9 @@
+use super::super::fuel::{pool_refund, FuelLease};
 use super::super::wasm_function::{read_guest_mem, HostState};
 use crate::runtime::context::{FnBatch, FnCtx};
 use crate::runtime::params::Params;
 use shamir_types::types::value::QueryValue;
+use std::sync::atomic::Ordering;
 
 // ── Async host import: call ───────────────────────────────────────────
 //
@@ -51,7 +53,9 @@ pub(in crate::wasm) fn host_call(
         let globals;
         let next_depth;
         let depth_limit;
-        let fuel_budget;
+        let fuel_pool;
+        let baseline;
+        let own_cap_left;
         let actor;
         let db_gateway;
         let repo;
@@ -72,7 +76,9 @@ pub(in crate::wasm) fn host_call(
             globals = state.globals.clone();
             next_depth = state.depth.saturating_add(1);
             depth_limit = state.depth_limit;
-            fuel_budget = state.fuel_budget.clone();
+            fuel_pool = state.fuel_pool.clone();
+            baseline = state.fuel_baseline.load(Ordering::Relaxed);
+            own_cap_left = state.own_cap_left.load(Ordering::Relaxed);
             // RI-7: clone the per-invocation identity + capabilities so the
             // child FnCtx (Phase 2) inherits the SAME actor instead of
             // Actor::System, and keeps db/repo/net/secret-grant access
@@ -84,6 +90,35 @@ pub(in crate::wasm) fn host_call(
             secret_grants = state.secret_grants.clone();
         }
         // Borrows on caller (memory, data) are dropped. Caller itself is still alive.
+        #[cfg(test)]
+        let observer = caller.data().observer.clone();
+
+        // RV-WASM-HOST-6F709AC2 (exclusive-lease design): suspend the parent —
+        // REVOKE its executable fuel first, then release the reservation, so the
+        // child can draw the parent's unused capacity while the parent holds
+        // nothing executable. Segment consumption is charged against the parent's
+        // own cap.
+        let parent_unused = caller.get_fuel().unwrap_or(0);
+        let parent_spent = baseline.saturating_sub(parent_unused);
+        caller
+            .set_fuel(0)
+            .map_err(|e| wasmtime::Error::msg(format!("call: suspend parent fuel: {e}")))?;
+        {
+            let state = caller.data();
+            state.fuel_baseline.store(0, Ordering::Relaxed);
+            state
+                .own_cap_left
+                .store(own_cap_left.saturating_sub(parent_spent), Ordering::Relaxed);
+        }
+        pool_refund(&fuel_pool, parent_unused);
+        #[cfg(test)]
+        if let Some(obs) = observer.as_ref() {
+            // Observe the REAL fuel after the revoke (must be 0) and record
+            // the parent's segment consumption baseline − before.
+            let after = caller.get_fuel().unwrap_or(0);
+            let store_id = caller.data().store_id;
+            obs.record_suspend(store_id, baseline, parent_unused, after);
+        }
 
         let name = String::from_utf8(name_bytes)
             .map_err(|_| wasmtime::Error::msg("call: name is not valid UTF-8"))?;
@@ -117,7 +152,11 @@ pub(in crate::wasm) fn host_call(
             .with_depth_limit(depth_limit)
             .with_actor(actor)
             .with_secret_grants(secret_grants.iter().cloned())
-            .with_fuel_budget(fuel_budget);
+            .with_fuel_budget(fuel_pool.clone());
+        #[cfg(test)]
+        if let Some(obs) = observer.clone() {
+            child_ctx = child_ctx.with_fuel_observer(obs);
+        }
         if let Some(db) = db_gateway {
             child_ctx = child_ctx.with_db(db, repo);
         }
@@ -126,12 +165,41 @@ pub(in crate::wasm) fn host_call(
         }
         let child_batch = FnBatch::with_context(batch_ctx);
 
-        let result = child_ctx
+        let invoked = child_ctx
             .registry()
             .expect("registry just set")
             .invoke(&name, &child_ctx, &child_batch, &params)
-            .await
-            .map_err(|e| wasmtime::Error::msg(format!("call: {e}")))?;
+            .await;
+        // Reacquire for the parent BEFORE any parent guest code runs again (the
+        // shamir_alloc below) and BEFORE propagating the child's result or error.
+        // The ceiling is min(own_cap_left, the amount just relinquished) — the
+        // suspended parent gave up `parent_unused`, so it may reclaim at most
+        // that much, AND at most its own remaining cap. A failed `set_fuel`
+        // install refunds through the [`FuelLease`] drop on the `?` path.
+        {
+            let cap_left = caller.data().own_cap_left.load(Ordering::Relaxed);
+            let lease = FuelLease::take(&fuel_pool, cap_left.min(parent_unused));
+            let reacquired = lease.amount();
+            caller
+                .set_fuel(reacquired)
+                .map_err(|e| wasmtime::Error::msg(format!("call: resume parent fuel: {e}")))?;
+            lease.consume();
+            caller
+                .data()
+                .fuel_baseline
+                .store(reacquired, Ordering::Relaxed);
+            #[cfg(test)]
+            if let Some(obs) = observer.as_ref() {
+                // Observe the REAL fuel after the reacquire install.
+                let actual = caller.get_fuel().unwrap_or(0);
+                let store_id = caller.data().store_id;
+                obs.record_install(store_id, reacquired, actual, cap_left);
+            }
+        }
+        // Preserve the child's typed cause (fuel / interrupt / aggregate) by
+        // wrapping the `FunctionError` as the SOURCE of the wasmtime error —
+        // never stringified here; `map_wasm_error` recovers it by downcast.
+        let result = invoked.map_err(wasmtime::Error::new)?;
 
         // ── Phase 3: write result back into guest memory ──
         let encoded = result

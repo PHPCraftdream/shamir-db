@@ -209,9 +209,11 @@ async fn wasm_fuel_exhaustion_traps() {
         .await;
 
     let err = result.unwrap_err();
+    // Typed classification (P0.2): a fuel trap is the typed
+    // FuelExhausted variant, not a stringified Compute.
     assert!(
-        matches!(err, FunctionError::Compute(_)),
-        "expected Compute error, got: {err:?}"
+        matches!(err, FunctionError::FuelExhausted),
+        "expected typed FuelExhausted, got: {err:?}"
     );
 }
 
