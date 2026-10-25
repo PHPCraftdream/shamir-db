@@ -4,7 +4,6 @@ use crate::kind::{VectorMetric, VectorQuantization};
 use crate::vector::adapter::VectorAdapter;
 use crate::vector::hnsw_adapter::{HnswAdapter, HnswConfig};
 use crate::vector::vector_backend::AdapterSlot;
-use arc_swap::ArcSwapOption;
 use shamir_collections::TFxSet;
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
@@ -284,20 +283,22 @@ async fn stress_concurrent_mutations_during_compaction() {
 
     // Set up ArcSwap (simulating VectorBackend.adapter)
     let adapter_swap: Arc<arc_swap::ArcSwap<AdapterSlot>> =
-        Arc::new(arc_swap::ArcSwap::from(Arc::new(AdapterSlot {
-            adapter: old_adapter.clone() as Arc<dyn VectorAdapter>,
-        })));
+        Arc::new(arc_swap::ArcSwap::from(Arc::new(AdapterSlot::live(
+            old_adapter.clone() as Arc<dyn VectorAdapter>,
+        ))));
 
     // Create compaction target
     let config = old_adapter.build_config();
     let new_adapter = HnswAdapter::new_compaction_target(dim, VectorMetric::L2, config);
     let new_adapter_arc: Arc<dyn VectorAdapter> = Arc::new(new_adapter);
 
-    // Arm double-write (Step 2)
-    let compaction_target: Arc<ArcSwapOption<AdapterSlot>> =
-        Arc::new(ArcSwapOption::from(Some(Arc::new(AdapterSlot {
-            adapter: Arc::clone(&new_adapter_arc),
-        }))));
+    // Arm double-write (Step 2): an armed routing slot
+    let armed_target =
+        crate::vector::vector_backend::CompactionTarget::new(Arc::clone(&new_adapter_arc));
+    adapter_swap.store(Arc::new(AdapterSlot::armed(
+        old_adapter.clone() as Arc<dyn VectorAdapter>,
+        Arc::clone(&armed_target),
+    )));
 
     // Track expected live set
     let expected_live = Arc::new(tokio::sync::Mutex::new(
@@ -311,7 +312,7 @@ async fn stress_concurrent_mutations_during_compaction() {
     // Spawn concurrent mutation tasks (run alongside Steps 3-4b)
     let mut handles = Vec::new();
     for worker in 0..4u16 {
-        let compaction_target = Arc::clone(&compaction_target);
+        let adapter_swap = Arc::clone(&adapter_swap);
         let expected_live = Arc::clone(&expected_live);
         let op_counter = Arc::clone(&op_counter);
         let barrier = Arc::clone(&barrier);
@@ -323,11 +324,11 @@ async fn stress_concurrent_mutations_during_compaction() {
                 let r = rid(base_rid + i);
                 let vec = random_vec(dim as usize, (base_rid + i) as u64);
 
-                // Upsert into primary (old — simulating the real hot path before swap)
+                // Upsert into the slot's primary + mirror (real writer shape)
+                let slot = adapter_swap.load_full();
                 old_adapter.upsert(r, &vec).await.unwrap();
-                // Double-write to compaction target
-                if let Some(target) = compaction_target.load_full() {
-                    let _ = target.adapter.upsert(r, &vec).await;
+                if let Some(t) = &slot.target {
+                    t.mirror_upsert(r, &vec).await;
                 }
                 {
                     let mut live = expected_live.lock().await;
@@ -337,13 +338,13 @@ async fn stress_concurrent_mutations_during_compaction() {
                 // Delete some (every 3rd)
                 if i % 3 == 0 {
                     old_adapter.delete(r).await.unwrap();
-                    if let Some(target) = compaction_target.load_full() {
-                        let _ = target.adapter.delete(r).await;
-                        if let Some(hnsw) = target.adapter.as_hnsw_adapter() {
+                    if let Some(t) = &slot.target {
+                        if let Some(hnsw) = t.adapter.as_hnsw_adapter() {
                             if let Some(ref del_rids) = hnsw.compaction_deleted_rids {
                                 let _ = del_rids.insert_sync(r, ());
                             }
                         }
+                        t.mirror_delete(r).await;
                     }
                     {
                         let mut live = expected_live.lock().await;
@@ -394,11 +395,8 @@ async fn stress_concurrent_mutations_during_compaction() {
     }
     compaction_handle.await.unwrap();
 
-    // Now do Step 5 (swap) and Step 6 (clear) — no concurrent mutations
-    adapter_swap.store(Arc::new(AdapterSlot {
-        adapter: Arc::clone(&new_adapter_arc),
-    }));
-    compaction_target.store(None);
+    // Now do Step 5 (cutover publish) — no concurrent mutations
+    adapter_swap.store(Arc::new(AdapterSlot::live(Arc::clone(&new_adapter_arc))));
 
     // Verify: new adapter's live set matches expected
     let slot = adapter_swap.load_full();
@@ -493,9 +491,9 @@ async fn stress_concurrent_mutations_during_quantized_compaction() {
     );
 
     let adapter_swap: Arc<arc_swap::ArcSwap<AdapterSlot>> =
-        Arc::new(arc_swap::ArcSwap::from(Arc::new(AdapterSlot {
-            adapter: old_adapter.clone() as Arc<dyn VectorAdapter>,
-        })));
+        Arc::new(arc_swap::ArcSwap::from(Arc::new(AdapterSlot::live(
+            old_adapter.clone() as Arc<dyn VectorAdapter>,
+        ))));
 
     // Compaction target inherits quantization (#428 fix) — starts un-fitted,
     // fits DURING backfill once the live set crosses FIT_THRESHOLD.
@@ -508,10 +506,12 @@ async fn stress_concurrent_mutations_during_quantized_compaction() {
     );
     let new_adapter_arc: Arc<dyn VectorAdapter> = Arc::new(new_adapter);
 
-    let compaction_target: Arc<ArcSwapOption<AdapterSlot>> =
-        Arc::new(ArcSwapOption::from(Some(Arc::new(AdapterSlot {
-            adapter: Arc::clone(&new_adapter_arc),
-        }))));
+    let armed_target =
+        crate::vector::vector_backend::CompactionTarget::new(Arc::clone(&new_adapter_arc));
+    adapter_swap.store(Arc::new(AdapterSlot::armed(
+        old_adapter.clone() as Arc<dyn VectorAdapter>,
+        Arc::clone(&armed_target),
+    )));
 
     let expected_live = Arc::new(tokio::sync::Mutex::new(
         (0..n_initial).map(rid).collect::<TFxSet<RecordId>>(),
@@ -523,7 +523,7 @@ async fn stress_concurrent_mutations_during_quantized_compaction() {
 
     let mut handles = Vec::new();
     for worker in 0..4u16 {
-        let compaction_target = Arc::clone(&compaction_target);
+        let adapter_swap = Arc::clone(&adapter_swap);
         let expected_live = Arc::clone(&expected_live);
         let op_counter = Arc::clone(&op_counter);
         let barrier = Arc::clone(&barrier);
@@ -535,9 +535,10 @@ async fn stress_concurrent_mutations_during_quantized_compaction() {
                 let r = rid(base_rid + i);
                 let vec = random_vec(dim as usize, (base_rid + i) as u64);
 
+                let slot = adapter_swap.load_full();
                 old_adapter.upsert(r, &vec).await.unwrap();
-                if let Some(target) = compaction_target.load_full() {
-                    let _ = target.adapter.upsert(r, &vec).await;
+                if let Some(t) = &slot.target {
+                    t.mirror_upsert(r, &vec).await;
                 }
                 {
                     let mut live = expected_live.lock().await;
@@ -546,13 +547,13 @@ async fn stress_concurrent_mutations_during_quantized_compaction() {
 
                 if i % 3 == 0 {
                     old_adapter.delete(r).await.unwrap();
-                    if let Some(target) = compaction_target.load_full() {
-                        let _ = target.adapter.delete(r).await;
-                        if let Some(hnsw) = target.adapter.as_hnsw_adapter() {
+                    if let Some(t) = &slot.target {
+                        if let Some(hnsw) = t.adapter.as_hnsw_adapter() {
                             if let Some(ref del_rids) = hnsw.compaction_deleted_rids {
                                 let _ = del_rids.insert_sync(r, ());
                             }
                         }
+                        t.mirror_delete(r).await;
                     }
                     {
                         let mut live = expected_live.lock().await;
@@ -574,7 +575,7 @@ async fn stress_concurrent_mutations_during_quantized_compaction() {
     // pattern the fix addresses. Deletes target existing initial rids,
     // simulating user deletes during the compaction window.
     {
-        let compaction_target = Arc::clone(&compaction_target);
+        let adapter_swap = Arc::clone(&adapter_swap);
         let expected_live = Arc::clone(&expected_live);
         let barrier = Arc::clone(&barrier);
         let old_adapter = Arc::clone(&old_adapter);
@@ -582,14 +583,15 @@ async fn stress_concurrent_mutations_during_quantized_compaction() {
             barrier.wait().await;
             for i in 0..(n_concurrent_ops / 2) {
                 let r = rid(i % n_initial);
+                let slot = adapter_swap.load_full();
                 old_adapter.delete(r).await.unwrap();
-                if let Some(target) = compaction_target.load_full() {
-                    if let Some(hnsw) = target.adapter.as_hnsw_adapter() {
+                if let Some(t) = &slot.target {
+                    if let Some(hnsw) = t.adapter.as_hnsw_adapter() {
                         if let Some(ref del_rids) = hnsw.compaction_deleted_rids {
                             let _ = del_rids.insert_sync(r, ());
                         }
                     }
-                    let _ = target.adapter.delete(r).await;
+                    t.mirror_delete(r).await;
                 }
                 {
                     let mut live = expected_live.lock().await;
@@ -635,10 +637,7 @@ async fn stress_concurrent_mutations_during_quantized_compaction() {
     }
     compaction_handle.await.unwrap();
 
-    adapter_swap.store(Arc::new(AdapterSlot {
-        adapter: Arc::clone(&new_adapter_arc),
-    }));
-    compaction_target.store(None);
+    adapter_swap.store(Arc::new(AdapterSlot::live(Arc::clone(&new_adapter_arc))));
 
     let slot = adapter_swap.load_full();
     let new_hnsw = slot.adapter.as_hnsw_adapter().unwrap();
