@@ -18,11 +18,12 @@ pub use infra::durable_counters;
 pub use infra::{audit_chain, config, conn_services, dispatch};
 pub use limits::{argon2_semaphore, lockout, rate_limit};
 pub use ops::{admin, rotation, user_record};
-pub use state::{resume, session, ticket};
+pub use state::{admission, resume, session, ticket};
 
 pub use conn_services::{ConnectionServices, PushRejected, PushSink};
 pub use dispatch::{dispatch_request, DispatchOutcome, RequestHandler};
 pub use session::{PendingChangePwChallenge, Session, SessionPermissions, SessionStore};
+pub use state::admission::{Admission, AdmitReject, Sid, ACTIVE_WINDOW_NS};
 
 pub use config::{ListenerPolicy, ServerSecrets};
 pub use handshake::{

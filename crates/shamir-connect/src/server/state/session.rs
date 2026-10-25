@@ -10,9 +10,10 @@
 
 use crate::common::time::{ns, UnixNanos};
 use crate::common::types::{limits, BindingMode, TransportKind};
+use crate::server::state::admission::{Admission, AdmitReject, Sid, ACTIVE_WINDOW_NS};
 use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
-use parking_lot::Mutex;
+use smallvec::SmallVec;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -302,9 +303,15 @@ impl Session {
     /// Allows the transport layer to capture `UnixNanos::now()` once per
     /// request (or per batch) and reuse it across multiple session touches,
     /// amortizing the syscall cost. On Windows this saves ~100 ns/dispatch.
+    ///
+    /// Monotonic by construction: `fetch_max` (NOT a plain `store`, the same
+    /// reasoning as `PostAuthBucket::last_refill_at_ns`) so a delayed or
+    /// out-of-order timestamp can never REGRESS activity and make a fresh
+    /// session look idle.
     #[inline]
     pub fn touch_at(&self, now_ns: u64) {
-        self.last_activity_ns.store(now_ns, Ordering::Relaxed);
+        // fetch_max, not store: activity never goes backwards (see doc).
+        self.last_activity_ns.fetch_max(now_ns, Ordering::Relaxed);
     }
 
     /// Whether this session has expired by wall-clock.
@@ -409,11 +416,27 @@ pub const DISCONNECT_GRACE_NS: u64 = 5 * ns::SECOND;
 /// not from the hash function. SipHash's per-byte cost is wasted here.
 type SessionIdHasher = std::hash::BuildHasherDefault<rustc_hash::FxHasher>;
 
+/// Per-user membership slot list: up to the spec §7.4 cap of 16
+/// (sid, session) pairs, stack-allocated via `SmallVec`.
+type UserSlot = SmallVec<[(Sid, Arc<Session>); 16]>;
+/// Contention-model map: one shard guard per user hash (see `SessionStore`).
+type UserSlotMap = DashMap<[u8; 16], UserSlot, SessionIdHasher>;
+
 #[derive(Debug)]
-/// Active sessions indexed by session ID.
+/// Active sessions indexed by session ID (routing) plus a per-user
+/// membership index (cap accounting).
 pub struct SessionStore {
-    by_sid: DashMap<[u8; limits::SESSION_ID_BYTES], Arc<Session>, SessionIdHasher>,
-    cap_lock: Mutex<()>,
+    /// Routing index: bearer sid -> session. Contention model: per-shard
+    /// DashMap locks keyed by sid hash; guards are short-lived, never held
+    /// across `.await`, and never two at once.
+    by_sid: DashMap<Sid, Arc<Session>, SessionIdHasher>,
+    /// Per-user membership: user -> [(sid, session)]. Contention model: one
+    /// shard guard per user hash — ALL cap decisions and slot mutation for a
+    /// user happen under this guard with O(cap) work (never an O(all-sessions)
+    /// scan; replaces the old global cap mutex, RV-CONNECT-D8C2825A).
+    /// Lock order: `admit` takes the `by_user` guard FIRST, then a single
+    /// `by_sid` guard under it — never the reverse (see `admit`'s doc).
+    by_user: UserSlotMap,
 }
 
 impl Default for SessionStore {
@@ -427,74 +450,173 @@ impl SessionStore {
     pub fn new() -> Self {
         Self {
             by_sid: DashMap::with_hasher(SessionIdHasher::default()),
-            cap_lock: Mutex::new(()),
+            by_user: DashMap::with_hasher(SessionIdHasher::default()),
         }
     }
 
-    /// Insert a fresh session under its `session_id`.
-    pub fn insert(
+    /// Test-fixture insertion ONLY: [`SessionStore::admit`] with the cap
+    /// disabled (`cap = 0`). Production code paths (login AND resume) must
+    /// use [`SessionStore::admit`] so the per-user cap is always enforced.
+    pub fn insert(&self, session_id: Sid, session: Session) -> Arc<Session> {
+        match self.admit(session_id, session, 0, 0) {
+            Admission::Admitted { session, .. } => session,
+            // Unreachable: cap 0 disables the cap and fixture sids are unique.
+            Admission::Rejected(_) => unreachable!("admit with cap 0 never rejects"),
+        }
+    }
+
+    /// The ONLY way a session enters the store (spec §7.4 overflow policy;
+    /// one function for login AND resume — RV-CONNECT-8AD8B1C8 /
+    /// RV-CONNECT-0A42F42C).
+    ///
+    /// Under ONE per-user shard guard: (1) idempotent pruning, (2) decide
+    /// with no side effects, (3) claim the sid in `by_sid`, (4) evict idle
+    /// LRU victims, (5) update the slot. All work is O(cap), synchronous,
+    /// never across `.await`. Lock order: the `by_user` guard may be held
+    /// while taking a single `by_sid` guard — never the reverse, never two
+    /// `by_sid` guards at once.
+    ///
+    /// Invariants: I2 exact index when nothing is in flight; I3 an admit
+    /// never pushes the user above `max(cap, previous length)`; I4 a
+    /// `Rejected` result changes nothing apart from idempotent pruning; I5
+    /// active iff `now - last < ACTIVE_WINDOW_NS` (saturating), only idle
+    /// sessions evicted in (last_activity, sid) order.
+    pub fn admit(
         &self,
-        session_id: [u8; limits::SESSION_ID_BYTES],
+        session_id: Sid,
         mut session: Session,
-    ) -> Arc<Session> {
+        now_ns: u64,
+        cap: usize,
+    ) -> Admission {
         session.session_id = session_id;
-        // Warm the HMAC key cache while we still own the Session
-        // (OnceLock::set succeeds on the first attempt). The derive
-        // is SHA-256 over 23+32 bytes — cheap to do once at auth
-        // time, free for every subsequent destructive-op check.
+        let user_id = session.user_id;
+        // Warm the HMAC key cache while we still own the Session (see the
+        // old `insert` doc): SHA-256 over 23+32 bytes, once at auth time.
         let _ = session
             .hmac_key_cache
             .set(Session::derive_hmac_key(&session_id));
         let arc = Arc::new(session);
-        self.by_sid.insert(session_id, Arc::clone(&arc));
-        arc
-    }
 
-    /// **v1 #7:** insert with `MAX_SESSIONS_PER_USER` enforcement.
-    ///
-    /// If the user already has `max_sessions_per_user` live sessions, the
-    /// oldest one (by `last_activity_ns`) is evicted before the new
-    /// session is added — spec §7.4 NORMATIVE LRU policy. Returns
-    /// `(new_arc, evicted_sid)` where `evicted_sid` is `Some(_)` iff an
-    /// LRU eviction happened (caller can emit
-    /// `session_evicted{reason="max_sessions_lru"}` per IMPL §3.2).
-    pub fn insert_with_per_user_cap(
-        &self,
-        session_id: [u8; limits::SESSION_ID_BYTES],
-        mut session: Session,
-        max_sessions_per_user: usize,
-    ) -> (Arc<Session>, Option<[u8; limits::SESSION_ID_BYTES]>) {
-        session.session_id = session_id;
-        let user_id = session.user_id;
+        // by_user guard: all cap accounting for this user happens under it.
+        let mut slot = self.by_user.entry(user_id).or_default();
 
-        let _cap_guard = self.cap_lock.lock();
+        // 1. Idempotent pruning: drop slot entries whose by_sid binding was
+        //    removed or replaced (ptr_eq). One by_sid guard at a time.
+        slot.retain(|(k, v)| {
+            self.by_sid
+                .get(k)
+                .is_some_and(|b| Arc::ptr_eq(b.value(), v))
+        });
 
-        // Atomically: collect snapshot of all current sids for this user
-        // (cheap — typically ≤16) and evict LRU if cap reached.
-        let evicted = if max_sessions_per_user > 0 {
-            let mut user_sids: Vec<([u8; limits::SESSION_ID_BYTES], u64)> = Vec::new();
-            for entry in self.by_sid.iter() {
-                if entry.value().user_id == user_id {
-                    let last = entry.value().last_activity_ns.load(Ordering::Relaxed);
-                    user_sids.push((*entry.key(), last));
+        // 2. Decide with NO side effects. A replacement (same sid already in
+        //    this user's slot) consumes no extra capacity. cap 0 disables
+        //    the cap entirely.
+        let replacing = slot.iter().any(|(k, _)| *k == session_id);
+        let need = if cap == 0 {
+            0
+        } else if replacing {
+            slot.len().saturating_sub(cap)
+        } else {
+            (slot.len() + 1).saturating_sub(cap)
+        };
+        // Victims: the first `need` entries by (last_activity, sid),
+        // excluding the sid being replaced.
+        let mut order: Vec<(u64, Sid, Arc<Session>)> = slot
+            .iter()
+            .filter(|(k, _)| *k != session_id)
+            .map(|(k, v)| {
+                (
+                    v.last_activity_ns.load(Ordering::Relaxed),
+                    *k,
+                    Arc::clone(v),
+                )
+            })
+            .collect();
+        order.sort_by_key(|e| (e.0, e.1));
+        let victims: SmallVec<[(Sid, Arc<Session>); 1]> = order
+            .into_iter()
+            .take(need)
+            .map(|(_, k, v)| (k, v))
+            .collect();
+        // I5 classification (no side effects): active iff now - last <
+        // ACTIVE_WINDOW_NS (saturating). Any active victim => reject the whole
+        // admission before anything is mutated.
+        if victims.iter().any(|(_, v)| {
+            now_ns.saturating_sub(v.last_activity_ns.load(Ordering::Relaxed)) < ACTIVE_WINDOW_NS
+        }) {
+            return Admission::Rejected(AdmitReject::AllActive);
+        }
+
+        // 3. Claim the sid atomically in by_sid (a foreign user's sid is never
+        //    stolen). `prev` lets a later rejection restore the old binding.
+        let prev = match self.by_sid.entry(session_id) {
+            dashmap::mapref::entry::Entry::Occupied(mut occ) => {
+                if occ.get().user_id != user_id {
+                    return Admission::Rejected(AdmitReject::SidConflict);
                 }
+                // Same user's replacement: swap the Arc in place.
+                Some(occ.insert(Arc::clone(&arc)))
             }
-            if user_sids.len() >= max_sessions_per_user {
-                // Evict the LRU (smallest last_activity_ns).
-                user_sids.sort_by_key(|(_, last)| *last);
-                let victim = user_sids[0].0;
-                self.by_sid.remove(&victim);
-                Some(victim)
-            } else {
+            dashmap::mapref::entry::Entry::Vacant(vac) => {
+                vac.insert(Arc::clone(&arc));
                 None
             }
-        } else {
-            None
         };
 
-        let arc = Arc::new(session);
-        self.by_sid.insert(session_id, arc.clone());
-        (arc, evicted)
+        // 4. Evict the victims. The idle check is repeated INSIDE `remove_if`
+        //    (shard write lock) and `lookup` touches under the shard read
+        //    lock, so a concurrent touch is either seen here (victim stays,
+        //    admission rolled back) or finds the session already gone.
+        //    `ptr_eq` guarantees a replacement generation is never removed.
+        //    With a single victim (the only case outside a cap shrink) a
+        //    rollback mutates nothing; with several, victims removed before a
+        //    racing touch was observed were idle (>= 60 s) and stay removed.
+        let mut evicted: SmallVec<[Sid; 1]> = SmallVec::new();
+        for (vk, va) in &victims {
+            let removed = self.by_sid.remove_if(vk, |_, v| {
+                Arc::ptr_eq(v, va)
+                    && now_ns.saturating_sub(v.last_activity_ns.load(Ordering::Relaxed))
+                        >= ACTIVE_WINDOW_NS
+            });
+            if removed.is_some() {
+                slot.retain(|(k, _)| k != vk);
+                evicted.push(*vk);
+            } else if self
+                .by_sid
+                .get(vk)
+                .is_some_and(|b| Arc::ptr_eq(b.value(), va))
+            {
+                // Still bound => it turned active: undo the claim and reject.
+                match prev {
+                    Some(old) => {
+                        self.by_sid.insert(session_id, old);
+                    }
+                    None => {
+                        self.by_sid
+                            .remove_if(&session_id, |_, v| Arc::ptr_eq(v, &arc));
+                    }
+                }
+                return Admission::Rejected(AdmitReject::AllActive);
+            } else {
+                // Removed concurrently: its capacity is already free.
+                slot.retain(|(k, _)| k != vk);
+            }
+        }
+
+        // 5. Update the per-user slot (victims already dropped): replace or push.
+        if replacing {
+            if let Some(e) = slot.iter_mut().find(|(k, _)| *k == session_id) {
+                e.1 = Arc::clone(&arc);
+            }
+        } else {
+            slot.push((session_id, Arc::clone(&arc)));
+        }
+
+        Admission::Admitted {
+            session: arc,
+            evicted,
+            replaced: replacing,
+        }
     }
 
     /// Look up a session by id, touching `last_activity_ns` if found.
@@ -504,9 +626,12 @@ impl SessionStore {
     /// should still prefer [`SessionStore::lookup_at`] to share one
     /// timestamp across multiple session touches.
     pub fn lookup(&self, sid: &[u8; limits::SESSION_ID_BYTES]) -> Option<Arc<Session>> {
-        let session = self.by_sid.get(sid).map(|r| r.clone())?;
-        session.touch();
-        Some(session)
+        // Touch under the shard guard: admission's idle recheck (remove_if)
+        // takes the shard write lock, so it observes this touch.
+        self.by_sid.get(sid).map(|r| {
+            r.touch();
+            r.clone()
+        })
     }
 
     /// **Optim #5:** lookup with a caller-supplied `now_ns`, avoiding a
@@ -516,14 +641,37 @@ impl SessionStore {
         sid: &[u8; limits::SESSION_ID_BYTES],
         now_ns: u64,
     ) -> Option<Arc<Session>> {
-        let session = self.by_sid.get(sid).map(|r| r.clone())?;
-        session.touch_at(now_ns);
-        Some(session)
+        self.by_sid.get(sid).map(|r| {
+            r.touch_at(now_ns);
+            r.clone()
+        })
     }
 
     /// Remove a session by id. Returns the previous session if any.
-    pub fn remove(&self, sid: &[u8; limits::SESSION_ID_BYTES]) -> Option<Arc<Session>> {
-        self.by_sid.remove(sid).map(|(_, v)| v)
+    ///
+    /// Takes the `by_sid` guard FIRST and drops it, then updates the
+    /// per-user slot with a ptr_eq check — a stale removal racing with an
+    /// admit that replaced the sid cannot drop the replacement generation.
+    pub fn remove(&self, sid: &Sid) -> Option<Arc<Session>> {
+        let (_, v) = self.by_sid.remove(sid)?;
+        let user = v.user_id;
+        self.remove_from_user_slot(user, sid, &v);
+        Some(v)
+    }
+
+    /// Drop the per-user slot entry for ONE removed generation (ptr_eq),
+    /// detaching the user cell if it empties. Shared by [`SessionStore::remove`]
+    /// and [`SessionStore::gc_expired`] so a stale cleanup can never drop a
+    /// freshly-admitted replacement generation bound to the same sid.
+    fn remove_from_user_slot(&self, user: [u8; 16], sid: &Sid, gen: &Arc<Session>) {
+        if let Some(mut slot) = self.by_user.get_mut(&user) {
+            slot.retain(|(k, s)| !(k == sid && Arc::ptr_eq(s, gen)));
+            if slot.is_empty() {
+                drop(slot);
+                // Detach the empty user cell only if still empty.
+                self.by_user.remove_if(&user, |_, s| s.is_empty());
+            }
+        }
     }
 
     /// Number of currently-live sessions.
@@ -537,41 +685,60 @@ impl SessionStore {
     }
 
     /// Background GC: remove sessions where `is_expired(now, max_age, idle_ttl)`.
-    /// Returns the number of evicted sessions.
+    /// Returns the number of evicted sessions (only generations ACTUALLY
+    /// removed are counted).
+    ///
+    /// Generation-safe (stale-cleanup): each victim is captured as a
+    /// `(sid, Arc<Session>)` PAIR and removal re-checks BOTH `is_expired`
+    /// AND `Arc::ptr_eq` via `remove_if` — a GC pass that captured an
+    /// expired generation while a replacement was being admitted can never
+    /// later delete the freshly-admitted REPLACEMENT with the same sid. The
+    /// per-user slot is updated through the same ptr_eq helper as
+    /// [`SessionStore::remove`], keeping the index exact (I2).
     pub fn gc_expired(&self, now_ns: u64, max_age_ns: u64, idle_ttl_ns: u64) -> usize {
-        let mut victims: Vec<[u8; limits::SESSION_ID_BYTES]> = Vec::new();
-        for entry in self.by_sid.iter() {
-            if entry.value().is_expired(now_ns, max_age_ns, idle_ttl_ns) {
-                victims.push(*entry.key());
+        let victims: Vec<(Sid, Arc<Session>)> = self
+            .by_sid
+            .iter()
+            .filter(|e| e.value().is_expired(now_ns, max_age_ns, idle_ttl_ns))
+            .map(|e| (*e.key(), Arc::clone(e.value())))
+            .collect();
+        let mut removed = 0;
+        for (sid, gen) in victims {
+            let gone = self
+                .by_sid
+                .remove_if(&sid, |_, v| {
+                    Arc::ptr_eq(v, &gen) && v.is_expired(now_ns, max_age_ns, idle_ttl_ns)
+                })
+                .is_some();
+            if gone {
+                removed += 1;
+                let user = gen.user_id;
+                self.remove_from_user_slot(user, &sid, &gen);
             }
-        }
-        let removed = victims.len();
-        for sid in victims {
-            self.by_sid.remove(&sid);
         }
         removed
     }
 
     /// Snapshot all sessions belonging to a given `user_id` (for admin
     /// `kickSession` / `updateUser` snapshot+kill semantics, spec §12.4 / §12.6).
-    pub fn snapshot_by_user(&self, user_id: &[u8; 16]) -> Vec<[u8; limits::SESSION_ID_BYTES]> {
-        self.by_sid
-            .iter()
-            .filter(|e| &e.value().user_id == user_id)
-            .map(|e| *e.key())
-            .collect()
+    /// Reads the per-user index — O(cap), never an O(all-sessions) scan.
+    pub fn snapshot_by_user(&self, user_id: &[u8; 16]) -> Vec<Sid> {
+        self.by_user
+            .get(user_id)
+            .map(|slot| slot.iter().map(|(k, _)| *k).collect())
+            .unwrap_or_default()
     }
 
-    /// Number of sessions currently held for a user.
+    /// Number of sessions currently held for a user. Reads the per-user
+    /// index — O(cap).
     pub fn count_for_user(&self, user_id: &[u8; 16]) -> usize {
-        self.by_sid
-            .iter()
-            .filter(|e| &e.value().user_id == user_id)
-            .count()
+        self.by_user.get(user_id).map_or(0, |slot| slot.len())
     }
 
     /// Iterate over all (sid, session) pairs — for monitoring/`listSessions`.
-    pub fn for_each(&self, mut f: impl FnMut(&[u8; limits::SESSION_ID_BYTES], &Session)) {
+    /// Clones nothing; the callback runs without any store guard held by the
+    /// iterator beyond the per-shard read guard of `by_sid` itself.
+    pub fn for_each(&self, mut f: impl FnMut(&Sid, &Session)) {
         for entry in self.by_sid.iter() {
             f(entry.key(), entry.value());
         }

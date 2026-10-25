@@ -378,6 +378,11 @@ path = "tests/connection/resume_fast_path.rs"
 harness = true
 
 [[test]]
+name = "rv_connect_0a42f42c_capped_login_reject_e2e"
+path = "tests/e2e/transport/rv_connect_0a42f42c_capped_login_reject_e2e.rs"
+harness = true
+
+[[test]]
 name = "audit_appender"
 path = "tests/misc/audit_log/audit_appender.rs"
 harness = true

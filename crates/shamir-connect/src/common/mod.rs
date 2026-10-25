@@ -13,7 +13,7 @@ mod user;
 mod tests;
 
 pub use messages::{auth_message, bootstrap_message, changepw, envelope, push_envelope, wire};
-pub use model::{error, types};
+pub use model::{admit, error, types};
 pub use primitives::{crypto, domain_tags, kdf_params, password, scram};
 pub use runtime::{fake_blob, latency, rotation, time};
 pub use user::{identity, username};
