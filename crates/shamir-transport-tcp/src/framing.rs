@@ -5,8 +5,8 @@
 //! [length: u32 BE][msgpack: length bytes]
 //! ```
 //!
-//! `length == 0` is a graceful close indicator. Empty frames are also legal
-//! at the application level (caller decides).
+//! `length == 0` is reserved for the graceful-close indicator (spec §2),
+//! so the writers reject empty payloads instead of encoding them.
 
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -36,6 +36,10 @@ pub enum FrameError {
     /// from a graceful close and from a mid-body truncation (`Io`).
     #[error("peer eof")]
     PeerEof,
+    /// Empty payload — length 0 is reserved for the graceful-close
+    /// sentinel (spec §2), so writers refuse to emit it as a data frame.
+    #[error("empty payload: length 0 is the close sentinel")]
+    EmptyPayload,
 }
 
 /// Read the 4-byte length header. EOF before the first header byte is
@@ -162,6 +166,9 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
             max: MAX_FRAME_SIZE_DEFAULT,
         });
     }
+    if payload.is_empty() {
+        return Err(FrameError::EmptyPayload);
+    }
     let len = payload.len() as u32;
     let mut buf = Vec::with_capacity(4 + payload.len());
     buf.extend_from_slice(&len.to_be_bytes());
@@ -200,6 +207,9 @@ pub async fn write_frame_into<W: AsyncWrite + Unpin>(
             actual: payload.len(),
             max: MAX_FRAME_SIZE_DEFAULT,
         });
+    }
+    if payload.is_empty() {
+        return Err(FrameError::EmptyPayload);
     }
     let len = payload.len() as u32;
     scratch.clear();
@@ -251,6 +261,9 @@ pub async fn write_frame_prereserved<W: AsyncWrite + Unpin>(
         });
     }
     let declared_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    if declared_len == 0 {
+        return Err(FrameError::EmptyPayload);
+    }
     // The payload length on the wire must match what's in the buffer.
     let actual_payload = buf.len() - 4;
     if declared_len != actual_payload || declared_len > MAX_FRAME_SIZE_DEFAULT {
