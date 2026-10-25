@@ -96,6 +96,10 @@ name = "integration_full_auth"
 path = "tests/auth/integration_full_auth.rs"
 
 [[test]]
+name = "rv_handshake_0fc58d93_tofu_pin"
+path = "tests/auth/rv_handshake_0fc58d93_tofu_pin_after_identity_verify.rs"
+
+[[test]]
 name = "integration_log_redaction"
 path = "tests/audit/integration_log_redaction.rs"
 
@@ -114,3 +118,7 @@ path = "tests/session/integration_session.rs"
 [[test]]
 name = "integration_username_precis"
 path = "tests/identity/integration_username_precis.rs"
+[[test]]
+name = "rv_feature_fed6910e_client_only"
+path = "tests/lifecycle/rv_feature_fed6910e_client_only_surface.rs"
+

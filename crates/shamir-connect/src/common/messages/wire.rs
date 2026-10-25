@@ -1,0 +1,146 @@
+//! Shared wire views used by BOTH the client and server flows.
+//!
+//! These live in `common` (not behind the `server` feature) so the
+//! standalone `client` feature builds without server code
+//! (RV-CONNECT-FED6910E). The `server` modules re-export them so all
+//! existing `server::<module>::` paths keep working.
+
+use zeroize::Zeroizing;
+
+use crate::common::bootstrap_message::build_bootstrap_input;
+use crate::common::crypto::Ed25519Keypair;
+use crate::common::kdf_params::KdfParams;
+use crate::common::time::UnixNanos;
+use crate::common::types::{limits, TransportKind};
+use crate::common::username::NormalizedUsername;
+
+/// Wire view: client → server `bootstrap_hello`.
+#[derive(Debug, Clone)]
+pub struct BootstrapHello {
+    /// 32-byte CSPRNG nonce — anti-replay for the challenge.
+    pub client_nonce: [u8; 32],
+}
+
+/// Wire view: server → client `bootstrap_challenge`.
+#[derive(Debug, Clone)]
+pub struct BootstrapChallenge {
+    /// Current Ed25519 server public key.
+    pub server_pub_key: [u8; 32],
+    /// Server wall-clock unix nanos (client validates `abs(now - server_time) ≤ 60s`).
+    pub server_time_ns: u64,
+    /// Ed25519 signature over `build_bootstrap_input(...)`.
+    pub identity_sig_bootstrap: [u8; 64],
+}
+
+/// Wire view: client → server `bootstrap` (the actual create-superuser).
+///
+/// Custom [`Debug`] impl redacts `token` and `server_key` — both are raw
+/// crypto secrets (the operator-issued bootstrap token and the SCRAM server
+/// key) and must never appear in `{:?}`-style logging.
+pub struct BootstrapRequest {
+    /// 32-byte token from operator (out-of-band channel).
+    pub token: Zeroizing<[u8; 32]>,
+    /// Username (post-NFC + UsernameCaseMapped).
+    pub user: NormalizedUsername,
+    /// Per-user salt.
+    pub salt: [u8; limits::SALT_BYTES],
+    /// Stored key (= SHA256(client_key)).
+    pub stored_key: [u8; 32],
+    /// Server key (= HMAC(salted_password, "Server Key")).
+    pub server_key: Zeroizing<[u8; 32]>,
+    /// KDF parameters used.
+    pub kdf_params: KdfParams,
+}
+
+impl core::fmt::Debug for BootstrapRequest {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("BootstrapRequest")
+            .field("token", &"<REDACTED>")
+            .field("user", &self.user)
+            .field("salt", &self.salt)
+            .field("stored_key", &self.stored_key)
+            .field("server_key", &"<REDACTED>")
+            .field("kdf_params", &self.kdf_params)
+            .finish()
+    }
+}
+
+/// Server-side: build the [`BootstrapChallenge`] in response to `bootstrap_hello`.
+pub fn make_bootstrap_challenge(
+    server_keypair: &Ed25519Keypair,
+    transport_kind: TransportKind,
+    tls_exporter: &[u8; 32],
+    hello: &BootstrapHello,
+) -> BootstrapChallenge {
+    let server_pub = server_keypair.public_bytes();
+    let server_time_ns = UnixNanos::now().as_u64();
+    let payload = build_bootstrap_input(
+        &server_pub,
+        transport_kind,
+        tls_exporter,
+        &hello.client_nonce,
+        server_time_ns,
+    );
+    let sig = server_keypair.sign(&payload);
+    BootstrapChallenge {
+        server_pub_key: server_pub,
+        server_time_ns,
+        identity_sig_bootstrap: sig,
+    }
+}
+
+/// Wire view: client → server `changePassword` body.
+#[derive(Debug, Clone)]
+pub struct ChangePwRequest {
+    /// SCRAM proof recovered from the OLD password.
+    pub client_proof_old: [u8; 32],
+    /// New per-user salt (CSPRNG).
+    pub new_salt: [u8; limits::SALT_BYTES],
+    /// New stored_key = SHA256(HMAC(new_salted_pw, "Client Key")).
+    pub new_stored_key: [u8; 32],
+    /// New server_key = HMAC(new_salted_pw, "Server Key").
+    pub new_server_key: [u8; 32],
+}
+
+/// Wire view: `identity_rotation` event sent over the active session bus.
+#[derive(Debug, Clone)]
+pub struct IdentityRotationEvent {
+    /// Old Ed25519 public key.
+    pub old_pub: [u8; 32],
+    /// New Ed25519 public key.
+    pub new_pub: [u8; 32],
+    /// End of overlap.
+    pub transition_until_ns: u64,
+    /// Full session id of the recipient (spec HIGH-5 fix — full 32 bytes).
+    pub recipient_session_id: [u8; 32],
+    /// Ed25519 signature by previous priv over the canonical input.
+    pub signed_by_old: [u8; 64],
+}
+
+/// Wire view: `rotation_in_progress` payload embedded in `auth_ok` for
+/// offline-client orphan recovery (spec §6.5 + diagram 05 Part B step 70).
+///
+/// Spec §6.5 NORMATIVE 4-field schema:
+/// ```text
+/// rotation_in_progress: {
+///     previous_pub,
+///     identity_sig_previous,  // Ed25519 sig by previous_priv over SAME identity_input
+///     transition_until_ns,
+///     rotation_proof          // Ed25519 sig by previous_priv over rotation chain
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct RotationInProgressPayload {
+    /// Old Ed25519 pub.
+    pub previous_pub: [u8; 32],
+    /// Ed25519 signature by previous_priv over the **same byte-exact**
+    /// `identity_input` that current_priv signed for `identity_sig`. Allows
+    /// orphan client to verify mutual auth against its old pin (spec §6.5
+    /// step 3 / diagram 05 Part B step 75).
+    pub identity_sig_previous: [u8; 64],
+    /// End of overlap.
+    pub transition_until_ns: u64,
+    /// Ed25519 signature by previous priv over the
+    /// `(previous_pub, current_pub, transition_until_ns)` rotation chain.
+    pub rotation_proof: [u8; 64],
+}
