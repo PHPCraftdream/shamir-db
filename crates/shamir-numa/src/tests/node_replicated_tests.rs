@@ -124,3 +124,73 @@ fn rcu_closure_sees_latest_value() {
     r.rcu(|s| format!("{s}c"));
     assert_eq!(r.load_node(NodeId(1)).as_str(), "abc");
 }
+
+#[test]
+fn rcu_mirror_does_not_regress_newer_replica_rv_numa_6e1761a2() {
+    // Regression: a delayed older mirror must never overwrite a newer value
+    // on a non-zero node. Deterministic oracle: the one-shot gate parks the
+    // first mirror AFTER it captured node 0's value (1) and BEFORE it stores
+    // it into a replica. A newer full publish (1000) completes meanwhile; on
+    // release the parked mirror stores its stale capture last. Unfixed code
+    // (capture once, store, done) leaves nodes 1..3 at 1 → assert fails;
+    // fixed code re-reads node 0 after the store, sees it moved, and
+    // converges to 1000.
+    let topo: Arc<dyn Topology> = Arc::new(MockTopology::with_nodes(4, 2));
+    let r = Arc::new(NodeReplicated::new(topo, 0u64));
+    r.arm_mirror_gate();
+    let publisher = {
+        let r = Arc::clone(&r);
+        std::thread::spawn(move || {
+            r.rcu(|v| v + 1); // node 0 = 1, then pauses pre-mirror
+        })
+    };
+    r.wait_mirror_paused();
+    r.store(1000); // full newer publish while the older one is parked
+    r.release_mirror_gate();
+    publisher.join().unwrap();
+    for n in 0..4 {
+        assert_eq!(**r.load_node(NodeId(n)), 1000, "node {n} regressed");
+    }
+}
+
+#[test]
+fn concurrent_rcu_all_replicas_converge_rv_numa_c54e6a13() {
+    // Phase 1: real multi-threaded mirror coverage — 8x1000 rcu increments.
+    let topo: Arc<dyn Topology> = Arc::new(MockTopology::with_nodes(4, 2));
+    let r = Arc::new(NodeReplicated::new(topo, 0u64));
+    let handles: Vec<_> = (0..8usize)
+        .map(|_| {
+            let r = Arc::clone(&r);
+            std::thread::spawn(move || {
+                for _ in 0..1000 {
+                    r.rcu(|v| v + 1);
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    // Phase 1 result: all increments are applied exactly once and every
+    // replica converged to the final value.
+    for n in 0..4 {
+        assert_eq!(**r.load_node(NodeId(n)), 8000, "node {n} after phase 1");
+    }
+    // Phase 2: deterministic delayed-mirror oracle (see the first test): the
+    // parked mirror holds a stale capture (8001); unfixed code leaves it on
+    // nodes 1..3 after the newer publish, fixed code re-reads node 0.
+    r.arm_mirror_gate();
+    let publisher = {
+        let r = Arc::clone(&r);
+        std::thread::spawn(move || {
+            r.rcu(|v| v + 1); // node 0 = 8001, then pauses pre-mirror
+        })
+    };
+    r.wait_mirror_paused();
+    r.store(100_000);
+    r.release_mirror_gate();
+    publisher.join().unwrap();
+    for n in 0..4 {
+        assert_eq!(**r.load_node(NodeId(n)), 100_000);
+    }
+}
