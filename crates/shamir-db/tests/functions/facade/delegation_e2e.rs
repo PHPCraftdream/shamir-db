@@ -32,7 +32,7 @@ use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
 /// Build a ShamirDb with database "testdb"/repo "main"/table "users".
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let db = shamir.create_db("testdb").await;
+    let db = shamir.create_db("testdb").await.expect("create_db");
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     db.add_repo(repo_config).await.unwrap();

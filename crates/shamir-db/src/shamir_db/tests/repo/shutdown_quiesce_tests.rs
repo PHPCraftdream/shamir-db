@@ -106,7 +106,7 @@ fn flush_all_persists_detached_post_wal_tail() {
     let (rid, value) = runtime.block_on(async {
         let hook = hook();
         let shamir = ShamirDb::init_memory().await.unwrap();
-        let db = shamir.create_db("app").await;
+        let db = shamir.create_db("app").await.expect("create_db");
         db.add_repo(
             RepoConfig::new(REPO, BoxRepoFactory::fjall_raw(&path))
                 .add_table(TableConfig::new("items")),
@@ -172,7 +172,7 @@ fn quiescence_timeout_leaves_j_absent_and_hard_reopen_certifies() {
     let (h, rid) = runtime.block_on(async {
         let hook = hook();
         let shamir = ShamirDb::init_memory().await.unwrap();
-        let db = shamir.create_db("app").await;
+        let db = shamir.create_db("app").await.expect("create_db");
         db.add_repo(
             RepoConfig::new(REPO, BoxRepoFactory::fjall_raw(&path))
                 .add_table(TableConfig::new("items")),
@@ -262,7 +262,7 @@ fn quiescence_timeout_leaves_j_absent_and_hard_reopen_certifies() {
 async fn detached_tail_in_memory() {
     let hook = hook();
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("app").await;
+    shamir.create_db("app").await.expect("create_db");
     shamir
         .add_repo(
             "app",
@@ -308,7 +308,7 @@ async fn flush_all_warns_and_continues_past_wedged_tail() {
     WARNINGS.0.lock().unwrap().clear();
     let hook = hook();
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("app").await;
+    shamir.create_db("app").await.expect("create_db");
     shamir
         .add_repo(
             "app",

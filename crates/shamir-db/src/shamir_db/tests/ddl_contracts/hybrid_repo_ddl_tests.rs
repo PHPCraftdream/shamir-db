@@ -56,7 +56,7 @@ async fn hybrid_repo_config_survives_restart_but_data_is_ephemeral() {
         let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        shamir.create_db("appdb").await;
+        shamir.create_db("appdb").await.expect("create_db");
 
         let mut b = Batch::new();
         b.id(1);
@@ -187,7 +187,7 @@ async fn hybrid_repo_config_survives_restart_but_data_is_ephemeral() {
 #[tokio::test]
 async fn hybrid_repo_without_data_root_errors_clearly() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("appdb").await;
+    shamir.create_db("appdb").await.expect("create_db");
 
     let mut b = Batch::new();
     b.id(1);
@@ -226,7 +226,7 @@ async fn hybrid_repo_persists_engine_and_path_in_system_store() {
     let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
         .await
         .unwrap();
-    shamir.create_db("appdb").await;
+    shamir.create_db("appdb").await.expect("create_db");
 
     let mut b = Batch::new();
     b.id(1);
@@ -278,7 +278,7 @@ async fn hybrid_repo_validator_genuinely_enforces_post_restart() {
         let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        shamir.create_db("appdb").await;
+        shamir.create_db("appdb").await.expect("create_db");
 
         let mut b = Batch::new();
         b.id(1);
@@ -370,7 +370,7 @@ async fn hybrid_repo_index_genuinely_usable_post_restart() {
         let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        shamir.create_db("appdb").await;
+        shamir.create_db("appdb").await.expect("create_db");
 
         let mut b = Batch::new();
         b.id(1);
@@ -503,7 +503,7 @@ async fn hybrid_repo_index_stays_usable_across_two_restarts() {
         let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        shamir.create_db("appdb").await;
+        shamir.create_db("appdb").await.expect("create_db");
 
         let mut b = Batch::new();
         b.id(1);
@@ -679,7 +679,7 @@ async fn hybrid_repo_index_stays_usable_across_two_restarts() {
 #[tokio::test]
 async fn unsupported_engine_error_mentions_hybrid() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("appdb").await;
+    shamir.create_db("appdb").await.expect("create_db");
 
     let mut b = Batch::new();
     b.id(1);
@@ -709,7 +709,7 @@ async fn unsupported_engine_error_mentions_hybrid() {
 #[tokio::test]
 async fn create_repo_with_explicit_path_is_rejected_not_silently_ignored() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("appdb").await;
+    shamir.create_db("appdb").await.expect("create_db");
 
     let mut b = Batch::new();
     b.id(1);
@@ -755,7 +755,7 @@ async fn create_repo_with_explicit_path_is_rejected_not_silently_ignored() {
 #[tokio::test]
 async fn create_repo_without_path_still_succeeds() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("appdb").await;
+    shamir.create_db("appdb").await.expect("create_db");
 
     let mut b = Batch::new();
     b.id(1);

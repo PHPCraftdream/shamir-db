@@ -31,7 +31,9 @@ async fn fixture(lifetime: Duration) -> (ShamirDbHandler, Session, u64) {
     );
     let db = ShamirDb::init_memory().await.expect("init memory database");
     let owner = Actor::User(principal64(session.user_id));
-    db.create_db_as("app", owner.clone()).await;
+    db.create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
     db.add_repo_as(
         "app",
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items")),

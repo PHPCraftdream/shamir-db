@@ -384,15 +384,15 @@ impl ShamirDb {
             )));
         }
 
+        // Durable removal FIRST (RV-DB-6540DC7B): a persistence error on
+        // this PREWRITE delete propagates and leaves the live registry
+        // binding intact, so a retry still sees the validator. (A remove
+        // that commits and then fails at flush can also surface here; no
+        // restart-visibility guarantee is claimed for that case.) No
+        // durable row — the delete matches nothing and succeeds
+        // idempotently.
+        self.system_store.remove_validator(name).await?;
         let existed = self.validators.remove(&id);
-        // Best-effort catalogue removal.
-        if let Err(e) = self.system_store.remove_validator(name).await {
-            log::warn!(
-                "shamir_db::drop_validator: failed to remove '{}' from catalogue: {}",
-                name,
-                e
-            );
-        }
         Ok(existed)
     }
 
@@ -413,10 +413,11 @@ impl ShamirDb {
             .map_err(|e| DbError::Validation(e.to_string()))?;
 
         // If there was a durable record, re-key it, preserving the
-        // existing owner/group/mode.
+        // existing owner/group/mode. Write the durable new record BEFORE
+        // removing the old one (a crash between the two leaves the new row
+        // resolvable and the old row inert).
         if let Some(mut rec) = old_record {
             let existing_meta = ResourceMeta::from_record(&rec);
-            self.system_store.remove_validator(from).await?;
             if let shamir_types::types::value::QueryValue::Map(ref mut map) = rec {
                 map.insert(
                     "name".to_string(),
@@ -426,6 +427,7 @@ impl ShamirDb {
             self.system_store
                 .save_validator(to, &rec, &existing_meta)
                 .await?;
+            self.system_store.remove_validator(from).await?;
         }
 
         Ok(())

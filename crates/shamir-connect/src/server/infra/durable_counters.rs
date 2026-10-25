@@ -27,11 +27,20 @@
 
 use crate::common::time::{ns, UnixNanos};
 use crate::common::types::limits;
-use crate::server::resume::ConsumedCounterStore;
+use crate::server::resume::{AdvanceOutcome, ConsumedCounterStore};
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 use parking_lot::Mutex;
 use std::path::Path;
 use std::sync::Arc;
+
+/// Test-only fault-injection points for the real storage branches.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FaultPoint {
+    Get,
+    Insert,
+    Persist,
+}
 
 /// Per spec §6.2: idle entries dropped after `RESUMPTION_MAX_CHAIN_AGE`
 /// (= 24h) of no activity.
@@ -52,6 +61,10 @@ pub struct FjallConsumedCounters {
     /// race on the get-then-conditional-insert sequence. Not held across
     /// the fsync — fjall's `persist` is synchronous and short.
     write_lock: Mutex<()>,
+    /// Test-only fault injection (RV-CONNECT-ECE3E157 regression): 0 = none,
+    /// `FaultPoint as u8 + 1` = inject at that call site.
+    #[cfg(test)]
+    fault: std::sync::atomic::AtomicU8,
 }
 
 impl core::fmt::Debug for FjallConsumedCounters {
@@ -74,6 +87,24 @@ impl FjallConsumedCounters {
             db: Arc::new(db),
             keyspace,
             write_lock: Mutex::new(()),
+            #[cfg(test)]
+            fault: std::sync::atomic::AtomicU8::new(0),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_fault(&self, point: FaultPoint) {
+        self.fault
+            .store(point as u8 + 1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn fault_err(&self, point: FaultPoint) -> Option<fjall::Error> {
+        let stored = self.fault.load(std::sync::atomic::Ordering::Relaxed);
+        (stored == point as u8 + 1).then(|| {
+            fjall::Error::Io(std::io::Error::other(
+                "injected fault (RV-CONNECT-ECE3E157 regression)",
+            ))
         })
     }
 
@@ -117,15 +148,27 @@ impl ConsumedCounterStore for FjallConsumedCounters {
         user_id: &[u8; 16],
         family_id: &[u8; limits::TICKET_FAMILY_ID_BYTES],
         new_counter: u64,
-    ) -> bool {
+    ) -> AdvanceOutcome {
         let key = Self::key(user_id, family_id);
         let now_ns = UnixNanos::now().as_u64();
 
         let _guard = self.write_lock.lock();
 
-        let prior = match self.keyspace.get(&key[..]) {
+        // RV-CONNECT-ECE3E157: every failure cause is logged and mapped to a
+        // distinct outcome — storage errors must not be conflated with replay.
+        #[cfg(test)]
+        let get_outcome = match self.fault_err(FaultPoint::Get) {
+            Some(e) => Err(e),
+            None => self.keyspace.get(&key[..]),
+        };
+        #[cfg(not(test))]
+        let get_outcome = self.keyspace.get(&key[..]);
+        let prior = match get_outcome {
             Ok(opt) => opt,
-            Err(_) => return false,
+            Err(e) => {
+                log::warn!("durable_counters::try_advance: get failed: {}", e);
+                return AdvanceOutcome::StorageFailed;
+            }
         };
         let prior_counter = prior.map(|s| Self::unpack_value(&s).0);
         let accept = match prior_counter {
@@ -133,21 +176,37 @@ impl ConsumedCounterStore for FjallConsumedCounters {
             None => true,
         };
         if !accept {
-            return false;
+            return AdvanceOutcome::Replayed;
         }
 
         let v = Self::pack_value(new_counter, now_ns);
-        if self.keyspace.insert(&key[..], &v[..]).is_err() {
-            return false;
+        #[cfg(test)]
+        let insert_outcome = match self.fault_err(FaultPoint::Insert) {
+            Some(e) => Err(e),
+            None => self.keyspace.insert(&key[..], &v[..]),
+        };
+        #[cfg(not(test))]
+        let insert_outcome = self.keyspace.insert(&key[..], &v[..]);
+        if let Err(e) = insert_outcome {
+            log::warn!("durable_counters::try_advance: insert failed: {}", e);
+            return AdvanceOutcome::StorageFailed;
         }
 
-        // Spec §6.2 NORMATIVE: fsync before returning `true`. Without
+        // Spec §6.2 NORMATIVE: fsync before returning `Accepted`. Without
         // this the on-disk state may lag the in-memory journal and a
         // crash could replay a "consumed" ticket.
-        if self.db.persist(PersistMode::SyncAll).is_err() {
-            return false;
+        #[cfg(test)]
+        let persist_outcome = match self.fault_err(FaultPoint::Persist) {
+            Some(e) => Err(e),
+            None => self.db.persist(PersistMode::SyncAll),
+        };
+        #[cfg(not(test))]
+        let persist_outcome = self.db.persist(PersistMode::SyncAll);
+        if let Err(e) = persist_outcome {
+            log::warn!("durable_counters::try_advance: persist failed: {}", e);
+            return AdvanceOutcome::StorageFailed;
         }
-        true
+        AdvanceOutcome::Accepted
     }
 
     fn gc(&self, now_ns: u64) {

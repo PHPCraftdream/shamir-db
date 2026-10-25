@@ -27,7 +27,9 @@ async fn encoded_oversize_refuses_and_releases_with_or_without_global_budget() {
     for cap in [Some(1024), None] {
         let db = ShamirDb::init_memory().await.unwrap();
         let actor = Actor::User(principal64([0xAB; 16]));
-        db.create_db_as("app", actor.clone()).await;
+        db.create_db_as("app", actor.clone())
+            .await
+            .expect("create_db");
         db.add_repo_as(
             "app",
             RepoConfig::new("main", BoxRepoFactory::in_memory()),

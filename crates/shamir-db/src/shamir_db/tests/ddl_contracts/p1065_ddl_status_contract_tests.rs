@@ -45,7 +45,7 @@ use crate::ShamirDb;
 /// Setup in-memory ShamirDb with testdb/main/items table and a regular index.
 async fn setup_with_index() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir.add_repo("testdb", repo_config).await.unwrap();
@@ -568,7 +568,7 @@ async fn p1065_versioned_envelope_rejects_unrecognized_version() {
 #[tokio::test]
 async fn p1065_rename_ddlopkind_family_classification() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir.add_repo("testdb", repo_config).await.unwrap();

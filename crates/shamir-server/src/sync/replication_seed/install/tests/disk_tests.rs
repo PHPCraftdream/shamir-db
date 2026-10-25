@@ -23,7 +23,7 @@ fn runtime() -> Runtime {
 
 async fn artifact(root: &Path) -> String {
     let source = ShamirDb::init_memory().await.unwrap();
-    source.create_db("app").await;
+    source.create_db("app").await.expect("create_db");
     source
         .add_repo("app", RepoConfig::new("main", BoxRepoFactory::in_memory()))
         .await

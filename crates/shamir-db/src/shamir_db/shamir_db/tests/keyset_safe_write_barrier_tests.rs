@@ -46,7 +46,7 @@ use crate::ShamirDb;
 /// In-memory ShamirDb with a single empty table `testdb/main/users`.
 async fn setup() -> ShamirDb {
     let db = ShamirDb::init_memory().await.unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     db.add_repo("testdb", repo_config).await.unwrap();

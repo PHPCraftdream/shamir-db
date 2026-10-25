@@ -32,7 +32,7 @@ async fn admin_batch_allowed_for_superuser() {
     // Start with the DB present but no `inventory` table yet; create it via
     // a wire-side admin batch.
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
-    shamir.create_db("prod").await;
+    shamir.create_db("prod").await.expect("create_db");
     let cfg = RepoConfig::new("main", BoxRepoFactory::in_memory());
     shamir.add_repo("prod", cfg).await.expect("add repo");
     let handler = ShamirDbHandler::new(Arc::new(shamir));

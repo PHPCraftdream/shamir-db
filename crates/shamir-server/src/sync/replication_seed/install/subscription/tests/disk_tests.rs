@@ -23,7 +23,7 @@ fn install_cli_final_step_is_paused_durable_and_exact_retry_idempotent() {
     let runtime = Builder::new_current_thread().enable_all().build().unwrap();
     let digest = runtime.block_on(async {
         let source = ShamirDb::init_memory().await.unwrap();
-        source.create_db("app").await;
+        source.create_db("app").await.expect("create_db");
         source
             .add_repo("app", RepoConfig::new("main", BoxRepoFactory::in_memory()))
             .await

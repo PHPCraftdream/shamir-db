@@ -64,7 +64,7 @@ async fn rename_populated_survives_cold_restart() {
         let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        shamir.create_db("appdb").await;
+        shamir.create_db("appdb").await.expect("create_db");
 
         // Create repo (durable — no engine specified) + table.
         let mut b = Batch::new();

@@ -21,7 +21,7 @@ use shamir_types::access::{Action, Actor, ResourceMeta, ResourcePath};
 /// behaviour under test.
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     shamir.add_repo("testdb", repo_config).await.unwrap();

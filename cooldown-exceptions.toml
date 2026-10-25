@@ -384,3 +384,28 @@ reason = "Security patch release admitted under DEC-3 Q4 (PR 225); a lockstep co
 approved_by = "PHPCraftdream"
 approved_on = "2026-10-21"
 
+[[exception]]
+package = "tokio"
+version = "1.51.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a13e32eacd0222f9658be2ccbd83b718bfd9bfb0d54b5921913c184cb86124a5"
+published = "2026-10-13T20:51:27Z"
+expires = "2026-11-12"
+kind = "security"
+advisories = ["RUSTSEC-2026-0386"]
+reason = "Security patch release for the AsyncFd I/O-safety unsoundness (fixed in >=1.51.6,<1.52.0), published 11 days before admission."
+approved_by = "PHPCraftdream"
+approved_on = "2026-10-24"
+
+[[exception]]
+package = "mio"
+version = "1.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
+published = "2026-10-03T16:33:10Z"
+expires = "2026-11-02"
+kind = "security"
+companion_of = "tokio@1.51.6"
+reason = "Lockstep companion: tokio 1.51.6 requires mio 1.2.x; admitted only because its primary requires it."
+approved_by = "PHPCraftdream"
+approved_on = "2026-10-24"

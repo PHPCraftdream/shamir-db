@@ -22,7 +22,7 @@ use crate::ShamirDb;
 /// Setup in-memory ShamirDb with testdb/main/items table and a regular index.
 async fn setup_with_index() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir.add_repo("testdb", repo_config).await.unwrap();
@@ -71,7 +71,7 @@ async fn drop_index_returns_op_id_and_status() {
 #[tokio::test]
 async fn rename_index_returns_op_id_and_status() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir.add_repo("testdb", repo_config).await.unwrap();
@@ -168,7 +168,7 @@ async fn poll_unknown_op_id_returns_none() {
 #[tokio::test]
 async fn poll_right_op_id_wrong_table_returns_none() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
 
     // Create two tables in the same repo
     let repo_config = RepoConfig::new("main", BoxRepoFactory::in_memory())
@@ -229,7 +229,7 @@ async fn poll_right_op_id_wrong_table_returns_none() {
 #[tokio::test]
 async fn two_drop_index_dispatches_on_one_table_mint_distinct_pollable_op_ids() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir.add_repo("testdb", repo_config).await.unwrap();

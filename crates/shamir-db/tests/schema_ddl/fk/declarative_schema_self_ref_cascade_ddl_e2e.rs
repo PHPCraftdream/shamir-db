@@ -70,7 +70,7 @@ async fn setup() -> (ShamirDb, tempfile::TempDir) {
     let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
 
     let mut b = Batch::new();
     b.id(1);
@@ -193,7 +193,7 @@ async fn non_self_ref_cascade_still_accepted() {
     let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
 
     let mut b = Batch::new();
     b.id(1);
