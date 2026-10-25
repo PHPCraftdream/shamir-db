@@ -6,7 +6,6 @@
 
 use std::sync::{Arc, Mutex};
 
-use shamir_collections::TFxMap;
 use shamir_query_types::admin::ChangesSinceOp;
 use shamir_query_types::batch::{
     BatchOp, BatchRequest, BatchResponse, TransactionInfo, VisibilityPendingReason,
@@ -19,7 +18,7 @@ use tokio::sync::oneshot;
 use crate::builder::batch::Batch;
 use crate::builder::write::insert;
 use crate::builder::write::Insert;
-use crate::client::{await_pending_response, PendingMap};
+use crate::client::{await_pending_response, Lifecycle};
 use crate::interner_cache::InternerCacheRegistry;
 use crate::receipts::{changes_since_via, execute_with_receipts_via, wait_for_visibility_via};
 use crate::{ChangesSinceResponse, ClientError, DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
@@ -186,14 +185,14 @@ async fn transport_timeout_sends_exactly_once_and_never_replays() {
                 .lock()
                 .unwrap()
                 .push(rmp_serde::to_vec_named(&req).unwrap());
-            let pending: PendingMap = Arc::new(Mutex::new(TFxMap::default()));
+            let state = Lifecycle::new();
             let (tx, rx) = oneshot::channel();
-            pending.lock().unwrap().insert(1, tx);
+            state.pending.lock().unwrap().map.insert(1, tx);
             async move {
                 let payload = await_pending_response(
                     rx,
                     Some(std::time::Duration::from_millis(50)),
-                    &pending,
+                    &state,
                     1,
                 )
                 .await?;

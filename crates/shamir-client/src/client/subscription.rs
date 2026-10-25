@@ -2,11 +2,12 @@
 
 use std::sync::{Arc, Mutex as StdMutex};
 
-use shamir_collections::TFxMap;
-
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 use shamir_connect::common::push_envelope::PushEnvelope;
+
+use crate::error::CloseCause;
 
 /// Per-subscription channel capacity. A stalled consumer can no longer
 /// balloon client memory unboundedly — the reader task drops new pushes
@@ -23,43 +24,78 @@ pub type PushSender = mpsc::Sender<PushEnvelope>;
 /// Receiver half yielding push frames to the subscription consumer.
 pub type PushReceiver = mpsc::Receiver<PushEnvelope>;
 
-/// Registry of active subscription channels, keyed by `sub_id`.
-/// Push frames are routed here by the reader task.
-pub(crate) type SubscriptionMap = Arc<StdMutex<TFxMap<u64, PushSender>>>;
-
 pub(crate) const EARLY_BUFFER_CAP: usize = 256;
 
-/// Bounded per-sub early buffer for pushes arriving before `subscribe_push`.
-pub(crate) type EarlyBuffer = Arc<StdMutex<TFxMap<u64, Vec<PushEnvelope>>>>;
+/// Subscription registry (live senders + early buffer + close cause). See
+/// [`crate::client::transport::SubsInner`] for the contention model.
+pub(crate) type SubsMap = Arc<StdMutex<crate::client::transport::SubsInner>>;
 
-/// Handle to a live subscription stream. Yields push envelopes as they arrive.
+/// Handle to a live subscription stream. Yields push envelopes as they
+/// arrive; after the connection terminates, queued items drain and the
+/// stream ends (`next()` → `None`), with the terminal cause available via
+/// [`Self::termination`].
 pub struct SubscriptionHandle {
     /// Server-assigned subscription id.
     pub sub_id: u64,
     rx: PushReceiver,
-    registry: SubscriptionMap,
+    registry: SubsMap,
+    /// Typed termination channel: resolved by `Lifecycle::shutdown` (or
+    /// pre-resolved when the handle was created on a closed client).
+    term_rx: Option<oneshot::Receiver<CloseCause>>,
+    /// Cached cause once observed.
+    terminal: Option<CloseCause>,
 }
 
 impl SubscriptionHandle {
     /// Create a new handle (crate-internal).
-    pub(crate) fn new(sub_id: u64, rx: PushReceiver, registry: SubscriptionMap) -> Self {
+    pub(crate) fn new(
+        sub_id: u64,
+        rx: PushReceiver,
+        registry: SubsMap,
+        termination: oneshot::Receiver<CloseCause>,
+    ) -> Self {
         Self {
             sub_id,
             rx,
             registry,
+            term_rx: Some(termination),
+            terminal: None,
         }
     }
 
-    /// Receive the next push envelope, or `None` if the subscription was closed.
+    /// Receive the next push envelope, or `None` once the subscription
+    /// channel ended (connection terminal transition).
     pub async fn next(&mut self) -> Option<PushEnvelope> {
         self.rx.recv().await
+    }
+
+    /// The terminal close cause, `Some` once the subscription has ended.
+    /// Synchronous: reads the cached cause or non-blockingly polls the
+    /// termination channel (`None` = not yet terminated; once `next()`
+    /// returned `None` after a shutdown the cause is always present).
+    pub fn termination(&mut self) -> Option<CloseCause> {
+        if let Some(cause) = &self.terminal {
+            return Some(cause.clone());
+        }
+        let cause = match self.term_rx.as_mut()?.try_recv() {
+            // Channel is single-shot; stop tracking it once drained.
+            Ok(cause) => {
+                self.term_rx = None;
+                Some(cause)
+            }
+            Err(_) => None,
+        };
+        self.terminal = cause.clone();
+        cause
     }
 }
 
 impl Drop for SubscriptionHandle {
     fn drop(&mut self) {
-        // Remove from registry so no more pushes are routed here.
-        let mut map = self.registry.lock().unwrap_or_else(|p| p.into_inner());
-        map.remove(&self.sub_id);
+        // Remove from registry so no more pushes are routed here and no
+        // terminal send is attempted on a dead handle.
+        let mut subs = self.registry.lock().unwrap_or_else(|p| p.into_inner());
+        subs.live.remove(&self.sub_id);
+        subs.terminal.remove(&self.sub_id);
     }
 }

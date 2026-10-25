@@ -121,9 +121,56 @@ enum BigIntSource {
 /// The Vec still grows on demand for legit large inputs beyond this cap.
 const SANE_PREALLOC_CAP: usize = 4096;
 
-struct ValueVisitor<K>(std::marker::PhantomData<K>);
+/// Legacy typed-prefix decode boundary (RV-WASM-HOST-B1A78B5B).
+///
+/// The default `Value<String>` deserialization preserves map keys verbatim.
+/// This newtype is the ONLY opt-in path that still interprets the legacy
+/// typed key prefixes (`i:` `u:` `float:` `dec:` `big:` `arr:` `set:`),
+/// kept for the legacy test fixtures that pin that contract. The legacy
+/// interpretation is recursive: it applies at EVERY nesting depth on this
+/// boundary (nested maps, lists, and sets are decoded via `LegacyValue`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LegacyPrefixed(pub Value<String>);
 
-impl<'de, Key> Visitor<'de> for ValueVisitor<Key>
+impl<'de> Deserialize<'de> for LegacyPrefixed {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer
+            .deserialize_any(ValueVisitor::<String, true>(std::marker::PhantomData))
+            .map(LegacyPrefixed)
+    }
+}
+
+impl LegacyPrefixed {
+    /// Deserializes legacy prefixed-key MessagePack bytes.
+    pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<Value<String>, rmp_serde::decode::Error> {
+        rmp_serde::from_slice::<LegacyPrefixed>(bytes.as_ref()).map(|p| p.0)
+    }
+}
+
+/// Wrapper that keeps the legacy typed-prefix interpretation active for
+/// nested values at any depth inside a `LegacyPrefixed` boundary.
+struct LegacyValue<K: Eq + Hash + Ord + Clone + Serialize + Debug>(Value<K>);
+
+impl<'de, Key> Deserialize<'de> for LegacyValue<Key>
+where
+    Key: Deserialize<'de> + Eq + Hash + Ord + Clone + Serialize + Debug + 'static,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer
+            .deserialize_any(ValueVisitor::<Key, true>(std::marker::PhantomData))
+            .map(LegacyValue)
+    }
+}
+
+struct ValueVisitor<K, const LEGACY: bool>(std::marker::PhantomData<K>);
+
+impl<'de, Key, const LEGACY: bool> Visitor<'de> for ValueVisitor<Key, LEGACY>
 where
     Key: Deserialize<'de> + Eq + Hash + Ord + Clone + Serialize + Debug + 'static,
 {
@@ -189,8 +236,18 @@ where
         A: SeqAccess<'de>,
     {
         let mut list = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(SANE_PREALLOC_CAP));
-        while let Some(elem) = seq.next_element()? {
-            list.push(elem);
+        if LEGACY {
+            // Inside a `LegacyPrefixed` boundary, list elements must keep the
+            // typed-prefix interpretation too (RV-WASM-HOST-B1A78B5B);
+            // plain `seq.next_element::<Value<Key>>()` would decode them with
+            // LEGACY=false.
+            while let Some(elem) = seq.next_element::<LegacyValue<Key>>()? {
+                list.push(elem.0);
+            }
+        } else {
+            while let Some(elem) = seq.next_element::<Value<Key>>()? {
+                list.push(elem);
+            }
         }
         Ok(Value::List(list))
     }
@@ -208,68 +265,101 @@ where
             return Ok(Value::Map(inner_map));
         }
 
-        // For UserValue (Key=String), use the special prefix-parsing logic.
+        // Legacy boundary only (RV-WASM-HOST-B1A78B5B): typed-prefix
+        // interpretation applies solely via `LegacyPrefixed`; the default
+        // String-key decode preserves map keys verbatim so ordinary guest
+        // values like { "i:count": 7 } keep their literal keys.
+        if LEGACY {
+            return visit_map_legacy::<Key, M>(map);
+        }
+
         let mut inner_map = new_map_wc(map.size_hint().unwrap_or(0).min(SANE_PREALLOC_CAP));
-        while let Some(key_str) = map.next_key::<String>()? {
-            let (prefix, real_key) = parse_key_prefix(&key_str);
-
-            let value = match prefix {
-                Some("i") => map.next_value::<i64>().map(Value::Int)?,
-                Some("u") => {
-                    // Same `<= i64::MAX` → `Int` / else → `Big` contract as
-                    // `visit_u64` (fix FG-1), reusing this file's established
-                    // `BigInt::from(_)` construction idiom (see the `Some("big")`
-                    // branch below). This `visit_map` branch is the `Key=String`
-                    // prefixed-key test-fixture path (`UserValue` is
-                    // `#[deprecated]`, tests-only).
-                    map.next_value::<u64>().map(|v| {
-                        if v <= i64::MAX as u64 {
-                            Value::Int(v as i64)
-                        } else {
-                            Value::Big(BigInt::from(v))
-                        }
-                    })?
-                }
-                Some("float") => map.next_value::<f64>().map(Value::F64)?,
-                Some("dec") => {
-                    let s: String = map.next_value()?;
-                    // validation-only; parsed value not retained
-                    let _ = Decimal::from_str(&s).map_err(de::Error::custom)?;
-                    Value::Str(s)
-                }
-                Some("big") => {
-                    let source: BigIntSource = map.next_value()?;
-                    let s = match source {
-                        BigIntSource::Str(s) => {
-                            // validation-only; parsed value not retained
-                            let _ = BigInt::from_str(&s).map_err(de::Error::custom)?;
-                            s
-                        }
-                        BigIntSource::Int(i) => BigInt::from(i).to_string(),
-                        BigIntSource::Uint(u) => BigInt::from(u).to_string(),
-                    };
-                    Value::Str(s)
-                }
-                Some("arr") => map.next_value::<Vec<Value<Key>>>().map(Value::List)?,
-                Some("set") => map.next_value::<TSet<Value<Key>>>().map(Value::Set)?,
-                None => map.next_value()?,
-                Some(_) => {
-                    // Unknown prefix — treat the full original key as a
-                    // plain field name (supports user data with colons,
-                    // e.g. "xml:lang", "urn:isbn:...").
-                    let val: Value<Key> = map.next_value()?;
-                    let map_key =
-                        Key::deserialize(de::IntoDeserializer::into_deserializer(key_str.clone()))?;
-                    inner_map.insert(map_key, val);
-                    continue;
-                }
-            };
-
-            let map_key = Key::deserialize(de::IntoDeserializer::into_deserializer(real_key))?;
-            inner_map.insert(map_key, value);
+        while let Some((key, value)) = map.next_entry::<Key, Value<Key>>()? {
+            inner_map.insert(key, value);
         }
         Ok(Value::Map(inner_map))
     }
+}
+
+/// Legacy typed-prefix map decode (only reachable via `LegacyPrefixed`).
+fn visit_map_legacy<'de, Key, M>(mut map: M) -> Result<Value<Key>, M::Error>
+where
+    Key: Deserialize<'de> + Eq + Hash + Ord + Clone + Serialize + Debug + 'static,
+    M: MapAccess<'de>,
+{
+    let mut inner_map = new_map_wc(map.size_hint().unwrap_or(0).min(SANE_PREALLOC_CAP));
+    while let Some(key_str) = map.next_key::<String>()? {
+        let (prefix, real_key) = parse_key_prefix(&key_str);
+
+        let value = match prefix {
+            Some("i") => map.next_value::<i64>().map(Value::Int)?,
+            Some("u") => {
+                // Same `<= i64::MAX` → `Int` / else → `Big` contract as
+                // `visit_u64` (fix FG-1), reusing this file's established
+                // `BigInt::from(_)` construction idiom (see the `Some("big")`
+                // branch below).
+                map.next_value::<u64>().map(|v| {
+                    if v <= i64::MAX as u64 {
+                        Value::Int(v as i64)
+                    } else {
+                        Value::Big(BigInt::from(v))
+                    }
+                })?
+            }
+            Some("float") => map.next_value::<f64>().map(Value::F64)?,
+            Some("dec") => {
+                let s: String = map.next_value()?;
+                // validation-only; parsed value not retained
+                let _ = Decimal::from_str(&s).map_err(de::Error::custom)?;
+                Value::Str(s)
+            }
+            Some("big") => {
+                let source: BigIntSource = map.next_value()?;
+                let s = match source {
+                    BigIntSource::Str(s) => {
+                        // validation-only; parsed value not retained
+                        let _ = BigInt::from_str(&s).map_err(de::Error::custom)?;
+                        s
+                    }
+                    BigIntSource::Int(i) => BigInt::from(i).to_string(),
+                    BigIntSource::Uint(u) => BigInt::from(u).to_string(),
+                };
+                Value::Str(s)
+            }
+            Some("arr") => Value::List(
+                map.next_value::<Vec<LegacyValue<Key>>>()?
+                    .into_iter()
+                    .map(|v| v.0)
+                    .collect(),
+            ),
+            Some("set") => Value::Set(
+                map.next_value::<Vec<LegacyValue<Key>>>()?
+                    .into_iter()
+                    .map(|v| v.0)
+                    .collect(),
+            ),
+            None => {
+                let val: LegacyValue<Key> = map.next_value()?;
+                let map_key = Key::deserialize(de::IntoDeserializer::into_deserializer(key_str))?;
+                inner_map.insert(map_key, val.0);
+                continue;
+            }
+            Some(_) => {
+                // Unknown prefix — treat the full original key as a
+                // plain field name (supports user data with colons,
+                // e.g. "xml:lang", "urn:isbn:...").
+                let val: LegacyValue<Key> = map.next_value()?;
+                let map_key =
+                    Key::deserialize(de::IntoDeserializer::into_deserializer(key_str.clone()))?;
+                inner_map.insert(map_key, val.0);
+                continue;
+            }
+        };
+
+        let map_key = Key::deserialize(de::IntoDeserializer::into_deserializer(real_key))?;
+        inner_map.insert(map_key, value);
+    }
+    Ok(Value::Map(inner_map))
 }
 
 impl<'de, Key> Deserialize<'de> for Value<Key>
@@ -280,7 +370,7 @@ where
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_any(ValueVisitor(std::marker::PhantomData))
+        deserializer.deserialize_any(ValueVisitor::<Key, false>(std::marker::PhantomData))
     }
 }
 

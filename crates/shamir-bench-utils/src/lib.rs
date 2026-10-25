@@ -11,7 +11,6 @@
 //! migrated off Criterion — bench-scale-tool's calibrate/run model replaces
 //! it entirely (see `bench-iters.txt` at the workspace root).
 
-#[cfg(feature = "peak_mem")]
 pub mod peak_mem;
 
 pub mod vector_data;

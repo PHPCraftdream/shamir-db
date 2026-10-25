@@ -16,6 +16,7 @@ use shamir_storage::types::KvOp;
 use crate::tests::mvcc_store_tests::gc::helpers::{
     count_history_entries, make_gate, make_mvcc, make_mvcc_with_gate,
 };
+use crate::tests::mvcc_store_tests::gc::test_stores::make_failing_history_mvcc;
 use crate::version_codec::encode_version_key;
 use shamir_storage::types::RecordKey;
 use std::sync::Arc;
@@ -441,5 +442,67 @@ async fn batched_write_waits_for_drain_exclusive_instead_of_skipping() {
         history_raw(&mvcc, b"k1", version).await,
         Some(Bytes::from_static(b"v1")),
         "the batched write must have landed in history"
+    );
+}
+
+// ================================================================
+// RV-TX-D54D3EE5 — a FAILED drain must release `drain_exclusive`.
+// ================================================================
+
+/// RV-TX-D54D3EE5 — drain-error guard release: when `drain_to_history`
+/// fails mid-drain (injected history I/O fault), the `drain_exclusive`
+/// guard must still be released, so a retrying drain (or the background
+/// batched drainer) is not wedged behind a leaked lock forever.
+///
+/// Proof is timing-bounded but deterministic: a leaked tokio Mutex guard
+/// NEVER releases, so the timeout cannot flake — the retry either acquires
+/// (guard released, current behaviour) or the assertion fails.
+#[tokio::test]
+async fn rv_tx_d54d3ee5_failed_drain_releases_drain_exclusive() {
+    let gate = make_gate();
+    let (mvcc, history) = make_failing_history_mvcc(gate.clone());
+
+    // Commit a visible-but-undurable overlay entry (the real tx-ack shape):
+    // this gives the drain real work to do.
+    let guard = mvcc.gate.assign_next_version_guarded();
+    let v = guard.version();
+    mvcc.apply_committed_visible(
+        &[KvOp::Set(
+            RecordKey::from(Bytes::from_static(b"k1")),
+            Bytes::from_static(b"v1"),
+        )],
+        v,
+    );
+    guard.commit();
+    assert_eq!(mvcc.overlay_len(), 1, "setup: overlay holds the commit");
+    assert_eq!(gate.durable_watermark(), 0, "setup: nothing durable yet");
+
+    // Fail the drain's history write.
+    history
+        .fail_set
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        mvcc.drain_to_history().await.is_err(),
+        "the injected history fault must fail the drain"
+    );
+    history
+        .fail_set
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+
+    // The guard must have been dropped with the error path: a retrying
+    // drain acquires the lock and completes. A leaked guard would never
+    // release, so the timeout fires deterministically and the test fails.
+    let retry = tokio::time::timeout(Duration::from_millis(1000), mvcc.drain_to_history()).await;
+    assert!(
+        retry.is_ok(),
+        "RV-TX-D54D3EE5: drain_exclusive must be released after a failed drain"
+    );
+    retry
+        .expect("guard released")
+        .expect("retry drain must succeed once the fault is disarmed");
+    assert_eq!(
+        mvcc.overlay_len(),
+        0,
+        "the retry drain must have drained the overlay"
     );
 }
