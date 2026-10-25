@@ -294,38 +294,50 @@ async fn apply_config_enables_ttl_at_runtime() {
         max_bytes: 64 * 1024,
         max_entries: 256,
         ttl_ms: None,
-        flush_interval_ms: 25,
+        flush_interval_ms: 60_000,
         flush_batch_size: 16,
     };
     let inner_repo = InMemoryRepo::new();
     let inner_store = inner_repo.store_get("t").await.unwrap();
     let buffered = Arc::new(MemBufferStore::new(inner_store, cfg));
 
-    let _ = buffered.insert(Bytes::from_static(b"v")).await.unwrap();
-    // Allow moka maintenance to commit weighted_size.
-    buffered.run_pending_cache_tasks().await;
-    assert!(buffered.cache_bytes() > 0);
+    // Populate for real: write two entries, FLUSH dirty to the backing,
+    // then read — reads are what populate the cache (tagged clean fills;
+    // writers never republish, RV-STORAGE-98f6650d).
+    let k1 = buffered.insert(Bytes::from_static(b"v1")).await.unwrap();
+    let k2 = buffered.insert(Bytes::from_static(b"v2")).await.unwrap();
+    buffered.flush().await.unwrap();
+    assert!(
+        buffered.is_dirty_empty(),
+        "dirty must be drained before reads"
+    );
 
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    let _ = buffered.get(k1.clone()).await.unwrap();
+    let _ = buffered.get(k2.clone()).await.unwrap();
     buffered.run_pending_cache_tasks().await;
     assert!(
         buffered.cache_bytes() > 0,
-        "no TTL set — entry should persist"
+        "clean fills must populate the no-TTL cache (cache_bytes={})",
+        buffered.cache_bytes()
     );
 
-    let with_ttl = MemBufferConfig {
+    // Runtime DDL: hot-swap to a TTL=0 cache. moka treats a TTL of zero
+    // as immediate expiry (`expiration = last_modified + 0 <= now`), so
+    // NO sleeps and no paused-time support are needed: every entry that
+    // lands in the new cache is expired on the next maintenance pass.
+    let ttl0 = MemBufferConfig {
         max_bytes: 64 * 1024,
         max_entries: 256,
-        ttl_ms: Some(50),
-        flush_interval_ms: 25,
+        ttl_ms: Some(0),
+        flush_interval_ms: 60_000,
         flush_batch_size: 16,
     };
-    buffered.apply_config(&with_ttl).await.unwrap();
+    buffered.apply_config(&ttl0).await.unwrap();
 
-    // New cache is empty (rebuild). Insert one more entry under
-    // the TTL'd cache; wait for it to expire.
-    let _ = buffered.insert(Bytes::from_static(b"w")).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // A clean fill into the TTL=0 cache expires immediately: after
+    // maintenance the resident weight must be back to zero.
+    let _ = buffered.get(k1.clone()).await.unwrap();
+    let _ = buffered.get(k2.clone()).await.unwrap();
     buffered.run_pending_cache_tasks().await;
     assert_eq!(
         buffered.cache_bytes(),
@@ -333,6 +345,9 @@ async fn apply_config_enables_ttl_at_runtime() {
         "TTL not applied at runtime: cache_bytes={}",
         buffered.cache_bytes()
     );
+    // Data is untouched — TTL only evicts cache entries, never records.
+    assert_eq!(buffered.get(k1).await.unwrap(), Bytes::from_static(b"v1"));
+    assert_eq!(buffered.get(k2).await.unwrap(), Bytes::from_static(b"v2"));
 }
 
 #[tokio::test]
