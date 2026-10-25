@@ -8,7 +8,7 @@ use crate::common::password::validate_password;
 use crate::common::scram::DerivedKeys;
 use crate::common::types::{limits, BindingMode, TransportKind};
 use crate::common::username::NormalizedUsername;
-use crate::server::changepw::ChangePwRequest;
+use crate::common::wire::ChangePwRequest;
 use zeroize::Zeroize;
 
 /// Step 1: client emits `changePasswordChallenge { client_nonce_cp }`.

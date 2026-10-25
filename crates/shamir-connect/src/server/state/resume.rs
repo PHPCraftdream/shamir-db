@@ -33,21 +33,37 @@ type CounterKey = ([u8; 16], [u8; limits::TICKET_FAMILY_ID_BYTES]);
 /// Map value: `(last_counter, last_observed_at_ns)`.
 type CounterValue = (u64, u64);
 
+/// Outcome of [`ConsumedCounterStore::try_advance`] — distinguishes a
+/// genuine replay (auth failure) from a persistence failure (server-side
+/// storage error), per RV-CONNECT-ECE3E157.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvanceOutcome {
+    /// Counter advanced and durably recorded.
+    Accepted,
+    /// Replay or stale counter — reject as a generic auth failure.
+    Replayed,
+    /// Persistence failed. NOT a replay: caller maps to a distinct
+    /// server-side storage error instead of replay rejection.
+    StorageFailed,
+}
+
 /// Pluggable per-(user_id, family_id) counter store.
 ///
 /// Production: persistent K-V with synchronous fsync (spec §6.2). Tests +
 /// development: in-memory [`InMemoryConsumedCounters`] (below).
 pub trait ConsumedCounterStore: Send + Sync {
-    /// Atomic compare-and-swap: if `new_counter > stored`, set stored = new and return true.
-    /// Else return false (replay or stale).
+    /// Atomic compare-and-swap: if `new_counter > stored`, set stored = new and
+    /// return [`AdvanceOutcome::Accepted`]. Return [`AdvanceOutcome::Replayed`]
+    /// on replay/stale, or [`AdvanceOutcome::StorageFailed`] when persistence
+    /// fails (implementations log the cause; RV-CONNECT-ECE3E157).
     ///
-    /// Implementation **MUST** persist durably (fsync) before returning `true`.
+    /// Implementation **MUST** persist durably (fsync) before returning `Accepted`.
     fn try_advance(
         &self,
         user_id: &[u8; 16],
         family_id: &[u8; limits::TICKET_FAMILY_ID_BYTES],
         new_counter: u64,
-    ) -> bool;
+    ) -> AdvanceOutcome;
 
     /// Background GC: remove entries with `last_observed_at + max_chain_age < now_ns`.
     /// Default impl is no-op (caller may override).
@@ -94,21 +110,21 @@ impl ConsumedCounterStore for InMemoryConsumedCounters {
         user_id: &[u8; 16],
         family_id: &[u8; limits::TICKET_FAMILY_ID_BYTES],
         new_counter: u64,
-    ) -> bool {
+    ) -> AdvanceOutcome {
         let key = (*user_id, *family_id);
         let now_ns = UnixNanos::now().as_u64();
-        let mut accepted = false;
+        let mut accepted = AdvanceOutcome::Replayed;
         self.map
             .entry(key)
             .and_modify(|(c, ts)| {
                 if new_counter > *c {
                     *c = new_counter;
                     *ts = now_ns;
-                    accepted = true;
+                    accepted = AdvanceOutcome::Accepted;
                 }
             })
             .or_insert_with(|| {
-                accepted = true;
+                accepted = AdvanceOutcome::Accepted;
                 (new_counter, now_ns)
             });
         accepted
@@ -363,8 +379,17 @@ pub fn process_resume(
     // Step 11: atomic per-(user, family) counter CAS.
     // Optim #2: `plain.ticket_family_id` is `ByteArray<16>` — no copy/parse.
     let family_id: [u8; 16] = *plain.ticket_family_id.as_ref();
-    if !counters.try_advance(&user_id, &family_id, plain.family_counter) {
-        return Err(Error::AuthFailed);
+    match counters.try_advance(&user_id, &family_id, plain.family_counter) {
+        AdvanceOutcome::Accepted => {}
+        AdvanceOutcome::Replayed => return Err(Error::AuthFailed),
+        AdvanceOutcome::StorageFailed => {
+            // RV-CONNECT-ECE3E157: persistence failure is NOT a replay.
+            log::warn!(
+                "resume: consumed-counter persistence failed (family_counter={})",
+                plain.family_counter
+            );
+            return Err(Error::StorageFailed);
+        }
     }
 
     // Step 12: create new Session.

@@ -14,7 +14,7 @@ use crate::common::scram::DerivedKeys;
 use crate::common::time::ns;
 use crate::common::types::{limits, TransportKind};
 use crate::common::username::NormalizedUsername;
-use crate::server::bootstrap::{
+use crate::common::wire::{
     make_bootstrap_challenge, BootstrapChallenge, BootstrapHello, BootstrapRequest,
 };
 use zeroize::{Zeroize, Zeroizing};

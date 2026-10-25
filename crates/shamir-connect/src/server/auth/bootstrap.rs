@@ -26,13 +26,9 @@
 //! 5. server CAS-validates and creates the user
 //! ```
 
-use crate::common::bootstrap_message::build_bootstrap_input;
-use crate::common::crypto::{constant_time_eq, random_array, sha256, Ed25519Keypair, StoredKey};
+use crate::common::crypto::{constant_time_eq, random_array, sha256, StoredKey};
 use crate::common::error::{Error, Result};
 use crate::common::kdf_params::KdfParams;
-use crate::common::time::UnixNanos;
-use crate::common::types::{limits, TransportKind};
-use crate::common::username::NormalizedUsername;
 use crate::server::user_record::UserRecord;
 use parking_lot::Mutex;
 use zeroize::Zeroizing;
@@ -203,77 +199,8 @@ impl BootstrapState {
     }
 }
 
-/// Wire view: client → server `bootstrap_hello`.
-#[derive(Debug, Clone)]
-pub struct BootstrapHello {
-    /// 32-byte CSPRNG nonce — anti-replay for the challenge.
-    pub client_nonce: [u8; 32],
-}
-
-/// Wire view: server → client `bootstrap_challenge`.
-#[derive(Debug, Clone)]
-pub struct BootstrapChallenge {
-    /// Current Ed25519 server public key.
-    pub server_pub_key: [u8; 32],
-    /// Server wall-clock unix nanos (client validates `abs(now - server_time) ≤ 60s`).
-    pub server_time_ns: u64,
-    /// Ed25519 signature over `build_bootstrap_input(...)`.
-    pub identity_sig_bootstrap: [u8; 64],
-}
-
-/// Wire view: client → server `bootstrap` (the actual create-superuser).
-///
-/// Custom [`Debug`] impl redacts `token` and `server_key` — both are raw
-/// crypto secrets (the operator-issued bootstrap token and the SCRAM server
-/// key) and must never appear in `{:?}`-style logging.
-pub struct BootstrapRequest {
-    /// 32-byte token from operator (out-of-band channel).
-    pub token: Zeroizing<[u8; 32]>,
-    /// Username (post-NFC + UsernameCaseMapped).
-    pub user: NormalizedUsername,
-    /// Per-user salt.
-    pub salt: [u8; limits::SALT_BYTES],
-    /// Stored key (= SHA256(client_key)).
-    pub stored_key: [u8; 32],
-    /// Server key (= HMAC(salted_password, "Server Key")).
-    pub server_key: Zeroizing<[u8; 32]>,
-    /// KDF parameters used.
-    pub kdf_params: KdfParams,
-}
-
-impl core::fmt::Debug for BootstrapRequest {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("BootstrapRequest")
-            .field("token", &"<REDACTED>")
-            .field("user", &self.user)
-            .field("salt", &self.salt)
-            .field("stored_key", &self.stored_key)
-            .field("server_key", &"<REDACTED>")
-            .field("kdf_params", &self.kdf_params)
-            .finish()
-    }
-}
-
-/// Server-side: build the [`BootstrapChallenge`] in response to `bootstrap_hello`.
-pub fn make_bootstrap_challenge(
-    server_keypair: &Ed25519Keypair,
-    transport_kind: TransportKind,
-    tls_exporter: &[u8; 32],
-    hello: &BootstrapHello,
-) -> BootstrapChallenge {
-    let server_pub = server_keypair.public_bytes();
-    let server_time_ns = UnixNanos::now().as_u64();
-    let payload = build_bootstrap_input(
-        &server_pub,
-        transport_kind,
-        tls_exporter,
-        &hello.client_nonce,
-        server_time_ns,
-    );
-    let sig = server_keypair.sign(&payload);
-    BootstrapChallenge {
-        server_pub_key: server_pub,
-        server_time_ns,
-        identity_sig_bootstrap: sig,
-    }
-}
+// Wire views moved to common so the standalone `client` feature builds
+// without server code (RV-CONNECT-FED6910E); paths preserved via re-export.
+pub use crate::common::wire::{
+    make_bootstrap_challenge, BootstrapChallenge, BootstrapHello, BootstrapRequest,
+};

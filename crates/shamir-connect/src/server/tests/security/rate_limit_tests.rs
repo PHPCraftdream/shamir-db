@@ -333,3 +333,55 @@ fn with_rate_warmup_divides_configured_rate() {
 
     assert_eq!(r.effective_rate_per_sec(now), 8 / WARMUP_DIVISOR);
 }
+
+/// RV-CONNECT-06AB39CF regression: a STALE `now_ns` (captured before the
+/// caller reached the bucket, after a newer call already refilled) must
+/// neither regress the refill watermark nor let a later call with the
+/// newer timestamp re-credit the already-credited interval.
+///
+/// Pre-fix, the unconditional `b.last_refill_at_ns = now_ns` assignment let
+/// the stale call drag the watermark backwards; the final `check` at the
+/// newer timestamp then computed `elapsed` over the SAME wall-clock span a
+/// previous call had already credited, re-credited it, and returned
+/// `Allowed` — the assertion below pins `RateLimited`.
+#[test]
+fn rv_rate_06ab39cf_stale_timestamp_does_not_recredit_refilled_interval() {
+    let r = InMemoryRateLimiter::new(0);
+    let t0 = WARMUP_WINDOW_NS + 1; // past warmup → full 10/sec rate
+
+    // Drain the bucket at t0 (10 allowed, 11th throttled; watermark = t0).
+    for _ in 0..10 {
+        assert_eq!(r.check(s(1), t0), RateDecision::Allowed);
+    }
+    assert!(matches!(
+        r.check(s(1), t0),
+        RateDecision::RateLimited { .. }
+    ));
+
+    // Advance half a second: refills 5 tokens; 5 allowed, 6th throttled.
+    // Watermark is now t1 = t0 + 500ms.
+    let t1 = t0 + ns::SECOND / 2;
+    for _ in 0..5 {
+        assert_eq!(r.check(s(1), t1), RateDecision::Allowed);
+    }
+    assert!(matches!(
+        r.check(s(1), t1),
+        RateDecision::RateLimited { .. }
+    ));
+
+    // STALE call: an out-of-order timestamp OLDER than the watermark.
+    // Pre-fix this regressed the watermark back to t0; post-fix it is a
+    // zero-refill no-op.
+    assert!(matches!(
+        r.check(s(1), t0),
+        RateDecision::RateLimited { .. }
+    ));
+
+    // The newer timestamp again: the [t0, t1] interval was ALREADY
+    // credited, so no re-credit is permitted — still throttled. (Pre-fix
+    // this re-credited 5 tokens and returned `Allowed`.)
+    assert!(matches!(
+        r.check(s(1), t1),
+        RateDecision::RateLimited { .. }
+    ));
+}

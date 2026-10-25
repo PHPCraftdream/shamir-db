@@ -24,7 +24,7 @@ use crate::common::kdf_params::{validate_client_kdf_safe, KdfParams};
 use crate::common::scram::{build_client_proof, build_server_signature, ClientProof, DerivedKeys};
 use crate::common::types::{limits, BindingMode, ProtocolVersion, TransportKind};
 use crate::common::username::NormalizedUsername;
-use crate::server::rotation::RotationInProgressPayload;
+use crate::common::wire::RotationInProgressPayload;
 use zeroize::Zeroize;
 
 /// Server-supplied challenge fields.
@@ -67,7 +67,7 @@ pub struct ServerAuthOk {
     /// Optional resumption expiry (paired with `resumption_ticket`).
     pub resumption_expires_at_ns: Option<u64>,
     /// Optional orphan-recovery payload — see
-    /// [`crate::server::rotation::RotationInProgressPayload`].
+    /// [`crate::common::wire::RotationInProgressPayload`].
     pub rotation_in_progress: Option<RotationInProgressPayload>,
     /// Optional flag asking client to run changePassword to upgrade KDF.
     pub kdf_upgrade_required: Option<bool>,
@@ -261,17 +261,14 @@ impl ClientHandshake {
             return Err(Error::ServerAuthFailed);
         }
 
-        // (2) Pin check (TOFU or out-of-band)
+        // (2) Pin check (TOFU or out-of-band) — mismatch is fatal.
+        // The TOFU callback itself is deferred to step (4): a pin is only
+        // offered for persistence after ALL verification steps pass
+        // (RV-CONNECT-0FC58D93).
         let received_hash = sha256(&auth_ok.server_pub_key);
-        match self.pinned_hash {
-            Some(pinned) => {
-                if !constant_time_eq(&pinned, &received_hash) {
-                    return Err(Error::ServerIdentityChanged);
-                }
-            }
-            None => {
-                debug_assert!(self.accept_new_host, "builder enforces this");
-                pin_callback(&received_hash);
+        if let Some(pinned) = self.pinned_hash {
+            if !constant_time_eq(&pinned, &received_hash) {
+                return Err(Error::ServerIdentityChanged);
             }
         }
 
@@ -291,6 +288,13 @@ impl ClientHandshake {
             &auth_ok.identity_sig,
         ) {
             return Err(Error::ServerSignatureInvalid);
+        }
+
+        // (4) First connection (TOFU): all checks passed — only now offer
+        // the pin for persistence.
+        if self.pinned_hash.is_none() {
+            debug_assert!(self.accept_new_host, "builder enforces this");
+            pin_callback(&received_hash);
         }
 
         Ok(HandshakeSuccess {

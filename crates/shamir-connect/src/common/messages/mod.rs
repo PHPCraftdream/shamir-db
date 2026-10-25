@@ -5,3 +5,4 @@ pub mod bootstrap_message;
 pub mod changepw;
 pub mod envelope;
 pub mod push_envelope;
+pub mod wire;

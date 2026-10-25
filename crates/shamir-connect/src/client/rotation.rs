@@ -17,7 +17,7 @@ use crate::common::crypto::{constant_time_eq, ed25519_verify_strict, sha256};
 use crate::common::error::{Error, Result};
 use crate::common::rotation::{build_rotate_event_input, build_rotation_proof_input};
 use crate::common::time::ns;
-use crate::server::rotation::{IdentityRotationEvent, RotationInProgressPayload};
+use crate::common::wire::{IdentityRotationEvent, RotationInProgressPayload};
 
 /// Maximum allowed overlap-window length to avoid leaked-priv-key attack
 /// with far-future timestamps (spec §6.5 HIGH-2 fix).

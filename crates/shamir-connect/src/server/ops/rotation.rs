@@ -298,45 +298,6 @@ pub fn build_rotation_in_progress_payload(
     })
 }
 
-/// Wire view: `identity_rotation` event sent over the active session bus.
-#[derive(Debug, Clone)]
-pub struct IdentityRotationEvent {
-    /// Old Ed25519 public key.
-    pub old_pub: [u8; 32],
-    /// New Ed25519 public key.
-    pub new_pub: [u8; 32],
-    /// End of overlap.
-    pub transition_until_ns: u64,
-    /// Full session id of the recipient (spec HIGH-5 fix — full 32 bytes).
-    pub recipient_session_id: [u8; 32],
-    /// Ed25519 signature by previous priv over the canonical input.
-    pub signed_by_old: [u8; 64],
-}
-
-/// Wire view: `rotation_in_progress` payload embedded in `auth_ok` for
-/// offline-client orphan recovery (spec §6.5 + diagram 05 Part B step 70).
-///
-/// Spec §6.5 NORMATIVE 4-field schema:
-/// ```text
-/// rotation_in_progress: {
-///     previous_pub,
-///     identity_sig_previous,  // Ed25519 sig by previous_priv over SAME identity_input
-///     transition_until_ns,
-///     rotation_proof          // Ed25519 sig by previous_priv over rotation chain
-/// }
-/// ```
-#[derive(Debug, Clone)]
-pub struct RotationInProgressPayload {
-    /// Old Ed25519 pub.
-    pub previous_pub: [u8; 32],
-    /// Ed25519 signature by previous_priv over the **same byte-exact**
-    /// `identity_input` that current_priv signed for `identity_sig`. Allows
-    /// orphan client to verify mutual auth against its old pin (spec §6.5
-    /// step 3 / diagram 05 Part B step 75).
-    pub identity_sig_previous: [u8; 64],
-    /// End of overlap.
-    pub transition_until_ns: u64,
-    /// Ed25519 signature by previous priv over the
-    /// `(previous_pub, current_pub, transition_until_ns)` rotation chain.
-    pub rotation_proof: [u8; 64],
-}
+// Wire views moved to common so the standalone `client` feature builds
+// without server code (RV-CONNECT-FED6910E); paths preserved via re-export.
+pub use crate::common::wire::{IdentityRotationEvent, RotationInProgressPayload};

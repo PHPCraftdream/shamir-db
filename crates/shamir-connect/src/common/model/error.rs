@@ -81,6 +81,12 @@ pub enum Error {
     /// Serialization / deserialization failure.
     #[error("encoding: {0}")]
     Encoding(String),
+
+    /// Durable storage failure (e.g. consumed-counter persist,
+    /// RV-CONNECT-ECE3E157). Server-internal: `to_wire` collapses it to
+    /// `AuthFailed`.
+    #[error("storage_failure")]
+    StorageFailed,
 }
 
 impl Error {

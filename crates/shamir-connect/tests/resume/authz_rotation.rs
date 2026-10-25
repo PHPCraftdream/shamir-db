@@ -16,7 +16,7 @@ fn counter_store_gc_evicts_stale_entries() {
     let counters = InMemoryConsumedCounters::new();
     let uid = [1u8; 16];
     let fam = [2u8; 16];
-    counters.try_advance(&uid, &fam, 1);
+    let _ = counters.try_advance(&uid, &fam, 1);
     assert_eq!(counters.len(), 1);
 
     let now_far_future = UnixNanos::now().as_u64() + 48 * ns::HOUR;
