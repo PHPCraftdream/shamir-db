@@ -593,8 +593,24 @@ fn scrubbed_env() -> Vec<(&'static str, std::ffi::OsString)> {
 /// compilation failure (including forbidden-macro rejection and compile
 /// timeout — see the module-level security note), or the raw `.wasm` bytes
 /// on success.
+// NOTE: sync and blocking (up to 120 s on the caller's thread). Kept `pub`
+// only because it is re-exported cross-crate; async callers MUST use
+// [`compile_rust_source_blocking`] instead.
+#[doc(hidden)]
 pub fn compile_rust_source(source: &str) -> FnResult<Vec<u8>> {
     compile_rust_source_with_timeout(source, WASM_COMPILE_TIMEOUT)
+}
+
+/// Async counterpart of [`compile_rust_source`].
+///
+/// `compile_rust_source` spawns cargo and blocks in `wait_timeout`, so async
+/// callers must not run it inline on a tokio worker. This moves the
+/// (identical) synchronous pipeline onto `tokio::task::spawn_blocking` via
+/// the shared [`crate::wasm::run_compile_blocking`] helper — behaviour and
+/// error values are identical.
+pub async fn compile_rust_source_blocking(source: &str) -> FnResult<Vec<u8>> {
+    let source = source.to_string();
+    crate::wasm::run_compile_blocking(move || compile_rust_source(&source)).await
 }
 
 /// Same as [`compile_rust_source`] but with an explicit compile timeout.
