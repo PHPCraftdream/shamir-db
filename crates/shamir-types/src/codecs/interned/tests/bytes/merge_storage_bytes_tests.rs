@@ -494,3 +494,17 @@ fn merge_str_length_boundaries_in_set() {
     ]);
     assert_byte_identical("str_length_boundaries", &old, &set_map);
 }
+
+// -------------------------------------------------------------------------
+// RV-TYPES-BB78489C — merge_storage_bytes must not preallocate from an
+// attacker-controlled Map32 count that the remaining body cannot back.
+// -------------------------------------------------------------------------
+
+#[test]
+fn rv_types_bb78489c_merge_prealloc_capped_by_remaining() {
+    // Map32 header declaring u32::MAX entries with no body — must surface as
+    // a decode error, not a ~terabyte `Vec::with_capacity`.
+    let old: [u8; 5] = [0xdf, 0xff, 0xff, 0xff, 0xff];
+    let set_map = new_map();
+    assert!(merge_storage_bytes(&old, &set_map).is_err());
+}

@@ -858,7 +858,7 @@ impl MvccStore {
             Resolved(Option<Bytes>),
             /// Direct-path, overlay miss — `miss_idx` is the position in
             /// the `miss_keys` vector fed to `history.get_many`.
-            HistoryMiss { miss_idx: usize },
+            HistoryMiss { miss_idx: usize, cur_v: u64 },
             /// Fallback path (`cur_v == 0` or `cur_v > snapshot_version`) —
             /// resolved per-key via the existing `resolve_read` below.
             Fallback,
@@ -884,7 +884,7 @@ impl MvccStore {
             let vk = encode_version_key(key, cur_v);
             let miss_idx = miss_keys.len();
             miss_keys.push(vk.into());
-            slots.push(Slot::HistoryMiss { miss_idx });
+            slots.push(Slot::HistoryMiss { miss_idx, cur_v });
         }
 
         // Phase 2: ONE batched history read for the whole direct-path
@@ -900,9 +900,18 @@ impl MvccStore {
         for (i, slot) in slots.iter().enumerate() {
             match slot {
                 Slot::Resolved(val) => out.push(val.clone()),
-                Slot::HistoryMiss { miss_idx } => match &miss_results[*miss_idx] {
+                Slot::HistoryMiss { miss_idx, cur_v } => match &miss_results[*miss_idx] {
                     Some(val) if val.is_empty() => out.push(None), // tombstone
                     Some(val) => out.push(Some(val.clone())),
+                    // RV-TX-2CB455A7: exact-version miss ⇒ that version was
+                    // attempted and aborted — fall back below it instead of
+                    // masking the prior committed value.
+                    None if *cur_v > 0 => {
+                        let val = self
+                            .resolve_read(&keys[i], snapshot_version.min(cur_v - 1), 0)
+                            .await?;
+                        out.push(val);
+                    }
                     None => out.push(None), // not found
                 },
                 Slot::Fallback => {

@@ -5,6 +5,7 @@
 //! [`AuthFailed`](Error::AuthFailed). Internal variants exist for callers
 //! that need to log / audit / branch on real cause.
 
+use super::admit::AdmitReject;
 use thiserror::Error;
 
 /// Result alias for connection protocol operations.
@@ -87,6 +88,20 @@ pub enum Error {
     /// `AuthFailed`.
     #[error("storage_failure")]
     StorageFailed,
+
+    /// Session admission rejected by the per-user cap (RV-CONNECT-0A42F42C /
+    /// RV-CONNECT-8AD8B1C8): all sessions active, or sid bound to another
+    /// user. Carries the audited username so the RESUME rejection path can
+    /// emit the same `auth_failed` audit event as login (the login path has
+    /// its own username in scope). Server-internal only: `to_wire` collapses
+    /// it to `AuthFailed`.
+    #[error("admission_rejected")]
+    AdmissionRejected {
+        /// Why admission was rejected (internal audit reason only).
+        reason: AdmitReject,
+        /// Audited username (post-NFC) of the rejected session.
+        username: String,
+    },
 }
 
 impl Error {

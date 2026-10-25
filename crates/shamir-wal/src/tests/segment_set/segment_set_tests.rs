@@ -522,6 +522,16 @@ fn wal_path(dir: &std::path::Path, n: u64) -> std::path::PathBuf {
     dir.join(format!("{n:08}.wal"))
 }
 
+/// Commit versions of a full replay, in order.
+async fn replay_versions(set: &SegmentSet) -> Vec<u64> {
+    set.replay()
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| e.commit_version)
+        .collect()
+}
+
 /// Sealing a segment writes a `.meta` sidecar next to its `.wal`, and a reopen
 /// picks up the same `max_version` from that sidecar.
 #[tokio::test]
@@ -752,23 +762,26 @@ async fn truncate_removes_sidecar() {
     );
 }
 
-/// Task #500 (found in `@fl` review): a segment can be RE-ACTIVATED — a
-/// prior process sealed it (writing a durable max_version sidecar), then
-/// crashed before the NEXT segment's file was durably created, so on reopen
-/// the highest seq on disk (the already-sealed segment) is chosen as active
-/// again. Further appends push its true max_version PAST what the stale
-/// sidecar claims. If that sidecar survived, a LATER open would trust the
-/// stale (too-low) value instead of the true content — this test proves
-/// `open` sheds the re-activated segment's stale sidecar immediately, so a
-/// later reseal computes the correct max_version from a genuine replay
-/// (segment 0 has no sidecar and must be replayed), not the stale number.
+/// RV-WAL-A025886E — rule: "a segment that has a sidecar never changes."
+/// A prior process sealed segment 0 (valid WMT2 sidecar) and crashed before
+/// the next segment's file existed. On reopen the highest seq carries a valid
+/// WMT2 sidecar, so `open` treats it as SEALED and creates seq+1 — it never
+/// goes through repair/reactivation, the sidecar is kept untouched, and all
+/// later appends (through v60) land in the new segment.
+///
+/// Reverts that make this fail on old code: reverting the highest-segment
+/// WMT2 check in `SegmentSet::open` re-activates segment 0 (and deletes its
+/// sidecar), so the assertions below (sidecar kept, seq1 created, seq0 bytes
+/// unchanged, full replay) all fail. The truncation assertions fail with the
+/// same revert: re-activated seq 0 is no longer sealed-with-sidecar, so its
+/// true max (60, after the append flood) drives `truncate_below(55)`
+/// differently and the surviving-version set diverges.
 #[tokio::test]
-async fn reactivated_segment_sheds_stale_sidecar() {
+async fn rv_wal_a025886e_valid_wmt2_on_highest_seals_segment() {
     let dir = TempDir::new().unwrap();
 
-    // Plant only a lone segment 0 with SOME data — simulate "this segment
-    // was sealed once with max=10" by writing a stale sidecar directly,
-    // without ever having actually sealed it in this process.
+    // Build segment 0 with some data, then plant a valid WMT2 sidecar on it,
+    // as a prior incarnation would have at seal time.
     {
         let set = SegmentSet::open(dir.path().to_path_buf(), 1 << 20)
             .await
@@ -779,25 +792,29 @@ async fn reactivated_segment_sheds_stale_sidecar() {
         set.sync().await.unwrap();
         drop(set);
     }
-    // Plant a stale sidecar next to segment 0 claiming max_version=10 (as if
-    // a prior incarnation sealed it, then this incarnation re-activated it).
     crate::segment_meta::write_blocking(&wal_path(dir.path(), 0), 10).unwrap();
-    assert!(meta_path(dir.path(), 0).exists(), "stale sidecar planted");
+    let meta_before = std::fs::read(meta_path(dir.path(), 0)).unwrap();
+    let wal_before = std::fs::read(wal_path(dir.path(), 0)).unwrap();
 
-    // Reopen: segment 0 (highest seq = only seq) becomes active again.
+    // Reopen: segment 0 must be sealed as-is (sidecar kept), seq 1 created.
     let set = SegmentSet::open(dir.path().to_path_buf(), 32)
         .await
         .unwrap();
-    assert!(
-        !meta_path(dir.path(), 0).exists(),
-        "open must remove the re-activated segment's stale sidecar \
-         immediately, before any new append can make it stale"
+    assert_eq!(
+        std::fs::read(meta_path(dir.path(), 0)).unwrap(),
+        meta_before,
+        "a segment with a sidecar never changes: the sidecar must be kept"
+    );
+    assert_eq!(
+        std::fs::read(wal_path(dir.path(), 0)).unwrap(),
+        wal_before,
+        "a segment with a sidecar never changes: the .wal is never reopened for append/repair"
     );
 
-    // Push its true max_version well past the stale sidecar's claim (10),
-    // and past `max_bytes` (32) so it seals for real on the next append.
+    // Push well past the stale-looking claim (10) and past `max_bytes` (32):
+    // everything must land in seq 1, never back into sealed seq 0.
     for k in 2..=6u64 {
-        let v = k * 10; // 20, 30, 40, 50, 60
+        let v = k * 10; // 20..60
         set.append_batch(vec![entry(k, v).encode().unwrap()], v)
             .await
             .unwrap();
@@ -805,20 +822,38 @@ async fn reactivated_segment_sheds_stale_sidecar() {
     set.sync().await.unwrap();
     drop(set);
 
-    // Reopen once more: segment 0 must now be SEALED (rotation happened),
-    // with its max_version derived from a genuine replay (no sidecar to
-    // trust — the "open sheds the stale one" step ensured none survived),
-    // reflecting the TRUE max (60), not the stale claim (10).
+    assert_eq!(
+        std::fs::read(wal_path(dir.path(), 0)).unwrap(),
+        wal_before,
+        "sealed-by-sidecar segment 0 must never receive new appends"
+    );
+    assert!(
+        wal_path(dir.path(), 1).exists(),
+        "appends must land in the newly created segment 1"
+    );
+
+    // Reopen: replay sees the TRUE data (10..60); truncation keyed on the
+    // sidecar value (10) must not delete anything still holding v60.
     let reopened = SegmentSet::open(dir.path().to_path_buf(), 32)
         .await
         .unwrap();
     let replayed = reopened.replay().await.unwrap();
-    let max_seen = replayed.iter().map(|e| e.commit_version).max().unwrap_or(0);
+    let versions: Vec<u64> = replayed.iter().map(|e| e.commit_version).collect();
+    assert_eq!(versions, vec![10, 20, 30, 40, 50, 60]);
+
+    // (i) The full replay after the appends: v60 landed in seq1, so every
+    // version must be visible (already asserted above); re-assert here as the
+    // baseline for the truncation step.
+    // (ii) truncate_below(55): seq0 (sidecar max 10) may be reclaimed, but
+    // seq1 holds v60 and must survive — the sidecar's stale claim (10) must
+    // never cause v60's segment to be deleted.
+    reopened.truncate_below(55).await.unwrap();
+    let after = replay_versions(&reopened).await;
     assert_eq!(
-        max_seen, 60,
-        "replay must see the true max_version (60), not the stale \
-         sidecar's claim (10) — proves no stale sidecar survived to \
-         mislead a future truncation decision"
+        after,
+        vec![60],
+        "only v60 (in seq1) survives truncate_below(55); a stale sidecar claim \
+         on seq0 must not delete the segment holding v60"
     );
 }
 
