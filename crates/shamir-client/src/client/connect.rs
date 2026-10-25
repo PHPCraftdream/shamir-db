@@ -2,10 +2,8 @@
 //! [`Client::connect_local`] (IPC+SCRAM) and [`Client::resume`]
 //! (ticket-based resumption).
 
-use std::sync::atomic::{AtomicU32, AtomicU8};
-// Ordering is only referenced from the `#[cfg(test)]` test-accessor impl below.
-#[cfg(test)]
-use std::sync::atomic::Ordering;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use rand::RngCore;
@@ -36,6 +34,25 @@ use crate::client::transport::{
 };
 use crate::error::ClientError;
 use crate::interner_cache::InternerCacheRegistry;
+
+/// Handshake phases for [`ClientError::HandshakeTimeout`] diagnostics —
+/// stored in a shared atomic and updated before each stage.
+const PHASE_DNS: u8 = 0;
+const PHASE_TCP: u8 = 1;
+const PHASE_TLS: u8 = 2;
+const PHASE_SCRAM: u8 = 3;
+const PHASE_KDF: u8 = 4;
+
+fn phase_name(phase: u8) -> &'static str {
+    match phase {
+        PHASE_DNS => "dns",
+        PHASE_TCP => "tcp",
+        PHASE_TLS => "tls",
+        PHASE_SCRAM => "scram",
+        PHASE_KDF => "kdf",
+        _ => "unknown",
+    }
+}
 
 /// Session metadata shared by every client-construction path; consumed by
 /// [`Client::assemble`].
@@ -135,6 +152,21 @@ impl Client {
 
     /// Run the full TCP→TLS→SCRAM handshake and return a ready client.
     pub async fn connect(opts: ConnectOptions) -> Result<Self, ClientError> {
+        let budget = opts.handshake_timeout.unwrap_or_default();
+        let deadline = opts
+            .handshake_timeout
+            .map(|d| tokio::time::Instant::now() + d);
+        Self::connect_until(opts, budget, deadline).await
+    }
+
+    /// [`Self::connect`] against an ABSOLUTE deadline shared by the caller, so
+    /// a multi-step connect (DNS + several address attempts) spends ONE
+    /// `handshake_timeout` budget in total instead of re-arming per step.
+    async fn connect_until(
+        opts: ConnectOptions,
+        hs_budget: std::time::Duration,
+        hs_deadline: Option<tokio::time::Instant>,
+    ) -> Result<Self, ClientError> {
         // Install rustls crypto provider once. `install_default` is a
         // no-op on second call.
         let _ = default_provider().install_default();
@@ -142,17 +174,101 @@ impl Client {
         let username = NormalizedUsername::from_raw(&opts.username)
             .map_err(|e| ClientError::InvalidUsername(e.to_string()))?;
 
+        // ONE terminal deadline bounds the WHOLE handshake — the TCP connect,
+        // TLS negotiation, every SCRAM frame read/write and the blocking KDF
+        // derivation await (RV-CLIENT-NODE-1CFB3796). `connect_timeout`
+        // additionally bounds just the TCP-connect step inside it.
+        // Phase tracking: the timeout error reports the stage the handshake
+        // was ACTUALLY in when the deadline elapsed (never a guessed phase).
+        let phase = Arc::new(AtomicU8::new(PHASE_TCP));
+        let fut = Self::handshake(opts, username, phase.clone());
+        match hs_deadline {
+            None => fut.await,
+            Some(dl) => tokio::time::timeout_at(dl, fut).await.map_err(|_| {
+                ClientError::HandshakeTimeout(
+                    hs_budget,
+                    Arc::from(phase_name(phase.load(Ordering::Relaxed))),
+                )
+            })?,
+        }
+    }
+
+    /// Resolve `host:port` and connect — trying EVERY resolved address in
+    /// order (RV-CLIENT-NODE-8FB7D9BF). This is the SINGLE production
+    /// hostname path: the Node binding calls it directly and performs no
+    /// address parsing of its own. IP literals connect directly; a hostname
+    /// is DNS-resolved under the `handshake_timeout` budget (a DNS stall
+    /// reports the `dns` phase), and each candidate address receives the
+    /// SAME absolute deadline: DNS and every address attempt together spend
+    /// ONE `handshake_timeout` (it never re-arms per attempt).
+    pub async fn connect_host(
+        host: &str,
+        port: u16,
+        mut opts: ConnectOptions,
+    ) -> Result<Self, ClientError> {
+        let budget = opts.handshake_timeout.unwrap_or_default();
+        let deadline = opts
+            .handshake_timeout
+            .map(|d| tokio::time::Instant::now() + d);
+
+        // IP literal: no resolver involved.
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            opts.addr = SocketAddr::new(ip, port);
+            return Self::connect_until(opts, budget, deadline).await;
+        }
+
+        let candidate = format!("{host}:{port}");
+        let lookup = tokio::net::lookup_host(&candidate);
+        let addrs: Vec<SocketAddr> = match deadline {
+            None => lookup.await?.collect(),
+            Some(dl) => tokio::time::timeout_at(dl, lookup)
+                .await
+                .map_err(|_| {
+                    ClientError::HandshakeTimeout(budget, Arc::from(phase_name(PHASE_DNS)))
+                })?
+                .map_err(ClientError::from)?
+                .collect(),
+        };
+        if addrs.is_empty() {
+            return Err(ClientError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("host resolved to no addresses: {candidate}"),
+            )));
+        }
+
+        let mut last: Option<ClientError> = None;
+        for addr in addrs {
+            opts.addr = addr;
+            match Self::connect_until(opts.clone(), budget, deadline).await {
+                Ok(client) => return Ok(client),
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(last.expect("at least one resolved address attempted"))
+    }
+
+    /// The handshake proper: TCP connect → TLS → SCRAM → [`Self::assemble`].
+    /// Bounded as a whole by `ConnectOptions::handshake_timeout` (see
+    /// [`Self::connect`]); `connect_timeout` bounds the TCP step inside.
+    async fn handshake(
+        opts: ConnectOptions,
+        username: NormalizedUsername,
+        phase: Arc<AtomicU8>,
+    ) -> Result<Self, ClientError> {
         // ---- TLS ----
+        phase.store(PHASE_TCP, Ordering::Relaxed);
         let client_cfg = make_client_config_no_ca().map_err(|e| ClientError::Tls(e.to_string()))?;
         let connector = TlsConnector::from(client_cfg);
         let server_name = ServerName::try_from(opts.server_name.clone())
             .map_err(|e| ClientError::Tls(e.to_string()))?;
         let tcp = connect_tcp(opts.addr, opts.connect_timeout).await?;
+        phase.store(PHASE_TLS, Ordering::Relaxed);
         let tls = connector.connect(server_name, tcp).await?;
         let exporter = extract_tls_exporter(&tls)
             .ok_or_else(|| ClientError::Handshake("TLS exporter unavailable".into()))?;
 
         // ---- SCRAM ----
+        phase.store(PHASE_SCRAM, Ordering::Relaxed);
         let mut hb = HandshakeBuilder::new(username, TransportKind::Tcp, BindingMode::TlsExporter)
             .tls_exporter(exporter);
         hb = match opts.trusted_pin {
@@ -208,6 +324,7 @@ impl Client {
         // error), not only the success path.
         let mut password_buf = Zeroizing::new(opts.password.to_vec());
         let challenge_clone = challenge.clone();
+        phase.store(PHASE_KDF, Ordering::Relaxed);
         let (hs_ret, result) = tokio::task::spawn_blocking(move || {
             let res = hs.process_challenge(&challenge_clone, &mut password_buf);
             (hs, res)
@@ -215,6 +332,9 @@ impl Client {
         .await
         .map_err(|e| ClientError::Handshake(format!("Argon2 spawn_blocking: {e}")))?;
         hs = hs_ret;
+        // KDF is done: the remaining waits (proof write, `auth_ok` read) are
+        // SCRAM I/O again — a timeout here must not be labelled `kdf`.
+        phase.store(PHASE_SCRAM, Ordering::Relaxed);
         let (proof, derived, auth_message) =
             result.map_err(|e| ClientError::Handshake(e.to_string()))?;
 

@@ -99,6 +99,7 @@ async fn sdk_full_lifecycle() {
         accept_new_host: true,
         trusted_pin: None,
         connect_timeout: None,
+        handshake_timeout: None,
         request_timeout: None,
     })
     .await

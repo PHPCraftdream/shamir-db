@@ -1,10 +1,13 @@
 //! Connection option structs for the ShamirDB client.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use zeroize::Zeroizing;
 
+use crate::error::ClientError;
+
 /// Connection parameters.
+#[derive(Clone)]
 pub struct ConnectOptions {
     /// Server address (host:port).
     pub addr: SocketAddr,
@@ -33,6 +36,13 @@ pub struct ConnectOptions {
     /// own timeout is the only bound. Mirrors the TS SDK's
     /// `connectTimeoutMs`.
     pub connect_timeout: Option<std::time::Duration>,
+    /// Deadline for the WHOLE TCP→TLS→SCRAM handshake ([`Client::connect`]).
+    /// `Some(d)` bounds the TLS handshake and the SCRAM frame awaits —
+    /// previously only the TCP connect was bounded, leaving the TLS and
+    /// SCRAM awaits unbounded (RV-CLIENT-NODE-1CFB3796). Elapsing returns
+    /// [`ClientError::HandshakeTimeout`]. `None` (the default for existing
+    /// callers) preserves the prior unbounded behaviour.
+    pub handshake_timeout: Option<std::time::Duration>,
     /// Deadline for a single request/response round-trip in
     /// [`Client::execute`]/[`Client::ping`]/etc. `Some(d)` bounds the
     /// response await and returns [`ClientError::RequestTimeout`] if no
@@ -40,6 +50,47 @@ pub struct ConnectOptions {
     /// prior unbounded-wait behaviour. Mirrors the TS SDK's
     /// `requestTimeoutMs`.
     pub request_timeout: Option<std::time::Duration>,
+}
+
+/// Race `fut` against an ABSOLUTE deadline (RV-CLIENT-NODE-1CFB3796 request
+/// deadlines): `None` runs `fut` unbounded; `Some(dl)` returns `Ok(None)`
+/// when the deadline elapses first — the CALLER maps that to its own typed
+/// timeout error. `Ok(Some(v))` is `fut`'s value; errors from `fut` pass
+/// through unchanged. Deterministic under `tokio::time::pause()`.
+pub async fn bound_until<T, F>(
+    deadline: Option<tokio::time::Instant>,
+    fut: F,
+) -> Result<Option<T>, ClientError>
+where
+    // NOTE: `T` is the future's WHOLE output — callers pass futures with
+    // `Output = Result<V, ClientError>`, so the success arm carries the
+    // inner `Result` and the caller destructures `Ok(Some(Ok(v)))` /
+    // `Ok(Some(Err(e)))` (errors pass through inside `Some`, unchanged).
+    F: std::future::Future<Output = T>,
+{
+    match deadline {
+        None => Ok(Some(fut.await)),
+        Some(dl) => Ok(tokio::time::timeout_at(dl, fut).await.ok()),
+    }
+}
+
+/// Resolve a `host:port` pair into a [`SocketAddr`] for
+/// [`ConnectOptions::addr`] (RV-CLIENT-NODE-8FB7D9BF): IP literals (IPv4,
+/// bare or bracketed IPv6) are used as-is; any other hostname is resolved
+/// through the system resolver and the first address is returned.
+pub async fn resolve_host(host: &str, port: u16) -> Result<SocketAddr, ClientError> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(SocketAddr::new(ip, port));
+    }
+    let candidate = format!("{host}:{port}");
+    let mut addrs = tokio::net::lookup_host(&candidate).await?;
+    addrs.next().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("host resolved to no addresses: {candidate}"),
+        )
+        .into()
+    })
 }
 
 /// Options for fast session resumption via a previously-issued ticket.
