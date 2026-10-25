@@ -138,7 +138,7 @@ pub(crate) async fn login(
     [u8; 32],
 ) {
     let username = NormalizedUsername::from_raw("admin").unwrap();
-    let connector = TlsConnector::from(make_client_config_no_ca());
+    let connector = TlsConnector::from(make_client_config_no_ca().unwrap());
     let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
     let tcp = TcpStream::connect(addr).await.unwrap();
     let tls = connector.connect(server_name, tcp).await.unwrap();
