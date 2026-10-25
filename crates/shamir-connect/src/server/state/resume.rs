@@ -14,8 +14,9 @@ use crate::common::crypto::{aes256gcm_cipher, random_array, random_bytes, Aes256
 use crate::common::error::{Error, Result};
 use crate::common::time::UnixNanos;
 use crate::common::types::{limits, BindingMode, TransportKind};
+use crate::server::admission::Admission;
 use crate::server::rotation::ServerIdentityState;
-use crate::server::session::{Session, SessionPermissions, SessionStore};
+use crate::server::session::{Session, SessionPermissions, SessionStore, MAX_SESSIONS_PER_USER};
 use crate::server::ticket::{
     check_anti_downgrade, decrypt_ticket_with_ciphers, encrypt_ticket, encrypt_ticket_with_cipher,
     ticket_limits, validate_ticket_enums, TicketPlain, TicketWire,
@@ -211,6 +212,13 @@ pub struct ResumeRequest<'a> {
 pub struct ResumeOk {
     /// New session id.
     pub session_id: [u8; limits::SESSION_ID_BYTES],
+    /// Username of the resumed user (for the server's eviction audit only —
+    /// never sent on the wire).
+    pub username: String,
+    /// Idle LRU sessions evicted by admission to respect
+    /// `MAX_SESSIONS_PER_USER` (RV-CONNECT-8AD8B1C8: resume uses the same
+    /// admission function as login).
+    pub evicted: Vec<[u8; limits::SESSION_ID_BYTES]>,
     /// Absolute session expiry.
     pub expires_at_ns: u64,
     /// New resumption ticket (same family_id, counter+1) — optional.
@@ -445,6 +453,7 @@ pub fn process_resume(
     // ticket's stale snapshot (task #558 / design doc §5). Built once,
     // outside the refresh decision: whether or not a refresh ticket is
     // issued, the live session is always sourced from the directory.
+    let username = state.username.clone();
     let session = Session::new(
         user_id,
         state.username,
@@ -454,10 +463,23 @@ pub fn process_resume(
         request.channel_binding_now,
         now_ns,
     );
-    session_store.insert(session_id, session);
+    // Admission is the LAST step that can fail (after try_advance and after
+    // the refresh ticket above), so a rejection needs no rollback. Resume
+    // uses the SAME capped admission as login (RV-CONNECT-8AD8B1C8).
+    let evicted = match session_store.admit(session_id, session, now_ns, MAX_SESSIONS_PER_USER) {
+        Admission::Admitted { evicted, .. } => evicted.into_iter().collect(),
+        Admission::Rejected(reason) => {
+            // Carry the audited username so the server can emit the same
+            // `auth_failed` audit event as login (spec §7.4, RV-CONNECT-
+            // 8AD8B1C8); `to_wire` still collapses this to `AuthFailed`.
+            return Err(Error::AdmissionRejected { reason, username });
+        }
+    };
 
     Ok(ResumeOk {
         session_id,
+        username,
+        evicted,
         expires_at_ns,
         resumption_ticket,
         resumption_expires_at_ns,

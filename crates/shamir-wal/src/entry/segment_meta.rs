@@ -44,13 +44,20 @@ use std::path::{Path, PathBuf};
 
 use shamir_storage::error::{DbError, DbResult};
 
+#[cfg(test)]
+use std::sync::atomic::Ordering;
+
 /// Sidecar magic — distinct from `WAL2` so a sidecar can never be mistaken for
 /// a data frame and vice versa.
-const META_MAGIC: [u8; 4] = *b"WMT1";
+/// RV-WAL-A025886E: WMT2. A WMT2 sidecar means "this segment is sealed and
+/// its bytes never change" — `SegmentSet::open` treats the highest segment
+/// carrying one as sealed. Legacy WMT1 sidecars are never trusted: they read
+/// as absent and the segment falls back to replay.
+const META_MAGIC: [u8; 4] = *b"WMT2";
 
 /// Sidecar format version. Bump only on an incompatible layout change; an
 /// unknown version reads as "absent" (fall back to replay), never a hard error.
-const META_VERSION: u8 = 1;
+const META_VERSION: u8 = 2;
 
 /// On-disk layout: `[magic:4][version:1][max_version:8 LE][crc32:4 LE]`.
 /// The CRC covers the first 13 bytes (magic ‖ version ‖ max_version).
@@ -154,6 +161,18 @@ fn decode(buf: &[u8]) -> Option<u64> {
     ]))
 }
 
+/// RV-WAL-A025886E: deterministic test seam — when armed, `remove_blocking`
+/// becomes a no-op (models a stubborn unlink failure, e.g. a held file).
+#[cfg(test)]
+static REMOVE_FAIL_FOR_TEST: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Arm/disarm the `remove_blocking` failure seam (tests only).
+#[cfg(test)]
+pub(crate) fn set_remove_fail_for_test(on: bool) {
+    REMOVE_FAIL_FOR_TEST.store(on, Ordering::Release);
+}
+
 /// Best-effort removal of a segment's sidecar. A missing sidecar is fine; any
 /// other error is logged and swallowed rather than treated as fatal — the
 /// sidecar is only ever a cache (see the module doc's crash-safety contract),
@@ -163,6 +182,11 @@ fn decode(buf: &[u8]) -> Option<u64> {
 /// caller wraps in `spawn_blocking`.
 pub(crate) fn remove_blocking(seg_path: &Path, context: &str) {
     let path = meta_path_for(seg_path);
+    #[cfg(test)]
+    if REMOVE_FAIL_FOR_TEST.load(Ordering::Acquire) {
+        log::warn!("segment meta remove {path:?} injected failure (test seam); {context}");
+        return;
+    }
     match std::fs::remove_file(&path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -193,9 +217,24 @@ mod tests {
 
     #[test]
     fn decode_rejects_bad_version() {
+        // Version 3 is not the current version (2) nor any known one — the
+        // sidecar must read as absent so open falls back to replay.
         let mut bytes = encode(99);
-        bytes[4] = 2;
+        bytes[4] = 3;
         assert_eq!(decode(&bytes), None);
+    }
+
+    #[test]
+    fn decode_rejects_wmt1_magic() {
+        // Hand-build a well-formed LEGACY WMT1 sidecar: same layout, only the
+        // magic/version differ. It must never decode (never trusted).
+        let mut buf = [0u8; META_TOTAL_LEN];
+        buf[0..4].copy_from_slice(b"WMT1");
+        buf[4] = 1;
+        buf[5..13].copy_from_slice(&99u64.to_le_bytes());
+        let crc = crc32fast::hash(&buf[0..META_BODY_LEN]);
+        buf[13..17].copy_from_slice(&crc.to_le_bytes());
+        assert_eq!(decode(&buf), None);
     }
 
     #[test]
