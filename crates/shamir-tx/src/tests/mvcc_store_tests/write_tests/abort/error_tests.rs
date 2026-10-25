@@ -1,3 +1,4 @@
+use crate::mvcc_store::ts_key;
 use crate::mvcc_store::MvccStore;
 use crate::repo_tx_gate::RepoTxGate;
 use crate::tests::mvcc_store_tests::gc::helpers::make_gate;
@@ -255,24 +256,33 @@ pub(in crate::tests::mvcc_store_tests) mod non_atomic_store {
     use shamir_storage::storage_in_memory::InMemoryStore;
     use shamir_storage::types::{KvOp, RecordKey, Store};
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     pub struct NonAtomicStore {
         inner: InMemoryStore,
-        fail_after_first_op: AtomicBool,
+        /// Index of the op AFTER which the next armed `transact` fails
+        /// (`usize::MAX` = disarmed).
+        fail_after_op: AtomicUsize,
     }
 
     impl NonAtomicStore {
         pub fn new() -> Self {
             Self {
                 inner: InMemoryStore::new(),
-                fail_after_first_op: AtomicBool::new(false),
+                fail_after_op: AtomicUsize::new(usize::MAX),
             }
         }
 
         /// Arm: the next `transact` applies its first op, then errors.
         pub fn arm(&self) {
-            self.fail_after_first_op.store(true, Ordering::SeqCst);
+            self.arm_after(0);
+        }
+
+        /// Arm: the next `transact` applies ops `0..=n`, then errors — so
+        /// ops with index <= n are PHYSICALLY APPLIED and must be rolled
+        /// back by any compensating cleanup.
+        pub fn arm_after(&self, n: usize) {
+            self.fail_after_op.store(n, Ordering::SeqCst);
         }
     }
 
@@ -295,6 +305,8 @@ pub(in crate::tests::mvcc_store_tests) mod non_atomic_store {
         }
 
         async fn transact(&self, ops: Vec<KvOp>) -> DbResult<()> {
+            // One-shot: take the armed index once, up front.
+            let fail_at = self.fail_after_op.swap(usize::MAX, Ordering::SeqCst);
             for (i, op) in ops.into_iter().enumerate() {
                 match op {
                     KvOp::Set(k, v) => {
@@ -304,7 +316,7 @@ pub(in crate::tests::mvcc_store_tests) mod non_atomic_store {
                         self.remove(k).await?;
                     }
                 }
-                if i == 0 && self.fail_after_first_op.swap(false, Ordering::SeqCst) {
+                if i == fail_at {
                     return Err(DbError::Storage("injected non-atomic fault".into()));
                 }
             }
@@ -705,4 +717,136 @@ async fn rv_tx_2cb455a7_rebuilt_store_shows_no_failed_version() {
         rebuilt.history_store().get(vk6.into()).await,
         Err(DbError::NotFound(_))
     ));
+}
+
+// ================================================================
+// RV-TX-D54D3EE5 — the remaining fault oracles must cover an
+// EXISTING value with a LATE (mid-batch) operation failure, not just
+// fresh keys with a first-Set failure.
+// ================================================================
+
+/// RV-TX-D54D3EE5 — a non-atomic backend applies BOTH ops of the failed
+/// write (the version-key Set AND the ts-key Set — store.rs writes the
+/// version key first, then the ts key) and THEN fails: the compensating
+/// cleanup must roll back the already-landed version key AND remove the
+/// already-landed ts key, and the prior committed value ("v5") must stay
+/// visible through every point-read seam.
+///
+/// Unlike the fresh-key/first-Set oracles above, this proves existing-value
+/// recovery plus late-operation rollback (both keys were physically written
+/// before the fault, so each NotFound below pins one of the two compensating
+/// Removes).
+///
+/// FAILS ON HEAD (a) with the version-key Remove dropped from
+/// `compensate_failed_write` — `k::6` survives and the first `get` sees Ok;
+/// (b) with the ts-key Remove dropped — `ts_key(6)` survives and the second
+/// `get` sees Ok; (c) with `compensate_failed_write` removed entirely —
+/// `get_current` returns the stale bumped cell / None instead of "v5".
+#[tokio::test]
+async fn rv_tx_d54d3ee5_late_op_failure_rolls_back_and_keeps_prior_value() {
+    let history = Arc::new(non_atomic_store::NonAtomicStore::new());
+    let mvcc = MvccStore::new(
+        history.clone() as Arc<dyn Store>,
+        Arc::new(RepoTxGate::fresh()),
+    );
+    let k = seed_to_v5(&mvcc).await;
+
+    // Fail AFTER op index 1: both the version-key Set and the ts-key Set
+    // are applied, then the batch faults.
+    history.arm_after(1);
+    assert!(
+        mvcc.set_versioned(k.clone(), Bytes::from_static(b"v6"))
+            .await
+            .is_err(),
+        "the mid-batch fault must fail the write"
+    );
+
+    // Existing-value recovery: the prior committed value is still current.
+    assert_eq!(
+        mvcc.get_current(k.clone()).await.unwrap().as_deref(),
+        Some(&b"v5"[..]),
+        "prior value must stay visible after a late-op failure"
+    );
+    assert_eq!(
+        mvcc.get_at(b"k", mvcc.gate.last_committed())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(&b"v5"[..])
+    );
+
+    // Late-operation rollback: the version key AND the ts key, both of which
+    // LANDED before the fault, are gone from history.
+    let vk6 = encode_version_key(b"k", 6);
+    assert!(matches!(
+        history.get(vk6.into()).await,
+        Err(DbError::NotFound(_))
+    ));
+    assert!(matches!(
+        history.get(ts_key(6).into()).await,
+        Err(DbError::NotFound(_))
+    ));
+}
+
+// ================================================================
+// RV-TX-D54D3EE5 — vectored reads must propagate history get faults.
+// ================================================================
+
+/// RV-TX-D54D3EE5 — with the value living ONLY in history (overlay swept via
+/// `gc_overlay_to` after the inline-durable write), an armed `fail_get` must
+/// propagate through BOTH `get_current_many` and `get_at_many` as `Err` —
+/// never silently collapsed to `None`.
+///
+/// Overlay-hit short-circuit confirmed in code: both vectored paths probe
+/// `self.overlay.get(key, cur_v)` first (version_entry.rs Phase 1 /
+/// mvcc_history.rs Phase 1) and only call `history.get_many` on an overlay
+/// miss, so the sweep below is what forces the faulting read.
+///
+/// FAILS ON HEAD if the vectored read paths swallow history errors — e.g.
+/// replacing the `?` on `self.history.get_many(miss_keys).await?`
+/// (version_entry.rs Phase 2 / mvcc_history.rs Phase 2) with an
+/// `unwrap_or_default()`-style collapse to `None`: both `is_err`
+/// assertions fail.
+#[tokio::test]
+async fn rv_tx_d54d3ee5_vectored_reads_propagate_history_get_faults() {
+    let gate = make_gate();
+    let (mvcc, history) = make_failing_history_mvcc(gate.clone());
+    let k = RecordKey::from(Bytes::from_static(b"k"));
+
+    mvcc.set_versioned(k.clone(), Bytes::from_static(b"v1"))
+        .await
+        .unwrap();
+    // The inline write marked its version durable — sweep the overlay so
+    // the value lives ONLY in history (the read must go to history).
+    mvcc.gc_overlay_to(mvcc.gate.durable_watermark());
+    assert_eq!(
+        mvcc.overlay_len(),
+        0,
+        "setup: overlay must miss so the vectored read hits history"
+    );
+
+    // Arm AFTER setup: fail_get would otherwise fire on setup reads.
+    history.fail_get.store(true, Ordering::Relaxed);
+    assert!(
+        mvcc.get_current_many(&[Bytes::from_static(b"k")])
+            .await
+            .is_err(),
+        "get_current_many must propagate the history get fault"
+    );
+    assert!(
+        mvcc.get_at_many(&[Bytes::from_static(b"k")], mvcc.gate.last_committed())
+            .await
+            .is_err(),
+        "get_at_many must propagate the history get fault"
+    );
+    history.fail_get.store(false, Ordering::Relaxed);
+
+    // Sanity: disarmed, the value is still readable from history.
+    assert_eq!(
+        mvcc.get_current_many(&[Bytes::from_static(b"k")])
+            .await
+            .unwrap()[0]
+            .as_deref(),
+        Some(&b"v1"[..])
+    );
 }
