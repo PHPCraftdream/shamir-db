@@ -46,10 +46,30 @@ impl IpcListener {
     /// the `binding_mode = 0x00` plain-transport handshake that follows
     /// (spec TRANSPORT_UNIX.md).
     pub async fn bind(path: impl AsRef<Path>) -> io::Result<Self> {
-        let path = path.as_ref().to_path_buf();
-        let inner = TokioUnixListener::bind(&path)?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        Ok(Self { inner, path })
+        Self::bind_with(path.as_ref(), |p| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600))
+        })
+        .await
+    }
+
+    /// Testable core of [`IpcListener::bind`]: `set_perms` is the hook that
+    /// restricts the socket file (the real one applies `0600`); tests inject
+    /// failures here.
+    pub(crate) async fn bind_with(
+        path: &Path,
+        set_perms: impl Fn(&Path) -> io::Result<()>,
+    ) -> io::Result<Self> {
+        let inner = TokioUnixListener::bind(path)?;
+        if let Err(e) = set_perms(path) {
+            // The socket file would otherwise leak with default (wide)
+            // permissions and poison the next start ("address in use").
+            let _ = std::fs::remove_file(path);
+            return Err(e);
+        }
+        Ok(Self {
+            inner,
+            path: path.to_path_buf(),
+        })
     }
 
     /// Accept the next incoming connection.

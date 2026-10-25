@@ -19,6 +19,14 @@ use crate::framer::{TcpFramer, WsFramer};
 
 use super::helpers::{run_until_cancelled, IPC_PEER_ADDR};
 
+/// Per-listener WS accept parameters (endpoint path + origin policy),
+/// bundled so the accept-loop signatures stay under the clippy
+/// argument limit.
+pub(super) struct WsAcceptParams {
+    pub(super) path: String,
+    pub(super) policy: BrowserOriginPolicy,
+}
+
 /// TCP+TLS accept loop. The accept_loop itself never blocks: every step
 /// is async, and per-connection work is `tokio::spawn`'d so multiple
 /// in-flight TLS handshakes / Argon2id verifies don't serialise on the
@@ -258,6 +266,7 @@ pub(super) async fn accept_loop_ws_native(
     shutdown: tokio_util::sync::CancellationToken,
     limiter: ConnLimiter,
     per_ip: PerIpLimiter,
+    params: WsAcceptParams,
 ) {
     loop {
         tokio::select! {
@@ -301,6 +310,10 @@ pub(super) async fn accept_loop_ws_native(
                 };
                 let acceptor = acceptor.clone();
                 let ctx = ctx.clone();
+                let params = WsAcceptParams {
+                    path: params.path.clone(),
+                    policy: params.policy.clone(),
+                };
                 tokio::spawn(run_until_cancelled(shutdown.clone(), async move {
                     let _guard = guard;
                     let _per_ip_guard = per_ip_guard;
@@ -328,7 +341,7 @@ pub(super) async fn accept_loop_ws_native(
                     let exporter = extract_tls_exporter(&tls).unwrap_or([0u8; 32]);
                     let ws = match tokio::time::timeout(
                         ctx.auth_init_timeout,
-                        accept_native_ws(tls),
+                        accept_native_ws(tls, &params.path, &params.policy),
                     ).await {
                         Ok(Ok(ws)) => ws,
                         Ok(Err(e)) => {
@@ -362,7 +375,7 @@ pub(super) async fn accept_loop_ws_browser(
     shutdown: tokio_util::sync::CancellationToken,
     limiter: ConnLimiter,
     per_ip: PerIpLimiter,
-    policy: BrowserOriginPolicy,
+    params: WsAcceptParams,
 ) {
     loop {
         tokio::select! {
@@ -406,7 +419,10 @@ pub(super) async fn accept_loop_ws_browser(
                 };
                 let acceptor = acceptor.clone();
                 let ctx = ctx.clone();
-                let policy = policy.clone();
+                let params = WsAcceptParams {
+                    path: params.path.clone(),
+                    policy: params.policy.clone(),
+                };
                 tokio::spawn(run_until_cancelled(shutdown.clone(), async move {
                     let _guard = guard;
                     let _per_ip_guard = per_ip_guard;
@@ -432,7 +448,7 @@ pub(super) async fn accept_loop_ws_browser(
                     let exporter = [0u8; 32];
                     let ws = match tokio::time::timeout(
                         ctx.auth_init_timeout,
-                        accept_browser_ws(tls, &policy),
+                        accept_browser_ws(tls, &params.path, &params.policy),
                     ).await {
                         Ok(Ok(ws)) => ws,
                         Ok(Err(e)) => {
