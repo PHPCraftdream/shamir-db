@@ -564,9 +564,31 @@ async fn rv_transport_ws_c0c43a18_non_text_subprotocol_header_rejected_400() {
             .await
             .is_err());
     });
-    let bad = http::HeaderValue::from_bytes(b"shamir-v1\xff")
-        .expect("HeaderValue accepts obs-text bytes");
-    let req = ws_request_header(NATIVE_WS_PATH, "Sec-WebSocket-Protocol", Some(bad));
-    assert_rejected_400(req, client_io).await;
+    // The tungstenite CLIENT refuses to build a non-text header value, so send
+    // the handshake as raw bytes and read the raw server response.
+    let mut client_io = client_io;
+    let mut request = format!(
+        "GET {NATIVE_WS_PATH} HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\n\
+         Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: "
+    )
+    .into_bytes();
+    request.extend_from_slice(b"shamir-v1\xff\r\n\r\n");
+    tokio::io::AsyncWriteExt::write_all(&mut client_io, &request)
+        .await
+        .expect("write raw handshake");
+    let mut response = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::io::AsyncReadExt::read_to_end(&mut client_io, &mut response),
+    )
+    .await
+    .expect("server must answer and close")
+    .expect("read raw response");
+    assert!(
+        response.starts_with(b"HTTP/1.1 400"),
+        "non-text subprotocol header must be rejected with 400, got {:?}",
+        String::from_utf8_lossy(&response)
+    );
     server.await.expect("join");
 }

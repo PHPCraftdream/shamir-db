@@ -53,7 +53,7 @@ describe('ws subprotocol negotiation (rv_transport_ws_c0c43a18)', () => {
     void NodePlatform.openSocket('wss://x/shamir/v1', {});
 
     expect(wsCtor).toHaveBeenCalledTimes(1);
-    const [url, protocols] = wsCtor.mock.calls[0] as [string, string[], unknown];
+    const [url, protocols] = wsCtor.mock.calls[0] as unknown as [string, string[], unknown];
     expect(url).toBe('wss://x/shamir/v1');
     expect(protocols).toEqual(['shamir-v1']);
   });
