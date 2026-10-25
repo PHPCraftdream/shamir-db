@@ -11,11 +11,13 @@
 //!  * edge cases — dim-mismatch panics, constant dimension (`scale == 0`)
 //!    doesn't divide by zero.
 //!
-//! The clustered dataset generator is self-contained (Numerical-Recipes
-//! LCG + Box-Muller, mirroring `shamir_bench_utils::clustered_vectors`)
-//! because `shamir-bench-utils` is not a dev-dependency of this crate.
+//! The clustered dataset generator is an intentional self-contained mirror of
+//! `shamir_bench_utils::vector_data` (Numerical-Recipes LCG + Box-Muller), so
+//! test binaries need no fixture crate at runtime; the lineage test below
+//! keeps the mirror in check.
 
 use crate::vector::sq8::Sq8Quantizer;
+use shamir_bench_utils::vector_data::{Lcg as BenchLcg, LCG_INC, LCG_MULT};
 
 // ----- deterministic RNG (mirrors shamir_bench_utils::Lcg lineage) --------
 
@@ -494,4 +496,36 @@ fn dequant_norm_sq_dim_mismatch_panics() {
     let train = clustered(8, dim, 2, 0.1, 1);
     let q = Sq8Quantizer::fit(&train, dim);
     let _ = q.dequant_norm_sq(&[1u8, 2, 3]);
+}
+
+// =========================================================================
+// LCG lineage vs the canonical shamir_bench_utils generator
+// =========================================================================
+
+/// The local LCG must stay in the same lineage as
+/// `shamir_bench_utils::vector_data::Lcg` (same constants, same stream,
+/// same Box-Muller output). Without this test the lineage contract was
+/// prose-only and a drifted constant would pass silently.
+#[test]
+fn rv_bench_utils_a7605ff1_lcg_lineage_matches_bench_utils() {
+    assert_eq!(6364136223846793005, LCG_MULT);
+    assert_eq!(1442695040888963407, LCG_INC);
+    for seed in [0u64, 1, 42, 0xDEAD_BEEF, u64::MAX] {
+        let mut local = Lcg::new(seed);
+        let mut canon = BenchLcg::new(seed);
+        for _ in 0..64 {
+            assert_eq!(
+                local.next_u64(),
+                canon.next_u64(),
+                "seed {seed}: u64 stream drifted"
+            );
+        }
+        for _ in 0..64 {
+            assert_eq!(
+                local.next_gaussian(),
+                canon.next_gaussian(),
+                "seed {seed}: gaussian stream drifted"
+            );
+        }
+    }
 }
