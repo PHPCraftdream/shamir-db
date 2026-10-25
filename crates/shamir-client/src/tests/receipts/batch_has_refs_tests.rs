@@ -5,8 +5,10 @@
 //! `BatchRequest`, and all three composite constructors are public.
 
 use shamir_collections::TMap;
-use shamir_query_types::batch::{BatchOp, BatchRequest, QueryEntry, ResultEncoding};
-use shamir_query_types::filter::{Cond, Filter, FilterExpr, FilterExprOp, FilterValue, FnCall};
+use shamir_query_types::batch::{BatchOp, BatchRequest, ForEachOp, QueryEntry, ResultEncoding};
+use shamir_query_types::filter::{
+    Cond, Filter, FilterExpr, FilterExprOp, FilterValue, FnCall, ValueCompareOp,
+};
 use shamir_query_types::read::{Select, Temporal};
 use shamir_query_types::write::DeleteOp;
 use shamir_query_types::TableRef;
@@ -187,4 +189,84 @@ fn delete_where_clause_is_scanned() {
         expected_version: None,
     });
     assert!(batch_has_refs(&batch_with(op)));
+}
+
+#[test]
+fn rv_client_5212ed16_when_guard_and_foreach_are_scanned() {
+    // `when` guard carrying a $query ref: the guard is evaluated against an
+    // empty synthetic record and can legally reference an earlier alias's
+    // result, so the batch must NOT request id-keyed intermediates.
+    let mut queries: TMap<String, QueryEntry> = TMap::default();
+    queries.insert(
+        "q".to_string(),
+        QueryEntry {
+            op: read_op("name", FilterValue::String("alice".into())),
+            return_result: true,
+            after: Vec::new(),
+            when: Some(Filter::Eq {
+                field: vec!["flag".to_string()],
+                value: FilterValue::QueryRef {
+                    alias: "other".into(),
+                    path: None,
+                },
+            }),
+        },
+    );
+    let guarded = BatchRequest {
+        id: QueryValue::Null,
+        name: None,
+        transactional: false,
+        isolation: None,
+        visibility_wait: None,
+        durability: None,
+        index_visibility: None,
+        queries,
+        return_all: true,
+        return_only: None,
+        limits: Default::default(),
+        result_encoding: ResultEncoding::Name,
+        interner_epochs: TMap::default(),
+    };
+    assert!(
+        batch_has_refs(&guarded),
+        "a $query ref inside a QueryEntry.when guard must be detected — \
+         the smart path would otherwise encode the referenced result as opaque IdBytes"
+    );
+
+    // ForEach whose `over` is a $query ref: the loop source consumes an
+    // earlier alias's result, which must stay name-keyed.
+    let body = batch_with(read_op("name", FilterValue::String("x".into())));
+    let fe = BatchOp::ForEach(ForEachOp {
+        over: FilterValue::QueryRef {
+            alias: "other".into(),
+            path: None,
+        },
+        bind_row: "row".to_string(),
+        batch: body,
+    });
+    assert!(
+        batch_has_refs(&batch_with(fe)),
+        "a ForEach op with a $query-ref `over` (or ref-bearing body) must be detected"
+    );
+}
+
+#[test]
+fn rv_client_236dad0a_valuecompare_operands_are_scanned() {
+    let mut q = read_op("name", FilterValue::String("alice".into()));
+    let BatchOp::Read(ref mut rq) = q else {
+        panic!("read_op builds a Read");
+    };
+    rq.r#where = Some(Filter::ValueCompare {
+        left: FilterValue::QueryRef {
+            alias: "other".into(),
+            path: None,
+        },
+        cmp: ValueCompareOp::Eq,
+        right: FilterValue::Int(1),
+    });
+    assert!(
+        batch_has_refs(&batch_with(q)),
+        "a $query ref in either ValueCompare operand must be detected — \
+         ValueCompare is the only comparison shape meaningful inside a when guard"
+    );
 }
