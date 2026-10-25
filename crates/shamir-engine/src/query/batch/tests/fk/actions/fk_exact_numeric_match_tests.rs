@@ -162,7 +162,12 @@ async fn rv_funclib_5fa455f7_fk_restrict_parent_delete_with_exact_child() {
     b.id(1);
     b.insert(
         "ins_parent1",
-        write::insert("parent").row(doc().set_value("id", QueryValue::Int(1)).set("name", "P1")),
+        write::insert("parent").row(
+            doc()
+                .set_value("id", QueryValue::Int(1))
+                .set("name", "P1")
+                .unwrap(),
+        ),
     );
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -175,7 +180,8 @@ async fn rv_funclib_5fa455f7_fk_restrict_parent_delete_with_exact_child() {
         write::insert("child").row(
             doc()
                 .set_value("parent_id", QueryValue::F64(1.0))
-                .set("label", "x"),
+                .set("label", "x")
+                .unwrap(),
         ),
     );
     let req = b.build();
@@ -214,7 +220,8 @@ async fn rv_funclib_5fa455f7_fk_restrict_parent_delete_with_exact_child() {
         write::insert("parent").row(
             doc()
                 .set_value("id", QueryValue::Int(parent_key))
-                .set("name", "P"),
+                .set("name", "P")
+                .unwrap(),
         ),
     );
     let req = b.build();
@@ -230,7 +237,8 @@ async fn rv_funclib_5fa455f7_fk_restrict_parent_delete_with_exact_child() {
         write::insert("child").row(
             doc()
                 .set_value("parent_id", QueryValue::Int(parent_key))
-                .set("label", "x"),
+                .set("label", "x")
+                .unwrap(),
         ),
     );
     let req = b.build();
