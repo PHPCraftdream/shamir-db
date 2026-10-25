@@ -16,6 +16,8 @@ use rustc_hash::FxHasher;
 use shamir_storage::types::RecordKey;
 use shamir_storage::types::Store;
 use shamir_types::record_view::RecordRef;
+use shamir_types::types::numeric_key::decimal_exact_parts;
+use shamir_types::types::numeric_key::NumericKey;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use std::collections::BTreeSet;
@@ -157,23 +159,12 @@ fn hash_inner(val: &InnerValue, h: &mut FxHasher) {
             h.write_i64(*n);
         }
         InnerValue::F64(f) => {
-            // Mirror of base_index::infra::index_keys::hash_f64_canonical
-            // (RV-FUNCLIB-5FA455F7 D1-S1): this crate cannot share the
-            // private fn, so the canonical numeric rule is replicated
-            // locally — integral f64 in i64 range keys like the equal Int,
-            // -0.0 keys as 0, NaN keys to one canonical pattern.
-            if f.is_nan() {
-                h.write_u8(3);
-                h.write_u64(f64::NAN.to_bits());
-            } else if f.fract() == 0.0
-                && (-9223372036854775808.0..9223372036854775808.0).contains(f)
-            {
-                h.write_u8(2);
-                h.write_i64(*f as i64);
-            } else {
-                h.write_u8(3);
-                h.write_u64(f.to_bits());
-            }
+            // Shared canonical numeric key (RV-FUNCLIB-5FA455F7, S1/S2) —
+            // ONE implementation in `shamir_types::types::numeric_key`,
+            // also used by the legacy index hashes, DISTINCT, GROUP BY and
+            // FK matching: integral f64 in i64 range keys like the equal
+            // Int, -0.0 keys as 0, NaN keys to its own bit pattern.
+            NumericKey::from_f64(*f).hash_tagged(2, 8, 3, h);
         }
         InnerValue::Str(s) => {
             h.write_u8(4);
@@ -196,12 +187,21 @@ fn hash_inner(val: &InnerValue, h: &mut FxHasher) {
             }
         }
         InnerValue::Dec(d) => {
-            h.write_u8(7);
-            d.hash(h);
+            // Exact Int↔Dec parity (S2): integral Dec keys like the equal
+            // Int; non-integral Dec keys by exact decimal value.
+            if let Some(key) = NumericKey::from_decimal(d) {
+                key.hash_tagged(2, 8, 3, h);
+            } else {
+                h.write_u8(7);
+                let (mantissa, scale) = decimal_exact_parts(d);
+                mantissa.hash(h);
+                scale.hash(h);
+            }
         }
         InnerValue::Big(b) => {
-            h.write_u8(8);
-            b.hash(h);
+            // Exact Int↔Big parity (S2): Big equal to an Int keys like
+            // that Int; beyond i64 keys by sign + magnitude bytes.
+            NumericKey::from_bigint(b).hash_tagged(2, 8, 3, h);
         }
         InnerValue::Bin(b) => {
             h.write_u8(9);

@@ -4,9 +4,11 @@
 
 use std::cmp::Ordering;
 
-use crate::record_view::scalar_ref::scalar_ref_cmp;
+use num_bigint::BigInt;
+
+use crate::record_view::scalar_ref::{scalar_ref_cmp, scalar_ref_numeric_eq};
 use crate::record_view::ScalarRef;
-use crate::types::value::InnerValue;
+use crate::types::value::{InnerValue, QueryValue};
 
 // ── Int / Int ───────────────────────────────────────────────────────────────
 
@@ -249,5 +251,55 @@ fn bin_vs_mismatched_family_returns_none() {
     assert_eq!(
         scalar_ref_cmp(ScalarRef::Bin(&[1, 2, 3]), &InnerValue::Str("abc".into())),
         None,
+    );
+}
+
+// ── scalar_ref_numeric_eq: InnerValue-shaped sibling (pinned via QueryValue) ─
+
+/// Mirror pin for the `InnerValue`-shaped comparison: the numeric_eq
+/// predicate itself is defined over `ScalarRef × QueryValue`; this pins the
+/// `scalar_ref_cmp` ordering: F64↔Big keeps the accepted lossy fallback
+/// while FK equality moved to the exact predicate — an Int field
+/// and a Big FK value beyond 2^53 stay equal in the equality predicate even
+/// though the F64↔Big ORDERING keeps the accepted f64 fallback.
+#[test]
+fn rv_funclib_5fa455f7_scalar_ref_cmp_int_big_ordering_stays_lossy() {
+    let i = 9007199254740993i64; // 2^53 + 1
+                                 // ORDERING: F64↔Big lossy fallback unchanged (rounds to f64(2^53)).
+    assert_eq!(
+        scalar_ref_cmp(ScalarRef::F64(i as f64), &InnerValue::Big(BigInt::from(i))),
+        Some(Ordering::Equal)
+    );
+    // EQUALITY (what FK matching now uses): exact.
+    assert!(scalar_ref_numeric_eq(
+        ScalarRef::Int(i),
+        &QueryValue::Big(BigInt::from(i))
+    ));
+    assert!(!scalar_ref_numeric_eq(
+        ScalarRef::Int(i),
+        &QueryValue::Big(BigInt::from(i + 1))
+    ));
+}
+
+/// ORDERING regression: Int↔Big ordering is EXACT via `BigInt: Ord`
+/// (RV-FUNCLIB-5FA455F7, S2) — the `(a as f64)` cast equated distinct
+/// integers beyond 2^53 (all three orderings came back Equal).
+#[test]
+fn rv_funclib_5fa455f7_scalar_ref_cmp_int_big_ordering_exact_beyond_2p53() {
+    let i = 9007199254740993i64; // 2^53 + 1
+    assert_eq!(
+        scalar_ref_cmp(ScalarRef::Int(i), &InnerValue::Big(BigInt::from(i))),
+        Some(Ordering::Equal)
+    );
+    assert_eq!(
+        scalar_ref_cmp(
+            ScalarRef::Int(i),
+            &InnerValue::Big(BigInt::from(i - 1)) // 2^53
+        ),
+        Some(Ordering::Greater)
+    );
+    assert_eq!(
+        scalar_ref_cmp(ScalarRef::Int(i), &InnerValue::Big(BigInt::from(i + 1))),
+        Some(Ordering::Less)
     );
 }

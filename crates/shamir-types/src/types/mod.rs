@@ -5,6 +5,7 @@ mod basic;
 mod ids;
 pub use basic::base;
 pub use basic::common;
+pub use basic::numeric_key;
 pub use ids::record_id;
 pub use ids::repo_record;
 pub mod value;
