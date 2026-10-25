@@ -11,6 +11,7 @@ use shamir_connect::common::types::limits::MAX_PRE_AUTH_FRAME;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
 use shamir_connect::server::admin::UserDirectory;
+use shamir_connect::server::admission::{Admission, AdmitReject};
 use shamir_connect::server::handshake::{
     AuthInitView, AuthOkView, ProofOutcome, ServerHandshake, SESSION_MAX_AGE_NS,
 };
@@ -87,6 +88,10 @@ enum HandshakeError {
     },
     UnknownUser,
     LockedOut,
+    /// Session admission rejected by the per-user cap (spec §7.4; internal
+    /// only — the wire sees a generic failure). NOT a wrong-password event:
+    /// no lockout failure registration, no lockout reset.
+    Admission,
     /// Client requested a handshake-protocol version this server does not
     /// implement. Fast-rejected before any Argon2id work.
     UnsupportedVersion,
@@ -98,14 +103,17 @@ enum HandshakeError {
 /// non-empty `ticket`. Calls [`process_resume`] from `shamir-connect`,
 /// inserts the new session, and sends a [`wire::ResumeOkWire`] response.
 ///
-/// No latency padding is applied — the ticket is opaque AES-256-GCM
-/// ciphertext, so timing the response cannot reveal user existence.
+/// Success is unpadded — the ticket is opaque AES-256-GCM ciphertext, so
+/// timing the response cannot reveal user existence. A rejection returns
+/// `HandshakeError::Admission` (after emitting the same `auth_failed` audit
+/// event as login); the OUTER handler pads that path to the constant-time
+/// floor before closing.
 async fn run_resume<F: Framer>(
     ctx: &ConnectionContext,
     first_frame: &[u8],
     framer: &mut F,
     write_scratch: &mut Vec<u8>,
-    _subnet: shamir_connect::server::lockout::Subnet,
+    subnet: shamir_connect::server::lockout::Subnet,
     exporter: [u8; 32],
 ) -> Result<[u8; 32], HandshakeError> {
     let init: wire::ResumeInit =
@@ -125,7 +133,7 @@ async fn run_resume<F: Framer>(
     let now_ns = UnixNanos::now().as_u64();
     let user_lookup = RedbUserStateLookup(&ctx.user_dir);
 
-    let ok = process_resume(
+    let ok = match process_resume(
         &ResumeRequest {
             ticket_wire_bytes: &init.ticket,
             client_nonce,
@@ -140,8 +148,38 @@ async fn run_resume<F: Framer>(
         SESSION_MAX_AGE_NS,
         RESUMPTION_TICKET_TTL_NS,
         now_ns,
-    )
-    .map_err(|_| HandshakeError::BadProof { backoff_ms: 0 })?;
+    ) {
+        Ok(ok) => ok,
+        // Admission rejection is a distinct internal outcome — the SAME
+        // `auth_failed` audit event as login (spec §7.4, RV-CONNECT-
+        // 8AD8B1C8), then the outer handler closes without a success frame;
+        // no backoff registration. There is no proposed sid to log on
+        // rejection (the new session id is only assigned on success), so the
+        // sid prefix is `None` — the same convention as the other resume
+        // failure audit sites.
+        Err(shamir_connect::common::error::Error::AdmissionRejected { reason, username }) => {
+            let reason_str = match reason {
+                AdmitReject::AllActive => "max_sessions",
+                AdmitReject::SidConflict => "sid_conflict",
+            };
+            audit_emit(ctx, "auth_failed", &username, subnet, None, reason_str);
+            return Err(HandshakeError::Admission);
+        }
+        Err(_) => return Err(HandshakeError::BadProof { backoff_ms: 0 }),
+    };
+
+    // Audit the idle sessions the capped admission evicted (same reason
+    // string as login — RV-CONNECT-8AD8B1C8).
+    for victim_sid in &ok.evicted {
+        audit_emit(
+            ctx,
+            "session_evicted",
+            &ok.username,
+            subnet,
+            Some(&prefix_8(victim_sid)),
+            "max_sessions_lru",
+        );
+    }
 
     // Build and send ResumeOkWire.
     let wire_ok = wire::ResumeOkWire {
@@ -480,6 +518,68 @@ async fn run_handshake<F: Framer>(
         }
     }
 
+    // 8. Directory lookup, then build + admit the session under the
+    // per-user cap (spec §7.4); success-only effects and auth_ok follow.
+    // Task #557: ONE `state_by_user_id` lookup returns the authoritative
+    // `superuser` flag plus the roles list; the roles value has exactly ONE
+    // consumer — the freshly-built session (moved).
+    let user_id = match ctx.user_dir.user_id(username.as_str()) {
+        Some(id) => id,
+        None => return Err(HandshakeError::UnknownUser),
+    };
+    let user_state = match ctx.user_dir.state_by_user_id(&user_id) {
+        Some(s) => s,
+        None => return Err(HandshakeError::UnknownUser),
+    };
+    // Admission timestamp sampled ONCE here (NOT the pre-challenge clock
+    // from step 2) and passed to both `Session::new` and `admit`, so the
+    // all-active/idle classification uses the true login instant.
+    let admit_ns = UnixNanos::now().as_u64();
+    let session = Session::new(
+        user_id,
+        username.as_str().to_string(),
+        SessionPermissions::new(
+            user_state.superuser,
+            user_state.replicator,
+            user_state.roles,
+        ),
+        ctx.transport_kind,
+        binding_mode,
+        exporter,
+        admit_ns,
+    );
+    let evicted =
+        match ctx
+            .session_store
+            .admit(auth_ok.session_id, session, admit_ns, MAX_SESSIONS_PER_USER)
+        {
+            Admission::Admitted { evicted, .. } => evicted,
+            Admission::Rejected(reason) => {
+                // Spec §7.4: every existing session active within 60 s (or sid
+                // conflict) => reject. Internal audit reason only; no
+                // `auth_success`, no ticket. NOT a wrong-password event: no
+                // `register_failure` and no lockout reset.
+                let reason_str = match reason {
+                    AdmitReject::AllActive => "max_sessions",
+                    AdmitReject::SidConflict => "sid_conflict",
+                };
+                tracing::info!(user_hash = %hex::encode(uhash), "auth_failed: admission rejected");
+                audit_emit(
+                    ctx,
+                    "auth_failed",
+                    username.as_str(),
+                    subnet,
+                    Some(&prefix_8(&auth_ok.session_id)),
+                    reason_str,
+                );
+                return Err(HandshakeError::Admission);
+            }
+        };
+
+    // Success-only effects start HERE — behind admission — so a rejected
+    // login neither resets the lockout counter nor consumes bootstrap
+    // credentials.
+
     // Reset lockout on success per spec §5.2.5 NORMATIVE.
     ctx.lockout.reset_on_success(pair);
 
@@ -541,54 +641,14 @@ async fn run_handshake<F: Framer>(
         }
     }
 
-    // 8. Build session, insert with per-user cap, send auth_ok.
-    let user_id = match ctx.user_dir.user_id(username.as_str()) {
-        Some(id) => id,
-        None => return Err(HandshakeError::UnknownUser),
-    };
-    // Task #557: ONE directory lookup (`state_by_user_id`) replaces the two
-    // prior `lookup_roles` calls — it returns the authoritative `superuser`
-    // flag (read directly off the persisted blob) plus the post-migration
-    // roles list in a single fjall get + msgpack decode. The session's
-    // `is_superuser` is now driven by the flag, not by scanning the roles
-    // list for the literal `"superuser"` string (which is reserved at the
-    // directory write boundary as of #557, so the persisted list never
-    // contains it anyway).
-    //
-    // The roles value is no longer threaded into the resumption ticket
-    // (task #558 dropped `roles` from `TicketPlain`; resume re-verifies
-    // against the directory on every reconnect), so `user_state.roles` has
-    // exactly ONE consumer here — the freshly-built session. It is MOVED
-    // rather than cloned.
-    let user_state = match ctx.user_dir.state_by_user_id(&user_id) {
-        Some(s) => s,
-        None => return Err(HandshakeError::UnknownUser),
-    };
-    let session = Session::new(
-        user_id,
-        username.as_str().to_string(),
-        SessionPermissions::new(
-            user_state.superuser,
-            user_state.replicator,
-            user_state.roles,
-        ),
-        ctx.transport_kind,
-        binding_mode,
-        exporter,
-        now_ns,
-    );
-    let (_arc, evicted) = ctx.session_store.insert_with_per_user_cap(
-        auth_ok.session_id,
-        session,
-        MAX_SESSIONS_PER_USER,
-    );
-    if let Some(victim_sid) = evicted {
+    // Eviction audits from the capped admission (idle LRU, spec §7.4).
+    for victim_sid in &evicted {
         audit_emit(
             ctx,
             "session_evicted",
             username.as_str(),
             subnet,
-            Some(&prefix_8(&victim_sid)),
+            Some(&prefix_8(victim_sid)),
             "max_sessions_lru",
         );
     }
@@ -741,8 +801,14 @@ pub async fn handle_connection<F>(
     let is_resume = matches!(rmp_serde::from_slice::<wire::ResumeInit>(&frame_buf), Ok(r) if !r.ticket.is_empty());
 
     let session_id = if is_resume {
-        // Resume fast-path — no latency padding (the ticket is opaque
-        // ciphertext; timing reveals nothing about user existence).
+        // Resume fast-path — success is deliberately UNPADDED (the ticket is
+        // opaque ciphertext; timing reveals nothing about user existence).
+        // A REJECTED resume, though, is externally indistinguishable from a
+        // failed login, so the whole resume attempt is wrapped in a
+        // LatencyPadGuard and the error path is padded to the constant-time
+        // floor (backoff 0 — NOT a wrong-password event, no
+        // register_failure) BEFORE shutdown (spec §8.5).
+        let pad_guard = LatencyPadGuard::start();
         match run_resume(
             &ctx,
             &frame_buf,
@@ -754,11 +820,21 @@ pub async fn handle_connection<F>(
         .await
         {
             Ok(sid) => {
+                // No pad on success — the deliberate resume fast-path.
                 record_auth_attempt("success");
                 sid
             }
-            Err(_) => {
-                record_auth_attempt("bad_proof");
+            Err(e) => {
+                let label = if matches!(e, HandshakeError::Admission) {
+                    "admission"
+                } else {
+                    "bad_proof"
+                };
+                record_auth_attempt(label);
+                let pad = pad_guard.finish_with_target(target_constant_time_ms());
+                if pad > Duration::ZERO {
+                    tokio::time::sleep(pad).await;
+                }
                 framer.shutdown().await;
                 return;
             }
@@ -796,6 +872,7 @@ pub async fn handle_connection<F>(
                     HandshakeError::LockedOut => "locked_out",
                     HandshakeError::BadProof { .. } => "bad_proof",
                     HandshakeError::UnknownUser => "unknown_user",
+                    HandshakeError::Admission => "admission",
                     HandshakeError::UnsupportedVersion => "unsupported_version",
                     HandshakeError::Policy => "policy",
                     HandshakeError::Io | HandshakeError::Decode => "io_or_decode",
