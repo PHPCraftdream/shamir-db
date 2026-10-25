@@ -60,6 +60,13 @@ pub enum BatchError {
         blocking_version: u64,
     },
 
+    /// An implicit single-op commit whose WAL ticket outcome was UNKNOWN after
+    /// the frame was queued (seal-time failure the WAL cannot prove rolled
+    /// back). The attempt may have survived: the alias fails with the stable
+    /// `wal_requires_reopen` code and carries the ATTEMPTED `commit_version` —
+    /// no success claim, never blind-retried. WAL replay after reopen decides.
+    WalOutcomeUnknown { alias: String, commit_version: u64 },
+
     /// Lock timeout (deadlock prevention).
     ///
     /// Could not acquire locks within the timeout period.
@@ -344,6 +351,16 @@ impl std::fmt::Display for BatchError {
                     "Query '{alias}' AsOf {requested} timed out at prefix {visible_through}"
                 )
             }
+            BatchError::WalOutcomeUnknown {
+                alias,
+                commit_version,
+            } => {
+                write!(
+                    f,
+                    "query '{alias}': WAL outcome indeterminate (commit_version \
+                     {commit_version}); repository must be reopened"
+                )
+            }
             BatchError::LockTimeout { aliases } => {
                 write!(f, "Lock timeout for queries: {}", aliases.join(", "))
             }
@@ -460,6 +477,7 @@ impl BatchError {
         match self {
             BatchError::QueryError { code, .. } => code.as_deref(),
             BatchError::AsOfVisibilityTimeout { .. } => Some("as_of_visibility_timeout"),
+            BatchError::WalOutcomeUnknown { .. } => Some("wal_requires_reopen"),
             BatchError::ResyncRequired { .. } => Some("resync_required"),
             _ => None,
         }

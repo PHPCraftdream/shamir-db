@@ -16,11 +16,11 @@ The response variant alone is not proof of success: inspect `status`, then
 | Field | Contract |
 |---|---|
 | `tx_id` | Repository transaction identifier. |
-| `status` | `"committed"` or `"aborted"`. |
-| `reason` | Abort diagnostic; omitted when absent, not necessarily a stable code. |
+| `status` | `"committed"`, `"aborted"`, or `"indeterminate"`. |
+| `reason` | Abort diagnostic; omitted when absent, not necessarily a stable code. Omitted for indeterminate outcomes (their `error` is `"wal_outcome_unknown"`). |
 | `error` | **Additive, optional** published-commit error; omitted when absent. Does not change `status` or set `reason`. |
 | `snapshot_version` | Read snapshot version; present for committed outcomes. |
-| `commit_version` | Published version; present for committed outcomes, absent for aborted outcomes. |
+| `commit_version` | Published version for committed outcomes; the ATTEMPTED version (no success claim) for indeterminate outcomes; absent for aborted outcomes. |
 | `materialized` | Inline projection outcome, independent of visibility and WAL durability. Neither timeout nor reopen observation changes it. Only meaningful for committed outcomes. |
 
 (Source: `crates/shamir-query-types/src/batch/transaction_info.rs`.)
@@ -56,10 +56,15 @@ commit attempt, even when acknowledgement is unknown. Inspect the retained
 `wal_requires_reopen` is different: WAL outcome was indeterminate, the repository
 is marked as requiring reopen, and new commits are refused. Stop issuing commits
 and reopen/reconcile the repository rather than blindly replaying writes. The
-current metadata mapping reports `status: "aborted"`,
-`reason: "wal_requires_reopen"`; that is not evidence that an indeterminate WAL
-write is absent on disk (source: `crates/shamir-engine/src/tx/commit.rs`,
-`wal_completion` and the commit-entry reopen gates).
+attempted-but-unknown commit is reported as `status: "indeterminate"` with
+`error: "wal_outcome_unknown"`, the ATTEMPTED `commit_version` (no success
+claim) and the `snapshot_version`, with no claimed materialization or
+visibility; an indeterminate status is NOT evidence the
+write is absent on disk. WAL replay after reopen decides (CRC-valid frame =
+committed at that version; missing/torn = never written); clients reconcile by reading, never
+auto-retry (source: `crates/shamir-engine/src/tx/commit.rs`, `wal_completion`
+and the commit-entry reopen gates). A `wal_requires_reopen` refusal BEFORE
+admission (repository already stopped, nothing queued) is `status: "aborted"`.
 
 `wal_retention_exceeded` is a transient admission refusal, not a durability
 outcome: the commit was refused before admission because the retained sealed
@@ -169,8 +174,11 @@ the commit version; Bounded checks W immediately, waits at most its budget, and
 re-samples W at expiry so visibility wins. Reopen before visibility yields
 Pending with `reason: "reopen_required"` without changing materialization.
 Read-only/no-allocation commits already at their snapshot position are Visible.
-Pre-commit aborts and indeterminate WAL outcomes keep their existing classification;
-a timeout never manufactures committed metadata for them.
+Pre-commit aborts keep their `aborted` classification; indeterminate WAL
+outcomes are reported as `status: "indeterminate"` with
+`error: "wal_outcome_unknown"`, the ATTEMPTED commit version (no success claim) and no claimed
+materialization; a timeout never
+manufactures committed metadata for them.
 
 **Contractual exclusions:** this is not a bound on inner commit execution,
 execution/admission time, WAL uncertainty, response encoding, channel/socket
@@ -375,7 +383,7 @@ Commit errors are mapped to transaction metadata, not necessarily to a top-level
 | `reason: "version_conflict"` | Commit-time CAS mismatch; also used by staging-time CAS errors. Re-read and refresh the expected version before retrying; do not blindly resend the stale expectation. |
 | `reason: "unique_violation"` | Unique constraint failure. Not retryable without changing input/state. |
 | `reason: "table_migrating"` | Source table is frozen for migration. Wait for migration completion/cancellation and resolve the active table before submitting a new write. |
-| `reason: "wal_requires_reopen"` | Indeterminate WAL outcome; reopen/reconcile first, no blind retry. |
+| `status: "indeterminate"` + `error: "wal_outcome_unknown"` | WAL outcome unknown AFTER the frame was queued; carries the ATTEMPTED `commit_version` (no success claim). Reopen and reconcile by reading first; never blind-retry and never treat as rolled back. Implicit single ops fail with the stable `wal_requires_reopen` code carrying the attempted commit_version as a typed field of the batch error. An admission refusal BEFORE admission is `status: "aborted"` with `reason: "wal_requires_reopen"`. |
 | `reason: "wal_retention_exceeded"` | Retained sealed WAL exceeded `durability.wal_retention_max_bytes` under `on_wal_retention_exceeded: refuse_writes`. Retryable: transient admission refusal; clears once the drainer truncates, then a retried commit succeeds. |
 | `reason` beginning `storage: ` | Storage diagnostic, not a stable retry code. Investigate the underlying failure. |
 | `reason` beginning `tx expired: elapsed ` | Engine commit lifetime check failed; diagnostic includes elapsed/max durations, **not** the literal code `tx_expired`. Begin a new transaction. |

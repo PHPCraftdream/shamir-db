@@ -35,6 +35,9 @@ pub(crate) fn receipt_error_code(error: &CommitError) -> Option<&'static str> {
         | CommitError::SsiConflict { .. }
         | CommitError::Wounded { .. } => Some("tx_conflict"),
         CommitError::WalRequiresReopen => Some("wal_requires_reopen"),
+        // Attempted commit, outcome unknown — the client must reopen and
+        // reconcile, never blind-retry.
+        CommitError::WalOutcomeUnknown { .. } => Some("wal_requires_reopen"),
         // S5c-X: commit admission refused while the retained sealed WAL exceeds
         // `durability.wal_retention_max_bytes` under mode `refuse_writes`.
         // RETRYABLE: the refusal clears by itself once the drainer truncates
@@ -63,6 +66,12 @@ async fn commit_implicit_inner(
         .with_visibility(outcome.visibility)),
         Err(error @ CommitError::WalDurability { .. }) => {
             Ok(error.into_transaction_info(tx_id, snapshot))
+        }
+        Err(CommitError::WalOutcomeUnknown { commit_version }) => {
+            Err(BatchError::WalOutcomeUnknown {
+                alias: alias.into(),
+                commit_version,
+            })
         }
         Err(error) => {
             let code = receipt_error_code(&error);

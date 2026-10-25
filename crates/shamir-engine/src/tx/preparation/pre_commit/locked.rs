@@ -403,7 +403,8 @@ pub(in crate::tx) async fn pre_commit_locked(
         wal.begin_grouped_ticketed(&entry_arc, crate::tx::commit::commit_wal_durability(repo))?;
     version_guard.attach_metrics(repo.tx_metrics().clone());
     version_guard.wal_queued(ticket, entry_arc.clone());
-    let (wc_result, proven_not_written) = crate::tx::commit::wal_completion(gate, completion.await);
+    let (wc_result, proven_not_written) =
+        crate::tx::commit::wal_completion(gate, commit_version, completion.await);
     if proven_not_written {
         repo.settle_unwritten_version(commit_version).await;
     }
