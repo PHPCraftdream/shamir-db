@@ -156,9 +156,6 @@ fn truncation_detected_after_restart() {
     );
 }
 
-// multi_thread flavor: the batched appender's background flusher
-// calls `tokio::task::block_in_place` around the synchronous fsync,
-// which panics on the default current-thread runtime.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn batched_mode_flushes_on_interval() {
     let dir = TempDir::new().unwrap();
@@ -177,6 +174,36 @@ async fn batched_mode_flushes_on_interval() {
 
     let read = FjallAuditAppender::read_log_for_verify(dir.path()).unwrap();
     assert_eq!(read.len(), 3, "background flusher must drain buffer");
+
+    appender.shutdown().await;
+}
+
+/// The batched flusher must work on a CURRENT-THREAD runtime too (the
+/// default `#[tokio::test]` flavor and the single-threaded server fixtures):
+/// `block_in_place` panics there, which killed the flusher task and stalled
+/// every later audit flush. Fails if the flusher goes back to a bare
+/// `tokio::task::block_in_place`.
+#[tokio::test]
+async fn batched_mode_flushes_on_interval_current_thread() {
+    let dir = TempDir::new().unwrap();
+    let appender =
+        FjallAuditAppender::open_batched(dir.path(), Duration::from_millis(100)).unwrap();
+    let chain = AuditChain::new(key());
+
+    use shamir_connect::server::audit_chain::AuditAppender;
+    for i in 0..3 {
+        let e = append_event(&chain, i);
+        appender.append_entry(&e);
+    }
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let read = FjallAuditAppender::read_log_for_verify(dir.path()).unwrap();
+    assert_eq!(
+        read.len(),
+        3,
+        "flusher must drain on a current-thread runtime"
+    );
 
     appender.shutdown().await;
 }

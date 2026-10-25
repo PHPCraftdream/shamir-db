@@ -343,10 +343,10 @@ impl FjallAuditAppender {
                     break;
                 };
                 if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
-                    let _ = tokio::task::block_in_place(|| strong.flush_buffer());
+                    let _ = blocking_io(|| strong.flush_buffer());
                     break;
                 }
-                let _ = tokio::task::block_in_place(|| strong.flush_buffer());
+                let _ = blocking_io(|| strong.flush_buffer());
             }
         });
 
@@ -661,8 +661,8 @@ impl FjallAuditAppender {
 /// PERF (#1079): `append_entry` (Strict mode) and `checkpoint` both do
 /// synchronous fsyncs, called inline from whatever task emitted the audit
 /// event — no dedicated flusher task backs those two paths (unlike Batched
-/// mode's periodic `open_batched` loop, which already wraps its
-/// `flush_buffer()` call in `tokio::task::block_in_place`).
+/// mode's periodic `open_batched` loop, which wraps its
+/// `flush_buffer()` call in this same helper).
 /// `block_in_place` panics outside a multi-thread tokio runtime — both
 /// "no runtime at all" (several `audit_appender.rs` tests exercise this
 /// trait directly as plain synchronous `#[test]` functions) and "a
