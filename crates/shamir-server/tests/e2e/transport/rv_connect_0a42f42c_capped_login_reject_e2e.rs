@@ -23,7 +23,8 @@ use shamir_transport_tcp::framing::{read_frame, write_frame, MAX_FRAME_SIZE_DEFA
 use shamir_transport_tcp::tls::{extract_tls_exporter, make_client_config_no_ca};
 
 use shamir_server::config::{
-    Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ProfileKind, TlsConfig,
+    Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ProfileKind, SecurityConfig,
+    TlsConfig,
 };
 use shamir_server::server::{BootstrapMode, ServerLauncher};
 
@@ -117,7 +118,12 @@ fn make_test_config(temp: &TempDir) -> Config {
             cert_path: data_dir.join("cert.pem"),
             key_path: data_dir.join("key.pem"),
         },
-        security: Default::default(),
+        // 17 logins arrive from one subnet within a second; the default
+        // 10/s auth_init bucket would close some before the challenge.
+        security: SecurityConfig {
+            auth_init_rate_per_second: 1000,
+            ..Default::default()
+        },
         audit: Default::default(),
         observability: shamir_server::config::ObservabilityConfig {
             addr: String::new(),
