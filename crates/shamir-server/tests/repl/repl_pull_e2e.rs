@@ -153,7 +153,7 @@ async fn scram_login(
 ) {
     let norm_username = NormalizedUsername::from_raw(username).expect("username");
 
-    let client_cfg = make_client_config_no_ca();
+    let client_cfg = make_client_config_no_ca().unwrap();
     let connector = TlsConnector::from(client_cfg);
     let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
     let tcp = TcpStream::connect(server_addr).await.expect("tcp connect");
