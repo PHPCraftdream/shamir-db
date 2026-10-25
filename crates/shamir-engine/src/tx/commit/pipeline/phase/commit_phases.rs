@@ -79,6 +79,27 @@ pub(crate) static FAIL_PHASE_5A_TRANSIENT_REMAINING: std::sync::atomic::AtomicU3
 pub(crate) static FAIL_VECTOR_PROMOTE_TX_ID: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// Test-only injection (round-2 finding 1): unlike
+/// [`FAIL_VECTOR_PROMOTE_TX_ID`] (which fires BEFORE the ticket loop, so
+/// every attempt fails and the tickets Drop unentered), this pair fails
+/// exactly [`FAIL_VECTOR_PROMOTE_ONCE_REMAINING`] attempts for the matching
+/// tx at the APPLY level INSIDE the ticket loop (after `wait_turn`, before
+/// `promote`), so the FIRST attempt fails while the ticket's turn is HELD
+/// and the in-loop bounded retry re-runs and succeeds — proving a failed
+/// promote is retried with the ticket STILL ACTIVE, not silently
+/// acknowledged via a consumed ticket.
+#[cfg(test)]
+pub(crate) static FAIL_VECTOR_PROMOTE_ONCE_TX_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Remaining-failures counter for [`FAIL_VECTOR_PROMOTE_ONCE_TX_ID`]. Each
+/// matching in-loop attempt decrements this and fails while it is `> 0`;
+/// once it reaches `0` the real `promote` goes through. Mirrors the
+/// `FAIL_PHASE_5A_TRANSIENT_REMAINING` pattern.
+#[cfg(test)]
+pub(crate) static FAIL_VECTOR_PROMOTE_ONCE_REMAINING: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
 /// Test-only injection (#426, VR-4 Phase 5d durability variant A): when set
 /// to a non-zero tx_id, the PRE-publish delta-chunk append
 /// (`apply_vector_delta_batch` / `apply_vector_delta_phase`) returns a
@@ -222,24 +243,35 @@ pub(crate) async fn apply_vector_delta_phase(
 ) {
     let tx_id = tx.tx_id.0;
 
-    // Tables with staged vector INSERTS. `staged_vectors` survives Phase 5a
-    // (which drained only `tx.write_set`), so the slices are intact here.
-    //
-    // P2 perf fix (audit 4.26): only the table TOKENS are collected up
-    // front (cheap, `u64`s). The embedding payloads themselves are
-    // borrowed straight out of `tx.staged_vectors` inside the loop below
-    // instead of being deep-cloned into an owned batch — `tx.staged_vectors`
-    // itself is never mutated on this path (only `tx.async_prefix_failed`
-    // is), so the borrow is scoped to just the `retry_materialize` call and
-    // is released before that flag is set, closing the only borrow-checker
-    // conflict this restructuring could hit.
-    let insert_tokens: Vec<u64> = tx
+    // P0 index promote order (round-2 finding 2): reservations must follow
+    // the SAME global total order (ascending table token) that
+    // `promote_vectors` uses for promotion, so every tx reserves its
+    // (token, backend descriptor id) pairs in one deterministic order. The
+    // insert tokens and the delete-only tokens are therefore collected into
+    // ONE sorted Vec and visited in that order: a token with staged inserts
+    // takes the insert path (its deletes ride the same chunk — gap#1), a
+    // token with ONLY deletes takes the delete-only path. Unsorted map
+    // iteration would let two txs reserve the same two tables in opposite
+    // orders, breaking the deadlock-freedom induction in
+    // `apply_vector_graph_batch`.
+    let mut tokens: Vec<u64> = tx
         .staged_vectors
         .iter()
         .filter(|(_, v)| !v.is_empty())
         .map(|(t, _)| *t)
         .collect();
-    for token in insert_tokens {
+    for (t, dels) in tx.staged_vector_deletes.iter() {
+        // gap#1: delete-only tables (no staged inserts) still need their
+        // tombstones echoed durably. Tokens that also appear in
+        // `staged_vectors` are handled by the single insert-path call below.
+        if !dels.is_empty() && !tx.staged_vectors.contains_key(t) {
+            tokens.push(*t);
+        }
+    }
+    tokens.sort_unstable();
+    tokens.dedup();
+    for token in tokens {
+        let has_inserts = tx.staged_vectors.get(&token).is_some_and(|v| !v.is_empty());
         // This table's staged vector deletes ride the SAME delta chunk as
         // the inserts (gap#1: a replace = delete old + insert new on the
         // same rid). `append_vector_delta` writes both `DeltaOp::Upsert`
@@ -249,17 +281,30 @@ pub(crate) async fn apply_vector_delta_phase(
             .staged_vector_deletes_for(token)
             .map(|s| s.to_vec())
             .unwrap_or_default();
-        let result = retry_materialize(MATERIALIZE_ATTEMPTS, || {
-            let vecs = tx.staged_vectors_for(token).unwrap_or(&[]);
-            apply_vector_delta_batch(repo, token, vecs, &deleted, tx_id)
-        })
-        .await;
+        let result = if has_inserts {
+            retry_materialize(MATERIALIZE_ATTEMPTS, || {
+                let vecs = tx.staged_vectors_for(token).unwrap_or(&[]);
+                apply_vector_delta_batch(repo, token, vecs, &deleted, tx_id)
+            })
+            .await
+        } else {
+            // Delete-only table: empty vecs, tombstones only.
+            retry_materialize(MATERIALIZE_ATTEMPTS, || {
+                apply_vector_delta_batch(repo, token, &[], &deleted, tx_id)
+            })
+            .await
+        };
         match result {
             // P0 delta-prune: park the per-backend chunk acknowledgements on
             // the tx; promote_vectors calls them only after the graph half
             // succeeded, which is what advances the applied prune boundary.
-            Ok(acks) => {
+            Ok((acks, promote_tickets)) => {
                 let _ = tx.vector_delta_acks.insert_sync(token, acks);
+                // P0 index promote order: park the turnstile tickets on the
+                // tx; their Drop releases the turn on EVERY outcome.
+                let _ = tx
+                    .vector_promote_tickets
+                    .insert_sync(token, promote_tickets);
             }
             Err(e) => {
                 log::warn!(
@@ -267,36 +312,6 @@ pub(crate) async fn apply_vector_delta_phase(
                  commit_version {_commit_version} table {token}: {e}; tx will be reported \
                  Deferred — the vector mutation has no durable delta echo and recovery will \
                  NOT re-apply it (vectors are derived, not WAL-replayed); client should retry"
-                );
-                tx.async_prefix_failed = true;
-            }
-        }
-    }
-
-    // gap#1: tables that have ONLY staged vector deletes (no staged
-    // inserts). The loop above only visited tables present in
-    // `staged_vectors`; this second loop visits the delete-only tables so
-    // their tombstones get a durable `DeltaOp::Delete` echo too.
-    let delete_only_batches = tx
-        .staged_vector_deletes
-        .iter()
-        .filter(|(t, dels)| !dels.is_empty() && !tx.staged_vectors.contains_key(t))
-        .map(|(t, dels)| (*t, dels.clone()))
-        .collect::<Vec<_>>();
-    for (token, deleted) in delete_only_batches {
-        let result = retry_materialize(MATERIALIZE_ATTEMPTS, || {
-            apply_vector_delta_batch(repo, token, &[], &deleted, tx_id)
-        })
-        .await;
-        match result {
-            Ok(acks) => {
-                let _ = tx.vector_delta_acks.insert_sync(token, acks);
-            }
-            Err(e) => {
-                log::warn!(
-                    "commit_tx Phase 5d (delta-append delete-only, pre-publish) failed for tx \
-                 {tx_id} commit_version {_commit_version} table {token}: {e}; tx will be \
-                 reported Deferred — the vector delete has no durable delta echo"
                 );
                 tx.async_prefix_failed = true;
             }
@@ -477,13 +492,31 @@ pub(crate) async fn promote_vectors(tx: &TxContext, repo: &RepoInstance, commit_
     // its own matching fix). `tx` is a plain shared reference here and
     // `staged_vectors` is never mutated by this function, so there is no
     // borrow-checker conflict to work around, unlike the delta-phase side.
-    let vector_tokens: Vec<u64> = tx
+    //
+    // P0 index promote order (round-2 finding 2): the promotion pass must
+    // follow the SAME global total order (ascending table token) that
+    // `apply_vector_delta_phase` used for its reservations. The insert
+    // tokens and the delete-only tokens are therefore merged into ONE
+    // sorted Vec — running all inserts before all delete-onlys (or vice
+    // versa) would let a tx promote table Y (insert) while still holding an
+    // earlier RESERVATION on table X (delete-only) that another tx
+    // processes before Y, breaking the identical-order premise of the
+    // induction in `apply_vector_graph_batch`.
+    let mut vector_tokens: Vec<u64> = tx
         .staged_vectors
         .iter()
         .filter(|(_, v)| !v.is_empty())
         .map(|(t, _)| *t)
         .collect();
+    for (t, dels) in tx.staged_vector_deletes.iter() {
+        if !dels.is_empty() && !tx.staged_vectors.contains_key(t) {
+            vector_tokens.push(*t);
+        }
+    }
+    vector_tokens.sort_unstable();
+    vector_tokens.dedup();
     for token in vector_tokens {
+        let has_inserts = tx.staged_vectors.get(&token).is_some_and(|v| !v.is_empty());
         // gap#1: gather this table's staged vector deletes so they ride
         // the SAME commit-ack promote pass as the inserts. A replace
         // (delete old + insert new on the same rid) lands BOTH here: the
@@ -501,12 +534,27 @@ pub(crate) async fn promote_vectors(tx: &TxContext, repo: &RepoInstance, commit_
             .map(|s| s.to_vec())
             .unwrap_or_default();
         let vecs = tx.staged_vectors_for(token).unwrap_or(&[]);
-        if retry_materialize(MATERIALIZE_ATTEMPTS, || {
-            apply_vector_graph_batch(repo, token, vecs, &deleted, tx_id)
-        })
-        .await
-        .is_ok()
-        {
+        // P0 index promote order: take the tickets BEFORE promoting — they
+        // must drop (releasing the turn) on every outcome, including a
+        // failed or cancelled promote. A failed promote never acks below.
+        let tickets = tx
+            .vector_promote_tickets
+            .remove_sync(&token)
+            .map(|(_, t)| t)
+            .unwrap_or_default();
+        let res = if has_inserts {
+            retry_materialize(MATERIALIZE_ATTEMPTS, || {
+                apply_vector_graph_batch(repo, token, vecs, &deleted, tx_id, &tickets)
+            })
+            .await
+        } else {
+            // gap#1 delete-only table: empty vecs, tombstones only.
+            retry_materialize(MATERIALIZE_ATTEMPTS, || {
+                apply_vector_graph_batch(repo, token, &[], &deleted, tx_id, &tickets)
+            })
+            .await
+        };
+        if res.is_ok() {
             // P0 delta-prune: the chunk's mutations are in the live graph;
             // acknowledge them so the backend's applied prefix advances and
             // the next snapshot may prune the chunk. A failed promote never
@@ -526,41 +574,6 @@ pub(crate) async fn promote_vectors(tx: &TxContext, repo: &RepoInstance, commit_
             // WAL-replayed.
             log::warn!(
                 "commit_tx Phase 5d (hnsw graph promote, post-lock) failed for tx {tx_id} \
-                 commit_version {commit_version} table {token}; the live graph \
-                 lags until restore_on_open replays the pre-publish durable delta \
-                 (tx stays COMMITTED + materialized — NOT deferred)"
-            );
-        }
-    }
-
-    // gap#1: tables that have ONLY staged vector deletes (no staged
-    // inserts) still need their deletes promoted — otherwise a tx that
-    // deletes a vector-backed row without inserting a new one leaves a
-    // ghost in the live graph + delta. The loop above only visits tables
-    // present in `staged_vectors`; this second loop visits the
-    // delete-only tables.
-    let delete_only_batches = tx
-        .staged_vector_deletes
-        .iter()
-        .filter(|(t, dels)| !dels.is_empty() && !tx.staged_vectors.contains_key(t))
-        .map(|(t, dels)| (*t, dels.clone()))
-        .collect::<Vec<_>>();
-    for (token, deleted) in delete_only_batches {
-        if retry_materialize(MATERIALIZE_ATTEMPTS, || {
-            apply_vector_graph_batch(repo, token, &[], &deleted, tx_id)
-        })
-        .await
-        .is_ok()
-        {
-            // P0 delta-prune: same acknowledgement rule as the insert loop.
-            if let Some((_, acks)) = tx.vector_delta_acks.remove_sync(&token) {
-                for ack in acks {
-                    ack();
-                }
-            }
-        } else {
-            log::warn!(
-                "commit_tx Phase 5d (hnsw graph delete promote, post-lock) failed for tx {tx_id} \
                  commit_version {commit_version} table {token}; the live graph \
                  lags until restore_on_open replays the pre-publish durable delta \
                  (tx stays COMMITTED + materialized — NOT deferred)"

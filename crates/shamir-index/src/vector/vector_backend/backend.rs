@@ -4,12 +4,14 @@
 
 use crate::backend::{IndexBackend, IndexError, IndexQuery, IndexResult};
 use crate::descriptor::IndexDescriptor;
-use crate::vector::adapter::{VectorAdapter, VectorError};
+use crate::vector::adapter::VectorAdapter;
 use crate::vector::snapshot::{self, SnapshotError, SnapshotManifest};
-use crate::vector::vector_backend::maintenance::{run_background_snapshot, SnapshotFlightGuard};
+use crate::vector::vector_backend::maintenance::{
+    run_background_snapshot, ve, SnapshotFlightGuard,
+};
 use crate::vector::vector_backend::slot::AdapterSlot;
 use crate::write_ops::IndexWriteOp;
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use async_trait::async_trait;
 use futures::StreamExt;
 use shamir_storage::types::Store;
@@ -23,12 +25,10 @@ use shamir_types::types::value::InnerValue;
 use smallvec::SmallVec;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::Notify;
+use tokio::sync::{oneshot, Notify};
 
 #[cfg(test)]
 use crate::vector::vector_backend::cutover::CompactionHooks;
-#[cfg(test)]
-use tokio::sync::oneshot;
 
 /// Keyspace prefix every vector-snapshot record lives under in the info
 /// store. The full keyspace is `__vec_snap__<index_id>` where `<index_id>`
@@ -43,11 +43,11 @@ use tokio::sync::oneshot;
 pub(super) const SNAPSHOT_KEYSPACE_PREFIX: &str = "__vec_snap__";
 
 /// (the slot struct itself lives in [`super::slot`] — see there for the
-/// RV-INDEX-9F62C8DF single-control-word design; the slot stays swappable
-/// on purpose — #402 generation flips and #408 compaction rebuild-aside
-/// swap a freshly-built graph into a LIVE backend. Readers take a snapshot
-/// via `load_full()` (an `Arc`, never a `Guard` held across `.await`), so
-/// a concurrent swap is wait-free RCU.)
+/// RV-INDEX-9F62C8DF single-control-word design; the slot stays swappable:
+/// #402 generation flips and #408 compaction rebuild-aside swap a
+/// freshly-built graph into a LIVE backend; readers snapshot via
+/// `load_full()` — an `Arc`, never a `Guard` held across `.await` — so a
+/// concurrent swap is wait-free RCU.)
 pub struct VectorBackend {
     descriptor: IndexDescriptor,
     field_path: Vec<u64>,
@@ -61,10 +61,8 @@ pub struct VectorBackend {
     /// `Arc<ArcSwap<AdapterSlot>>` — see [`super::slot`].
     pub(crate) adapter: Arc<ArcSwap<AdapterSlot>>,
     /// Full-scan rebuild counter (V2.2 / #401 instrumentation). Incremented
-    /// on EVERY fallback to a data-store-scan rebuild (no snapshot, corrupt
-    /// snapshot, version mismatch); NOT incremented on a successful snapshot
-    /// load. Exposed via [`rebuild_count`] so tests can prove the snapshot
-    /// path was taken.
+    /// on EVERY fallback to a data-store-scan rebuild; NOT on a snapshot
+    /// load. Exposed via [`rebuild_count`] (tests prove the snapshot path).
     full_rebuild_count: AtomicU64,
     /// V2.3 (#402) — number of vector mutations (upserts + deletes) appended
     /// to the delta-log since the last successful generation flip. Bumped by
@@ -96,18 +94,39 @@ pub struct VectorBackend {
     /// commit-ack path (Phase 5d is serial per tx) so a plain `fetch_add`
     /// is correct without a lock.
     ///
-    /// `Arc`-shared so the background snapshot task can read it to compute
-    /// the `delta_applied_upto` for the new manifest.
+    /// `Arc`-shared so the background snapshot task can read the
+    /// `delta_applied_upto` for the new manifest.
     pub(super) next_delta_idx: Arc<AtomicU64>,
     /// P0 delta-prune (brief 164) — contiguous APPLIED prefix: every chunk
-    /// index below it was acknowledged via `mark_delta_applied` (graph
-    /// promote succeeded). Sampled BEFORE the dump for both the manifest
-    /// boundary and the prune bound; never the allocation counter.
+    /// below was acknowledged (`mark_delta_applied`). Sampled BEFORE the
+    /// dump for the manifest boundary and prune bound, never the allocator.
     pub(super) applied_prefix: Arc<AtomicU64>,
     /// P0 delta-prune (brief 164) — acknowledged chunk indices not yet
     /// covered by the contiguous prefix (out-of-order completions); drained
     /// by `ack_delta_applied`. Ordered set per the brief (`scc::TreeIndex`).
     pub(super) applied_set: Arc<scc::TreeIndex<u64, ()>>,
+    /// P0 index promote order (stage L3b) — next delta chunk index allowed to
+    /// promote into the live graph; same-backend promotes run ONE at a time in
+    /// chunk order (one Acquire load + a CAS uncontended, no mutex). Separated
+    /// from `applied_prefix`: a FAILED promote releases the turn (later chunks
+    /// proceed) but never acknowledges (the chunk stays replayable and the
+    /// prune prefix stays below it).
+    pub(super) promote_turn: Arc<AtomicU64>,
+    /// P0 index promote order — chunk indices released ahead of
+    /// `promote_turn` (failed/cancelled); same pattern as `applied_set`.
+    pub(super) turn_finished: Arc<scc::TreeIndex<u64, ()>>,
+    /// P0 index promote order — wake waiters on every turn advance.
+    pub(super) turn_notify: Arc<Notify>,
+    /// Test seam (stage L3b, round-2 finding 3): one-shot fired when a
+    /// promote has to WAIT at the turnstile. ALWAYS compiled — the engine's
+    /// tests build this crate WITHOUT `cfg(test)`, so a cfg-gated seam
+    /// would never fire cross-crate. Contended-wait-path-only; the test
+    /// must hold ONLY the receiver so `Arc::try_unwrap` succeeds on fire.
+    #[doc(hidden)]
+    pub turn_wait_tx: ArcSwapOption<oneshot::Sender<()>>,
+    /// Arm flag for [`Self::turn_wait_tx`] — see `maintenance.rs`.
+    #[doc(hidden)]
+    pub turn_wait_armed: AtomicBool,
     /// Delta-count threshold that arms a background snapshot. Defaults to the
     /// production tunable `VECTOR_SNAPSHOT_DELTA_THRESHOLD`; overridable in
     /// tests (via `set_snapshot_threshold_for_test`) so the full
@@ -159,6 +178,11 @@ impl VectorBackend {
             next_delta_idx: Arc::new(AtomicU64::new(0)),
             applied_prefix: Arc::new(AtomicU64::new(0)),
             applied_set: Arc::new(scc::TreeIndex::new()),
+            promote_turn: Arc::new(AtomicU64::new(0)),
+            turn_finished: Arc::new(scc::TreeIndex::new()),
+            turn_notify: Arc::new(Notify::new()),
+            turn_wait_tx: ArcSwapOption::empty(),
+            turn_wait_armed: AtomicBool::new(false),
             snapshot_threshold: AtomicU64::new(VECTOR_SNAPSHOT_DELTA_THRESHOLD),
             compaction_in_flight: Arc::new(AtomicBool::new(false)),
             published: Arc::new(Notify::new()),
@@ -175,22 +199,6 @@ impl VectorBackend {
         }
     }
 
-    /// Get a clone of the adapter Arc for async use across await points.
-    /// V3.2: used by the engine to access `HnswAdapter::search_prefilter` /
-    /// `search_cofilter` via `adapter.as_hnsw_adapter()`.
-    ///
-    /// # Raw-adapter boundary (F8)
-    /// This hands out the raw adapter, BYPASSING the compaction gate:
-    /// mutations performed through the returned Arc do NOT participate in
-    /// the cutover protocol (no lease, no mirror, no RID claim). Callers
-    /// must not mutate through it while a compaction generation may be
-    /// armed. Current callers are engine READ paths and tests mutating only
-    /// while idle. A write-path facade over this accessor is explicitly
-    /// deferred (documented boundary only this round).
-    pub fn adapter_arc(&self) -> Arc<dyn VectorAdapter> {
-        Arc::clone(&self.adapter.load_full().adapter)
-    }
-
     /// Lower the background-snapshot threshold so a test can cross it without
     /// appending the production default (10k) vectors. Test-only.
     #[cfg(test)]
@@ -198,43 +206,11 @@ impl VectorBackend {
         self.snapshot_threshold.store(threshold, Ordering::Release);
     }
 
-    /// Read the single-flight guard flag. Test-only — used to prove the flag is
-    /// cleared after a background snapshot completes (drop-guard reset).
+    /// Read the single-flight guard flag. Test-only - used to prove the flag
+    /// is cleared after a background snapshot completes (drop-guard reset).
     #[cfg(test)]
     pub(crate) fn snapshot_in_flight_for_test(&self) -> bool {
         self.snapshot_in_flight.load(Ordering::Acquire)
-    }
-
-    /// V4.2 (#408) — lower compaction thresholds for testing.
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn set_compaction_thresholds_for_test(&self, ratio: f64, min_live: usize) {
-        self.compaction_ratio_threshold
-            .store(ratio.to_bits(), Ordering::Release);
-        self.compaction_min_live
-            .store(min_live as u64, Ordering::Release);
-    }
-
-    /// V4.2 (#408) — read compaction in-flight flag. Test-only.
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn compaction_in_flight_for_test(&self) -> bool {
-        self.compaction_in_flight.load(Ordering::Acquire)
-    }
-
-    /// V4.2 (#408) — replace the whole routing slot. Test-only arming hook
-    /// (tests build an `AdapterSlot::armed` and store it here).
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn set_slot_for_test(&self, slot: AdapterSlot) {
-        self.adapter.store(Arc::new(slot));
-    }
-
-    /// V4.2 (#408) — current routing slot. Test-only inspection.
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn slot_for_test(&self) -> Arc<AdapterSlot> {
-        self.adapter.load_full()
     }
 
     /// Snapshot keyspace for this backend's index: `__vec_snap__<id>`.
@@ -284,9 +260,7 @@ impl VectorBackend {
     }
 }
 
-fn ve(e: VectorError) -> IndexError {
-    IndexError::Backend(e.to_string())
-}
+/// (the `ve` error-mapping helper lives in [`super::maintenance`].)
 
 #[async_trait]
 impl IndexBackend for VectorBackend {
@@ -810,6 +784,10 @@ impl IndexBackend for VectorBackend {
                 // all of them.
                 self.applied_prefix
                     .store(hwm.saturating_add(1), Ordering::Release);
+                // P0 index promote order: the turn starts above every
+                // replayed chunk, right beside the applied prefix seed.
+                self.promote_turn
+                    .store(hwm.saturating_add(1), Ordering::Release);
 
                 // Publish the fully-replayed adapter + seeded HWM.
                 // `ArcSwap::store` is wait-free; a concurrent query grabbing
@@ -871,19 +849,15 @@ impl IndexBackend for VectorBackend {
     ///
     /// See [`IndexBackend::append_vector_delta`] for the contract. The chunk
     /// is written at the monotonic `next_delta_idx` (one `Store::set`); the
-    /// HWM is bumped AFTER the write lands so a crash between the write and
-    /// the bump leaves a duplicate-index chunk on the next attempt (which
-    // `Store::set` overwrites — last-writer-wins on the chunk key, and the
-    // ops are idempotent under replay because upsert/delete are
-    // last-write-wins on the adapter).
+    /// HWM is bumped AFTER the write lands so a crash leaves a duplicate-index
+    /// chunk on the next attempt (`Store::set` overwrites — last-writer-wins).
     async fn append_vector_delta(
         &self,
         info_store: &Arc<dyn Store>,
         vecs: &[(RecordId, Vec<f32>)],
         deleted: &[RecordId],
     ) -> Result<Option<u64>, IndexError> {
-        // Build the chunk. An empty promote (no vecs, no deletes) writes
-        // nothing — keeps the chunk stream dense.
+        // Build the chunk; an empty promote writes nothing (dense stream).
         if vecs.is_empty() && deleted.is_empty() {
             return Ok(None);
         }
@@ -896,19 +870,49 @@ impl IndexBackend for VectorBackend {
         }
         let keyspace = self.snapshot_keyspace();
         let idx = self.next_delta_idx.fetch_add(1, Ordering::AcqRel);
+        // P0 index promote order (RV finding 1): armed IMMEDIATELY after the
+        // reservation, BEFORE the only await. Dropped mid-await, the guard
+        // releases the TURN on the unwind (the chunk is NOT marked applied —
+        // it stays replayable, prefix below it). Disarmed at both explicit
+        // exits that handle the release themselves.
+        let mut reservation = super::maintenance::DeltaReservationGuard::arm(self, idx);
         if let Err(e) = snapshot::append_delta(info_store, &keyspace, idx, &ops).await {
-            // Nothing was persisted at `idx` (the `fetch_add` already
-            // reserved it): mark it applied so the failed write does not
-            // stall the contiguous applied prefix forever.
-            IndexBackend::mark_delta_applied(self, idx);
+            // Nothing was persisted at `idx` (already reserved by the
+            // `fetch_add`): mark it applied so the failed write does not
+            // stall the applied prefix, and release the promote turn so
+            // later chunks are never stuck behind it.
+            self.mark_delta_applied(idx);
+            self.release_promote_turn(idx);
+            reservation.disarm();
             return Err(IndexError::Backend(format!("delta append: {e}")));
-        }
+        } // P0 index promote order: the engine's Drop-guard ticket (minted right
+          // below, no await between) owns the turn from here on.
+        reservation.disarm();
         // Bump the mutation counter by the number of ops in this chunk. The
         // background snapshot trigger reads this counter to decide when to
         // flip the generation.
         self.delta_count
             .fetch_add(ops.len() as u64, Ordering::AcqRel);
         Ok(Some(idx))
+    }
+
+    /// P0 index promote order — delegated to the turnstile in [`super::maintenance`].
+    async fn wait_promote_turn(&self, idx: u64) {
+        self.turn_wait(idx).await;
+    }
+
+    /// P0 index promote order — delegated to the turnstile in [`super::maintenance`].
+    fn release_promote_turn(&self, idx: u64) {
+        self.turn_release(idx);
+    }
+
+    /// P0 index promote order — delegated to the turnstile in [`super::maintenance`].
+    async fn promote_graph_batch(
+        &self,
+        vecs: &[(RecordId, Vec<f32>)],
+        deleted: &[RecordId],
+    ) -> Result<(), IndexError> {
+        self.promote_graph_in_turn(vecs, deleted).await
     }
 
     /// P0 delta-prune (brief 164) — see [`IndexBackend::mark_delta_applied`].
