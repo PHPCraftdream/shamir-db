@@ -23,7 +23,7 @@ fn rv_query_builder_macros_7e797992_empty_having_names_having() {
     let err = q_err("from t group_by g having");
     assert_eq!(
         err.to_string(),
-        "q!: expected a filter expression after `having`"
+        "unexpected end of input, q!: expected a filter expression after `having`"
     );
 }
 
@@ -33,7 +33,7 @@ fn rv_query_builder_macros_7e797992_empty_where_still_names_where() {
     let err = q_err("from t where");
     assert_eq!(
         err.to_string(),
-        "q!: expected a filter expression after `where`"
+        "unexpected end of input, q!: expected a filter expression after `where`"
     );
 }
 

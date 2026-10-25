@@ -59,7 +59,10 @@ fn rv_query_builder_macros_e24d5f62_call_args_trailing_tokens_message() {
 #[test]
 fn rv_query_builder_macros_e24d5f62_dotted_ident_missing_field_message() {
     let err = q_err("from t select sum(a.) as x");
-    assert_eq!(err.to_string(), "expected field name after `.`");
+    assert_eq!(
+        err.to_string(),
+        "unexpected end of input, expected field name after `.`"
+    );
 }
 
 #[test]
@@ -76,7 +79,7 @@ fn rv_query_builder_macros_a63844fd_aggregate_requires_as() {
     let err = q_err("from t select count(f)");
     assert_eq!(
         err.to_string(),
-        "q!: aggregate `count(...)` requires `as <alias>` after it"
+        "unexpected end of input, q!: aggregate `count(...)` requires `as <alias>` after it"
     );
 }
 
@@ -85,7 +88,7 @@ fn rv_query_builder_macros_a63844fd_order_by_requires_direction() {
     let err = q_err("from t order_by x");
     assert_eq!(
         err.to_string(),
-        "order_by: expected `asc` or `desc` after field name"
+        "unexpected end of input, order_by: expected `asc` or `desc` after field name"
     );
 }
 
@@ -254,7 +257,7 @@ fn rv_query_builder_macros_a63844fd_delete_requires_where() {
     let err = q_err("delete from t");
     assert_eq!(
         err.to_string(),
-        "q!(delete ...): `where` clause is required for delete statements"
+        "unexpected end of input, q!(delete ...): `where` clause is required for delete statements"
     );
 }
 
