@@ -8,6 +8,27 @@
 //! promote BEFORE transaction A (chunk idx, parked between publish and
 //! promote) and A's stale mutation overwrites B's.
 //!
+//! Shapes exercised here:
+//! - SEEDED-ROW UPDATES: a row is committed FIRST (own tx, hooks unarmed);
+//!   transactions A and B are two `update_tx` calls on the SAME rid. Rids
+//!   are allocator-assigned (`insert_tx` allocates `RecordId::new()`), so
+//!   same-rid ordering can only be exercised on an existing row.
+//! - RE-INSERT VIA UPDATE-OF-DELETED: B "re-inserts" a deleted rid with
+//!   `update_tx` — the update path reads NotFound and stages an INSERT at
+//!   the SAME allocator-assigned rid (`tx_update.rs`: `old = None` →
+//!   `plan_insert_ops(id, ...)`). A fresh `insert_tx` would allocate a NEW
+//!   rid and prove nothing about same-rid ordering.
+//! - TWO-TABLE GLOBAL ORDER: because `create_index_v2` admits at most ONE
+//!   vector index per table (Validation), a single
+//!   `apply_vector_graph_batch` call can never own two vector tickets for
+//!   one table; the cross-table scenario uses two tables and pins the
+//!   merged ascending-token reservation order.
+//!
+//! Oracle: `distance_of(backend, q, rid)` reads the cosine DISTANCE (0 = identical) of ONE
+//! specific rid — tie-immune, unlike a top-hit `match_score` (which the
+//! graph may legitimately answer with EITHER the seed vector or B's own
+//! vector at distance 0 when both vectors are live).
+//!
 //! Determinism: transaction A is parked at the pre-broadcast test hook
 //! (fires AFTER publish, BEFORE `promote_vectors`); transaction B's promote
 //! must WAIT at the turnstile — observed via the backend's one-shot
@@ -58,10 +79,10 @@ async fn field_id(tbl: &crate::table::TableManager, name: &str) -> u64 {
     }
 }
 
-fn vector_index_op(name: &str) -> CreateIndexOp {
+fn vector_index_op(table: &str, name: &str) -> CreateIndexOp {
     CreateIndexOp {
         create_index: name.into(),
-        table: "vecs".into(),
+        table: table.into(),
         fields: vec![vec!["embedding".into()]],
         unique: false,
         sorted: false,
@@ -96,26 +117,32 @@ fn as_vector(backends: &[Arc<dyn IndexBackend>]) -> &VectorBackend {
         .expect("the table must own a VectorBackend")
 }
 
-/// Which embedding the graph currently holds for the single row: the match
-/// score of the live vector against `q`. The stale/new vectors are mutually
-/// orthogonal, so the larger score identifies which promote won.
-async fn match_score(backend: &VectorBackend, q: &[f64]) -> f32 {
+/// COSINE DISTANCE (0 = identical, 1 = orthogonal; NOT similarity) of ONE
+/// specific rid under query `q`; panics if
+/// the rid is absent — absence is asserted separately via `hits_contain`.
+/// Unlike a top-hit score, this is PER-RID and therefore tie-immune: when
+/// the graph legitimately holds BOTH the seed vector and B's newer vector
+/// (e.g. A's update failed or was replaced), both queries answer 1.0 at the
+/// top hit and a `s_new > s_stale` comparison is vacuously false. This
+/// oracle fails precisely when the stale promote won.
+async fn distance_of(backend: &VectorBackend, q: &[f64], rid: &RecordId) -> f32 {
     let q: Vec<f32> = q.iter().map(|f| *f as f32).collect();
     match IndexBackend::lookup(
         backend,
         IndexQuery::Vector {
             vec: q,
-            k: 5,
+            k: 10,
             opts: crate::index2::vector::SearchOpts::default(),
         },
     )
     .await
     .unwrap()
     {
-        IndexResult::Ranked(hits) => {
-            assert!(!hits.is_empty(), "the rid must be in the live graph");
-            hits[0].1
-        }
+        IndexResult::Ranked(hits) => hits
+            .iter()
+            .find(|(r, _)| r == rid)
+            .map(|(_, s)| *s)
+            .unwrap_or_else(|| panic!("rid {rid:?} absent from the live graph")),
         _ => panic!("expected Ranked result"),
     }
 }
@@ -182,38 +209,18 @@ async fn join_tail(outcome: &mut crate::tx::tx_outcome::TxOutcome) {
     }
 }
 
-/// Every vector backend on a table, DOWNCAST — for per-backend oracles the
-/// two-index scenario (round-2 finding 2) asserts on BOTH backends.
-fn vector_backends(backends: &[Arc<dyn IndexBackend>]) -> Vec<&VectorBackend> {
-    backends
-        .iter()
-        .filter_map(|b| b.as_any().downcast_ref::<VectorBackend>())
-        .collect()
-}
-
-/// The VectorBackend with the LOWEST descriptor id — the FIRST ticket in
-/// the global (token, descriptor id) order. Index ids auto-increment, so
-/// the first-created index is always lowest.
-fn as_vector_lowest(backends: &[Arc<dyn IndexBackend>]) -> &VectorBackend {
-    let low = backends
-        .iter()
-        .min_by_key(|b| shamir_index::IndexBackend::descriptor(b.as_ref()).id)
-        .expect("the table must own at least one index backend");
-    low.as_any()
-        .downcast_ref::<VectorBackend>()
-        .expect("the lowest-id backend must be the vector backend")
-}
-
-/// (a) main scenario: A (stale vector, chunk idx) is parked between publish
-/// and promote; B (newer vector, chunk idx+1, same rid) promotes — and MUST
-/// wait at the turnstile; A resumes LAST yet must NOT overwrite B. The
-/// snapshot + restart oracle still holds B's vector.
+/// (a) main scenario (the proven (b) shape): a row is committed FIRST
+/// (seed, chunk 0, hooks unarmed); then A (mid vector, chunk 1) is parked
+/// between publish and promote; B (newer vector, chunk 2, same rid) promotes
+/// — and MUST wait at the turnstile; A resumes LAST yet must NOT overwrite
+/// B. The snapshot + restart oracle still holds B's vector.
 ///
 /// Fails on old code because: reverting the turnstile in
 /// `apply_vector_graph_batch` (wait_turn/promote via tickets) back to the
 /// unordered `apply_staged_vector_deletes` + `apply_staged_vectors` loop lets
 /// B promote without ever waiting — the turn-wait one-shot never fires,
-/// `within(turn_rx)` times out, and A's stale promote lands last.
+/// `within(turn_rx)` times out, and A's stale promote lands last
+/// (`distance_of(rid, q_new) < 0.1`).
 ///
 /// Awaits inside the spawned tasks are bounded by the outer `within(join)`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -221,23 +228,39 @@ async fn rv_index_l3b_promote_order_stale_promote_loses_to_newer_vector() {
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = within(repo.get_table("vecs")).await.unwrap();
-    within(tbl.create_index_v2(&vector_index_op("vec_idx")))
+    within(tbl.create_index_v2(&vector_index_op("vecs", "vec_idx")))
         .await
         .unwrap();
     let emb = within(field_id(&tbl, "embedding")).await;
     let backends = within(tbl.index2_registry().all_backends()).await;
     let backend = as_vector(&backends);
 
+    // Seed BEFORE arming the journal hook (RV finding 6): an armed hook parks
+    // EVERY commit at the pre-broadcast point, so the seed would hang forever.
+    // A committed row gives A and B the SAME allocator-assigned rid to fight
+    // over — `insert_tx` rids are allocator-assigned, never content-derived.
+    let (mut tx0, pin0) = within(repo.begin_tx(IsolationLevel::Snapshot))
+        .await
+        .unwrap();
+    let rid = within(tbl.insert_tx(&vec_record(emb, &[1.0, 0.0, 0.0]), Some(&mut tx0)))
+        .await
+        .unwrap();
+    let mut outcome0 = within(repo.commit_tx(tx0)).await.unwrap();
+    join_tail(&mut outcome0).await;
+    drop(pin0);
+    assert_eq!(backend.applied_prefix(), 1, "chunk 0 must be acknowledged");
+
+    // NOW arm: A parks pre-promote, B waits at the turnstile behind A.
     let park = park_hook();
     repo.journal_publish_hook.store(Some(park.clone()));
     let (turn_tx, turn_rx) = oneshot::channel();
     backend.arm_promote_turn_wait_hook_for_test(turn_tx);
 
-    // Transaction A: stale vector; parked pre-promote (chunk idx reserved).
+    // Transaction A: mid vector; parked pre-promote (chunk 1 reserved).
     let (mut tx_a, pin_a) = within(repo.begin_tx(IsolationLevel::Snapshot))
         .await
         .unwrap();
-    let rid = within(tbl.insert_tx(&vec_record(emb, &[1.0, 0.0, 0.0]), Some(&mut tx_a)))
+    within(tbl.update_tx(rid, &vec_record(emb, &[0.0, 1.0, 0.0]), Some(&mut tx_a)))
         .await
         .unwrap();
     let repo_a = repo.clone();
@@ -248,27 +271,39 @@ async fn rv_index_l3b_promote_order_stale_promote_loses_to_newer_vector() {
     let (mut tx_b, pin_b) = within(repo.begin_tx(IsolationLevel::Snapshot))
         .await
         .unwrap();
-    within(tbl.update_tx(rid, &vec_record(emb, &[0.0, 1.0, 0.0]), Some(&mut tx_b)))
+    within(tbl.update_tx(rid, &vec_record(emb, &[0.0, 0.0, 1.0]), Some(&mut tx_b)))
         .await
         .unwrap();
     let repo_b = repo.clone();
     let task_b = tokio::spawn(async move { repo_b.commit_tx(tx_b).await });
     let _ = within(turn_rx).await;
 
-    // Resume A — its stale promote runs, but B's chunk still promotes AFTER.
+    // Resume A — its mid promote runs, but B's chunk still promotes AFTER.
     park.resume.notify_one();
     let mut outcome_a = within(task_a).await.unwrap().unwrap();
     join_tail(&mut outcome_a).await;
     let mut outcome_b = within(task_b).await.unwrap().unwrap();
     join_tail(&mut outcome_b).await;
 
-    // The live graph holds B's vector: the NEW vector outranks the stale one.
-    let s_new = within(match_score(backend, &[0.0, 1.0, 0.0])).await;
-    let s_stale = within(match_score(backend, &[1.0, 0.0, 0.0])).await;
+    // Per-rid oracle (tie-immune): the row's LIVE vector IS B's newer
+    // embedding; A's mid embedding is NOT live.
+    let s_new = within(distance_of(backend, &[0.0, 0.0, 1.0], &rid)).await;
+    let s_mid = within(distance_of(backend, &[0.0, 1.0, 0.0], &rid)).await;
     assert!(
-        s_new > s_stale,
-        "the live graph must hold B's newer vector (s_new {s_new} <= s_stale {s_stale} — \
-         A's stale promote landed after B's)"
+        s_new < 0.1,
+        "the live graph must hold B's newer vector for this rid \
+         (distance_of(q_new) = {s_new} — A's stale promote landed after B's)"
+    );
+    assert!(
+        s_mid > 0.9,
+        "A's mid vector must NOT be live for this rid (distance_of(q_mid) = {s_mid})"
+    );
+
+    // Seed chunk 0 + A's chunk 1 + B's chunk 2 ⇒ contiguous prefix 3.
+    assert_eq!(
+        backend.applied_prefix(),
+        3,
+        "A's and B's chunks must each be acked exactly once"
     );
 
     // Snapshot + restart: the persisted graph is still B's vector.
@@ -281,11 +316,12 @@ async fn rv_index_l3b_promote_order_stale_promote_loses_to_newer_vector() {
         tbl.data_store_for_test(),
     ))
     .await;
-    let s_new = within(match_score(&reloaded, &[0.0, 1.0, 0.0])).await;
-    let s_stale = within(match_score(&reloaded, &[1.0, 0.0, 0.0])).await;
+    let s_new = within(distance_of(&reloaded, &[0.0, 0.0, 1.0], &rid)).await;
+    let s_mid = within(distance_of(&reloaded, &[0.0, 1.0, 0.0], &rid)).await;
     assert!(
-        s_new > s_stale,
-        "the restarted graph must still hold B's newer vector"
+        s_new < 0.1 && s_mid > 0.9,
+        "the restarted graph must still hold B's newer vector for this rid \
+         (s_new {s_new}, s_mid {s_mid})"
     );
     drop((pin_a, pin_b));
 }
@@ -303,7 +339,7 @@ async fn rv_index_l3b_promote_order_upsert_then_delete_stays_absent() {
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = within(repo.get_table("vecs")).await.unwrap();
-    within(tbl.create_index_v2(&vector_index_op("vec_idx")))
+    within(tbl.create_index_v2(&vector_index_op("vecs", "vec_idx")))
         .await
         .unwrap();
     let emb = within(field_id(&tbl, "embedding")).await;
@@ -366,9 +402,17 @@ async fn rv_index_l3b_promote_order_upsert_then_delete_stays_absent() {
     drop((pin_a, pin_b));
 }
 
-/// (c) delete-then-reinsert: A (delete of the rid, chunk idx) parked; B
-/// re-inserts the same record (chunk idx+1) and must wait; after both
-/// promote IN ORDER the rid is present with the newest vector.
+/// (c) delete-then-reinsert: a row is committed FIRST (seed, chunk 0); A
+/// (delete of the rid, chunk 1) is parked; B re-inserts the SAME rid via
+/// `update_tx` (chunk 2) and must wait; after both promote IN ORDER the rid
+/// is present with the (same) vector.
+///
+/// The re-insert is an UPDATE-OF-DELETED-ROW, not a fresh insert:
+/// `update_tx` reads NotFound (A's data delete commits at publish) and
+/// stages an INSERT at the SAME allocator-assigned rid (`tx_update.rs`:
+/// `old = None` → `plan_insert_ops(id, ...)`). A fresh `insert_tx` would
+/// allocate a NEW rid (`RecordId::new()`) and prove nothing about same-rid
+/// ordering.
 ///
 /// Fails on old code because: on the unordered path B's insert promotes
 /// first and A's parked delete promotes after it, tombstoning the freshly
@@ -378,16 +422,15 @@ async fn rv_index_l3b_promote_order_delete_then_reinsert_present_newest() {
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = within(repo.get_table("vecs")).await.unwrap();
-    within(tbl.create_index_v2(&vector_index_op("vec_idx")))
+    within(tbl.create_index_v2(&vector_index_op("vecs", "vec_idx")))
         .await
         .unwrap();
     let emb = within(field_id(&tbl, "embedding")).await;
     let backends = within(tbl.index2_registry().all_backends()).await;
     let backend = as_vector(&backends);
 
-    // Seed a committed row BEFORE arming the journal hook (RV finding 6); the
-    // re-insert below uses the SAME value so the content-derived rid lands on
-    // the same record.
+    // Seed a committed row BEFORE arming the journal hook (RV finding 6).
+    // The re-insert below targets this allocator-assigned rid.
     let (mut tx0, pin0) = within(repo.begin_tx(IsolationLevel::Snapshot))
         .await
         .unwrap();
@@ -397,6 +440,7 @@ async fn rv_index_l3b_promote_order_delete_then_reinsert_present_newest() {
     let mut outcome0 = within(repo.commit_tx(tx0)).await.unwrap();
     join_tail(&mut outcome0).await;
     drop(pin0);
+    assert_eq!(backend.applied_prefix(), 1, "chunk 0 must be acknowledged");
 
     // NOW arm: A parks pre-promote, B waits at the turnstile behind A.
     let park = park_hook();
@@ -404,7 +448,8 @@ async fn rv_index_l3b_promote_order_delete_then_reinsert_present_newest() {
     let (turn_tx, turn_rx) = oneshot::channel();
     backend.arm_promote_turn_wait_hook_for_test(turn_tx);
 
-    // A: delete the rid, parked pre-promote.
+    // A: delete the rid, parked pre-promote (A's data delete COMMITS at
+    // publish, so the row is gone before B reads).
     let (mut tx_a, pin_a) = within(repo.begin_tx(IsolationLevel::Snapshot))
         .await
         .unwrap();
@@ -413,31 +458,50 @@ async fn rv_index_l3b_promote_order_delete_then_reinsert_present_newest() {
     let task_a = tokio::spawn(async move { repo_a.commit_tx(tx_a).await });
     within(park.reached.notified()).await;
 
-    // B: re-insert the SAME value (same rid, newest vector).
+    // B: re-insert via update-of-deleted-row — the update path reads
+    // NotFound (deleted) and stages an INSERT at the SAME rid
+    // (tx_update.rs: `old = None` → `plan_insert_ops(id, ...)`).
     let (mut tx_b, pin_b) = within(repo.begin_tx(IsolationLevel::Snapshot))
         .await
         .unwrap();
-    let rid_b = within(tbl.insert_tx(&vec_record(emb, &[1.0, 0.0, 0.0]), Some(&mut tx_b)))
+    within(tbl.update_tx(rid, &vec_record(emb, &[1.0, 0.0, 0.0]), Some(&mut tx_b)))
         .await
         .unwrap();
-    assert_eq!(
-        rid_b, rid,
-        "re-insert must land on the same content-derived rid"
-    );
     let repo_b = repo.clone();
     let task_b = tokio::spawn(async move { repo_b.commit_tx(tx_b).await });
     let _ = within(turn_rx).await;
 
     park.resume.notify_one();
     let mut outcome_a = within(task_a).await.unwrap().unwrap();
+    assert_eq!(
+        outcome_a.materialization,
+        MaterializationState::Complete,
+        "tx A (delete) must commit Complete"
+    );
     join_tail(&mut outcome_a).await;
     let mut outcome_b = within(task_b).await.unwrap().unwrap();
+    assert_eq!(
+        outcome_b.materialization,
+        MaterializationState::Complete,
+        "tx B (re-insert) must commit Complete"
+    );
     join_tail(&mut outcome_b).await;
 
     assert!(
         within(hits_contain(backend, &[1.0, 0.0, 0.0], &rid)).await,
         "re-inserted rid must be present in the live graph after the \
          delete-then-reinsert pair promotes in chunk order"
+    );
+    let s = within(distance_of(backend, &[1.0, 0.0, 0.0], &rid)).await;
+    assert!(
+        s < 0.1,
+        "the re-inserted rid must hold the re-inserted vector (score {s})"
+    );
+    // Seed chunk 0 + A's delete chunk 1 + B's re-insert chunk 2 ⇒ prefix 3.
+    assert_eq!(
+        backend.applied_prefix(),
+        3,
+        "A's and B's chunks must each be acked exactly once"
     );
     drop((pin_a, pin_b));
 }
@@ -463,7 +527,7 @@ async fn rv_index_l3b_promote_order_failed_promote_releases_turn() {
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = within(repo.get_table("vecs")).await.unwrap();
-    within(tbl.create_index_v2(&vector_index_op("vec_idx")))
+    within(tbl.create_index_v2(&vector_index_op("vecs", "vec_idx")))
         .await
         .unwrap();
     let emb = within(field_id(&tbl, "embedding")).await;
@@ -528,11 +592,17 @@ async fn rv_index_l3b_promote_order_failed_promote_releases_turn() {
     let mut outcome_b = within(task_b).await.unwrap().unwrap();
     join_tail(&mut outcome_b).await;
 
-    let s_new = within(match_score(backend, &[0.0, 0.0, 1.0])).await;
-    let s_stale = within(match_score(backend, &[1.0, 0.0, 0.0])).await;
+    // Per-rid oracle (tie-immune): B's vector is live after A's failed
+    // promote, and A's failed mid vector never landed for this rid.
+    let s_new = within(distance_of(backend, &[0.0, 0.0, 1.0], &rid)).await;
     assert!(
-        s_new > s_stale,
-        "B's vector must be live after A's failed promote"
+        s_new < 0.1,
+        "B's vector must be live after A's failed promote (score {s_new})"
+    );
+    let s_mid = within(distance_of(backend, &[0.0, 1.0, 0.0], &rid)).await;
+    assert!(
+        s_mid > 0.9,
+        "A's failed mid vector must NOT be live (score {s_mid})"
     );
 
     // A's failed chunk stays unacknowledged (never acked by its failure);
@@ -545,93 +615,123 @@ async fn rv_index_l3b_promote_order_failed_promote_releases_turn() {
     drop((pin_a, pin_b));
 }
 
-/// (g) WAIT-CYCLE ACROSS BACKENDS with the round-2 GLOBAL ORDER (finding 2):
-/// ONE table ("vecs") with TWO vector indexes (`create_index_v2` twice —
-/// index ids auto-increment, so index A sorts before index B), i.e. TWO
-/// backends inside ONE `apply_vector_graph_batch` call. Because
-/// `apply_vector_delta_phase` and `promote_vectors` both merge their tokens
-/// into ONE sorted Vec and `apply_vector_delta_batch` mints tickets by
-/// ascending descriptor id, tx A and tx B reserve AND promote their
-/// (token, backend id) pairs in the SAME global total order: B's promote
-/// must WAIT at the LOW-id backend FIRST (the turn-wait seam is armed ONLY
-/// there, so the handshake is deterministic — if B ever promoted low-out-of
-///-order, `within(turn_rx)` would time out before anything else), and only
-/// after A finishes BOTH backends does B proceed.
+/// (g) WAIT-CYCLE ACROSS TABLES with the GLOBAL ORDER: TWO tables ("t1",
+/// "t2"), ONE vector index each (ONE vector index per table is a
+/// PRODUCTION CONSTRAINT — `create_index_v2` Validation: "only ONE vector
+/// index per table"), so a single `apply_vector_graph_batch` call owns one
+/// ticket per table, and the per-table calls release all turns before the
+/// next table starts. This test therefore pins the MERGED SORTED TOKEN
+/// ORDER (`apply_vector_delta_phase` visits the insert ∪ delete-only
+/// tokens in ONE ascending order, `commit_phases.rs` ~:239-320) and
+/// cross-table liveness — NOT a same-call multi-ticket inversion, which
+/// cannot exist under the one-vector-index-per-table constraint.
 ///
-/// Revert honesty (stated as required): with the round-1
-/// wait-all-then-promote-all-no-release shape, B cannot START on backend-low
-/// until A finished BOTH backends — the seam still fires (the wait exists);
-/// what the sort guarantees is the ORDERED-RELEASE property. The true
-/// inversion DEADLOCK requires two txs processing the two tickets in
-/// OPPOSITE orders: that is impossible BY CONSTRUCTION under the sorted
-/// order, and makes the test NONDETERMINISTIC under the unsorted revert
-/// (registry iteration order) — this test therefore asserts the strongest
-/// deterministic oracle available (B waits at backend-low FIRST; both txs
-/// Complete; both backends hold B's newer embedding; both prefixes exactly
+/// Shape: tx A updates t1's row THEN t2's row (one tx, BOTH deltas staged
+/// before A parks — the park fires after publish, and both delta chunks are
+/// appended in A's materialize before the park, so both reservations exist
+/// in ascending token order); tx B updates t2's row THEN t1's row and
+/// commits → must WAIT at the lower-token table's turnstile (the seam is
+/// armed ONLY there); A resumes; both txs Complete; each table's row holds
+/// its newer vector; each backend prefix exactly 3.
+///
+/// Revert honesty (stated as required): with the old two-separate-loops
+/// shape (all inserts before all delete-onlys), a tx could reserve t2 while
+/// holding t1's earlier reservation and interleave against B's opposite
+/// order — the handshake/seam and the bounded `within` detect the stall.
+/// Under the unsorted revert the stall itself is RESIDUAL NONDETERMINISTIC
+/// (map iteration order); this test asserts the strongest deterministic
+/// oracle available (B waits at the low-token table's turnstile FIRST; both
+/// txs Complete; both rows hold B's newer embedding; both prefixes exactly
 /// 3) and NOT the nondeterministic inversion itself.
 ///
 /// Awaits inside the spawned tasks are bounded by the outer `within(join)`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn rv_index_l3b_promote_order_no_wait_cycle_across_backends_one_table() {
+async fn rv_index_l3b_promote_order_no_wait_cycle_across_tables_global_order() {
     let repo = make_repo();
-    repo.add_table_for_test(TableConfig::new("vecs"));
-    let tbl = within(repo.get_table("vecs")).await.unwrap();
-    within(tbl.create_index_v2(&vector_index_op("vec_idx_a")))
+    repo.add_table_for_test(TableConfig::new("t1"));
+    repo.add_table_for_test(TableConfig::new("t2"));
+    let tbl1 = within(repo.get_table("t1")).await.unwrap();
+    let tbl2 = within(repo.get_table("t2")).await.unwrap();
+    within(tbl1.create_index_v2(&vector_index_op("t1", "t1_vec_idx")))
         .await
         .unwrap();
-    within(tbl.create_index_v2(&vector_index_op("vec_idx_b")))
+    within(tbl2.create_index_v2(&vector_index_op("t2", "t2_vec_idx")))
         .await
         .unwrap();
-    let emb = within(field_id(&tbl, "embedding")).await;
-    let backends = within(tbl.index2_registry().all_backends()).await;
-    assert_eq!(
-        vector_backends(&backends).len(),
-        2,
-        "the table must own TWO vector backends (one per index)"
-    );
-    let low = as_vector_lowest(&backends);
+    let emb1 = within(field_id(&tbl1, "embedding")).await;
+    let emb2 = within(field_id(&tbl2, "embedding")).await;
+    let backends1 = within(tbl1.index2_registry().all_backends()).await;
+    let backends2 = within(tbl2.index2_registry().all_backends()).await;
+    let be1 = as_vector(&backends1);
+    let be2 = as_vector(&backends2);
 
-    // Seed BEFORE arming the journal hook: one committed row on BOTH
-    // backends (chunk 0 acked on each → applied_prefix == 1 on each).
+    // Tokens ARE easily comparable (`TableManager::table_token`): the seam
+    // is armed on the LOWER-token table's backend — the first table in the
+    // merged ascending-token order, so the handshake is deterministic.
+    let tok1 = tbl1.table_token();
+    let tok2 = tbl2.table_token();
+    let low_be = if tok1 <= tok2 { be1 } else { be2 };
+
+    // Seed BEFORE arming the journal hook: one committed row PER TABLE
+    // (chunk 0 acked on each → applied_prefix == 1 on each).
     let (mut tx0, pin0) = within(repo.begin_tx(IsolationLevel::Snapshot))
         .await
         .unwrap();
-    let rid = within(tbl.insert_tx(&vec_record(emb, &[1.0, 0.0, 0.0]), Some(&mut tx0)))
+    let rid1 = within(tbl1.insert_tx(&vec_record(emb1, &[1.0, 0.0, 0.0]), Some(&mut tx0)))
         .await
         .unwrap();
     let mut outcome0 = within(repo.commit_tx(tx0)).await.unwrap();
     join_tail(&mut outcome0).await;
-    drop(pin0);
-    for b in vector_backends(&backends) {
-        assert_eq!(b.applied_prefix(), 1, "seed chunk 0 acked on every backend");
-    }
+    let (mut tx1, pin1) = within(repo.begin_tx(IsolationLevel::Snapshot))
+        .await
+        .unwrap();
+    let rid2 = within(tbl2.insert_tx(&vec_record(emb2, &[1.0, 0.0, 0.0]), Some(&mut tx1)))
+        .await
+        .unwrap();
+    let mut outcome1 = within(repo.commit_tx(tx1)).await.unwrap();
+    join_tail(&mut outcome1).await;
+    drop((pin0, pin1));
+    assert_eq!(be1.applied_prefix(), 1, "seed chunk 0 acked on t1");
+    assert_eq!(be2.applied_prefix(), 1, "seed chunk 0 acked on t2");
 
-    // NOW arm: A parks pre-promote (chunk 1 reserved on BOTH backends); B
-    // (chunk 2 on BOTH) must wait at the LOW-id backend.
+    // NOW arm: A parks pre-promote (chunks reserved on BOTH tables in
+    // ascending token order); B must wait at the LOW-token table's
+    // turnstile.
     let park = park_hook();
     repo.journal_publish_hook.store(Some(park.clone()));
     let (turn_tx, turn_rx) = oneshot::channel();
-    low.arm_promote_turn_wait_hook_for_test(turn_tx);
+    low_be.arm_promote_turn_wait_hook_for_test(turn_tx);
 
+    // A: updates t1's row THEN t2's row (one tx) — both deltas staged and
+    // reserved BEFORE the park fires (post-publish).
     let (mut tx_a, pin_a) = within(repo.begin_tx(IsolationLevel::Snapshot))
         .await
         .unwrap();
-    within(tbl.update_tx(rid, &vec_record(emb, &[0.0, 1.0, 0.0]), Some(&mut tx_a)))
+    within(tbl1.update_tx(rid1, &vec_record(emb1, &[0.0, 1.0, 0.0]), Some(&mut tx_a)))
+        .await
+        .unwrap();
+    within(tbl2.update_tx(rid2, &vec_record(emb2, &[0.0, 1.0, 0.0]), Some(&mut tx_a)))
         .await
         .unwrap();
     let repo_a = repo.clone();
     let task_a = tokio::spawn(async move { repo_a.commit_tx(tx_a).await });
     within(park.reached.notified()).await;
 
+    // B: updates t2's row THEN t1's row (OPPOSITE order) — the merged
+    // ascending-token order makes both txs process the two tables in the
+    // SAME order, so B waits at the low-token table's turnstile.
     let (mut tx_b, pin_b) = within(repo.begin_tx(IsolationLevel::Snapshot))
         .await
         .unwrap();
-    within(tbl.update_tx(rid, &vec_record(emb, &[0.0, 0.0, 1.0]), Some(&mut tx_b)))
+    within(tbl2.update_tx(rid2, &vec_record(emb2, &[0.0, 0.0, 1.0]), Some(&mut tx_b)))
+        .await
+        .unwrap();
+    within(tbl1.update_tx(rid1, &vec_record(emb1, &[0.0, 0.0, 1.0]), Some(&mut tx_b)))
         .await
         .unwrap();
     let repo_b = repo.clone();
     let task_b = tokio::spawn(async move { repo_b.commit_tx(tx_b).await });
-    // THE handshake: B must park at the LOW-id backend's turnstile (the
+    // THE handshake: B must park at the LOW-token table's turnstile (the
     // seam is armed only there).
     let _ = within(turn_rx).await;
 
@@ -651,24 +751,32 @@ async fn rv_index_l3b_promote_order_no_wait_cycle_across_backends_one_table() {
         "tx B must commit Complete (deadlock-free promote order)"
     );
 
-    // BOTH backends hold B's NEWER embedding (match_score comparison, not
-    // just rid presence): B's vector outranks A's on each backend.
-    for b in vector_backends(&backends) {
-        let s_new = within(match_score(b, &[0.0, 0.0, 1.0])).await;
-        let s_mid = within(match_score(b, &[0.0, 1.0, 0.0])).await;
-        assert!(
-            s_new > s_mid,
-            "each backend's live graph must hold B's newer vector \
-             (s_new {s_new} <= s_mid {s_mid})"
-        );
-        // Contiguous acked prefix: seed chunk 0 + A's chunk 1 + B's chunk 2
-        // acked on EACH backend ⇒ exactly 3 (computed from the seed hwm).
-        assert_eq!(
-            b.applied_prefix(),
-            3,
-            "A's and B's chunks must each be acked exactly once on every backend"
-        );
-    }
+    // Per-table, per-rid oracle: each table's live graph holds B's newer
+    // embedding for THAT table's row (tie-immune distance_of).
+    let s1 = within(distance_of(be1, &[0.0, 0.0, 1.0], &rid1)).await;
+    let s1_mid = within(distance_of(be1, &[0.0, 1.0, 0.0], &rid1)).await;
+    assert!(
+        s1 < 0.1 && s1_mid > 0.9,
+        "t1's row must hold B's newer vector (s_new {s1}, s_mid {s1_mid})"
+    );
+    let s2 = within(distance_of(be2, &[0.0, 0.0, 1.0], &rid2)).await;
+    let s2_mid = within(distance_of(be2, &[0.0, 1.0, 0.0], &rid2)).await;
+    assert!(
+        s2 < 0.1 && s2_mid > 0.9,
+        "t2's row must hold B's newer vector (s_new {s2}, s_mid {s2_mid})"
+    );
+    // Contiguous acked prefix per backend: seed chunk 0 + A's chunk 1 +
+    // B's chunk 2 ⇒ exactly 3.
+    assert_eq!(
+        be1.applied_prefix(),
+        3,
+        "A's and B's chunks must each be acked exactly once on t1"
+    );
+    assert_eq!(
+        be2.applied_prefix(),
+        3,
+        "A's and B's chunks must each be acked exactly once on t2"
+    );
     drop((pin_a, pin_b));
 }
 
@@ -682,6 +790,15 @@ async fn rv_index_l3b_promote_order_no_wait_cycle_across_backends_one_table() {
 /// ticket whose `promote` answered a phantom `Ok(())` — a real adapter
 /// failure "succeeded" on retry and the chunk got acknowledged without its
 /// mutations ever reaching the adapter.
+///
+/// Oracle honesty (stated as required): the transient-retry oracle is the
+/// prefix==3 + both-Complete combination — against the OLD consumed-ticket
+/// code the retried apply either errors (A's chunk never acked, prefix
+/// stops at 2) or phantom-Oks (prefix would read 3 without B ever
+/// waiting). The per-rid scores pin the final VALUE: `distance_of(q_new) <
+/// 0.1` requires A's chunk to have actually promoted BEFORE B's (B's
+/// identical-rid write then replaces it), and `distance_of(q_mid) > 0.9`
+/// proves the retry truly applied.
 ///
 /// Fails on old code because: with the ticket released before `res?`, the
 /// retried apply errors with "promote ticket already released" (or, before
@@ -700,7 +817,7 @@ async fn rv_index_l3b_promote_order_transient_promote_failure_retries_in_turn() 
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = within(repo.get_table("vecs")).await.unwrap();
-    within(tbl.create_index_v2(&vector_index_op("vec_idx")))
+    within(tbl.create_index_v2(&vector_index_op("vecs", "vec_idx")))
         .await
         .unwrap();
     let emb = within(field_id(&tbl, "embedding")).await;
@@ -773,20 +890,24 @@ async fn rv_index_l3b_promote_order_transient_promote_failure_retries_in_turn() 
         "tx B must commit Complete"
     );
 
-    // The live graph holds B's NEWER embedding (not A's mid vector).
-    let s_new = within(match_score(backend, &[0.0, 0.0, 1.0])).await;
-    let s_mid = within(match_score(backend, &[0.0, 1.0, 0.0])).await;
-    let s_stale = within(match_score(backend, &[1.0, 0.0, 0.0])).await;
+    // Per-rid oracle (tie-immune): the row's LIVE vector is B's newer
+    // embedding, not A's mid vector.
+    let s_new = within(distance_of(backend, &[0.0, 0.0, 1.0], &rid)).await;
+    let s_mid = within(distance_of(backend, &[0.0, 1.0, 0.0], &rid)).await;
     assert!(
-        s_new > s_mid && s_new > s_stale,
-        "B's newer vector must be live after A's transient promote failure"
+        s_new < 0.1,
+        "B's newer vector must be live after A's transient promote failure (score {s_new})"
+    );
+    assert!(
+        s_mid > 0.9,
+        "A's mid vector must NOT be live (score {s_mid})"
     );
 
     // EXACT ack accounting: chunk 0 (seed) + chunk 1 (A, retried and then
     // acked EXACTLY ONCE) + chunk 2 (B) ⇒ applied_prefix == 3, not more.
-    // A false-success retry (consumed ticket answering Ok) acks a chunk
-    // whose apply never ran — with the fixed code the retry really applies,
-    // so the prefix is exactly start + 2.
+    // Against the OLD consumed-ticket code the retried apply fails (or
+    // phantom-Oks without applying); prefix==3 + both-Complete is the
+    // transient-retry oracle — the per-rid scores above pin the final value.
     assert_eq!(
         backend.applied_prefix(),
         3,
