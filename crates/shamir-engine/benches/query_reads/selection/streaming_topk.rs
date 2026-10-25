@@ -30,9 +30,9 @@
 //! real engine `tbl.read()` calls — no synthetic harness.
 //!
 //! Peak allocation is sampled once per path up front via
-//! `shamir_bench_utils::peak_mem` (a `#[global_allocator]` wrapper that tracks
-//! the max live-byte watermark); the `Harness` then owns the timed latency
-//! sweep.
+//! `shamir_bench_utils::peak_mem` (installed explicitly by this bench via
+//! `install_peak_alloc!`, tracking the max live-byte watermark); the `Harness`
+//! then owns the timed latency sweep.
 //!
 //! Run (isolated bench target dir, per the workspace bench-cache rule):
 //!   `CARGO_TARGET_DIR=D:\dev\rust\.cargo-target-bench cargo bench -p
@@ -50,6 +50,9 @@ use shamir_storage::types::Store;
 use shamir_types::core::interner::TouchInd;
 use shamir_types::types::common::{new_map, new_map_wc};
 use shamir_types::types::value::InnerValue;
+
+// Opt in to the peak_mem tracking allocator for this binary (off by default).
+shamir_bench_utils::install_peak_alloc!();
 
 /// Rows per table. Large enough that N projected `QueryValue` maps dominate
 /// the peak watermark over scan/decode noise, small enough to stay within the
@@ -123,9 +126,6 @@ async fn peak_of_read(mgr: &TableManager, q: &ReadQuery) -> usize {
 }
 
 fn main() {
-    // Force the peak_mem global allocator to be linked.
-    shamir_bench_utils::peak_mem::setup();
-
     let mut h = Harness::new("streaming_topk", env!("CARGO_MANIFEST_DIR"));
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

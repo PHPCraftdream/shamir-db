@@ -1,10 +1,9 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use shamir_collections::TFxMap;
 use tokio::sync::oneshot;
 
-use crate::client::{await_pending_response, PendingMap};
+use crate::client::{await_pending_response, Lifecycle};
 use crate::{
     ClientError, DbRequest, DbResponse, VisibilityState, VisibilityWait, CURRENT_QUERY_LANG_VERSION,
 };
@@ -60,11 +59,11 @@ async fn commit_transport_timeout_has_one_request_and_no_replay() {
         log.lock()
             .unwrap()
             .push(rmp_serde::to_vec_named(&request).unwrap());
-        let pending: PendingMap = Arc::new(Mutex::new(TFxMap::default()));
+        let state = Lifecycle::new();
         let (tx, rx) = oneshot::channel();
-        pending.lock().unwrap().insert(1, tx);
+        state.pending.lock().unwrap().map.insert(1, tx);
         let response =
-            await_pending_response(rx, Some(Duration::from_millis(50)), &pending, 1).await?;
+            await_pending_response(rx, Some(Duration::from_millis(50)), &state, 1).await?;
         rmp_serde::from_slice(&response).map_err(ClientError::from)
     };
     let result = crate::visibility::commit_once(&request, send).await;

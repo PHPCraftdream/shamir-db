@@ -5,8 +5,8 @@
 //! [length: u32 BE][msgpack: length bytes]
 //! ```
 //!
-//! `length == 0` is a graceful close indicator. Empty frames are also legal
-//! at the application level (caller decides).
+//! `length == 0` is reserved for the graceful-close indicator (spec §2),
+//! so the writers reject empty payloads instead of encoding them.
 
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -31,6 +31,35 @@ pub enum FrameError {
     /// Peer sent a graceful-close (length == 0).
     #[error("peer requested close")]
     PeerClose,
+    /// Peer ended the stream while the 4-byte length header was being read
+    /// (clean EOF at a frame boundary) — an abrupt disconnect, distinct
+    /// from a graceful close and from a mid-body truncation (`Io`).
+    #[error("peer eof")]
+    PeerEof,
+    /// Empty payload — length 0 is reserved for the graceful-close
+    /// sentinel (spec §2), so writers refuse to emit it as a data frame.
+    #[error("empty payload: length 0 is the close sentinel")]
+    EmptyPayload,
+}
+
+/// Read the 4-byte length header. EOF before the first header byte is
+/// [`FrameError::PeerEof`] (peer disconnected between frames); EOF after one
+/// to three header bytes is a truncated frame (`Io(UnexpectedEof)`).
+async fn read_len_header<R: AsyncRead + Unpin>(reader: &mut R) -> Result<usize, FrameError> {
+    let mut len_buf = [0u8; 4];
+    let mut got = 0;
+    while got < len_buf.len() {
+        let n = reader.read(&mut len_buf[got..]).await?;
+        if n == 0 {
+            return Err(if got == 0 {
+                FrameError::PeerEof
+            } else {
+                FrameError::Io(std::io::ErrorKind::UnexpectedEof.into())
+            });
+        }
+        got += n;
+    }
+    Ok(u32::from_be_bytes(len_buf) as usize)
 }
 
 /// Read one frame: `[u32_be length][bytes]`.
@@ -46,9 +75,7 @@ pub async fn read_frame<R: AsyncRead + Unpin>(
     reader: &mut R,
     max_frame_size: usize,
 ) -> Result<Vec<u8>, FrameError> {
-    let mut len_buf = [0u8; 4];
-    reader.read_exact(&mut len_buf).await?;
-    let len = u32::from_be_bytes(len_buf) as usize;
+    let len = read_len_header(reader).await?;
 
     if len == 0 {
         return Err(FrameError::PeerClose);
@@ -97,9 +124,7 @@ pub async fn read_frame_into<R: AsyncRead + Unpin>(
     max_frame_size: usize,
     buf: &mut Vec<u8>,
 ) -> Result<(), FrameError> {
-    let mut len_buf = [0u8; 4];
-    reader.read_exact(&mut len_buf).await?;
-    let len = u32::from_be_bytes(len_buf) as usize;
+    let len = read_len_header(reader).await?;
 
     if len == 0 {
         return Err(FrameError::PeerClose);
@@ -141,6 +166,9 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
             max: MAX_FRAME_SIZE_DEFAULT,
         });
     }
+    if payload.is_empty() {
+        return Err(FrameError::EmptyPayload);
+    }
     let len = payload.len() as u32;
     let mut buf = Vec::with_capacity(4 + payload.len());
     buf.extend_from_slice(&len.to_be_bytes());
@@ -179,6 +207,9 @@ pub async fn write_frame_into<W: AsyncWrite + Unpin>(
             actual: payload.len(),
             max: MAX_FRAME_SIZE_DEFAULT,
         });
+    }
+    if payload.is_empty() {
+        return Err(FrameError::EmptyPayload);
     }
     let len = payload.len() as u32;
     scratch.clear();
@@ -230,6 +261,9 @@ pub async fn write_frame_prereserved<W: AsyncWrite + Unpin>(
         });
     }
     let declared_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    if declared_len == 0 {
+        return Err(FrameError::EmptyPayload);
+    }
     // The payload length on the wire must match what's in the buffer.
     let actual_payload = buf.len() - 4;
     if declared_len != actual_payload || declared_len > MAX_FRAME_SIZE_DEFAULT {
