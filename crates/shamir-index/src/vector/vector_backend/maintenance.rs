@@ -5,12 +5,19 @@
 use crate::vector::adapter::VectorAdapter;
 use crate::vector::hnsw_adapter::HnswAdapter;
 use crate::vector::snapshot::{self, SnapshotError, SnapshotManifest};
-use crate::vector::vector_backend::backend::{AdapterSlot, VectorBackend};
-use arc_swap::{ArcSwap, ArcSwapOption};
+use crate::vector::vector_backend::backend::VectorBackend;
+use crate::vector::vector_backend::cutover::{disarm_publish, publish_slot, seal_and_drain};
+
+#[cfg(test)]
+use crate::vector::vector_backend::cutover::CompactionHooks;
+use crate::vector::vector_backend::slot::AdapterSlot;
+use crate::vector::vector_backend::target::CompactionTarget;
+use arc_swap::ArcSwap;
 use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use tokio::sync::Notify;
 
 /// Resets the single-flight `snapshot_in_flight` flag on drop, so the flag is
 /// cleared whether the background snapshot task returns `Ok`, returns `Err`, or
@@ -159,11 +166,15 @@ impl VectorBackend {
         }
 
         let adapter_swap = Arc::clone(&self.adapter);
-        let compaction_target = Arc::clone(&self.compaction_target);
+        let published = Arc::clone(&self.published);
         let compaction_in_flight = Arc::clone(&self.compaction_in_flight);
         let delta_count = Arc::clone(&self.delta_count);
         let next_delta_idx = Arc::clone(&self.next_delta_idx);
         let snapshot_in_flight = Arc::clone(&self.snapshot_in_flight);
+        #[cfg(test)]
+        let fail_next_backfill = Arc::clone(&self.fail_next_backfill);
+        #[cfg(test)]
+        let compaction_hooks = Arc::clone(&self.compaction_hooks);
         let info_store = Arc::clone(info_store);
         let keyspace = self.snapshot_keyspace();
 
@@ -171,12 +182,16 @@ impl VectorBackend {
             let _flight_guard = CompactionFlightGuard(compaction_in_flight);
             let res = run_background_compaction(
                 &adapter_swap,
-                &compaction_target,
+                &published,
                 &info_store,
                 &keyspace,
                 &delta_count,
                 &next_delta_idx,
                 &snapshot_in_flight,
+                #[cfg(test)]
+                &fail_next_backfill,
+                #[cfg(test)]
+                Some(compaction_hooks),
             )
             .await;
             if let Err(e) = res {
@@ -189,19 +204,47 @@ impl VectorBackend {
     }
 }
 
-/// V4.2 (#408) — the body of the background compaction task (Steps 1–7).
-async fn run_background_compaction(
+/// V4.2 (#408) — the body of the background compaction task, reworked for
+/// RV-INDEX-9F62C8DF (binding @oh design):
+///
+/// 1. build the target adapter privately;
+/// 2. **arm**: seal+drain g0's gate, then CAS-publish the armed slot g1 =
+///    `{g0.adapter, Some(target), fresh gate}` — one linearizable
+///    publication, no separately-sampled mirror pointer. F1: the slot is
+///    wrapped in an Arc ONCE and `publish_slot` publishes that exact Arc,
+///    which the coordinator retains — every later seal/drain/CAS targets
+///    the slot that is really current;
+/// 3. capture the live set S0 **after** that publish (a write drained
+///    during the seal is visible to backfill);
+/// 4. backfill: any error disarms (seal, drain, publish a slot without
+///    target — retrying the CAS against the freshly loaded slot on a lost
+///    race, never ignoring it) and returns Err — an armed-but-unbackfilled
+///    target is never published;
+///
+/// Step 4b: reconcile deletes only for RIDs still absent from the old
+///    primary — F4: the RID is CLAIMED on the target FIRST (a claim failure
+///    fails the target, same ordering-ambiguity rule as writers), then the
+///    presence check runs, then the mirror delete, then the claim is
+///    released — closing the reinsertion window;
+/// 5. **cutover**: seal+drain g1; if the target failed, disarm-publish
+///    `{old, None}` and return Err (compaction retried later); else publish
+///    `{new, None}`. Nothing fallible between seal and publish;
+/// 7. snapshot of the published primary.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_background_compaction(
     adapter_swap: &Arc<ArcSwap<AdapterSlot>>,
-    compaction_target: &Arc<ArcSwapOption<AdapterSlot>>,
+    published: &Arc<Notify>,
     info_store: &Arc<dyn Store>,
     keyspace: &str,
     delta_count: &Arc<AtomicU64>,
     next_delta_idx: &Arc<AtomicU64>,
     snapshot_in_flight: &Arc<AtomicBool>,
+    #[cfg(test)] fail_next_backfill: &AtomicBool,
+    #[cfg(test)] hooks: Option<Arc<CompactionHooks>>,
 ) -> Result<(), String> {
-    // Step 1: Create empty new adapter
-    let old_slot = adapter_swap.load_full();
-    let old_hnsw = old_slot
+    // Step 1: g0 + private target adapter.
+    let g0 = adapter_swap.load_full();
+    let old_hnsw = g0
         .adapter
         .as_hnsw_adapter()
         .ok_or_else(|| "compaction on non-HnswAdapter".to_string())?;
@@ -209,34 +252,64 @@ async fn run_background_compaction(
     let config = old_hnsw.build_config();
     let dim = old_hnsw.dim_field();
     let metric = old_hnsw.metric_field();
-    // #428 (VR-6) — quantization-aware compaction target. If the OLD adapter
-    // was constructed with a quantization mode, the target inherits the SAME
-    // mode (so the post-compaction snapshot is v2 with QuantMeta, and the
-    // deferred-fit in `backfill_if_absent` re-trains the quantizer on the
-    // surviving live set). `None` → legacy `new_compaction_target` (f32 path,
-    // bit-for-bit back-compat with the pre-#428 compaction).
+    // #428 (VR-6) — quantization-aware compaction target (see the V4.2
+    // history): the target inherits the OLD adapter's quantization mode.
     let quant_mode = old_hnsw.quantization_mode();
     let new_adapter = HnswAdapter::new_compaction_target_quantized(dim, metric, config, quant_mode);
     let new_adapter_arc: Arc<dyn VectorAdapter> = Arc::new(new_adapter);
+    let target = CompactionTarget::new(Arc::clone(&new_adapter_arc));
 
-    // Step 2: Arm double-write
-    compaction_target.store(Some(Arc::new(AdapterSlot {
-        adapter: Arc::clone(&new_adapter_arc),
-    })));
+    // Step 2: arm — seal g0, drain in-flight leases, publish g1 atomically.
+    // F1: g1 is wrapped ONCE; publish_slot publishes that exact Arc.
+    #[cfg(test)]
+    if let Some(h) = hooks.as_deref() {
+        h.fire_before_seal();
+    }
+    seal_and_drain(&g0).await;
+    let g1 = Arc::new(AdapterSlot::armed(
+        Arc::clone(&g0.adapter),
+        Arc::clone(&target),
+    ));
+    if publish_slot(adapter_swap, &g0, Arc::clone(&g1), published).is_none() {
+        return Err("compaction arm publication lost the slot CAS".to_string());
+    }
+    // F5: instance-scoped hook — hand the coordinator's OWN target to the
+    // test, then park until the test releases (T2/T8 determinism).
+    #[cfg(test)]
+    if let Some(h) = hooks.as_deref() {
+        h.fire_after_arm(Arc::clone(&target)).await;
+    }
 
-    // Step 3: Collect live-set S0 from OLD adapter
+    // Step 3: live set S0 AFTER the arm publish.
     let live_pairs = old_hnsw.collect_live_vectors();
 
-    // Step 4a: Backfill S0 into new (INSERT-IF-ABSENT)
+    // Step 4a: backfill S0 into new (INSERT-IF-ABSENT). Any error disarms.
     let new_hnsw = new_adapter_arc
         .as_hnsw_adapter()
         .ok_or_else(|| "compaction target not HnswAdapter".to_string())?;
-    new_hnsw
-        .backfill_if_absent(&live_pairs)
-        .await
-        .map_err(|e| e.to_string())?;
+    let backfill = async {
+        #[cfg(test)]
+        if fail_next_backfill.swap(false, Ordering::AcqRel) {
+            return Err("injected backfill failure (fail_next_backfill)".to_string());
+        }
+        new_hnsw
+            .backfill_if_absent(&live_pairs)
+            .await
+            .map_err(|e| e.to_string())
+    };
+    if let Err(e) = backfill.await {
+        // Disarm (F1): seal, drain, publish a slot WITHOUT the target,
+        // retrying the CAS against the freshly loaded slot on a lost race
+        // (`disarm_publish` never ignores the CAS result). The old primary
+        // stays authoritative; compaction retries on the next crossing.
+        disarm_publish(adapter_swap, published).await;
+        return Err(format!("compaction backfill failed: {e}"));
+    }
 
-    // Step 4b: Reconcile-deletes (close resurrect race)
+    // Step 4b: reconcile-deletes, but ONLY for RIDs still absent from the
+    // old primary — the historical tombstone set records "deleted
+    // sometime", not "currently absent", so a blanket delete would undo a
+    // successful re-insertion. A mirror error fails the target.
     if let Some(ref del_rids) = new_hnsw.compaction_deleted_rids {
         let mut rids_to_delete: Vec<RecordId> = Vec::new();
         del_rids.iter_sync(|rid, ()| {
@@ -244,20 +317,58 @@ async fn run_background_compaction(
             true
         });
         for rid in rids_to_delete {
-            let _ = new_adapter_arc.delete(rid).await;
+            // F4: claim the RID on the target FIRST. A failed claim means a
+            // concurrent writer holds this RID inside the generation —
+            // ordering ambiguity, fail the target (same rule as writers).
+            // This closes the reinsertion window: a concurrent reinsertion
+            // either happens before the presence check (skipped below) or
+            // sees this claim and fails the target (never published).
+            if !target.claim(rid) {
+                target.fail(format!(
+                    "reconcile delete raced a live writer for rid {rid:?}"
+                ));
+                break;
+            }
+            if old_hnsw.contains_rid(&rid) {
+                target.release(rid); // re-inserted after the delete: tombstone lost
+                continue;
+            }
+            target.mirror_delete(rid).await;
+            target.release(rid);
         }
     }
 
-    // Step 5: Atomic swap (new becomes primary)
-    adapter_swap.store(Arc::new(AdapterSlot {
-        adapter: Arc::clone(&new_adapter_arc),
-    }));
+    // Step 5: cutover — seal g1, drain its leases, publish atomically.
+    seal_and_drain(&g1).await;
+    // F5: instance-scoped after-seal PAIR — the coordinator parks between
+    // the drain and the publish until the test releases (T4).
+    #[cfg(test)]
+    if let Some(h) = hooks.as_deref() {
+        h.fire_after_seal().await;
+    }
+    if target.failed() {
+        // A failed target is NEVER published: keep the current primary,
+        // drop the mirror, let compaction retry later (F1: CAS loss is
+        // retried against the freshly loaded slot, not ignored).
+        let reason = target.fail_reason().unwrap_or("unknown").to_string();
+        disarm_publish(adapter_swap, published).await;
+        return Err(format!(
+            "compaction target failed; old primary retained: {reason}"
+        ));
+    }
+    if publish_slot(
+        adapter_swap,
+        &g1,
+        Arc::new(AdapterSlot::live(Arc::clone(&new_adapter_arc))),
+        published,
+    )
+    .is_none()
+    {
+        return Err("compaction cutover publication lost the slot CAS".to_string());
+    }
 
-    // Step 6: Clear double-write (AFTER swap — order critical)
-    compaction_target.store(None);
-
-    // Step 7: Force snapshot from new adapter
-    delta_count.store(0, Ordering::Release);
+    // Step 7: Force snapshot from new adapter. F7: the delta counter is NOT
+    // reset here — only the snapshot task resets it, AFTER snapshot success.
     // Only trigger if no snapshot already in flight
     if snapshot_in_flight
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
