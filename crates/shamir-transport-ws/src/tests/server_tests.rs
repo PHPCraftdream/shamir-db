@@ -8,7 +8,7 @@ use crate::framing::MAX_WS_FRAME_SIZE;
 use crate::server::{
     accept_browser_ws, accept_native_ws, server_ws_config, WsAcceptError, NATIVE_WS_PATH,
 };
-use tokio_tungstenite::tungstenite::handshake::client::{generate_key, Request};
+use tokio_tungstenite::tungstenite::handshake::client::{generate_key, Request, Response};
 use tokio_tungstenite::tungstenite::http::StatusCode;
 
 /// NEW-1: the server accept config MUST cap incoming buffering at the
@@ -74,7 +74,7 @@ async fn live_accept_rejects_message_over_cap() {
         .max_message_size(None)
         .max_frame_size(None);
     let (mut client, _resp) = tokio_tungstenite::client_async_with_config(
-        "ws://localhost/shamir/v1",
+        ws_request(NATIVE_WS_PATH, None),
         client_io,
         Some(client_cfg),
     )
@@ -112,7 +112,7 @@ async fn live_accept_passes_small_frame() {
     });
 
     let (mut client, _resp) =
-        tokio_tungstenite::client_async("ws://localhost/shamir/v1", client_io)
+        tokio_tungstenite::client_async(ws_request(NATIVE_WS_PATH, None), client_io)
             .await
             .expect("client handshake");
     client
@@ -129,18 +129,30 @@ async fn live_accept_passes_small_frame() {
 // ---------------------------------------------------------------------------
 
 /// Build a WS upgrade request with an explicit path and optional `Origin`.
+/// Offers the mandatory `shamir-v1` subprotocol by default.
 fn ws_request(path: &str, origin: Option<&str>) -> Request {
-    ws_request_header(
-        path,
-        "Origin",
-        origin.map(|o| http::HeaderValue::from_str(o).expect("valid origin header")),
-    )
+    ws_request_protocols(path, origin, Some("shamir-v1"))
 }
 
 /// Build a WS upgrade request with an explicit path and one raw header
 /// (pass `None` to omit it — needed for non-`&str` header values such as
-/// obs-text Origin bytes).
+/// obs-text Origin bytes). Offers `shamir-v1` by default.
 fn ws_request_header(path: &str, name: &str, value: Option<http::HeaderValue>) -> Request {
+    let mut req = ws_request_protocols(path, None, Some("shamir-v1"));
+    if let Some(v) = value {
+        let (mut parts, body) = req.into_parts();
+        parts.headers.insert(
+            http::HeaderName::from_bytes(name.as_bytes()).expect("valid header name"),
+            v,
+        );
+        req = Request::from_parts(parts, body);
+    }
+    req
+}
+
+/// Build a WS upgrade request; sets `Sec-WebSocket-Protocol` only when
+/// `protocols` is `Some` (comma-separated, as browsers send it).
+fn ws_request_protocols(path: &str, origin: Option<&str>, protocols: Option<&str>) -> Request {
     let mut builder = Request::builder()
         .uri(format!("ws://localhost{path}"))
         .header("Host", "localhost")
@@ -148,8 +160,14 @@ fn ws_request_header(path: &str, name: &str, value: Option<http::HeaderValue>) -
         .header("Upgrade", "websocket")
         .header("Sec-WebSocket-Version", "13")
         .header("Sec-WebSocket-Key", generate_key());
-    if let Some(v) = value {
-        builder = builder.header(name, v);
+    if let Some(o) = origin {
+        builder = builder.header(
+            "Origin",
+            http::HeaderValue::from_str(o).expect("valid origin header"),
+        );
+    }
+    if let Some(p) = protocols {
+        builder = builder.header("Sec-WebSocket-Protocol", p);
     }
     builder.body(()).expect("valid request")
 }
@@ -354,4 +372,201 @@ async fn rv_transport_ws_4fc6bcdd_browser_wrong_path_rejected_404() {
         other => panic!("expected Http error, got {other:?}"),
     }
     assert!(server.await.expect("join").is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests: RV-TRANSPORT-WS-C0C43A18 (`shamir-v1` subprotocol)
+// ---------------------------------------------------------------------------
+
+/// Assert the 101 response selected `shamir-v1`.
+fn assert_selected(resp: &Response) {
+    assert_eq!(
+        resp.headers()
+            .get("sec-websocket-protocol")
+            .and_then(|v| v.to_str().ok()),
+        Some(crate::server::WS_SUBPROTOCOL),
+        "handshake response must select the shamir-v1 subprotocol",
+    );
+}
+
+/// Assert the handshake failed with `Error::Http` status 400.
+async fn assert_rejected_400(req: Request, client_io: tokio::io::DuplexStream) {
+    let err = tokio_tungstenite::client_async(req, client_io)
+        .await
+        .expect_err("handshake must fail");
+    match err {
+        tokio_tungstenite::tungstenite::Error::Http(resp) => {
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+        other => panic!("expected Http error, got {other:?}"),
+    }
+}
+
+/// RV-TRANSPORT-WS-C0C43A18 (native): a client offering `shamir-v1` —
+/// alone or among other protocols — gets a 101 whose response selects it.
+#[tokio::test]
+async fn rv_transport_ws_c0c43a18_native_offered_subprotocol_selected() {
+    // Sub-case 1: `shamir-v1` alone.
+    let (server_io, client_io) = duplex(64 * 1024);
+    let policy = BrowserOriginPolicy::empty();
+    let server = tokio::spawn(async move {
+        accept_native_ws(server_io, NATIVE_WS_PATH, &policy)
+            .await
+            .expect("accept")
+    });
+    let req = ws_request_protocols(NATIVE_WS_PATH, None, Some("shamir-v1"));
+    let (_client, resp) = tokio_tungstenite::client_async(req, client_io)
+        .await
+        .expect("client handshake");
+    assert_selected(&resp);
+    server.await.expect("join");
+
+    // Sub-case 2: `shamir-v1` among other offers.
+    let (server_io, client_io) = duplex(64 * 1024);
+    let policy = BrowserOriginPolicy::empty();
+    let server = tokio::spawn(async move {
+        accept_native_ws(server_io, NATIVE_WS_PATH, &policy)
+            .await
+            .expect("accept")
+    });
+    let req = ws_request_protocols(NATIVE_WS_PATH, None, Some("foo, shamir-v1"));
+    let (_client, resp) = tokio_tungstenite::client_async(req, client_io)
+        .await
+        .expect("client handshake");
+    assert_selected(&resp);
+    server.await.expect("join");
+}
+
+/// RV-TRANSPORT-WS-C0C43A18 (browser): same negotiation on
+/// `accept_browser_ws` with a valid `Origin`.
+#[tokio::test]
+async fn rv_transport_ws_c0c43a18_browser_offered_subprotocol_selected() {
+    let (server_io, client_io) = duplex(64 * 1024);
+    let policy = BrowserOriginPolicy::allow(["https://good.example"]);
+    let server = tokio::spawn(async move {
+        accept_browser_ws(server_io, crate::server::BROWSER_WS_PATH, &policy)
+            .await
+            .expect("accept")
+    });
+    let req = ws_request_protocols(
+        crate::server::BROWSER_WS_PATH,
+        Some("https://good.example"),
+        Some("foo, shamir-v1"),
+    );
+    let (_client, resp) = tokio_tungstenite::client_async(req, client_io)
+        .await
+        .expect("client handshake");
+    assert_selected(&resp);
+    server.await.expect("join");
+}
+
+/// RV-TRANSPORT-WS-C0C43A18 (browser): `shamir-v1` offered ALONE is selected.
+#[tokio::test]
+async fn rv_transport_ws_c0c43a18_browser_single_protocol_selected() {
+    let (server_io, client_io) = duplex(64 * 1024);
+    let policy = BrowserOriginPolicy::allow(["https://good.example"]);
+    let server = tokio::spawn(async move {
+        accept_browser_ws(server_io, crate::server::BROWSER_WS_PATH, &policy)
+            .await
+            .expect("accept")
+    });
+    let req = ws_request_protocols(
+        crate::server::BROWSER_WS_PATH,
+        Some("https://good.example"),
+        Some("shamir-v1"),
+    );
+    let (_client, resp) = tokio_tungstenite::client_async(req, client_io)
+        .await
+        .expect("client handshake");
+    assert_selected(&resp);
+    server.await.expect("join");
+}
+
+/// RV-TRANSPORT-WS-C0C43A18: a request with NO `Sec-WebSocket-Protocol`
+/// header must be rejected with 400 on both acceptors.
+#[tokio::test]
+async fn rv_transport_ws_c0c43a18_missing_subprotocol_rejected_400() {
+    // Native acceptor.
+    let (server_io, client_io) = duplex(64 * 1024);
+    let policy = BrowserOriginPolicy::empty();
+    let server = tokio::spawn(async move {
+        assert!(accept_native_ws(server_io, NATIVE_WS_PATH, &policy)
+            .await
+            .is_err());
+    });
+    let req = ws_request_protocols(NATIVE_WS_PATH, None, None);
+    assert_rejected_400(req, client_io).await;
+    server.await.expect("join");
+
+    // Browser acceptor.
+    let (server_io, client_io) = duplex(64 * 1024);
+    let policy = BrowserOriginPolicy::allow(["https://good.example"]);
+    let server = tokio::spawn(async move {
+        assert!(
+            accept_browser_ws(server_io, crate::server::BROWSER_WS_PATH, &policy)
+                .await
+                .is_err()
+        );
+    });
+    let req = ws_request_protocols(
+        crate::server::BROWSER_WS_PATH,
+        Some("https://good.example"),
+        None,
+    );
+    assert_rejected_400(req, client_io).await;
+    server.await.expect("join");
+}
+
+/// RV-TRANSPORT-WS-C0C43A18: offering only incompatible protocols must be
+/// rejected with 400 on both acceptors.
+#[tokio::test]
+async fn rv_transport_ws_c0c43a18_only_incompatible_offers_rejected_400() {
+    // Native acceptor.
+    let (server_io, client_io) = duplex(64 * 1024);
+    let policy = BrowserOriginPolicy::empty();
+    let server = tokio::spawn(async move {
+        assert!(accept_native_ws(server_io, NATIVE_WS_PATH, &policy)
+            .await
+            .is_err());
+    });
+    let req = ws_request_protocols(NATIVE_WS_PATH, None, Some("foo, bar"));
+    assert_rejected_400(req, client_io).await;
+    server.await.expect("join");
+
+    // Browser acceptor.
+    let (server_io, client_io) = duplex(64 * 1024);
+    let policy = BrowserOriginPolicy::allow(["https://good.example"]);
+    let server = tokio::spawn(async move {
+        assert!(
+            accept_browser_ws(server_io, crate::server::BROWSER_WS_PATH, &policy)
+                .await
+                .is_err()
+        );
+    });
+    let req = ws_request_protocols(
+        crate::server::BROWSER_WS_PATH,
+        Some("https://good.example"),
+        Some("foo, bar"),
+    );
+    assert_rejected_400(req, client_io).await;
+    server.await.expect("join");
+}
+
+/// RV-TRANSPORT-WS-C0C43A18: a `Sec-WebSocket-Protocol` header whose value
+/// is not valid text (obs-text bytes) must be rejected with 400, never
+/// treated as a no-match.
+#[tokio::test]
+async fn rv_transport_ws_c0c43a18_non_text_subprotocol_header_rejected_400() {
+    let (server_io, client_io) = duplex(64 * 1024);
+    let policy = BrowserOriginPolicy::empty();
+    let server = tokio::spawn(async move {
+        assert!(accept_native_ws(server_io, NATIVE_WS_PATH, &policy)
+            .await
+            .is_err());
+    });
+    let bad = http::HeaderValue::from_bytes(b"shamir-v1\xff")
+        .expect("HeaderValue accepts obs-text bytes");
+    let req = ws_request_header(NATIVE_WS_PATH, "Sec-WebSocket-Protocol", Some(bad));
+    assert_rejected_400(req, client_io).await;
+    server.await.expect("join");
 }
