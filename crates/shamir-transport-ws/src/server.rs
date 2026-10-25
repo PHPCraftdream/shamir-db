@@ -12,11 +12,17 @@
 
 use crate::browser::{validate_origin, BrowserOriginPolicy, OriginRejected};
 use crate::framing::MAX_WS_FRAME_SIZE;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::WebSocketStream;
+
+/// Native WS endpoint path (spec TRANSPORT_WS §2).
+pub const NATIVE_WS_PATH: &str = "/shamir/v1";
+/// Browser WS endpoint path (spec TRANSPORT_WS §2).
+pub const BROWSER_WS_PATH: &str = "/shamir/v1/browser";
 
 /// Build the [`WebSocketConfig`] applied to every accepted server stream.
 ///
@@ -61,49 +67,95 @@ pub enum WsAcceptError {
     #[error("wrong path: expected {expected}, got {actual}")]
     WrongPath {
         /// Expected URI path.
-        expected: &'static str,
+        expected: String,
         /// What the request actually had.
         actual: String,
     },
 }
 
-/// Accept a native-WSS upgrade on `/shamir/v1`.
+/// Accept a native-WSS upgrade on `path` (spec default: [`NATIVE_WS_PATH`]).
 ///
 /// `stream` is the TLS-wrapped TCP stream (post TLS 1.3 handshake).
 /// Returns the upgraded `WebSocketStream`. Caller then extracts the TLS
 /// exporter from the underlying TLS state for SCRAM channel binding.
-pub async fn accept_native_ws<S>(stream: S) -> Result<WebSocketStream<S>, WsAcceptError>
+///
+/// Origin (spec §9): the header is OPTIONAL on the native endpoint. If the
+/// client sends one, it must match `policy`; if absent, the upgrade is
+/// accepted (native clients do not send `Origin`).
+pub async fn accept_native_ws<S>(
+    stream: S,
+    path: &str,
+    policy: &BrowserOriginPolicy,
+) -> Result<WebSocketStream<S>, WsAcceptError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     // NEW-1: cap tungstenite's per-connection buffering at the 16 MiB frame
     // ceiling (vs. the 64 MiB default) so an unauthenticated peer can't force
     // 64 MiB of buffering before the 4 KiB pre-auth logical check.
+    let policy = policy.clone();
+    let path = path.to_string();
+    // Not a hot path: once-per-handshake capture, the callback and the
+    // single awaiting task are the only users.
+    let actual_path: Arc<Mutex<Option<String>>> = Arc::default();
+    let cb_path = path.clone();
+    let cb_actual_path = actual_path.clone();
     let ws = tokio_tungstenite::accept_hdr_async_with_config(
         stream,
         #[allow(clippy::result_large_err)] // Err type is tungstenite's Callback trait contract
-        |req: &Request, resp: Response| {
-            // Spec §2: native endpoint expects path `/shamir/v1`.
-            if req.uri().path() != "/shamir/v1" {
+        move |req: &Request, resp: Response| {
+            *cb_actual_path.lock().expect("path capture poisoned") =
+                Some(req.uri().path().to_string());
+            // Spec §2: native endpoint expects the configured path.
+            if req.uri().path() != cb_path {
                 let mut err = ErrorResponse::new(Some("wrong path for native endpoint".into()));
                 *err.status_mut() = http::StatusCode::NOT_FOUND;
                 return Err(err);
+            }
+            // Spec §9: Origin optional here; if present it must be allowed.
+            if let Some(origin_val) = req.headers().get(http::header::ORIGIN) {
+                let supplied = origin_val.to_str().ok();
+                let rejected = match supplied {
+                    Some(origin) => validate_origin(&policy, Some(origin)).is_err(),
+                    None => true, // supplied but non-text: never treat as absent
+                };
+                if rejected {
+                    let mut err = ErrorResponse::new(Some("origin rejected".into()));
+                    *err.status_mut() = http::StatusCode::FORBIDDEN;
+                    return Err(err);
+                }
             }
             Ok(resp)
         },
         Some(server_ws_config()),
     )
-    .await?;
+    .await
+    .map_err(|e| match e {
+        tokio_tungstenite::tungstenite::Error::Http(ref resp)
+            if resp.status() == http::StatusCode::NOT_FOUND =>
+        {
+            WsAcceptError::WrongPath {
+                expected: path.clone(),
+                actual: actual_path
+                    .lock()
+                    .expect("path capture poisoned")
+                    .take()
+                    .unwrap_or_default(),
+            }
+        }
+        other => other.into(),
+    })?;
     Ok(ws)
 }
 
-/// Accept a browser-WSS upgrade on `/shamir/v1/browser`.
+/// Accept a browser-WSS upgrade on `path` (spec default: [`BROWSER_WS_PATH`]).
 ///
 /// Validates the `Origin` header against `policy` per spec §9. Rejects
 /// upgrades without `Origin` (spec §9: native clients should use the
 /// non-browser endpoint).
 pub async fn accept_browser_ws<S>(
     stream: S,
+    path: &str,
     policy: &BrowserOriginPolicy,
 ) -> Result<WebSocketStream<S>, WsAcceptError>
 where
@@ -113,12 +165,20 @@ where
     // 101 Switching Protocols. Tungstenite gives us a callback hook for
     // exactly this.
     let policy = policy.clone();
+    let path = path.to_string();
     // NEW-1: same buffering cap as the native path (see `server_ws_config`).
+    // Not a hot path: once-per-handshake capture, the callback and the
+    // single awaiting task are the only users.
+    let actual_path: Arc<Mutex<Option<String>>> = Arc::default();
+    let cb_path = path.clone();
+    let cb_actual_path = actual_path.clone();
     let ws = tokio_tungstenite::accept_hdr_async_with_config(
         stream,
         #[allow(clippy::result_large_err)] // Err type is tungstenite's Callback trait contract
         move |req: &Request, resp: Response| {
-            if req.uri().path() != "/shamir/v1/browser" {
+            *cb_actual_path.lock().expect("path capture poisoned") =
+                Some(req.uri().path().to_string());
+            if req.uri().path() != cb_path {
                 let mut err = ErrorResponse::new(Some("wrong path for browser endpoint".into()));
                 *err.status_mut() = http::StatusCode::NOT_FOUND;
                 return Err(err);
@@ -130,14 +190,39 @@ where
             match validate_origin(&policy, origin) {
                 Ok(()) => Ok(resp),
                 Err(rej) => {
-                    let mut err = ErrorResponse::new(Some(format!("origin rejected: {}", rej)));
-                    *err.status_mut() = http::StatusCode::FORBIDDEN;
+                    let (status, msg) = match rej {
+                        OriginRejected::Missing => (
+                            http::StatusCode::BAD_REQUEST,
+                            "origin required: use the native endpoint".to_string(),
+                        ),
+                        other => (
+                            http::StatusCode::FORBIDDEN,
+                            format!("origin rejected: {}", other),
+                        ),
+                    };
+                    let mut err = ErrorResponse::new(Some(msg));
+                    *err.status_mut() = status;
                     Err(err)
                 }
             }
         },
         Some(server_ws_config()),
     )
-    .await?;
+    .await
+    .map_err(|e| match e {
+        tokio_tungstenite::tungstenite::Error::Http(ref resp)
+            if resp.status() == http::StatusCode::NOT_FOUND =>
+        {
+            WsAcceptError::WrongPath {
+                expected: path.clone(),
+                actual: actual_path
+                    .lock()
+                    .expect("path capture poisoned")
+                    .take()
+                    .unwrap_or_default(),
+            }
+        }
+        other => other.into(),
+    })?;
     Ok(ws)
 }
