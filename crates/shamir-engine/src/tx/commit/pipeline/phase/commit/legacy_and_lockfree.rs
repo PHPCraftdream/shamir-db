@@ -348,7 +348,7 @@ pub(super) async fn commit_tx_lockfree(
         }
     };
     version_guard.wal_queued(ticket, validated.wal_entry_arc.clone());
-    let (wc_result, proven_not_written) = wal_completion(gate, completion.await);
+    let (wc_result, proven_not_written) = wal_completion(gate, commit_version, completion.await);
     if proven_not_written {
         repo.settle_unwritten_version(commit_version).await;
     }

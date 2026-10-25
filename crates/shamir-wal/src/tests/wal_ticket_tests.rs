@@ -135,7 +135,7 @@ async fn sync_failure_preserves_written_and_replay() {
 async fn failed_write_is_not_written_and_next_append_recovers() {
     let sink = Arc::new(WalSink::mem());
     let group = WalGroupCommit::new(Arc::clone(&sink));
-    sink.arm_fail_next_append();
+    sink.arm_fail_next_append_for_test();
     let (ticket, completion) = group.append_ticketed(payload(1), 1, WalDurability::Synced);
     assert_eq!(completion.await, Err(WalAppendError::NotWritten));
     assert_eq!(ticket.state(), WalTicketState::Failed);
