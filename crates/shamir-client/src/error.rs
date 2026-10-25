@@ -55,6 +55,18 @@ pub enum ClientError {
     #[error("request_id mismatch: sent {sent:?}, got {got:?}")]
     RequestIdMismatch { sent: Option<u32>, got: Option<u32> },
 
+    /// The caller explicitly set `result_encoding = Id` on a batch carrying
+    /// `$query` / `$param` refs (or a sub-batch). Under Id encoding the
+    /// referenced intermediate becomes an opaque `QueryRecord::IdBytes`
+    /// whose `as_value()` is `Null`, so ref path-resolution silently
+    /// resolves to `Null` instead of the earlier alias's result. The
+    /// request is rejected before it is sent.
+    #[error("result_encoding=Id on ref-bearing batch (alias '{alias}'): the referenced intermediate would become an opaque IdBytes whose as_value() is Null")]
+    IdEncodingWithRefs {
+        /// Alias of the FIRST ref-bearing query in the batch.
+        alias: String,
+    },
+
     #[error("encode: {0}")]
     Encode(#[from] rmp_serde::encode::Error),
 

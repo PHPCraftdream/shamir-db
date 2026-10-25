@@ -12,6 +12,8 @@ mod target;
 
 pub use backend::VectorBackend;
 #[cfg(test)]
+pub(crate) use maintenance::run_background_compaction;
+#[cfg(test)]
 pub(crate) use slot::AdapterSlot;
 #[cfg(test)]
 pub(crate) use target::CompactionTarget;

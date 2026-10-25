@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use shamir_storage::types::Store;
 use shamir_tunables::instance_defaults::{
-    VECTOR_COMPACTION_MIN_LIVE, VECTOR_COMPACTION_RATIO_THRESHOLD, VECTOR_SNAPSHOT_DELTA_THRESHOLD,
+    vector_snapshot_delta_threshold, VECTOR_COMPACTION_MIN_LIVE, VECTOR_COMPACTION_RATIO_THRESHOLD,
 };
 use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::{RecordRef, ScalarRef};
@@ -99,12 +99,21 @@ pub struct VectorBackend {
     /// `Arc`-shared so the background snapshot task can read it to compute
     /// the `delta_applied_upto` for the new manifest.
     pub(super) next_delta_idx: Arc<AtomicU64>,
+    /// P0 delta-prune (brief 164) — contiguous APPLIED prefix: every chunk
+    /// index below it was acknowledged via `mark_delta_applied` (graph
+    /// promote succeeded). Sampled BEFORE the dump for both the manifest
+    /// boundary and the prune bound; never the allocation counter.
+    pub(super) applied_prefix: Arc<AtomicU64>,
+    /// P0 delta-prune (brief 164) — acknowledged chunk indices not yet
+    /// covered by the contiguous prefix (out-of-order completions); drained
+    /// by `ack_delta_applied`. Ordered set per the brief (`scc::TreeIndex`).
+    pub(super) applied_set: Arc<scc::TreeIndex<u64, ()>>,
     /// Delta-count threshold that arms a background snapshot. Defaults to the
     /// production tunable `VECTOR_SNAPSHOT_DELTA_THRESHOLD`; overridable in
     /// tests (via `set_snapshot_threshold_for_test`) so the full
     /// trigger → spawn → `run_background_snapshot` path can be exercised
     /// deterministically without appending 10k real vectors.
-    snapshot_threshold: AtomicU64,
+    pub(super) snapshot_threshold: AtomicU64,
     /// V4.2 (#408) — single-flight guard for the background compaction task.
     pub(super) compaction_in_flight: Arc<AtomicBool>,
     /// RV-INDEX-9F62C8DF — publication signal. Writers parked on a sealed
@@ -148,7 +157,9 @@ impl VectorBackend {
             delta_count: Arc::new(AtomicU64::new(0)),
             snapshot_in_flight: Arc::new(AtomicBool::new(false)),
             next_delta_idx: Arc::new(AtomicU64::new(0)),
-            snapshot_threshold: AtomicU64::new(VECTOR_SNAPSHOT_DELTA_THRESHOLD),
+            applied_prefix: Arc::new(AtomicU64::new(0)),
+            applied_set: Arc::new(scc::TreeIndex::new()),
+            snapshot_threshold: AtomicU64::new(vector_snapshot_delta_threshold()),
             compaction_in_flight: Arc::new(AtomicBool::new(false)),
             published: Arc::new(Notify::new()),
             #[cfg(test)]
@@ -275,39 +286,6 @@ impl VectorBackend {
 
 fn ve(e: VectorError) -> IndexError {
     IndexError::Backend(e.to_string())
-}
-
-impl VectorBackend {
-    /// RV-INDEX-2F3CBCA3 on the rebuild fallback: the rebuilt graph comes
-    /// from the data store, but `next_delta_idx` must still start above the
-    /// persisted absorption boundary and any surviving chunk, or the next
-    /// `append_delta` lands below the boundary and is skipped by replay.
-    /// A scan error is propagated (never defaulted to 0).
-    async fn seed_delta_idx_for_fallback(
-        &self,
-        info_store: &Arc<dyn Store>,
-        keyspace: &str,
-        manifest: Option<&SnapshotManifest>,
-    ) -> Result<(), IndexError> {
-        let stored_hwm = snapshot::highest_delta_index(info_store, keyspace)
-            .await
-            .map_err(|e| {
-                IndexError::Backend(format!(
-                    "delta HWM scan failed for index {} (keyspace {}): {} —                      refusing to seed next_delta_idx below the surviving chunks",
-                    self.descriptor.name, keyspace, e
-                ))
-            })?;
-        // Fresh index (no manifest, no chunks): keep the constructor seed.
-        if manifest.is_none() && stored_hwm == 0 {
-            return Ok(());
-        }
-        let boundary = manifest.map_or(0, |m| m.delta_applied_upto);
-        self.next_delta_idx.store(
-            boundary.max(stored_hwm).saturating_add(1),
-            Ordering::Release,
-        );
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -827,6 +805,11 @@ impl IndexBackend for VectorBackend {
                 let hwm = replayed_hwm.map_or(stored_hwm, |r| r.max(stored_hwm));
                 self.next_delta_idx
                     .store(hwm.saturating_add(1), Ordering::Release);
+                // P0 delta-prune: every surviving chunk was replayed into the
+                // freshly-loaded graph, so the applied prefix starts above
+                // all of them.
+                self.applied_prefix
+                    .store(hwm.saturating_add(1), Ordering::Release);
 
                 // Publish the fully-replayed adapter + seeded HWM.
                 // `ArcSwap::store` is wait-free; a concurrent query grabbing
@@ -840,8 +823,13 @@ impl IndexBackend for VectorBackend {
             Err(SnapshotError::NotFound) => {
                 // No snapshot for this index — fresh index or first open.
                 // Fall through to a full rebuild scan.
-                self.seed_delta_idx_for_fallback(&info_store, &keyspace, manifest_opt.as_ref())
-                    .await?;
+                self.seed_delta_idx_for_fallback(
+                    &self.descriptor.name,
+                    &info_store,
+                    &keyspace,
+                    manifest_opt.as_ref(),
+                )
+                .await?;
                 self.rebuild(data_store).await
             }
             Err(e) => {
@@ -856,8 +844,13 @@ impl IndexBackend for VectorBackend {
                     keyspace,
                     e
                 );
-                self.seed_delta_idx_for_fallback(&info_store, &keyspace, manifest_opt.as_ref())
-                    .await?;
+                self.seed_delta_idx_for_fallback(
+                    &self.descriptor.name,
+                    &info_store,
+                    &keyspace,
+                    manifest_opt.as_ref(),
+                )
+                .await?;
                 self.rebuild(data_store).await
             }
         }
@@ -888,11 +881,11 @@ impl IndexBackend for VectorBackend {
         info_store: &Arc<dyn Store>,
         vecs: &[(RecordId, Vec<f32>)],
         deleted: &[RecordId],
-    ) -> Result<(), IndexError> {
+    ) -> Result<Option<u64>, IndexError> {
         // Build the chunk. An empty promote (no vecs, no deletes) writes
         // nothing — keeps the chunk stream dense.
         if vecs.is_empty() && deleted.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let mut ops: Vec<snapshot::DeltaOp> = Vec::with_capacity(vecs.len() + deleted.len());
         for (rid, vec) in vecs {
@@ -903,15 +896,24 @@ impl IndexBackend for VectorBackend {
         }
         let keyspace = self.snapshot_keyspace();
         let idx = self.next_delta_idx.fetch_add(1, Ordering::AcqRel);
-        snapshot::append_delta(info_store, &keyspace, idx, &ops)
-            .await
-            .map_err(|e| IndexError::Backend(format!("delta append: {e}")))?;
+        if let Err(e) = snapshot::append_delta(info_store, &keyspace, idx, &ops).await {
+            // Nothing was persisted at `idx` (the `fetch_add` already
+            // reserved it): mark it applied so the failed write does not
+            // stall the contiguous applied prefix forever.
+            IndexBackend::mark_delta_applied(self, idx);
+            return Err(IndexError::Backend(format!("delta append: {e}")));
+        }
         // Bump the mutation counter by the number of ops in this chunk. The
         // background snapshot trigger reads this counter to decide when to
         // flip the generation.
         self.delta_count
             .fetch_add(ops.len() as u64, Ordering::AcqRel);
-        Ok(())
+        Ok(Some(idx))
+    }
+
+    /// P0 delta-prune (brief 164) — see [`IndexBackend::mark_delta_applied`].
+    fn mark_delta_applied(&self, idx: u64) {
+        self.ack_delta_applied(idx);
     }
 
     /// V2.3 (#402) — check the delta counter against the threshold and, if
@@ -957,7 +959,7 @@ impl IndexBackend for VectorBackend {
         }
         let keyspace = self.snapshot_keyspace();
         let info_store = Arc::clone(info_store);
-        let next_delta_idx = Arc::clone(&self.next_delta_idx);
+        let applied_prefix = self.prune_boundary();
         let delta_count = Arc::clone(&self.delta_count);
         // Move the flag into a drop-guard so it is cleared on EVERY exit of the
         // task — normal return, `Err`, OR panic (unwind still runs `Drop`). A
@@ -968,7 +970,7 @@ impl IndexBackend for VectorBackend {
         tokio::spawn(async move {
             let _flight_guard = flight_guard; // cleared on drop (incl. unwind)
             let res =
-                run_background_snapshot(&info_store, &keyspace, &adapter_arc, &next_delta_idx)
+                run_background_snapshot(&info_store, &keyspace, &adapter_arc, &applied_prefix)
                     .await;
             match res {
                 Ok(()) => {
