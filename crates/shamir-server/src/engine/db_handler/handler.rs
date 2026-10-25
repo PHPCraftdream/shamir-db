@@ -854,6 +854,10 @@ pub(super) fn error_code(e: &BatchError) -> &str {
         // `max_result_size_bytes`; rejected outright, never truncated.
         BatchError::CursorPageTooLarge { .. } => "cursor_page_too_large",
         BatchError::AsOfVisibilityTimeout { .. } => "as_of_visibility_timeout",
+        // RV-WAL-3B29232E: implicit single-op commit whose WAL outcome was
+        // unknown after queueing — stable code; the attempted commit_version
+        // rides in the typed error payload, no success claim.
+        BatchError::WalOutcomeUnknown { .. } => "wal_requires_reopen",
         // S5c-X PR8b: read refused — replication destination in
         // `resync_required` quarantine; non-retryable until reseed.
         BatchError::ResyncRequired { .. } => "resync_required",

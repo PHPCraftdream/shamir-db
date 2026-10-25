@@ -332,6 +332,10 @@ retry, дождитесь завершения/отмены и заново ра
 `crates/shamir-db/src/shamir_db/execute/admin_migration.rs`).
 
 `wal_requires_reopen` требует reopen/reconciliation, новые commits отказаны.
+Попытка commit с неизвестным исходом WAL (frame уже поставлен в очередь)
+возвращается как `status: "indeterminate"`, `error: "wal_outcome_unknown"`, с ATTEMPTED
+`commit_version` (без claim успеха) и `snapshot_version`; reopen и сверка чтением решают, что сохранилось.
+Отказ ДО admission (repository уже остановлен) остаётся `status: "aborted"`.
 `status: committed` с `error: wal_durability` — уже опубликованные writes,
 **не retry и не rollback**: TS `db.tx()` сохраняет warning в committed receipt.
 `materialized: false` не означает abort: проекции отложены до recovery на
@@ -347,7 +351,8 @@ Pending is **committed**, never an instruction to resend. Rust exposes
 value, transaction, visibility }`. Published `wal_durability` warnings remain
 in `transaction.error`, independently of pending/visible. Aborts and
 `wal_requires_reopen` remain errors with their original reason; indeterminate
-WAL is not proof that writes are absent. No value-only transaction convenience
+WAL is not proof that writes are absent and is reported as
+`status: "indeterminate"`. No value-only transaction convenience
 hides these outcomes.
 
 ```ts
