@@ -736,8 +736,10 @@ async fn phase2_unknown_alias_in_call_params() {
     let mut b = Batch::new();
     b.id("phase2_unknown");
     b.call("p", "echo_first", [qref("no_such_alias", ".x")]);
+    // `build()` on purpose: this test pins SERVER-side planning rejection, so
+    // the invalid request must bypass the builder's own `try_build` check.
     let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.build())
         .await
         .expect_err("should fail with UnknownAlias");
     let msg = format!("{err}");
