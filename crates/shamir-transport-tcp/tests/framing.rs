@@ -5,6 +5,8 @@ use shamir_transport_tcp::framing::{
     write_frame_prereserved, FrameError, MAX_FRAME_SIZE_DEFAULT,
 };
 use tokio::io::duplex;
+// Hoisted (P3): no name collisions in this file.
+use tokio::io::AsyncWriteExt;
 
 #[tokio::test]
 async fn round_trip_small_payload() {
@@ -43,11 +45,89 @@ async fn close_frame_returns_peer_close_error() {
     assert!(matches!(err, FrameError::PeerClose));
 }
 
+/// A peer that ends the stream at a frame boundary (clean EOF while reading
+/// the 4-byte length header) maps to `FrameError::PeerEof` in BOTH read
+/// variants — distinct from a graceful close (`PeerClose`) and from a
+/// mid-body truncation (`Io(UnexpectedEof)`).
+#[tokio::test]
+async fn header_eof_maps_to_peer_eof() {
+    let (a, mut b) = duplex(16);
+    drop(a);
+    let err = read_frame(&mut b, MAX_FRAME_SIZE_DEFAULT)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, FrameError::PeerEof), "read_frame: {err:?}");
+
+    let (a, mut b) = duplex(16);
+    drop(a);
+    let mut buf = Vec::new();
+    let err = read_frame_into(&mut b, MAX_FRAME_SIZE_DEFAULT, &mut buf)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, FrameError::PeerEof),
+        "read_frame_into: {err:?}"
+    );
+}
+
+/// A length header that announces N bytes but a truncated body maps to
+/// `Io(UnexpectedEof)` — only header-boundary EOF is `PeerEof`.
+#[tokio::test]
+async fn truncated_body_maps_to_io_unexpected_eof() {
+    let (mut a, mut b) = duplex(16);
+    let mut partial = 8u32.to_be_bytes().to_vec();
+    partial.extend_from_slice(b"abc");
+    a.write_all(&partial).await.unwrap();
+    drop(a);
+    let err = read_frame(&mut b, MAX_FRAME_SIZE_DEFAULT)
+        .await
+        .unwrap_err();
+    match err {
+        FrameError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof),
+        other => panic!("expected Io(UnexpectedEof), got {other:?}"),
+    }
+}
+
+/// EOF after 1..=3 length-header bytes is a truncated frame, not a clean
+/// boundary EOF: `Io(UnexpectedEof)` in both read variants.
+#[tokio::test]
+async fn partial_header_maps_to_io_unexpected_eof() {
+    for header_bytes in 1..=3usize {
+        let (mut a, mut b) = duplex(16);
+        a.write_all(&8u32.to_be_bytes()[..header_bytes])
+            .await
+            .unwrap();
+        drop(a);
+        let err = read_frame(&mut b, MAX_FRAME_SIZE_DEFAULT)
+            .await
+            .unwrap_err();
+        match err {
+            FrameError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof),
+            other => panic!("read_frame {header_bytes}: expected Io(UnexpectedEof), got {other:?}"),
+        }
+
+        let (mut a, mut b) = duplex(16);
+        a.write_all(&8u32.to_be_bytes()[..header_bytes])
+            .await
+            .unwrap();
+        drop(a);
+        let mut buf = Vec::new();
+        let err = read_frame_into(&mut b, MAX_FRAME_SIZE_DEFAULT, &mut buf)
+            .await
+            .unwrap_err();
+        match err {
+            FrameError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof),
+            other => {
+                panic!("read_frame_into {header_bytes}: expected Io(UnexpectedEof), got {other:?}")
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn rejects_oversized_frame_declaration() {
     let (mut a, mut b) = duplex(16);
     let too_big = (MAX_FRAME_SIZE_DEFAULT as u32 + 1).to_be_bytes();
-    use tokio::io::AsyncWriteExt;
     a.write_all(&too_big).await.unwrap();
     a.flush().await.unwrap();
     let err = read_frame(&mut b, MAX_FRAME_SIZE_DEFAULT)
@@ -152,7 +232,6 @@ async fn read_frame_into_close_returns_peer_close() {
 async fn read_frame_into_rejects_oversized() {
     let (mut a, mut b) = duplex(16);
     let too_big = (MAX_FRAME_SIZE_DEFAULT as u32 + 1).to_be_bytes();
-    use tokio::io::AsyncWriteExt;
     a.write_all(&too_big).await.unwrap();
     a.flush().await.unwrap();
     let mut buf = Vec::new();

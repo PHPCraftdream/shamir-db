@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use thiserror::Error;
 
 /// All errors surfaced by the SDK.
@@ -63,10 +65,11 @@ pub enum ClientError {
     #[error("invalid username: {0}")]
     InvalidUsername(String),
 
-    /// The connection was closed (EOF, I/O error, or explicit `close()`)
-    /// before the response arrived.
-    #[error("connection closed")]
-    ConnectionClosed,
+    /// The connection was closed (EOF, I/O error, explicit `close()`, client
+    /// drop, or reader-task cancellation) before the response arrived. The
+    /// first cause observed by [`CloseCause`]-producing shutdown wins.
+    #[error("connection closed ({0})")]
+    ConnectionClosed(CloseCause),
 
     /// The TCP connection to the server did not complete within the
     /// configured `ConnectOptions::connect_timeout` budget.
@@ -77,6 +80,36 @@ pub enum ClientError {
     /// `ConnectOptions::request_timeout` budget.
     #[error("request timed out after {0:?}")]
     RequestTimeout(std::time::Duration),
+}
+
+/// Why the connection reached its terminal closed state. Shared by every
+/// waiter and registry after shutdown; the first cause recorded wins.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CloseCause {
+    /// Server closed its write side / peer EOF.
+    PeerEof,
+    /// Read error from the transport (formatted `std::io::Error`).
+    Io(Arc<str>),
+    /// Explicit [`Client::close()`](crate::Client::close).
+    LocalClose,
+    /// The [`Client`](crate::Client) was dropped without an explicit close.
+    ClientDropped,
+    /// The background reader task was aborted/cancelled before its loop ran
+    /// to completion.
+    ReaderCancelled,
+}
+
+impl std::fmt::Display for CloseCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CloseCause::PeerEof => write!(f, "peer eof"),
+            CloseCause::Io(e) => write!(f, "io: {e}"),
+            CloseCause::LocalClose => write!(f, "local close"),
+            CloseCause::ClientDropped => write!(f, "client dropped"),
+            CloseCause::ReaderCancelled => write!(f, "reader cancelled"),
+        }
+    }
 }
 
 impl From<rustls::Error> for ClientError {

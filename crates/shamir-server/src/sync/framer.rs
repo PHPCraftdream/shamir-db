@@ -314,6 +314,9 @@ fn map_tcp_err(e: shamir_transport_tcp::framing::FrameError) -> FramerError {
     use shamir_transport_tcp::framing::FrameError;
     match e {
         FrameError::PeerClose => FramerError::PeerClose,
+        // Clean EOF at the frame boundary: the peer dropped the connection —
+        // indistinguishable from a close for the server's session lifecycle.
+        FrameError::PeerEof => FramerError::PeerClose,
         FrameError::TooLarge { actual, max } => FramerError::TooLarge { actual, max },
         other => FramerError::Io(other.to_string()),
     }
