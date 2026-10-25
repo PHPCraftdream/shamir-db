@@ -73,7 +73,8 @@ use crate::replication::supervisor::{ReplSourceFactory, Subscription, Subscripti
 pub(crate) async fn build_db() -> Arc<ShamirDb> {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64_from_username("alice"));
-    shamir.create_db_as("app", owner.clone()).await;
+    let created = shamir.create_db_as("app", owner.clone()).await;
+    created.expect("create_db");
     for repo in ["main", "other"] {
         let cfg =
             RepoConfig::new(repo, BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));

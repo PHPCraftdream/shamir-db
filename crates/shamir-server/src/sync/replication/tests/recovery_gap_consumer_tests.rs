@@ -54,7 +54,7 @@ fn runtime() -> Runtime {
 // directory. This isolates certification from metadata/file-lock retry timing.
 async fn open(path: Option<&Path>) -> ShamirDb {
     let db = ShamirDb::init_memory().await.unwrap();
-    db.create_db("app").await;
+    db.create_db("app").await.expect("create_db");
     let factory = match path {
         Some(path) => BoxRepoFactory::fjall_raw(path),
         None => BoxRepoFactory::in_memory(),

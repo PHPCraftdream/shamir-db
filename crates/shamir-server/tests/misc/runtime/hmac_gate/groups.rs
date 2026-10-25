@@ -15,7 +15,7 @@ use shamir_server::db_handler::ShamirDbHandler;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_group_without_hmac_rejected() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
@@ -40,7 +40,7 @@ async fn create_group_without_hmac_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_group_with_wrong_hmac_rejected() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
@@ -65,7 +65,7 @@ async fn create_group_with_wrong_hmac_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_group_with_correct_hmac_accepted() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
@@ -94,7 +94,7 @@ async fn create_group_with_correct_hmac_accepted() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn drop_group_without_hmac_rejected() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
@@ -124,7 +124,7 @@ async fn drop_group_without_hmac_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn drop_group_with_wrong_hmac_rejected() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
@@ -155,7 +155,7 @@ async fn drop_group_with_wrong_hmac_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn drop_group_with_correct_hmac_accepted() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
@@ -204,7 +204,7 @@ async fn drop_group_with_correct_hmac_accepted() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rename_group_without_hmac_rejected() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
@@ -237,7 +237,7 @@ async fn rename_group_without_hmac_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rename_group_with_wrong_hmac_rejected() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
@@ -271,7 +271,7 @@ async fn rename_group_with_wrong_hmac_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rename_group_with_correct_hmac_accepted() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
@@ -323,7 +323,7 @@ async fn rename_group_with_correct_hmac_accepted() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn add_group_member_without_hmac_rejected() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
@@ -356,7 +356,7 @@ async fn add_group_member_without_hmac_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn add_group_member_with_wrong_hmac_rejected() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
@@ -441,7 +441,7 @@ async fn add_group_member_with_correct_hmac_accepted() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remove_group_member_without_hmac_rejected() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
@@ -474,7 +474,7 @@ async fn remove_group_member_without_hmac_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remove_group_member_with_wrong_hmac_rejected() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
+    shamir.create_db("scratch").await.expect("create_db");
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 

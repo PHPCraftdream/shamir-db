@@ -42,7 +42,7 @@ async fn setup() -> ShamirDb {
     // internal testing, disabled for real clients" posture the gate is
     // going for).
     shamir.enable_experimental_migration_api();
-    let db = shamir.create_db("testdb").await;
+    let db = shamir.create_db("testdb").await.expect("create_db");
     let repo_config = RepoConfig::new("src_repo", BoxRepoFactory::in_memory())
         .add_table(TableConfig::new("docs"));
     db.add_repo(repo_config).await.unwrap();

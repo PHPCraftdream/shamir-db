@@ -94,7 +94,7 @@ impl ReplSource for Source {
 
 async fn home() -> (Arc<ShamirDb>, SeedReceipt) {
     let home = ShamirDb::init_memory().await.unwrap();
-    home.create_db("app").await;
+    home.create_db("app").await.expect("create_db");
     home.add_repo("app", RepoConfig::new("main", BoxRepoFactory::in_memory()))
         .await
         .unwrap();
@@ -230,7 +230,7 @@ async fn paused_subscription_never_constructs_source_or_pulls() {
 #[tokio::test]
 async fn real_in_process_hello_advertises_schema_settled_position_and_named_publication() {
     let source = ShamirDb::init_memory().await.unwrap();
-    source.create_db("app").await;
+    source.create_db("app").await.expect("create_db");
     // The repo is in-memory (no persistent WAL), so publication-time
     // enforcement only allows publishing it under an explicit
     // `completed_reseed` durability override.

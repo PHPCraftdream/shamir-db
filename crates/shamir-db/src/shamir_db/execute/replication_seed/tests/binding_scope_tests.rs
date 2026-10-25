@@ -46,7 +46,7 @@ async fn reopen_durable(sys_path: std::path::PathBuf) -> ShamirDb {
 /// exercised.
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let testdb = shamir.create_db("testdb").await;
+    let testdb = shamir.create_db("testdb").await.expect("create_db");
     for repo in ["main", "side"] {
         testdb
             .add_repo(
@@ -56,7 +56,7 @@ async fn setup() -> ShamirDb {
             .await
             .unwrap();
     }
-    let otherdb = shamir.create_db("otherdb").await;
+    let otherdb = shamir.create_db("otherdb").await.expect("create_db");
     otherdb
         .add_repo(
             RepoConfig::new("main", BoxRepoFactory::in_memory())
@@ -286,7 +286,7 @@ async fn binding_scope_overlapping_quarantines_clear_independently() {
 #[tokio::test]
 async fn binding_scope_overlap_clearing_through_real_reseed_resume() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let db = shamir.create_db("testdb").await;
+    let db = shamir.create_db("testdb").await.expect("create_db");
     // No inline `users` table on `main`: the installed seed image carries
     // the table inventory (same layout as `quarantine_reads_tests::t13`).
     db.add_repo(RepoConfig::new("main", BoxRepoFactory::in_memory()))
@@ -350,7 +350,7 @@ async fn binding_scope_overlap_clearing_through_real_reseed_resume() {
 #[tokio::test]
 async fn binding_scope_resume_removes_quarantine_marker_durably() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let db = shamir.create_db("testdb").await;
+    let db = shamir.create_db("testdb").await.expect("create_db");
     db.add_repo(RepoConfig::new("main", BoxRepoFactory::in_memory()))
         .await
         .unwrap();
@@ -404,7 +404,7 @@ async fn binding_scope_resume_marker_removal_survives_reopen() {
         let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        shamir.create_db("testdb").await;
+        shamir.create_db("testdb").await.expect("create_db");
         shamir
             .add_repo(
                 "testdb",
@@ -541,7 +541,7 @@ async fn replace_subscription_row_true_replaces_fields() {
 #[tokio::test]
 async fn resume_releases_stale_same_name_claim_after_recovery() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let db = shamir.create_db("testdb").await;
+    let db = shamir.create_db("testdb").await.expect("create_db");
     db.add_repo(RepoConfig::new("main", BoxRepoFactory::in_memory()))
         .await
         .unwrap();
@@ -627,7 +627,7 @@ async fn set_profile_alone_preserves_complete_row_through_reopen() {
         let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        let db = shamir.create_db("testdb").await;
+        let db = shamir.create_db("testdb").await.expect("create_db");
         // RAW fjall (no MemBuffer): this test binds a SUBSCRIPTION to
         // this repo, and the CREATE/RESUME admission
         // (validate_repo_wide_atomic_batch) refuses MemBuffer-wrapped
@@ -718,7 +718,7 @@ async fn pause_and_set_profile_persist_exact_durable_row() {
         let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        let db = shamir.create_db("testdb").await;
+        let db = shamir.create_db("testdb").await.expect("create_db");
         db.add_repo(RepoConfig::new(
             "main",
             // RAW fjall (no MemBuffer): this test binds a SUBSCRIPTION to

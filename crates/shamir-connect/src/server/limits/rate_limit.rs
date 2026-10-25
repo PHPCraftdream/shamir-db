@@ -336,10 +336,29 @@ impl RateLimiter for InMemoryRateLimiter {
             .entry(subnet)
             .and_modify(|b| {
                 // Refill: tokens += elapsed_ns × rate / 1e9 (in scaled units).
-                let elapsed = now_ns.saturating_sub(b.last_refill_at_ns);
+                //
+                // Watermark advance is MAX-guarded (fetch_max pattern; the
+                // #1090 hazard, RV-CONNECT-06AB39CF): callers capture
+                // `now_ns` BEFORE acquiring the map entry, so a preempted
+                // caller can reach this line with a STALE timestamp after a
+                // newer call already refilled. A plain assignment
+                // (`b.last_refill_at_ns = now_ns`) would REGRESS the
+                // watermark; the next call with the newer timestamp then
+                // re-credits an already-credited interval — an over-refill
+                // with no aggregate cap. `watermark = prior.max(now_ns)`
+                // turns a stale call into a zero-refill no-op and never
+                // lets the stored watermark go backwards, so total refill
+                // across any out-of-order call sequence is bounded by the
+                // true wall-clock span. The shard write-lock held by
+                // `and_modify` makes this read-modify-write atomic; the
+                // max-guard supplies the cross-call ordering the lock
+                // alone does not.
+                let prior = b.last_refill_at_ns;
+                let watermark = prior.max(now_ns);
+                let elapsed = watermark.saturating_sub(prior);
                 let refill = elapsed.saturating_mul(rate as u64);
                 b.micro_tokens = b.micro_tokens.saturating_add(refill).min(capacity);
-                b.last_refill_at_ns = now_ns;
+                b.last_refill_at_ns = watermark;
 
                 let cost = 1_000_000_000u64;
                 if b.micro_tokens >= cost {

@@ -12,7 +12,7 @@ use crate::ShamirDb;
 
 async fn setup_shamir() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let db = shamir.create_db("testdb").await;
+    let db = shamir.create_db("testdb").await.expect("create_db");
 
     let repo_config = RepoConfig::new("main", BoxRepoFactory::in_memory())
         .add_table(TableConfig::new("users"))
@@ -539,7 +539,7 @@ async fn create_repo_via_execute_persists_to_catalogue() {
         let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        shamir.create_db("production").await;
+        shamir.create_db("production").await.expect("create_db");
 
         let mut b = Batch::new();
         b.id(1);
@@ -602,7 +602,7 @@ async fn drop_repo_via_execute_clears_catalogue() {
         let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
-        shamir.create_db("production").await;
+        shamir.create_db("production").await.expect("create_db");
 
         let mut b = Batch::new();
         b.id(1);
@@ -724,7 +724,7 @@ async fn create_db_rejects_dotdot_name() {
     // Actually, CreateDb is an admin op so we just use execute.
     // The db_name param here is just routing -- the create_db value is
     // the payload. We need a db that exists.
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
     let err = shamir.execute("testdb", &req).await.unwrap_err();
     let msg = format!("{:?}", err);
     assert!(
@@ -794,7 +794,7 @@ async fn concurrent_create_db_if_not_exists_is_consistent() {
     // CreateDb payload names the NEW db); route through the system db like
     // the existing dotdot test does — any pre-existing db works here since
     // CreateDb's own ACL target is Root, not the routing db.
-    shamir.create_db("router").await;
+    shamir.create_db("router").await.expect("create_db");
 
     let (r1, r2) = tokio::join!(
         shamir.execute("router", &req_a),
@@ -841,7 +841,7 @@ async fn concurrent_create_repo_if_not_exists_is_consistent() {
     use shamir_query_builder::ddl;
 
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
 
     let make_req = || {
         let mut b = Batch::new();
@@ -908,7 +908,7 @@ async fn create_db_lock_actually_serialises_concurrent_callers() {
     use shamir_query_builder::ddl;
 
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("router").await;
+    shamir.create_db("router").await.expect("create_db");
 
     // Hold the lock as if a create_db were already mid-flight.
     let held_guard = shamir.db_create_lock().lock().await;
@@ -953,7 +953,7 @@ async fn create_repo_lock_actually_serialises_concurrent_callers() {
     use shamir_query_builder::ddl;
 
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await;
+    shamir.create_db("testdb").await.expect("create_db");
 
     // Acquire the per-db lock the same way handle_create_repo does
     // (get-or-insert then lock), simulating "a create_repo is mid-flight".

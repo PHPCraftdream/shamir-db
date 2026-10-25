@@ -174,7 +174,7 @@ async fn setup_with_index(sys_path: std::path::PathBuf) -> ShamirDb {
     let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
 
     // Create repo with table.
     let mut b = Batch::new();
@@ -293,7 +293,7 @@ async fn unique_without_index_rejected_at_ddl() {
     let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
 
     // Create repo with table but NO index on users.email.
     let mut b = Batch::new();
@@ -725,7 +725,7 @@ async fn unique_bare_index_without_rule_rejects_duplicate() {
     let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .unwrap();
-    db.create_db("testdb").await;
+    db.create_db("testdb").await.expect("create_db");
 
     // Create repo with table.
     let mut b = Batch::new();

@@ -30,7 +30,10 @@ async fn setup_shamir() -> ShamirDb {
     // User(42) as owner via the `_as` variants — that makes it PermClass::Owner with
     // full rwx on db/repo/table, matching what `user_traverse_*` intends to exercise.
     let bench_user = Actor::User(42);
-    shamir.create_db_as("benchdb", bench_user.clone()).await;
+    shamir
+        .create_db_as("benchdb", bench_user.clone())
+        .await
+        .expect("create_db");
     let config =
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("records"));
     shamir

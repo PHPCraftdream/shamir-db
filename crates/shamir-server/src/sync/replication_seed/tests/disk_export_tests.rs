@@ -33,7 +33,7 @@ async fn fixture(root: &Path, clean: bool) -> (u64, Vec<(Vec<u8>, Vec<u8>)>, Cha
     let source = ShamirDb::init(SystemStoreConfig::Fjall(meta))
         .await
         .unwrap();
-    source.create_db("app").await;
+    source.create_db("app").await.expect("create_db");
     source
         .add_repo(
             "app",

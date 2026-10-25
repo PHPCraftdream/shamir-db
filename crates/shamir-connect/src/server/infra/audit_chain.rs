@@ -42,6 +42,7 @@
 
 use crate::common::crypto::{constant_time_eq, hmac_sha256};
 use parking_lot::Mutex;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 /// One audit log entry per spec §3.3.
@@ -131,13 +132,20 @@ pub struct AuditChain {
     inner: Mutex<ChainInner>,
 }
 
+/// Bound on entries retained in-memory by `snapshot()`. The HMAC chain,
+/// `seq`/`prev_hmac` state, `checkpoint()` and the durable `AuditAppender`
+/// are all independent of this Vec — durable storage keeps full history
+/// for `verify_chain`/`verify_against_checkpoint`, so only the in-memory
+/// debug/test window is capped.
+pub const RETAINED_ENTRIES: usize = 4096;
+
 struct ChainInner {
     next_seq: u64,
     prev_hmac: [u8; 32],
-    /// Entries accumulated in-memory (for tests + simple deployments).
-    /// Production should override with a streaming writer that persists
-    /// each entry to durable log + bumps `last_audit_hmac` checkpoint.
-    entries: Vec<AuditEntry>,
+    /// Most recent entries, bounded at [`RETAINED_ENTRIES`] (tests +
+    /// simple deployments). Full history lives in durable storage; this
+    /// Vec must never be treated as the complete audit log.
+    entries: VecDeque<AuditEntry>,
 }
 
 impl core::fmt::Debug for AuditChain {
@@ -160,7 +168,7 @@ impl AuditChain {
             inner: Mutex::new(ChainInner {
                 next_seq: 1,
                 prev_hmac: [0u8; 32],
-                entries: Vec::new(),
+                entries: VecDeque::new(),
             }),
         }
     }
@@ -173,7 +181,7 @@ impl AuditChain {
             inner: Mutex::new(ChainInner {
                 next_seq,
                 prev_hmac,
-                entries: Vec::new(),
+                entries: VecDeque::new(),
             }),
         }
     }
@@ -211,7 +219,12 @@ impl AuditChain {
 
         g.prev_hmac = entry.hmac;
         g.next_seq = g.next_seq.saturating_add(1);
-        g.entries.push(entry.clone());
+        // Bounded retention, O(1) per append: drop the oldest at the cap
+        // (chain state is separate, so `checkpoint`/`verify_*` stay intact).
+        if g.entries.len() >= RETAINED_ENTRIES {
+            g.entries.pop_front();
+        }
+        g.entries.push_back(entry.clone());
         entry
     }
 
@@ -223,9 +236,10 @@ impl AuditChain {
         (g.next_seq, g.prev_hmac)
     }
 
-    /// Snapshot all in-memory entries (test helper).
+    /// Snapshot the retained in-memory window (test helper) — at most
+    /// [`RETAINED_ENTRIES`] most recent entries, not the full log.
     pub fn snapshot(&self) -> Vec<AuditEntry> {
-        self.inner.lock().entries.clone()
+        self.inner.lock().entries.iter().cloned().collect()
     }
 
     /// Verify a sequence of entries against this chain key. Returns
