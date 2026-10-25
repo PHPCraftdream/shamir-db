@@ -108,10 +108,21 @@ impl QueryMacro {
 // ── write code generation ──────────────────────────────────────────
 
 /// Emit tokens for a `DocMapAst` → `::shamir_query_builder::write::doc().set(k, v)...`.
+///
+/// `Doc::set` is fallible (RV-QUERY-BUILDER-20D9732A), so each `.set` is
+/// followed by an unwrap that panics with the typed error — the macro layer
+/// keeps its infallible ergonomics while the setter itself never panics.
+///
+/// **Note:** over-deep literal values (nesting beyond `MAX_FILTER_DEPTH`)
+/// therefore PANIC at macro construction.
 fn lower_doc_map(doc: &DocMapAst) -> TokenStream2 {
     let mut chain = quote! { ::shamir_query_builder::write::doc() };
     for (key, val) in &doc.pairs {
-        chain = quote! { #chain.set(#key, #val) };
+        chain = quote! {
+            #chain.set(#key, #val).unwrap_or_else(|e| {
+                ::core::panic!("q! doc construction failed: {e}")
+            })
+        };
     }
     chain
 }

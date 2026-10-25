@@ -326,7 +326,9 @@ async fn run_fanout_iter(fixture: Arc<FanoutFixture>, iter_idx: u64) {
             insert("messages").row(
                 doc! { "_id" => format!("k{}-{}", iter_idx, i) }
                     .set("thread_id", 42_i64)
-                    .set("body", body),
+                    .unwrap()
+                    .set("body", body)
+                    .unwrap(),
             ),
         );
         let _ = fixture

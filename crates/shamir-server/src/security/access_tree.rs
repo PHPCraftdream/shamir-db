@@ -224,7 +224,9 @@ async fn fetch_online(args: &AccessTreeArgs, addr: &str) -> anyhow::Result<Query
     }
     let mut batch = shamir_query_builder::batch::Batch::new();
     batch.id(1).access_tree("tree", ddl);
-    let batch = batch.build();
+    let batch = batch
+        .try_build()
+        .map_err(|e| anyhow!("build access_tree batch: {e}"))?;
 
     let resp = client
         .execute("default", batch)

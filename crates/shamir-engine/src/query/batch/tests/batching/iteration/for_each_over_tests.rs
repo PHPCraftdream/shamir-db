@@ -20,9 +20,18 @@ async fn for_each_over_query_column_ref() {
 
     let mut seed = Batch::new();
     seed.id(0);
-    seed.op_silent("s1", write::insert("users").row(doc().set("score", 1i64)));
-    seed.op_silent("s2", write::insert("users").row(doc().set("score", 2i64)));
-    seed.op_silent("s3", write::insert("users").row(doc().set("score", 3i64)));
+    seed.op_silent(
+        "s1",
+        write::insert("users").row(doc().set("score", 1i64).unwrap()),
+    );
+    seed.op_silent(
+        "s2",
+        write::insert("users").row(doc().set("score", 2i64).unwrap()),
+    );
+    seed.op_silent(
+        "s3",
+        write::insert("users").row(doc().set("score", 3i64).unwrap()),
+    );
     execute_batch(&seed.build(), &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();

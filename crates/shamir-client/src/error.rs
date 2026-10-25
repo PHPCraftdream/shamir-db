@@ -136,3 +136,11 @@ impl From<rustls::Error> for ClientError {
         ClientError::Tls(e.to_string())
     }
 }
+
+/// Map a [`shamir_query_builder::batch::BuildError`] into a [`ClientError`] — the
+/// single conversion used by every call site that turns a builder `Batch`
+/// into a sent request via `try_build` (batch validation must surface, never
+/// silently drop deferred registration errors).
+pub(crate) fn client_batch_error(e: shamir_query_builder::batch::BuildError) -> ClientError {
+    ClientError::Protocol(format!("batch validation: {e}"))
+}

@@ -14,8 +14,20 @@ async fn test_insert_update_delete_pipeline() {
 
     // 1. Insert
     let insert_op = write::insert("users")
-        .row(doc().set("name", "Alice").set("score", 100_i64))
-        .row(doc().set("name", "Bob").set("score", 50_i64))
+        .row(
+            doc()
+                .set("name", "Alice")
+                .unwrap()
+                .set("score", 100_i64)
+                .unwrap(),
+        )
+        .row(
+            doc()
+                .set("name", "Bob")
+                .unwrap()
+                .set("score", 50_i64)
+                .unwrap(),
+        )
         .build();
     let r = insert_via_tx(&repo, &table, &insert_op, true)
         .await
@@ -25,7 +37,7 @@ async fn test_insert_update_delete_pipeline() {
     // 2. Update: boost Bob's score
     let update_op = write::update("users")
         .where_(filter::eq("name", "Bob"))
-        .set(doc().set("score", 75_i64))
+        .set(doc().set("score", 75_i64).unwrap())
         .returning(UpdateReturnMode::Changed)
         .build()
         .unwrap();

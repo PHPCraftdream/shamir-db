@@ -478,7 +478,13 @@ pub(crate) async fn bridge_task(
                         // Match the existing server-owned reactive-read limits policy.
                         // Each target read has its own cooperative execution budget.
                         batch.limits(query_limits.clone());
-                        let find_req = batch.build();
+                        let find_req = match batch.try_build() {
+                            Ok(req) => req,
+                            Err(error) => {
+                                tracing::warn!(sub_id, %error, "snapshot batch build failed");
+                                return;
+                            }
+                        };
 
                         match db
                             .tx_execute_as(actor.clone(), &db_name, &find_req, &mut tx)

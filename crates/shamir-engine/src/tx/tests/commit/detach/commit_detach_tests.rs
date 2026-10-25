@@ -64,7 +64,7 @@ async fn fixture(name: &str) -> (RepoInstance, Arc<PostWalPrePublishHook>) {
 
 async fn record(tbl: &TableManager, email: &str) -> InnerValue {
     let interner = tbl.interner().get().await.unwrap();
-    query_value_to_inner(&doc().set("email", email).build(), interner).unwrap()
+    query_value_to_inner(&doc().set("email", email).unwrap().build(), interner).unwrap()
 }
 
 async fn staged(repo: &RepoInstance, value: &str) -> (TxContext, SnapshotGuard) {

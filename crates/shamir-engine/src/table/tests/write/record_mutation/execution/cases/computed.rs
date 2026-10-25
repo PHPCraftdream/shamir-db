@@ -15,7 +15,9 @@ async fn test_insert_computed_field_lowercase() {
         .row(
             doc()
                 .set("email", "Alice@Example.COM")
-                .set("email_norm", func("strings/lower", [col("email")])),
+                .unwrap()
+                .set("email_norm", func("strings/lower", [col("email")]))
+                .unwrap(),
         )
         .build();
 
@@ -41,11 +43,13 @@ async fn test_set_computed_field() {
     let (table, repo) = setup_empty_table().await;
 
     let op = write::upsert("users")
-        .key(doc().set("email", "x@y.z"))
+        .key(doc().set("email", "x@y.z").unwrap())
         .value(
             doc()
                 .set("email", "X@Y.Z")
-                .set("email_norm", func("strings/lower", [col("email")])),
+                .unwrap()
+                .set("email_norm", func("strings/lower", [col("email")]))
+                .unwrap(),
         )
         .build()
         .unwrap();
@@ -64,7 +68,7 @@ async fn test_insert_computed_unknown_function_fails_closed() {
     let (table, repo) = setup_empty_table().await;
 
     let op = write::insert("users")
-        .row(doc().set("x", func("strings/does_not_exist", [])))
+        .row(doc().set("x", func("strings/does_not_exist", [])).unwrap())
         .build();
 
     // A broken computed value aborts the write rather than storing garbage.
@@ -76,7 +80,11 @@ async fn test_insert_computed_bad_ref_fails_closed() {
     let (table, repo) = setup_empty_table().await;
 
     let op = write::insert("users")
-        .row(doc().set("y", func("strings/lower", [col("missing_field")])))
+        .row(
+            doc()
+                .set("y", func("strings/lower", [col("missing_field")]))
+                .unwrap(),
+        )
         .build();
 
     assert!(insert_via_tx(&repo, &table, &op, true).await.is_err());

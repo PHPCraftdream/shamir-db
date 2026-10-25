@@ -380,7 +380,13 @@ async fn set_update_indexed_field_reflected_in_index() {
 
     // Seed a record with city=NYC.
     let insert_op = write::insert("users")
-        .row(doc().set("email", "a@b.c").set("city", "NYC"))
+        .row(
+            doc()
+                .set("email", "a@b.c")
+                .unwrap()
+                .set("city", "NYC")
+                .unwrap(),
+        )
         .build();
     insert_via_tx(&repo, &table, &insert_op, false)
         .await
@@ -388,8 +394,14 @@ async fn set_update_indexed_field_reflected_in_index() {
 
     // Upsert by email — UPDATE branch — changing the indexed `city` field.
     let set_op = write::upsert("users")
-        .key(doc().set("email", "a@b.c"))
-        .value(doc().set("email", "a@b.c").set("city", "LA"))
+        .key(doc().set("email", "a@b.c").unwrap())
+        .value(
+            doc()
+                .set("email", "a@b.c")
+                .unwrap()
+                .set("city", "LA")
+                .unwrap(),
+        )
         .build()
         .unwrap();
     let result = set_via_implicit_tx(&repo, &table, &set_op).await.unwrap();
@@ -409,8 +421,8 @@ async fn set_update_indexed_field_reflected_in_index() {
     // city=LA must find it (UPDATE branch → _created=false); city=NYC must NOT
     // find it (INSERT branch → _created=true).
     let find_la = write::upsert("users")
-        .key(doc().set("city", "LA"))
-        .value(doc().set("city", "LA").set("flag", true))
+        .key(doc().set("city", "LA").unwrap())
+        .value(doc().set("city", "LA").unwrap().set("flag", true).unwrap())
         .build()
         .unwrap();
     let la = set_via_implicit_tx(&repo, &table, &find_la).await.unwrap();
@@ -420,8 +432,8 @@ async fn set_update_indexed_field_reflected_in_index() {
     );
 
     let find_nyc = write::upsert("users")
-        .key(doc().set("city", "NYC"))
-        .value(doc().set("city", "NYC").set("flag", true))
+        .key(doc().set("city", "NYC").unwrap())
+        .value(doc().set("city", "NYC").unwrap().set("flag", true).unwrap())
         .build()
         .unwrap();
     let nyc = set_via_implicit_tx(&repo, &table, &find_nyc).await.unwrap();
@@ -438,8 +450,14 @@ async fn set_insert_new_record_counter_delta() {
     let tbl = make_table().await;
 
     let op = write::upsert("t")
-        .key(doc().set("email", "a@b.c"))
-        .value(doc().set("email", "a@b.c").set("name", "alice"))
+        .key(doc().set("email", "a@b.c").unwrap())
+        .value(
+            doc()
+                .set("email", "a@b.c")
+                .unwrap()
+                .set("name", "alice")
+                .unwrap(),
+        )
         .build()
         .unwrap();
     let tx = set_into_tx(&tbl, &op).await;
@@ -462,7 +480,13 @@ async fn set_update_introduces_new_field() {
 
     // Seed { email, name }.
     let insert_op = write::insert("users")
-        .row(doc().set("email", "a@b.c").set("name", "alice"))
+        .row(
+            doc()
+                .set("email", "a@b.c")
+                .unwrap()
+                .set("name", "alice")
+                .unwrap(),
+        )
         .build();
     insert_via_tx(&repo, &table, &insert_op, false)
         .await
@@ -470,8 +494,8 @@ async fn set_update_introduces_new_field() {
 
     // Upsert by email — introduce a brand-new field `score`.
     let set_op = write::upsert("users")
-        .key(doc().set("email", "a@b.c"))
-        .value(doc().set("score", 100_i64))
+        .key(doc().set("email", "a@b.c").unwrap())
+        .value(doc().set("score", 100_i64).unwrap())
         .build()
         .unwrap();
     let result = set_via_implicit_tx(&repo, &table, &set_op).await.unwrap();
@@ -506,8 +530,20 @@ async fn set_update_unique_indexed_field() {
 
     // Seed two records with distinct unique emails.
     let insert_op = write::insert("users")
-        .row(doc().set("email", "a@b.c").set("name", "alice"))
-        .row(doc().set("email", "x@y.z").set("name", "bob"))
+        .row(
+            doc()
+                .set("email", "a@b.c")
+                .unwrap()
+                .set("name", "alice")
+                .unwrap(),
+        )
+        .row(
+            doc()
+                .set("email", "x@y.z")
+                .unwrap()
+                .set("name", "bob")
+                .unwrap(),
+        )
         .build();
     insert_via_tx(&repo, &table, &insert_op, false)
         .await
@@ -516,8 +552,14 @@ async fn set_update_unique_indexed_field() {
     // Upsert alice's record by email — UPDATE branch — keep the same email.
     // The unique planner must see owner==self and not flag a self-conflict.
     let set_op = write::upsert("users")
-        .key(doc().set("email", "a@b.c"))
-        .value(doc().set("email", "a@b.c").set("name", "ALICE"))
+        .key(doc().set("email", "a@b.c").unwrap())
+        .value(
+            doc()
+                .set("email", "a@b.c")
+                .unwrap()
+                .set("name", "ALICE")
+                .unwrap(),
+        )
         .build()
         .unwrap();
     let result = set_via_implicit_tx(&repo, &table, &set_op).await.unwrap();
@@ -534,8 +576,14 @@ async fn set_update_unique_indexed_field() {
 
     // A second upsert keyed on a NEW email that does not exist → INSERT branch.
     let set_new = write::upsert("users")
-        .key(doc().set("email", "c@d.e"))
-        .value(doc().set("email", "c@d.e").set("name", "carol"))
+        .key(doc().set("email", "c@d.e").unwrap())
+        .value(
+            doc()
+                .set("email", "c@d.e")
+                .unwrap()
+                .set("name", "carol")
+                .unwrap(),
+        )
         .build()
         .unwrap();
     let result = set_via_implicit_tx(&repo, &table, &set_new).await.unwrap();
@@ -687,8 +735,14 @@ async fn set_merge_omitting_created_at_preserves_original() {
 
     // INSERT branch: created_at stamped by AutoNowAdd.
     let op_ins = write::upsert("users")
-        .key(doc().set("email", "a@b.c"))
-        .value(doc().set("email", "a@b.c").set("name", "alice"))
+        .key(doc().set("email", "a@b.c").unwrap())
+        .value(
+            doc()
+                .set("email", "a@b.c")
+                .unwrap()
+                .set("name", "alice")
+                .unwrap(),
+        )
         .build()
         .unwrap();
     let res_ins = set_via_implicit_tx(&repo, &table, &op_ins).await.unwrap();
@@ -705,8 +759,8 @@ async fn set_merge_omitting_created_at_preserves_original() {
 
     // MERGE branch: same key, created_at OMITTED.
     let op_merge = write::upsert("users")
-        .key(doc().set("email", "a@b.c"))
-        .value(doc().set("name", "ALICE"))
+        .key(doc().set("email", "a@b.c").unwrap())
+        .value(doc().set("name", "ALICE").unwrap())
         .build()
         .unwrap();
     let res_merge = set_via_implicit_tx(&repo, &table, &op_merge).await.unwrap();
@@ -735,8 +789,14 @@ async fn set_insert_new_key_still_stamps_created_at() {
     bind_timestamp_schema(&mut table).await;
 
     let op = write::upsert("users")
-        .key(doc().set("email", "new@b.c"))
-        .value(doc().set("email", "new@b.c").set("name", "newbie"))
+        .key(doc().set("email", "new@b.c").unwrap())
+        .value(
+            doc()
+                .set("email", "new@b.c")
+                .unwrap()
+                .set("name", "newbie")
+                .unwrap(),
+        )
         .build()
         .unwrap();
     let res = set_via_implicit_tx(&repo, &table, &op).await.unwrap();
@@ -766,8 +826,14 @@ async fn set_merge_explicit_created_at_is_used() {
 
     // Seed a row first.
     let op_ins = write::upsert("users")
-        .key(doc().set("email", "a@b.c"))
-        .value(doc().set("email", "a@b.c").set("name", "alice"))
+        .key(doc().set("email", "a@b.c").unwrap())
+        .value(
+            doc()
+                .set("email", "a@b.c")
+                .unwrap()
+                .set("name", "alice")
+                .unwrap(),
+        )
         .build()
         .unwrap();
     set_via_implicit_tx(&repo, &table, &op_ins).await.unwrap();
@@ -775,8 +841,8 @@ async fn set_merge_explicit_created_at_is_used() {
     // MERGE with an explicit created_at — must override the original.
     let explicit_ts: i64 = 1_234_567_890;
     let op_merge = write::upsert("users")
-        .key(doc().set("email", "a@b.c"))
-        .value(doc().set("created_at", explicit_ts))
+        .key(doc().set("email", "a@b.c").unwrap())
+        .value(doc().set("created_at", explicit_ts).unwrap())
         .build()
         .unwrap();
     let res = set_via_implicit_tx(&repo, &table, &op_merge).await.unwrap();

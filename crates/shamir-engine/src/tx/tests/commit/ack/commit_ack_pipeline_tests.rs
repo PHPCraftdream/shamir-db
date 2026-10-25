@@ -49,7 +49,7 @@ async fn transactional_batch_forwards_policy_and_retains_results() {
     batch.transactional().visibility_wait(STATUS);
     batch.insert(
         "written",
-        write::insert("b").row(doc().set("name", "receipt")),
+        write::insert("b").row(doc().set("name", "receipt").unwrap()),
     );
     let request = batch.build();
     let resolver = Resolver(repo.clone());
@@ -410,10 +410,16 @@ async fn nested_bounded_override_in_transactional_outer_rejected_before_any_writ
     let (repo, _) = fixture("ack_nested_reject").await;
     let mut inner = Batch::new();
     inner.transactional().visibility_wait(STATUS);
-    inner.insert("inner", write::insert("b").row(doc().set("name", "inner")));
+    inner.insert(
+        "inner",
+        write::insert("b").row(doc().set("name", "inner").unwrap()),
+    );
     let mut outer = Batch::new();
     outer.transactional();
-    outer.insert("outer", write::insert("a").row(doc().set("name", "outer")));
+    outer.insert(
+        "outer",
+        write::insert("a").row(doc().set("name", "outer").unwrap()),
+    );
     outer.sub_batch_no_bind("nested", inner.build());
     let result = execute_batch_unchecked(
         &outer.build(),
@@ -444,9 +450,15 @@ async fn nested_bounded_override_in_implicit_outer_commits_with_receipts() {
     let (repo, _) = fixture("ack_nested_implicit").await;
     let mut inner = Batch::new();
     inner.transactional().visibility_wait(STATUS);
-    inner.insert("inner", write::insert("b").row(doc().set("name", "inner")));
+    inner.insert(
+        "inner",
+        write::insert("b").row(doc().set("name", "inner").unwrap()),
+    );
     let mut outer = Batch::new();
-    outer.insert("outer", write::insert("a").row(doc().set("name", "outer")));
+    outer.insert(
+        "outer",
+        write::insert("a").row(doc().set("name", "outer").unwrap()),
+    );
     outer.sub_batch_no_bind("nested", inner.build());
     let response = execute_batch_unchecked(
         &outer.build(),
@@ -477,7 +489,7 @@ async fn non_transactional_bounded_batch_returns_alias_receipt() {
     batch.visibility_wait(STATUS);
     batch.insert(
         "written",
-        write::insert("b").row(doc().set("name", "implicit")),
+        write::insert("b").row(doc().set("name", "implicit").unwrap()),
     );
     let request = batch.build();
     let response = execute_batch_unchecked(

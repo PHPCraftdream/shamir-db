@@ -122,7 +122,7 @@ async fn f4b_nontx_insert_crash_recovery() {
         let tbl = repo.get_table("t").await.unwrap();
 
         let op = write::insert("t")
-            .row(doc().set("name", "nontx_durable"))
+            .row(doc().set("name", "nontx_durable").unwrap())
             .build();
 
         // Implicit single-op BATCH tx: Snapshot isolation (never aborts on
@@ -220,7 +220,7 @@ async fn c5_implicit_insert_new_field_recovers_with_preserved_id() {
 
         // "c5_fresh_field" is guaranteed new to the table's interner.
         let op = write::insert("t")
-            .row(doc().set("c5_fresh_field", "v"))
+            .row(doc().set("c5_fresh_field", "v").unwrap())
             .build();
 
         let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();

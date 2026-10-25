@@ -65,7 +65,12 @@ async fn build_db(tables: &[&str], indexed: bool) -> ShamirDb {
 }
 
 fn row(label: &str, value: i64) -> QueryValue {
-    doc().set("label", label).set("v", value).build()
+    doc()
+        .set("label", label)
+        .unwrap()
+        .set("v", value)
+        .unwrap()
+        .build()
 }
 
 async fn execute(db: &ShamirDb, batch: &Batch) -> BatchResponse {
@@ -259,7 +264,7 @@ async fn assert_read(
             )
             .await;
             let count = i64::try_from(expected.len()).expect("small fixture");
-            assert_rows(&result, &[doc().set("n", count).build()]);
+            assert_rows(&result, &[doc().set("n", count).unwrap().build()]);
             assert_eq!(
                 result
                     .stats
@@ -304,7 +309,7 @@ async fn matrix(write: Write, read: Read) {
                     "write",
                     update("items")
                         .where_(eq("label", "one"))
-                        .set(doc().set("v", 20)),
+                        .set(doc().set("v", 20).unwrap()),
                 )
                 .expect("build update");
             execute(&leader, &batch).await;

@@ -66,7 +66,7 @@ async fn setup() -> Resolver {
     let mut seed = Batch::new();
     seed.insert(
         "seed",
-        insert("rows").row(doc().set("pad", "x".repeat(10_240))),
+        insert("rows").row(doc().set("pad", "x".repeat(10_240)).unwrap()),
     );
     let request = seed.build();
     run(&request, &resolver, &ExecScope::root(&request.limits))
@@ -79,7 +79,7 @@ async fn add_second_row(resolver: &Resolver) {
     let mut seed = Batch::new();
     seed.insert(
         "second",
-        insert("rows").row(doc().set("pad", "y".repeat(10_240))),
+        insert("rows").row(doc().set("pad", "y".repeat(10_240)).unwrap()),
     );
     let request = seed.build();
     run(&request, resolver, &ExecScope::root(&request.limits))

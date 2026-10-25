@@ -159,7 +159,7 @@ async fn update_where_clause_deep_filter_still_rejected() {
     b.update(
         "u",
         write::update("users")
-            .set(doc().set("v", 1_i64))
+            .set(doc().set("v", 1_i64).unwrap())
             .where_(deeply_nested_not_filter(100))
             .build()
             .unwrap(),
@@ -184,7 +184,10 @@ async fn update_where_clause_deep_filter_still_rejected() {
 async fn when_guard_with_deep_filter_is_rejected_at_validate_time() {
     let resolver = setup().await;
     let mut b = Batch::new();
-    let ins = b.insert("ins", write::insert("users").row(doc().set("name", "x")));
+    let ins = b.insert(
+        "ins",
+        write::insert("users").row(doc().set("name", "x").unwrap()),
+    );
     b.when(&ins, deeply_nested_not_filter(100));
     let req = b.build();
 
@@ -304,7 +307,7 @@ async fn delete_with_invalid_regex_under_not_is_rejected_not_delete_all() {
     for i in 0..3 {
         seed.insert(
             format!("seed{i}"),
-            write::insert("users").row(doc().set("name", format!("user{i}"))),
+            write::insert("users").row(doc().set("name", format!("user{i}")).unwrap()),
         );
     }
     execute_batch(&seed.build(), &resolver, None, None, Actor::System, "test")
@@ -355,7 +358,7 @@ async fn delete_with_overlong_like_under_not_is_rejected_not_delete_all() {
     let mut seed = Batch::new();
     seed.insert(
         "seed",
-        write::insert("users").row(doc().set("name", "alice")),
+        write::insert("users").row(doc().set("name", "alice").unwrap()),
     );
     execute_batch(&seed.build(), &resolver, None, None, Actor::System, "test")
         .await

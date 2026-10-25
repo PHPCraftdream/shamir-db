@@ -97,8 +97,11 @@ async fn self_ref_on_update_cascade_rekeys_subordinates() {
         "employees",
         doc()
             .set("id", 10_i64)
+            .unwrap()
             .set("name", "CEO")
-            .set("manager_id", QueryValue::Null),
+            .unwrap()
+            .set("manager_id", QueryValue::Null)
+            .unwrap(),
     )
     .await;
     insert_row(
@@ -107,8 +110,11 @@ async fn self_ref_on_update_cascade_rekeys_subordinates() {
         "employees",
         doc()
             .set("id", 20_i64)
+            .unwrap()
             .set("name", "S1")
-            .set("manager_id", 10_i64),
+            .unwrap()
+            .set("manager_id", 10_i64)
+            .unwrap(),
     )
     .await;
     insert_row(
@@ -117,8 +123,11 @@ async fn self_ref_on_update_cascade_rekeys_subordinates() {
         "employees",
         doc()
             .set("id", 30_i64)
+            .unwrap()
             .set("name", "S2")
-            .set("manager_id", 10_i64),
+            .unwrap()
+            .set("manager_id", 10_i64)
+            .unwrap(),
     )
     .await;
 
@@ -129,7 +138,7 @@ async fn self_ref_on_update_cascade_rekeys_subordinates() {
         "upd",
         write::update("employees")
             .where_(filter::eq("id", 10_i64))
-            .set(doc().set("id", 77_i64)),
+            .set(doc().set("id", 77_i64).unwrap()),
     )
     .unwrap();
     let req = b.build();
@@ -179,8 +188,11 @@ async fn self_ref_on_update_restrict_blocks_rekey() {
         "employees",
         doc()
             .set("id", 10_i64)
+            .unwrap()
             .set("name", "CEO")
-            .set("manager_id", QueryValue::Null),
+            .unwrap()
+            .set("manager_id", QueryValue::Null)
+            .unwrap(),
     )
     .await;
     insert_row(
@@ -189,8 +201,11 @@ async fn self_ref_on_update_restrict_blocks_rekey() {
         "employees",
         doc()
             .set("id", 20_i64)
+            .unwrap()
             .set("name", "Sub")
-            .set("manager_id", 10_i64),
+            .unwrap()
+            .set("manager_id", 10_i64)
+            .unwrap(),
     )
     .await;
 
@@ -201,7 +216,7 @@ async fn self_ref_on_update_restrict_blocks_rekey() {
         "upd",
         write::update("employees")
             .where_(filter::eq("id", 10_i64))
-            .set(doc().set("id", 77_i64)),
+            .set(doc().set("id", 77_i64).unwrap()),
     )
     .unwrap();
     let req = b.build();
@@ -257,8 +272,11 @@ async fn self_ref_on_update_set_null_nulls_subordinates() {
         "employees",
         doc()
             .set("id", 10_i64)
+            .unwrap()
             .set("name", "CEO")
-            .set("manager_id", QueryValue::Null),
+            .unwrap()
+            .set("manager_id", QueryValue::Null)
+            .unwrap(),
     )
     .await;
     insert_row(
@@ -267,8 +285,11 @@ async fn self_ref_on_update_set_null_nulls_subordinates() {
         "employees",
         doc()
             .set("id", 20_i64)
+            .unwrap()
             .set("name", "Sub")
-            .set("manager_id", 10_i64),
+            .unwrap()
+            .set("manager_id", 10_i64)
+            .unwrap(),
     )
     .await;
 
@@ -279,7 +300,7 @@ async fn self_ref_on_update_set_null_nulls_subordinates() {
         "upd",
         write::update("employees")
             .where_(filter::eq("id", 10_i64))
-            .set(doc().set("id", 77_i64)),
+            .set(doc().set("id", 77_i64).unwrap()),
     )
     .unwrap();
     let req = b.build();
@@ -331,8 +352,11 @@ async fn self_ref_on_update_self_loop_overlapping_parent_and_child() {
         "employees",
         doc()
             .set("id", 10_i64)
+            .unwrap()
             .set("name", "R1")
-            .set("manager_id", QueryValue::Null),
+            .unwrap()
+            .set("manager_id", QueryValue::Null)
+            .unwrap(),
     )
     .await;
     insert_row(
@@ -341,8 +365,11 @@ async fn self_ref_on_update_self_loop_overlapping_parent_and_child() {
         "employees",
         doc()
             .set("id", 20_i64)
+            .unwrap()
             .set("name", "R2")
-            .set("manager_id", QueryValue::Null),
+            .unwrap()
+            .set("manager_id", QueryValue::Null)
+            .unwrap(),
     )
     .await;
     insert_row(
@@ -351,8 +378,11 @@ async fn self_ref_on_update_self_loop_overlapping_parent_and_child() {
         "employees",
         doc()
             .set("id", 30_i64)
+            .unwrap()
             .set("name", "R3")
-            .set("manager_id", 10_i64),
+            .unwrap()
+            .set("manager_id", 10_i64)
+            .unwrap(),
     )
     .await;
 
@@ -363,7 +393,7 @@ async fn self_ref_on_update_self_loop_overlapping_parent_and_child() {
         "upd",
         write::update("employees")
             .where_(filter::in_("id", [10_i64, 20_i64]))
-            .set(doc().set("id", 99_i64)),
+            .set(doc().set("id", 99_i64).unwrap()),
     )
     .unwrap();
     let req = b.build();

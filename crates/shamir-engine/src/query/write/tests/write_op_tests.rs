@@ -20,7 +20,13 @@ use crate::query::TableRef;
 #[test]
 fn test_insert_single_record() {
     let op = write::insert("users")
-        .row(doc().set("name", "Alice").set("email", "alice@example.com"))
+        .row(
+            doc()
+                .set("name", "Alice")
+                .unwrap()
+                .set("email", "alice@example.com")
+                .unwrap(),
+        )
         .build();
 
     assert_eq!(op.insert_into, TableRef::new("users"));
@@ -32,12 +38,26 @@ fn test_insert_single_record() {
 #[test]
 fn test_insert_multiple_records() {
     let op = write::insert("users")
-        .row(doc().set("name", "Alice").set("email", "alice@example.com"))
-        .row(doc().set("name", "Bob").set("email", "bob@example.com"))
+        .row(
+            doc()
+                .set("name", "Alice")
+                .unwrap()
+                .set("email", "alice@example.com")
+                .unwrap(),
+        )
+        .row(
+            doc()
+                .set("name", "Bob")
+                .unwrap()
+                .set("email", "bob@example.com")
+                .unwrap(),
+        )
         .row(
             doc()
                 .set("name", "Charlie")
-                .set("email", "charlie@example.com"),
+                .unwrap()
+                .set("email", "charlie@example.com")
+                .unwrap(),
         )
         .build();
 
@@ -55,7 +75,9 @@ fn test_insert_nested_data() {
         .row(
             doc()
                 .set("id", 1_i64)
+                .unwrap()
                 .set("user_id", 100_i64)
+                .unwrap()
                 .set_value(
                     "items",
                     mpack!([
@@ -80,8 +102,11 @@ fn test_insert_roundtrip() {
         .row(
             doc()
                 .set("id", 1_i64)
+                .unwrap()
                 .set("name", "Widget")
-                .set("price", 9.99),
+                .unwrap()
+                .set("price", 9.99)
+                .unwrap(),
         )
         .build();
 
@@ -102,7 +127,13 @@ fn test_insert_roundtrip() {
 fn test_update_with_filter() {
     let op = write::update("users")
         .where_(filter::eq("id", 1_i64))
-        .set(doc().set("name", "New Name").set("status", "active"))
+        .set(
+            doc()
+                .set("name", "New Name")
+                .unwrap()
+                .set("status", "active")
+                .unwrap(),
+        )
         .build()
         .unwrap();
 
@@ -115,7 +146,7 @@ fn test_update_with_filter() {
 #[test]
 fn test_update_without_filter() {
     let op = write::update("products")
-        .set(doc().set("status", "discontinued"))
+        .set(doc().set("status", "discontinued").unwrap())
         .build()
         .unwrap();
 
@@ -128,7 +159,7 @@ fn test_update_without_filter() {
 fn test_update_with_complex_filter() {
     let op = write::update("orders")
         .where_(filter::eq("status", "pending").and(filter::lt("created_at", "2024-01-01")))
-        .set(doc().set("status", "expired"))
+        .set(doc().set("status", "expired").unwrap())
         .build()
         .unwrap();
 
@@ -144,10 +175,15 @@ fn test_update_full_record() {
         .set(
             doc()
                 .set("id", 1_i64)
+                .unwrap()
                 .set("name", "Full")
+                .unwrap()
                 .set("email", "full@example.com")
+                .unwrap()
                 .set("status", "active")
-                .set("created_at", "2024-01-15T10:30:00Z"),
+                .unwrap()
+                .set("created_at", "2024-01-15T10:30:00Z")
+                .unwrap(),
         )
         .build()
         .unwrap();
@@ -163,7 +199,7 @@ fn test_update_roundtrip() {
     // Msgpack roundtrip: build op → serialize → deserialize → verify fields.
     let op = write::update("users")
         .where_(filter::eq("id", 1_i64))
-        .set(doc().set("name", "Updated"))
+        .set(doc().set("name", "Updated").unwrap())
         .build()
         .unwrap();
 
@@ -178,7 +214,7 @@ fn test_update_roundtrip() {
 #[test]
 fn test_update_serializes_without_optional_where() {
     let op = write::update("users")
-        .set(doc().set("status", "active"))
+        .set(doc().set("status", "active").unwrap())
         .build()
         .unwrap();
 
@@ -200,7 +236,7 @@ fn test_update_serializes_without_optional_where() {
 fn test_update_select_changed_mode() {
     let op = write::update("users")
         .where_(filter::eq("status", "inactive"))
-        .set(doc().set("status", "active"))
+        .set(doc().set("status", "active").unwrap())
         .returning(UpdateReturnMode::Changed)
         .build()
         .unwrap();
@@ -219,7 +255,7 @@ fn test_update_select_changed_mode() {
 fn test_update_select_all_mode() {
     let op = write::update("users")
         .where_(filter::eq("id", 1_i64))
-        .set(doc().set("name", "Updated"))
+        .set(doc().set("name", "Updated").unwrap())
         .returning(UpdateReturnMode::All)
         .build()
         .unwrap();
@@ -235,7 +271,7 @@ fn test_update_select_all_mode() {
 fn test_update_select_unchanged_mode() {
     let op = write::update("users")
         .where_(filter::eq("id", 1_i64))
-        .set(doc().set("status", "active"))
+        .set(doc().set("status", "active").unwrap())
         .returning(UpdateReturnMode::Unchanged)
         .build()
         .unwrap();
@@ -251,7 +287,13 @@ fn test_update_select_unchanged_mode() {
 fn test_update_select_with_fields() {
     let op = write::update("users")
         .where_(filter::eq("id", 1_i64))
-        .set(doc().set("name", "Updated").set("status", "active"))
+        .set(
+            doc()
+                .set("name", "Updated")
+                .unwrap()
+                .set("status", "active")
+                .unwrap(),
+        )
         .returning_fields(UpdateReturnMode::Changed, ["id", "name", "status"])
         .build()
         .unwrap();
@@ -276,7 +318,7 @@ fn test_update_select_roundtrip() {
     // Msgpack roundtrip: build op with select → serialize → deserialize.
     let op = write::update("users")
         .where_(filter::eq("id", 1_i64))
-        .set(doc().set("name", "Updated"))
+        .set(doc().set("name", "Updated").unwrap())
         .returning_fields(UpdateReturnMode::Changed, ["id", "name"])
         .build()
         .unwrap();
@@ -299,7 +341,7 @@ fn test_update_select_roundtrip() {
 fn test_update_without_select() {
     let op = write::update("users")
         .where_(filter::eq("id", 1_i64))
-        .set(doc().set("name", "Updated"))
+        .set(doc().set("name", "Updated").unwrap())
         .build()
         .unwrap();
 
@@ -309,7 +351,7 @@ fn test_update_without_select() {
 #[test]
 fn test_update_select_serializes_without_optional_fields() {
     let op = write::update("users")
-        .set(doc().set("status", "active"))
+        .set(doc().set("status", "active").unwrap())
         .returning(UpdateReturnMode::Changed)
         .build()
         .unwrap();
@@ -327,7 +369,7 @@ fn test_update_select_default_mode() {
     // Validate that the serde default for UpdateReturnMode is Changed.
     // Build a minimal op without specifying mode, roundtrip via msgpack.
     let op = write::update("users")
-        .set(doc().set("status", "active"))
+        .set(doc().set("status", "active").unwrap())
         .returning(UpdateReturnMode::Changed)
         .build()
         .unwrap();
@@ -348,8 +390,14 @@ fn test_update_select_default_mode() {
 #[test]
 fn test_set_by_primary_key() {
     let op = write::upsert("users")
-        .key(doc().set("id", 1_i64))
-        .value(doc().set("name", "Alice").set("email", "alice@example.com"))
+        .key(doc().set("id", 1_i64).unwrap())
+        .value(
+            doc()
+                .set("name", "Alice")
+                .unwrap()
+                .set("email", "alice@example.com")
+                .unwrap(),
+        )
         .build()
         .unwrap();
 
@@ -362,8 +410,8 @@ fn test_set_by_primary_key() {
 #[test]
 fn test_set_by_unique_field() {
     let op = write::upsert("users")
-        .key(doc().set("email", "alice@example.com"))
-        .value(doc().set("name", "Alice Updated"))
+        .key(doc().set("email", "alice@example.com").unwrap())
+        .value(doc().set("name", "Alice Updated").unwrap())
         .build()
         .unwrap();
 
@@ -375,8 +423,20 @@ fn test_set_by_unique_field() {
 #[test]
 fn test_set_composite_key() {
     let op = write::upsert("order_items")
-        .key(doc().set("order_id", 1_i64).set("product_id", 5_i64))
-        .value(doc().set("qty", 3_i64).set("price", 19.99))
+        .key(
+            doc()
+                .set("order_id", 1_i64)
+                .unwrap()
+                .set("product_id", 5_i64)
+                .unwrap(),
+        )
+        .value(
+            doc()
+                .set("qty", 3_i64)
+                .unwrap()
+                .set("price", 19.99)
+                .unwrap(),
+        )
         .build()
         .unwrap();
 
@@ -390,8 +450,8 @@ fn test_set_composite_key() {
 fn test_set_roundtrip() {
     // Msgpack roundtrip: build op → serialize → deserialize → verify fields.
     let op = write::upsert("users")
-        .key(doc().set("id", 1_i64))
-        .value(doc().set("name", "Alice"))
+        .key(doc().set("id", 1_i64).unwrap())
+        .value(doc().set("name", "Alice").unwrap())
         .build()
         .unwrap();
 
@@ -507,7 +567,12 @@ fn test_set_requires_value() {
 #[test]
 fn test_insert_with_null() {
     let op = write::insert("users")
-        .row(doc().set("name", "Alice").set_value("email", mpack!(null)))
+        .row(
+            doc()
+                .set("name", "Alice")
+                .unwrap()
+                .set_value("email", mpack!(null)),
+        )
         .build();
 
     assert!(op.values[0]["email"].is_null());
@@ -519,8 +584,11 @@ fn test_insert_with_special_characters() {
         .row(
             doc()
                 .set("name", "O'Brien")
+                .unwrap()
                 .set("bio", "Line1\nLine2\tTabbed")
-                .set("emoji", "\u{1f600}\u{1f389}"),
+                .unwrap()
+                .set("emoji", "\u{1f600}\u{1f389}")
+                .unwrap(),
         )
         .build();
 
@@ -534,9 +602,13 @@ fn test_insert_with_numbers() {
         .row(
             doc()
                 .set("id", 1_i64)
+                .unwrap()
                 .set("price", 99.99)
+                .unwrap()
                 .set("stock", 100_i64)
-                .set("weight", 1.5e-3),
+                .unwrap()
+                .set("weight", 1.5e-3)
+                .unwrap(),
         )
         .build();
 
@@ -548,7 +620,13 @@ fn test_insert_with_numbers() {
 #[test]
 fn test_insert_with_boolean() {
     let op = write::insert("flags")
-        .row(doc().set("active", true).set("deleted", false))
+        .row(
+            doc()
+                .set("active", true)
+                .unwrap()
+                .set("deleted", false)
+                .unwrap(),
+        )
         .build();
 
     assert_eq!(op.values[0]["active"], true);

@@ -11,12 +11,15 @@ async fn test_set_nontx_insert_parity() {
     let (table, repo) = setup_empty_table().await;
 
     let op = write::upsert("users")
-        .key(doc().set("email", "parity@test.com"))
+        .key(doc().set("email", "parity@test.com").unwrap())
         .value(
             doc()
                 .set("email", "parity@test.com")
+                .unwrap()
                 .set("name", "Parity")
-                .set("score", 42_i64),
+                .unwrap()
+                .set("score", 42_i64)
+                .unwrap(),
         )
         .build()
         .unwrap();
@@ -69,12 +72,15 @@ async fn test_set_nontx_update_parity() {
 
     // Alice exists with name, age, status. Upsert by name, adding a new field.
     let op = write::upsert("users")
-        .key(doc().set("name", "Alice"))
+        .key(doc().set("name", "Alice").unwrap())
         .value(
             doc()
                 .set("name", "Alice")
+                .unwrap()
                 .set("status", "vip")
-                .set("badge", "gold"),
+                .unwrap()
+                .set("badge", "gold")
+                .unwrap(),
         )
         .build()
         .unwrap();

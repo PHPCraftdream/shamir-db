@@ -43,7 +43,7 @@ async fn insert_value_with_query_ref_resolves_to_real_value() {
     seed.id(1);
     seed.op_silent(
         "seed_users",
-        write::insert("users").row(doc().set("name", "Alice")),
+        write::insert("users").row(doc().set("name", "Alice").unwrap()),
     );
     let seed_req = seed.build();
     execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
@@ -62,7 +62,9 @@ async fn insert_value_with_query_ref_resolves_to_real_value() {
         write::insert("orders").row(
             doc()
                 .set("total", 100)
-                .set("owner", users.first().field("name")),
+                .unwrap()
+                .set("owner", users.first().field("name"))
+                .unwrap(),
         ),
     );
     // Read the order back to inspect what was actually stored. `check` has
@@ -100,8 +102,14 @@ async fn update_set_value_with_query_ref_resolves_to_real_value() {
     seed.op_silent(
         "seed",
         write::insert("users")
-            .row(doc().set("name", "Bob").set("tag", "source"))
-            .row(doc().set("name", "").set("tag", "target")),
+            .row(
+                doc()
+                    .set("name", "Bob")
+                    .unwrap()
+                    .set("tag", "source")
+                    .unwrap(),
+            )
+            .row(doc().set("name", "").unwrap().set("tag", "target").unwrap()),
     );
     let seed_req = seed.build();
     execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
@@ -116,7 +124,7 @@ async fn update_set_value_with_query_ref_resolves_to_real_value() {
             "copy_name",
             write::update("users")
                 .where_(filter::eq("tag", "target"))
-                .set(doc().set("name", source.first().field("name"))),
+                .set(doc().set("name", source.first().field("name")).unwrap()),
         )
         .unwrap();
     // `check` has no `$query`/data-flow edge onto `copy_name` (it just reads
@@ -156,7 +164,7 @@ async fn upsert_value_with_query_ref_resolves_to_real_value() {
     seed.id(1);
     seed.op_silent(
         "seed_users",
-        write::insert("users").row(doc().set("name", "Carol")),
+        write::insert("users").row(doc().set("name", "Carol").unwrap()),
     );
     let seed_req = seed.build();
     execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
@@ -171,7 +179,7 @@ async fn upsert_value_with_query_ref_resolves_to_real_value() {
             "upsert_profile",
             write::upsert("orders")
                 .key(mpack!({"total": 200}))
-                .value(doc().set("owner", users.first().field("name"))),
+                .value(doc().set("owner", users.first().field("name")).unwrap()),
         )
         .unwrap();
     // See the `after` rationale in `insert_value_with_query_ref_resolves_to_real_value`.
@@ -208,10 +216,16 @@ async fn insert_value_with_fn_call_literal_arg_resolves() {
     b.id(1);
     b.op_silent(
         "make_user",
-        write::insert("users").row(doc().set("name", "Eve").set(
-            "name_norm",
-            func("strings/lower", [FilterValue::from("EVE")]),
-        )),
+        write::insert("users").row(
+            doc()
+                .set("name", "Eve")
+                .unwrap()
+                .set(
+                    "name_norm",
+                    func("strings/lower", [FilterValue::from("EVE")]),
+                )
+                .unwrap(),
+        ),
     );
     b.query("check", Query::from("users"));
     let req = b.build();
@@ -327,7 +341,7 @@ async fn insert_row_with_fn_ref_and_query_ref_siblings_both_resolve_correctly() 
     seed.id(1);
     seed.op_silent(
         "seed_users",
-        write::insert("users").row(doc().set("name", "Judy")),
+        write::insert("users").row(doc().set("name", "Judy").unwrap()),
     );
     let seed_req = seed.build();
     execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
@@ -342,14 +356,17 @@ async fn insert_row_with_fn_ref_and_query_ref_siblings_both_resolve_correctly() 
         write::insert("orders").row(
             doc()
                 .set("email", "J@X.COM")
+                .unwrap()
                 // Table-layer computed value: $fn+$ref against the SAME row's
                 // sibling "email" field — must be left untouched here and
                 // resolved by write_helpers::resolve_computed_record instead.
                 .set("email_norm", func("strings/lower", [col("email")]))
+                .unwrap()
                 // Batch-level resolution: a genuine $query ref to another
                 // query's result in this same batch — must be resolved HERE
                 // by resolve_write_value, exactly as #641 already does.
-                .set("owner", users.first().field("name")),
+                .set("owner", users.first().field("name"))
+                .unwrap(),
         ),
     );
     let check = b.query("check", Query::from("orders"));
@@ -393,7 +410,7 @@ async fn insert_value_with_cond_resolves_true_branch() {
     let band = cond(filter::value_gte(100_i64, 50_i64), "high", "low");
     b.op_silent(
         "make_row",
-        write::insert("orders").row(doc().set("total", 100).set("band", band)),
+        write::insert("orders").row(doc().set("total", 100).unwrap().set("band", band).unwrap()),
     );
     b.query("check", Query::from("orders"));
     let req = b.build();
@@ -421,7 +438,7 @@ async fn insert_value_with_cond_resolves_false_branch() {
     let band = cond(filter::value_gte(10_i64, 50_i64), "high", "low");
     b.op_silent(
         "make_row",
-        write::insert("orders").row(doc().set("total", 10).set("band", band)),
+        write::insert("orders").row(doc().set("total", 10).unwrap().set("band", band).unwrap()),
     );
     b.query("check", Query::from("orders"));
     let req = b.build();
@@ -455,10 +472,14 @@ async fn insert_value_with_query_ref_to_unknown_alias_fails_at_plan_time() {
     b.id(1);
     b.op_silent(
         "make_row",
-        write::insert("orders").row(doc().set(
-            "owner",
-            shamir_query_builder::val::qref("does_not_exist", "[0].name"),
-        )),
+        write::insert("orders").row(
+            doc()
+                .set(
+                    "owner",
+                    shamir_query_builder::val::qref("does_not_exist", "[0].name"),
+                )
+                .unwrap(),
+        ),
     );
     let req = b.build();
 
@@ -518,7 +539,7 @@ async fn insert_value_with_param_still_resolves_via_sub_batch_bind() {
     inner.id(1);
     inner.op_silent(
         "insert_row",
-        write::insert("users").row(doc().set("name", param("who"))),
+        write::insert("users").row(doc().set("name", param("who")).unwrap()),
     );
     let inner_req = inner.build();
 
@@ -555,7 +576,7 @@ async fn insert_value_with_unbound_param_still_errors() {
     inner.id(1);
     inner.op_silent(
         "insert_row",
-        write::insert("users").row(doc().set("name", param("missing"))),
+        write::insert("users").row(doc().set("name", param("missing")).unwrap()),
     );
     let inner_req = inner.build();
 
@@ -586,8 +607,8 @@ async fn insert_plain_literal_values_unaffected() {
     b.op_silent(
         "make_row",
         write::insert("users")
-            .row(doc().set("name", "Grace").set("age", 41))
-            .row(doc().set("name", "Heidi").set("age", 29)),
+            .row(doc().set("name", "Grace").unwrap().set("age", 41).unwrap())
+            .row(doc().set("name", "Heidi").unwrap().set("age", 29).unwrap()),
     );
     b.query("check", Query::from("users"));
     let req = b.build();
@@ -617,7 +638,7 @@ async fn insert_value_with_top_level_expr_literal_resolves() {
     b.id(1);
     b.op_silent(
         "make_row",
-        write::insert("orders").row(doc().set("total", add(2_i64, 3_i64))),
+        write::insert("orders").row(doc().set("total", add(2_i64, 3_i64)).unwrap()),
     );
     b.query("check", Query::from("orders"));
     let req = b.build();
@@ -760,8 +781,8 @@ async fn upsert_key_with_unbound_param_errors_proving_key_is_resolved() {
         .try_op_silent(
             "upsert_row",
             write::upsert("orders")
-                .key(doc().set("name", param("missing")))
-                .value(doc().set("total", 100)),
+                .key(doc().set("name", param("missing")).unwrap())
+                .value(doc().set("total", 100).unwrap()),
         )
         .unwrap();
     let inner_req = inner.build();
@@ -873,10 +894,14 @@ async fn insert_value_with_nested_query_ref_inside_fn_arg_unknown_alias_fails() 
     // at plan time and reject the unknown alias, same as a top-level $query.
     b.op_silent(
         "make_row",
-        write::insert("orders").row(doc().set(
-            "owner",
-            func("strings/lower", [qref("does_not_exist", "[0].name")]),
-        )),
+        write::insert("orders").row(
+            doc()
+                .set(
+                    "owner",
+                    func("strings/lower", [qref("does_not_exist", "[0].name")]),
+                )
+                .unwrap(),
+        ),
     );
     let req = b.build();
 

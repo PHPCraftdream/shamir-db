@@ -90,7 +90,7 @@ async fn buffered_request_does_not_weaken_synced_server_policy() {
         .durability(Durability::Buffered);
     batch.insert(
         "written",
-        write::insert("items").row(doc().set("name", "v")),
+        write::insert("items").row(doc().set("name", "v").unwrap()),
     );
     let resolver = Resolver(repo.clone());
     let task = tokio::spawn(async move {

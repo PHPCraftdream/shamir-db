@@ -52,7 +52,10 @@ async fn fast_interactive_batch_keeps_tx_usable_and_rollback_discards_writes() {
 
     let mut batch = Batch::new();
     batch.limits(BatchLimits::default());
-    batch.insert("ins", insert("users").row(doc().set("name", "alice")));
+    batch.insert(
+        "ins",
+        insert("users").row(doc().set("name", "alice").unwrap()),
+    );
     let request = batch.build();
     let response = execute_in_open_tx(
         &request,
@@ -150,7 +153,10 @@ async fn expired_interactive_deadline_returns_timeout_and_allows_caller_rollback
 
     // An earlier successful call has staged a write in the same open tx.
     let mut batch = Batch::new();
-    batch.insert("prior", insert("users").row(doc().set("name", "alice")));
+    batch.insert(
+        "prior",
+        insert("users").row(doc().set("name", "alice").unwrap()),
+    );
     let request = batch.build();
     let response = execute_in_open_tx(
         &request,
@@ -167,7 +173,10 @@ async fn expired_interactive_deadline_returns_timeout_and_allows_caller_rollback
     assert_eq!(response.results["prior"].records.len(), 1);
 
     let mut batch = Batch::new();
-    batch.insert("expired", insert("users").row(doc().set("name", "bob")));
+    batch.insert(
+        "expired",
+        insert("users").row(doc().set("name", "bob").unwrap()),
+    );
     let request = batch.build();
     // std::Instant is not Tokio's paused clock. Zero Duration guarantees
     // expiration without sleeping, preemption or process-global clock state.

@@ -111,7 +111,13 @@ async fn update_validator_runs_when_bound() {
 
     // Seed a row.
     let op_ins = write::insert("users")
-        .row(doc().set("name", "Alice").set("status", "active"))
+        .row(
+            doc()
+                .set("name", "Alice")
+                .unwrap()
+                .set("status", "active")
+                .unwrap(),
+        )
         .build();
     insert_via_tx(&repo, &table, &op_ins, false).await.unwrap();
 
@@ -120,7 +126,7 @@ async fn update_validator_runs_when_bound() {
     // Benign UPDATE — validator accepts.
     let op_ok = write::update("users")
         .where_(filter::eq("name", "Alice"))
-        .set(doc().set("status", "premium"))
+        .set(doc().set("status", "premium").unwrap())
         .build()
         .unwrap();
     let res_ok = update_via_tx(&repo, &table, &op_ok, &refs).await;
@@ -133,7 +139,7 @@ async fn update_validator_runs_when_bound() {
     // Rejecting UPDATE — validator must block it.
     let op_bad = write::update("users")
         .where_(filter::eq("name", "Alice"))
-        .set(doc().set("status", "banned"))
+        .set(doc().set("status", "banned").unwrap())
         .build()
         .unwrap();
     let res_bad = update_via_tx(&repo, &table, &op_bad, &refs).await;
@@ -158,8 +164,20 @@ async fn update_returning_correct_without_validators() {
 
     // Seed two rows.
     let op_ins = write::insert("users")
-        .row(doc().set("name", "Alice").set("age", 30_i64))
-        .row(doc().set("name", "Bob").set("age", 25_i64))
+        .row(
+            doc()
+                .set("name", "Alice")
+                .unwrap()
+                .set("age", 30_i64)
+                .unwrap(),
+        )
+        .row(
+            doc()
+                .set("name", "Bob")
+                .unwrap()
+                .set("age", 25_i64)
+                .unwrap(),
+        )
         .build();
     insert_via_tx(&repo, &table, &op_ins, false).await.unwrap();
 
@@ -167,7 +185,7 @@ async fn update_returning_correct_without_validators() {
 
     // Mass UPDATE with RETURNING All — no validators anywhere.
     let op = write::update("users")
-        .set(doc().set("status", "premium"))
+        .set(doc().set("status", "premium").unwrap())
         .returning(UpdateReturnMode::All)
         .build()
         .unwrap();
@@ -237,7 +255,13 @@ async fn set_merge_validator_runs_when_bound() {
     // status="active"). Establishes the row so the next SET merges.
     let op_ins = write::upsert("users")
         .key(mpack_key("name", "Alice"))
-        .value(doc().set("name", "Alice").set("status", "active"))
+        .value(
+            doc()
+                .set("name", "Alice")
+                .unwrap()
+                .set("status", "active")
+                .unwrap(),
+        )
         .build()
         .unwrap();
     let res_ins = set_via_tx(&repo, &table, &op_ins).await;
@@ -254,7 +278,13 @@ async fn set_merge_validator_runs_when_bound() {
     // rejected by the bound Upsert validator.
     let op_merge_bad = write::upsert("users")
         .key(mpack_key("name", "Alice"))
-        .value(doc().set("name", "Alice").set("status", "banned"))
+        .value(
+            doc()
+                .set("name", "Alice")
+                .unwrap()
+                .set("status", "banned")
+                .unwrap(),
+        )
         .build()
         .unwrap();
     let res_merge_bad = set_via_tx(&repo, &table, &op_merge_bad).await;
@@ -267,7 +297,13 @@ async fn set_merge_validator_runs_when_bound() {
     // accepts status="premium") and reports _created=false (merge, not insert).
     let op_merge_ok = write::upsert("users")
         .key(mpack_key("name", "Alice"))
-        .value(doc().set("name", "Alice").set("status", "premium"))
+        .value(
+            doc()
+                .set("name", "Alice")
+                .unwrap()
+                .set("status", "premium")
+                .unwrap(),
+        )
         .build()
         .unwrap();
     let res_merge_ok = set_via_tx(&repo, &table, &op_merge_ok).await;

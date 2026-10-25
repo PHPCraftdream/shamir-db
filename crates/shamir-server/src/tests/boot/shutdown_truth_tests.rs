@@ -147,7 +147,8 @@ fn clean_report_writes_j_and_hard_reopen_certifies_nothing() {
         let gate = repo.tx_gate().await.unwrap();
         let table = repo.get_table("items").await.unwrap();
         let interner = table.interner_for_test().get().await.unwrap();
-        let value = query_value_to_inner(&doc().set("name", "durable").build(), interner).unwrap();
+        let value =
+            query_value_to_inner(&doc().set("name", "durable").unwrap().build(), interner).unwrap();
         let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
         table.insert_tx(&value, Some(&mut tx)).await.unwrap();
         repo.commit_tx(tx).await.unwrap();

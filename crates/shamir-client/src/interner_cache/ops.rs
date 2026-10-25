@@ -32,7 +32,7 @@ use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::RecordView;
 use shamir_types::types::value::{QueryValue, Value};
 
-use crate::error::ClientError;
+use crate::error::{client_batch_error, ClientError};
 use crate::Client;
 
 /// Parsed `interner_dump` admin payload.
@@ -198,7 +198,16 @@ impl Client {
                 batch.op(alias, ddl::interner_dump().repo(&repo));
                 // Errors are logged + swallowed so the OnceCell still resolves
                 // with `()`; the maps stay empty until a successful retry.
-                match self.execute(&db, batch.build()).await {
+                let req = match batch.try_build() {
+                    Ok(req) => req,
+                    // Errors are logged + swallowed so the OnceCell still
+                    // resolves with `()`; a later retry revalidates.
+                    Err(e) => {
+                        tracing::warn!("interner dump_repo batch invalid: {e}");
+                        return;
+                    }
+                };
+                match self.execute(&db, req).await {
                     Ok(resp) => match first_record_value(&resp, alias)
                         .and_then(|v| parse_dump_payload(&v, alias))
                     {
@@ -230,7 +239,9 @@ impl Client {
         let alias = "_ic_refresh";
         let mut batch = Batch::new();
         batch.op(alias, ddl::interner_dump().repo(repo).since(epoch));
-        let resp = self.execute(db, batch.build()).await?;
+        let resp = self
+            .execute(db, batch.try_build().map_err(client_batch_error)?)
+            .await?;
         let payload_value = first_record_value(&resp, alias)?;
         let payload = parse_dump_payload(&payload_value, alias)?;
         for (id, name) in &payload.entries {
@@ -269,7 +280,9 @@ impl Client {
             alias,
             ddl::interner_touch(unknown.iter().cloned()).repo(repo),
         );
-        let resp = self.execute(db, batch.build()).await?;
+        let resp = self
+            .execute(db, batch.try_build().map_err(client_batch_error)?)
+            .await?;
         let payload_value = first_record_value(&resp, alias)?;
         let payload = parse_touch_payload(&payload_value, alias)?;
         for (name, id) in &payload.mappings {

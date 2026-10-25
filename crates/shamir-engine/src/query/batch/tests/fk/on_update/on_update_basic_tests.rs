@@ -52,14 +52,20 @@ async fn on_update_restrict_rejects_when_child_references_old() {
         &resolver,
         "ip",
         "parent",
-        doc().set("id", 5).set("name", "P5"),
+        doc().set("id", 5).unwrap().set("name", "P5").unwrap(),
     )
     .await;
     insert_row(
         &resolver,
         "ic",
         "child",
-        doc().set("cid", 50).set("parent_id", 5).set("label", "c50"),
+        doc()
+            .set("cid", 50)
+            .unwrap()
+            .set("parent_id", 5)
+            .unwrap()
+            .set("label", "c50")
+            .unwrap(),
     )
     .await;
 
@@ -70,7 +76,7 @@ async fn on_update_restrict_rejects_when_child_references_old() {
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 5))
-            .set(doc().set("id", 7)),
+            .set(doc().set("id", 7).unwrap()),
     )
     .unwrap();
     let req = b.build();
@@ -128,7 +134,7 @@ async fn on_update_restrict_passes_when_no_child_references_old() {
         &resolver,
         "ip",
         "parent",
-        doc().set("id", 5).set("name", "P5"),
+        doc().set("id", 5).unwrap().set("name", "P5").unwrap(),
     )
     .await;
 
@@ -139,7 +145,7 @@ async fn on_update_restrict_passes_when_no_child_references_old() {
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 5))
-            .set(doc().set("id", 7)),
+            .set(doc().set("id", 7).unwrap()),
     )
     .unwrap();
     let req = b.build();
@@ -191,14 +197,20 @@ async fn on_update_cascade_rekeys_child_fk() {
         &resolver,
         "ip",
         "parent",
-        doc().set("id", 5).set("name", "P5"),
+        doc().set("id", 5).unwrap().set("name", "P5").unwrap(),
     )
     .await;
     insert_row(
         &resolver,
         "ic",
         "child",
-        doc().set("cid", 50).set("parent_id", 5).set("label", "c50"),
+        doc()
+            .set("cid", 50)
+            .unwrap()
+            .set("parent_id", 5)
+            .unwrap()
+            .set("label", "c50")
+            .unwrap(),
     )
     .await;
 
@@ -214,7 +226,7 @@ async fn on_update_cascade_rekeys_child_fk() {
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 5))
-            .set(doc().set("id", 7)),
+            .set(doc().set("id", 7).unwrap()),
     )
     .unwrap();
     let req = b.build();
@@ -268,35 +280,53 @@ async fn on_update_cascade_rekeys_multiple_children_and_rows() {
         &resolver,
         "ip1",
         "parent",
-        doc().set("id", 5).set("name", "P5"),
+        doc().set("id", 5).unwrap().set("name", "P5").unwrap(),
     )
     .await;
     insert_row(
         &resolver,
         "ip2",
         "parent",
-        doc().set("id", 6).set("name", "P6"),
+        doc().set("id", 6).unwrap().set("name", "P6").unwrap(),
     )
     .await;
     insert_row(
         &resolver,
         "ic1",
         "child",
-        doc().set("cid", 1).set("parent_id", 5).set("label", "a"),
+        doc()
+            .set("cid", 1)
+            .unwrap()
+            .set("parent_id", 5)
+            .unwrap()
+            .set("label", "a")
+            .unwrap(),
     )
     .await;
     insert_row(
         &resolver,
         "ic2",
         "child",
-        doc().set("cid", 2).set("parent_id", 5).set("label", "b"),
+        doc()
+            .set("cid", 2)
+            .unwrap()
+            .set("parent_id", 5)
+            .unwrap()
+            .set("label", "b")
+            .unwrap(),
     )
     .await;
     insert_row(
         &resolver,
         "ic3",
         "child",
-        doc().set("cid", 3).set("parent_id", 6).set("label", "c"),
+        doc()
+            .set("cid", 3)
+            .unwrap()
+            .set("parent_id", 6)
+            .unwrap()
+            .set("label", "c")
+            .unwrap(),
     )
     .await;
 
@@ -307,7 +337,7 @@ async fn on_update_cascade_rekeys_multiple_children_and_rows() {
         "upd_parents",
         write::update("parent")
             .where_(filter::in_("id", [5, 6]))
-            .set(doc().set("id", 99)),
+            .set(doc().set("id", 99).unwrap()),
     )
     .unwrap();
     let req = b.build();
@@ -361,14 +391,20 @@ async fn on_update_set_null_nulls_child_fk() {
         &resolver,
         "ip",
         "parent",
-        doc().set("id", 5).set("name", "P5"),
+        doc().set("id", 5).unwrap().set("name", "P5").unwrap(),
     )
     .await;
     insert_row(
         &resolver,
         "ic",
         "child",
-        doc().set("cid", 50).set("parent_id", 5).set("label", "c50"),
+        doc()
+            .set("cid", 50)
+            .unwrap()
+            .set("parent_id", 5)
+            .unwrap()
+            .set("label", "c50")
+            .unwrap(),
     )
     .await;
 
@@ -379,7 +415,7 @@ async fn on_update_set_null_nulls_child_fk() {
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 5))
-            .set(doc().set("id", 7)),
+            .set(doc().set("id", 7).unwrap()),
     )
     .unwrap();
     let req = b.build();
@@ -429,14 +465,20 @@ async fn on_update_set_null_on_non_nullable_errors() {
         &resolver,
         "ip",
         "parent",
-        doc().set("id", 5).set("name", "P5"),
+        doc().set("id", 5).unwrap().set("name", "P5").unwrap(),
     )
     .await;
     insert_row(
         &resolver,
         "ic",
         "child",
-        doc().set("cid", 50).set("parent_id", 5).set("label", "c50"),
+        doc()
+            .set("cid", 50)
+            .unwrap()
+            .set("parent_id", 5)
+            .unwrap()
+            .set("label", "c50")
+            .unwrap(),
     )
     .await;
 
@@ -447,7 +489,7 @@ async fn on_update_set_null_on_non_nullable_errors() {
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 5))
-            .set(doc().set("id", 7)),
+            .set(doc().set("id", 7).unwrap()),
     )
     .unwrap();
     let req = b.build();
@@ -503,14 +545,20 @@ async fn on_update_noop_when_set_does_not_touch_ref_field() {
         &resolver,
         "ip",
         "parent",
-        doc().set("id", 5).set("name", "P5"),
+        doc().set("id", 5).unwrap().set("name", "P5").unwrap(),
     )
     .await;
     insert_row(
         &resolver,
         "ic",
         "child",
-        doc().set("cid", 50).set("parent_id", 5).set("label", "c50"),
+        doc()
+            .set("cid", 50)
+            .unwrap()
+            .set("parent_id", 5)
+            .unwrap()
+            .set("label", "c50")
+            .unwrap(),
     )
     .await;
 
@@ -521,7 +569,7 @@ async fn on_update_noop_when_set_does_not_touch_ref_field() {
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 5))
-            .set(doc().set("name", "renamed")),
+            .set(doc().set("name", "renamed").unwrap()),
     )
     .unwrap();
     let req = b.build();
@@ -578,14 +626,20 @@ async fn on_update_no_action_no_fanout() {
         &resolver,
         "ip",
         "parent",
-        doc().set("id", 5).set("name", "P5"),
+        doc().set("id", 5).unwrap().set("name", "P5").unwrap(),
     )
     .await;
     insert_row(
         &resolver,
         "ic",
         "child",
-        doc().set("cid", 50).set("parent_id", 5).set("label", "c50"),
+        doc()
+            .set("cid", 50)
+            .unwrap()
+            .set("parent_id", 5)
+            .unwrap()
+            .set("label", "c50")
+            .unwrap(),
     )
     .await;
 
@@ -596,7 +650,7 @@ async fn on_update_no_action_no_fanout() {
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 5))
-            .set(doc().set("id", 7)),
+            .set(doc().set("id", 7).unwrap()),
     )
     .unwrap();
     let req = b.build();
@@ -653,14 +707,20 @@ async fn on_update_cascade_skips_when_old_equals_new() {
         &resolver,
         "ip",
         "parent",
-        doc().set("id", 5).set("name", "P5"),
+        doc().set("id", 5).unwrap().set("name", "P5").unwrap(),
     )
     .await;
     insert_row(
         &resolver,
         "ic",
         "child",
-        doc().set("cid", 50).set("parent_id", 5).set("label", "c50"),
+        doc()
+            .set("cid", 50)
+            .unwrap()
+            .set("parent_id", 5)
+            .unwrap()
+            .set("label", "c50")
+            .unwrap(),
     )
     .await;
 
@@ -671,7 +731,7 @@ async fn on_update_cascade_skips_when_old_equals_new() {
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 5))
-            .set(doc().set("id", 5)),
+            .set(doc().set("id", 5).unwrap()),
     )
     .unwrap();
     let req = b.build();

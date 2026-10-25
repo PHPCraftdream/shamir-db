@@ -175,7 +175,10 @@ fn vis1_legacy_requests_reject_before_writes_and_commit_consumption() {
         let (handler, session, handle) = fixture(Duration::from_secs(300)).await;
         let conn = ConnectionServices::without_push(0);
         let mut write = Batch::new();
-        write.insert("insert", insert("items").row(doc().set("marker", "vis1")));
+        write.insert(
+            "insert",
+            insert("items").row(doc().set("marker", "vis1").unwrap()),
+        );
         for query_version in [0, 1, 2, 99] {
             let request = DbRequest::Execute {
                 query_version,
@@ -275,7 +278,7 @@ fn vis1_tx_execute_rejects_commit_only_override_without_staging() {
         let mut write = Batch::new();
         write.insert(
             "insert",
-            insert("items").row(doc().set("marker", "must-not-stage")),
+            insert("items").row(doc().set("marker", "must-not-stage").unwrap()),
         );
         for wait in [
             VisibilityWait::Strict,
@@ -289,7 +292,10 @@ fn vis1_tx_execute_rejects_commit_only_override_without_staging() {
         }
         let mut inner = Batch::new();
         inner.visibility_wait(VisibilityWait::Strict);
-        inner.insert("insert", insert("items").row(doc().set("marker", "nested")));
+        inner.insert(
+            "insert",
+            insert("items").row(doc().set("marker", "nested").unwrap()),
+        );
         let mut outer = Batch::new();
         outer.sub_batch_no_bind("nested", inner.build());
         match execute(&handler, &session, handle, outer.build()).await {

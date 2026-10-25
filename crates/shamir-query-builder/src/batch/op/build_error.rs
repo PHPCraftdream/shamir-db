@@ -26,6 +26,25 @@ pub enum BuildError {
         /// The raw `after` string that carried the path tail.
         raw: String,
     },
+    /// A registration call reused an alias that is already registered in the
+    /// batch. The FIRST registered operation is kept intact and the later
+    /// registration is discarded; the duplicate is recorded here as a deferred
+    /// error surfaced by [`Batch::try_build`], so re-registering an alias can
+    /// never silently replace (and thus drop) an earlier op.
+    DuplicateAlias {
+        /// The alias that was registered twice.
+        alias: String,
+    },
+    /// A handle-consuming API (`after`/`when`) received a handle whose alias
+    /// is not registered in this batch. The call is discarded and recorded as
+    /// a deferred error surfaced by [`Batch::try_build`] — unknown handles are
+    /// errors, not silent no-ops.
+    UnknownOrderingTarget {
+        /// The alias the handle carried (not registered in the batch).
+        alias: String,
+        /// The attempted operation: `"after"` or `"when"`.
+        operation: &'static str,
+    },
     /// The msgpack round-trip `try_build` uses to walk an entry's op (or its
     /// `when` guard) for `$query` refs failed. In practice this means the
     /// entry holds a value msgpack cannot represent (e.g. a `QueryValue`
@@ -63,6 +82,23 @@ impl std::fmt::Display for BuildError {
                      alias-only ordering and never resolves a path; use a bare alias, or a \
                      '$query' reference if you need the value",
                     raw, alias
+                )
+            }
+            BuildError::DuplicateAlias { alias } => {
+                write!(
+                    f,
+                    "alias '{}' is already registered in this batch; the \
+                     first registered operation is kept and the duplicate was \
+                     discarded",
+                    alias
+                )
+            }
+            BuildError::UnknownOrderingTarget { alias, operation } => {
+                write!(
+                    f,
+                    "'{}' received a handle for alias '{}', which is not \
+                     registered in this batch",
+                    operation, alias
                 )
             }
             BuildError::SerializationFailed { alias, reason } => {

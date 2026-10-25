@@ -43,7 +43,14 @@ async fn setup() -> Resolver {
     let mut seed = Batch::new();
     seed.insert(
         "seed",
-        write::insert("rows").row(write::doc().set("v", 3).set("m", 7).build()),
+        write::insert("rows").row(
+            write::doc()
+                .set("v", 3)
+                .unwrap()
+                .set("m", 7)
+                .unwrap()
+                .build(),
+        ),
     );
     execute_batch_unchecked(&seed.build(), &resolver, None, None, Actor::System, "test")
         .await

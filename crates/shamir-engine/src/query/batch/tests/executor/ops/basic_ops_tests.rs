@@ -24,8 +24,8 @@ async fn test_single_read_query() {
     b.insert(
         "insert",
         write::insert("users")
-            .row(doc().set("name", "Alice").set("age", 30))
-            .row(doc().set("name", "Bob").set("age", 25)),
+            .row(doc().set("name", "Alice").unwrap().set("age", 30).unwrap())
+            .row(doc().set("name", "Bob").unwrap().set("age", 25).unwrap()),
     );
     let insert_req = b.build();
     let resp = execute_batch(&insert_req, &resolver, None, None, Actor::System, "test")
@@ -68,7 +68,7 @@ async fn test_read_query_limit_bounds_results() {
     b.id(1);
     let mut insert = write::insert("users");
     for i in 0..5 {
-        insert = insert.row(doc().set("name", format!("user{i}")));
+        insert = insert.row(doc().set("name", format!("user{i}")).unwrap());
     }
     b.insert("insert", insert);
     let insert_req = b.build();
@@ -102,8 +102,14 @@ async fn test_independent_queries_same_stage() {
     // Seed data
     let mut b = Batch::new();
     b.id(1);
-    b.op_silent("s1", write::insert("users").row(doc().set("name", "Alice")));
-    b.op_silent("s2", write::insert("orders").row(doc().set("item", "Book")));
+    b.op_silent(
+        "s1",
+        write::insert("users").row(doc().set("name", "Alice").unwrap()),
+    );
+    b.op_silent(
+        "s2",
+        write::insert("orders").row(doc().set("item", "Book").unwrap()),
+    );
     let seed_req = b.build();
     execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
         .await
@@ -139,8 +145,14 @@ async fn test_insert_then_read() {
     b.insert(
         "insert",
         write::insert("users")
-            .row(doc().set("name", "Alice").set("score", 100))
-            .row(doc().set("name", "Bob").set("score", 50)),
+            .row(
+                doc()
+                    .set("name", "Alice")
+                    .unwrap()
+                    .set("score", 100)
+                    .unwrap(),
+            )
+            .row(doc().set("name", "Bob").unwrap().set("score", 50).unwrap()),
     );
     b.query("read", Query::from("users"));
     let req = b.build();
@@ -168,7 +180,7 @@ async fn test_return_only() {
     b.id(1);
     b.insert(
         "insert",
-        write::insert("users").row(doc().set("name", "Alice")),
+        write::insert("users").row(doc().set("name", "Alice").unwrap()),
     );
     b.query("read", Query::from("users"));
     b.return_only(["read"]);
@@ -198,7 +210,7 @@ async fn test_return_result_false() {
     b.return_flagged();
     b.op_silent(
         "setup",
-        write::insert("users").row(doc().set("name", "Alice")),
+        write::insert("users").row(doc().set("name", "Alice").unwrap()),
     );
     b.query("read", Query::from("users"));
     let req = b.build();
@@ -228,8 +240,20 @@ async fn test_batch_with_delete() {
     b.op_silent(
         "seed",
         write::insert("users")
-            .row(doc().set("name", "Alice").set("status", "active"))
-            .row(doc().set("name", "Bob").set("status", "inactive")),
+            .row(
+                doc()
+                    .set("name", "Alice")
+                    .unwrap()
+                    .set("status", "active")
+                    .unwrap(),
+            )
+            .row(
+                doc()
+                    .set("name", "Bob")
+                    .unwrap()
+                    .set("status", "inactive")
+                    .unwrap(),
+            ),
     );
     let seed_req = b.build();
     execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")

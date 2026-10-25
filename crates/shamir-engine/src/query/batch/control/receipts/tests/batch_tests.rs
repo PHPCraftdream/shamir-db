@@ -51,7 +51,7 @@ fn write(repo: &str) -> shamir_query_types::batch::BatchRequest {
     let mut batch = Batch::new();
     batch.insert(
         "written",
-        Insert::with_repo(repo, "items").row(doc().set("n", 1)),
+        Insert::with_repo(repo, "items").row(doc().set("n", 1).unwrap()),
     );
     batch.build()
 }
@@ -67,7 +67,7 @@ async fn implicit_pending_suppressed_multi_repo_and_dependent_read() {
     batch.visibility_wait(STATUS).return_flagged();
     let written = batch.op_silent(
         "written",
-        Insert::with_repo("default", "items").row(doc().set("n", 1)),
+        Insert::with_repo("default", "items").row(doc().set("n", 1).unwrap()),
     );
     let read = batch.query("dependent", Query::with_repo("default", "items"));
     batch.after(&read, &written);
@@ -77,7 +77,7 @@ async fn implicit_pending_suppressed_multi_repo_and_dependent_read() {
     );
     batch.insert(
         "independent",
-        Insert::with_repo("other", "items").row(doc().set("n", 2)),
+        Insert::with_repo("other", "items").row(doc().set("n", 2).unwrap()),
     );
     batch.query("unrelated", Query::with_repo("other", "items"));
     let request = batch.build();
@@ -203,12 +203,12 @@ async fn foreach_pending_reads_fail_without_dropping_independent_inner_ops() {
     let read = body.query("read", Query::with_repo("default", "items"));
     let written = body.insert(
         "written",
-        Insert::with_repo("default", "items").row(doc().set("n", param("row"))),
+        Insert::with_repo("default", "items").row(doc().set("n", param("row")).unwrap()),
     );
     body.after(&written, &read);
     body.insert(
         "independent",
-        Insert::with_repo("other", "items").row(doc().set("n", param("row"))),
+        Insert::with_repo("other", "items").row(doc().set("n", param("row")).unwrap()),
     );
     let mut outer = Batch::new();
     outer.visibility_wait(STATUS);
@@ -341,7 +341,7 @@ async fn repository_bounded_default_preflights_call_before_prior_write() {
     let mut batch = Batch::new();
     let written = batch.insert(
         "written",
-        Insert::with_repo("default", "items").row(doc().set("n", 1)),
+        Insert::with_repo("default", "items").row(doc().set("n", 1).unwrap()),
     );
     let call = batch.call_in_repo("call", "unavailable", "default", Vec::<i32>::new());
     batch.after(&call, &written);

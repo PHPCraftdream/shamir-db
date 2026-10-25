@@ -137,7 +137,10 @@ impl Db {
         &self,
         batch: &shamir_query_builder::batch::Batch,
     ) -> crate::Result<shamir_query_builder::BatchResponse> {
-        let req = batch.build();
+        // Validate via try_build — deferred registration errors (duplicate
+        // alias, unknown after/when handle) and unresolved `$query` refs must
+        // surface here, not be sent silently to the host.
+        let req = batch_request(batch)?;
         let bytes = rmp_serde::to_vec_named(&req)
             .map_err(|e| crate::Error::user(format!("execute: encode batch: {e}")))?;
         let resp_bytes = crate::host_imports::db_execute(&bytes);
@@ -147,4 +150,17 @@ impl Db {
         rmp_serde::from_slice(&resp_bytes)
             .map_err(|e| crate::Error::user(format!("execute: decode response: {e}")))
     }
+}
+
+/// Validate a builder [`Batch`] into a wire [`BatchRequest`], mapping
+/// [`BuildError`] into the SDK's [`Error`] — the testable seam of
+/// [`Db::execute`]'s request-construction step (the host call itself is
+/// guest-only and cannot run in unit tests).
+#[cfg(feature = "query-builder")]
+pub(crate) fn batch_request(
+    batch: &shamir_query_builder::batch::Batch,
+) -> crate::Result<shamir_query_builder::BatchRequest> {
+    batch
+        .try_build()
+        .map_err(|e| crate::Error::user(format!("execute: invalid batch: {e}")))
 }

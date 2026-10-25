@@ -34,8 +34,8 @@ async fn execute_batch_transactional_si_happy_path() {
     b.insert(
         "ins",
         write::insert("users")
-            .row(doc().set("name", "alice"))
-            .row(doc().set("name", "bob")),
+            .row(doc().set("name", "alice").unwrap())
+            .row(doc().set("name", "bob").unwrap()),
     );
     let request = b.build();
 

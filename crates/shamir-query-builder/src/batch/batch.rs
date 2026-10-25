@@ -19,6 +19,7 @@ use super::index_visibility::IndexVisibility;
 use super::into_batch_op::IntoBatchOp;
 use super::isolation::Isolation;
 use super::try_into_batch_op::TryIntoBatchOp;
+use super::BuildError;
 use crate::write::BuilderError;
 
 #[path = "batch_refs.rs"]
@@ -43,6 +44,10 @@ pub struct Batch {
     limits: BatchLimits,
     result_encoding: ResultEncoding,
     interner_epochs: TMap<String, u64>,
+    /// Deferred registration errors (duplicate aliases, unknown handles passed
+    /// to `after`/`when`) — recorded at the call site and surfaced by
+    /// [`Batch::try_build`] so a bad registration can never be silently lost.
+    pub(crate) deferred_errors: Vec<BuildError>,
 }
 
 impl Default for Batch {
@@ -68,6 +73,7 @@ impl Batch {
             limits: BatchLimits::default(),
             result_encoding: ResultEncoding::default(),
             interner_epochs: new_map(),
+            deferred_errors: Vec::new(),
         }
     }
 

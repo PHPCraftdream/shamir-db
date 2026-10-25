@@ -405,7 +405,13 @@ async fn update_indexed_field_reflected_in_index() {
 
     // Insert a record with city=NYC.
     let insert_op = w::insert("users")
-        .row(doc().set("name", "Alice").set("city", "NYC"))
+        .row(
+            doc()
+                .set("name", "Alice")
+                .unwrap()
+                .set("city", "NYC")
+                .unwrap(),
+        )
         .build();
     insert_via_tx(&repo, &table, &insert_op, false)
         .await
@@ -414,7 +420,7 @@ async fn update_indexed_field_reflected_in_index() {
     // Update city=NYC → city=LA.
     let update_op = w::update("users")
         .where_(filter::eq("city", "NYC"))
-        .set(doc().set("city", "LA"))
+        .set(doc().set("city", "LA").unwrap())
         .returning(UpdateReturnMode::Changed)
         .build()
         .unwrap();
@@ -433,7 +439,7 @@ async fn update_indexed_field_reflected_in_index() {
     // The old posting (NYC) should yield no results.
     let find_nyc = w::update("users")
         .where_(filter::eq("city", "NYC"))
-        .set(doc().set("dummy", true))
+        .set(doc().set("dummy", true).unwrap())
         .build()
         .unwrap();
     let nyc_result = update_via_tx(&repo, &table, &find_nyc, &refs)
@@ -447,7 +453,7 @@ async fn update_indexed_field_reflected_in_index() {
     // The new posting (LA) should find the record.
     let find_la = w::update("users")
         .where_(filter::eq("city", "LA"))
-        .set(doc().set("dummy", true))
+        .set(doc().set("dummy", true).unwrap())
         .returning(UpdateReturnMode::Changed)
         .build()
         .unwrap();
@@ -462,14 +468,16 @@ async fn update_new_field_with_returning() {
     let refs = new_map();
 
     // Insert a record with just name.
-    let insert_op = w::insert("users").row(doc().set("name", "Bob")).build();
+    let insert_op = w::insert("users")
+        .row(doc().set("name", "Bob").unwrap())
+        .build();
     insert_via_tx(&repo, &table, &insert_op, false)
         .await
         .unwrap();
 
     // Update: add a brand-new field `email`.
     let update_op = w::update("users")
-        .set(doc().set("email", "bob@example.com"))
+        .set(doc().set("email", "bob@example.com").unwrap())
         .returning(UpdateReturnMode::All)
         .build()
         .unwrap();

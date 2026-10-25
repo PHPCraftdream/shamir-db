@@ -43,7 +43,12 @@ fn doc_empty() {
 
 #[test]
 fn doc_literal_fields() {
-    let d = doc().set("name", "Alice").set("age", 30).build();
+    let d = doc()
+        .set("name", "Alice")
+        .unwrap()
+        .set("age", 30)
+        .unwrap()
+        .build();
     assert_eq!(d["name"], QueryValue::Str("Alice".to_string()));
     assert_eq!(d["age"], QueryValue::Int(30));
 }
@@ -61,6 +66,7 @@ fn doc_nested_literal() {
 fn doc_set_expr_fn_call() {
     let d = doc()
         .set("email_norm", func("strings/lower", [col("email")]))
+        .unwrap()
         .build();
     assert_eq!(
         d["email_norm"],
@@ -75,19 +81,22 @@ fn doc_set_expr_fn_call() {
 
 #[test]
 fn doc_set_expr_field_ref() {
-    let d = doc().set("copy", col("source")).build();
+    let d = doc().set("copy", col("source")).unwrap().build();
     assert_eq!(d["copy"], mpack!({"$ref": ["source"]}));
 }
 
 #[test]
 fn doc_set_expr_query_ref() {
-    let d = doc().set("user_id", qref("users", "[0].id")).build();
+    let d = doc()
+        .set("user_id", qref("users", "[0].id"))
+        .unwrap()
+        .build();
     assert_eq!(d["user_id"], mpack!({"$query": "@users", "path": "[0].id"}));
 }
 
 #[test]
 fn doc_into_value() {
-    let v: QueryValue = doc().set("x", 1).into();
+    let v: QueryValue = doc().set("x", 1).unwrap().into();
     assert_eq!(v["x"], QueryValue::Int(1));
 }
 
@@ -108,7 +117,7 @@ fn insert_single_row_literal() {
 #[test]
 fn insert_with_doc() {
     let op = insert("users")
-        .row(doc().set("name", "Alice").set("age", 25))
+        .row(doc().set("name", "Alice").unwrap().set("age", 25).unwrap())
         .build();
     // Check structure per-field.
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
@@ -129,7 +138,9 @@ fn insert_computed_fn_value() {
         .row(
             doc()
                 .set("email", "A@X.COM")
-                .set("email_norm", func("strings/lower", [col("email")])),
+                .unwrap()
+                .set("email_norm", func("strings/lower", [col("email")]))
+                .unwrap(),
         )
         .build();
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
@@ -218,7 +229,7 @@ fn insert_no_idmsgpack_absent_in_wire() {
 fn update_basic() {
     let op = update("users")
         .where_(filter::eq("id", 1_i64))
-        .set(doc().set("name", "Bob"))
+        .set(doc().set("name", "Bob").unwrap())
         .build()
         .unwrap();
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
@@ -239,7 +250,7 @@ fn update_basic() {
 fn update_with_returning_all() {
     let op = update("users")
         .where_(filter::eq("id", 1_i64))
-        .set(doc().set("active", false))
+        .set(doc().set("active", false).unwrap())
         .returning(UpdateReturnMode::All)
         .build()
         .unwrap();
@@ -260,7 +271,7 @@ fn update_with_returning_all() {
 fn update_with_returning_fields() {
     let op = update("users")
         .where_(filter::eq("id", 1_i64))
-        .set(doc().set("name", "X"))
+        .set(doc().set("name", "X").unwrap())
         .returning_fields(UpdateReturnMode::Changed, ["id", "name"])
         .build()
         .unwrap();
@@ -290,7 +301,7 @@ fn update_with_repo() {
 fn update_no_where() {
     // An update without where is valid (updates all records).
     let op = update("users")
-        .set(doc().set("active", false))
+        .set(doc().set("active", false).unwrap())
         .build()
         .unwrap();
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
@@ -308,7 +319,7 @@ fn update_no_where() {
 fn upsert_basic() {
     let op = upsert("cache")
         .key(mpack!("session:abc"))
-        .value(doc().set("data", "payload"))
+        .value(doc().set("data", "payload").unwrap())
         .build()
         .unwrap();
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
@@ -340,7 +351,7 @@ fn upsert_with_repo() {
 fn upsert_with_doc_value() {
     let op = upsert("users")
         .key(mpack!({"email": "a@x.com"}))
-        .value(doc().set("name", "Alice").set("age", 30))
+        .value(doc().set("name", "Alice").unwrap().set("age", 30).unwrap())
         .build()
         .unwrap();
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
@@ -452,7 +463,9 @@ fn insert_with_query_ref_value() {
         .row(
             doc()
                 .set("total", 100)
-                .set("user_id", qref("users", "[0].id")),
+                .unwrap()
+                .set("user_id", qref("users", "[0].id"))
+                .unwrap(),
         )
         .build();
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
@@ -474,7 +487,9 @@ fn upsert_with_computed_value() {
         .value(
             doc()
                 .set("raw_name", "ALICE")
-                .set("name", func("strings/lower", [col("raw_name")])),
+                .unwrap()
+                .set("name", func("strings/lower", [col("raw_name")]))
+                .unwrap(),
         )
         .build()
         .unwrap();

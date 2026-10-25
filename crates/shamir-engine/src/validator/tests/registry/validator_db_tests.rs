@@ -246,7 +246,9 @@ async fn fk_final_staged_state_matrix() {
                 let parent_id = if scenario == "insert" {
                     None
                 } else {
-                    let op = insert("parent").row(doc().set("uid", 1i64)).build();
+                    let op = insert("parent")
+                        .row(doc().set("uid", 1i64).unwrap())
+                        .build();
                     let (mut seed, seed_guard) = resolver
                         .repo
                         .begin_tx(IsolationLevel::Snapshot)
@@ -303,7 +305,9 @@ async fn fk_final_staged_state_matrix() {
                             .unwrap());
                     }
                     "insert" => {
-                        let op = insert("parent").row(doc().set("uid", 1i64)).build();
+                        let op = insert("parent")
+                            .row(doc().set("uid", 1i64).unwrap())
+                            .build();
                         let result = parent
                             .execute_insert_tx(
                                 &op,
@@ -328,7 +332,7 @@ async fn fk_final_staged_state_matrix() {
                     _ => unreachable!(),
                 }
                 let uid = if scenario == "update_new" { 2i64 } else { 1i64 };
-                let op = insert("child").row(doc().set("uid", uid)).build();
+                let op = insert("child").row(doc().set("uid", uid).unwrap()).build();
                 let result = child
                     .execute_insert_tx(
                         &op,
@@ -415,7 +419,7 @@ async fn fk_control_missing_parent_is_rejected_through_execute_insert_tx() {
             .begin_tx(IsolationLevel::Snapshot)
             .await
             .unwrap();
-        let op = insert("child").row(doc().set("uid", 1i64)).build();
+        let op = insert("child").row(doc().set("uid", 1i64).unwrap()).build();
         let result = child
             .execute_insert_tx(
                 &op,

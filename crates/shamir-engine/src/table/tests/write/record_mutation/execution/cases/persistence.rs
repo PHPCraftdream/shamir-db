@@ -23,8 +23,8 @@ async fn test_interner_persisted_after_insert() {
 
     // Insert records with new field keys ("brand_new_field" never seen before)
     let op = write::insert("users")
-        .row(doc().set("brand_new_field", "value1"))
-        .row(doc().set("brand_new_field", "value2"))
+        .row(doc().set("brand_new_field", "value1").unwrap())
+        .row(doc().set("brand_new_field", "value2").unwrap())
         .build();
     insert_via_tx(&repo, &table, &op, true).await.unwrap();
 
@@ -51,7 +51,7 @@ async fn test_interner_persisted_after_update() {
 
     // Update with a brand new field key
     let op = write::update("users")
-        .set(doc().set("completely_new_key", 42_i64))
+        .set(doc().set("completely_new_key", 42_i64).unwrap())
         .build()
         .unwrap();
     update_via_tx(&repo, &table, &op, &refs).await.unwrap();
@@ -74,11 +74,13 @@ async fn test_interner_persisted_after_set() {
     let (table, repo) = setup_empty_table().await;
 
     let op = write::upsert("users")
-        .key(doc().set("unique_field_xyz", "val"))
+        .key(doc().set("unique_field_xyz", "val").unwrap())
         .value(
             doc()
                 .set("unique_field_xyz", "val")
-                .set("another_new_field", 99_i64),
+                .unwrap()
+                .set("another_new_field", 99_i64)
+                .unwrap(),
         )
         .build()
         .unwrap();

@@ -13,17 +13,29 @@ use shamir_query_types::read::{ReadQuery, Select, SelectItem};
 impl Batch {
     // ── wire encoding (build + encode in one step) ─────────────────
 
-    /// Build and encode as msgpack (named fields) — primary wire format.
-    pub fn to_msgpack(&self) -> Result<Vec<u8>, rmp_serde::encode::Error> {
-        rmp_serde::to_vec_named(&self.build())
+    /// Validate and encode as msgpack (named fields) — primary wire format.
+    ///
+    /// Runs [`Batch::try_build`] first, so deferred registration errors
+    /// (duplicate alias, unknown `after`/`when` handle) and unresolved
+    /// `$query` refs surface here as [`BuildError`] instead of being sent
+    /// silently to the server. The rare codec failure on an already-validated
+    /// request is mapped to [`BuildError::SerializationFailed`].
+    pub fn to_msgpack(&self) -> Result<Vec<u8>, BuildError> {
+        let req = self.try_build()?;
+        rmp_serde::to_vec_named(&req).map_err(|e| BuildError::SerializationFailed {
+            alias: String::new(),
+            reason: e.to_string(),
+        })
     }
 
     /// Build, encode to msgpack, and decode back into a `BatchRequest`.
     ///
     /// Round-trips the request through the wire codec (named msgpack) — the
     /// same path a real client/server uses — so callers (notably tests)
-    /// exercise the builder AND the codec in one step. Panics on a codec
-    /// error (the builder always produces a serialisable request).
+    /// exercise the builder AND the codec in one step. Validates via
+    /// [`Batch::try_build`] (through [`Batch::to_msgpack`]) and PANICS on a
+    /// build/codec error (including deferred registration errors) — for
+    /// production paths use `try_build`/`to_msgpack` directly instead.
     pub fn to_request_via_msgpack(&self) -> BatchRequest {
         let bytes = self.to_msgpack().expect("msgpack encode");
         rmp_serde::from_slice(&bytes).expect("msgpack decode")
@@ -32,6 +44,13 @@ impl Batch {
     // ── build ──────────────────────────────────────────────────────
 
     /// Infallible build — clones accumulated state into a [`BatchRequest`].
+    ///
+    /// # NOT a validation point
+    /// This does NOT validate and does NOT surface deferred registration
+    /// errors (duplicate alias, unknown `after`/`when` handle) — a batch with
+    /// such errors silently builds. Production code that turns a batch into a
+    /// sent/executed request MUST use [`Batch::try_build`]
+    /// (or [`Batch::to_msgpack`]) instead.
     pub fn build(&self) -> BatchRequest {
         BatchRequest {
             id: self.id.clone(),
@@ -61,6 +80,11 @@ impl Batch {
     /// Also validates `after` entries: each must reference a known alias
     /// and must not reference the entry's own alias.
     pub fn try_build(&self) -> Result<BatchRequest, BuildError> {
+        // Surface deferred registration errors first — they happened at a
+        // specific registration call site and must not be lost by later calls.
+        if let Some(err) = self.deferred_errors.first() {
+            return Err(err.clone());
+        }
         for (alias, entry) in &self.queries {
             // Validate $query refs — typed walk, see collect_op_query_refs's
             // doc for which BatchOp variants get the fast (no-serialization)
@@ -152,6 +176,24 @@ impl Batch {
     /// — that's single-query keyset pagination; this is inter-query DAG
     /// ordering. See that method's docstring for the reverse cross-reference.
     pub fn after(&mut self, dependent: &Handle, on: &Handle) -> &mut Self {
+        // Unknown handles are deferred errors (surfaced by `try_build`), not
+        // silent no-ops — a discarded ordering intent must be diagnosable.
+        if !self.queries.contains_key(dependent.alias()) {
+            self.deferred_errors
+                .push(BuildError::UnknownOrderingTarget {
+                    alias: dependent.alias().to_string(),
+                    operation: "after",
+                });
+            return self;
+        }
+        if !self.queries.contains_key(on.alias()) {
+            self.deferred_errors
+                .push(BuildError::UnknownOrderingTarget {
+                    alias: on.alias().to_string(),
+                    operation: "after",
+                });
+            return self;
+        }
         if let Some(entry) = self.queries.get_mut(dependent.alias()) {
             entry.after.push(on.alias().to_string());
         }
@@ -174,6 +216,16 @@ impl Batch {
     /// `Filter` through the escape-hatch `op`/`op_after` call and set `when`
     /// afterwards, or use [`Batch::switch`] for multi-branch dispatch.
     pub fn when(&mut self, handle: &Handle, condition: Filter) -> &mut Self {
+        // Unknown handles are deferred errors (surfaced by `try_build`), not
+        // silent no-ops — a discarded guard intent must be diagnosable.
+        if !self.queries.contains_key(handle.alias()) {
+            self.deferred_errors
+                .push(BuildError::UnknownOrderingTarget {
+                    alias: handle.alias().to_string(),
+                    operation: "when",
+                });
+            return self;
+        }
         if let Some(entry) = self.queries.get_mut(handle.alias()) {
             entry.when = Some(condition);
         }
@@ -240,6 +292,15 @@ impl Batch {
         after: &[&Handle],
     ) -> Handle {
         let alias = alias.into();
+        // Duplicate alias: keep the FIRST registered operation intact and
+        // record a deferred error (surfaced by `try_build`) — re-registering
+        // an alias must never silently replace (and thus drop) an earlier op.
+        if self.queries.contains_key(&alias) {
+            self.deferred_errors.push(BuildError::DuplicateAlias {
+                alias: alias.clone(),
+            });
+            return Handle { alias };
+        }
         self.queries.insert(
             alias.clone(),
             QueryEntry {
@@ -269,8 +330,34 @@ fn collect_query_refs(value: &shamir_types::types::value::QueryValue, out: &mut 
     use shamir_types::types::value::QueryValue;
     match value {
         QueryValue::Map(map) => {
-            if let Some(QueryValue::Str(s)) = map.get("$query") {
-                out.push(s.clone());
+            // Reserved-key marker convention mirroring the planner's
+            // `extract_deps_from_value` (shamir-query-types
+            // ops/batch/plan/planner.rs, the #641 fix): a marker is a map of
+            // len 1 whose single key is one of "$query"/"$fn"/"$cond"/
+            // "$expr", OR a len-2 map with "$query"+"path" where `path` is a
+            // STRING — the planner's typed decode (`QueryRef { path:
+            // Option<String> }`) only accepts strings, so a non-string `path`
+            // is literal data, not a marker. A map that merely CONTAINS a
+            // "$query" key among others is literal write data
+            // (RV-QUERY-BUILDER-224EF7B1), not a marker.
+            let is_marker = match map.len() {
+                1 => ["$query", "$fn", "$cond", "$expr"]
+                    .iter()
+                    .any(|k| map.contains_key(*k)),
+                2 => {
+                    map.contains_key("$query")
+                        && matches!(map.get("path"), Some(QueryValue::Str(_)))
+                }
+                _ => false,
+            };
+            if is_marker {
+                if let Some(QueryValue::Str(s)) = map.get("$query") {
+                    out.push(s.clone());
+                }
+                // "$fn"/"$cond"/"$expr" markers carry refs INSIDE their
+                // payload (nested QueryRef operands) — keep recursing so
+                // those are still recognised, like the planner's decode into
+                // `FilterValue` does.
             }
             for v in map.values() {
                 collect_query_refs(v, out);
@@ -488,6 +575,18 @@ pub(super) fn collect_op_query_refs(alias: &str, op: &BatchOp) -> Result<Vec<Str
             collect_query_refs(&s.value, &mut refs);
         }
         BatchOp::Delete(d) => collect_filter_refs(&d.where_clause, &mut refs),
+        // Sub-batch / for_each: outer deps come EXCLUSIVELY from `bind`
+        // values / `over` (planner.rs `extract_entry_deps`, the
+        // `BatchOp::Batch` / `BatchOp::ForEach` arms). Do NOT descend into
+        // the inner batch's queries — those are planned recursively at
+        // execution time, and their internal aliases must never be validated
+        // against THIS batch's alias set (RV-QUERY-BUILDER-F3ED5A33).
+        BatchOp::Batch(sub) => {
+            for fv in sub.bind.values() {
+                collect_filter_value_refs(fv, &mut refs);
+            }
+        }
+        BatchOp::ForEach(fe) => collect_filter_value_refs(&fe.over, &mut refs),
         other => {
             let bytes =
                 rmp_serde::to_vec_named(other).map_err(|e| BuildError::SerializationFailed {

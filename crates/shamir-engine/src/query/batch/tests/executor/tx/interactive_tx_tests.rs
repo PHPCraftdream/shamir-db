@@ -44,7 +44,7 @@ async fn interactive_tx_accumulates_writes_across_calls_then_commits() {
     b.id(1);
     b.insert(
         "ins",
-        write::insert("users").row(doc().set("name", "alice")),
+        write::insert("users").row(doc().set("name", "alice").unwrap()),
     );
     let call1 = b.build();
     let r1 = execute_in_open_tx(
@@ -79,7 +79,10 @@ async fn interactive_tx_accumulates_writes_across_calls_then_commits() {
     // EXECUTE #2 — stage a second insert into the SAME open tx.
     let mut b = Batch::new();
     b.id(2);
-    b.insert("ins", write::insert("users").row(doc().set("name", "bob")));
+    b.insert(
+        "ins",
+        write::insert("users").row(doc().set("name", "bob").unwrap()),
+    );
     let call2 = b.build();
     let r2 = execute_in_open_tx(
         &call2,
@@ -135,7 +138,7 @@ async fn interactive_tx_rollback_discards_staged_writes() {
     b.id(1);
     b.insert(
         "ins",
-        write::insert("users").row(doc().set("name", "ghost")),
+        write::insert("users").row(doc().set("name", "ghost").unwrap()),
     );
     let call = b.build();
     execute_in_open_tx(
@@ -269,7 +272,7 @@ async fn interactive_ssi_write_skew_across_calls_one_aborts() {
         "w",
         write::update("users")
             .where_(shamir_query_builder::filter::eq("name", "alice"))
-            .set(doc().set("val", "a2")),
+            .set(doc().set("val", "a2").unwrap()),
     )
     .unwrap();
     let update_alice = b.build();
@@ -280,7 +283,7 @@ async fn interactive_ssi_write_skew_across_calls_one_aborts() {
         "w",
         write::update("users")
             .where_(shamir_query_builder::filter::eq("name", "bob"))
-            .set(doc().set("val", "b2")),
+            .set(doc().set("val", "b2").unwrap()),
     )
     .unwrap();
     let update_bob = b.build();
@@ -361,7 +364,7 @@ async fn two_interactive_si_txs_race_last_commit_wins() {
     sb.id(0);
     sb.insert(
         "seed",
-        write::insert("users").row(doc().set("name", "baseline")),
+        write::insert("users").row(doc().set("name", "baseline").unwrap()),
     );
     let seed_req = sb.build();
     let seed_resp = execute_batch(&seed_req, &resolver, None, None, Actor::System, "test").await;
@@ -383,7 +386,10 @@ async fn two_interactive_si_txs_race_last_commit_wins() {
     let mk_ins = |id: i32, name: &str| -> crate::query::batch::BatchRequest {
         let mut b = Batch::new();
         b.id(id);
-        b.insert("ins", write::insert("users").row(doc().set("name", name)));
+        b.insert(
+            "ins",
+            write::insert("users").row(doc().set("name", name).unwrap()),
+        );
         b.build()
     };
     let ins_a1 = mk_ins(1, "a1");
@@ -489,13 +495,16 @@ async fn crash_mid_interactive_tx_leaves_no_durable_footprint() {
         b1.id(1);
         b1.insert(
             "ins",
-            write::insert("users").row(doc().set("name", "alpha")),
+            write::insert("users").row(doc().set("name", "alpha").unwrap()),
         );
         let c1 = b1.build();
 
         let mut b2 = Batch::new();
         b2.id(2);
-        b2.insert("ins", write::insert("users").row(doc().set("name", "beta")));
+        b2.insert(
+            "ins",
+            write::insert("users").row(doc().set("name", "beta").unwrap()),
+        );
         let c2 = b2.build();
 
         execute_in_open_tx(&c1, &resolver, None, None, &Actor::System, "test", &mut tx)

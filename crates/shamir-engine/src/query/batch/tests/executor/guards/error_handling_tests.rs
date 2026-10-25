@@ -56,7 +56,7 @@ async fn test_unknown_table_fails_early() {
     b.id(1);
     b.insert(
         "good",
-        write::insert("users").row(doc().set("name", "Alice")),
+        write::insert("users").row(doc().set("name", "Alice").unwrap()),
     );
     b.query("bad", Query::from("nonexistent_table"));
     let req = b.build();

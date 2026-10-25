@@ -53,7 +53,7 @@ async fn cascade_deletes_child_when_parent_deleted() {
     b.id(1);
     b.insert(
         "ins_parent",
-        write::insert("parent").row(doc().set("id", 1).set("name", "Alice")),
+        write::insert("parent").row(doc().set("id", 1).unwrap().set("name", "Alice").unwrap()),
     );
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -64,7 +64,15 @@ async fn cascade_deletes_child_when_parent_deleted() {
     b.id(2);
     b.insert(
         "ins_child",
-        write::insert("child").row(doc().set("cid", 10).set("parent_id", 1).set("label", "c1")),
+        write::insert("child").row(
+            doc()
+                .set("cid", 10)
+                .unwrap()
+                .set("parent_id", 1)
+                .unwrap()
+                .set("label", "c1")
+                .unwrap(),
+        ),
     );
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -144,7 +152,7 @@ async fn cascade_chain_a_to_b_to_c() {
     // Insert A, B, C.
     let mut b = Batch::new();
     b.id(1);
-    b.insert("ia", write::insert("a").row(doc().set("id", 1)));
+    b.insert("ia", write::insert("a").row(doc().set("id", 1).unwrap()));
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -154,7 +162,7 @@ async fn cascade_chain_a_to_b_to_c() {
     b.id(2);
     b.insert(
         "ib",
-        write::insert("b").row(doc().set("id", 2).set("a_id", 1)),
+        write::insert("b").row(doc().set("id", 2).unwrap().set("a_id", 1).unwrap()),
     );
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -165,7 +173,7 @@ async fn cascade_chain_a_to_b_to_c() {
     b.id(3);
     b.insert(
         "ic",
-        write::insert("c").row(doc().set("id", 3).set("b_id", 2)),
+        write::insert("c").row(doc().set("id", 3).unwrap().set("b_id", 2).unwrap()),
     );
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -241,7 +249,7 @@ async fn cascade_cycle_triggers_depth_guard() {
     b.id(1);
     b.insert(
         "ix",
-        write::insert("x").row(doc().set("id", 1).set("y_id", 2)),
+        write::insert("x").row(doc().set("id", 1).unwrap().set("y_id", 2).unwrap()),
     );
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -252,7 +260,7 @@ async fn cascade_cycle_triggers_depth_guard() {
     b.id(2);
     b.insert(
         "iy",
-        write::insert("y").row(doc().set("id", 2).set("x_id", 1)),
+        write::insert("y").row(doc().set("id", 2).unwrap().set("x_id", 1).unwrap()),
     );
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -365,7 +373,7 @@ async fn cascade_diamond_topology_succeeds() {
     // Insert A(id=1), B(id=2, a_id=1), C(id=3, a_id=1), D(id=4, b_id=2, c_id=3).
     let mut b = Batch::new();
     b.id(1);
-    b.insert("ia", write::insert("a").row(doc().set("id", 1)));
+    b.insert("ia", write::insert("a").row(doc().set("id", 1).unwrap()));
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -375,7 +383,7 @@ async fn cascade_diamond_topology_succeeds() {
     b.id(2);
     b.insert(
         "ib",
-        write::insert("b").row(doc().set("id", 2).set("a_id", 1)),
+        write::insert("b").row(doc().set("id", 2).unwrap().set("a_id", 1).unwrap()),
     );
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -386,7 +394,7 @@ async fn cascade_diamond_topology_succeeds() {
     b.id(3);
     b.insert(
         "ic",
-        write::insert("c").row(doc().set("id", 3).set("a_id", 1)),
+        write::insert("c").row(doc().set("id", 3).unwrap().set("a_id", 1).unwrap()),
     );
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -397,7 +405,15 @@ async fn cascade_diamond_topology_succeeds() {
     b.id(4);
     b.insert(
         "id_row",
-        write::insert("d").row(doc().set("id", 4).set("b_id", 2).set("c_id", 3)),
+        write::insert("d").row(
+            doc()
+                .set("id", 4)
+                .unwrap()
+                .set("b_id", 2)
+                .unwrap()
+                .set("c_id", 3)
+                .unwrap(),
+        ),
     );
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -466,7 +482,7 @@ async fn set_null_nulls_child_field_when_parent_deleted() {
     b.id(1);
     b.insert(
         "ins_parent",
-        write::insert("parent").row(doc().set("id", 1).set("name", "Alice")),
+        write::insert("parent").row(doc().set("id", 1).unwrap().set("name", "Alice").unwrap()),
     );
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -477,7 +493,15 @@ async fn set_null_nulls_child_field_when_parent_deleted() {
     b.id(2);
     b.insert(
         "ins_child",
-        write::insert("child").row(doc().set("cid", 10).set("parent_id", 1).set("label", "c1")),
+        write::insert("child").row(
+            doc()
+                .set("cid", 10)
+                .unwrap()
+                .set("parent_id", 1)
+                .unwrap()
+                .set("label", "c1")
+                .unwrap(),
+        ),
     );
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -546,7 +570,7 @@ async fn set_null_on_non_nullable_field_errors() {
     b.id(1);
     b.insert(
         "ins_parent",
-        write::insert("parent").row(doc().set("id", 1).set("name", "Alice")),
+        write::insert("parent").row(doc().set("id", 1).unwrap().set("name", "Alice").unwrap()),
     );
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -557,7 +581,15 @@ async fn set_null_on_non_nullable_field_errors() {
     b.id(2);
     b.insert(
         "ins_child",
-        write::insert("child").row(doc().set("cid", 10).set("parent_id", 1).set("label", "c1")),
+        write::insert("child").row(
+            doc()
+                .set("cid", 10)
+                .unwrap()
+                .set("parent_id", 1)
+                .unwrap()
+                .set("label", "c1")
+                .unwrap(),
+        ),
     );
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
@@ -629,15 +661,23 @@ async fn cascade_int_parent_f64_child_coercion() {
     };
 
     // Parent key stored as Int(1).
-    insert_helper(&resolver, "parent", doc().set("id", 1_i64).set("name", "P")).await;
+    insert_helper(
+        &resolver,
+        "parent",
+        doc().set("id", 1_i64).unwrap().set("name", "P").unwrap(),
+    )
+    .await;
     // Child FK field stored as F64(1.0) — cross-type reference.
     insert_helper(
         &resolver,
         "child",
         doc()
             .set("cid", 10_i64)
+            .unwrap()
             .set("parent_id", 1.0_f64)
-            .set("label", "c"),
+            .unwrap()
+            .set("label", "c")
+            .unwrap(),
     )
     .await;
 
@@ -698,7 +738,7 @@ async fn cascade_f64_parent_int_child_coercion() {
     insert_helper(
         &resolver,
         "parent",
-        doc().set("id", 1.0_f64).set("name", "P"),
+        doc().set("id", 1.0_f64).unwrap().set("name", "P").unwrap(),
     )
     .await;
     // Child FK field stored as Int(1).
@@ -707,8 +747,11 @@ async fn cascade_f64_parent_int_child_coercion() {
         "child",
         doc()
             .set("cid", 10_i64)
+            .unwrap()
             .set("parent_id", 1_i64)
-            .set("label", "c"),
+            .unwrap()
+            .set("label", "c")
+            .unwrap(),
     )
     .await;
 
@@ -766,14 +809,22 @@ async fn set_null_int_parent_f64_child_coercion() {
         registry,
     };
 
-    insert_helper(&resolver, "parent", doc().set("id", 1_i64).set("name", "P")).await;
+    insert_helper(
+        &resolver,
+        "parent",
+        doc().set("id", 1_i64).unwrap().set("name", "P").unwrap(),
+    )
+    .await;
     insert_helper(
         &resolver,
         "child",
         doc()
             .set("cid", 10_i64)
+            .unwrap()
             .set("parent_id", 1.0_f64)
-            .set("label", "c"),
+            .unwrap()
+            .set("label", "c")
+            .unwrap(),
     )
     .await;
 

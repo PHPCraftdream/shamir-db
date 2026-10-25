@@ -68,7 +68,10 @@ impl TableResolver for Resolver {
 async fn batch_insert(repo: &RepoInstance, value: &str) -> BatchResponse {
     let mut batch = Batch::new();
     batch.transactional().visibility_wait(STATUS);
-    batch.insert("w", write::insert("t").row(doc().set("name", value)));
+    batch.insert(
+        "w",
+        write::insert("t").row(doc().set("name", value).unwrap()),
+    );
     let request = batch.build();
     let resolver = Resolver(repo.clone());
     match execute_batch_unchecked(&request, &resolver, None, None, Actor::System, "test").await {

@@ -782,9 +782,13 @@ fn main() {
                         QueryValue::from(
                             doc()
                                 .set("id", format!("k{i}"))
+                                .unwrap()
                                 .set("score", i as i64)
+                                .unwrap()
                                 .set("category", (i % 10) as i64)
+                                .unwrap()
                                 .set("name", format!("name_{i}"))
+                                .unwrap()
                                 .build(),
                         )
                     })

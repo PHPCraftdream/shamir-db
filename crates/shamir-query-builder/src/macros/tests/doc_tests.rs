@@ -14,7 +14,12 @@ fn doc_macro_simple() {
     }
     .build();
 
-    let from_builder: QueryValue = doc().set("a", 1).set("b", col("x")).build();
+    let from_builder: QueryValue = doc()
+        .set("a", 1)
+        .unwrap()
+        .set("b", col("x"))
+        .unwrap()
+        .build();
 
     assert_eq!(from_macro, from_builder);
 }
@@ -33,7 +38,7 @@ fn doc_macro_trailing_comma() {
     }
     .build();
 
-    let from_builder: QueryValue = doc().set("k", "v").build();
+    let from_builder: QueryValue = doc().set("k", "v").unwrap().build();
     assert_eq!(from_macro, from_builder);
 }
 

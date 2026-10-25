@@ -223,7 +223,7 @@ async fn insert_parent(resolver: &FkTestResolver, id: i64) {
     b.id(1);
     b.insert(
         "ins",
-        write::insert("parent").row(doc().set("id", id).set("name", "Alice")),
+        write::insert("parent").row(doc().set("id", id).unwrap().set("name", "Alice").unwrap()),
     );
     let req = b.build();
     execute_batch(&req, resolver, None, None, Actor::System, "test")
@@ -236,7 +236,13 @@ async fn insert_child(resolver: &FkTestResolver, parent_id: i64) {
     b.id(2);
     b.insert(
         "ins",
-        write::insert("child").row(doc().set("parent_id", parent_id).set("label", "x")),
+        write::insert("child").row(
+            doc()
+                .set("parent_id", parent_id)
+                .unwrap()
+                .set("label", "x")
+                .unwrap(),
+        ),
     );
     let req = b.build();
     execute_batch(&req, resolver, None, None, Actor::System, "test")

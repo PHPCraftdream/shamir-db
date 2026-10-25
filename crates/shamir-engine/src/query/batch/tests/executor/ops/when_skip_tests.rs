@@ -61,7 +61,7 @@ async fn when_false_skips_op() {
     seed.id(1);
     seed.op_silent(
         "seed",
-        write::insert("users").row(doc().set("name", "Alice")),
+        write::insert("users").row(doc().set("name", "Alice").unwrap()),
     );
     let seed_req = seed.build();
     execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
@@ -106,7 +106,13 @@ async fn cascade_skip_propagates_through_dataflow_edge() {
     seed.id(1);
     seed.op_silent(
         "seed",
-        write::insert("users").row(doc().set("name", "Alice").set("status", "active")),
+        write::insert("users").row(
+            doc()
+                .set("name", "Alice")
+                .unwrap()
+                .set("status", "active")
+                .unwrap(),
+        ),
     );
     let seed_req = seed.build();
     execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
@@ -153,7 +159,13 @@ async fn after_only_dependency_on_skipped_alias_does_not_cascade() {
     seed.id(1);
     seed.op_silent(
         "seed",
-        write::insert("users").row(doc().set("name", "Alice").set("status", "active")),
+        write::insert("users").row(
+            doc()
+                .set("name", "Alice")
+                .unwrap()
+                .set("status", "active")
+                .unwrap(),
+        ),
     );
     let seed_req = seed.build();
     execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
@@ -167,7 +179,13 @@ async fn after_only_dependency_on_skipped_alias_does_not_cascade() {
     // Explicit-only edge.
     let marker = b.op_silent(
         "marker",
-        write::insert("users").row(doc().set("name", "Marker").set("status", "marker")),
+        write::insert("users").row(
+            doc()
+                .set("name", "Marker")
+                .unwrap()
+                .set("status", "marker")
+                .unwrap(),
+        ),
     );
     b.after(&marker, &a);
     let mut req = b.build();
@@ -218,11 +236,11 @@ async fn skipped_write_inside_transactional_batch_has_no_side_effect_on_commit()
     b.transactional();
     b.op_silent(
         "unconditional",
-        write::insert("users").row(doc().set("name", "always")),
+        write::insert("users").row(doc().set("name", "always").unwrap()),
     );
     let guarded = b.op_silent(
         "guarded",
-        write::insert("users").row(doc().set("name", "never")),
+        write::insert("users").row(doc().set("name", "never").unwrap()),
     );
     let mut req = b.build();
     // `IsNotNull` on a field that never exists on the empty synthetic
@@ -287,7 +305,7 @@ async fn when_false_on_sub_batch_alias_skips_entire_inner_recursion() {
     inner.id(99);
     inner.op_silent(
         "inner_insert",
-        write::insert("users").row(doc().set("name", "from-sub-batch")),
+        write::insert("users").row(doc().set("name", "from-sub-batch").unwrap()),
     );
     let inner_req = inner.build();
 
@@ -340,7 +358,13 @@ async fn after_edge_from_skipped_alias_combined_with_own_independent_when() {
     seed.id(1);
     seed.op_silent(
         "seed",
-        write::insert("users").row(doc().set("name", "Alice").set("status", "active")),
+        write::insert("users").row(
+            doc()
+                .set("name", "Alice")
+                .unwrap()
+                .set("status", "active")
+                .unwrap(),
+        ),
     );
     let seed_req = seed.build();
     execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
@@ -354,7 +378,13 @@ async fn after_edge_from_skipped_alias_combined_with_own_independent_when() {
     // AND its own independent `when`.
     let b_op = b.op_silent(
         "b_op",
-        write::insert("users").row(doc().set("name", "B").set("status", "b-marker")),
+        write::insert("users").row(
+            doc()
+                .set("name", "B")
+                .unwrap()
+                .set("status", "b-marker")
+                .unwrap(),
+        ),
     );
     b.after(&b_op, &a);
     let mut req = b.build();
@@ -401,7 +431,13 @@ async fn seed_req_for_after_own_when_false(
     let a = b.query("a", Query::from("users").where_eq("status", "active"));
     let b_op = b.op_silent(
         "b_op",
-        write::insert("users").row(doc().set("name", "B2").set("status", "b-marker2")),
+        write::insert("users").row(
+            doc()
+                .set("name", "B2")
+                .unwrap()
+                .set("status", "b-marker2")
+                .unwrap(),
+        ),
     );
     b.after(&b_op, &a);
     let mut req = b.build();
@@ -436,7 +472,13 @@ async fn cascade_skip_propagates_through_three_level_dataflow_chain() {
     seed.id(1);
     seed.op_silent(
         "seed",
-        write::insert("users").row(doc().set("name", "Alice").set("status", "active")),
+        write::insert("users").row(
+            doc()
+                .set("name", "Alice")
+                .unwrap()
+                .set("status", "active")
+                .unwrap(),
+        ),
     );
     let seed_req = seed.build();
     execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
@@ -609,7 +651,13 @@ async fn value_compare_makes_balance_gte_amount_scenario_work_sufficient_directi
     seed.id(1);
     seed.op_silent(
         "seed",
-        write::insert("users").row(doc().set("name", "alice").set("balance", 100_i64)),
+        write::insert("users").row(
+            doc()
+                .set("name", "alice")
+                .unwrap()
+                .set("balance", 100_i64)
+                .unwrap(),
+        ),
     );
     let seed_req = seed.build();
     execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
@@ -624,7 +672,7 @@ async fn value_compare_makes_balance_gte_amount_scenario_work_sufficient_directi
     );
     let debit = b.op_silent(
         "debit",
-        write::insert("users").row(doc().set("name", "debit-row")),
+        write::insert("users").row(doc().set("name", "debit-row").unwrap()),
     );
     let mut req = b.build();
 
@@ -660,7 +708,13 @@ async fn value_compare_makes_balance_gte_amount_scenario_work_insufficient_direc
     seed.id(1);
     seed.op_silent(
         "seed",
-        write::insert("users").row(doc().set("name", "bob").set("balance", 10_i64)),
+        write::insert("users").row(
+            doc()
+                .set("name", "bob")
+                .unwrap()
+                .set("balance", 10_i64)
+                .unwrap(),
+        ),
     );
     let seed_req = seed.build();
     execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
@@ -675,7 +729,7 @@ async fn value_compare_makes_balance_gte_amount_scenario_work_insufficient_direc
     );
     let debit = b.op_silent(
         "debit",
-        write::insert("users").row(doc().set("name", "debit-row")),
+        write::insert("users").row(doc().set("name", "debit-row").unwrap()),
     );
     let mut req = b.build();
 

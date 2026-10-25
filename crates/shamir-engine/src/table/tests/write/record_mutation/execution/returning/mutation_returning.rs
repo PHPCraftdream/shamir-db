@@ -96,8 +96,11 @@ async fn test_execute_insert_returning_fields_projects() {
         .row(
             doc()
                 .set("name", "Alice")
+                .unwrap()
                 .set("age", 30_i64)
-                .set("city", "NYC"),
+                .unwrap()
+                .set("city", "NYC")
+                .unwrap(),
         )
         .returning_fields(["name", "city"])
         .build();
@@ -127,7 +130,13 @@ async fn test_execute_insert_without_projection_keeps_all_fields() {
     let (table, repo) = setup_empty_table().await;
 
     let op = write::insert("users")
-        .row(doc().set("name", "Alice").set("age", 30_i64))
+        .row(
+            doc()
+                .set("name", "Alice")
+                .unwrap()
+                .set("age", 30_i64)
+                .unwrap(),
+        )
         .build();
 
     let result = insert_via_tx(&repo, &table, &op, true).await.unwrap();
@@ -155,7 +164,7 @@ async fn test_execute_update_returning_fields_projects() {
 
     let op = write::update("users")
         .where_(filter::eq("status", "active"))
-        .set(doc().set("status", "premium"))
+        .set(doc().set("status", "premium").unwrap())
         .returning_fields(UpdateReturnMode::Changed, ["name", "status"])
         .build()
         .unwrap();

@@ -10,6 +10,19 @@ use crate::engine::repo::RepoConfig;
 use crate::engine::table::TableConfig;
 use crate::ShamirDb;
 
+/// Two-field test row (keeps seed batches under the layout line budget).
+fn doc2<
+    A: Into<shamir_query_types::filter::FilterValue>,
+    B: Into<shamir_query_types::filter::FilterValue>,
+>(
+    k1: &str,
+    v1: A,
+    k2: &str,
+    v2: B,
+) -> shamir_types::types::value::QueryValue {
+    doc().set(k1, v1).unwrap().set(k2, v2).unwrap().build()
+}
+
 async fn setup_shamir() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
     let db = shamir.create_db("testdb").await.expect("create_db");
@@ -21,11 +34,9 @@ async fn setup_shamir() -> ShamirDb {
     db.add_repo(repo_config).await.unwrap();
     shamir
 }
-
 // ============================================================================
 // Basic single operations
 // ============================================================================
-
 #[tokio::test]
 async fn test_execute_single_insert() {
     let shamir = setup_shamir().await;
@@ -35,15 +46,14 @@ async fn test_execute_single_insert() {
     b.insert(
         "ins",
         insert("users")
-            .row(doc().set("name", "Alice").set("age", 30))
-            .row(doc().set("name", "Bob").set("age", 25)),
+            .row(doc().set("name", "Alice").unwrap().set("age", 30).unwrap())
+            .row(doc().set("name", "Bob").unwrap().set("age", 25).unwrap()),
     );
     let req = b.to_request_via_msgpack();
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["ins"].records.len(), 2);
 }
-
 #[tokio::test]
 async fn test_execute_single_read() {
     let shamir = setup_shamir().await;
@@ -54,8 +64,8 @@ async fn test_execute_single_read() {
     b.op_silent(
         "s",
         insert("users")
-            .row(doc().set("name", "Alice"))
-            .row(doc().set("name", "Bob")),
+            .row(doc().set("name", "Alice").unwrap())
+            .row(doc().set("name", "Bob").unwrap()),
     );
     let seed = b.to_request_via_msgpack();
     shamir.execute("testdb", &seed).await.unwrap();
@@ -69,11 +79,9 @@ async fn test_execute_single_read() {
 
     assert_eq!(resp.results["users"].records.len(), 2);
 }
-
 // ============================================================================
 // Full CRUD pipeline in one batch
 // ============================================================================
-
 #[tokio::test]
 async fn test_execute_crud_pipeline() {
     let shamir = setup_shamir().await;
@@ -84,9 +92,9 @@ async fn test_execute_crud_pipeline() {
     b.op_silent(
         "ins",
         insert("users")
-            .row(doc().set("name", "Alice").set("status", "active"))
-            .row(doc().set("name", "Bob").set("status", "inactive"))
-            .row(doc().set("name", "Carol").set("status", "active")),
+            .row(doc2("name", "Alice", "status", "active"))
+            .row(doc2("name", "Bob", "status", "inactive"))
+            .row(doc2("name", "Carol", "status", "active")),
     );
     let q1 = b.to_request_via_msgpack();
     shamir.execute("testdb", &q1).await.unwrap();
@@ -98,7 +106,7 @@ async fn test_execute_crud_pipeline() {
         "upd",
         update("users")
             .where_(eq("name", "Bob"))
-            .set(doc().set("status", "active"))
+            .set(doc().set("status", "active").unwrap())
             .returning(UpdateReturnMode::Changed),
     )
     .unwrap();
@@ -121,12 +129,10 @@ async fn test_execute_crud_pipeline() {
 
     assert_eq!(resp.results["remaining"].records.len(), 2);
 }
-
 // ============================================================================
 // RETURNING-симметрия (Phase E.5 #245): DELETE с returning возвращает
 // удалённые строки; INSERT с projection возвращает только выбранные поля.
 // ============================================================================
-
 #[tokio::test]
 async fn test_execute_delete_returning_returns_deleted_rows() {
     let shamir = setup_shamir().await;
@@ -137,9 +143,9 @@ async fn test_execute_delete_returning_returns_deleted_rows() {
     b.op_silent(
         "ins",
         insert("users")
-            .row(doc().set("name", "Alice").set("status", "active"))
-            .row(doc().set("name", "Bob").set("status", "active"))
-            .row(doc().set("name", "Carol").set("status", "inactive")),
+            .row(doc2("name", "Alice", "status", "active"))
+            .row(doc2("name", "Bob", "status", "active"))
+            .row(doc2("name", "Carol", "status", "inactive")),
     );
     let q1 = b.to_request_via_msgpack();
     shamir.execute("testdb", &q1).await.unwrap();
@@ -169,7 +175,6 @@ async fn test_execute_delete_returning_returns_deleted_rows() {
     assert!(names.contains(&"Alice"), "names={:?}", names);
     assert!(names.contains(&"Bob"), "names={:?}", names);
 }
-
 #[tokio::test]
 async fn test_execute_insert_returning_fields_projects() {
     let shamir = setup_shamir().await;
@@ -179,7 +184,15 @@ async fn test_execute_insert_returning_fields_projects() {
     b.insert(
         "ins",
         insert("users")
-            .row(doc().set("name", "Alice").set("age", 30).set("city", "NYC"))
+            .row(
+                doc()
+                    .set("name", "Alice")
+                    .unwrap()
+                    .set("age", 30)
+                    .unwrap()
+                    .set("city", "NYC")
+                    .unwrap(),
+            )
             .returning_fields(["name", "city"]),
     );
     let req = b.to_request_via_msgpack();
@@ -193,11 +206,9 @@ async fn test_execute_insert_returning_fields_projects() {
     // Projection dropped age.
     assert!(rec.get_value_str("age").is_none());
 }
-
 // ============================================================================
 // Multi-table batch with $query dependency
 // ============================================================================
-
 #[tokio::test]
 async fn test_execute_multi_table_with_dependency() {
     let shamir = setup_shamir().await;
@@ -208,15 +219,15 @@ async fn test_execute_multi_table_with_dependency() {
     b.op_silent(
         "s1",
         insert("users")
-            .row(doc().set("name", "Alice").set("tier", "vip"))
-            .row(doc().set("name", "Bob").set("tier", "basic")),
+            .row(doc2("name", "Alice", "tier", "vip"))
+            .row(doc2("name", "Bob", "tier", "basic")),
     );
     b.op_silent(
         "s2",
         insert("orders")
-            .row(doc().set("user", "Alice").set("amount", 100))
-            .row(doc().set("user", "Bob").set("amount", 50))
-            .row(doc().set("user", "Alice").set("amount", 200)),
+            .row(doc2("user", "Alice", "amount", 100))
+            .row(doc().set("user", "Bob").unwrap().set("amount", 50).unwrap())
+            .row(doc2("user", "Alice", "amount", 200)),
     );
     let seed = b.to_request_via_msgpack();
     shamir.execute("testdb", &seed).await.unwrap();
@@ -239,11 +250,9 @@ async fn test_execute_multi_table_with_dependency() {
     assert_eq!(resp.results["vip_orders"].records.len(), 2);
     assert_eq!(resp.execution_plan.len(), 2);
 }
-
 // ============================================================================
 // Error: unknown database
 // ============================================================================
-
 #[tokio::test]
 async fn test_execute_unknown_db() {
     let shamir = setup_shamir().await;
@@ -259,11 +268,9 @@ async fn test_execute_unknown_db() {
         crate::query::batch::BatchError::QueryError { .. }
     ));
 }
-
 // ============================================================================
 // Migration ops -- Phase A stubs return "not yet implemented"
 // ============================================================================
-
 #[tokio::test]
 async fn test_migration_lifecycle_in_memory() {
     use shamir_query_builder::ddl;
@@ -282,9 +289,9 @@ async fn test_migration_lifecycle_in_memory() {
     b.op_silent(
         "s",
         insert("users")
-            .row(doc().set("name", "Alice"))
-            .row(doc().set("name", "Bob"))
-            .row(doc().set("name", "Carol")),
+            .row(doc().set("name", "Alice").unwrap())
+            .row(doc().set("name", "Bob").unwrap())
+            .row(doc().set("name", "Carol").unwrap()),
     );
     let seed = b.to_request_via_msgpack();
     shamir.execute("testdb", &seed).await.unwrap();
@@ -331,7 +338,6 @@ async fn test_migration_lifecycle_in_memory() {
     let read_resp = shamir.execute("testdb", &read_req).await.unwrap();
     assert_eq!(read_resp.results["r"].records.len(), 3);
 }
-
 #[tokio::test]
 async fn test_migration_rollback() {
     use shamir_query_builder::ddl;
@@ -344,7 +350,10 @@ async fn test_migration_rollback() {
     // Seed
     let mut b = Batch::new();
     b.id(0);
-    b.op_silent("s", insert("users").row(doc().set("name", "Alice")));
+    b.op_silent(
+        "s",
+        insert("users").row(doc().set("name", "Alice").unwrap()),
+    );
     let seed = b.to_request_via_msgpack();
     shamir.execute("testdb", &seed).await.unwrap();
 
@@ -384,7 +393,6 @@ async fn test_migration_rollback() {
         crate::query::batch::BatchError::QueryError { .. }
     ));
 }
-
 #[tokio::test]
 async fn test_migration_unknown_id() {
     use shamir_query_builder::ddl;
@@ -401,7 +409,6 @@ async fn test_migration_unknown_id() {
         crate::query::batch::BatchError::QueryError { .. }
     ));
 }
-
 // ============================================================================
 // F-5 (#795): the online migration API is gated as experimental, disabled
 // by default. The next two tests pin the gate's on/off behavior at the
@@ -470,7 +477,10 @@ async fn test_start_migration_succeeds_after_experimental_opt_in() {
     // Seed one row so the source table exists and is non-empty.
     let mut b = Batch::new();
     b.id(0);
-    b.op_silent("s", insert("users").row(doc().set("name", "Alice")));
+    b.op_silent(
+        "s",
+        insert("users").row(doc().set("name", "Alice").unwrap()),
+    );
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -493,7 +503,6 @@ async fn test_start_migration_succeeds_after_experimental_opt_in() {
         "a MigrationCoordinator targeting main/users must be registered after a successful StartMigration"
     );
 }
-
 // ============================================================================
 // CreateRepo via the wire/execute path persists the repo to the catalogue
 // ============================================================================
@@ -634,11 +643,9 @@ async fn drop_repo_via_execute_clears_catalogue() {
         "dropped repo must not resurrect after restart"
     );
 }
-
 // ============================================================================
 // Error: unknown repo
 // ============================================================================
-
 #[tokio::test]
 async fn test_execute_unknown_repo() {
     let shamir = setup_shamir().await;
@@ -655,11 +662,9 @@ async fn test_execute_unknown_repo() {
         crate::query::batch::BatchError::QueryError { .. }
     ));
 }
-
 // ============================================================================
 // Path-traversal rejection in CreateRepo / CreateDb (audit fix 1)
 // ============================================================================
-
 #[tokio::test]
 async fn create_repo_rejects_dotdot_name() {
     use shamir_query_builder::ddl;
@@ -676,7 +681,6 @@ async fn create_repo_rejects_dotdot_name() {
         "expected path-traversal rejection, got: {msg}"
     );
 }
-
 #[tokio::test]
 async fn create_repo_rejects_slash_in_name() {
     use shamir_query_builder::ddl;
@@ -693,7 +697,6 @@ async fn create_repo_rejects_slash_in_name() {
         "expected path-traversal rejection, got: {msg}"
     );
 }
-
 #[tokio::test]
 async fn create_repo_accepts_valid_name() {
     use shamir_query_builder::ddl;
@@ -709,7 +712,6 @@ async fn create_repo_accepts_valid_name() {
         Some("my-repo_01")
     );
 }
-
 #[tokio::test]
 async fn create_db_rejects_dotdot_name() {
     use shamir_query_builder::ddl;
@@ -732,7 +734,6 @@ async fn create_db_rejects_dotdot_name() {
         "expected path-traversal rejection, got: {msg}"
     );
 }
-
 // ============================================================================
 // #546 — create-DB / create-repo TOCTOU close
 // ============================================================================
@@ -774,7 +775,6 @@ async fn create_db_rejects_dotdot_name() {
 //    reproduction of the ORIGINAL exists-check race, but is a
 //    disproportionately large addition for this LOW-severity item — see
 //    the task's closing report for the scoped-down follow-up.
-
 #[tokio::test]
 async fn concurrent_create_db_if_not_exists_is_consistent() {
     use shamir_query_builder::ddl;
@@ -835,7 +835,6 @@ async fn concurrent_create_db_if_not_exists_is_consistent() {
     // The database itself must exist exactly once (no duplicate/ghost state).
     assert!(shamir.has_db("racedb"));
 }
-
 #[tokio::test]
 async fn concurrent_create_repo_if_not_exists_is_consistent() {
     use shamir_query_builder::ddl;

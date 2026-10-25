@@ -57,7 +57,7 @@ async fn cascade_and_direct_update_on_same_child_row_both_survive() {
         &resolver,
         "ip",
         "parent",
-        doc().set("id", 5).set("name", "P5"),
+        doc().set("id", 5).unwrap().set("name", "P5").unwrap(),
     )
     .await;
     insert_row(
@@ -66,8 +66,11 @@ async fn cascade_and_direct_update_on_same_child_row_both_survive() {
         "child",
         doc()
             .set("cid", 50)
+            .unwrap()
             .set("parent_id", 5)
-            .set("label", "original"),
+            .unwrap()
+            .set("label", "original")
+            .unwrap(),
     )
     .await;
 
@@ -82,7 +85,7 @@ async fn cascade_and_direct_update_on_same_child_row_both_survive() {
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 5))
-            .set(doc().set("id", 7)),
+            .set(doc().set("id", 7).unwrap()),
     )
     .unwrap();
     // (b) Direct UPDATE on the SAME child row, setting a DIFFERENT field.
@@ -92,7 +95,7 @@ async fn cascade_and_direct_update_on_same_child_row_both_survive() {
         "upd_child",
         write::update("child")
             .where_(filter::eq("cid", 50))
-            .set(doc().set("label", "direct")),
+            .set(doc().set("label", "direct").unwrap()),
     )
     .unwrap();
     let req = b.build();
@@ -151,7 +154,7 @@ async fn delete_then_update_same_row_in_one_tx_row_stays_deleted() {
         &resolver,
         "ii",
         "items",
-        doc().set("id", 5).set("name", "original"),
+        doc().set("id", 5).unwrap().set("name", "original").unwrap(),
     )
     .await;
     assert_eq!(count_rows(&resolver, "items").await, 1);
@@ -166,7 +169,7 @@ async fn delete_then_update_same_row_in_one_tx_row_stays_deleted() {
         "upd",
         write::update("items")
             .where_(filter::eq("id", 5))
-            .set(doc().set("name", "resurrected")),
+            .set(doc().set("name", "resurrected").unwrap()),
     )
     .unwrap();
     let req = b.build();
@@ -232,35 +235,53 @@ async fn on_update_cascade_with_index_fast_path_rekeys_same_children() {
         &resolver,
         "ip1",
         "parent",
-        doc().set("id", 5).set("name", "P5"),
+        doc().set("id", 5).unwrap().set("name", "P5").unwrap(),
     )
     .await;
     insert_row(
         &resolver,
         "ip2",
         "parent",
-        doc().set("id", 6).set("name", "P6"),
+        doc().set("id", 6).unwrap().set("name", "P6").unwrap(),
     )
     .await;
     insert_row(
         &resolver,
         "ic1",
         "child",
-        doc().set("cid", 1).set("parent_id", 5).set("label", "a"),
+        doc()
+            .set("cid", 1)
+            .unwrap()
+            .set("parent_id", 5)
+            .unwrap()
+            .set("label", "a")
+            .unwrap(),
     )
     .await;
     insert_row(
         &resolver,
         "ic2",
         "child",
-        doc().set("cid", 2).set("parent_id", 5).set("label", "b"),
+        doc()
+            .set("cid", 2)
+            .unwrap()
+            .set("parent_id", 5)
+            .unwrap()
+            .set("label", "b")
+            .unwrap(),
     )
     .await;
     insert_row(
         &resolver,
         "ic3",
         "child",
-        doc().set("cid", 3).set("parent_id", 6).set("label", "c"),
+        doc()
+            .set("cid", 3)
+            .unwrap()
+            .set("parent_id", 6)
+            .unwrap()
+            .set("label", "c")
+            .unwrap(),
     )
     .await;
 
@@ -278,7 +299,7 @@ async fn on_update_cascade_with_index_fast_path_rekeys_same_children() {
         "upd_parents",
         write::update("parent")
             .where_(filter::in_("id", [5, 6]))
-            .set(doc().set("id", 99)),
+            .set(doc().set("id", 99).unwrap()),
     )
     .unwrap();
     let req = b.build();
@@ -328,21 +349,33 @@ async fn on_update_set_null_with_index_fast_path_nulls_same_children() {
         &resolver,
         "ip",
         "parent",
-        doc().set("id", 5).set("name", "P5"),
+        doc().set("id", 5).unwrap().set("name", "P5").unwrap(),
     )
     .await;
     insert_row(
         &resolver,
         "ic1",
         "child",
-        doc().set("cid", 1).set("parent_id", 5).set("label", "a"),
+        doc()
+            .set("cid", 1)
+            .unwrap()
+            .set("parent_id", 5)
+            .unwrap()
+            .set("label", "a")
+            .unwrap(),
     )
     .await;
     insert_row(
         &resolver,
         "ic2",
         "child",
-        doc().set("cid", 2).set("parent_id", 5).set("label", "b"),
+        doc()
+            .set("cid", 2)
+            .unwrap()
+            .set("parent_id", 5)
+            .unwrap()
+            .set("label", "b")
+            .unwrap(),
     )
     .await;
 
@@ -360,7 +393,7 @@ async fn on_update_set_null_with_index_fast_path_nulls_same_children() {
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 5))
-            .set(doc().set("id", 7)),
+            .set(doc().set("id", 7).unwrap()),
     )
     .unwrap();
     let req = b.build();
@@ -424,7 +457,11 @@ async fn on_update_restrict_blocks_on_middle_value_among_several_deduped_parents
             &resolver,
             "ip",
             "parent",
-            doc().set("id", id).set("name", format!("P{id}")),
+            doc()
+                .set("id", id)
+                .unwrap()
+                .set("name", format!("P{id}"))
+                .unwrap(),
         )
         .await;
     }
@@ -438,8 +475,11 @@ async fn on_update_restrict_blocks_on_middle_value_among_several_deduped_parents
         "child",
         doc()
             .set("cid", 200)
+            .unwrap()
             .set("parent_id", 20)
-            .set("label", "c200a"),
+            .unwrap()
+            .set("label", "c200a")
+            .unwrap(),
     )
     .await;
     insert_row(
@@ -448,8 +488,11 @@ async fn on_update_restrict_blocks_on_middle_value_among_several_deduped_parents
         "child",
         doc()
             .set("cid", 201)
+            .unwrap()
             .set("parent_id", 20)
-            .set("label", "c200b"),
+            .unwrap()
+            .set("label", "c200b")
+            .unwrap(),
     )
     .await;
 
@@ -462,7 +505,7 @@ async fn on_update_restrict_blocks_on_middle_value_among_several_deduped_parents
         "upd_parents",
         write::update("parent")
             .where_(filter::in_("id", [10_i64, 20, 30]))
-            .set(doc().set("id", 999_i64)),
+            .set(doc().set("id", 999_i64).unwrap()),
     )
     .unwrap();
     let resp = execute_batch(&b.build(), &resolver, None, None, Actor::System, "test").await;
@@ -592,12 +635,24 @@ async fn on_update_noop_after_cache_warm_skips_child_table_resolve() {
         registry,
     };
 
-    insert_row(&inner, "ip", "parent", doc().set("id", 5).set("name", "P5")).await;
+    insert_row(
+        &inner,
+        "ip",
+        "parent",
+        doc().set("id", 5).unwrap().set("name", "P5").unwrap(),
+    )
+    .await;
     insert_row(
         &inner,
         "ic",
         "child",
-        doc().set("cid", 50).set("parent_id", 5).set("label", "c50"),
+        doc()
+            .set("cid", 50)
+            .unwrap()
+            .set("parent_id", 5)
+            .unwrap()
+            .set("label", "c50")
+            .unwrap(),
     )
     .await;
 
@@ -617,7 +672,7 @@ async fn on_update_noop_after_cache_warm_skips_child_table_resolve() {
         "warm",
         write::update("parent")
             .where_(filter::eq("id", 5))
-            .set(doc().set("id", 6)),
+            .set(doc().set("id", 6).unwrap()),
     )
     .unwrap();
     execute_batch(&warm.build(), &resolver, None, None, Actor::System, "test")
@@ -640,7 +695,7 @@ async fn on_update_noop_after_cache_warm_skips_child_table_resolve() {
             "noop",
             write::update("parent")
                 .where_(filter::eq("id", 6))
-                .set(doc().set("name", format!("renamed-{i}"))),
+                .set(doc().set("name", format!("renamed-{i}")).unwrap()),
         )
         .unwrap();
         execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
@@ -697,14 +752,20 @@ async fn on_update_cascade_fires_correctly_after_cache_warmed_by_prior_noop() {
         &resolver,
         "ip",
         "parent",
-        doc().set("id", 5).set("name", "P5"),
+        doc().set("id", 5).unwrap().set("name", "P5").unwrap(),
     )
     .await;
     insert_row(
         &resolver,
         "ic",
         "child",
-        doc().set("cid", 50).set("parent_id", 5).set("label", "c50"),
+        doc()
+            .set("cid", 50)
+            .unwrap()
+            .set("parent_id", 5)
+            .unwrap()
+            .set("label", "c50")
+            .unwrap(),
     )
     .await;
 
@@ -717,7 +778,7 @@ async fn on_update_cascade_fires_correctly_after_cache_warmed_by_prior_noop() {
         "warm",
         write::update("parent")
             .where_(filter::eq("id", 5))
-            .set(doc().set("name", "still-P5")),
+            .set(doc().set("name", "still-P5").unwrap()),
     )
     .unwrap();
     execute_batch(&warm.build(), &resolver, None, None, Actor::System, "test")
@@ -738,7 +799,7 @@ async fn on_update_cascade_fires_correctly_after_cache_warmed_by_prior_noop() {
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 5))
-            .set(doc().set("id", 7)),
+            .set(doc().set("id", 7).unwrap()),
     )
     .unwrap();
     execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")

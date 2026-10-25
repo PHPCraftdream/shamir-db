@@ -135,7 +135,10 @@ async fn for_each_n_iterations_accumulate_list() {
     // All three orders must exist.
     let mut seed = Batch::new();
     seed.id(0);
-    seed.op_silent("noop", write::insert("users").row(doc().set("noop", true)));
+    seed.op_silent(
+        "noop",
+        write::insert("users").row(doc().set("noop", true).unwrap()),
+    );
     execute_batch(&seed.build(), &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();

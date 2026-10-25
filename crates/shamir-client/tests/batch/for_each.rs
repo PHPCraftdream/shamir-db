@@ -153,7 +153,9 @@ fn audit_insert_body(bind_row: &str) -> BatchRequest {
         "audit",
         insert("audit_log").rows([doc()
             .set("order_id", param(bind_row))
+            .unwrap()
             .set("note", "audited")
+            .unwrap()
             .build()]),
     );
     inner.build()
@@ -203,8 +205,11 @@ fn audit_insert_body_with_div_guard(bind_row: &str) -> BatchRequest {
         "audit",
         insert("audit_log").rows([doc()
             .set("order_id", param(bind_row))
+            .unwrap()
             .set("note", "audited")
+            .unwrap()
             .set("guard", func("math/mod", [lit(1_i64), param(bind_row)]))
+            .unwrap()
             .build()]),
     );
     inner.build()
@@ -231,32 +236,44 @@ async fn for_each_over_query_column_ref_inserts_one_audit_row_per_order_over_rea
         "o1",
         insert("orders").rows([doc()
             .set("order_id", expected_ids[0])
+            .unwrap()
             .set("customer_id", "alice")
+            .unwrap()
             .set("amount", 10_i64)
+            .unwrap()
             .build()]),
     );
     seed.insert(
         "o2",
         insert("orders").rows([doc()
             .set("order_id", expected_ids[1])
+            .unwrap()
             .set("customer_id", "alice")
+            .unwrap()
             .set("amount", 20_i64)
+            .unwrap()
             .build()]),
     );
     seed.insert(
         "o3",
         insert("orders").rows([doc()
             .set("order_id", expected_ids[2])
+            .unwrap()
             .set("customer_id", "alice")
+            .unwrap()
             .set("amount", 30_i64)
+            .unwrap()
             .build()]),
     );
     seed.insert(
         "o4",
         insert("orders").rows([doc()
             .set("order_id", 2001_i64)
+            .unwrap()
             .set("customer_id", "bob")
+            .unwrap()
             .set("amount", 99_i64)
+            .unwrap()
             .build()]),
     );
     client.execute(db, seed.build()).await.expect("seed");
@@ -343,7 +360,9 @@ async fn for_each_zero_matching_orders_produces_empty_list_and_no_audit_rows_ove
         "o1",
         insert("orders").rows([doc()
             .set("customer_id", "dave")
+            .unwrap()
             .set("amount", 5_i64)
+            .unwrap()
             .build()]),
     );
     client.execute(db, seed.build()).await.expect("seed");
@@ -488,7 +507,9 @@ async fn for_each_iteration_error_mid_loop_rolls_back_whole_tx_over_real_wire() 
         "good",
         insert("orders").rows([doc()
             .set("customer_id", "erin")
+            .unwrap()
             .set("amount", 1_i64)
+            .unwrap()
             .build()]),
     );
     // over: [301, 0, 303] -- iteration 0 inserts order_id=301 (ok: a real

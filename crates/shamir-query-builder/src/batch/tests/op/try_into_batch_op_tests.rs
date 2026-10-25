@@ -49,7 +49,7 @@ fn try_update_happy_path_produces_valid_batch() {
     let upd = || {
         write::update("users")
             .where_(filter::eq("id", 1))
-            .set(doc().set("name", "Bob"))
+            .set(doc().set("name", "Bob").unwrap())
     };
     assert_try_path_deterministic(|b| {
         b.try_update("u", upd()).unwrap();
@@ -64,7 +64,10 @@ fn try_update_happy_path_produces_valid_batch() {
 fn try_upsert_without_key_returns_missing_key() {
     let mut b = Batch::new();
     let err = b
-        .try_upsert("s", write::upsert("cache").value(doc().set("v", 42)))
+        .try_upsert(
+            "s",
+            write::upsert("cache").value(doc().set("v", 42).unwrap()),
+        )
         .unwrap_err();
     assert_eq!(err, BuilderError::MissingKey);
 }
@@ -83,7 +86,7 @@ fn try_upsert_happy_path_produces_valid_batch() {
     let ups = || {
         write::upsert("cache")
             .key(shamir_types::mpack!("k1"))
-            .value(doc().set("v", 42))
+            .value(doc().set("v", 42).unwrap())
     };
     assert_try_path_deterministic(|b| {
         b.try_upsert("s", ups()).unwrap();
@@ -158,13 +161,13 @@ fn try_op_alter_subscription_happy_path_produces_valid_batch() {
 #[test]
 fn try_op_dispatches_to_all_five_fallible_builders() {
     let mut b = Batch::new();
-    b.try_update("u", write::update("t").set(doc().set("a", 1)))
+    b.try_update("u", write::update("t").set(doc().set("a", 1).unwrap()))
         .unwrap();
     b.try_upsert(
         "s",
         write::upsert("t")
             .key(shamir_types::mpack!("k"))
-            .value(doc().set("v", 2)),
+            .value(doc().set("v", 2).unwrap()),
     )
     .unwrap();
     b.try_delete("d", write::delete("t").where_(filter::eq("x", 0)))
