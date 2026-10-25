@@ -134,8 +134,8 @@ impl SegmentSet {
             });
         }
 
-        // Highest seq = active; everything below = sealed.
-        let active_seq = seqs.pop().expect("non-empty after is_empty check");
+        // Highest seq = active — UNLESS it carries a valid sidecar.
+        let mut active_seq = seqs.pop().expect("non-empty after is_empty check");
         let mut sealed = Vec::with_capacity(seqs.len());
         for seq in seqs {
             let path = dir.join(seg_file_name(seq));
@@ -172,7 +172,29 @@ impl SegmentSet {
                 synced: false,
             });
         }
-        let active_path = dir.join(seg_file_name(active_seq));
+        // RV-WAL-A025886E — rule: "a segment that has a sidecar never changes."
+        // If the highest segment has a VALID WMT2 sidecar it is sealed (its
+        // data was fsync'd before the sidecar was written) and must never be
+        // re-activated: create seq+1 as the new active instead. A WMT1
+        // (legacy) sidecar reads as absent here, so the replay fallback runs
+        // and a stale WMT1 value can never drive truncation.
+        let mut active_path = dir.join(seg_file_name(active_seq));
+        let highest_meta = {
+            let probe_path = active_path.clone();
+            spawn_blocking(move || crate::segment_meta::read_blocking(&probe_path))
+                .await
+                .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))??
+        };
+        if let Some(max_version) = highest_meta {
+            sealed.push(SealedMeta {
+                seq: active_seq,
+                path: active_path.clone(),
+                max_version,
+                synced: true,
+            });
+            active_seq += 1;
+            active_path = dir.join(seg_file_name(active_seq));
+        }
         let active = Arc::new(WalSegment::open(active_path.clone()).await?);
         // Self-heal the active segment (audit §1.3): a prior process crash
         // mid-write (or a partial write that could not be rolled back) may
@@ -182,18 +204,11 @@ impl SegmentSet {
         // `append_batch` window from being stranded behind it on replay.
         active.repair_torn_tail().await?;
 
-        // Task #500 (found in @fl review): a segment can be RE-ACTIVATED —
-        // a prior process sealed it (writing a durable max_version sidecar),
-        // then crashed before the NEW active segment's file was durably
-        // created, so on this reopen the highest seq on disk (this
-        // already-sealed segment) is chosen as active again. Any further
-        // appends into it will push its true max_version past what the
-        // stale sidecar claims. If that sidecar survives (this segment later
-        // gets poisoned-and-rotated, or re-sealed with a sidecar-write
-        // failure), a future open would trust the stale (too-low) value and
-        // `truncate_below` could delete not-yet-durable data — silent data
-        // loss. A re-activated segment MUST shed its old sidecar now, before
-        // any new append can make it stale.
+        // Cleanup only (RV-WAL-A025886E): with the sidecar-never-changes rule
+        // the active segment can no longer carry a VALID sidecar (a highest
+        // segment with one is sealed above), so this can only shed a
+        // stray/corrupt/legacy sidecar. Correctness never depends on it —
+        // failure is warned and swallowed.
         spawn_blocking(move || {
             crate::segment_meta::remove_blocking(
                 &active_path,
@@ -353,6 +368,11 @@ impl SegmentSet {
     /// freshly-opened segment rather than clobber the newer active (the
     /// single-writer leader model means this is not expected, but the guard
     /// keeps the invariant exact).
+    ///
+    /// Binding order (RV-WAL-A025886E): fsync → open the new active → swap it
+    /// in under the lock → THEN write the WMT2 sidecar. The sidecar-bearing
+    /// segment must never still be the live append tail when its sidecar lands
+    /// on disk (cancellation/append hazard — see the inline comment).
     async fn seal_and_rotate(&self) -> DbResult<()> {
         // Snapshot the segment to seal under the lock.
         let (sealed_seq, sealed_path, sealed_max, next_seq, sealing) = {
@@ -391,43 +411,50 @@ impl SegmentSet {
             self.sync_active(&sealing).await?;
         }
 
-        // Task #500: now that the segment's data is durably fsync'd, write its
-        // `max_version` sidecar so a future `open` skips the full replay. This
-        // is ordered strictly AFTER the data fsync so the sidecar can never
-        // claim a durability the data lacks; and it is best-effort — a sidecar
-        // write failure is logged and swallowed, never failing the rotation
-        // (the segment is intact and `open` will just replay it as before).
-        {
-            let meta_seg_path = sealed_path.clone();
-            let write_res = spawn_blocking(move || {
-                crate::segment_meta::write_blocking(&meta_seg_path, sealed_max)
-            })
-            .await
-            .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))?;
-            if let Err(e) = write_res {
-                log::warn!(
-                    "SegmentSet seal: max_version sidecar write for seq {sealed_seq} failed \
-                     ({e}); segment is intact, open will replay it (no fast path)"
-                );
-            }
-        }
-
         let new_active = Arc::new(WalSegment::open(self.dir.join(seg_file_name(next_seq))).await?);
 
-        let mut g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
-        // Re-check: another rotation may have advanced active past us.
-        if g.active_seq != sealed_seq {
-            // Already rotated — drop our freshly-opened (empty) segment.
-            return Ok(());
+        // Scoped so the std Mutex guard is provably dropped before the
+        // blocking sidecar I/O below (keeps the future Send).
+        {
+            let mut g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
+            // Re-check: another rotation may have advanced active past us.
+            if g.active_seq != sealed_seq {
+                // Already rotated — drop our freshly-opened (empty) segment. No
+                // sidecar is written on this path: the winner did not seal this
+                // segment, so leaving it sidecar-free keeps `open` on the (correct)
+                // replay fallback.
+                return Ok(());
+            }
+            g.sealed.push(SealedMeta {
+                seq: sealed_seq,
+                path: sealed_path.clone(),
+                max_version: sealed_max,
+                synced: true,
+            });
+            // RV-WAL-A025886E binding order: the active-pointer swap happens BEFORE
+            // the sidecar write. A sidecar means "this segment is sealed and its
+            // bytes never change" — if it were written while the segment is still
+            // the live active tail, a concurrent append or a cancellation of this
+            // task between the two steps would mutate a sidecar-bearing segment,
+            // breaking the rule. Only after the swap is the segment truly sealed.
+            g.active = new_active;
+            g.active_seq = next_seq;
         }
-        g.sealed.push(SealedMeta {
-            seq: sealed_seq,
-            path: sealed_path,
-            max_version: sealed_max,
-            synced: true,
-        });
-        g.active = new_active;
-        g.active_seq = next_seq;
+
+        // Best-effort sidecar write: data is already fsync'd (above), so the
+        // sidecar never claims durability the data lacks; a write failure is
+        // logged and swallowed (open falls back to replay).
+        let meta_seg_path = sealed_path;
+        let write_res =
+            spawn_blocking(move || crate::segment_meta::write_blocking(&meta_seg_path, sealed_max))
+                .await
+                .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))?;
+        if let Err(e) = write_res {
+            log::warn!(
+                "SegmentSet seal: max_version sidecar write for seq {sealed_seq} failed \
+                 ({e}); segment is intact, open will replay it (no fast path)"
+            );
+        }
         Ok(())
     }
 

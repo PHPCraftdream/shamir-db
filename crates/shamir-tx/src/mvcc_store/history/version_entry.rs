@@ -413,6 +413,10 @@ impl MvccStore {
         match self.history.get(encode_version_key(key, v).into()).await {
             Ok(val) if val.is_empty() => Ok(None),
             Ok(val) => Ok(Some(val)),
+            // RV-TX-2CB455A7: the cell version is an upper bound — an exact
+            // miss means the version was attempted and aborted. Fall back
+            // below it instead of masking the prior committed value.
+            Err(DbError::NotFound(_)) if v > 0 => self.resolve_read(key, floor.min(v - 1), 0).await,
             Err(DbError::NotFound(_)) => Ok(None),
             Err(e) => Err(e),
         }
@@ -566,7 +570,7 @@ impl MvccStore {
             Resolved(Option<Bytes>),
             /// Warm miss — `miss_idx` is the position in the `miss_keys`
             /// vector that will be fed to `history.get_many`.
-            HistoryMiss { miss_idx: usize },
+            HistoryMiss { miss_idx: usize, cur_v: u64 },
             /// Version > floor — fall back to snapshot read at floor.
             FloorExceeded,
             /// Cold cell — fall back to per-key `get_current_bytes`.
@@ -608,7 +612,7 @@ impl MvccStore {
             let vk = encode_version_key(key, cur_v);
             let miss_idx = miss_keys.len();
             miss_keys.push(vk.into());
-            slots.push(Slot::HistoryMiss { miss_idx });
+            slots.push(Slot::HistoryMiss { miss_idx, cur_v });
         }
 
         // Phase 2: single batched history read for all warm misses.
@@ -625,10 +629,16 @@ impl MvccStore {
                 Slot::Resolved(val) => {
                     out.push(val.clone());
                 }
-                Slot::HistoryMiss { miss_idx } => {
+                Slot::HistoryMiss { miss_idx, cur_v } => {
                     match &miss_results[*miss_idx] {
                         Some(val) if val.is_empty() => out.push(None), // tombstone
                         Some(val) => out.push(Some(val.clone())),
+                        // RV-TX-2CB455A7: exact-version miss ⇒ that version
+                        // was attempted and aborted — fall back below it.
+                        None if *cur_v > 0 => {
+                            let val = self.resolve_read(&keys[i], floor.min(cur_v - 1), 0).await?;
+                            out.push(val);
+                        }
                         None => out.push(None), // not found
                     }
                 }

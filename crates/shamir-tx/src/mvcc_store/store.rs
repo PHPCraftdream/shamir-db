@@ -460,6 +460,15 @@ impl MvccStore {
             {
                 Ok(val) if val.is_empty() => Ok(None),
                 Ok(val) => Ok(Some(val)),
+                // RV-TX-2CB455A7: the cell is bumped before the log write, so
+                // `cur_v` is an UPPER BOUND on the committed version — an
+                // exact-version miss means that version was attempted and
+                // aborted. Fall back below it instead of masking the prior
+                // committed value.
+                Err(DbError::NotFound(_)) if cur_v > 0 => {
+                    // Boxed: the fallback can recurse one more level.
+                    Box::pin(self.resolve_read(key, snapshot_version.min(cur_v - 1), 0)).await
+                }
                 Err(DbError::NotFound(_)) => Ok(None),
                 Err(e) => Err(e),
             };
@@ -517,7 +526,49 @@ impl MvccStore {
         self.set_versioned_inner(key, value, false).await
     }
 
+    /// RV-TX-2CB455A7: fail-stop refusal once a failed write's compensating
+    /// cleanup could not settle its versions.
+    fn ensure_writable(&self) -> DbResult<()> {
+        if self.gate.writes_fenced() {
+            return Err(DbError::RepoRequiresReopen(
+                "failed-write cleanup left versions unsettled; writes refused".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// RV-TX-2CB455A7: compensating cleanup after a failed `history.transact`.
+    /// Removes every attempted version key and ts key BEFORE the guards settle
+    /// as Aborted, so the failed versions cannot resolve as present. If the
+    /// removal itself fails the versions are NOT settled: fail-stop — the
+    /// guards are never dropped (the floor stalls below them),
+    /// `requires_reopen` is set and further writes are refused.
+    async fn compensate_failed_write(
+        &self,
+        guards: Vec<VersionGuard>,
+        keys: &[RecordKey],
+        versions: &[u64],
+    ) {
+        let mut ops: Vec<KvOp> = Vec::with_capacity(versions.len() * 2);
+        for (key, &v) in keys.iter().zip(versions.iter()) {
+            ops.push(KvOp::Remove(encode_version_key(key, v).into()));
+            ops.push(KvOp::Remove(ts_key(v).into()));
+        }
+        if let Err(e) = self.history.transact(ops).await {
+            for guard in guards {
+                // Keep the guards armed: their versions stay unsettled so the
+                // committed floor stalls below them (fail-stop).
+                std::mem::forget(guard);
+            }
+            self.gate.fence_writes();
+            log::warn!("failed-write cleanup failed ({e}); store requires reopen");
+        } else {
+            drop(guards);
+        }
+    }
+
     async fn set_versioned_inner(&self, key: RecordKey, value: Bytes, wait: bool) -> DbResult<u64> {
+        self.ensure_writable()?;
         // Single log append: every prior version is already in the log from
         // when it was written as current. No other store is written.
         //
@@ -542,15 +593,20 @@ impl MvccStore {
         // T1c: capture commit timestamp once for the age-retention axis.
         let ts_ms = self.now_millis();
         let ts_val = Bytes::from(ts_ms.to_le_bytes().to_vec());
-        self.history
-            .transact(vec![
-                KvOp::Set(
-                    encode_version_key(&key_snapshot, new_v).into(),
-                    value.clone(),
-                ),
-                KvOp::Set(ts_key(new_v).into(), ts_val),
-            ])
-            .await?;
+        let write_ops = vec![
+            KvOp::Set(
+                encode_version_key(&key_snapshot, new_v).into(),
+                value.clone(),
+            ),
+            KvOp::Set(ts_key(new_v).into(), ts_val),
+        ];
+        if let Err(e) = self.history.transact(write_ops).await {
+            // RV-TX-2CB455A7: remove the attempted version+ts keys before the
+            // guard settles as Aborted, so the failed version is absent.
+            self.compensate_failed_write(vec![guard], &[key_snapshot], &[new_v])
+                .await;
+            return Err(e);
+        }
         // Phase 3: maintain the in-memory ts-index for O(log N) as-of queries.
         self.ts_index_insert(ts_ms, new_v);
         // P1c: dual-write — populate the overlay with the SAME (key, version)
@@ -629,6 +685,7 @@ impl MvccStore {
         items: Vec<(RecordKey, Bytes)>,
         wait: bool,
     ) -> DbResult<u64> {
+        self.ensure_writable()?;
         if items.is_empty() {
             // No records written — return 0. The caller should not emit
             // a changefeed event for an empty batch.
@@ -673,7 +730,13 @@ impl MvccStore {
 
         // Single batched write to the log (data + ts, atomic).
         if !history_ops.is_empty() {
-            self.history.transact(history_ops).await?;
+            if let Err(e) = self.history.transact(history_ops).await {
+                // RV-TX-2CB455A7: remove every attempted version+ts key
+                // before the guards settle as Aborted.
+                self.compensate_failed_write(guards, &keys, &new_versions)
+                    .await;
+                return Err(e);
+            }
         }
 
         // Phase 3: maintain the in-memory ts-index for every version in the batch.
@@ -769,6 +832,7 @@ impl MvccStore {
         items: Vec<(RecordKey, Bytes)>,
         wait: bool,
     ) -> DbResult<u64> {
+        self.ensure_writable()?;
         if items.is_empty() {
             return Ok(0);
         }
@@ -799,7 +863,13 @@ impl MvccStore {
 
         // Single batched write to the log (data + ts, atomic).
         if !history_ops.is_empty() {
-            self.history.transact(history_ops).await?;
+            if let Err(e) = self.history.transact(history_ops).await {
+                // RV-TX-2CB455A7: remove every attempted version+ts key
+                // before the guards settle as Aborted.
+                self.compensate_failed_write(guards, &keys, &new_versions)
+                    .await;
+                return Err(e);
+            }
         }
 
         // Phase 3: maintain the in-memory ts-index for every version in the batch.
@@ -853,6 +923,7 @@ impl MvccStore {
     }
 
     async fn delete_versioned_inner(&self, key: RecordKey, wait: bool) -> DbResult<u64> {
+        self.ensure_writable()?;
         // Single log append: a tombstone (empty value) is written for the
         // delete version. The prior version is already in the log from when
         // it was written as current.
@@ -873,14 +944,19 @@ impl MvccStore {
         // T1c: capture commit timestamp once for the age-retention axis.
         let ts_ms = self.now_millis();
         let ts_val = Bytes::from(ts_ms.to_le_bytes().to_vec());
-        self.history
-            .transact(vec![
-                // Tombstone (empty value — MessagePack records are never
-                // zero-length, so empty is unambiguously a delete).
-                KvOp::Set(encode_version_key(&key, new_v).into(), Bytes::new()),
-                KvOp::Set(ts_key(new_v).into(), ts_val),
-            ])
-            .await?;
+        let write_ops = vec![
+            // Tombstone (empty value — MessagePack records are never
+            // zero-length, so empty is unambiguously a delete).
+            KvOp::Set(encode_version_key(&key, new_v).into(), Bytes::new()),
+            KvOp::Set(ts_key(new_v).into(), ts_val),
+        ];
+        if let Err(e) = self.history.transact(write_ops).await {
+            // RV-TX-2CB455A7: remove the attempted version+ts keys before the
+            // guard settles as Aborted.
+            self.compensate_failed_write(vec![guard], std::slice::from_ref(&key), &[new_v])
+                .await;
+            return Err(e);
+        }
         // Phase 3: maintain the in-memory ts-index for O(log N) as-of queries.
         self.ts_index_insert(ts_ms, new_v);
         // P1c: dual-write — overlay tombstone (empty `Bytes`, same convention
