@@ -7,8 +7,9 @@ use crate::descriptor::IndexDescriptor;
 use crate::vector::adapter::{VectorAdapter, VectorError};
 use crate::vector::snapshot::{self, SnapshotError, SnapshotManifest};
 use crate::vector::vector_backend::maintenance::{run_background_snapshot, SnapshotFlightGuard};
+use crate::vector::vector_backend::slot::AdapterSlot;
 use crate::write_ops::IndexWriteOp;
-use arc_swap::{ArcSwap, ArcSwapOption};
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use futures::StreamExt;
 use shamir_storage::types::Store;
@@ -22,6 +23,12 @@ use shamir_types::types::value::InnerValue;
 use smallvec::SmallVec;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use tokio::sync::Notify;
+
+#[cfg(test)]
+use crate::vector::vector_backend::cutover::CompactionHooks;
+#[cfg(test)]
+use tokio::sync::oneshot;
 
 /// Keyspace prefix every vector-snapshot record lives under in the info
 /// store. The full keyspace is `__vec_snap__<index_id>` where `<index_id>`
@@ -35,26 +42,12 @@ use std::sync::Arc;
 /// `__vec_snap__7.manifest`.
 pub(super) const SNAPSHOT_KEYSPACE_PREFIX: &str = "__vec_snap__";
 
-/// Sized handle wrapping an `Arc<dyn VectorAdapter>`, so it can live
-/// inside an `ArcSwap` (whose `RefCnt` impl requires `T: Sized` —
-/// `arc-swap 1.9.1` does not support unsized `Arc<dyn Trait>` directly).
-///
-/// This is a plain (non-transparent) struct: the outer `Arc<AdapterSlot>`
-/// is a thin pointer to a sized allocation that itself owns the
-/// `Arc<dyn VectorAdapter>`. `ArcSwap<Arc<AdapterSlot>>` uses the
-/// crate-provided `RefCnt for Arc<T>` (which works for sized `T`); the
-/// adapter is recovered via `.adapter` on load.
-///
-/// Why a PERMANENT `ArcSwap` (not a one-shot construct-with-loaded-adapter):
-/// V2.2 only hot-swaps once on open (before the backend sees traffic), but the
-/// slot stays swappable on purpose — #402 (background re-snapshot / generation
-/// flip) and #408 (compaction rebuild-aside) swap a freshly-built graph into a
-/// LIVE backend. Readers take a snapshot via `load_full()` (an `Arc`, never a
-/// `Guard` held across `.await`), so a concurrent swap is wait-free RCU.
-pub(crate) struct AdapterSlot {
-    pub adapter: Arc<dyn VectorAdapter>,
-}
-
+/// (the slot struct itself lives in [`super::slot`] — see there for the
+/// RV-INDEX-9F62C8DF single-control-word design; the slot stays swappable
+/// on purpose — #402 generation flips and #408 compaction rebuild-aside
+/// swap a freshly-built graph into a LIVE backend. Readers take a snapshot
+/// via `load_full()` (an `Arc`, never a `Guard` held across `.await`), so
+/// a concurrent swap is wait-free RCU.)
 pub struct VectorBackend {
     descriptor: IndexDescriptor,
     field_path: Vec<u64>,
@@ -65,9 +58,7 @@ pub struct VectorBackend {
     /// concurrent query never sees a half-swapped adapter. Mirrors
     /// `BruteForceAdapter`'s use of `ArcSwap`.
     ///
-    /// Wrapped in [`AdapterSlot`] (a sized struct holding the trait object)
-    /// because `arc-swap 1.9.1`'s `RefCnt` for `Arc<T>` requires `T: Sized`
-    /// — it does not support `ArcSwap<Arc<dyn Trait>>` directly.
+    /// `Arc<ArcSwap<AdapterSlot>>` — see [`super::slot`].
     pub(crate) adapter: Arc<ArcSwap<AdapterSlot>>,
     /// Full-scan rebuild counter (V2.2 / #401 instrumentation). Incremented
     /// on EVERY fallback to a data-store-scan rebuild (no snapshot, corrupt
@@ -116,9 +107,27 @@ pub struct VectorBackend {
     snapshot_threshold: AtomicU64,
     /// V4.2 (#408) — single-flight guard for the background compaction task.
     pub(super) compaction_in_flight: Arc<AtomicBool>,
-    /// V4.2 (#408) — double-write target during compaction. None = idle (one
-    /// atomic load ~0 ns). Some = duplicate every mutation here.
-    pub(super) compaction_target: Arc<ArcSwapOption<AdapterSlot>>,
+    /// RV-INDEX-9F62C8DF — publication signal. Writers parked on a sealed
+    /// slot's gate await this; the coordinator notifies after every slot
+    /// CAS. `Arc`-shared so the spawned compaction task can publish.
+    pub(crate) published: Arc<Notify>,
+    /// Test-only oneshot PAIR fired by the REAL writer path after the
+    /// primary write succeeds and before the mirror (T1/T2 park the writer
+    /// here; the writer hands the test the release SENDER and parks).
+    #[cfg(test)]
+    pub(super) after_primary_tx: std::sync::Mutex<Option<oneshot::Sender<oneshot::Sender<()>>>>,
+    /// Test-only (F5): signal fired when a writer parks on `published` at a
+    /// sealed gate inside the real `enter_write` (T3/T4).
+    #[cfg(test)]
+    pub(super) at_gate_tx: std::sync::Mutex<Option<oneshot::Sender<()>>>,
+    /// Test-only (F5): instance-scoped coordinator hooks (after-arm /
+    /// before-seal / after-seal), fired by the real coordinator path.
+    #[cfg(test)]
+    pub(super) compaction_hooks: Arc<CompactionHooks>,
+    /// Test-only (F5): instance-scoped injection — the backend's next
+    /// compaction backfill fails (T5). Consulted by `run_background_compaction`.
+    #[cfg(test)]
+    pub(super) fail_next_backfill: Arc<AtomicBool>,
     /// V4.2 (#408) — compaction ratio threshold (test-overridable).
     pub(super) compaction_ratio_threshold: std::sync::atomic::AtomicU64,
     /// V4.2 (#408) — compaction min live count (test-overridable).
@@ -134,14 +143,22 @@ impl VectorBackend {
         Self {
             descriptor,
             field_path,
-            adapter: Arc::new(ArcSwap::from(Arc::new(AdapterSlot { adapter }))),
+            adapter: Arc::new(ArcSwap::from(Arc::new(AdapterSlot::live(adapter)))),
             full_rebuild_count: AtomicU64::new(0),
             delta_count: Arc::new(AtomicU64::new(0)),
             snapshot_in_flight: Arc::new(AtomicBool::new(false)),
             next_delta_idx: Arc::new(AtomicU64::new(0)),
             snapshot_threshold: AtomicU64::new(VECTOR_SNAPSHOT_DELTA_THRESHOLD),
             compaction_in_flight: Arc::new(AtomicBool::new(false)),
-            compaction_target: Arc::new(ArcSwapOption::empty()),
+            published: Arc::new(Notify::new()),
+            #[cfg(test)]
+            after_primary_tx: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            at_gate_tx: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            compaction_hooks: Arc::new(CompactionHooks::default()),
+            #[cfg(test)]
+            fail_next_backfill: Arc::new(AtomicBool::new(false)),
             compaction_ratio_threshold: AtomicU64::new(VECTOR_COMPACTION_RATIO_THRESHOLD.to_bits()),
             compaction_min_live: AtomicU64::new(VECTOR_COMPACTION_MIN_LIVE as u64),
         }
@@ -150,6 +167,15 @@ impl VectorBackend {
     /// Get a clone of the adapter Arc for async use across await points.
     /// V3.2: used by the engine to access `HnswAdapter::search_prefilter` /
     /// `search_cofilter` via `adapter.as_hnsw_adapter()`.
+    ///
+    /// # Raw-adapter boundary (F8)
+    /// This hands out the raw adapter, BYPASSING the compaction gate:
+    /// mutations performed through the returned Arc do NOT participate in
+    /// the cutover protocol (no lease, no mirror, no RID claim). Callers
+    /// must not mutate through it while a compaction generation may be
+    /// armed. Current callers are engine READ paths and tests mutating only
+    /// while idle. A write-path facade over this accessor is explicitly
+    /// deferred (documented boundary only this round).
     pub fn adapter_arc(&self) -> Arc<dyn VectorAdapter> {
         Arc::clone(&self.adapter.load_full().adapter)
     }
@@ -185,11 +211,19 @@ impl VectorBackend {
         self.compaction_in_flight.load(Ordering::Acquire)
     }
 
-    /// V4.2 (#408) — access the compaction target for test inspection.
+    /// V4.2 (#408) — replace the whole routing slot. Test-only arming hook
+    /// (tests build an `AdapterSlot::armed` and store it here).
     #[cfg(test)]
     #[allow(dead_code)]
-    pub(crate) fn compaction_target_for_test(&self) -> &Arc<ArcSwapOption<AdapterSlot>> {
-        &self.compaction_target
+    pub(crate) fn set_slot_for_test(&self, slot: AdapterSlot) {
+        self.adapter.store(Arc::new(slot));
+    }
+
+    /// V4.2 (#408) — current routing slot. Test-only inspection.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn slot_for_test(&self) -> Arc<AdapterSlot> {
+        self.adapter.load_full()
     }
 
     /// Snapshot keyspace for this backend's index: `__vec_snap__<id>`.
@@ -210,20 +244,12 @@ impl VectorBackend {
 
     /// Extract the embedding vector from `rec` via `any_seq_elem`.
     ///
-    /// Parity with the legacy manual `InnerValue::List` walk: returns
-    /// `Some(Vec<f32>)` iff the field at `ipath` is a sequence whose
-    /// elements are ALL numeric (F64/Int); returns `None` otherwise
-    /// (non-sequence leaf, or any non-numeric scalar element).
-    ///
-    /// **Widening note vs. legacy:** `any_seq_elem` accepts List OR Set
-    /// (the legacy code only accepted List). Vector fields are always
-    /// List in practice, so this is harmless. Additionally,
-    /// `any_seq_elem` silently skips non-scalar elements (nested
-    /// Map/List/Set, Dec, Big) rather than reporting them to the
-    /// callback; a non-scalar element in a vector field would be
-    /// silently omitted rather than causing `None`. This never occurs
-    /// with well-formed vector data (lists of numbers) and matches the
-    /// plan's documented behaviour.
+    /// Returns `Some(Vec<f32>)` iff the field at `ipath` is a sequence whose
+    /// elements are ALL numeric (F64/Int); `None` otherwise. Widening vs the
+    /// legacy walk: `any_seq_elem` accepts List OR Set (vectors are always
+    /// List in practice — harmless) and silently skips non-scalar elements
+    /// (never occurs with well-formed vector data; matches the plan's
+    /// documented behaviour).
     fn extract_vec(&self, rec: &dyn RecordRef) -> Option<Vec<f32>> {
         let ipath = self.ipath();
         let mut v: Vec<f32> = Vec::with_capacity(4);
@@ -317,16 +343,31 @@ impl IndexBackend for VectorBackend {
         rec: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         if let Some(v) = self.extract_vec(rec) {
-            self.adapter
-                .load_full()
-                .adapter
-                .upsert(rid, &v)
-                .await
-                .map_err(ve)?;
-            // V4.2: double-write to compaction target (if active)
-            if let Some(target) = self.compaction_target.load_full() {
-                let _ = target.adapter.upsert(rid, &v).await;
+            // RV-INDEX-9F62C8DF: one lease covers primary + mirror; the
+            // primary is authoritative (its error returns), the mirror never
+            // fails the user's write — a mirror error fails the generation.
+            let mut lease = self.enter_write().await;
+            let target = lease.target().cloned();
+            if let Some(t) = &target {
+                if !lease.claim_rid(rid) {
+                    t.fail("overlapping mutation to the same RID inside one generation".into());
+                }
             }
+            let res = lease.slot().adapter.upsert(rid, &v).await;
+            #[cfg(test)]
+            self.fire_after_primary_hook().await;
+            // F3: a primary error `?`-returns with the lease UNFINISHED —
+            // Drop then invalidates the armed generation (the primary
+            // mutation may have partially applied) BEFORE releasing
+            // claims/count, and the mirror is skipped. On an idle slot (no
+            // target) Drop just releases.
+            res.map_err(ve)?;
+            if let Some(t) = &target {
+                t.mirror_upsert(rid, &v).await;
+            }
+            // Single terminal point: mark finished so Drop releases without
+            // invalidating the (successfully mirrored) generation.
+            lease.finish();
         }
         Ok(Vec::new())
     }
@@ -338,53 +379,49 @@ impl IndexBackend for VectorBackend {
         new: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         if let Some(v) = self.extract_vec(new) {
-            self.adapter
-                .load_full()
-                .adapter
-                .upsert(rid, &v)
-                .await
-                .map_err(ve)?;
-            // V4.2: double-write
-            if let Some(target) = self.compaction_target.load_full() {
-                let _ = target.adapter.upsert(rid, &v).await;
+            let mut lease = self.enter_write().await;
+            let target = lease.target().cloned();
+            if let Some(t) = &target {
+                if !lease.claim_rid(rid) {
+                    t.fail("overlapping mutation to the same RID inside one generation".into());
+                }
             }
+            let res = lease.slot().adapter.upsert(rid, &v).await;
+            // F3: unfinished-Drop invalidation on the primary-error path —
+            // see `plan_insert`.
+            res.map_err(ve)?;
+            if let Some(t) = &target {
+                t.mirror_upsert(rid, &v).await;
+            }
+            lease.finish();
         } else {
-            self.adapter
-                .load_full()
-                .adapter
-                .delete(rid)
-                .await
-                .map_err(ve)?;
-            // V4.2: double-write delete.
-            // ORDER (ghost-race fix): record the rid in `compaction_deleted_rids`
-            // BEFORE `target.adapter.delete(rid)`. If the tombstone were recorded
-            // AFTER the delete, a concurrent `backfill_if_absent` could observe
-            // the rid as absent-and-not-deleted (delete's read_async no-op'd on
-            // the not-yet-inserted slot, del_rids not yet written), insert it
-            // from S0, and Step4b's point-in-time scan would miss the late
-            // del_rids write → permanent ghost. Recording first guarantees
-            // backfill's under-guard re-check of del_rids sees it (→ skip), or,
-            // if backfill inserted first, the following `delete` removes it.
-            if let Some(target) = self.compaction_target.load_full() {
-                if let Some(hnsw) = target.adapter.as_hnsw_adapter() {
+            let mut lease = self.enter_write().await;
+            let target = lease.target().cloned();
+            if let Some(t) = &target {
+                if !lease.claim_rid(rid) {
+                    t.fail("overlapping mutation to the same RID inside one generation".into());
+                }
+                // ORDER (ghost-race fix): record the rid in
+                // `compaction_deleted_rids` BEFORE the mirror delete, so a
+                // concurrent `backfill_if_absent` cannot re-introduce a
+                // permanent ghost (full rationale in the V4.2 history).
+                if let Some(hnsw) = t.adapter.as_hnsw_adapter() {
                     if let Some(ref del_rids) = hnsw.compaction_deleted_rids {
-                        // DEADLOCK FIX (#589 class, commit `7a4abf62`, H1+H2
-                        // commit `621776bd`): `insert_sync`, NOT
-                        // `insert_async`. The `compaction_deleted_rids` map is
-                        // probed via `contains_sync` (backfill guard, both
-                        // pre- and under-entry-lock re-checks in
-                        // `backfill_if_absent`) and scanned via `iter_sync`
-                        // (Step4b reconcile, below) on the SAME runtime
-                        // worker threads. `insert_async`'s lock-HANDOFF wait
-                        // risks a whole-runtime deadlock against those sync
-                        // accessors. This map is genuinely shared/hammered
-                        // during the double-write compaction window, making
-                        // it the highest-reachability hazard of the five.
+                        // `insert_sync`, NOT `insert_async` — the map is
+                        // probed via sync accessors on the same worker
+                        // threads (#589 class deadlock).
                         let _ = del_rids.insert_sync(rid, ());
                     }
                 }
-                let _ = target.adapter.delete(rid).await;
             }
+            let res = lease.slot().adapter.delete(rid).await;
+            // F3: unfinished-Drop invalidation on the primary-error path —
+            // see `plan_insert`.
+            res.map_err(ve)?;
+            if let Some(t) = &target {
+                t.mirror_delete(rid).await;
+            }
+            lease.finish();
         }
         Ok(Vec::new())
     }
@@ -394,26 +431,28 @@ impl IndexBackend for VectorBackend {
         rid: RecordId,
         _rec: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
-        self.adapter
-            .load_full()
-            .adapter
-            .delete(rid)
-            .await
-            .map_err(ve)?;
-        // V4.2: double-write delete.
-        // ORDER (ghost-race fix): record `compaction_deleted_rids` BEFORE the
-        // `target.adapter.delete(rid)` — see the rationale in `plan_update`.
-        if let Some(target) = self.compaction_target.load_full() {
-            if let Some(hnsw) = target.adapter.as_hnsw_adapter() {
+        let mut lease = self.enter_write().await;
+        let target = lease.target().cloned();
+        if let Some(t) = &target {
+            if !lease.claim_rid(rid) {
+                t.fail("overlapping mutation to the same RID inside one generation".into());
+            }
+            // ORDER (ghost-race fix): record `compaction_deleted_rids` BEFORE
+            // the mirror delete — see `plan_update` (insert_sync: #589).
+            if let Some(hnsw) = t.adapter.as_hnsw_adapter() {
                 if let Some(ref del_rids) = hnsw.compaction_deleted_rids {
-                    // DEADLOCK FIX (#589 class): `insert_sync`, not
-                    // `insert_async` — see `plan_update` for the full
-                    // rationale.
                     let _ = del_rids.insert_sync(rid, ());
                 }
             }
-            let _ = target.adapter.delete(rid).await;
         }
+        let res = lease.slot().adapter.delete(rid).await;
+        // F3: unfinished-Drop invalidation on the primary-error path — see
+        // `plan_insert`.
+        res.map_err(ve)?;
+        if let Some(t) = &target {
+            t.mirror_delete(rid).await;
+        }
+        lease.finish();
         Ok(Vec::new())
     }
 
@@ -533,16 +572,22 @@ impl IndexBackend for VectorBackend {
     /// HIGH-6: promote the tx's staged vectors for this table into the
     /// live HNSW graph at commit. Delegates to the adapter.
     async fn apply_staged_vectors(&self, vecs: &[(RecordId, Vec<f32>)]) -> Result<(), IndexError> {
-        self.adapter
-            .load_full()
-            .adapter
-            .apply_committed_vectors(vecs)
-            .await
-            .map_err(ve)?;
-        // V4.2: double-write to compaction target
-        if let Some(target) = self.compaction_target.load_full() {
-            let _ = target.adapter.apply_committed_vectors(vecs).await;
+        // One lease for the whole batch; claims span the primary + mirror.
+        let mut lease = self.enter_write().await;
+        let target = lease.target().cloned();
+        if let Some(t) = &target {
+            if !lease.claim_rids(vecs.iter().map(|(rid, _)| *rid)) {
+                t.fail("overlapping mutation to the same RID inside one generation".into());
+            }
         }
+        let res = lease.slot().adapter.apply_committed_vectors(vecs).await;
+        // F3: unfinished-Drop invalidation on the primary-error path — see
+        // `plan_insert`. The mirror is skipped when the primary failed.
+        res.map_err(ve)?;
+        if let Some(t) = &target {
+            t.mirror_committed(vecs).await;
+        }
+        lease.finish();
         Ok(())
     }
 
@@ -560,30 +605,38 @@ impl IndexBackend for VectorBackend {
     /// concurrent `backfill_if_absent` cannot re-introduce a permanent
     /// ghost (see the rationale in `plan_update`).
     async fn apply_staged_vector_deletes(&self, deleted: &[RecordId]) -> Result<(), IndexError> {
+        // One lease for the whole loop (no nested `enter_write`).
+        let mut lease = self.enter_write().await;
+        let target = lease.target().cloned();
         for &rid in deleted {
-            self.adapter
-                .load_full()
-                .adapter
-                .delete(rid)
-                .await
-                .map_err(ve)?;
-            // V4.2: double-write delete with guard ordering.
-            if let Some(target) = self.compaction_target.load_full() {
-                if let Some(hnsw) = target.adapter.as_hnsw_adapter() {
+            if let Some(t) = &target {
+                if !lease.claim_rid(rid) {
+                    t.fail("overlapping mutation to the same RID inside one generation".into());
+                }
+                // Ghost-race guard ordering + insert_sync: see `plan_update`.
+                if let Some(hnsw) = t.adapter.as_hnsw_adapter() {
                     if let Some(ref del_rids) = hnsw.compaction_deleted_rids {
-                        // DEADLOCK FIX (#589 class): `insert_sync`, not
-                        // `insert_async` — see `plan_update` for the full
-                        // rationale.
                         let _ = del_rids.insert_sync(rid, ());
                     }
                 }
-                let _ = target.adapter.delete(rid).await;
+            }
+            let res = lease.slot().adapter.delete(rid).await;
+            // F3: unfinished-Drop invalidation on the primary-error path —
+            // see `plan_insert` (a mid-loop failure leaves PART of the batch
+            // applied, which is exactly why the generation is invalidated).
+            res.map_err(ve)?;
+            if let Some(t) = &target {
+                t.mirror_delete(rid).await;
             }
         }
+        lease.finish();
         Ok(())
     }
 
     async fn rebuild(&self, source: Arc<dyn Store>) -> Result<(), IndexError> {
+        // Lifecycle-excluded mutation path (F8): `rebuild` runs at startup /
+        // snapshot-restore fallback, BEFORE any traffic reaches this
+        // backend — no writer admission, no gate participation.
         // Count this full-scan rebuild for the V2.2 instrumentation.
         // `restore_on_open` skips `rebuild` entirely on a successful
         // snapshot load, so this counter ONLY moves when we genuinely
@@ -779,9 +832,8 @@ impl IndexBackend for VectorBackend {
                 // `ArcSwap::store` is wait-free; a concurrent query grabbing
                 // `load()` either sees the old empty adapter or the new one
                 // — never a torn state.
-                self.adapter.store(Arc::new(AdapterSlot {
-                    adapter: Arc::clone(&adapter_arc),
-                }));
+                self.adapter
+                    .store(Arc::new(AdapterSlot::live(Arc::clone(&adapter_arc))));
 
                 Ok(())
             }
