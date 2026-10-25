@@ -141,7 +141,7 @@ fn concurrent_callers_never_admit_more_than_the_burst_budget() {
 /// ZERO tokens (its `elapsed` computes as `now_ns.saturating_sub(newer value)
 /// == 0`) instead of re-crediting.
 #[test]
-fn out_of_order_now_ns_credits_no_extra_tokens() {
+fn rv_connect_ca7f732d_out_of_order_now_ns_credits_no_extra_tokens() {
     let t0 = 1_000_000_000u64;
     let session = fresh_session(t0);
     let burst = POST_AUTH_RATE_LIMIT_PER_SEC as usize;
@@ -168,13 +168,22 @@ fn out_of_order_now_ns_credits_no_extra_tokens() {
     // t0.saturating_sub(t_later) == 0` for this stale call -- ZERO refill,
     // and the bucket is still empty from the drain above, so it must be
     // rejected. A `swap`-based implementation would instead let this call
-    // overwrite the watermark back down to `t0`, and the run wouldn't even
-    // need to complete for the hazard to be real: ANY subsequent call
-    // computing `elapsed` against a regressed `t0` re-credits the interval
-    // the fast caller's drain already consumed.
+    // overwrite the watermark back down to `t0`.
     assert!(
         session.check_post_auth_rate_limit(t0).is_some(),
         "an out-of-order (stale) now_ns must not re-credit any tokens once the \
          watermark has already advanced past it"
+    );
+
+    // The actual discriminator: a subsequent call at the LATER timestamp
+    // must be REJECTED. Under `swap` the stale call above regressed the
+    // watermark to `t0`, so this call would compute a ~10 s `elapsed`,
+    // re-credit the already-drained interval, and be admitted. Under
+    // `fetch_max` the watermark stays at `t_later`, `elapsed` is 0, the
+    // bucket is still empty, and the call is rejected.
+    assert!(
+        session.check_post_auth_rate_limit(t_later).is_some(),
+        "a later-timestamp call after a stale out-of-order call must still be \
+         rejected -- the watermark must never have regressed to t0"
     );
 }
