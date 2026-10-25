@@ -278,7 +278,7 @@ async fn new_tls_conn(
     impl tokio::io::AsyncWrite + Unpin,
     [u8; 32],
 ) {
-    let client_cfg = make_client_config_no_ca();
+    let client_cfg = make_client_config_no_ca().unwrap();
     let connector = TlsConnector::from(client_cfg);
     let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
     let tcp = TcpStream::connect(addr).await.expect("connect");

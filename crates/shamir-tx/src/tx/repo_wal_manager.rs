@@ -39,6 +39,13 @@ impl RepoWalManager {
         self.group.arm_fail_next_sync_for_test();
     }
 
+    /// Test-only: arm the next Mem-sink `append_batch` to fail (Mem-only).
+    /// Cross-crate test seam.
+    #[doc(hidden)]
+    pub fn arm_fail_next_append_for_test(&self) {
+        self.group.arm_fail_next_append_for_test();
+    }
+
     pub fn requires_reopen(&self) -> bool {
         self.group.requires_reopen()
     }

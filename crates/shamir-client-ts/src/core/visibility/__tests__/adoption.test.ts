@@ -81,6 +81,25 @@ describe('visibility wire adoption', () => {
     } finally { await f.client.close(); }
   });
 
+  // RV-WAL-3B29232E: indeterminate outcome throws like aborted but carries
+  // its own classification on the attached transaction.
+  it('rv_wal_3b29232e indeterminate transaction maps to an error carrying transaction', async () => {
+    const f = await fixture();
+    try {
+      const result = f.client.db('db').tx(async () => 1);
+      const rejected = expect(result).rejects.toMatchObject({
+        code: 'wal_requires_reopen',
+        transaction: { status: 'indeterminate', commit_version: 9n },
+      });
+      await f.nextRequest();
+      f.respond({ kind: 'tx_opened', tx_handle: 7, snapshot_version: 1, isolation: 'snapshot' });
+      await f.nextRequest();
+      f.respond({ kind: 'tx_committed', transaction: { tx_id: 7, status: 'indeterminate', commit_version: 9, snapshot_version: 1, error: 'wal_outcome_unknown', materialized: false } });
+      await rejected;
+      expect(f.requests.map((r) => r.op)).toEqual(['tx_begin', 'tx_commit']);
+    } finally { await f.client.close(); }
+  });
+
   it('commit acknowledgement timeout neither rolls back nor resends', async () => {
     vi.useFakeTimers();
     const f = await fixture(50);

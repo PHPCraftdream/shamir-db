@@ -283,7 +283,11 @@ export type { VisibilityWait, VisibilityPendingReason, VisibilityState } from '.
 /** Transaction metadata (present on transactional batches). */
 export interface TransactionInfo {
   tx_id: number;
-  status: 'committed' | 'aborted';
+  /**
+   * 'indeterminate': WAL outcome unknown after the frame was queued; reopen
+   * and reconcile; never auto-retry or treat as rolled back.
+   */
+  status: 'committed' | 'aborted' | 'indeterminate';
   reason?: string;
   /** Published commit error; status remains committed, never retry the writes. */
   error?: string;
