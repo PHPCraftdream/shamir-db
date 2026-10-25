@@ -462,5 +462,9 @@ async fn rv_client_47644b74_concurrent_cold_dump_single_fetch() {
     assert_eq!(client.field_name("ic", "main", qty).as_deref(), Some("qty"));
 
     drop(client);
+    // A split duplex only reaches EOF once BOTH halves are gone: release the
+    // test-held read half so the emulated server sees the connection end.
+    drop(_unused_c2s_read);
+    drop(_unused_s2c_write);
     server.await.expect("emulated server task panicked");
 }
