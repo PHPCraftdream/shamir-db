@@ -20,6 +20,10 @@ First public alpha in preparation (`0.1.0-alpha.1`, not yet tagged). The
 detailed engineering log previously kept here lives in
 `docs/dev-artifacts/checkpoints/2026-08-engineering-log.md`.
 
+### Changed (index rebuild required)
+- Functional index posting hashes: computed `Dec`/`Big`/`Bin`/`Set` values now hash by content (previously collapsed to one shared tag-255 hash, RV-INDEX-56A505F0). Existing functional indexes hold postings under the old hashes and MUST be dropped and re-created after upgrading.
+- FTS tokenizers (Whitespace, Full): non-ASCII uppercase words (e.g. Russian/Greek) are now case-folded before hashing (RV-INDEX-A570106D). Existing FTS indexes contain pre-fix token hashes and MUST be dropped and re-created after upgrading.
+
 ### Included
 - Single-node server (`shamir-server`): TCP, WebSocket and local IPC listeners; TLS 1.3 + SCRAM-Argon2id; session resumption; rate limiting and lockout.
 - Document storage on Fjall with WAL-based crash recovery; MVCC transactions (snapshot, serializable, pessimistic), single-batch and interactive.
