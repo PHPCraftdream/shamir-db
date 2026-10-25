@@ -132,7 +132,7 @@ async fn client_refuses_tls12_only_server_per_transport_tcp_3_1() {
 
     let (cert_pem, key_pem) = generate_self_signed_server_cert(vec!["localhost".into()]).unwrap();
     let server_cfg = tls12_only_server_config(&cert_pem, &key_pem);
-    let client_cfg = make_client_config_no_ca();
+    let client_cfg = make_client_config_no_ca().unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
