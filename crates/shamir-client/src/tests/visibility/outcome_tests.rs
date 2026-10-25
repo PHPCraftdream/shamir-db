@@ -111,3 +111,30 @@ fn typed_errors_use_wire_fields_not_message_parsing() {
         assert_eq!(message, "opaque");
     }
 }
+
+// RV-WAL-3B29232E: indeterminate outcomes keep TransactionOutcome error
+// classification across a wire round-trip.
+#[test]
+fn rv_wal_3b29232e_indeterminate_keeps_error_classification() {
+    let info = TransactionInfo::indeterminate(9, 100, 9);
+    let result = CommitResult::from_transaction(info.clone());
+    let Err(ClientError::TransactionOutcome(outcome)) = result else {
+        panic!("expected indeterminate outcome error: {result:?}");
+    };
+    assert_eq!(outcome.status, "indeterminate");
+    assert_eq!(outcome.commit_version, Some(9));
+
+    let bytes = rmp_serde::to_vec_named(&DbResponse::TxCommitted {
+        transaction: info.clone(),
+    })
+    .unwrap();
+    let decoded: DbResponse = rmp_serde::from_slice(&bytes).unwrap();
+    let DbResponse::TxCommitted { transaction } = decoded else {
+        panic!("wrong response");
+    };
+    assert_eq!(transaction, info);
+    assert!(matches!(
+        CommitResult::from_transaction(transaction),
+        Err(ClientError::TransactionOutcome(_))
+    ));
+}

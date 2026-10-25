@@ -35,6 +35,17 @@ export function normalizeVisibility(value: VisibilityState): VisibilityState {
 }
 
 export function validateTransactionVisibility(transaction: TransactionInfo): void {
+  if (transaction.status === 'indeterminate') {
+    // Mirror Rust: visibility absent, reason absent, attempted commit_version
+    // required (no success claim).
+    if (transaction.visibility !== undefined || transaction.reason != null
+      || transaction.commit_version === undefined) {
+      throw new Error('malformed transaction visibility metadata');
+    }
+    transaction.commit_version = position(transaction.commit_version);
+    if (transaction.snapshot_version !== undefined) transaction.snapshot_version = position(transaction.snapshot_version);
+    return;
+  }
   if (transaction.status === 'aborted') {
     if (transaction.visibility !== undefined) throw new Error('malformed transaction visibility metadata');
     return;

@@ -10,10 +10,11 @@ pub struct TransactionInfo {
     /// Transaction ID (monotonic per repo).
     pub tx_id: u64,
 
-    /// Outcome: `"committed"` or `"aborted"`.
+    /// Outcome: `"committed"`, `"aborted"`, or `"indeterminate"`.
     pub status: String,
 
-    /// Human-readable abort reason (null when committed).
+    /// Human-readable abort reason (null when committed; omitted for
+    /// indeterminate, whose `error` is `"wal_outcome_unknown"`).
     /// E.g. `"tx_conflict"`, `"tx_cross_repo_not_supported"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -26,7 +27,8 @@ pub struct TransactionInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_version: Option<u64>,
 
-    /// Committed version (null when aborted).
+    /// Committed version for committed outcomes, the ATTEMPTED version (no
+    /// success claim) for indeterminate outcomes, absent for aborted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_version: Option<u64>,
 
@@ -98,6 +100,24 @@ impl TransactionInfo {
         }
     }
 
+    /// An indeterminate outcome reports the ATTEMPTED commit version without
+    /// claiming success — the `indeterminate` status and the
+    /// `wal_outcome_unknown` error carry the uncertainty; WAL replay after
+    /// reopen decides (CRC-valid frame = committed at this version;
+    /// missing/torn = never written).
+    pub fn indeterminate(tx_id: u64, snapshot_version: u64, commit_version: u64) -> Self {
+        Self {
+            tx_id,
+            status: "indeterminate".into(),
+            reason: None,
+            error: Some("wal_outcome_unknown".into()),
+            snapshot_version: Some(snapshot_version),
+            commit_version: Some(commit_version),
+            materialized: false,
+            visibility: None,
+        }
+    }
+
     /// Set the orthogonal visibility observation without changing commit status.
     pub fn with_visibility(mut self, visibility: VisibilityState) -> Self {
         self.visibility = Some(visibility);
@@ -113,12 +133,20 @@ impl TransactionInfo {
         match (self.status.as_str(), self.visibility) {
             ("committed", Some(visibility)) if self.reason.is_none() => visibility.validate(),
             ("aborted", None) => Ok(()),
+            // Visibility absent, reason absent, attempted version required.
+            ("indeterminate", None) if self.reason.is_none() && self.commit_version.is_some() => {
+                Ok(())
+            }
             _ => Err("malformed transaction visibility metadata"),
         }
     }
 
     pub fn is_committed(&self) -> bool {
         self.status == "committed"
+    }
+
+    pub fn is_indeterminate(&self) -> bool {
+        self.status == "indeterminate"
     }
 }
 

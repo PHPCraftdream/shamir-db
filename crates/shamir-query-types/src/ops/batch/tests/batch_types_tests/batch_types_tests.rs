@@ -217,6 +217,39 @@ fn transaction_info_aborted_roundtrip() {
 }
 
 #[test]
+fn transaction_info_indeterminate_roundtrip() {
+    let info = TransactionInfo::indeterminate(7, 100, 107);
+    assert!(info.is_indeterminate());
+    assert_eq!(info.validate(), Ok(()));
+
+    let qv = to_qv(&info);
+    assert_eq!(
+        qv.get("status").and_then(QueryValue::as_str),
+        Some("indeterminate")
+    );
+    assert_eq!(
+        qv.get("error").and_then(QueryValue::as_str),
+        Some("wal_outcome_unknown")
+    );
+    assert!(qv.get("reason").is_none());
+    assert!(qv.get("commit_version").is_some());
+    assert!(qv.get("visibility").is_none());
+    assert_eq!(from_qv::<TransactionInfo>(qv), info);
+
+    // Malformed indeterminate forms must fail validation.
+    let with_reason = TransactionInfo {
+        reason: Some("wal_requires_reopen".into()),
+        ..info.clone()
+    };
+    assert!(with_reason.validate().is_err());
+    let no_version = TransactionInfo {
+        commit_version: None,
+        ..info.clone()
+    };
+    assert!(no_version.validate().is_err());
+}
+
+#[test]
 fn transaction_info_committed_with_error_roundtrip() {
     for materialized in [true, false] {
         let info =

@@ -22,6 +22,7 @@ pub(super) use std::sync::{Arc, Mutex};
 pub(super) use shamir_storage::error::{DbError, DbResult};
 pub(super) use tokio::task::spawn_blocking;
 
+pub(super) use crate::segment::wal_sink::WalSink;
 pub(super) use crate::wal_entry_v2::WalEntryV2;
 pub(super) use crate::wal_segment::WalSegment;
 
@@ -379,6 +380,14 @@ impl SegmentSet {
         // a power-loss before they are drained to `history` still replays them.
         {
             let _sync = self.sync_gate.lock().await;
+            // Test seam (RV-WAL-3B29232E): models the seal fsync failing after
+            // the frames were written — exactly the outcome the WAL cannot
+            // prove rolled back (tickets go UNKNOWN).
+            if WalSink::take_fail_next_seal_sync_for_test() {
+                return Err(DbError::Storage(
+                    "SegmentSet injected seal fsync failure".into(),
+                ));
+            }
             self.sync_active(&sealing).await?;
         }
 

@@ -22,6 +22,10 @@ export async function runTransaction<T>(
       throw Object.assign(new ShamirDbError(transaction.reason ?? 'tx_error',
         `transaction aborted: ${transaction.reason ?? 'unknown'}`), { transaction });
     }
+    if (transaction.status === 'indeterminate') {
+      throw Object.assign(new ShamirDbError(transaction.reason ?? 'wal_requires_reopen',
+        'transaction outcome indeterminate: WAL result unknown; reopen and reconcile, do not replay writes'), { transaction });
+    }
     const visibility = transaction.visibility;
     if (visibility === undefined) throw new Error('missing committed visibility');
     if (visibility.state === 'pending') {

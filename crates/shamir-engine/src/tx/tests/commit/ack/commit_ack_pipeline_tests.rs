@@ -349,7 +349,7 @@ async fn real_abort_and_indeterminate_entry_keep_no_commit_metadata() {
     assert_eq!(info.visibility, None);
     assert_eq!(gate.version_allocation_high_water_mark(), 0);
     let error =
-        crate::tx::commit::wal_completion(&gate, Err(shamir_wal::WalAppendError::Indeterminate))
+        crate::tx::commit::wal_completion(&gate, 1, Err(shamir_wal::WalAppendError::Indeterminate))
             .0
             .unwrap_err();
     let info = crate::tx::commit::acknowledge_known_outcome(Err(error), &repo, &gate, STATUS, 0)

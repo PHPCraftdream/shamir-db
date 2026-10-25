@@ -16,6 +16,12 @@ use crate::wal_segment::WalSegment;
 // off; the flag is never armed outside tests, so production cost is one
 // relaxed load per fsync.
 static FILE_FAIL_NEXT_SYNC: AtomicBool = AtomicBool::new(false);
+// Test-only seal-fsync fault (RV-WAL-3B29232E): fails the next SEAL fsync in
+// `SegmentSet::seal_and_rotate` — models the fsync failing after the frames
+// were written, exactly the outcome the WAL cannot prove rolled back (the
+// window's tickets settle UNKNOWN → indeterminate). Compiled unconditionally
+// because the consumer is a CROSS-CRATE test (shamir-engine).
+static FILE_FAIL_NEXT_SEAL_SYNC: AtomicBool = AtomicBool::new(false);
 static FILE_PAUSE_NEXT_SYNC: AtomicBool = AtomicBool::new(false);
 static FILE_SYNC_PAUSED: Notify = Notify::const_new();
 static FILE_SYNC_RESUME: Notify = Notify::const_new();
@@ -28,6 +34,20 @@ async fn file_sync_pause_point() {
 }
 
 impl WalSink {
+    /// Test-only: fail the next SEAL fsync inside `SegmentSet::seal_and_rotate`
+    /// — the fsync fires AFTER the segment's frames were written, so the
+    /// outcome is unprovable (tickets go UNKNOWN). Cross-crate test seam (see
+    /// the static above for why this is not `cfg(test)`).
+    #[doc(hidden)]
+    pub fn arm_fail_next_seal_sync_for_test() {
+        FILE_FAIL_NEXT_SEAL_SYNC.store(true, Ordering::Release);
+    }
+
+    /// Test-only: take the pending seal-fsync fault flag (one-shot).
+    pub(crate) fn take_fail_next_seal_sync_for_test() -> bool {
+        FILE_FAIL_NEXT_SEAL_SYNC.swap(false, Ordering::AcqRel)
+    }
+
     /// Test-only: park the next File-sink `sync()` until
     /// [`Self::resume_file_sync`]. Cross-crate test seam (see the statics
     /// above for why this is not `cfg(test)`).
@@ -80,9 +100,8 @@ pub struct MemSink {
     /// group-commit leader's circuit-breaker fires and `append_many` returns
     /// `Err` while ZERO of the batch's frames survive to a later replay. This
     /// exercises the all-or-nothing atomicity claim `append_many`'s doc makes.
-    /// Never compiled into a production build (the `File` hot path is
-    /// untouched — it stays an enum, no dyn dispatch).
-    #[cfg(test)]
+    /// Cross-crate test seam remains in production Mem sinks (the `File` hot
+    /// path is untouched — it stays an enum, no dyn dispatch).
     fail_next_append: AtomicBool,
     // No crate test-util feature: cross-crate sync-fault seam remains in production Mem sinks.
     fail_next_sync: AtomicBool,
@@ -106,7 +125,6 @@ impl MemSink {
             frames: Mutex::new(Vec::new()),
             next_seq: AtomicU64::new(0),
             max_committed: AtomicU64::new(0),
-            #[cfg(test)]
             fail_next_append: AtomicBool::new(false),
             fail_next_sync: AtomicBool::new(false),
             #[cfg(test)]
@@ -133,8 +151,9 @@ impl MemSink {
     /// pushes NO frames (returns before the `frames.extend`), so the batch
     /// leaves zero trace — mirroring a `File` sink quarantining a segment on
     /// a partial write. One-shot: the flag clears itself on the failing call.
-    #[cfg(test)]
-    pub(crate) fn arm_fail_next_append(&self) {
+    /// Cross-crate test seam remains in production Mem sinks.
+    #[doc(hidden)]
+    pub fn arm_fail_next_append(&self) {
         self.fail_next_append.store(true, Ordering::Release);
     }
 }
@@ -163,11 +182,12 @@ impl WalSink {
         Self::Mem(MemSink::default())
     }
 
-    /// Test-only (task #531): arm the next `append_batch` on a `Mem` sink to
-    /// fail. Panics on a `File` sink (fault injection is a `Mem`-only knob —
-    /// production durability runs on `File` and its design is untouched).
-    #[cfg(test)]
-    pub(crate) fn arm_fail_next_append(&self) {
+    /// Test-only (task #531 / RV-WAL-3B29232E): arm the next `append_batch`
+    /// on a `Mem` sink to fail. Panics on a `File` sink (fault injection is a
+    /// `Mem`-only knob — production durability runs on `File` and its design
+    /// is untouched). Cross-crate test seam, hence not `cfg(test)`.
+    #[doc(hidden)]
+    pub fn arm_fail_next_append_for_test(&self) {
         match self {
             Self::Mem(m) => m.arm_fail_next_append(),
             Self::File(_) => panic!("arm_fail_next_append is Mem-only"),
@@ -241,7 +261,7 @@ impl WalSink {
                 // the leader sees `is_ok() == false`, trips the circuit
                 // breaker, and every caller gets `Err`. Nothing is pushed, so
                 // a subsequent replay sees ZERO of the batch's entries.
-                #[cfg(test)]
+                // Cross-crate test seam remains in production Mem sinks.
                 if m.fail_next_append.swap(false, Ordering::AcqRel) {
                     return Err(shamir_storage::error::DbError::Storage(
                         "MemSink injected append_batch failure (task #531)".into(),

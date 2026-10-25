@@ -311,6 +311,13 @@ pub(in crate::tx) async fn maybe_crash(_phase: &str, _repo: &RepoInstance) {}
 pub enum TxError {
     #[error("WAL outcome indeterminate; repository must be reopened")]
     WalRequiresReopen,
+    /// Ticket came back Unknown/Indeterminate AFTER the frame was queued; the
+    /// attempt may have survived — never settle as aborted. WAL replay after
+    /// reopen decides.
+    #[error(
+        "WAL outcome indeterminate (commit_version {commit_version}); repository must be reopened"
+    )]
+    WalOutcomeUnknown { commit_version: u64 },
     /// PR2 S5c-X: the retention gate is refusing writes — the retained
     /// sealed WAL exceeded `wal_retention_max_bytes` under `RefuseWrites`.
     /// Admission retries succeed once the drainer's declare-gap/truncate
@@ -393,6 +400,9 @@ impl TxError {
             // FG-7: commit-time CAS failures retain the staging-time code.
             Self::CasConflict { .. } => "version_conflict".to_string(),
             Self::WalRequiresReopen => "wal_requires_reopen".to_string(),
+            Self::WalOutcomeUnknown { commit_version } => {
+                return TransactionInfo::indeterminate(tx_id, snapshot_version, commit_version);
+            }
             Self::WalRetentionExceeded => "wal_retention_exceeded".to_string(),
             Self::Storage(e) => format!("storage: {}", e),
             Self::Expired { elapsed, max } => {
@@ -407,6 +417,7 @@ impl From<TxError> for DbError {
     fn from(error: TxError) -> Self {
         match error {
             error @ (TxError::WalRequiresReopen
+            | TxError::WalOutcomeUnknown { .. }
             | TxError::WalRetentionExceeded
             | TxError::WalDurability { .. }) => DbError::Storage(error.to_string()),
             TxError::Storage(error) => error,

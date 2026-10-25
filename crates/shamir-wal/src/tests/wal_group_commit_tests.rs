@@ -375,7 +375,7 @@ async fn append_many_write_failure_leaves_zero_entries() {
     let gc = tracked_group(Arc::clone(&sink));
 
     // Arm the NEXT append_batch (the batch's single leader write) to fail.
-    sink.arm_fail_next_append();
+    sink.arm_fail_next_append_for_test();
 
     // A batch of 4 entries (N>1) — the whole batch flows through ONE
     // append_batch call, which the armed knob fails at the real write path.

@@ -171,3 +171,23 @@ fn deferred_outcome_maps_to_materialized_false() {
         "Deferred must map to materialized=false"
     );
 }
+
+// RV-WAL-3B29232E: an indeterminate WAL outcome maps to status
+// "indeterminate" with the ATTEMPTED commit_version and the
+// `wal_outcome_unknown` error — no success claim, never aborted.
+#[test]
+fn rv_wal_3b29232e_unknown_outcome_is_indeterminate_not_aborted() {
+    let info = crate::tx::CommitError::WalOutcomeUnknown {
+        commit_version: 107,
+    }
+    .into_transaction_info(12, 100);
+    assert_eq!(info.status, "indeterminate");
+    assert_eq!(info.reason, None);
+    assert_eq!(info.commit_version, Some(107));
+    assert_eq!(info.snapshot_version, Some(100));
+    assert_eq!(info.visibility, None);
+    assert_eq!(info.error.as_deref(), Some("wal_outcome_unknown"));
+    assert_eq!(info.validate(), Ok(()));
+    assert!(!info.is_committed());
+    assert!(info.is_indeterminate());
+}

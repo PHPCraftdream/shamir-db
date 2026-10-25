@@ -23,8 +23,11 @@ pub(crate) fn commit_wal_durability(repo: &RepoInstance) -> shamir_wal::WalDurab
 /// at level 2 but not fsynced). The second tuple element is TRUE only when
 /// the ticket outcome PROVES the frame was never written (`NotWritten`) —
 /// the caller settles the version for R-contiguity at that point (B3).
+/// `Unknown`/`Indeterminate` report `WalOutcomeUnknown { commit_version }`:
+/// the frame was queued, so the attempt may have survived — never aborted.
 pub(crate) fn wal_completion(
     gate: &shamir_tx::RepoTxGate,
+    commit_version: u64,
     result: Result<(), WalAppendError>,
 ) -> (Result<bool, TxError>, bool) {
     match result {
@@ -36,7 +39,7 @@ pub(crate) fn wal_completion(
         ),
         Err(WalAppendError::Unknown | WalAppendError::Indeterminate) => {
             gate.set_requires_reopen();
-            (Err(TxError::WalRequiresReopen), false)
+            (Err(TxError::WalOutcomeUnknown { commit_version }), false)
         }
         Err(_) => {
             gate.set_requires_reopen();
