@@ -120,6 +120,7 @@ impl LazyWireSource {
             // supervisor loop then retries with backoff) instead of wedging
             // the replication worker forever on an unbounded await.
             connect_timeout: Some(std::time::Duration::from_secs(10)),
+            handshake_timeout: None,
             request_timeout: Some(std::time::Duration::from_secs(35)),
         };
         let client = Client::connect(opts).await.map_err(|e| {

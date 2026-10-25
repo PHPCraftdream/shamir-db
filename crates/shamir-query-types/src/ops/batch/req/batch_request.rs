@@ -120,6 +120,8 @@ pub struct BatchRequest {
     ///
     /// Each key is the alias used in `$query` references.
     /// The value can be just a `Query` or a `QueryEntry` with options.
+    /// Duplicate aliases on the wire keep the first position with the last
+    /// value winning (IndexMap insert semantics — see `shamir_collections::TMap`).
     pub queries: TMap<String, QueryEntry>,
 
     /// Return all results (default: true).

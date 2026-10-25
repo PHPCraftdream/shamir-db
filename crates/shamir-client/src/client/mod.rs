@@ -18,7 +18,7 @@ pub mod cursor_stream;
 pub mod subscription;
 
 pub use connect::Client;
-pub use options::{ConnectLocalOptions, ConnectOptions, ResumeOptions};
+pub use options::{bound_until, resolve_host, ConnectLocalOptions, ConnectOptions, ResumeOptions};
 
 #[cfg(test)]
 pub(crate) use connect::{resume_wire_exchange, verify_resume_identity_proof};

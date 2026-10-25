@@ -11,12 +11,18 @@
 //! of a live server: the request-side test drives a `oneshot` that the
 //! "server" (the test) simply never resolves.
 
+use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
+use zeroize::Zeroizing;
 
-use crate::client::{await_pending_response, connect_tcp, Lifecycle};
+use crate::client::{
+    await_pending_response, connect_tcp, ConnectOptions, Lifecycle, LifecycleHooks,
+};
 use crate::error::ClientError;
+use crate::Client;
 
 /// A guaranteed-unroutable private black-hole address: TCP `connect` to it
 /// neither completes nor is refused quickly (the SYN is dropped), so a
@@ -186,4 +192,128 @@ async fn request_timeout_generous_delivers_normally() {
     assert_eq!(out, b"ok");
 
     deliver.await.expect("deliver task");
+}
+
+// ─── handshake_timeout (RV-CLIENT-NODE-1CFB3796) ─────────────────────────────
+
+/// A full `Client::connect` against a peer that accepts TCP but never answers
+/// the TLS ClientHello must fail with `HandshakeTimeout` once
+/// `handshake_timeout` elapses — the pre-fix code bounded only the TCP
+/// connect and left the TLS/SCRAM awaits unbounded.
+#[tokio::test]
+async fn rv_client_node_1cfb3796_handshake_deadline_bounds_silent_tls_peer() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral listener");
+    let addr: SocketAddr = listener.local_addr().expect("listener addr");
+    // Silent peer: accept, then stall forever without reading or writing.
+    tokio::spawn(async move {
+        let (_stream, _) = listener.accept().await.expect("accept");
+        std::future::pending::<()>().await;
+    });
+
+    let budget = Duration::from_millis(250);
+    let opts = ConnectOptions {
+        addr,
+        server_name: "localhost".into(),
+        username: "timeout-probe".into(),
+        password: Zeroizing::new(b"unused".to_vec()),
+        accept_new_host: true,
+        trusted_pin: None,
+        connect_timeout: None,
+        handshake_timeout: Some(budget),
+        request_timeout: None,
+    };
+
+    // Outer guard: on the pre-fix code the TLS await never resolves and this
+    // test timer wins (failing the test); with the fix the handshake
+    // deadline fires first.
+    let raced = tokio::time::timeout(Duration::from_secs(5), Client::connect(opts)).await;
+    let res = raced.expect("connect must respect handshake_timeout, not hang");
+    match match res {
+        Err(e) => e,
+        Ok(_) => panic!("silent peer must fail the handshake"),
+    } {
+        ClientError::HandshakeTimeout(d, phase) => {
+            assert_eq!(d, budget);
+            assert_eq!(&*phase, "tls", "silent TLS peer must report the tls phase");
+        }
+        other => panic!("expected HandshakeTimeout, got {other:?}"),
+    }
+}
+
+/// `bound_until` bounds a never-ready future — the deterministic stand-in
+/// for any parked connect/write/response phase. Deadline elapses first:
+/// `Ok(None)`, never a hang (RV-CLIENT-NODE-1CFB3796).
+#[tokio::test(start_paused = true)]
+async fn rv_client_node_1cfb3796_bound_until_bounds_never_ready_future() {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+    let raced = tokio::time::timeout(
+        Duration::from_secs(5),
+        crate::client::bound_until(
+            Some(deadline),
+            std::future::pending::<Result<(), ClientError>>(),
+        ),
+    )
+    .await;
+    match raced.expect("bound_until must resolve, not hang") {
+        Ok(None) => {}
+        Ok(Some(Ok(()))) => panic!("a pending future cannot complete"),
+        Ok(Some(Err(e))) => panic!("unexpected error from pending future: {e:?}"),
+        Err(e) => panic!("unexpected error: {e:?}"),
+    }
+}
+
+/// A request deadline elapsing while the WRITE is parked (1-byte duplex
+/// buffer, peer never reads) yields `Ok(None)` and — because the dropped
+/// future arms the mid-frame cancellation guard — CLOSES the connection
+/// instead of leaving it reusable (RV-CLIENT-NODE-1CFB3796).
+#[tokio::test(start_paused = true)]
+async fn rv_client_node_1cfb3796_request_deadline_bounds_parked_write() {
+    let (client_io, server_io) = tokio::io::duplex(1);
+    let (_srv_r, _srv_w) = tokio::io::split(server_io); // peer never reads
+    let (c_r, c_w) = tokio::io::split(client_io);
+    let client = Client::for_test(c_r, c_w, LifecycleHooks::default());
+
+    // The operation deadline (30 s) must elapse BEFORE the outer no-hang guard.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let raced = tokio::time::timeout(
+        Duration::from_secs(120),
+        crate::client::bound_until(Some(deadline), client.ping()),
+    )
+    .await;
+    match raced.expect("bounded ping must resolve, not hang") {
+        Ok(None) => {}
+        Ok(Some(r)) => panic!("parked write must not succeed: {r:?}"),
+        Err(e) => panic!("unexpected error from parked write: {e:?}"),
+    }
+    assert!(
+        client.lifecycle_for_test().cause().is_some(),
+        "timed-out write must close the connection"
+    );
+}
+
+/// A request deadline elapsing while waiting on a HELD tokio mutex (the
+/// Node client-mutex case) yields `Ok(None)` deterministically — no routed
+/// addresses, no real server (RV-CLIENT-NODE-1CFB3796).
+#[tokio::test(start_paused = true)]
+async fn rv_client_node_1cfb3796_request_deadline_bounds_lock_wait() {
+    let mutex = Arc::new(tokio::sync::Mutex::new(()));
+    let guard = mutex.clone().lock_owned().await;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+    let raced = tokio::time::timeout(
+        Duration::from_secs(5),
+        crate::client::bound_until(Some(deadline), async move {
+            drop(mutex.lock().await);
+            Ok::<(), ClientError>(())
+        }),
+    )
+    .await;
+    match raced.expect("bounded lock wait must resolve, not hang") {
+        Ok(None) => {}
+        Ok(Some(Ok(()))) => panic!("lock cannot be acquired while held"),
+        Ok(Some(Err(e))) => panic!("unexpected error: {e:?}"),
+        Err(e) => panic!("unexpected error: {e:?}"),
+    }
+    drop(guard);
 }
