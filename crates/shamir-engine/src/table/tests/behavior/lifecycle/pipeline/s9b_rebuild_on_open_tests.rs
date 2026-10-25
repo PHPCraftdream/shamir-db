@@ -2,11 +2,12 @@
 //!
 //! Proves that when a table is reopened with an outdated legacy-index format
 //! marker (version < 2), `TableManager::create` triggers `repair()` and
-//! stamps version 2, leaving every index consistent.
+//! stamps the current version, leaving every index consistent.
 
 use std::sync::Arc;
 
 use bytes::Bytes;
+use shamir_index::LEGACY_INDEX_FORMAT_VERSION;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::types::common::new_map;
@@ -20,7 +21,7 @@ use crate::table::TableManager;
 
 /// Build shared in-memory stores, open a fresh table on them, create a
 /// regular index, seed a few records, and return (table, data_store, info_store).
-/// After this call the table is stamped with legacy_index_version == 2 (by
+/// After this call the table is stamped with legacy_index_version == current (by
 /// the create() trigger on its first open).
 async fn fresh_table_with_index() -> (TableManager, Arc<dyn Store>, Arc<dyn Store>) {
     let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
@@ -57,14 +58,17 @@ async fn s9b_outdated_marker_triggers_rebuild_on_open() {
     // -----------------------------------------------------------------------
     let (t1, data, info) = fresh_table_with_index().await;
 
-    // Baseline: healthy and already stamped at 2 by the first create().
+    // Baseline: healthy and already stamped at the current version by the first create().
     let report = t1.verify().await.unwrap();
     assert!(
         report.is_healthy(),
         "fresh table must be healthy, got {report:?}"
     );
     let v = load_legacy_index_version(&info).await.unwrap();
-    assert_eq!(v, 2, "first open must stamp version 2");
+    assert_eq!(
+        v, LEGACY_INDEX_FORMAT_VERSION,
+        "first open must stamp the current legacy index format version"
+    );
 
     // -----------------------------------------------------------------------
     // 2. Simulate an outdated on-disk format: lower the marker to 1.
@@ -118,7 +122,7 @@ async fn s9b_outdated_marker_triggers_rebuild_on_open() {
     //      legacy_indexes_need_rebuild() → true (stored == 1 < 2)
     //      has_legacy == true (by_x exists)
     //      repair() is called → orphan is cleared, postings are rebuilt
-    //      save_legacy_index_version() stamps 2
+    //      save_legacy_index_version() stamps the current version
     // -----------------------------------------------------------------------
     let t2 = TableManager::create("t".into(), Arc::clone(&data), Arc::clone(&info))
         .await
@@ -129,8 +133,8 @@ async fn s9b_outdated_marker_triggers_rebuild_on_open() {
     // -----------------------------------------------------------------------
     let stamped = load_legacy_index_version(&info).await.unwrap();
     assert_eq!(
-        stamped, 2,
-        "reopen must stamp legacy_index_version = 2 (was 1 before)"
+        stamped, LEGACY_INDEX_FORMAT_VERSION,
+        "reopen must stamp the current legacy_index_version (was 1 before)"
     );
 
     let after = t2.verify().await.unwrap();
@@ -158,7 +162,10 @@ async fn s9b_current_marker_skips_repair() {
     let (t1, data, info) = fresh_table_with_index().await;
 
     // Confirm marker is already 2.
-    assert_eq!(load_legacy_index_version(&info).await.unwrap(), 2);
+    assert_eq!(
+        load_legacy_index_version(&info).await.unwrap(),
+        LEGACY_INDEX_FORMAT_VERSION
+    );
 
     // Verify is healthy before reopen.
     assert!(t1.verify().await.unwrap().is_healthy());
@@ -195,7 +202,7 @@ async fn s9b_no_indexes_still_stamps_marker() {
     // Marker must be stamped even though there are no legacy indexes to rebuild.
     let v = load_legacy_index_version(&info).await.unwrap();
     assert_eq!(
-        v, 2,
+        v, LEGACY_INDEX_FORMAT_VERSION,
         "version marker must be written even for tables with no legacy indexes"
     );
 }
