@@ -4,7 +4,7 @@
 //! * [`WasmEngine`] / [`WasmLimits`] — engine configuration (`wasm_engine`).
 //! * [`WasmFunction`] — the [`ShamirFunction`] implementation (`wasm_function`).
 
-mod bindings;
+pub(crate) mod bindings;
 pub(crate) mod compile_cache;
 mod fuel;
 mod wasm_engine;

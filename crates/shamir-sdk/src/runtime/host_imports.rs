@@ -20,6 +20,8 @@
 
 #[cfg(target_arch = "wasm32")]
 mod imp {
+    use crate::__rt::{decode_value_bytes, unpack_ptr_len, ResponseBytes};
+    use crate::error::{Error, Result};
     use crate::Value;
 
     // The four host-import trampolines. Keys are passed as raw UTF-8 bytes;
@@ -52,114 +54,113 @@ mod imp {
         fn host_db_execute(rp: i32, rl: i32) -> i64;
     }
 
-    /// Encode `value` to msgpack, leak the bytes, and return `(ptr, len)`.
+    /// Encode `value` into an owned [`RequestBuffer`] for one host call.
     ///
-    /// Leaked buffers live in guest linear memory and remain valid for the
-    /// duration of a single host-call (the host reads them synchronously;
-    /// the Store is dropped after `shamir_call` returns).
-    fn encode_leak(value: &Value) -> (i32, i32) {
-        let bytes = crate::__rt::encode_value(value);
-        let len = bytes.len() as i32;
-        let ptr = bytes.as_ptr() as i32;
-        core::mem::forget(bytes);
-        (ptr, len)
+    /// The host reads the bytes synchronously during the extern call, so the
+    /// buffer drops normally at the end of the shim instead of leaking.
+    fn with_request<T>(value: &Value, call: impl FnOnce(i32, i32) -> T) -> Result<T> {
+        let buf = crate::__rt::RequestBuffer::encode(value)?;
+        Ok(call(buf.ptr(), buf.len()))
     }
 
-    /// Decode a packed `i64` return into `(ptr, len)` guest-memory range.
-    /// `packed == 0` means absent.
-    fn unpack_ptr_len(packed: i64) -> Option<(i32, i32)> {
-        if packed == 0 {
-            return None;
-        }
-        let ptr = (packed >> 32) as i32;
-        let len = (packed & 0xFFFF_FFFF) as i32;
-        Some((ptr, len))
+    /// Decode the host's msgpack response bytes. Fail-closed: a codec error
+    /// carries its cause instead of becoming a plausible value. The response
+    /// allocation (made via the guest's `shamir_alloc`) is owned by the
+    /// [`ResponseBytes`] guard and freed on both the Ok and Err paths.
+    ///
+    /// # Safety
+    /// The host must have written `len` msgpack bytes at `ptr` for this call.
+    unsafe fn decode_response(ptr: i32, len: i32) -> Result<Value> {
+        let guard = ResponseBytes::from_raw(ptr, len);
+        decode_value_bytes(guard.as_slice())
     }
 
-    pub fn batch_put(key: &str, value: Value) {
+    pub fn batch_put(key: &str, value: Value) -> Result<()> {
         let kp = key.as_ptr() as i32;
         let kl = key.len() as i32;
-        let (vp, vl) = encode_leak(&value);
-        // Safety: host reads from guest memory synchronously; buffers live
-        // for the duration of the call.
-        unsafe { host_batch_put(kp, kl, vp, vl) };
+        with_request(&value, |vp, vl| unsafe { host_batch_put(kp, kl, vp, vl) })
     }
 
-    pub fn batch_get(key: &str) -> Option<Value> {
+    pub fn batch_get(key: &str) -> Result<Option<Value>> {
         let kp = key.as_ptr() as i32;
         let kl = key.len() as i32;
         // Safety: host reads key from guest memory synchronously.
         let packed = unsafe { host_batch_get(kp, kl) };
-        let (ptr, len) = unpack_ptr_len(packed)?;
+        let (ptr, len) = match unpack_ptr_len(packed) {
+            Some(pair) => pair,
+            None => return Ok(None),
+        };
         // Safety: the host wrote the msgpack bytes into guest memory via
         // shamir_alloc. The buffer remains valid for the rest of this call.
-        let bytes: &[u8] = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
-        rmp_serde::from_slice(bytes).ok()
+        Ok(Some(unsafe { decode_response(ptr, len)? }))
     }
 
-    pub fn global_get(key: &str) -> Option<Value> {
+    pub fn global_get(key: &str) -> Result<Option<Value>> {
         let kp = key.as_ptr() as i32;
         let kl = key.len() as i32;
         let packed = unsafe { host_global_get(kp, kl) };
-        let (ptr, len) = unpack_ptr_len(packed)?;
-        let bytes: &[u8] = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
-        rmp_serde::from_slice(bytes).ok()
+        let (ptr, len) = match unpack_ptr_len(packed) {
+            Some(pair) => pair,
+            None => return Ok(None),
+        };
+        // Safety: the host wrote the msgpack bytes into guest memory via
+        // shamir_alloc. The buffer remains valid for the rest of this call.
+        Ok(Some(unsafe { decode_response(ptr, len)? }))
     }
 
-    pub fn global_set(key: &str, value: Value) {
+    pub fn global_set(key: &str, value: Value) -> Result<()> {
         let kp = key.as_ptr() as i32;
         let kl = key.len() as i32;
-        let (vp, vl) = encode_leak(&value);
-        unsafe { host_global_set(kp, kl, vp, vl) };
+        with_request(&value, |vp, vl| unsafe { host_global_set(kp, kl, vp, vl) })
     }
 
     /// Invoke another registered function by name.
     ///
     /// `args` is a `Value::Map` whose entries become the callee's `Params`.
-    /// Returns the callee's result as a `Value`. Traps if the callee is
-    /// not found, depth limit is exceeded, or the callee errors.
-    pub fn call(name: &str, args: Value) -> Value {
+    /// Returns the callee's result as a `Value`. The host traps if the callee
+    /// is not found, the depth limit is exceeded, or the callee errors.
+    pub fn call(name: &str, args: Value) -> Result<Value> {
         let np = name.as_ptr() as i32;
         let nl = name.len() as i32;
-        let (pp, pl) = encode_leak(&args);
-        let packed = unsafe { host_call(np, nl, pp, pl) };
+        let packed = with_request(&args, |pp, pl| unsafe { host_call(np, nl, pp, pl) })?;
         let (ptr, len) = match unpack_ptr_len(packed) {
             Some(pair) => pair,
-            None => return Value::Null,
+            None => return Err(Error::user("call: host returned no result")),
         };
-        let bytes: &[u8] = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
-        rmp_serde::from_slice(bytes).unwrap_or(Value::Null)
+        // Safety: the host wrote the msgpack bytes into guest memory for this call.
+        unsafe { decode_response(ptr, len) }
     }
 
     /// Read a record from a table by key.
     ///
     /// `table` is the table name. `key` is a `Value::Map` of primary-key
     /// fields (e.g. `{\"id\": 1}`) or a scalar (treated as filter on \"id\").
-    /// Returns `None` if no record matches.
-    pub fn db_get(table: &str, key: &Value) -> Option<Value> {
+    /// Returns `Ok(None)` if no record matches.
+    pub fn db_get(table: &str, key: &Value) -> Result<Option<Value>> {
         let tp = table.as_ptr() as i32;
         let tl = table.len() as i32;
-        let (kp, kl) = encode_leak(key);
-        let packed = unsafe { host_db_get(tp, tl, kp, kl) };
-        let (ptr, len) = unpack_ptr_len(packed)?;
-        let bytes: &[u8] = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
-        rmp_serde::from_slice(bytes).ok()
+        let packed = with_request(key, |kp, kl| unsafe { host_db_get(tp, tl, kp, kl) })?;
+        let (ptr, len) = match unpack_ptr_len(packed) {
+            Some(pair) => pair,
+            None => return Ok(None),
+        };
+        // Safety: the host wrote the msgpack bytes into guest memory for this call.
+        Ok(Some(unsafe { decode_response(ptr, len)? }))
     }
 
     /// Insert a document into a table. Returns the stored record.
     ///
     /// `doc` must be a `Value::Map`. Traps on error.
-    pub fn db_insert(table: &str, doc: &Value) -> Value {
+    pub fn db_insert(table: &str, doc: &Value) -> Result<Value> {
         let tp = table.as_ptr() as i32;
         let tl = table.len() as i32;
-        let (dp, dl) = encode_leak(doc);
-        let packed = unsafe { host_db_insert(tp, tl, dp, dl) };
+        let packed = with_request(doc, |dp, dl| unsafe { host_db_insert(tp, tl, dp, dl) })?;
         let (ptr, len) = match unpack_ptr_len(packed) {
             Some(pair) => pair,
-            None => return Value::Null,
+            None => return Err(Error::user("db_insert: host returned no record")),
         };
-        let bytes: &[u8] = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
-        rmp_serde::from_slice(bytes).unwrap_or(Value::Null)
+        // Safety: the host wrote the msgpack bytes into guest memory for this call.
+        unsafe { decode_response(ptr, len) }
     }
 
     /// Query records from a table with an optional filter.
@@ -167,20 +168,19 @@ mod imp {
     /// `filter` is `None` for "all records", or a `Value` that the host
     /// interprets as a filter (same key convention as `db_get`).
     /// Returns a `Value::List` of matching records.
-    pub fn db_query(table: &str, filter: Option<&Value>) -> Value {
+    pub fn db_query(table: &str, filter: Option<&Value>) -> Result<Value> {
         let tp = table.as_ptr() as i32;
         let tl = table.len() as i32;
-        let (fp, fl) = match filter {
-            Some(v) => encode_leak(v),
-            None => (core::ptr::null::<u8>() as i32, 0i32),
+        let packed = match filter {
+            Some(v) => with_request(v, |fp, fl| unsafe { host_db_query(tp, tl, fp, fl) })?,
+            None => unsafe { host_db_query(tp, tl, core::ptr::null::<u8>() as i32, 0i32) },
         };
-        let packed = unsafe { host_db_query(tp, tl, fp, fl) };
         let (ptr, len) = match unpack_ptr_len(packed) {
             Some(pair) => pair,
-            None => return Value::List(Vec::new()),
+            None => return Err(Error::user("db_query: host returned no result")),
         };
-        let bytes: &[u8] = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
-        rmp_serde::from_slice(bytes).unwrap_or(Value::List(Vec::new()))
+        // Safety: the host wrote the msgpack bytes into guest memory for this call.
+        unsafe { decode_response(ptr, len) }
     }
 
     /// Send an HTTP request via the host gateway.
@@ -196,15 +196,14 @@ mod imp {
     ///   curl failure, timeout).
     ///
     /// Traps only if egress is not configured at all (config bug).
-    pub fn http_fetch(req: &Value) -> Value {
-        let (rp, rl) = encode_leak(req);
-        let packed = unsafe { host_http_fetch(rp, rl) };
+    pub fn http_fetch(req: &Value) -> Result<Value> {
+        let packed = with_request(req, |rp, rl| unsafe { host_http_fetch(rp, rl) })?;
         let (ptr, len) = match unpack_ptr_len(packed) {
             Some(pair) => pair,
-            None => return Value::Null,
+            None => return Err(Error::user("http_fetch: host returned no result")),
         };
-        let bytes: &[u8] = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
-        rmp_serde::from_slice(bytes).unwrap_or(Value::Null)
+        // Safety: the host wrote the msgpack bytes into guest memory for this call.
+        unsafe { decode_response(ptr, len) }
     }
 
     /// Execute a full msgpack-encoded `BatchRequest`; returns the msgpack
@@ -219,10 +218,11 @@ mod imp {
             Some(pair) => pair,
             None => return Vec::new(),
         };
-        // Safety: the host wrote the response via shamir_alloc; the buffer
-        // remains valid for the rest of this call.
-        let bytes: &[u8] = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
-        bytes.to_vec()
+        // Safety: the host wrote len response bytes at ptr into guest memory
+        // via the guest's shamir_alloc for this call; the guard owns and
+        // frees that allocation after the copy.
+        let guard = unsafe { ResponseBytes::from_raw(ptr, len) };
+        guard.as_slice().to_vec()
     }
 }
 
@@ -230,50 +230,51 @@ mod imp {
 
 #[cfg(not(target_arch = "wasm32"))]
 mod imp {
+    use crate::error::Result;
     use crate::Value;
 
     fn host_only() -> ! {
         panic!("host imports are only available under wasm32")
     }
 
-    pub fn batch_put(_key: &str, _value: Value) {
+    pub fn batch_put(_key: &str, _value: Value) -> Result<()> {
         host_only()
     }
 
-    pub fn batch_get(_key: &str) -> Option<Value> {
+    pub fn batch_get(_key: &str) -> Result<Option<Value>> {
         host_only()
     }
 
-    pub fn global_get(_key: &str) -> Option<Value> {
+    pub fn global_get(_key: &str) -> Result<Option<Value>> {
         host_only()
     }
 
-    pub fn global_set(_key: &str, _value: Value) {
+    pub fn global_set(_key: &str, _value: Value) -> Result<()> {
         host_only()
     }
 
     /// Invoke another registered function by name (host-only).
-    pub fn call(_name: &str, _args: Value) -> Value {
+    pub fn call(_name: &str, _args: Value) -> Result<Value> {
         host_only()
     }
 
     /// Read a record by key (host-only).
-    pub fn db_get(_table: &str, _key: &Value) -> Option<Value> {
+    pub fn db_get(_table: &str, _key: &Value) -> Result<Option<Value>> {
         host_only()
     }
 
     /// Insert a document (host-only).
-    pub fn db_insert(_table: &str, _doc: &Value) -> Value {
+    pub fn db_insert(_table: &str, _doc: &Value) -> Result<Value> {
         host_only()
     }
 
     /// Query records (host-only).
-    pub fn db_query(_table: &str, _filter: Option<&Value>) -> Value {
+    pub fn db_query(_table: &str, _filter: Option<&Value>) -> Result<Value> {
         host_only()
     }
 
     /// HTTP egress: send a request and get a response (host-only).
-    pub fn http_fetch(_req: &Value) -> Value {
+    pub fn http_fetch(_req: &Value) -> Result<Value> {
         host_only()
     }
 

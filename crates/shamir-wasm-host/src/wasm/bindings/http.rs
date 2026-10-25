@@ -17,7 +17,7 @@ use shamir_types::types::value::QueryValue;
 /// ```text
 /// { "method": Str, "url": Str, "headers": Map|List, "body": Bin }
 /// ```
-pub(in crate::wasm) fn decode_http_request(val: &QueryValue) -> Result<HttpRequest, String> {
+pub(crate) fn decode_http_request(val: &QueryValue) -> Result<HttpRequest, String> {
     let map = match val {
         QueryValue::Map(entries) => entries,
         _ => return Err("http_fetch: request must be a Map".to_string()),
@@ -81,17 +81,20 @@ pub(in crate::wasm) fn decode_http_request(val: &QueryValue) -> Result<HttpReque
 ///
 /// Wire shape:
 /// ```text
-/// { "status": Int, "headers": Map, "body": Bin }
+/// { "status": Int, "headers": List<[Str, Str]>, "body": Bin }
 /// ```
-pub(in crate::wasm) fn encode_http_response(resp: HttpResponse) -> QueryValue {
-    let mut header_map = new_map_wc(resp.headers.len());
-    for (k, v) in resp.headers {
-        header_map.insert(k, QueryValue::Str(v));
-    }
+///
+/// Headers use a pair-list so duplicate names (Set-Cookie) survive.
+pub(crate) fn encode_http_response(resp: HttpResponse) -> QueryValue {
+    let header_pairs: Vec<QueryValue> = resp
+        .headers
+        .into_iter()
+        .map(|(k, v)| QueryValue::List(vec![QueryValue::Str(k), QueryValue::Str(v)]))
+        .collect();
 
     let mut map = new_map_wc(3);
     map.insert("status".to_string(), QueryValue::Int(resp.status as i64));
-    map.insert("headers".to_string(), QueryValue::Map(header_map));
+    map.insert("headers".to_string(), QueryValue::List(header_pairs));
     map.insert("body".to_string(), QueryValue::Bin(resp.body));
     QueryValue::Map(map)
 }
