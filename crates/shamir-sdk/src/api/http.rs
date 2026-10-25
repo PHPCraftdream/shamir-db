@@ -10,11 +10,11 @@
 //!
 //! `HttpRequest` serialises as a msgpack `Value::Map`:
 //! ```text
-//! { "method": Str, "url": Str, "headers": Map<Str,Str>, "body": Bin }
+//! { "method": Str, "url": Str, "headers": List<[Str, Str]>, "body": Bin }
 //! ```
 //!
 //! The host returns an envelope `Value::List([Bool, payload])`:
-//! - `[true, { "status": Int, "headers": Map, "body": Bin }]` on success.
+//! - `[true, { "status": Int, "headers": List<[Str,Str]>, "body": Bin }]` on success.
 //! - `[false, "error message"]` on runtime error.
 
 use crate::error::{Error, Result};
@@ -96,16 +96,17 @@ impl HttpRequest {
 
     /// Convert to the wire `Value::Map` shape.
     pub fn to_value(&self) -> Value {
-        let header_entries: Vec<(String, Value)> = self
+        // Pair-list form so duplicate header names (Set-Cookie) survive.
+        let header_pairs: Vec<Value> = self
             .headers
             .iter()
-            .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
+            .map(|(k, v)| Value::List(vec![Value::Str(k.clone()), Value::Str(v.clone())]))
             .collect();
 
         Value::Map(vec![
             ("method".to_string(), Value::Str(self.method.clone())),
             ("url".to_string(), Value::Str(self.url.clone())),
-            ("headers".to_string(), Value::Map(header_entries)),
+            ("headers".to_string(), Value::List(header_pairs)),
             ("body".to_string(), Value::Bin(self.body.clone())),
         ])
     }
@@ -136,7 +137,18 @@ impl HttpResponse {
             })
             .ok_or_else(|| Error::user("http_fetch: missing status field"))?;
 
+        // List-of-pairs is canonical; map form accepted for legacy hosts.
         let headers = match map.iter().find(|(k, _)| k == "headers") {
+            Some((_, Value::List(items))) => items
+                .iter()
+                .filter_map(|item| match item {
+                    Value::List(pair) if pair.len() == 2 => match (&pair[0], &pair[1]) {
+                        (Value::Str(k), Value::Str(v)) => Some((k.clone(), v.clone())),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect(),
             Some((_, Value::Map(entries))) => entries
                 .iter()
                 .filter_map(|(k, v)| match v {

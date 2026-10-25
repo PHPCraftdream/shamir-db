@@ -242,7 +242,7 @@ fn msgpack_roundtrip_matches_host_query_value() {
         .record("missing_contact")
         .stop();
     let guest_value = validation.into_value();
-    let bytes = crate::__rt::encode_value(&guest_value);
+    let bytes = crate::__rt::encode_value(&guest_value).unwrap();
 
     // Decode as the host QueryValue
     let host_value: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
@@ -305,7 +305,7 @@ fn accept_msgpack_roundtrip_matches_host() {
     use shamir_types::types::value::QueryValue;
 
     let guest_value = Validation::accept().into_value();
-    let bytes = crate::__rt::encode_value(&guest_value);
+    let bytes = crate::__rt::encode_value(&guest_value).unwrap();
     let host_value: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
 
     match &host_value {

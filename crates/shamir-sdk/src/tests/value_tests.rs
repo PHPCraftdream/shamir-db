@@ -12,7 +12,7 @@ use shamir_types::types::value::QueryValue;
 /// 2. host bytes → decode as guest `Value` must equal the original guest value.
 /// 3. guest bytes → decode as host `QueryValue` must equal the original host value.
 fn assert_bidirectional(guest: &Value, host: &QueryValue) {
-    let guest_bytes = encode_value(guest);
+    let guest_bytes = encode_value(guest).unwrap();
     let host_bytes = host.to_bytes().unwrap();
 
     assert_eq!(
@@ -155,7 +155,7 @@ fn map_bidirectional() {
     host_map.insert("s".into(), QueryValue::Str("hello".into()));
     let host = QueryValue::Map(host_map);
 
-    let guest_bytes = encode_value(&guest);
+    let guest_bytes = encode_value(&guest).unwrap();
     let host_bytes = host.to_bytes().unwrap();
 
     assert_eq!(
@@ -179,7 +179,7 @@ fn map_empty_bidirectional() {
     let guest = Value::Map(vec![]);
     let host = QueryValue::Map(new_map());
 
-    let guest_bytes = encode_value(&guest);
+    let guest_bytes = encode_value(&guest).unwrap();
     let host_bytes = host.to_bytes().unwrap();
     assert_eq!(guest_bytes, &*host_bytes);
 }
@@ -212,7 +212,7 @@ fn nested_list_in_map_bidirectional() {
     );
     let host = QueryValue::Map(host_map);
 
-    let guest_bytes = encode_value(&guest);
+    let guest_bytes = encode_value(&guest).unwrap();
     let host_bytes = host.to_bytes().unwrap();
     assert_eq!(guest_bytes, &*host_bytes);
 
@@ -233,7 +233,7 @@ fn nested_map_in_list_bidirectional() {
     inner.insert("a".into(), QueryValue::Int(1));
     let host = QueryValue::List(vec![QueryValue::Map(inner), QueryValue::Null]);
 
-    let guest_bytes = encode_value(&guest);
+    let guest_bytes = encode_value(&guest).unwrap();
     let host_bytes = host.to_bytes().unwrap();
     assert_eq!(guest_bytes, &*host_bytes);
 
@@ -257,7 +257,7 @@ fn deeply_nested_bidirectional() {
     outer.insert("a".into(), QueryValue::List(vec![QueryValue::Map(inner)]));
     let host = QueryValue::Map(outer);
 
-    let guest_bytes = encode_value(&guest);
+    let guest_bytes = encode_value(&guest).unwrap();
     let host_bytes = host.to_bytes().unwrap();
     assert_eq!(guest_bytes, &*host_bytes);
 
@@ -405,13 +405,13 @@ fn decode_params_extracts_map() {
     host_map.insert("msg".into(), QueryValue::Str("hi".into()));
     let encoded = QueryValue::Map(host_map).to_bytes().unwrap();
 
-    let params = decode_params(&encoded);
+    let params = decode_params(&encoded).unwrap();
     assert_eq!(params.i64("n").unwrap(), 21);
     assert_eq!(params.str("msg").unwrap(), "hi");
 }
 
 #[test]
 fn block_on_resolves_immediately() {
-    let result = block_on(async { 42 });
+    let result = block_on(async { 42 }).unwrap();
     assert_eq!(result, 42);
 }

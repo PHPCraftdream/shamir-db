@@ -75,8 +75,9 @@ impl Table {
     /// `Value::Map(vec![("id".into(), Value::Int(1))])`.
     /// A scalar is treated as a filter on `"id"`.
     ///
-    /// Returns `Ok(None)` if no record matches.
-    pub fn get(&self, key: Value) -> Option<Value> {
+    /// Returns `Ok(None)` if no record matches. A codec failure decoding the
+    /// record carries its cause in the returned `Err`.
+    pub fn get(&self, key: Value) -> crate::Result<Option<Value>> {
         host_imports::db_get(&self.name, &key)
     }
 
@@ -84,8 +85,8 @@ impl Table {
     ///
     /// `doc` must be a `Value::Map`. Returns the stored record.
     pub fn insert(&self, doc: Value) -> Result<Value> {
-        let result = host_imports::db_insert(&self.name, &doc);
-        match result {
+        let stored = host_imports::db_insert(&self.name, &doc)?;
+        match stored {
             Value::Null => Err(Error::user("db_insert returned null")),
             other => Ok(other),
         }
@@ -97,8 +98,8 @@ impl Table {
     /// key convention as `get`.
     pub fn query(&self, filter: Option<Value>) -> Result<Vec<Value>> {
         let result = match filter {
-            Some(ref f) => host_imports::db_query(&self.name, Some(f)),
-            None => host_imports::db_query(&self.name, None),
+            Some(ref f) => host_imports::db_query(&self.name, Some(f))?,
+            None => host_imports::db_query(&self.name, None)?,
         };
         match result {
             Value::List(items) => Ok(items),

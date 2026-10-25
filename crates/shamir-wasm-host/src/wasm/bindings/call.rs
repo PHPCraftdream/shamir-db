@@ -15,12 +15,18 @@ use std::sync::atomic::Ordering;
 // 4. .await the registry.invoke call (may take arbitrary time).
 // 5. Re-acquire Caller (mutable), get memory + shamir_alloc, write result.
 
-/// Host implementation of `call(name_ptr, name_len, params_ptr, params_len) -> i64`.
+/// Decodes guest call parameters: msgpack `QueryValue` map → `Params`.
 ///
-/// Invokes another registered function by name. The callee shares the same
-/// batch context and globals. On error (depth exceeded, function not found,
-/// callee trapped), the host import traps — propagating as the caller's
-/// `FunctionError::Compute`.
+/// Map keys are preserved verbatim (RV-WASM-HOST-B1A78B5B); the legacy
+/// typed-prefix interpretation is confined to `LegacyPrefixed` in
+/// `shamir-types` and never runs on guest input.
+pub(crate) fn decode_guest_params(bytes: &[u8]) -> Result<Params, wasmtime::Error> {
+    let params_value = QueryValue::from_bytes(bytes)
+        .map_err(|e| wasmtime::Error::msg(format!("params decode error: {e}")))?;
+    Params::from_value(params_value)
+        .map_err(|e| wasmtime::Error::msg(format!("params not a map: {e}")))
+}
+
 /// Host implementation of `call(name_ptr, name_len, params_ptr, params_len) -> i64`.
 ///
 /// Invokes another registered function by name. The callee shares the same
@@ -123,10 +129,11 @@ pub(in crate::wasm) fn host_call(
         let name = String::from_utf8(name_bytes)
             .map_err(|_| wasmtime::Error::msg("call: name is not valid UTF-8"))?;
 
-        let params_value = QueryValue::from_bytes(&params_bytes)
+        // RV-WASM-HOST-B1A78B5B: literal guest map keys are preserved here —
+        // the legacy typed-prefix interpretation lives only in
+        // `shamir_types::types::value::LegacyPrefixed`.
+        let params = decode_guest_params(&params_bytes)
             .map_err(|e| wasmtime::Error::msg(format!("call: params decode error: {e}")))?;
-        let params = Params::from_value(params_value)
-            .map_err(|e| wasmtime::Error::msg(format!("call: params not a map: {e}")))?;
 
         // ── Depth check ──
         if next_depth > depth_limit {

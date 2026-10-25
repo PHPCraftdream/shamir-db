@@ -1,0 +1,75 @@
+//! Regression tests for RV-WASM-HOST-4C69CFE0: duplicate HTTP headers
+//! must survive the wire codec (pair-list form, not map).
+
+use crate::api::http::HttpRequest;
+use crate::Value;
+
+#[test]
+fn rv_wasm_host_4c69cfe0_request_duplicate_headers_survive_wire() {
+    let req = HttpRequest::get("https://example.com/")
+        .header("Set-Cookie", "a=1")
+        .header("Set-Cookie", "b=2");
+
+    let val = req.to_value();
+    let entries = match &val {
+        Value::Map(entries) => entries,
+        other => panic!("expected Map, got {other:?}"),
+    };
+    let (_, headers) = entries
+        .iter()
+        .find(|(k, _)| k == "headers")
+        .expect("headers field");
+
+    let pairs = match headers {
+        Value::List(items) => items,
+        other => panic!("headers must be a List, got {other:?}"),
+    };
+    let cookies: Vec<&str> = pairs
+        .iter()
+        .filter_map(|item| match item {
+            Value::List(pair) if pair.len() == 2 => match (&pair[0], &pair[1]) {
+                (Value::Str(k), Value::Str(v)) if k == "Set-Cookie" => Some(v.as_str()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cookies, vec!["a=1", "b=2"]);
+}
+
+#[test]
+fn rv_wasm_host_4c69cfe0_response_duplicate_headers_round_trip() {
+    // Host-style wire value: pair-list headers with two Set-Cookie entries.
+    let wire = Value::Map(vec![
+        ("status".to_string(), Value::Int(200)),
+        (
+            "headers".to_string(),
+            Value::List(vec![
+                Value::List(vec![
+                    Value::Str("Set-Cookie".to_string()),
+                    Value::Str("a=1".to_string()),
+                ]),
+                Value::List(vec![
+                    Value::Str("Set-Cookie".to_string()),
+                    Value::Str("b=2".to_string()),
+                ]),
+            ]),
+        ),
+        ("body".to_string(), Value::Bin(Vec::new())),
+    ]);
+
+    let resp = crate::api::http::HttpResponse::from_value(&wire).expect("decode");
+    let cookies: Vec<(String, String)> = resp
+        .headers()
+        .iter()
+        .filter(|(k, _)| k == "Set-Cookie")
+        .cloned()
+        .collect();
+    assert_eq!(
+        cookies,
+        vec![
+            ("Set-Cookie".to_string(), "a=1".to_string()),
+            ("Set-Cookie".to_string(), "b=2".to_string()),
+        ]
+    );
+}

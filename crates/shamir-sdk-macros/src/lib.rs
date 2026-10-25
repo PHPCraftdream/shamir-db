@@ -7,7 +7,10 @@ extern crate proc_macro;
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, FnArg, ItemFn, PatType, ReturnType, Type};
+use syn::{parse_macro_input, FnArg, ItemFn, PatType, PathArguments, ReturnType, Type};
+
+#[cfg(test)]
+mod tests;
 
 /// Attribute macro that turns an async validator function into a WASM guest
 /// module.
@@ -43,7 +46,11 @@ use syn::{parse_macro_input, FnArg, ItemFn, PatType, ReturnType, Type};
 #[proc_macro_attribute]
 pub fn validator(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let fn_item = parse_macro_input!(item as ItemFn);
+    let expanded = expand_validator(fn_item);
+    TokenStream::from(expanded)
+}
 
+fn expand_validator(fn_item: ItemFn) -> proc_macro2::TokenStream {
     let fn_name = &fn_item.sig.ident;
     let inner_name = syn::Ident::new(&format!("__shamir_impl_{}", fn_name), fn_name.span());
 
@@ -64,7 +71,7 @@ pub fn validator(_attr: TokenStream, item: TokenStream) -> TokenStream {
         ReturnType::Type(_, ty) => {
             let type_str = quote!(#ty).to_string().replace(' ', "");
             assert!(
-                type_str == "Validation",
+                is_validation_return(ty),
                 "#[validator] must return Validation, got: {type_str}"
             );
         }
@@ -91,9 +98,12 @@ pub fn validator(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let expanded = quote! {
         // The user's original function, renamed to a private inner.
         #[allow(non_snake_case)]
+        // The inner fn's fixed SDK-typed signature may not mention the
+        // caller's lifetimes; they are used only in the copied body.
+        #[allow(clippy::extra_unused_lifetimes)]
         async fn #inner_name #impl_generics(
             #arg0: shamir_sdk::Value,
-            #arg1: Option<shamir_sdk::Value>,
+            #arg1: ::core::option::Option<shamir_sdk::Value>,
             #arg2: shamir_sdk::Ctx,
         ) -> shamir_sdk::Validation
         #where_clause
@@ -107,9 +117,9 @@ pub fn validator(_attr: TokenStream, item: TokenStream) -> TokenStream {
         /// short-lived.
         #[no_mangle]
         pub extern "C" fn shamir_alloc(len: i32) -> i32 {
-            let v: Vec<u8> = vec![0u8; len as usize];
+            let v: ::std::vec::Vec<u8> = ::std::vec![0u8; len as usize];
             let ptr = v.as_ptr();
-            core::mem::forget(v);
+            ::core::mem::forget(v);
             ptr as i32
         }
 
@@ -120,36 +130,45 @@ pub fn validator(_attr: TokenStream, item: TokenStream) -> TokenStream {
         pub extern "C" fn shamir_call(ptr: i32, len: i32) -> i64 {
             // Safety: the host wrote `len` msgpack bytes at `ptr` via shamir_alloc.
             let bytes: &[u8] = unsafe {
-                core::slice::from_raw_parts(ptr as *const u8, len as usize)
+                ::core::slice::from_raw_parts(ptr as *const u8, len as usize)
             };
 
-            let params = shamir_sdk::__rt::decode_params(bytes);
+            let params = match shamir_sdk::__rt::decode_params(bytes) {
+                ::core::result::Result::Ok(p) => p,
+                ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
+            };
 
-            // Extract `record` (required).
+            // Extract `record` (required; the host always sends it).
             let record: shamir_sdk::Value = match params.get("record") {
-                Ok(v) => v.clone(),
-                Err(_) => shamir_sdk::Value::Null,
+                ::core::result::Result::Ok(v) => v.clone(),
+                ::core::result::Result::Err(_) => shamir_sdk::__rt::trap("validator: missing `record` parameter"),
             };
 
             // Extract `old_record` (optional: absent or null → None).
-            let old_record: Option<shamir_sdk::Value> = match params.get("old_record") {
-                Ok(shamir_sdk::Value::Null) => None,
-                Ok(v) => Some(v.clone()),
-                Err(_) => None,
+            let old_record: ::core::option::Option<shamir_sdk::Value> = match params.get("old_record") {
+                ::core::result::Result::Ok(shamir_sdk::Value::Null) => ::core::option::Option::None,
+                ::core::result::Result::Ok(v) => ::core::option::Option::Some(v.clone()),
+                ::core::result::Result::Err(_) => ::core::option::Option::None,
             };
 
             let ctx = shamir_sdk::Ctx::new();
 
             let validation: shamir_sdk::Validation =
-                shamir_sdk::__rt::block_on(#inner_name(record, old_record, ctx));
+                match shamir_sdk::__rt::block_on(#inner_name(record, old_record, ctx)) {
+                    ::core::result::Result::Ok(validation) => validation,
+                    ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
+                };
 
             let value = validation.into_value();
-            let encoded = shamir_sdk::__rt::encode_value(&value);
+            let encoded = match shamir_sdk::__rt::encode_value(&value) {
+                ::core::result::Result::Ok(bytes) => bytes,
+                ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
+            };
             shamir_sdk::__rt::leak_result(encoded)
         }
     };
 
-    TokenStream::from(expanded)
+    expanded
 }
 
 /// Attribute macro that turns an async function into a WASM guest module.
@@ -175,11 +194,13 @@ pub fn validator(_attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn function(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let fn_item = parse_macro_input!(item as ItemFn);
+    let expanded = expand_function(fn_item);
+    TokenStream::from(expanded)
+}
 
+fn expand_function(fn_item: ItemFn) -> proc_macro2::TokenStream {
     let fn_name = &fn_item.sig.ident;
     let inner_name = syn::Ident::new(&format!("__shamir_impl_{}", fn_name), fn_name.span());
-
-    // Validate signature: async fn name(ctx: Ctx, batch: Batch, params: Params) -> Result<Value>
     assert!(
         fn_item.sig.asyncness.is_some(),
         "#[function] requires an async function"
@@ -194,7 +215,7 @@ pub fn function(_attr: TokenStream, item: TokenStream) -> TokenStream {
         ReturnType::Type(_, ty) => {
             let type_str = quote!(#ty).to_string().replace(' ', "");
             assert!(
-                type_str == "Result<Value>" || type_str == "core::result::Result<Value,Error>",
+                is_result_value_return(ty),
                 "#[function] must return Result<Value>, got: {type_str}"
             );
         }
@@ -221,6 +242,9 @@ pub fn function(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let expanded = quote! {
         // The user's original function, renamed to a private inner.
         #[allow(non_snake_case)]
+        // The inner fn's fixed SDK-typed signature may not mention the
+        // caller's lifetimes; they are used only in the copied body.
+        #[allow(clippy::extra_unused_lifetimes)]
         async fn #inner_name #impl_generics(
             #arg0: shamir_sdk::Ctx,
             #arg1: shamir_sdk::Batch,
@@ -237,9 +261,9 @@ pub fn function(_attr: TokenStream, item: TokenStream) -> TokenStream {
         /// short-lived.
         #[no_mangle]
         pub extern "C" fn shamir_alloc(len: i32) -> i32 {
-            let v: Vec<u8> = vec![0u8; len as usize];
+            let v: ::std::vec::Vec<u8> = ::std::vec![0u8; len as usize];
             let ptr = v.as_ptr();
-            core::mem::forget(v);
+            ::core::mem::forget(v);
             ptr as i32
         }
 
@@ -253,29 +277,38 @@ pub fn function(_attr: TokenStream, item: TokenStream) -> TokenStream {
         pub extern "C" fn shamir_call(ptr: i32, len: i32) -> i64 {
             // Safety: the host wrote `len` msgpack bytes at `ptr` via shamir_alloc.
             let bytes: &[u8] = unsafe {
-                core::slice::from_raw_parts(ptr as *const u8, len as usize)
+                ::core::slice::from_raw_parts(ptr as *const u8, len as usize)
             };
 
-            let params = shamir_sdk::__rt::decode_params(bytes);
+            let params = match shamir_sdk::__rt::decode_params(bytes) {
+                ::core::result::Result::Ok(p) => p,
+                ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
+            };
             let ctx = shamir_sdk::Ctx::new();
             let batch = shamir_sdk::Batch::new();
 
-            let result: shamir_sdk::Result<shamir_sdk::Value> =
+            let outcome: shamir_sdk::Result<shamir_sdk::Result<shamir_sdk::Value>> =
                 shamir_sdk::__rt::block_on(#inner_name(ctx, batch, params));
 
-            match result {
-                Ok(value) => {
-                    let encoded = shamir_sdk::__rt::encode_value(&value);
-                    shamir_sdk::__rt::leak_result(encoded)
-                }
-                Err(e) => {
-                    shamir_sdk::__rt::trap(&e.to_string())
-                }
+            match outcome {
+                ::core::result::Result::Ok(result) => match result {
+                    ::core::result::Result::Ok(value) => {
+                        let encoded = match shamir_sdk::__rt::encode_value(&value) {
+                            ::core::result::Result::Ok(bytes) => bytes,
+                            ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
+                        };
+                        shamir_sdk::__rt::leak_result(encoded)
+                    }
+                    ::core::result::Result::Err(e) => {
+                        shamir_sdk::__rt::trap(&e.to_string())
+                    }
+                },
+                ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
             }
         }
     };
 
-    TokenStream::from(expanded)
+    expanded
 }
 
 /// Attribute macro for a **procedure** — a guest function with database access.
@@ -353,6 +386,9 @@ pub fn procedure(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let expanded = quote! {
         // The user's original function, renamed to a private inner.
         #[allow(non_snake_case)]
+        // The inner fn's fixed SDK-typed signature may not mention the
+        // caller's lifetimes; they are used only in the copied body.
+        #[allow(clippy::extra_unused_lifetimes)]
         async fn #inner_name #impl_generics(
             #arg0: shamir_sdk::Ctx,
             #arg1: shamir_sdk::Params,
@@ -368,9 +404,9 @@ pub fn procedure(_attr: TokenStream, item: TokenStream) -> TokenStream {
         /// short-lived.
         #[no_mangle]
         pub extern "C" fn shamir_alloc(len: i32) -> i32 {
-            let v: Vec<u8> = vec![0u8; len as usize];
+            let v: ::std::vec::Vec<u8> = ::std::vec![0u8; len as usize];
             let ptr = v.as_ptr();
-            core::mem::forget(v);
+            ::core::mem::forget(v);
             ptr as i32
         }
 
@@ -381,23 +417,32 @@ pub fn procedure(_attr: TokenStream, item: TokenStream) -> TokenStream {
         pub extern "C" fn shamir_call(ptr: i32, len: i32) -> i64 {
             // Safety: the host wrote `len` msgpack bytes at `ptr` via shamir_alloc.
             let bytes: &[u8] = unsafe {
-                core::slice::from_raw_parts(ptr as *const u8, len as usize)
+                ::core::slice::from_raw_parts(ptr as *const u8, len as usize)
             };
 
-            let params = shamir_sdk::__rt::decode_params(bytes);
+            let params = match shamir_sdk::__rt::decode_params(bytes) {
+                ::core::result::Result::Ok(p) => p,
+                ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
+            };
             let ctx = shamir_sdk::Ctx::new();
 
-            let result: shamir_sdk::Result<shamir_sdk::Value> =
+            let outcome: shamir_sdk::Result<shamir_sdk::Result<shamir_sdk::Value>> =
                 shamir_sdk::__rt::block_on(#inner_name(ctx, params));
 
-            match result {
-                Ok(value) => {
-                    let encoded = shamir_sdk::__rt::encode_value(&value);
-                    shamir_sdk::__rt::leak_result(encoded)
-                }
-                Err(e) => {
-                    shamir_sdk::__rt::trap(&e.to_string())
-                }
+            match outcome {
+                ::core::result::Result::Ok(result) => match result {
+                    ::core::result::Result::Ok(value) => {
+                        let encoded = match shamir_sdk::__rt::encode_value(&value) {
+                            ::core::result::Result::Ok(bytes) => bytes,
+                            ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
+                        };
+                        shamir_sdk::__rt::leak_result(encoded)
+                    }
+                    ::core::result::Result::Err(e) => {
+                        shamir_sdk::__rt::trap(&e.to_string())
+                    }
+                },
+                ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
             }
         }
     };
@@ -405,18 +450,52 @@ pub fn procedure(_attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// Returns `true` if the return type matches `Result<Value>` in any
-/// qualification form (`Result<Value>`, `shamir_sdk::Result<shamir_sdk::Value>`,
-/// `core::result::Result<Value, Error>`, etc.).
+/// Returns `true` if the return type structurally matches `Result<Value>` in
+/// any qualification form accepted by the SDK: bare `Result<Value>` (via
+/// import), `shamir_sdk::Result<shamir_sdk::Value>`, `crate::Result<...>`,
+/// `::std::result::Result<Value, Error>`, `core::result::Result<...>`, and
+/// the rooted spellings of each. Any leading path prefix is accepted — the
+/// compiler is the real type guard; this only produces a clear message.
 fn is_result_value_return(ty: &Type) -> bool {
-    let s = quote!(#ty).to_string().replace(' ', "");
-    // Strip any `shamir_sdk::` or `crate::` prefixes from the string so that
-    // `shamir_sdk::Result<shamir_sdk::Value>` normalises to `Result<Value>`.
-    let normalised = s
-        .replace("shamir_sdk::", "")
-        .replace("crate::", "")
-        .replace("core::result::", "");
-    normalised == "Result<Value>" || normalised == "Result<Value,Error>"
+    let Type::Path(tp) = ty else { return false };
+    let Some(seg) = tp.path.segments.last() else {
+        return false;
+    };
+    if seg.ident != "Result" {
+        return false;
+    }
+    let PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return false;
+    };
+    let mut it = args.args.iter();
+    let ok_ty = it.next().is_some_and(ga_ends_with("Value"));
+    match args.args.len() {
+        // `Result<Value>` (SDK alias) or `Result<Value, Error>`.
+        1 => ok_ty,
+        2 => ok_ty && it.next().is_some_and(ga_ends_with("Error")),
+        _ => false,
+    }
+}
+
+/// Returns `true` if the return type structurally matches `Validation` in any
+/// qualification form (`Validation`, `shamir_sdk::Validation`,
+/// `::shamir_sdk::Validation`, `crate::Validation`).
+fn is_validation_return(ty: &Type) -> bool {
+    let Type::Path(tp) = ty else { return false };
+    let Some(seg) = tp.path.segments.last() else {
+        return false;
+    };
+    seg.ident == "Validation" && matches!(&seg.arguments, PathArguments::None)
+}
+
+/// Closure checking that a generic argument's final path segment is `ident`.
+fn ga_ends_with(ident: &'static str) -> impl Fn(&syn::GenericArgument) -> bool {
+    move |ga: &syn::GenericArgument| matches!(ga, syn::GenericArgument::Type(ty) if last_ident_is_inner(ty, ident))
+}
+
+/// True if `ty`'s final path segment is `ident`.
+fn last_ident_is_inner(ty: &Type, ident: &str) -> bool {
+    matches!(ty, Type::Path(tp) if tp.path.segments.last().is_some_and(|s| s.ident == ident))
 }
 
 /// Returns `true` if the type token-stream contains `Ctx` anywhere.
@@ -521,6 +600,9 @@ pub fn scalar(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let expanded = quote! {
         // The user's original function, renamed to a private inner.
         #[allow(non_snake_case)]
+        // The inner fn's fixed SDK-typed signature may not mention the
+        // caller's lifetimes; they are used only in the copied body.
+        #[allow(clippy::extra_unused_lifetimes)]
         async fn #inner_name #impl_generics(
             #arg0: shamir_sdk::Params,
         ) -> shamir_sdk::Result<shamir_sdk::Value>
@@ -535,9 +617,9 @@ pub fn scalar(_attr: TokenStream, item: TokenStream) -> TokenStream {
         /// short-lived.
         #[no_mangle]
         pub extern "C" fn shamir_alloc(len: i32) -> i32 {
-            let v: Vec<u8> = vec![0u8; len as usize];
+            let v: ::std::vec::Vec<u8> = ::std::vec![0u8; len as usize];
             let ptr = v.as_ptr();
-            core::mem::forget(v);
+            ::core::mem::forget(v);
             ptr as i32
         }
 
@@ -547,22 +629,31 @@ pub fn scalar(_attr: TokenStream, item: TokenStream) -> TokenStream {
         pub extern "C" fn shamir_call(ptr: i32, len: i32) -> i64 {
             // Safety: the host wrote `len` msgpack bytes at `ptr` via shamir_alloc.
             let bytes: &[u8] = unsafe {
-                core::slice::from_raw_parts(ptr as *const u8, len as usize)
+                ::core::slice::from_raw_parts(ptr as *const u8, len as usize)
             };
 
-            let params = shamir_sdk::__rt::decode_params(bytes);
+            let params = match shamir_sdk::__rt::decode_params(bytes) {
+                ::core::result::Result::Ok(p) => p,
+                ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
+            };
 
-            let result: shamir_sdk::Result<shamir_sdk::Value> =
+            let outcome: shamir_sdk::Result<shamir_sdk::Result<shamir_sdk::Value>> =
                 shamir_sdk::__rt::block_on(#inner_name(params));
 
-            match result {
-                Ok(value) => {
-                    let encoded = shamir_sdk::__rt::encode_value(&value);
-                    shamir_sdk::__rt::leak_result(encoded)
-                }
-                Err(e) => {
-                    shamir_sdk::__rt::trap(&e.to_string())
-                }
+            match outcome {
+                ::core::result::Result::Ok(result) => match result {
+                    ::core::result::Result::Ok(value) => {
+                        let encoded = match shamir_sdk::__rt::encode_value(&value) {
+                            ::core::result::Result::Ok(bytes) => bytes,
+                            ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
+                        };
+                        shamir_sdk::__rt::leak_result(encoded)
+                    }
+                    ::core::result::Result::Err(e) => {
+                        shamir_sdk::__rt::trap(&e.to_string())
+                    }
+                },
+                ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
             }
         }
     };

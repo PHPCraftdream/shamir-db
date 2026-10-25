@@ -3,7 +3,7 @@
 mod tests {
     use crate::core::interner::InternerKey;
     use crate::types::common::{new_map, new_set};
-    use crate::types::value::{InnerValue, UserValue};
+    use crate::types::value::{InnerValue, LegacyPrefixed, UserValue};
     use bytes::Bytes;
     use num_bigint::BigInt;
     use rust_decimal::Decimal;
@@ -688,21 +688,162 @@ mod tests {
 
     #[test]
     fn fg1_visit_map_u_prefix_promotes_overflow() {
-        // Fix site 2: the `Some("u")` prefixed-key branch in `visit_map`
-        // (Key=String test-fixture path) must apply the same contract.
-        // Encode a map {"u:n": <u64>} via rmp_serde over a plain Rust struct
-        // the prefixed-key parser recognises. We build the raw msgpack map
-        // { "u:n": uint64(u64::MAX) }.
+        // Fix site 2: the `Some("u")` prefixed-key branch in the LEGACY
+        // visitor must apply the same contract. This is the explicit legacy
+        // boundary (`LegacyPrefixed`), not the default `from_bytes` decode,
+        // which now preserves keys verbatim (RV-WASM-HOST-B1A78B5B).
+        // We build the raw msgpack map { "u:n": uint64(u64::MAX) }.
         let mut payload = vec![0x81]; // fixmap, 1 entry
         payload.push(0xa3); // fixstr len 3 ("u:n")
         payload.extend_from_slice(b"u:n");
         payload.push(0xcf); // uint64
         payload.extend_from_slice(&u64::MAX.to_be_bytes());
-        let decoded = UserValue::from_bytes(&payload).unwrap();
+        let decoded = LegacyPrefixed::from_bytes(&payload).unwrap();
         match decoded {
             UserValue::Map(m) => {
                 let v = m.get("n").expect("field n present");
                 assert_eq!(v, &UserValue::Big(BigInt::from(u64::MAX)));
+            }
+            other => panic!("expected Map, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rv_wasm_host_b1a78b5b_literal_keys_survive_default_decode() {
+        // RV-WASM-HOST-B1A78B5B: the DEFAULT String-key QueryValue decode
+        // must preserve map keys verbatim — a typed prefix is a literal
+        // field name, so `i:age` and `age` coexist and a `i:age` key may
+        // hold ANY value (no value-type rejection). On the old code the
+        // `i:` entries were interpreted (stripped to `age`, colliding, and
+        // the string-valued `i:age` was rejected with a type error).
+        let mut m = new_map();
+        m.insert("i:age".to_string(), UserValue::Int(7));
+        m.insert("age".to_string(), UserValue::Int(8));
+        let encoded = UserValue::Map(m).to_bytes().unwrap();
+
+        let decoded = UserValue::from_bytes(&encoded).unwrap();
+        match decoded {
+            UserValue::Map(m) => {
+                assert_eq!(m.get("i:age"), Some(&UserValue::Int(7)));
+                assert_eq!(m.get("age"), Some(&UserValue::Int(8)));
+                assert_eq!(m.len(), 2);
+            }
+            other => panic!("expected Map, got {other:?}"),
+        }
+
+        // Noninteger value under a prefixed key decodes fine now.
+        let mut m = new_map();
+        m.insert("i:age".to_string(), UserValue::Str("not an int".into()));
+        let encoded = UserValue::Map(m).to_bytes().unwrap();
+        let decoded = UserValue::from_bytes(&encoded).unwrap();
+        match decoded {
+            UserValue::Map(m) => {
+                assert_eq!(m.get("i:age"), Some(&UserValue::Str("not an int".into())));
+            }
+            other => panic!("expected Map, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rv_wasm_host_b1a78b5b_legacy_prefix_recurses_into_nested_maps() {
+        // RV-WASM-HOST-B1A78B5B follow-up: the legacy typed-prefix
+        // interpretation must apply at every nesting depth on the
+        // `LegacyPrefixed` boundary. Raw msgpack:
+        // { "outer": { "i:n": 7 }, "plain": 1 }
+        let mut payload = vec![0x82]; // fixmap, 2 entries
+        payload.push(0xa5); // fixstr len 5 ("outer")
+        payload.extend_from_slice(b"outer");
+        payload.push(0x81); // inner fixmap, 1 entry
+        payload.push(0xa3); // fixstr len 3 ("i:n")
+        payload.extend_from_slice(b"i:n");
+        payload.push(0x07); // positive fixint 7
+        payload.push(0xa5); // fixstr len 5 ("plain")
+        payload.extend_from_slice(b"plain");
+        payload.push(0x01); // positive fixint 1
+
+        // Legacy boundary: nested "i:n" is interpreted -> key "n", Int(7).
+        let decoded = LegacyPrefixed::from_bytes(&payload).unwrap();
+        match decoded {
+            UserValue::Map(m) => {
+                let outer = m.get("outer").expect("outer present");
+                match outer {
+                    UserValue::Map(inner) => {
+                        assert_eq!(inner.get("n"), Some(&UserValue::Int(7)));
+                        assert!(!inner.contains_key("i:n"), "prefix must be stripped");
+                    }
+                    other => panic!("expected nested Map, got {other:?}"),
+                }
+                assert_eq!(m.get("plain"), Some(&UserValue::Int(1)));
+            }
+            other => panic!("expected Map, got {other:?}"),
+        }
+
+        // Default decode on the same bytes keeps "i:n" literal (nested too).
+        let decoded = UserValue::from_bytes(&payload).unwrap();
+        match decoded {
+            UserValue::Map(m) => {
+                let outer = m.get("outer").expect("outer present");
+                match outer {
+                    UserValue::Map(inner) => {
+                        assert_eq!(inner.get("i:n"), Some(&UserValue::Int(7)));
+                        assert!(!inner.contains_key("n"), "default path keeps literal key");
+                    }
+                    other => panic!("expected nested Map, got {other:?}"),
+                }
+                assert_eq!(m.get("plain"), Some(&UserValue::Int(1)));
+            }
+            other => panic!("expected Map, got {other:?}"),
+        }
+
+        // Lists must recurse too: { "outer": [ { "i:n": 7 } ] }.
+        // Raw msgpack: fixmap 1 / "outer" / fixarray 1 / inner fixmap 1 /
+        // "i:n" / 7.
+        let mut payload = vec![0x81]; // fixmap, 1 entry
+        payload.push(0xa5); // fixstr len 5 ("outer")
+        payload.extend_from_slice(b"outer");
+        payload.push(0x91); // fixarray, 1 element
+        payload.push(0x81); // inner fixmap, 1 entry
+        payload.push(0xa3); // fixstr len 3 ("i:n")
+        payload.extend_from_slice(b"i:n");
+        payload.push(0x07); // positive fixint 7
+
+        // Legacy boundary: list elements keep the prefix interpretation.
+        let decoded = LegacyPrefixed::from_bytes(&payload).unwrap();
+        match decoded {
+            UserValue::Map(m) => {
+                let outer = m.get("outer").expect("outer present");
+                match outer {
+                    UserValue::List(items) => {
+                        assert_eq!(items.len(), 1);
+                        match &items[0] {
+                            UserValue::Map(inner) => {
+                                assert_eq!(inner.get("n"), Some(&UserValue::Int(7)));
+                                assert!(!inner.contains_key("i:n"), "prefix must be stripped");
+                            }
+                            other => panic!("expected Map inside list, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected List, got {other:?}"),
+                }
+            }
+            other => panic!("expected Map, got {other:?}"),
+        }
+
+        // Default decode on the same bytes keeps "i:n" literal (lists too).
+        let decoded = UserValue::from_bytes(&payload).unwrap();
+        match decoded {
+            UserValue::Map(m) => {
+                let outer = m.get("outer").expect("outer present");
+                match outer {
+                    UserValue::List(items) => match &items[0] {
+                        UserValue::Map(inner) => {
+                            assert_eq!(inner.get("i:n"), Some(&UserValue::Int(7)));
+                            assert!(!inner.contains_key("n"), "default path keeps literal key");
+                        }
+                        other => panic!("expected Map inside list, got {other:?}"),
+                    },
+                    other => panic!("expected List, got {other:?}"),
+                }
             }
             other => panic!("expected Map, got {other:?}"),
         }

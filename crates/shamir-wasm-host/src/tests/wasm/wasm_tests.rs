@@ -2,6 +2,7 @@ use crate::{
     FnBatch, FnCtx, FunctionError, FunctionRegistry, Params, ShamirFunction, WasmEngine,
     WasmFunction, WasmLimits,
 };
+use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
 
@@ -336,4 +337,19 @@ async fn wasm_aggregate_fuel_default_single_call_still_succeeds() {
         .unwrap();
 
     assert_eq!(result, expected);
+}
+
+#[test]
+fn rv_wasm_host_b1a78b5b_guest_params_colon_key_round_trips() {
+    // RV-WASM-HOST-B1A78B5B: the `call` host import's guest-parameter decode
+    // (`decode_guest_params`, call.rs) must preserve literal map keys. On the
+    // old code the String-key QueryValue visitor interpreted typed prefixes,
+    // so a guest map { "i:count": 7 } decoded as { "count": 7 }.
+    let mut m = new_map();
+    m.insert("i:count".to_string(), QueryValue::Int(7));
+    let encoded = QueryValue::Map(m).to_bytes().unwrap();
+
+    let params = crate::wasm::bindings::decode_guest_params(&encoded).unwrap();
+    let got = params.get("i:count").unwrap();
+    assert_eq!(got, &QueryValue::Int(7));
 }
