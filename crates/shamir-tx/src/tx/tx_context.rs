@@ -438,6 +438,17 @@ pub struct TxContext {
     /// Interior-mutable (`scc::HashMap`) because `promote_vectors` holds
     /// `&TxContext`; empty for txs that never touch vector indexes.
     pub vector_delta_acks: scc::HashMap<u64, Vec<VectorDeltaAck>, THasher>,
+
+    /// P0 index promote order (stage L3b): per-table promote-turnstile
+    /// tickets, one per successfully appended delta chunk (per backend).
+    /// Created by the Phase 5d DELTA half, awaited + consumed by the GRAPH
+    /// half (`promote_vectors`): each ticket waits for its chunk's turn,
+    /// applies the batch ordered, and — critically — RELEASES the turn on
+    /// `Drop`, covering failed promotes and cancelled commit futures.
+    /// Interior-mutable (`scc::HashMap`) because `promote_vectors` holds
+    /// `&TxContext`; empty for txs that never touch vector indexes.
+    pub vector_promote_tickets:
+        scc::HashMap<u64, Vec<crate::promote_ticket::VectorPromoteTicket>, THasher>,
 }
 
 impl TxContext {
@@ -482,6 +493,7 @@ impl TxContext {
             locked_keys: scc::HashMap::with_hasher(THasher::default()),
             released_unique_cache: TFxMap::default(),
             vector_delta_acks: scc::HashMap::with_hasher(THasher::default()),
+            vector_promote_tickets: scc::HashMap::with_hasher(THasher::default()),
         }
     }
 

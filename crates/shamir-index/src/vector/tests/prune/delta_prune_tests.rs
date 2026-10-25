@@ -25,7 +25,7 @@ use shamir_types::types::record_id::RecordId;
 use smallvec::SmallVec;
 use std::sync::Arc;
 
-const DIM: u32 = 16;
+pub(crate) const DIM: u32 = 16;
 
 fn intern(i: &Interner, s: &str) -> u64 {
     match i.touch_ind(s).unwrap() {
@@ -33,7 +33,7 @@ fn intern(i: &Interner, s: &str) -> u64 {
     }
 }
 
-fn lcg_vec(dim: usize, seed: u64) -> Vec<f32> {
+pub(crate) fn lcg_vec(dim: usize, seed: u64) -> Vec<f32> {
     let mut v = Vec::with_capacity(dim);
     let mut s = seed;
     for _ in 0..dim {
@@ -45,14 +45,14 @@ fn lcg_vec(dim: usize, seed: u64) -> Vec<f32> {
     v
 }
 
-fn rid(i: usize) -> RecordId {
+pub(crate) fn rid(i: usize) -> RecordId {
     let mut a = [0u8; 16];
     a[14] = (i >> 8) as u8;
     a[15] = (i & 0xFF) as u8;
     RecordId(a)
 }
 
-fn make_backend(interner: &Interner, id: u32) -> VectorBackend {
+pub(crate) fn make_backend(interner: &Interner, id: u32) -> VectorBackend {
     let desc = IndexDescriptor::new(
         id,
         format!("vec_idx_{id}"),
@@ -84,7 +84,11 @@ fn make_backend(interner: &Interner, id: u32) -> VectorBackend {
 
 /// Seed a gen-0 base snapshot with 10 base vectors and open `backend` from
 /// it (the snapshot path, not the rebuild fallback).
-async fn seed_base_and_open(backend: &VectorBackend, info_store: &Arc<dyn Store>, id: u32) {
+pub(crate) async fn seed_base_and_open(
+    backend: &VectorBackend,
+    info_store: &Arc<dyn Store>,
+    id: u32,
+) {
     let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let adapter = backend.adapter_arc();
     let hnsw = adapter.as_hnsw_adapter().unwrap();
@@ -109,7 +113,7 @@ async fn seed_base_and_open(backend: &VectorBackend, info_store: &Arc<dyn Store>
     );
 }
 
-async fn top1(backend: &VectorBackend, seed: u64) -> RecordId {
+pub(crate) async fn top1(backend: &VectorBackend, seed: u64) -> RecordId {
     let r = backend
         .lookup(IndexQuery::Vector {
             vec: lcg_vec(DIM as usize, seed),
