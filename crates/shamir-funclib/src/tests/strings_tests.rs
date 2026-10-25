@@ -340,3 +340,83 @@ fn reg_find_index_found_and_missing() {
         v_int(-1)
     );
 }
+
+// -------------------------------------------------------------------------
+// RV-FUNCLIB-CDACB2E5 — repeat/pad outputs are byte-capped before allocation
+// (amplification via an attacker-controlled size is rejected, not built).
+// -------------------------------------------------------------------------
+
+#[test]
+fn rv_funclib_cdacb2e5_repeat_pad_output_capped() {
+    let r = reg();
+    // repeat above the 1 MiB output ceiling is rejected before allocation.
+    assert_eq!(
+        r.call("repeat", &[s("ab"), QueryValue::Int(1 << 21)])
+            .unwrap_err()
+            .code,
+        "out_of_range"
+    );
+    // Sizes within the cap still work.
+    assert_eq!(
+        r.call("repeat", &[s("ab"), QueryValue::Int(4)]).unwrap(),
+        v_str("abababab".into())
+    );
+    // pad beyond the ceiling is rejected on both sides.
+    assert_eq!(
+        r.call("pad_left", &[s("x"), QueryValue::Int(1 << 21), s("0")])
+            .unwrap_err()
+            .code,
+        "out_of_range"
+    );
+    assert_eq!(
+        r.call("pad_right", &[s("x"), QueryValue::Int(1 << 21), s("0")])
+            .unwrap_err()
+            .code,
+        "out_of_range"
+    );
+    assert_eq!(
+        r.call("pad_left", &[s("7"), QueryValue::Int(3), s("0")])
+            .unwrap(),
+        v_str("007".into())
+    );
+    // Boundary: a 600_000-char ASCII input padded by ONE char to 600_001
+    // total bytes is just under the 1 MiB cap and must succeed. The old
+    // guard computed `target * ch.len_utf8() + s.len()` (600_001 pad chars
+    // PLUS the input) and spuriously rejected this exact case.
+    let big = "a".repeat(600_000);
+    assert_eq!(
+        r.call("pad_right", &[s(&big), QueryValue::Int(600_001), s("x")])
+            .unwrap(),
+        v_str(format!("{big}x"))
+    );
+}
+
+// -------------------------------------------------------------------------
+// RV-FUNCLIB-64320F3C — the regex cache must not bulk-evict on a full cache
+// (the old global-Mutex cache cleared itself on the 257th miss, thrashing
+// every hot pattern).
+// -------------------------------------------------------------------------
+
+#[test]
+fn rv_funclib_64320f3c_regex_cache_entries_survive_churn() {
+    let r = reg();
+    let early = "early_64320f3c_[a-z]+";
+    assert_eq!(
+        r.call("is_reg_match", &[s("x"), s(early)]).unwrap(),
+        v_bool(false)
+    );
+    assert!(
+        crate::functions::text::regex_cache::is_cached(early),
+        "compiling via a scalar must populate the shared cache"
+    );
+    // Flood past the 256-entry cap with distinct patterns.
+    for i in 0..400 {
+        let pat = format!("flood_{i}_64320f3c_[a-z]");
+        assert!(crate::functions::text::regex_cache::compile(&pat).is_ok());
+    }
+    // The early entry survives — no whole-cache clear on overflow.
+    assert!(
+        crate::functions::text::regex_cache::is_cached(early),
+        "cached patterns must not be bulk-evicted when the cache fills"
+    );
+}

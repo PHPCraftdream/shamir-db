@@ -67,6 +67,11 @@ use crate::filter::Filter;
 use shamir_collections::{new_map, new_set, TFxSet, TMap, TSet};
 use shamir_types::types::value::QueryValue;
 
+/// Maximum nesting depth for the planner's value/filter extraction walks.
+/// Bounds native recursion on attacker-shaped trees BEFORE the engine's own
+/// filter-depth validation runs (planning precedes it).
+const MAX_EXTRACT_DEPTH: usize = 256;
+
 /// Batch query planner.
 ///
 /// Creates execution plans from query entries with automatic
@@ -196,7 +201,7 @@ impl BatchPlanner {
                 // resolve a `FieldPath` against a record that does not
                 // exist in a `when` context, and would otherwise silently
                 // fold to a fixed result (see `QueryRunner::resolve_skip`).
-                if Self::contains_field_based_comparison(when_filter) {
+                if Self::contains_field_based_comparison(when_filter, 0) {
                     return Err(BatchError::InvalidWhenFilter {
                         alias: alias.clone(),
                         message: "field-based comparisons are not meaningful inside `when` \
@@ -205,7 +210,7 @@ impl BatchPlanner {
                             .to_string(),
                     });
                 }
-                Self::extract_deps_from_filter(when_filter, &mut data_flow_deps);
+                Self::extract_deps_from_filter(when_filter, &mut data_flow_deps, 0)?;
             }
 
             let mut provenance: TMap<String, EdgeKind> = new_map();
@@ -287,33 +292,40 @@ impl BatchPlanner {
         match op {
             BatchOp::Read(query) => {
                 if let Some(filter) = &query.r#where {
-                    Self::extract_deps_from_filter(filter, &mut deps);
+                    Self::extract_deps_from_filter(filter, &mut deps, 0)?;
                 }
                 for item in &query.select.items {
                     match item {
                         crate::read::SelectItem::Function { args, .. } => {
                             for arg in args {
-                                Self::extract_deps_from_filter_value(arg, &mut deps);
+                                Self::extract_deps_from_filter_value(arg, &mut deps, 0)?;
                             }
                         }
                         crate::read::SelectItem::AggregateFn { args, input, .. } => {
                             for arg in args {
-                                Self::extract_deps_from_filter_value(arg, &mut deps);
+                                Self::extract_deps_from_filter_value(arg, &mut deps, 0)?;
                             }
                             if let Some(input) = input {
-                                Self::extract_deps_from_filter_value(input, &mut deps);
+                                Self::extract_deps_from_filter_value(input, &mut deps, 0)?;
                             }
                         }
                         crate::read::SelectItem::Aggregate { input, .. } => {
                             if let Some(input) = input {
-                                Self::extract_deps_from_filter_value(input, &mut deps);
+                                Self::extract_deps_from_filter_value(input, &mut deps, 0)?;
                             }
                         }
                         crate::read::SelectItem::Expression { expr, .. } => {
-                            Self::extract_deps_from_filter_value(
-                                &expr.to_filter_value(),
-                                &mut deps,
-                            );
+                            // `to_filter_value` recurses with no depth
+                            // state: probe the INPUT tree iteratively
+                            // (mirrors `value_height_bounded`) first.
+                            if !Self::select_expr_height_bounded(expr, MAX_EXTRACT_DEPTH) {
+                                return Err(BatchError::NestingTooDeep {
+                                    depth: MAX_EXTRACT_DEPTH,
+                                    max: MAX_EXTRACT_DEPTH,
+                                });
+                            }
+                            let fv = expr.to_filter_value();
+                            Self::extract_deps_from_filter_value(&fv, &mut deps, 0)?;
                         }
                         crate::read::SelectItem::All
                         | crate::read::SelectItem::Field { .. }
@@ -323,20 +335,20 @@ impl BatchPlanner {
             }
             BatchOp::Update(update) => {
                 if let Some(filter) = &update.where_clause {
-                    Self::extract_deps_from_filter(filter, &mut deps);
+                    Self::extract_deps_from_filter(filter, &mut deps, 0)?;
                 }
-                Self::extract_deps_from_value(&update.set, &mut deps, alias)?;
+                Self::extract_deps_from_value(&update.set, &mut deps, alias, 0)?;
             }
             BatchOp::Set(set) => {
-                Self::extract_deps_from_value(&set.key, &mut deps, alias)?;
-                Self::extract_deps_from_value(&set.value, &mut deps, alias)?;
+                Self::extract_deps_from_value(&set.key, &mut deps, alias, 0)?;
+                Self::extract_deps_from_value(&set.value, &mut deps, alias, 0)?;
             }
             BatchOp::Delete(delete) => {
-                Self::extract_deps_from_filter(&delete.where_clause, &mut deps);
+                Self::extract_deps_from_filter(&delete.where_clause, &mut deps, 0)?;
             }
             BatchOp::Insert(insert) => {
                 for value in &insert.values {
-                    Self::extract_deps_from_value(value, &mut deps, alias)?;
+                    Self::extract_deps_from_value(value, &mut deps, alias, 0)?;
                 }
             }
             // Stored-procedure call: scan positional params for `$query` refs
@@ -344,7 +356,7 @@ impl BatchPlanner {
             // query whose result it consumes as an argument).
             BatchOp::Call(call_op) => {
                 for fv in &call_op.params {
-                    Self::extract_deps_from_filter_value(fv, &mut deps);
+                    Self::extract_deps_from_filter_value(fv, &mut deps, 0)?;
                 }
             }
             // Sub-batch: outer deps come exclusively from `bind` values.
@@ -352,7 +364,7 @@ impl BatchPlanner {
             // planned recursively at execution time (P3).
             BatchOp::Batch(sub) => {
                 for fv in sub.bind.values() {
-                    Self::extract_deps_from_filter_value(fv, &mut deps);
+                    Self::extract_deps_from_filter_value(fv, &mut deps, 0)?;
                 }
             }
             // ForEach loop (Epic04/B, #653): outer deps come exclusively
@@ -360,7 +372,7 @@ impl BatchPlanner {
             // loop body's queries — those are planned recursively at
             // execution time (K times), mirroring `Batch(sub)` above.
             BatchOp::ForEach(fe) => {
-                Self::extract_deps_from_filter_value(&fe.over, &mut deps);
+                Self::extract_deps_from_filter_value(&fe.over, &mut deps, 0)?;
             }
             // Admin ops have no query dependencies
             _ => {}
@@ -372,25 +384,19 @@ impl BatchPlanner {
     /// Extract dependencies from a write-row `QueryValue`
     /// (`InsertOp.values[i]`/`UpdateOp.set`/`SetOp.{key,value}`).
     ///
-    /// #641 fix: this used to detect `$query` LOOSELY (`map.get("$query")`
-    /// anywhere in a map, regardless of what else the map contained) and did
-    /// NOT recurse into `$fn`'s args / `$cond`'s branches / `$expr`'s
-    /// operands — so a `$query` ref nested inside one of those (e.g.
-    /// `{"total": {"$expr": {"op": "add", "args": [{"$query": "@a"}, 1]}}}`)
-    /// silently dropped out of the dependency graph (wrong topological
-    /// order: the write could run BEFORE the alias it reads from). This now
-    /// matches the precision AND recursion depth of
-    /// [`Self::extract_deps_from_filter_value`] (the #642 fix for WHERE/
-    /// `when` trees): a marker is detected with the exact reserved-key-map
-    /// convention (mirroring `contains_param_ref`'s `is_marker_map` in
-    /// `shamir-engine`'s `param_subst.rs`), then the marker map is decoded
-    /// into a [`crate::filter::FilterValue`] via the same msgpack
-    /// round-trip `param_subst.rs` uses to RESOLVE it at execution time —
-    /// `FilterValue`'s wire encoding for `QueryRef`/`FnCall`/`Cond`/`Expr` IS
-    /// exactly this reserved-key map shape — and delegated to the shared
-    /// `extract_deps_from_filter_value` leaf extractor, so both extractors
-    /// recurse identically forever after (one shared implementation, no
-    /// drift).
+    /// #641 fix: `$query` detection used to be LOOSE (`map.get("$query")`
+    /// anywhere, no recursion into `$fn`/`$cond`/`$expr` operands), so a
+    /// `$query` ref nested inside one of those silently dropped out of the
+    /// dependency graph (wrong topological order). This now matches the
+    /// precision AND recursion depth of
+    /// [`Self::extract_deps_from_filter_value`] (the #642 fix): a marker is
+    /// detected with the exact reserved-key-map convention (mirroring
+    /// `contains_param_ref`'s `is_marker_map` in `shamir-engine`'s
+    /// `param_subst.rs`), then decoded into a
+    /// [`crate::filter::FilterValue`] via the same msgpack round-trip
+    /// `param_subst.rs` uses to RESOLVE it at execution time — the wire
+    /// encodings coincide — and delegated to the shared leaf extractor
+    /// (one shared implementation, no drift).
     ///
     /// `$param` is intentionally NOT treated as a marker here: it carries no
     /// alias to depend on (it reads from the sub-batch's `bind` scope, not
@@ -410,13 +416,19 @@ impl BatchPlanner {
         value: &QueryValue,
         deps: &mut TSet<String>,
         alias: &str,
+        depth: usize,
     ) -> Result<(), BatchError> {
         use crate::filter::FilterValue;
 
+        if depth > MAX_EXTRACT_DEPTH {
+            return Err(BatchError::NestingTooDeep {
+                depth,
+                max: MAX_EXTRACT_DEPTH,
+            });
+        }
         match value {
             QueryValue::Map(map) => {
-                // Reserved-key marker detection (mirrors
-                // `contains_param_ref`'s `is_marker_map` in
+                // Reserved-key marker detection (mirrors `is_marker_map` in
                 // `shamir-engine`'s `param_subst.rs`) — `$param` excluded
                 // (see doc comment above). `$query`'s serde shape is
                 // `{"$query": "<alias>", "path"?: "<path>"}` — a SECOND
@@ -431,7 +443,17 @@ impl BatchPlanner {
                     2 => map.contains_key("$query") && map.contains_key("path"),
                     _ => false,
                 };
-                if is_query_fn_cond_expr_marker {
+                if is_query_fn_cond_expr_marker
+                    && Self::value_height_bounded(value, MAX_EXTRACT_DEPTH - depth)
+                {
+                    // `rmp_serde::to_vec_named` serializes the ENTIRE value
+                    // recursively — only safe when the value tree's height is
+                    // bounded (checked above, iteratively, against the
+                    // remaining depth budget). An over-deep value falls
+                    // through to the plain depth-bounded recursion below,
+                    // which rejects it with `NestingTooDeep` at
+                    // `MAX_EXTRACT_DEPTH` instead of overflowing the stack
+                    // inside serde.
                     if let Some(fv) = rmp_serde::to_vec_named(value)
                         .ok()
                         .and_then(|bytes| rmp_serde::from_slice::<FilterValue>(&bytes).ok())
@@ -442,11 +464,16 @@ impl BatchPlanner {
                             // `$cond` is nested deeper inside a branch value
                             // (a `$cond`'s branches can themselves be
                             // `$cond`s).
-                            let invalid = Self::contains_field_based_comparison(&cond.condition)
-                                || Self::filter_value_contains_field_based_comparison(&cond.then)
-                                || Self::filter_value_contains_field_based_comparison(
-                                    &cond.or_else,
-                                );
+                            let invalid =
+                                Self::contains_field_based_comparison(&cond.condition, depth + 1)
+                                    || Self::filter_value_contains_field_based_comparison(
+                                        &cond.then,
+                                        depth + 1,
+                                    )
+                                    || Self::filter_value_contains_field_based_comparison(
+                                        &cond.or_else,
+                                        depth + 1,
+                                    );
                             if invalid {
                                 return Err(BatchError::InvalidCondCondition {
                                     alias: alias.to_string(),
@@ -458,24 +485,24 @@ impl BatchPlanner {
                                 });
                             }
                         }
-                        Self::extract_deps_from_filter_value(&fv, deps);
+                        Self::extract_deps_from_filter_value(&fv, deps, depth + 1)?;
                         return Ok(());
                     }
-                    // Malformed marker payload (fails to decode as a
-                    // FilterValue): fall through to plain recursion below —
-                    // execution-time resolution (`param_subst.rs`) is the
-                    // authority that rejects malformed markers with a clear
-                    // error; the planner's dependency pass stays best-effort.
+                    // Malformed marker payload: fall through to plain
+                    // recursion below — execution-time resolution
+                    // (`param_subst.rs`) is the authority that rejects
+                    // malformed markers with a clear error; the planner's
+                    // dependency pass stays best-effort.
                 }
                 // Recurse into nested objects (also covers `$param` markers
                 // and non-marker maps).
                 for v in map.values() {
-                    Self::extract_deps_from_value(v, deps, alias)?;
+                    Self::extract_deps_from_value(v, deps, alias, depth + 1)?;
                 }
             }
             QueryValue::List(arr) => {
                 for v in arr {
-                    Self::extract_deps_from_value(v, deps, alias)?;
+                    Self::extract_deps_from_value(v, deps, alias, depth + 1)?;
                 }
             }
             _ => {}
@@ -483,8 +510,20 @@ impl BatchPlanner {
         Ok(())
     }
 
-    /// Extract dependencies from a filter.
-    fn extract_deps_from_filter(filter: &Filter, deps: &mut TSet<String>) {
+    /// Extract dependencies from a filter. Depth-bounded: `depth` caps the
+    /// recursion so an attacker-shaped filter tree cannot overflow the stack
+    /// before the engine's own filter-depth validation runs.
+    fn extract_deps_from_filter(
+        filter: &Filter,
+        deps: &mut TSet<String>,
+        depth: usize,
+    ) -> Result<(), BatchError> {
+        if depth > MAX_EXTRACT_DEPTH {
+            return Err(BatchError::NestingTooDeep {
+                depth,
+                max: MAX_EXTRACT_DEPTH,
+            });
+        }
         match filter {
             Filter::Eq { value, .. }
             | Filter::Ne { value, .. }
@@ -493,32 +532,32 @@ impl BatchPlanner {
             | Filter::Lt { value, .. }
             | Filter::Lte { value, .. }
             | Filter::Contains { value, .. } => {
-                Self::extract_deps_from_filter_value(value, deps);
+                Self::extract_deps_from_filter_value(value, deps, depth + 1)?;
             }
             Filter::In { values, .. } | Filter::NotIn { values, .. } => {
                 for v in values {
-                    Self::extract_deps_from_filter_value(v, deps);
+                    Self::extract_deps_from_filter_value(v, deps, depth + 1)?;
                 }
             }
             Filter::Between { from, to, .. } => {
-                Self::extract_deps_from_filter_value(from, deps);
-                Self::extract_deps_from_filter_value(to, deps);
+                Self::extract_deps_from_filter_value(from, deps, depth + 1)?;
+                Self::extract_deps_from_filter_value(to, deps, depth + 1)?;
             }
             Filter::ContainsAny { values, .. } | Filter::ContainsAll { values, .. } => {
                 for v in values {
-                    Self::extract_deps_from_filter_value(v, deps);
+                    Self::extract_deps_from_filter_value(v, deps, depth + 1)?;
                 }
             }
             Filter::And { filters } | Filter::Or { filters } => {
                 for f in filters {
-                    Self::extract_deps_from_filter(f, deps);
+                    Self::extract_deps_from_filter(f, deps, depth + 1)?;
                 }
             }
             Filter::Not { filter } => {
-                Self::extract_deps_from_filter(filter, deps);
+                Self::extract_deps_from_filter(filter, deps, depth + 1)?;
             }
             Filter::FieldEq { value, .. } => {
-                Self::extract_deps_from_filter_value(value, deps);
+                Self::extract_deps_from_filter_value(value, deps, depth + 1)?;
             }
             // Filters without FilterValue
             Filter::Like { .. }
@@ -533,18 +572,19 @@ impl BatchPlanner {
             Filter::Computed {
                 value, expr_args, ..
             } => {
-                Self::extract_deps_from_filter_value(value, deps);
+                Self::extract_deps_from_filter_value(value, deps, depth + 1)?;
                 if let Some(args) = expr_args {
                     for v in args {
-                        Self::extract_deps_from_filter_value(v, deps);
+                        Self::extract_deps_from_filter_value(v, deps, depth + 1)?;
                     }
                 }
             }
             Filter::ValueCompare { left, right, .. } => {
-                Self::extract_deps_from_filter_value(left, deps);
-                Self::extract_deps_from_filter_value(right, deps);
+                Self::extract_deps_from_filter_value(left, deps, depth + 1)?;
+                Self::extract_deps_from_filter_value(right, deps, depth + 1)?;
             }
         }
+        Ok(())
     }
 
     /// #651/#663 defensive check: return `true` iff `filter` contains,
@@ -574,7 +614,18 @@ impl BatchPlanner {
     /// unconditionally `true` regardless of their operands, so their
     /// `value`/`values`/`from`/`to`/`expr_args` are not separately walked —
     /// there is no additional signal a `true`-anyway variant could add.
-    fn contains_field_based_comparison(filter: &Filter) -> bool {
+    /// Depth parameter: over-deep trees return `true` (conservatively
+    /// invalid) instead of recursing further — the planner rejects any
+    /// filter deeper than [`MAX_EXTRACT_DEPTH`] anyway, so treating
+    /// un-walkable depth as "contains a field-based comparison" only ever
+    /// converts an eventual `NestingTooDeep` rejection into a slightly
+    /// earlier guard rejection, never changes the verdict for legal depths.
+    fn contains_field_based_comparison(filter: &Filter, depth: usize) -> bool {
+        // Unbounded recursion would overflow the native stack before the
+        // planner's own depth-bounded extraction runs — cap the walk.
+        if depth > MAX_EXTRACT_DEPTH {
+            return true;
+        }
         match filter {
             Filter::Eq { .. }
             | Filter::Ne { .. }
@@ -595,13 +646,13 @@ impl BatchPlanner {
             | Filter::ContainsAll { .. }
             | Filter::Between { .. }
             | Filter::Computed { .. } => true,
-            Filter::And { filters } | Filter::Or { filters } => {
-                filters.iter().any(Self::contains_field_based_comparison)
-            }
-            Filter::Not { filter } => Self::contains_field_based_comparison(filter),
+            Filter::And { filters } | Filter::Or { filters } => filters
+                .iter()
+                .any(|f| Self::contains_field_based_comparison(f, depth + 1)),
+            Filter::Not { filter } => Self::contains_field_based_comparison(filter, depth + 1),
             Filter::ValueCompare { left, right, .. } => {
-                Self::filter_value_contains_field_based_comparison(left)
-                    || Self::filter_value_contains_field_based_comparison(right)
+                Self::filter_value_contains_field_based_comparison(left, depth + 1)
+                    || Self::filter_value_contains_field_based_comparison(right, depth + 1)
             }
             Filter::IsNull { .. }
             | Filter::IsNotNull { .. }
@@ -623,26 +674,34 @@ impl BatchPlanner {
     /// `QueryRef`/`Param`/`FieldRef`/literals are never themselves a
     /// field-based-comparison issue — a `$query`/`$param` reference is not a
     /// record-field lookup.
-    fn filter_value_contains_field_based_comparison(fv: &crate::filter::FilterValue) -> bool {
+    fn filter_value_contains_field_based_comparison(
+        fv: &crate::filter::FilterValue,
+        depth: usize,
+    ) -> bool {
         use crate::filter::FilterValue;
 
+        // Same depth cap as [`Self::contains_field_based_comparison`] — see
+        // its depth-parameter doc comment for why `true` is conservative.
+        if depth > MAX_EXTRACT_DEPTH {
+            return true;
+        }
         match fv {
             FilterValue::Cond { cond } => {
-                Self::contains_field_based_comparison(&cond.condition)
-                    || Self::filter_value_contains_field_based_comparison(&cond.then)
-                    || Self::filter_value_contains_field_based_comparison(&cond.or_else)
+                Self::contains_field_based_comparison(&cond.condition, depth + 1)
+                    || Self::filter_value_contains_field_based_comparison(&cond.then, depth + 1)
+                    || Self::filter_value_contains_field_based_comparison(&cond.or_else, depth + 1)
             }
             FilterValue::Expr { expr } => expr
                 .args
                 .iter()
-                .any(Self::filter_value_contains_field_based_comparison),
+                .any(|v| Self::filter_value_contains_field_based_comparison(v, depth + 1)),
             FilterValue::FnCall { call } => call
                 .args()
                 .iter()
-                .any(Self::filter_value_contains_field_based_comparison),
+                .any(|v| Self::filter_value_contains_field_based_comparison(v, depth + 1)),
             FilterValue::Array(items) => items
                 .iter()
-                .any(Self::filter_value_contains_field_based_comparison),
+                .any(|v| Self::filter_value_contains_field_based_comparison(v, depth + 1)),
             _ => false,
         }
     }
@@ -657,13 +716,25 @@ impl BatchPlanner {
     /// topological order, and — for `when` — no cascade on skip). This is
     /// the single shared leaf-level extractor for both WHERE-`Filter` trees
     /// and (Epic03/B) `when`-`Filter` trees; fixing it here benefits both.
-    fn extract_deps_from_filter_value(value: &crate::filter::FilterValue, deps: &mut TSet<String>) {
+    /// Depth-bounded via `depth`/[`MAX_EXTRACT_DEPTH`] — the planner runs
+    /// before the engine's filter-depth validation.
+    fn extract_deps_from_filter_value(
+        value: &crate::filter::FilterValue,
+        deps: &mut TSet<String>,
+        depth: usize,
+    ) -> Result<(), BatchError> {
         use crate::filter::FilterValue;
 
+        if depth > MAX_EXTRACT_DEPTH {
+            return Err(BatchError::NestingTooDeep {
+                depth,
+                max: MAX_EXTRACT_DEPTH,
+            });
+        }
         match value {
             FilterValue::Array(arr) => {
                 for v in arr {
-                    Self::extract_deps_from_filter_value(v, deps);
+                    Self::extract_deps_from_filter_value(v, deps, depth + 1)?;
                 }
             }
             FilterValue::QueryRef { alias, .. } => {
@@ -671,22 +742,23 @@ impl BatchPlanner {
                 deps.insert(base_alias);
             }
             FilterValue::Cond { cond } => {
-                Self::extract_deps_from_filter(&cond.condition, deps);
-                Self::extract_deps_from_filter_value(&cond.then, deps);
-                Self::extract_deps_from_filter_value(&cond.or_else, deps);
+                Self::extract_deps_from_filter(&cond.condition, deps, depth + 1)?;
+                Self::extract_deps_from_filter_value(&cond.then, deps, depth + 1)?;
+                Self::extract_deps_from_filter_value(&cond.or_else, deps, depth + 1)?;
             }
             FilterValue::Expr { expr } => {
                 for arg in &expr.args {
-                    Self::extract_deps_from_filter_value(arg, deps);
+                    Self::extract_deps_from_filter_value(arg, deps, depth + 1)?;
                 }
             }
             FilterValue::FnCall { call } => {
                 for arg in call.args() {
-                    Self::extract_deps_from_filter_value(arg, deps);
+                    Self::extract_deps_from_filter_value(arg, deps, depth + 1)?;
                 }
             }
             _ => {}
         }
+        Ok(())
     }
 
     /// Extract base alias from a `$query` reference string like
@@ -700,99 +772,156 @@ impl BatchPlanner {
         crate::batch::alias::extract_base_alias(s)
     }
 
-    /// Detect cycle in dependency graph using DFS (white-gray-black algorithm).
-    ///
-    /// Uses borrow-based `HashSet<&str>` to avoid per-node `String` allocations
-    /// in the DFS hot loop. Only allocates when a cycle is found (rare / error path).
+    /// Detect cycle in the dependency graph — ITERATIVE DFS (white-gray-black
+    /// with an explicit stack). The cycle check precedes the depth rejection,
+    /// so its walk depth must not scale with an attacker-controlled alias
+    /// chain length.
     fn detect_cycle(deps: &TMap<String, TSet<String>>) -> Option<Vec<String>> {
         // Borrow-based sets — no allocations in the happy path.
         let mut white: TFxSet<&str> = deps.keys().map(String::as_str).collect();
-        let mut gray: TFxSet<&str> = TFxSet::default();
         let mut black: TFxSet<&str> = TFxSet::default();
-
-        fn dfs<'a>(
-            node: &'a str,
-            deps: &'a TMap<String, TSet<String>>,
-            white: &mut TFxSet<&'a str>,
-            gray: &mut TFxSet<&'a str>,
-            black: &mut TFxSet<&'a str>,
-            path: &mut Vec<&'a str>,
-        ) -> Option<Vec<String>> {
-            white.remove(node);
-            gray.insert(node);
-            path.push(node);
-
-            if let Some(neighbors) = deps.get(node) {
-                for neighbor in neighbors {
-                    let nb: &str = neighbor.as_str();
-                    if gray.contains(nb) {
-                        // Found cycle — allocate only here (error path).
-                        let cycle_start = path.iter().position(|&n| n == nb)?;
-                        return Some(path[cycle_start..].iter().map(|&s| s.to_string()).collect());
-                    }
-                    if white.contains(nb) {
-                        if let Some(cycle) = dfs(nb, deps, white, gray, black, path) {
-                            return Some(cycle);
-                        }
-                    }
-                }
-            }
-
-            gray.remove(node);
-            black.insert(node);
-            path.pop();
-            None
-        }
 
         // Collect keys once so we can iterate without borrowing `white` mutably.
         let all_nodes: Vec<&str> = deps.keys().map(String::as_str).collect();
-        for node in all_nodes {
-            if !white.contains(node) {
+        for start in all_nodes {
+            if !white.contains(start) {
                 continue;
             }
+            // Explicit-stack DFS: gray set == nodes on the current path.
+            let mut gray: TFxSet<&str> = TFxSet::default();
             let mut path: Vec<&str> = Vec::new();
-            if let Some(cycle) = dfs(node, deps, &mut white, &mut gray, &mut black, &mut path) {
-                return Some(cycle);
+            // (node, next neighbor index)
+            let mut stack: Vec<(&str, usize)> = Vec::new();
+            white.remove(start);
+            gray.insert(start);
+            path.push(start);
+            stack.push((start, 0));
+
+            while let Some(top) = stack.last_mut() {
+                let (node, idx) = *top;
+                let next = deps.get(node).and_then(|ns| ns.iter().nth(idx));
+                if let Some(n) = next {
+                    top.1 += 1;
+                    let nb: &str = n.as_str();
+                    if gray.contains(nb) {
+                        // Found cycle — allocate only here (error path).
+                        let cycle_start = path.iter().position(|&x| x == nb)?;
+                        return Some(path[cycle_start..].iter().map(|&s| s.to_string()).collect());
+                    }
+                    if white.contains(nb) {
+                        white.remove(nb);
+                        gray.insert(nb);
+                        path.push(nb);
+                        stack.push((nb, 0));
+                    }
+                } else {
+                    stack.pop();
+                    gray.remove(node);
+                    black.insert(node);
+                    path.pop();
+                }
             }
         }
 
         None
     }
 
-    /// Calculate maximum dependency depth.
-    fn calculate_max_depth(deps: &TMap<String, TSet<String>>) -> usize {
-        fn depth(
-            node: &str,
-            deps: &TMap<String, TSet<String>>,
-            cache: &mut TMap<String, usize>,
-        ) -> usize {
-            if let Some(&d) = cache.get(node) {
-                return d;
+    /// Iterative (explicit-stack) check that the `QueryValue` tree's height
+    /// is at most `cap`. Used to prove that a recursive serde serialization
+    /// of `value` cannot overflow the native stack before it is attempted.
+    fn value_height_bounded(value: &QueryValue, cap: usize) -> bool {
+        let mut stack: Vec<(&QueryValue, usize)> = vec![(value, 1)];
+        while let Some((v, h)) = stack.pop() {
+            if h > cap {
+                return false;
             }
-
-            let d = if let Some(neighbors) = deps.get(node) {
-                if neighbors.is_empty() {
-                    0
-                } else {
-                    1 + neighbors
-                        .iter()
-                        .map(|n| depth(n, deps, cache))
-                        .max()
-                        .unwrap_or(0)
+            match v {
+                QueryValue::Map(map) => {
+                    for child in map.values() {
+                        stack.push((child, h + 1));
+                    }
                 }
-            } else {
-                0
-            };
+                QueryValue::List(arr) => {
+                    for child in arr {
+                        stack.push((child, h + 1));
+                    }
+                }
+                _ => {}
+            }
+        }
+        true
+    }
 
-            cache.insert(node.to_string(), d);
-            d
+    /// Iterative (explicit-stack) height check on a `SelectExpr` tree —
+    /// mirrors [`Self::value_height_bounded`]: proves that
+    /// `to_filter_value`'s recursive translation cannot overflow.
+    fn select_expr_height_bounded(expr: &crate::read::SelectExpr, cap: usize) -> bool {
+        use crate::read::SelectExpr;
+        let mut stack: Vec<(&SelectExpr, usize)> = vec![(expr, 1)];
+        while let Some((e, h)) = stack.pop() {
+            if h > cap {
+                return false;
+            }
+            if let SelectExpr::Add { left, right }
+            | SelectExpr::Sub { left, right }
+            | SelectExpr::Mul { left, right }
+            | SelectExpr::Div { left, right } = e
+            {
+                stack.push((left, h + 1));
+                stack.push((right, h + 1));
+            }
+        }
+        true
+    }
+
+    /// Calculate maximum dependency depth — iterative Kahn wave counting.
+    /// The graph is a DAG by the time this runs (`detect_cycle` ran first),
+    /// and the wave index of a node IS its dependency depth, so a long
+    /// alias chain never drives native recursion.
+    ///
+    /// `deps` maps node → its DEPENDENCIES, so `in_degree[node]` = number of
+    /// dependencies: the initial frontier is the no-dependency nodes and the
+    /// wave walk must traverse the REVERSE adjacency (dep → dependents),
+    /// exactly like [`Self::topological_sort`] below.
+    fn calculate_max_depth(deps: &TMap<String, TSet<String>>) -> usize {
+        let mut in_degree: TMap<&str, usize> =
+            deps.iter().map(|(k, v)| (k.as_str(), v.len())).collect();
+
+        // reverse_adj[dep] = list of nodes that depend on `dep`.
+        let mut reverse_adj: TMap<&str, Vec<&str>> =
+            deps.keys().map(|k| (k.as_str(), vec![])).collect();
+        for (node, neighbors) in deps {
+            for n in neighbors {
+                if let Some(list) = reverse_adj.get_mut(n.as_str()) {
+                    list.push(node.as_str());
+                }
+            }
         }
 
-        let mut cache: TMap<String, usize> = new_map();
-        deps.keys()
-            .map(|k| depth(k, deps, &mut cache))
-            .max()
-            .unwrap_or(0)
+        let mut frontier: Vec<&str> = in_degree
+            .iter()
+            .filter(|&(_, &d)| d == 0)
+            .map(|(&k, _)| k)
+            .collect();
+        let mut waves = 0usize;
+        while !frontier.is_empty() {
+            waves += 1;
+            let mut next: Vec<&str> = Vec::new();
+            for node in &frontier {
+                if let Some(dependents) = reverse_adj.get(*node) {
+                    for n in dependents {
+                        if let Some(deg) = in_degree.get_mut(n) {
+                            *deg -= 1;
+                            if *deg == 0 {
+                                next.push(n);
+                            }
+                        }
+                    }
+                }
+            }
+            frontier = next;
+        }
+        waves.saturating_sub(1)
     }
 
     /// Compute maximum static body nesting depth with the shared visitor.
