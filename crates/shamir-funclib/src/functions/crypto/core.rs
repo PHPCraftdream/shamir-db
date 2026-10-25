@@ -40,6 +40,9 @@ use sha2::{Digest, Sha256, Sha512};
 use sha3::{Digest as Sha3Digest, Sha3_256};
 use shamir_types::types::value::QueryValue;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+// Test-only observation field in `CountingSemaphore` (cfg(test) builds).
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::sync::{Condvar, LazyLock, Mutex};
 use subtle::ConstantTimeEq;
 
@@ -115,16 +118,26 @@ static ARGON2ID_CONCURRENCY_GATE: LazyLock<CountingSemaphore> =
 /// Minimal counting semaphore (atomics + condvar), mirroring `shamir-connect`'s
 /// `Argon2Semaphore` so the two paths stay consistent. Kept private — the only
 /// consumer is [`ARGON2ID_CONCURRENCY_GATE`].
-struct CountingSemaphore {
+pub(crate) struct CountingSemaphore {
     available: AtomicI64,
     notify: (Mutex<()>, Condvar),
+    /// Test-only observation (RV-WASM-HOST-D2732518): set by `release` to
+    /// whether the notify mutex was STILL held by the releasing thread
+    /// after `notify_one` (recorded via `try_lock()` yielding `WouldBlock`
+    /// on the mutex that same thread holds). Never gates production
+    /// behaviour; exists so the regression test can observe the actual
+    /// release path deterministically instead of racing a scheduler.
+    #[cfg(test)]
+    released_with_notify_lock_held: AtomicBool,
 }
 
 impl CountingSemaphore {
-    fn with_capacity(capacity: u32) -> Self {
+    pub(crate) fn with_capacity(capacity: u32) -> Self {
         Self {
             available: AtomicI64::new(capacity as i64),
             notify: (Mutex::new(()), Condvar::new()),
+            #[cfg(test)]
+            released_with_notify_lock_held: AtomicBool::new(false),
         }
     }
 
@@ -145,7 +158,43 @@ impl CountingSemaphore {
 
     fn release(&self) {
         self.available.fetch_add(1, Ordering::Release);
-        self.notify.1.notify_one();
+        // Hold the notify mutex across notify_one: a waiter holds this same
+        // mutex from its predicate check until it is registered on the
+        // condvar inside `wait`, so it cannot miss the wakeup.
+        let (lock, cvar) = &self.notify;
+        let _guard = lock.lock().expect("semaphore mutex poisoned");
+        cvar.notify_one();
+        // Test observation only (kept separate from the release algorithm
+        // above): while we still hold the mutex, a try_lock must fail —
+        // recording that the wakeup was issued under the lock. Reverting
+        // ONLY the guard acquisition above (keeping this record) makes the
+        // flag read `false` and the regression test fail. The temporary
+        // guard, if any, drops at once; it never blocks.
+        #[cfg(test)]
+        {
+            let held = matches!(lock.try_lock(), Err(std::sync::TryLockError::WouldBlock));
+            self.released_with_notify_lock_held
+                .store(held, Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(test)]
+impl CountingSemaphore {
+    pub(crate) fn test_acquire(&self) {
+        self.acquire();
+    }
+    pub(crate) fn test_release(&self) {
+        self.release();
+    }
+    /// Test-only getter for the [`CountingSemaphore::release`] observation
+    /// flag: did the most recent release notify while still holding the
+    /// notify mutex?
+    pub(crate) fn test_released_with_notify_lock_held(&self) -> bool {
+        self.released_with_notify_lock_held.load(Ordering::Relaxed)
+    }
+    pub(crate) fn test_available(&self) -> i64 {
+        self.available.load(Ordering::Relaxed)
     }
 }
 

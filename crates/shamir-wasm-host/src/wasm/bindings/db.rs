@@ -48,6 +48,14 @@ pub(in crate::wasm) fn host_db_get(
             wasmtime::Error::msg("db_get: no db gateway (invoke via invoke_function_in_db)")
         })?;
 
+        // Test-only: observe the active Store's actual remaining fuel at the
+        // import boundary (real `Store::get_fuel`, not a derived estimate) so
+        // cancellation tests can snapshot the active child's segment spend.
+        #[cfg(test)]
+        if let Some(obs) = caller.data().observer.as_ref() {
+            obs.record_gate_fuel(caller.get_fuel().unwrap_or(0));
+        }
+
         // Phase 2: await the gateway.
         let result = gateway
             .get(&repo, &table, key)

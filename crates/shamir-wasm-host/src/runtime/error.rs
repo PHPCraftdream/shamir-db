@@ -29,9 +29,27 @@ pub enum FunctionError {
     #[error("user error: {0}")]
     User(String),
 
-    /// The function's computation failed (e.g. the KDF rejected its inputs).
+    /// A function's computation failed (e.g. the KDF rejected its inputs).
     #[error("compute error: {0}")]
     Compute(String),
+
+    /// The guest trapped with `Trap::OutOfFuel` — its per-Store fuel grant
+    /// was exhausted mid-execution. Typed (not message-classified) so the
+    /// cause survives the `FunctionError → host_call → wasmtime::Error →
+    /// outer FunctionError` round trip without stringification.
+    #[error("fuel exhausted")]
+    FuelExhausted,
+
+    /// The invocation's AGGREGATE fuel budget (the shared free-capacity
+    /// pool across all nested Stores) could not fund the reservation.
+    #[error("aggregate fuel budget exhausted across nested calls")]
+    AggregateFuelExhausted,
+
+    /// The guest was interrupted by the epoch/wall-clock deadline
+    /// (`Trap::Interrupt`). Typed for the same reason as
+    /// [`FunctionError::FuelExhausted`].
+    #[error("wasm guest interrupted (wall-clock deadline exceeded)")]
+    Interrupted,
 
     /// The off-thread task carrying the computation was cancelled or panicked.
     #[error("function task cancelled")]
