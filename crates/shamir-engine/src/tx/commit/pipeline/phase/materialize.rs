@@ -486,7 +486,7 @@ pub(crate) async fn interner_delta_safe_to_truncate(
 }
 
 /// Promote one table's staged HNSW vectors + vector deletes into the live
-/// in-RAM graph (Phase 5d GRAPH half, post-lock — see [`promote_vectors`]).
+/// in-RAM graph (Phase 5d GRAPH half, post-lock — see [`promote_vectors`](super::commit_phases::promote_vectors)).
 ///
 /// gap#1 / HIGH-6: `deleted` is this table's slice of staged vector-delete
 /// rids (`tx.staged_vector_deletes_for(token)`). The promote order is
@@ -497,7 +497,7 @@ pub(crate) async fn interner_delta_safe_to_truncate(
 ///
 /// #426 (VR-4 variant A): this is the GRAPH half only. The DURABLE delta
 /// chunk (`DeltaOp::Upsert`/`Delete`) is appended PRE-publish by
-/// [`apply_vector_delta_batch`] (called from [`apply_vector_delta_phase`]),
+/// [`apply_vector_delta_batch`] (called from [`apply_vector_delta_phase`](super::commit_phases::apply_vector_delta_phase)),
 /// so a post-lock graph-promote failure leaves the mutation durable in the
 /// delta-log — `restore_on_open::replay_delta` re-materializes it on the
 /// next open.
@@ -549,7 +549,7 @@ pub(crate) async fn apply_vector_graph_batch(
 
 /// Append one table's durable delta-log chunk for its staged vectors +
 /// deletes (Phase 5d DELTA half, pre-publish — see
-/// [`apply_vector_delta_phase`]).
+/// [`apply_vector_delta_phase`](super::commit_phases::apply_vector_delta_phase)).
 ///
 /// #426 (VR-4 variant A): this is the DELTA half only. It runs BEFORE
 /// `version_guard.commit()` so the delta chunk is durable by the time the
