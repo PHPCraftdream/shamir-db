@@ -10,11 +10,7 @@ license = "MIT OR Apache-2.0"
 # Tests live alongside their callers; this crate is a thin helper.
 doctest = false
 
-[features]
-peak_mem = ["dep:peak_alloc"]
-
 [dependencies]
-peak_alloc = { version = "0.3", optional = true }
 
 [lints]
 workspace = true

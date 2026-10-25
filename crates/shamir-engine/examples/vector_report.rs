@@ -59,7 +59,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use memory_stats::memory_stats;
-use shamir_bench_utils::vector_data::clustered_vectors;
+use shamir_bench_utils::vector_data::{clustered_vectors, GENERATOR_REVISION};
 use shamir_engine::index2::kind::VectorMetric;
 use shamir_engine::index2::vector::adapter::{SearchOpts, VectorAdapter};
 use shamir_engine::index2::vector::brute_force::BruteForceAdapter;
@@ -333,7 +333,7 @@ fn print_report(
          run the artefact directly — the perimeter guard blocks `cargo run`)"
     );
     println!(
-        "- **Dataset**: `clustered_vectors` — n={}, dims={dims:?}, k_clusters={}, σ={}, seed={}",
+        "- **Dataset**: `clustered_vectors` — n={}, dims={dims:?}, k_clusters={}, σ={}, seed={}, generator={GENERATOR_REVISION}",
         p.n, p.k_clusters, p.sigma, p.seed
     );
     println!("- **Queries**: {} (seed={})", p.n_queries, p.seed + 1);

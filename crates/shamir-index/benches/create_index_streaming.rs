@@ -21,12 +21,13 @@
 //! each iteration builds into a FRESH `IndexManager` + `info_store` so postings
 //! never accumulate across iterations.
 //!
-//! NOTE: enabling the `peak_mem` feature installs a `#[global_allocator]` that
-//! adds one atomic op per alloc/free process-wide, so the Harness wall-time
-//! cells carry that constant per-alloc overhead — but it is identical for OLD
-//! and NEW, so the old-vs-new RATIO is unaffected (only the absolute ns/op is
-//! inflated). The headline signal here is the peak-heap delta, which is
-//! allocator-independent.
+//! NOTE: this bench installs the `#[global_allocator]` explicitly via
+//! `shamir_bench_utils::install_peak_alloc!` (merely linking bench-utils never
+//! changes the allocator), which adds one atomic op per alloc/free
+//! process-wide, so the Harness wall-time cells carry that constant per-alloc
+//! overhead — but it is identical for OLD and NEW, so the old-vs-new RATIO is
+//! unaffected (only the absolute ns/op is inflated). The headline signal here
+//! is the peak-heap delta, which is allocator-independent.
 //!
 //! Run:
 //!   CARGO_TARGET_DIR=D:\dev\rust\.cargo-target-bench cargo bench -p shamir-index --bench create_index_streaming
@@ -73,6 +74,9 @@ use shamir_types::core::interner::InternerKey;
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
+
+// Opt in to the peak_mem tracking allocator for this binary (off by default).
+shamir_bench_utils::install_peak_alloc!();
 
 const FIELD_ID: u64 = 1;
 const NAME_PAYLOAD: u64 = 2;
@@ -193,9 +197,6 @@ fn measure_peak(label: &str, n: usize, data_store: &Arc<dyn Store>, new_path: bo
 }
 
 fn main() {
-    // Force the peak_mem global allocator to be linked.
-    shamir_bench_utils::peak_mem::setup();
-
     let sizes: &[usize] = &[50_000, 200_000];
 
     // ── PEAK-HEAP measurement (one-shot per cell) ──────────────────────────
