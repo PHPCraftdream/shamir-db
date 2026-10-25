@@ -1,15 +1,26 @@
+//! `CachedStore` — a full in-memory mirror of any `Store`.
+//!
+//! ROUND 4 design (RV-STORAGE-E70A0DDC / -897437C3): a single long-lived
+//! FIFO owner task owns EVERY cache/backing mutation in BOTH write modes,
+//! draining one command at a time — no per-key locks, no admission
+//! counters. Reads are lock-free (epoch + mirror probe + inner fallback +
+//! epoch-checked fill). Any backing mutation failure is sticky-terminal:
+//! every queued and subsequent command, and every trusted read, fails
+//! until the store is rebuilt.
+
 use crate::error::{DbError, DbResult};
 use crate::types::{RecordKey, Store};
-use arc_swap::ArcSwapOption;
 use async_stream::stream;
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::Stream;
+use futures::{stream::Stream, StreamExt};
 use scc::TreeIndex;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Notify};
+#[cfg(test)]
+use tokio::sync::Notify;
+use tokio::sync::{mpsc, oneshot, watch};
 
 // ============================================================================
 // WriteMode - write strategy for CachedStore
@@ -18,119 +29,209 @@ use tokio::sync::{mpsc, Notify};
 /// Write strategy for cache operations.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WriteMode {
-    /// Write-through: wait for disk write before returning.
-    /// Safer, slower. Use for critical data like indexes.
+    /// Write-through: wait for disk write before returning (safer, slower;
+    /// critical data like indexes).
     Sync,
 
-    /// Write-behind: write to cache immediately, disk write in background.
-    /// Faster, but data may be lost on crash. Use for non-critical data.
+    /// Write-behind: cache immediately, disk write in background (faster;
+    /// data may be lost on crash — non-critical data).
     Async,
 }
 
 // ============================================================================
-// CacheWriteJob / async write worker - ordered background writes (§B8,
-// taskId #616 pt.2)
+// Commands to the FIFO owner task
 // ============================================================================
-//
-// `WriteMode::Async` used to `tokio::spawn` an INDEPENDENT task per
-// `set`/`remove` call. Two independently-spawned tasks writing the same
-// key to `inner` have no ordering guarantee — the tokio scheduler may run
-// the task for an older value AFTER the task for a newer one, leaving
-// `inner` stuck on stale data while the cache (updated synchronously,
-// in-order) holds the fresh value. `flush()` only waited for
-// `pending_writes == 0`, which proves completion, not order.
-//
-// Fix: route every async `set`/`remove` through a single long-lived
-// background task that drains an `mpsc` queue strictly FIFO — one
-// `.await` at a time, never spawning nested tasks — so submission order
-// is preserved end-to-end. This mirrors `storage_fjall.rs`'s
-// `WriteWorker` pattern, but as a lightweight `tokio::spawn` task (not an
-// OS thread + `std::sync::mpsc`): `inner: Arc<dyn Store>` is an async
-// trait, so there is no blocking work to move off the async runtime.
 
-/// A unit of write work submitted to the async-mode background worker.
-/// Carries only `set`/`remove` — `insert` always awaits `inner` inline
-/// (Async mode only applies to `set`/`remove`, unchanged from before).
-enum CacheWriteJob {
-    Set { key: RecordKey, value: Bytes },
-    Remove { key: RecordKey },
+/// One queued unit of work for the owner; `reply` is completed exactly once
+/// (a dropped caller means the reply send fails, which the owner ignores).
+enum Command {
+    Insert {
+        value: Bytes,
+        reply: oneshot::Sender<DbResult<RecordKey>>,
+    },
+    Set {
+        key: RecordKey,
+        value: Bytes,
+        reply: oneshot::Sender<DbResult<bool>>,
+    },
+    Remove {
+        key: RecordKey,
+        reply: oneshot::Sender<DbResult<bool>>,
+    },
+    Transact {
+        ops: Vec<crate::types::KvOp>,
+        reply: oneshot::Sender<DbResult<()>>,
+    },
+    Reload {
+        reply: oneshot::Sender<DbResult<()>>,
+    },
+    /// Reader-initiated miss fill. Applied only on an exact EVEN capture;
+    /// a fill itself never bumps the epoch.
+    Fill {
+        epoch: u64,
+        key: RecordKey,
+        value: Option<Bytes>,
+        reply: oneshot::Sender<DbResult<()>>,
+    },
+    Flush {
+        reply: oneshot::Sender<DbResult<()>>,
+    },
+    FlushDrain {
+        reply: oneshot::Sender<DbResult<()>>,
+    },
 }
 
-/// Drains `rx` strictly one job at a time (single `.await` per
-/// iteration, no nested spawns), applying each to `inner` in submission
-/// order. Decrements `pending_writes` after each job completes, so
-/// `flush()`'s `pending_writes == 0` wait now also implies "and they
-/// landed in order" (not just "all done, order unspecified").
-///
-/// Exits when every `CacheWriteJob` sender has been dropped (the owning
-/// `CachedStore` was dropped) — `rx.recv()` then returns `None` and the
-/// loop ends naturally, no explicit shutdown signal needed.
-async fn run_async_write_worker(
-    mut rx: mpsc::UnboundedReceiver<CacheWriteJob>,
-    inner: Arc<dyn Store>,
-    pending: Arc<AtomicUsize>,
-    last_error: Arc<ArcSwapOption<String>>,
-    notify: Arc<Notify>,
-) {
-    while let Some(job) = rx.recv().await {
-        match job {
-            CacheWriteJob::Set { key, value } => {
-                // §B8: WriteMode::Async is fire-and-forget by design,
-                // but a swallowed `Err` used to silently lose
-                // durability from the CALLER's perspective. Log (for
-                // an operator watching logs under sustained backing-
-                // store failure) AND record into `last_error` so the
-                // next `flush()` call surfaces it as an `Err` instead
-                // of a silent `Ok(())` — the cache already holds the
-                // value so subsequent reads still succeed either way.
-                if let Err(e) = inner.set(key, value).await {
-                    log::error!("storage_cached async write to backing store failed: {}", e);
-                    last_error.store(Some(Arc::new(e.to_string())));
-                }
-            }
-            CacheWriteJob::Remove { key } => {
-                if let Err(e) = inner.remove(key).await {
-                    log::error!(
-                        "storage_cached async remove from backing store failed: {}",
-                        e
-                    );
-                    last_error.store(Some(Arc::new(e.to_string())));
-                }
-            }
-        }
-        // Release: pairs with `wait_for_async_writes`'s `Acquire` load —
-        // establishes happens-before so a flusher that observes
-        // `pending == 0` here is guaranteed to also observe this job's
-        // `last_error.store` above, if any. Plain `Relaxed` on both sides
-        // would let a flusher see the decrement without the error store
-        // becoming visible yet, reporting a clean flush one call too early.
-        pending.fetch_sub(1, Ordering::Release);
-        // Wake every task parked in `wait_for_async_writes` so it can
-        // recheck `pending == 0` — see that function for why a plain
-        // `yield_now` busy-poll was replaced with this.
-        notify.notify_waiters();
+fn storage_err(msg: impl Into<String>) -> DbError {
+    DbError::Storage(msg.into())
+}
+
+/// Health watch payload: `None` = healthy, `Some(msg)` = sticky failure.
+type HealthWatch = watch::Sender<Option<String>>;
+
+/// Publishes a terminal failure if none existed yet (idempotent).
+fn publish_failure(health: &HealthWatch, msg: String) {
+    if health.borrow().is_none() {
+        health.send_replace(Some(msg));
     }
 }
 
-// ============================================================================
-// CacheAction - what `transact` should do to the cache for a given op
-// ============================================================================
+/// RAII: dropped when the owner future is dropped (normal exit, panic
+/// unwind, or abort before the first poll — built before `tokio::spawn`).
+/// Marks the store terminally failed on every exit path.
+struct OwnerGuard {
+    health: HealthWatch,
+}
 
-/// Post-commit cache action for a single op in a `transact` batch.
-///
-/// Built from the original `KvOp` slice *before* `ops` is moved into
-/// `inner.transact`, so the fresh value of a `Set` survives the move
-/// and can populate the cache instead of forcing an invalidate (which
-/// would leave the cache cold on just-written keys — audit
-/// `2026-07-06-perf-radical-o-notation` finding 1.4).
+impl Drop for OwnerGuard {
+    fn drop(&mut self) {
+        publish_failure(
+            &self.health,
+            "cache owner task terminated (panic, abort or shutdown)".into(),
+        );
+    }
+}
+
+/// Await a command reply, racing it against the persistent terminal
+/// failure watch. A failed reply send is also published sticky.
+async fn await_reply<T>(
+    rx: oneshot::Receiver<DbResult<T>>,
+    mut health: watch::Receiver<Option<String>>,
+    health_tx: HealthWatch,
+) -> DbResult<T> {
+    // Check the watch BEFORE the select so a ready reply cannot race it.
+    if let Some(msg) = health.borrow().clone() {
+        return Err(storage_err(msg));
+    }
+    tokio::select! {
+        r = rx => match r {
+            Ok(v) => {
+                // Re-check health before returning a trusted success.
+                if let Some(msg) = health.borrow_and_update().clone() {
+                    return Err(storage_err(msg));
+                }
+                v
+            }
+            Err(_) => {
+                let msg = "cache owner dropped the command reply".to_string();
+                publish_failure(&health_tx, msg.clone());
+                Err(storage_err(msg))
+            }
+        },
+        changed = health.changed() => match changed {
+            Ok(()) => Err(storage_err(
+                health
+                    .borrow()
+                    .clone()
+                    .unwrap_or_else(|| "cache owner terminated".into()),
+            )),
+            Err(_) => Err(storage_err("cache owner health channel closed")),
+        },
+    }
+}
+
+/// Checked fetch-and-increment of the epoch; exhaustion fails closed.
+fn bump_epoch(epoch: &AtomicU64) -> Result<u64, String> {
+    let mut cur = epoch.load(Ordering::Acquire);
+    loop {
+        let next = cur
+            .checked_add(1)
+            .ok_or_else(|| "cache epoch counter exhausted".to_string())?;
+        match epoch.compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return Ok(next),
+            Err(actual) => cur = actual,
+        }
+    }
+}
+
+/// Completes a mutation: bumps the epoch back to EVEN before the ack /
+/// next dequeue, so a Fill that captured the odd in-flight epoch is
+/// rejected at completion too. Checked-exhaustion is sticky-terminal.
+fn finish_mutation(epoch: &AtomicU64, health: &HealthWatch) -> Option<String> {
+    match bump_epoch(epoch) {
+        Ok(_) => None,
+        Err(msg) => {
+            publish_failure(health, msg.clone());
+            Some(msg)
+        }
+    }
+}
+
+/// Completion bump (back to even) + ack; on checked-exhaustion the store
+/// goes sticky-terminal and the ack carries the failure instead of `ok`.
+fn finish_and_ack<T>(
+    epoch: &AtomicU64,
+    health: &HealthWatch,
+    failed: &mut Option<String>,
+    reply: oneshot::Sender<DbResult<T>>,
+    ok: DbResult<T>,
+) {
+    match finish_mutation(epoch, health) {
+        Some(msg) => {
+            *failed = Some(msg.clone());
+            let _ = reply.send(Err(storage_err(msg)));
+        }
+        None => {
+            let _ = reply.send(ok);
+        }
+    }
+}
+
+/// Cache upsert on a bare `TreeIndex` + size counter; returns `true` if
+/// the key was newly created.
+fn cache_upsert_into(
+    cache: &TreeIndex<RecordKey, Bytes>,
+    size: &AtomicUsize,
+    key: RecordKey,
+    value: Bytes,
+) -> bool {
+    let existed = cache.remove_sync(&key);
+    if !existed {
+        size.fetch_add(1, Ordering::Relaxed);
+    }
+    // insert always succeeds after remove (scc only rejects duplicates).
+    let _ = cache.insert_sync(key, value);
+    !existed
+}
+
+fn cache_evict_into(
+    cache: &TreeIndex<RecordKey, Bytes>,
+    size: &AtomicUsize,
+    key: &RecordKey,
+) -> bool {
+    if cache.remove_sync(key) {
+        size.fetch_sub(1, Ordering::Relaxed);
+        true
+    } else {
+        false
+    }
+}
+
+/// Post-commit cache action for one `transact` op, built before `ops` is
+/// moved into `inner.transact`.
 enum CacheAction {
     /// `KvOp::Set` — populate the cache with the committed value.
-    /// Inlines the same remove-then-insert + conditional size-bump
-    /// that `cache_upsert` uses for the single-key `set` path, so the
-    /// size-accounting discipline is identical (bumps `size` only on a
-    /// genuinely new key).
     Populate(RecordKey, Bytes),
-    /// `KvOp::Remove` — evict the entry (delete semantics).
+    /// `KvOp::Remove` — evict the entry.
     Invalidate(RecordKey),
 }
 
@@ -142,85 +243,348 @@ impl CacheAction {
         }
     }
 
-    /// Apply this action to the cache, mirroring the existing
-    /// size-accounting discipline:
-    /// - `Populate` inlines `cache_upsert`'s remove-then-insert (bumps
-    ///   `size` only on a genuinely new key).
-    /// - `Invalidate` does a single `remove` and decrements `size` if
-    ///   the key was present (unchanged from the prior behaviour).
     fn apply(self, cache: &TreeIndex<RecordKey, Bytes>, size: &AtomicUsize) {
         match self {
             Self::Populate(key, value) => {
-                let existed = cache.remove_sync(&key);
-                if !existed {
-                    size.fetch_add(1, Ordering::Relaxed);
-                }
-                // insert always succeeds after a remove (scc::TreeIndex
-                // only rejects on a duplicate key, which we just removed).
-                let _ = cache.insert_sync(key, value);
+                cache_upsert_into(cache, size, key, value);
             }
             Self::Invalidate(key) => {
-                if cache.remove_sync(&key) {
-                    size.fetch_sub(1, Ordering::Relaxed);
-                }
+                cache_evict_into(cache, size, &key);
             }
         }
     }
 }
 
 // ============================================================================
-// CachedStore - in-memory full mirror of any Store
+// FIFO owner task
+// ============================================================================
+
+/// Shared owner state, passed to the owner task as one handle.
+struct OwnerState {
+    inner: Arc<dyn Store>,
+    cache: Arc<TreeIndex<RecordKey, Bytes>>,
+    size: Arc<AtomicUsize>,
+    epoch: Arc<AtomicU64>,
+    pending: Arc<AtomicUsize>,
+    health: HealthWatch,
+    mode: WriteMode,
+}
+
+/// The single long-lived owner task. Drains `rx` strictly FIFO, one
+/// command at a time; each command is fully awaited (backing AND cache)
+/// before the next dequeue, so cache and backing mutate in submission
+/// order. Exits when every `CachedStore` handle is dropped.
+async fn run_owner(
+    mut rx: mpsc::UnboundedReceiver<Command>,
+    state: OwnerState,
+    guard: OwnerGuard,
+    #[cfg(test)] start_gate: Option<Arc<Notify>>,
+) {
+    let OwnerState {
+        inner,
+        cache,
+        size,
+        epoch,
+        pending,
+        health,
+        mode,
+    } = state;
+    let _guard = guard;
+    // Test-only pause so an abort can land before owner work.
+    #[cfg(test)]
+    if let Some(gate) = start_gate {
+        gate.notified().await;
+    }
+
+    // Sticky terminal failure: every remaining queued command fails with
+    // this message; the loop then drains-and-fails forever.
+    let mut failed: Option<String> = None;
+
+    while let Some(cmd) = rx.recv().await {
+        if let Some(msg) = failed.clone() {
+            fail_command(cmd, &msg);
+            continue;
+        }
+        // Odd/even protocol: bump ODD before a mutation, EVEN on
+        // completion; `Fill` itself never bumps.
+        let is_mutation = matches!(
+            cmd,
+            Command::Insert { .. }
+                | Command::Set { .. }
+                | Command::Remove { .. }
+                | Command::Transact { .. }
+                | Command::Reload { .. }
+        );
+        if is_mutation {
+            if let Err(msg) = bump_epoch(&epoch) {
+                publish_failure(&health, msg.clone());
+                failed = Some(msg.clone());
+                fail_command(cmd, &msg);
+                continue;
+            }
+        }
+        match cmd {
+            Command::Insert { value, reply } => match inner.insert(value.clone()).await {
+                Ok(key) => {
+                    // Bump exact membership only when the insert succeeded.
+                    if cache.insert_sync(key.clone(), value).is_ok() {
+                        size.fetch_add(1, Ordering::Relaxed);
+                    }
+                    finish_and_ack(&epoch, &health, &mut failed, reply, Ok(key));
+                }
+                Err(e) => {
+                    publish_failure(&health, e.to_string());
+                    failed = Some(e.to_string());
+                    let _ = reply.send(Err(e));
+                }
+            },
+            Command::Set { key, value, reply } => match mode {
+                WriteMode::Sync => match inner.set(key.clone(), value.clone()).await {
+                    Ok(created) => {
+                        cache_upsert_into(&cache, &size, key, value);
+                        finish_and_ack(&epoch, &health, &mut failed, reply, Ok(created));
+                    }
+                    Err(e) => {
+                        publish_failure(&health, e.to_string());
+                        failed = Some(e.to_string());
+                        let _ = reply.send(Err(e));
+                    }
+                },
+                WriteMode::Async => {
+                    // Tentative cache publication + ack FIRST, then the
+                    // backing await (one command at a time keeps FIFO).
+                    let created = cache_upsert_into(&cache, &size, key.clone(), value.clone());
+                    pending.fetch_add(1, Ordering::Relaxed);
+                    let _ = reply.send(Ok(created));
+                    if let Err(e) = inner.set(key, value).await {
+                        pending.fetch_sub(1, Ordering::Relaxed);
+                        log::error!("storage_cached async set failed terminally: {}", e);
+                        publish_failure(&health, e.to_string());
+                        failed = Some(e.to_string());
+                    } else {
+                        pending.fetch_sub(1, Ordering::Relaxed);
+                        // Completion bump (even) before the next dequeue.
+                        if let Some(msg) = finish_mutation(&epoch, &health) {
+                            failed = Some(msg);
+                        }
+                    }
+                }
+            },
+            Command::Remove { key, reply } => match mode {
+                WriteMode::Sync => match inner.remove(key.clone()).await {
+                    Ok(removed) => {
+                        cache_evict_into(&cache, &size, &key);
+                        finish_and_ack(&epoch, &health, &mut failed, reply, Ok(removed));
+                    }
+                    Err(e) => {
+                        publish_failure(&health, e.to_string());
+                        failed = Some(e.to_string());
+                        let _ = reply.send(Err(e));
+                    }
+                },
+                WriteMode::Async => {
+                    let existed = cache_evict_into(&cache, &size, &key);
+                    pending.fetch_add(1, Ordering::Relaxed);
+                    let _ = reply.send(Ok(existed));
+                    if let Err(e) = inner.remove(key).await {
+                        pending.fetch_sub(1, Ordering::Relaxed);
+                        log::error!("storage_cached async remove failed terminally: {}", e);
+                        publish_failure(&health, e.to_string());
+                        failed = Some(e.to_string());
+                    } else {
+                        pending.fetch_sub(1, Ordering::Relaxed);
+                        if let Some(msg) = finish_mutation(&epoch, &health) {
+                            failed = Some(msg);
+                        }
+                    }
+                }
+            },
+            Command::Transact { ops, reply } => {
+                let actions: Vec<CacheAction> = ops.iter().map(CacheAction::from_op).collect();
+                match inner.transact(ops).await {
+                    Ok(()) => {
+                        for action in actions {
+                            action.apply(&cache, &size);
+                        }
+                        finish_and_ack(&epoch, &health, &mut failed, reply, Ok(()));
+                    }
+                    Err(e) => {
+                        publish_failure(&health, e.to_string());
+                        failed = Some(e.to_string());
+                        let _ = reply.send(Err(e));
+                    }
+                }
+            }
+            Command::Reload { reply } => {
+                // Scan into a PRIVATE tree first; on scan error the live
+                // tree is left unchanged and the store stays healthy.
+                let fresh = TreeIndex::new();
+                let mut scan_err: Option<DbError> = None;
+                {
+                    let mut s = inner.iter_stream(shamir_tunables::store_defaults::FULL_SCAN_BATCH);
+                    while let Some(batch_result) = s.next().await {
+                        match batch_result {
+                            Ok(batch) => {
+                                for (key, value) in batch {
+                                    let _ = fresh.insert_sync(key, value);
+                                }
+                            }
+                            Err(e) => {
+                                scan_err = Some(e);
+                                break;
+                            }
+                        }
+                    }
+                }
+                if let Some(e) = scan_err {
+                    // Finish even; live mirror unchanged, store healthy
+                    // (a scan failure is not a backing MUTATION failure).
+                    match finish_mutation(&epoch, &health) {
+                        Some(msg) => {
+                            failed = Some(msg.clone());
+                            let _ = reply.send(Err(storage_err(msg)));
+                        }
+                        None => {
+                            let _ = reply.send(Err(e));
+                        }
+                    }
+                    continue;
+                }
+                // Synchronous diff application; the live tree is
+                // diff-applied, NEVER `clear()`ed.
+                let mut vanished: Vec<RecordKey> = Vec::new();
+                {
+                    let g = scc::Guard::new();
+                    for (k, _) in cache.iter(&g) {
+                        if !fresh.contains(k) {
+                            vanished.push(k.clone());
+                        }
+                    }
+                }
+                for k in vanished {
+                    cache_evict_into(&cache, &size, &k);
+                }
+                {
+                    let g = scc::Guard::new();
+                    let updates: Vec<(RecordKey, Bytes)> = fresh
+                        .iter(&g)
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    for (k, v) in updates {
+                        cache_upsert_into(&cache, &size, k, v);
+                    }
+                }
+                let _ = reply.send(match finish_mutation(&epoch, &health) {
+                    Some(msg) => {
+                        failed = Some(msg.clone());
+                        Err(storage_err(msg))
+                    }
+                    None => Ok(()),
+                });
+            }
+            Command::Fill {
+                epoch: captured,
+                key,
+                value,
+                reply,
+            } => {
+                // Applies only on an exact EVEN capture.
+                let cur = epoch.load(Ordering::Acquire);
+                if cur != captured || cur % 2 == 1 {
+                    let _ = reply.send(Ok(()));
+                    continue;
+                }
+                if let Some(v) = value {
+                    cache_upsert_into(&cache, &size, key, v);
+                }
+                let _ = reply.send(Ok(()));
+            }
+            Command::Flush { reply } => {
+                // Barrier: every earlier mutation has reached `inner`.
+                // A flush failure is NOT sticky-terminal.
+                let _ = reply.send(inner.flush().await);
+            }
+            Command::FlushDrain { reply } => {
+                let _ = reply.send(inner.flush_drain().await);
+            }
+        }
+    }
+}
+
+/// Fails a queued command with the sticky terminal message (owner has
+/// already failed; every queued job is rejected in order).
+fn fail_reply<T>(reply: oneshot::Sender<DbResult<T>>, msg: &str) {
+    let _ = reply.send(Err(storage_err(msg)));
+}
+
+fn fail_command(cmd: Command, msg: &str) {
+    match cmd {
+        Command::Insert { reply, .. } => fail_reply(reply, msg),
+        Command::Set { reply, .. } => fail_reply(reply, msg),
+        Command::Remove { reply, .. } => fail_reply(reply, msg),
+        Command::Transact { reply, .. } => fail_reply(reply, msg),
+        Command::Reload { reply, .. } => fail_reply(reply, msg),
+        Command::Fill { reply, .. } => fail_reply(reply, msg),
+        Command::Flush { reply, .. } => fail_reply(reply, msg),
+        Command::FlushDrain { reply, .. } => fail_reply(reply, msg),
+    }
+}
+
+/// Supervisor: awaits the owner's `JoinHandle`; publishes a failure if the owner
+/// finished without a more specific one (alongside [`OwnerGuard`]).
+async fn supervise_owner(handle: tokio::task::JoinHandle<()>, health: HealthWatch) {
+    let _ = handle.await;
+    publish_failure(&health, "cache owner task finished unexpectedly".into());
+}
+
+// ============================================================================
+// CachedStore
 // ============================================================================
 
 /// Full mirror cache that loads ALL data from inner store on creation.
+/// `Sync` = write-through (safer, indexes); `Async` = write-behind (the
+/// owner publishes the tentative cache entry and acks, then awaits the
+/// backing write before dequeuing the next command).
 ///
-/// ## Write Modes:
-/// - `WriteMode::Sync`: write-through, waits for disk (safer for indexes)
-/// - `WriteMode::Async`: write-behind, background writes (faster for data)
-///
-/// ## Behavior:
-/// - Constructor: loads all data from inner into local cache
-/// - Reads: from cache first, fallback to inner on miss (lazy load)
-/// - Writes: depends on WriteMode (sync or async)
-///
-/// ## Cache structure:
-/// `scc::TreeIndex` — lock-free sorted B+ tree. Gives O(log N + k) prefix
-/// range scans (no collect+sort) and O(log N) point ops. Replaces the
-/// previous `DashMap` shape that did O(N log N) full-collect+sort on every
-/// `iter_stream` / `scan_prefix_stream` call.
+/// ## Concurrency (ROUND 4, RV-STORAGE-E70A0DDC):
+/// One FIFO owner task owns every mutation in both modes; reads are
+/// lock-free (epoch + mirror probe + inner fallback + epoch-checked fill).
+/// A backing mutation failure is sticky-terminal for the whole store.
 pub struct CachedStore {
     inner: Arc<dyn Store>,
     cache: Arc<TreeIndex<RecordKey, Bytes>>,
     mode: WriteMode,
+    /// Telemetry: async set/remove jobs not yet completed in the backing.
     pending_writes: Arc<AtomicUsize>,
-    /// Tracks the number of entries in the cache.
-    /// `TreeIndex` has no O(1) `len()`, so we maintain a counter ourselves.
+    /// Cache entry count (`TreeIndex` has no O(1) `len()`).
     size: Arc<AtomicUsize>,
-    /// `Some` only for `WriteMode::Async` — the channel into the single
-    /// background write worker (see `run_async_write_worker` above) that
-    /// applies `set`/`remove` to `inner` strictly FIFO, guaranteeing the
-    /// backing store observes writes to the same key in submission
-    /// order. `None` for `WriteMode::Sync` (writes are inline, no worker).
-    async_write_tx: Option<mpsc::UnboundedSender<CacheWriteJob>>,
-    /// Most recent background write/remove failure (`WriteMode::Async`
-    /// only), consumed and cleared by `flush()`. Always `None` for
-    /// `WriteMode::Sync` (writes are inline and their errors already
-    /// propagate through the call's own `Result`).
-    write_error: Arc<ArcSwapOption<String>>,
-    /// Woken by `run_async_write_worker` after every job — lets
-    /// `wait_for_async_writes` park instead of busy-polling
-    /// `pending_writes` with `yield_now`.
-    write_notify: Arc<Notify>,
+    /// Odd/even: ODD while a mutation/reload is in flight, EVEN when
+    /// quiescent; completion bumps invalidate captures taken mid-flight.
+    epoch: Arc<AtomicU64>,
+    tx: mpsc::UnboundedSender<Command>,
+    health: watch::Receiver<Option<String>>,
+    /// Health sender clone: lets a dropped-reply diagnostic be published
+    /// sticky even if the `OwnerGuard` publication races.
+    health_tx: HealthWatch,
+    #[cfg(test)]
+    abort_handle: tokio::task::AbortHandle,
 }
 
 impl CachedStore {
     async fn new_with_mode(inner: Arc<dyn Store>, mode: WriteMode) -> DbResult<Self> {
-        use futures::StreamExt;
+        Self::build(inner, mode, None).await
+    }
 
+    async fn build(
+        inner: Arc<dyn Store>,
+        mode: WriteMode,
+        #[cfg(test)] start_gate: Option<Arc<Notify>>,
+        #[cfg(not(test))] _start_gate: Option<Arc<tokio::sync::Notify>>,
+    ) -> DbResult<Self> {
         let cache = Arc::new(TreeIndex::new());
         let size = Arc::new(AtomicUsize::new(0));
 
-        // Load ALL data from inner store into cache (streaming to avoid double allocation)
+        // Load ALL data from inner store into cache (streaming).
         let mut stream = inner.iter_stream(shamir_tunables::store_defaults::FULL_SCAN_BATCH);
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
@@ -232,25 +596,34 @@ impl CachedStore {
         }
 
         let pending_writes = Arc::new(AtomicUsize::new(0));
-        let write_error: Arc<ArcSwapOption<String>> = Arc::new(ArcSwapOption::from(None));
-        let write_notify = Arc::new(Notify::new());
-
-        // Only Async mode needs the background write worker; Sync writes
-        // stay fully inline (await at the call site), so no channel/task
-        // is created for it.
-        let async_write_tx = if matches!(mode, WriteMode::Async) {
-            let (tx, rx) = mpsc::unbounded_channel::<CacheWriteJob>();
-            tokio::spawn(run_async_write_worker(
-                rx,
-                inner.clone(),
-                pending_writes.clone(),
-                write_error.clone(),
-                write_notify.clone(),
-            ));
-            Some(tx)
-        } else {
-            None
+        let epoch = Arc::new(AtomicU64::new(0));
+        let (tx, rx) = mpsc::unbounded_channel::<Command>();
+        let (health_tx, health_rx) = watch::channel(None);
+        // Built BEFORE spawn: even an abort before the first poll marks
+        // the store failed on drop.
+        let guard = OwnerGuard {
+            health: health_tx.clone(),
         };
+        let state = OwnerState {
+            inner: inner.clone(),
+            cache: cache.clone(),
+            size: size.clone(),
+            epoch: epoch.clone(),
+            pending: pending_writes.clone(),
+            health: health_tx.clone(),
+            mode,
+        };
+        let health_tx_store = health_tx.clone();
+        let handle = tokio::spawn(run_owner(
+            rx,
+            state,
+            guard,
+            #[cfg(test)]
+            start_gate,
+        ));
+        #[cfg(test)]
+        let abort_handle = handle.abort_handle();
+        tokio::spawn(supervise_owner(handle, health_tx));
 
         Ok(Self {
             inner,
@@ -258,20 +631,21 @@ impl CachedStore {
             mode,
             pending_writes,
             size,
-            async_write_tx,
-            write_error,
-            write_notify,
+            epoch,
+            tx,
+            health: health_rx,
+            health_tx: health_tx_store,
+            #[cfg(test)]
+            abort_handle,
         })
     }
 
-    /// Create a new cached store with Sync write mode (safer, for indexes).
-    /// Loads ALL data from inner store into cache.
+    /// New cached store, Sync write mode (safer, for indexes).
     pub async fn new_sync(inner: Arc<dyn Store>) -> DbResult<Self> {
         Self::new_with_mode(inner, WriteMode::Sync).await
     }
 
-    /// Create a new cached store with Async write mode (faster, for data).
-    /// Loads ALL data from inner store into cache.
+    /// New cached store, Async write mode (faster, for data).
     pub async fn new_async(inner: Arc<dyn Store>) -> DbResult<Self> {
         Self::new_with_mode(inner, WriteMode::Async).await
     }
@@ -281,7 +655,7 @@ impl CachedStore {
         &self.inner
     }
 
-    /// Get reference to the underlying `TreeIndex` cache (for inspection/debugging).
+    /// Reference to the underlying `TreeIndex` cache (inspection/debugging).
     pub fn cache(&self) -> &Arc<TreeIndex<RecordKey, Bytes>> {
         &self.cache
     }
@@ -296,290 +670,195 @@ impl CachedStore {
         self.size.load(Ordering::Relaxed)
     }
 
-    /// Get number of pending async writes (0 for Sync mode).
+    /// Number of async set/remove jobs not yet completed (0 for Sync).
     pub fn pending_writes(&self) -> usize {
         self.pending_writes.load(Ordering::Relaxed)
     }
 
-    /// Reload all data from inner store (re-sync cache).
-    /// Useful if inner store was modified externally.
+    /// Returns the sticky terminal failure message, if any.
+    fn sticky_failure(&self) -> Option<String> {
+        self.health.borrow().clone()
+    }
+
+    /// Submit a command to the FIFO owner and await its reply, racing the
+    /// persistent terminal-failure watch.
+    async fn command<T>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<DbResult<T>>) -> Command,
+    ) -> DbResult<T> {
+        if let Some(msg) = self.sticky_failure() {
+            return Err(storage_err(msg));
+        }
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self.tx.send(make(reply_tx)).is_err() {
+            return Err(storage_err("cache owner command channel closed"));
+        }
+        await_reply(reply_rx, self.health.clone(), self.health_tx.clone()).await
+    }
+
+    /// Reload all data from inner store (re-sync the mirror). On scan
+    /// error the live mirror is left unchanged and the store stays
+    /// healthy; on success the diff is applied to the SAME live tree
+    /// synchronously (never `cache.clear()`ed).
     pub async fn reload(&self) -> DbResult<()> {
-        use futures::StreamExt;
-
-        // Clear current cache and reset size counter
-        self.cache.clear();
-        self.size.store(0, Ordering::Relaxed);
-
-        // Reload all data from inner (streaming)
-        let mut stream = self
-            .inner
-            .iter_stream(shamir_tunables::store_defaults::FULL_SCAN_BATCH);
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result?;
-            for (key, value) in batch {
-                if self.cache.insert_sync(key, value).is_ok() {
-                    self.size.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-        }
-
-        Ok(())
+        self.command(|reply| Command::Reload { reply }).await
     }
 
-    /// Flush pending async writes AND propagate the flush down to `inner`
-    /// (its own buffered state — e.g. a `MemBufferStore` overlay or an
-    /// fsync — needs this regardless of `CachedStore`'s own write mode).
-    ///
-    /// `inner.flush()` runs unconditionally, even when waiting on pending
-    /// async writes surfaces a background failure — an early return there
-    /// would silently skip `inner`'s own durability work for every OTHER,
-    /// successfully-buffered write, not just the one that failed (a
-    /// regression caught by @oh review, 2026-08-11, in an earlier version
-    /// of this fix). This is the canonical implementation; `Store::flush`
-    /// below delegates to it (method resolution prefers this inherent
-    /// method over the trait one on a bare `self.flush()` call even
-    /// inside that trait impl, so there is exactly one code path, not two
-    /// that could silently diverge — see the same review, which caught
-    /// this INHERENT method never calling `inner.flush()` at all under
-    /// the pre-existing implementation).
+    /// Flush every queued mutation down to `inner` (FIFO barrier) and
+    /// propagate to `inner`'s own buffered state. If the owner is
+    /// terminally failed, the inner durability op is still attempted directly.
     pub async fn flush(&self) -> DbResult<()> {
-        let bg_result = if matches!(self.mode, WriteMode::Sync) {
-            Ok(())
-        } else {
-            self.wait_for_async_writes().await
-        };
-        let inner_result = self.inner.flush().await;
-
-        if let Err(ref e) = bg_result {
-            if inner_result.is_ok() {
-                return bg_result;
+        match self.command(|reply| Command::Flush { reply }).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if self.sticky_failure().is_some() {
+                    self.flush_owner_down(e.to_string(), false).await
+                } else {
+                    // Owner healthy; the reply itself is inner.flush's error.
+                    Err(e)
+                }
             }
-            // Both failed: `inner_result` is the more actionable signal
-            // (the flush this call actually attempted just failed), but
-            // log the background failure so it isn't silently dropped —
-            // `wait_for_async_writes` already cleared it out of
-            // `write_error`, so this is its only remaining trace.
-            log::error!(
-                "storage_cached flush: inner.flush() failed AND a prior background write also \
-                 failed ({e}); returning inner's error, background failure logged here"
-            );
         }
-        inner_result
     }
 
-    /// Drain pending async writes into the inner backend WITHOUT the inner
-    /// `flush()` — the shutdown flush pass drains every store first and then
-    /// persists the backend ONCE (`Repo::persist_once`), so calling the
-    /// inner flush here would reintroduce one full-database fsync per
-    /// buffered store. With no `inner.flush()` there is only the background
-    /// error to surface (no bg/inner priority merge, unlike `flush`). The
-    /// inner drain is recursive — a `Cached` stacked over `MemBuffer` drains
-    /// the whole wrapper chain; fjall's no-op `flush_drain` terminates it.
+    /// Drain queued mutations into the inner backend WITHOUT the inner
+    /// `flush()` (the shutdown pass persists the backend once). Same
+    /// sticky-failure handling as `flush`.
     pub async fn flush_drain(&self) -> DbResult<()> {
-        let bg_result = if matches!(self.mode, WriteMode::Sync) {
-            Ok(())
-        } else {
-            self.wait_for_async_writes().await
-        };
-        let inner_result = self.inner.flush_drain().await;
-        match inner_result {
-            Ok(()) => bg_result,
+        match self.command(|reply| Command::FlushDrain { reply }).await {
+            Ok(()) => Ok(()),
             Err(e) => {
-                if let Err(ref bg) = bg_result {
-                    log::error!(
-                        "storage_cached flush_drain: inner.flush_drain() failed AND a prior \
-                         background write also failed ({bg}); returning inner's error, \
-                         background failure logged here"
-                    );
+                if self.sticky_failure().is_some() {
+                    self.flush_owner_down(e.to_string(), true).await
+                } else {
+                    Err(e)
                 }
+            }
+        }
+    }
+
+    /// Terminal-failure flush path: the inner durability op is attempted
+    /// DIRECTLY; the error merges the sticky failure and the inner result.
+    async fn flush_owner_down(&self, sticky: String, drain: bool) -> DbResult<()> {
+        let inner_result = if drain {
+            self.inner.flush_drain().await
+        } else {
+            self.inner.flush().await
+        };
+        match inner_result {
+            Ok(()) => Err(storage_err(format!(
+                "cache owner failed terminally ({sticky}); inner {} succeeded but the \
+                 cache mirror is unusable",
+                if drain { "flush_drain" } else { "flush" }
+            ))),
+            Err(e) => {
+                log::error!(
+                    "storage_cached flush_down: inner {} failed AND the cache owner is \
+                     terminally failed ({sticky}); returning inner's error, sticky \
+                     failure logged here",
+                    if drain { "flush_drain" } else { "flush" }
+                );
                 Err(e)
             }
         }
     }
 
-    /// Park until every job the background write worker has already
-    /// dequeued has finished (`pending_writes == 0`), then surface the
-    /// most recent background write/remove failure, if any, as an `Err`
-    /// — and clear it, so a failure is reported exactly once, to the
-    /// next `flush()` call after it happened.
-    ///
-    /// Uses `Notify`'s "create the `Notified` future before re-checking
-    /// the condition" pattern (see `tokio::sync::Notify`'s own docs for
-    /// this exact shape) instead of a `yield_now` busy-poll: the
-    /// background worker calls `notify_waiters()` after every job, so a
-    /// waiter here is woken promptly rather than repeatedly re-scheduled
-    /// by the runtime to just recheck an atomic. No-op (immediate
-    /// return) for `WriteMode::Sync`, where `pending_writes` is always 0.
-    async fn wait_for_async_writes(&self) -> DbResult<()> {
-        loop {
-            let notified = self.write_notify.notified();
-            // Acquire: pairs with the worker's `Release` fetch_sub — see
-            // that call site for why plain `Relaxed` here could miss a
-            // same-job `last_error` store.
-            if self.pending_writes.load(Ordering::Acquire) == 0 {
-                break;
-            }
-            notified.await;
-        }
-
-        if let Some(msg) = self.write_error.swap(None) {
-            return Err(DbError::Storage((*msg).clone()));
-        }
-        Ok(())
+    #[cfg(test)]
+    pub(crate) fn abort_owner_for_tests(&self) {
+        self.abort_handle.abort();
     }
 
-    /// Cache-internal upsert: remove old entry (updating size), then insert new.
-    /// Returns `true` if this was a new key (didn't exist before).
-    fn cache_upsert(&self, key: RecordKey, value: Bytes) -> bool {
-        let existed = self.cache.remove_sync(&key);
-        if !existed {
-            self.size.fetch_add(1, Ordering::Relaxed);
-        }
-        // insert always succeeds after remove
-        let _ = self.cache.insert_sync(key, value);
-        !existed
+    /// Resolves once the health watch holds a terminal value.
+    #[cfg(test)]
+    pub(crate) async fn await_health_terminal_for_tests(&self) {
+        let mut rx = self.health.clone();
+        while rx.borrow_and_update().is_none() && rx.changed().await.is_ok() {}
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn new_sync_paused_owner_for_tests(
+        inner: Arc<dyn Store>,
+    ) -> DbResult<(Self, Arc<Notify>)> {
+        let gate = Arc::new(Notify::new());
+        Ok((
+            Self::build(inner, WriteMode::Sync, Some(gate.clone())).await?,
+            gate,
+        ))
     }
 }
 
 #[async_trait]
 impl Store for CachedStore {
     async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
-        // Insert ALWAYS needs to wait for inner to get the correct key
-        // Async mode only applies to set/remove, not insert
-        let key = self.inner.insert(value.clone()).await?;
-
-        // Cache the value immediately (new key, so always increments size)
-        let _ = self.cache.insert_sync(key.clone(), value);
-        self.size.fetch_add(1, Ordering::Relaxed);
-        Ok(key)
+        self.command(|reply| Command::Insert { value, reply }).await
     }
 
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
-        match self.mode {
-            WriteMode::Sync => {
-                // Write to both inner store and cache synchronously
-                let created = self.inner.set(key.clone(), value.clone()).await?;
-                self.cache_upsert(key, value);
-                Ok(created)
-            }
-            WriteMode::Async => {
-                // Write to cache immediately
-                let created = self.cache_upsert(key.clone(), value.clone());
-
-                // Enqueue onto the single ordered background worker
-                // instead of spawning an independent task per write —
-                // see `run_async_write_worker` for why: independently
-                // spawned tasks give no ordering guarantee, which could
-                // let a stale value win the race against `inner` for a
-                // key written twice in quick succession.
-                self.pending_writes.fetch_add(1, Ordering::Relaxed);
-                if let Err(e) = self
-                    .async_write_tx
-                    .as_ref()
-                    .expect("async_write_tx set for WriteMode::Async")
-                    .send(CacheWriteJob::Set { key, value })
-                {
-                    // Worker task is gone (channel closed) — this should
-                    // only happen if `CachedStore` is being torn down
-                    // concurrently. Undo the pending-writes bump (the
-                    // job will never run) and log loudly: durability is
-                    // silently lost otherwise.
-                    self.pending_writes.fetch_sub(1, Ordering::Relaxed);
-                    log::error!(
-                        "storage_cached async write worker channel closed, write dropped: {}",
-                        e
-                    );
-                }
-
-                Ok(created)
-            }
-        }
+        self.command(|reply| Command::Set { key, value, reply })
+            .await
     }
 
     async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
-        // Try cache first
+        // Trusted read: refuse terminally-failed stores outright.
+        if let Some(msg) = self.sticky_failure() {
+            return Err(storage_err(msg));
+        }
+        // Capture the epoch BEFORE the mirror probe and the inner read.
+        let captured = self.epoch.load(Ordering::Acquire);
         if let Some(v) = self.cache.peek_with(&key, |_, v| v.clone()) {
+            // Health re-check after the (lock-free) probe.
+            if let Some(msg) = self.sticky_failure() {
+                return Err(storage_err(msg));
+            }
             return Ok(v);
         }
-
-        // Cache miss - load from inner store and cache it
-        // This handles cases where inner was modified externally
-        let value = self.inner.get(key.clone()).await?;
-
-        // Store in cache for future access (new entry → increment size)
-        if self.cache.insert_sync(key, value.clone()).is_ok() {
-            self.size.fetch_add(1, Ordering::Relaxed);
-        }
-
-        Ok(value)
+        let value = match self.inner.get(key.clone()).await {
+            Ok(v) => Some(v),
+            Err(DbError::NotFound(_)) => None,
+            Err(e) => return Err(e),
+        };
+        self.command(|reply| Command::Fill {
+            epoch: captured,
+            key: key.clone(),
+            value: value.clone(),
+            reply,
+        })
+        .await?;
+        value.ok_or_else(|| DbError::NotFound(format!("record not found: {:?}", key)))
     }
 
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
-        let existed = self.cache.remove_sync(&key);
-        if existed {
-            self.size.fetch_sub(1, Ordering::Relaxed);
-        }
-
-        match self.mode {
-            WriteMode::Sync => self.inner.remove(key).await,
-            WriteMode::Async => {
-                // Enqueue onto the ordered background worker (see
-                // `set`'s Async branch above for the rationale).
-                self.pending_writes.fetch_add(1, Ordering::Relaxed);
-                if let Err(e) = self
-                    .async_write_tx
-                    .as_ref()
-                    .expect("async_write_tx set for WriteMode::Async")
-                    .send(CacheWriteJob::Remove { key })
-                {
-                    self.pending_writes.fetch_sub(1, Ordering::Relaxed);
-                    log::error!(
-                        "storage_cached async write worker channel closed, remove dropped: {}",
-                        e
-                    );
-                }
-
-                Ok(existed)
-            }
-        }
+        self.command(|reply| Command::Remove { key, reply }).await
     }
 
     fn iter_stream(
         &self,
         batch_size: usize,
     ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
-        // Incremental/cursor stream: one bounded `range` query per batch,
-        // each under its own short-lived `scc::ebr::Guard`. This replaces
-        // the previous eager `collect()` of the entire cache before the
-        // first yield — a consumer that only wants the first batch (e.g.
-        // an upstream `LIMIT 10`) now pays O(batch_size) clones instead
-        // of O(N) (audit `2026-07-06-perf-radical-o-notation` finding 1.3).
-        //
-        // scc's `Iter`/`Range` borrow the EBR `Guard` via a `'g` lifetime
-        // and yield `&'g` references, so a fully-lazy held-cursor stream
-        // (iterator stored across `.await` points in the `stream!` block)
-        // isn't sound — the `Guard` must not outlive its short scope.
-        // The repeated-bounded-requery approach mirrors fjall's
-        // `iter_stream` resume-by-last-key cursor pattern: each batch
-        // re-seeks to `Bound::Excluded(last_key)` and takes
-        // `batch_size`, so per-batch cost is O(batch_size) and total
-        // work scales with what the consumer actually drains. Order is
-        // unchanged (TreeIndex ascending key order).
+        // Incremental/cursor stream over the mirror: one bounded `range`
+        // query per batch, each under its own short-lived `scc::ebr::Guard`,
+        // re-seeking past the last yielded key. O(batch_size) per batch;
+        // TreeIndex ascending key order.
         let cache = self.cache.clone();
+        let health = self.health.clone();
 
         Box::pin(stream! {
             let mut last_key: Option<RecordKey> = None;
 
             loop {
-                // Drive one batch inside a short-lived Guard scope.
+                // Trusted read: fail closed when terminally failed (one
+                // diagnostic batch, then stop). Clone out of the borrow
+                // guard so the future stays Send across yields.
+                let terminal = health.borrow().clone();
+                if let Some(msg) = terminal {
+                    yield Err(storage_err(msg));
+                    return;
+                }
                 let cur_last = last_key.clone();
                 let batch: Vec<(RecordKey, Bytes)> = {
                     let g = scc::Guard::new();
-                    // Use the tuple `(Bound<RecordKey>, Bound<RecordKey>)`
-                    // form so scc infers `Q = RecordKey` (which is
-                    // `Comparable<RecordKey>`); an explicit `Bound<..>..`
-                    // range would make `Q = Bound<RecordKey>`, which isn't
-                    // `Comparable<RecordKey>`.
+                    // Tuple `(Bound, Bound)` form so scc infers
+                    // `Q = RecordKey` (which is `Comparable<RecordKey>`).
                     let iter = match &cur_last {
                         Some(c) => cache.range((std::ops::Bound::Excluded(c.clone()), std::ops::Bound::Unbounded), &g),
                         None => cache.range((std::ops::Bound::Unbounded, std::ops::Bound::Unbounded), &g),
@@ -590,9 +869,8 @@ impl Store for CachedStore {
                         batch_last = Some(k.clone());
                         items.push((k.clone(), v.clone()));
                     }
-                    // If we produced a full batch, advance the cursor to
-                    // its last key; a short (final) batch signals stream
-                    // exhaustion → clear `last_key` so the outer loop ends.
+                    // Full batch advances the cursor; a short batch ends
+                    // the stream.
                     if items.len() == batch_size {
                         last_key = batch_last;
                     } else {
@@ -606,7 +884,6 @@ impl Store for CachedStore {
                 }
                 yield Ok(batch);
 
-                // A short (final) batch cleared `last_key` → stream done.
                 if last_key.is_none() {
                     break;
                 }
@@ -619,26 +896,27 @@ impl Store for CachedStore {
         prefix: Bytes,
         batch_size: usize,
     ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
-        // Same incremental/cursor pattern as `iter_stream` above, but the
-        // initial lower bound is the prefix itself (seek directly to the
-        // prefix range), and each entry is checked against the prefix to
-        // stop as soon as we walk past it (TreeIndex yields lex order).
-        // Per-batch cost is O(batch_size); a `LIMIT`-style early break
-        // costs only what the consumer drained (audit finding 1.3).
+        // Same incremental/cursor pattern as `iter_stream`, bounded below
+        // by the prefix.
         let cache = self.cache.clone();
+        let health = self.health.clone();
 
         Box::pin(stream! {
             let mut last_key: Option<RecordKey> = None;
 
             loop {
+                // Trusted read: fail closed when terminally failed (one
+                // diagnostic batch, then stop). Clone out of the borrow
+                // guard so the future stays Send across yields.
+                let terminal = health.borrow().clone();
+                if let Some(msg) = terminal {
+                    yield Err(storage_err(msg));
+                    return;
+                }
                 let cur_last = last_key.clone();
                 let pfx = prefix.clone();
                 let batch: Vec<(RecordKey, Bytes)> = {
                     let g = scc::Guard::new();
-                    // `Bound` type must be `Comparable<RecordKey>` → use
-                    // owned `RecordKey` for the bound key (the prefix bound
-                    // converts the `Bytes` prefix into a `RecordKey`, a
-                    // byte-identical boundary conversion; see `iter_stream`).
                     let iter = match &cur_last {
                         Some(c) => cache.range((std::ops::Bound::Excluded(c.clone()), std::ops::Bound::Unbounded), &g),
                         None => cache.range((std::ops::Bound::Included(RecordKey::from(pfx.clone())), std::ops::Bound::Unbounded), &g),
@@ -654,8 +932,6 @@ impl Store for CachedStore {
                         batch_last = Some(k.clone());
                         items.push((k.clone(), v.clone()));
                     }
-                    // Advance the cursor unless we hit the end of the
-                    // prefix range (then signal stream exhaustion).
                     if exited_prefix || items.len() < batch_size {
                         last_key = None;
                     } else {
@@ -675,48 +951,18 @@ impl Store for CachedStore {
         })
     }
 
-    /// Delegate to inner store's `transact`, then update the cache
-    /// to reflect the committed state:
-    /// - `KvOp::Set(key, value)` → **populate** the cache with the fresh
-    ///   value, so a subsequent read-after-write hits the cache (RAM)
-    ///   instead of going to the (disk) backend. The previous code
-    ///   *invalidated* every touched key, which systematically kept the
-    ///   cache cold on exactly the hottest keys (just-written data) —
-    ///   audit `2026-07-06-perf-radical-o-notation` finding 1.4.
-    /// - `KvOp::Remove(key)` → keep the existing eviction behaviour
-    ///   (removal from cache is correct for deletes).
-    ///
-    /// The cache layer itself doesn't add atomicity — that comes from
-    /// the inner backend. Size accounting for the populate path mirrors
-    /// the same remove-then-insert + conditional-bump discipline the
-    /// single-key `set` path uses, so the eviction accounting is
-    /// identical.
+    /// Delegate to inner store's `transact`, then populate (`Set`) /
+    /// evict (`Remove`) the cache. Ack after backing AND cache.
     async fn transact(&self, ops: Vec<crate::types::KvOp>) -> DbResult<()> {
-        // Capture the cache action for each op BEFORE `ops` is moved
-        // into `inner.transact`. `Set` carries the fresh value so the
-        // cache can be populated post-commit; `Remove` just invalidates.
-        let actions: Vec<CacheAction> = ops.iter().map(CacheAction::from_op).collect();
-
-        self.inner.transact(ops).await?;
-
-        // Apply each captured action to the cache. `Set` → populate
-        // (upsert, same size discipline as `set`); `Remove` → evict.
-        for action in actions {
-            action.apply(&self.cache, &self.size);
-        }
-        Ok(())
+        self.command(|reply| Command::Transact { ops, reply }).await
     }
 
-    /// Delegates to `inner` — the cache layer adds no atomicity of its
-    /// own (it populates from `inner.transact`'s committed result).
-    /// F-77 (#904).
+    /// Delegates to inner store (F-77 #904).
     fn supports_atomic_transact(&self) -> bool {
         self.inner.supports_atomic_transact()
     }
 
-    /// Pass-through for buffer config: a CachedStore doesn't have
-    /// its own buffer knobs but the underlying store likely does
-    /// (especially when stacked Cached → MemBuffer → raw).
+    /// Pass-through: the underlying store owns the buffer knobs.
     async fn apply_buffer_config(
         &self,
         config: &crate::storage_membuffer::MemBufferConfig,
@@ -728,32 +974,14 @@ impl Store for CachedStore {
         Some(Arc::clone(&self.inner))
     }
 
-    /// Drain pending async writes and propagate the flush down to
-    /// the inner store. Reachable through `Arc<dyn Store>` —
-    /// without this override the trait dispatcher would land on
-    /// the default no-op and async-mode writes would not become
-    /// durable on a `flush()` callsite.
-    ///
-    /// Delegates to the inherent [`CachedStore::flush`] rather than
-    /// duplicating its logic — Rust's method resolution prefers an
-    /// inherent method over a trait method for a bare `self.flush()`
-    /// call even from inside this very trait impl, so this is a genuine
-    /// delegation, not infinite recursion. See the inherent method's doc
-    /// for why there must be exactly one implementation, not two that
-    /// could silently diverge.
+    /// Delegates to the inherent [`CachedStore::flush`] (exactly one
+    /// implementation; method resolution prefers the inherent one).
     async fn flush(&self) -> DbResult<()> {
         self.flush().await
     }
 
-    /// Drain pending async writes into the inner backend; the
-    /// backend-wide fsync is deferred to `Repo::persist_once`.
-    /// Delegates to the inherent [`CachedStore::flush_drain`] (same
-    /// one-implementation pattern as `flush` above).
+    /// Delegates to the inherent [`CachedStore::flush_drain`] (as above).
     async fn flush_drain(&self) -> DbResult<()> {
         self.flush_drain().await
     }
 }
-
-// ============================================================================
-// Tests
-// ============================================================================

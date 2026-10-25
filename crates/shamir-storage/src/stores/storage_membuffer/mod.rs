@@ -47,35 +47,38 @@
 //!
 //! # Durability contract (unchanged)
 //!
-//! `insert / set / remove` return as soon as the cache + dirty set are
+//! `insert / set / remove` return as soon as the dirty set is
 //! updated — the inner store hasn't been touched yet. The flusher drains
 //! `dirty` in batches; for synchronous durability call `flush().await`.
 //!
-//! # Eviction
+//! # Concurrency (RV-STORAGE-98f6650d)
 //!
-//! When `moka` evicts an entry to honour capacity / TTL, the
-//! async eviction listener fires. If the key is still in `dirty`,
-//! the listener flushes the value to `inner` inline and removes
-//! the key from `dirty`. This preserves the no-data-loss
-//! guarantee: a dirty entry is never silently dropped from cache.
-//!
-//! The user-observable effect is **eventually consistent**: the
-//! eviction listener runs in moka's background maintenance task,
-//! not synchronously with the user's insert. Tests that assume
-//! "immediate inner visibility after eviction" wait for the
-//! flusher tick.
+//! Dirty mutation routes (`insert`/`insert_many`/`set`/`set_many`/
+//! `remove`/`remove_many`/`transact`/drain) hold a fixed-size striped
+//! revision epoch (`revision::StripeGuard`, packed `{revision, active}`
+//! CAS) across their publication. The moka cache stores tagged values
+//! `{rev, Slot}` and is populated ONLY by clean backing fills — writers
+//! never republish into it. Every cache hit validates its tag against the
+//! stripe stamp (unchanged stamp, zero active writers, matching revision,
+//! non-exhausted stripe), so stale physical entries are harmless. See
+//! `revision.rs`.
 //!
 //! # apply_config
 //!
 //! Atomic config fields are written directly. For sizing /
 //! TTL changes, the cache is **rebuilt** with the new config —
-//! the old cache's contents are flushed to inner via
-//! `drain_all().await` first, so no data is lost. This is rare
-//! (DDL-driven only), so the rebuild cost is amortised.
+//! `drain_all().await` runs first so no dirty data is lost. This is rare
+//! (DDL-driven only), so the rebuild cost is amortised. The rebuilt cache
+//! uses the same tagged value type.
 
 mod core;
+mod revision;
 mod store_impl;
 
 pub use core::{MemBufferConfig, MemBufferStore};
 
+#[cfg(test)]
+pub(crate) use core::FillPauseHook;
 pub(crate) use core::Slot;
+#[cfg(test)]
+pub(crate) use revision::StripedRevisions;
