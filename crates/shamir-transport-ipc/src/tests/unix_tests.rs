@@ -1,3 +1,4 @@
+use std::io;
 use std::os::unix::fs::PermissionsExt;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -51,4 +52,31 @@ async fn drop_removes_the_socket_file() {
     assert!(path.exists());
     drop(listener);
     assert!(!path.exists(), "Drop must unlink the socket path");
+}
+
+/// RV-TRANSPORT-IPC-3C21F8FA: if restricting the socket file's permissions
+/// fails after `bind` created the file, the socket file must be removed
+/// before the error propagates — otherwise it leaks with default (wide)
+/// permissions and poisons the next start ("address in use").
+#[tokio::test]
+async fn rv_transport_ipc_3c21f8fa_failed_chmod_removes_socket_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("shamir-test.sock");
+
+    let result = crate::unix::IpcListener::bind_with(&path, |_| {
+        Err(io::Error::other("injected chmod failure"))
+    })
+    .await;
+
+    assert!(result.is_err(), "bind_with must propagate the perms error");
+    assert!(
+        !path.exists(),
+        "socket file must be removed on set_permissions failure"
+    );
+
+    // Verify safe rebinding after cleanup: the real `bind` (real chmod)
+    // must succeed on the same path now that the failed socket file is gone.
+    let rebound = IpcListener::bind(&path).await;
+    assert!(rebound.is_ok(), "re-bind after cleanup must succeed");
+    drop(rebound);
 }
