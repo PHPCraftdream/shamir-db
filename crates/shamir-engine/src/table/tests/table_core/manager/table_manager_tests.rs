@@ -5,6 +5,7 @@ use crate::table::TableConfig;
 use crate::table::TableManager;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_storage::types::Repo;
+use shamir_types::types::common::new_map;
 use shamir_types::types::value::InnerValue;
 use std::sync::Arc;
 
@@ -343,4 +344,49 @@ async fn test_get_record() {
 
     let retrieved = table.get(id).await.unwrap();
     assert_eq!(retrieved, value);
+}
+
+#[tokio::test]
+async fn rv_funclib_5fa455f7_batch_dup_canonical_key() {
+    // Regression (RV-FUNCLIB-5FA455F7): the batch-local `batch_seen`
+    // duplicate map must key rows by the CANONICAL index key, not
+    // bincode-serialized leaves — F64(1.0) and Int(1) are one unique
+    // value; NaN never conflicts with NaN.
+    let configs = vec![TableConfig::new("users")];
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        factory: BoxRepoFactory::in_memory(),
+        tables: configs,
+    };
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
+    let ctx = db.get_table("default", "users").await.unwrap();
+    ctx.create_unique_index("by_id", &["id"]).await.unwrap();
+
+    let interner = ctx.interner().get().await.unwrap();
+    let id_key = interner.touch_ind("id").unwrap().into_key();
+    let mk = |n: InnerValue| -> InnerValue {
+        let mut m = new_map();
+        m.insert(id_key.clone(), n);
+        InnerValue::Map(m)
+    };
+
+    // F64(1.0) then Int(1) in one batch: same canonical unique value —
+    // must be rejected by the batch-seen catch.
+    let canonical_dup = vec![mk(InnerValue::F64(1.0)), mk(InnerValue::Int(1))];
+    let res = ctx.insert_many(&canonical_dup).await;
+    assert!(
+        matches!(res, Err(shamir_storage::error::DbError::DuplicateKey(_))),
+        "F64(1.0) + Int(1) in one batch must be a unique conflict"
+    );
+    assert_eq!(
+        ctx.count().await.unwrap(),
+        0,
+        "rejected batch must not land any rows"
+    );
+
+    // Two NaN rows in one batch: NaN is not a conflict — must succeed.
+    let nan_batch = vec![mk(InnerValue::F64(f64::NAN)), mk(InnerValue::F64(f64::NAN))];
+    let ids = ctx.insert_many(&nan_batch).await.unwrap();
+    assert_eq!(ids.len(), 2, "NaN rows must not false-conflict");
+    assert_eq!(ctx.count().await.unwrap(), 2);
 }

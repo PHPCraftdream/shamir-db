@@ -513,3 +513,42 @@ async fn w2d_dec_big_invariant_index_key_parity() {
         other => panic!("expected Str for decimal-as-string, got {:?}", other),
     }
 }
+
+/// RV-FUNCLIB-5FA455F7: inside one tx, `insert_tx_many`'s batch-local
+/// `batch_seen` map must key rows by the CANONICAL unique key —
+/// F64(1.0) then Int(1) in one tx batch is a duplicate and stages
+/// nothing; two NaN rows in one tx batch succeed.
+#[tokio::test]
+async fn rv_funclib_5fa455f7_tx_batch_dup_canonical_key() {
+    let tbl = make_table().await;
+    tbl.create_unique_index("by_id", &["id"]).await.unwrap();
+
+    let interner = tbl.interner().get().await.unwrap();
+    let id_key = interner.touch_ind("id").unwrap().into_key();
+    let mk = |n: InnerValue| -> InnerValue {
+        let mut m = new_map();
+        m.insert(id_key.clone(), n);
+        InnerValue::Map(m)
+    };
+
+    let mut tx = TxContext::new(TxId::new(30), 0, u64::MAX, IsolationLevel::Snapshot);
+    let dup = vec![mk(InnerValue::F64(1.0)), mk(InnerValue::Int(1))];
+    let res = tbl.insert_tx_many(&dup, &mut tx).await;
+    assert!(
+        matches!(res, Err(shamir_storage::error::DbError::DuplicateKey(_))),
+        "F64(1.0) + Int(1) in one tx batch must be a unique conflict"
+    );
+    assert!(
+        !tx.write_set.contains_key(&tbl.table_token()),
+        "rejected batch must stage nothing"
+    );
+
+    // Two NaN rows in the same tx: NaN claims no unique key — succeed.
+    let nans = vec![mk(InnerValue::F64(f64::NAN)), mk(InnerValue::F64(f64::NAN))];
+    let ids = tbl.insert_tx_many(&nans, &mut tx).await.unwrap();
+    assert_eq!(ids.len(), 2, "NaN rows must not false-conflict");
+    assert!(
+        tx.write_set.contains_key(&tbl.table_token()),
+        "successful NaN batch must stage both rows"
+    );
+}

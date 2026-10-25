@@ -139,6 +139,12 @@ impl FunctionalBackend {
 /// wildcard collapsed Dec/Big/Bin/Set to one shared hash. Set hashes are
 /// order-independent (XOR of per-element hashes). The `InnerValue` here is the owned computed expression result
 /// (see `IndexExpr::eval`), not a record materialization.
+/// Top-level NaN leaf (RV-FUNCLIB-5FA455F7): NaN claims no posting,
+/// same as the scan filter, which never matches NaN.
+fn inner_is_top_level_nan(v: &InnerValue) -> bool {
+    matches!(v, InnerValue::F64(f) if f.is_nan())
+}
+
 fn hash_inner(val: &InnerValue, h: &mut FxHasher) {
     match val {
         InnerValue::Null => h.write_u8(0),
@@ -151,8 +157,23 @@ fn hash_inner(val: &InnerValue, h: &mut FxHasher) {
             h.write_i64(*n);
         }
         InnerValue::F64(f) => {
-            h.write_u8(3);
-            h.write_u64(f.to_bits());
+            // Mirror of base_index::infra::index_keys::hash_f64_canonical
+            // (RV-FUNCLIB-5FA455F7 D1-S1): this crate cannot share the
+            // private fn, so the canonical numeric rule is replicated
+            // locally — integral f64 in i64 range keys like the equal Int,
+            // -0.0 keys as 0, NaN keys to one canonical pattern.
+            if f.is_nan() {
+                h.write_u8(3);
+                h.write_u64(f64::NAN.to_bits());
+            } else if f.fract() == 0.0
+                && (-9223372036854775808.0..9223372036854775808.0).contains(f)
+            {
+                h.write_u8(2);
+                h.write_i64(*f as i64);
+            } else {
+                h.write_u8(3);
+                h.write_u64(f.to_bits());
+            }
         }
         InnerValue::Str(s) => {
             h.write_u8(4);
@@ -223,6 +244,11 @@ impl IndexBackend for FunctionalBackend {
                 self.descriptor.name, e
             ))
         })?;
+        // NaN claims no posting — a NaN probe must match nothing, same
+        // as the scan filter (RV-FUNCLIB-5FA455F7).
+        if inner_is_top_level_nan(&val) {
+            return Ok(vec![]);
+        }
         let key = self.posting_key(&val, &rid);
         Ok(vec![IndexWriteOp::SetPosting {
             key: Bytes::from(key),
@@ -245,12 +271,35 @@ impl IndexBackend for FunctionalBackend {
         };
         let old_val = self.eval_or_null(old).map_err(&eval_err)?;
         let new_val = self.eval_or_null(new).map_err(&eval_err)?;
+        // NaN claims no posting: remove the old one, never write a NaN
+        // one (RV-FUNCLIB-5FA455F7).
+        let provenance = crate::write_ops::index2_provenance(&self.descriptor);
+        match (
+            inner_is_top_level_nan(&old_val),
+            inner_is_top_level_nan(&new_val),
+        ) {
+            (true, true) => return Ok(vec![]),
+            (true, false) => {
+                return Ok(vec![IndexWriteOp::SetPosting {
+                    key: Bytes::from(self.posting_key(&new_val, &rid)),
+                    value: Bytes::new(),
+                    provenance,
+                }]);
+            }
+            (false, true) => {
+                return Ok(vec![IndexWriteOp::RemovePosting {
+                    key: Bytes::from(self.posting_key(&old_val, &rid)),
+                    provenance,
+                    owner: None,
+                }]);
+            }
+            (false, false) => {}
+        }
         let old_hash = Self::hash_value(&old_val);
         let new_hash = Self::hash_value(&new_val);
         if old_hash != new_hash {
             let old_key = self.posting_key(&old_val, &rid);
             let new_key = self.posting_key(&new_val, &rid);
-            let provenance = crate::write_ops::index2_provenance(&self.descriptor);
             Ok(vec![
                 IndexWriteOp::RemovePosting {
                     key: Bytes::from(old_key),
@@ -279,6 +328,10 @@ impl IndexBackend for FunctionalBackend {
                 self.descriptor.name, e
             ))
         })?;
+        // NaN has no posting — nothing to remove.
+        if inner_is_top_level_nan(&val) {
+            return Ok(vec![]);
+        }
         let key = self.posting_key(&val, &rid);
         Ok(vec![IndexWriteOp::RemovePosting {
             key: Bytes::from(key),

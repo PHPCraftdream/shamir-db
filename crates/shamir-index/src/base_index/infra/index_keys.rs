@@ -28,8 +28,12 @@
 //! # Index format version
 //!
 //! This hash scheme is VERSION 2 of the legacy index posting format.
-//! Old V1 postings (based on `<Value<InternerKey> as Hash>` with
-//! `std::mem::discriminant` tags) are NOT byte-compatible with V2.
+//! The V2 numeric-key encoding changed (Int↔F64 parity, -0.0→0, NaN
+//! unindexed, RV-FUNCLIB-5FA455F7): legacy indexes holding numeric keys
+//! are REBUILD-REQUIRED after upgrading (manual drop/re-create; no
+//! automatic rebuild). Old V1 postings (based on `<Value<InternerKey> as
+//! Hash>` with `std::mem::discriminant` tags) are NOT byte-compatible
+//! with V2.
 //!
 //! The engine wires rebuild-on-open (S9b / #81): `TableManager::create`
 //! calls `legacy_indexes_need_rebuild` on every table open and, when the
@@ -72,6 +76,36 @@ const TAG_MAP: u8 = 10;
 // Core hash primitives
 // ============================================================================
 
+/// Canonical numeric key (RV-FUNCLIB-5FA455F7, D1-S1): an integral f64
+/// that fits i64 exactly keys like the equal Int; -0.0 keys like 0;
+/// NaN hashes to one canonical pattern — the write path refuses NaN
+/// (see `compute_leaf_hashes`), so this key only arises on a probe
+/// and matches nothing, same as the scan filter's `partial_cmp`.
+fn hash_f64_canonical(f: f64, state: &mut impl Hasher) {
+    if f.is_nan() {
+        TAG_F64.hash(state);
+        f64::NAN.to_bits().hash(state);
+        return;
+    }
+    const I64_MIN_AS_F64: f64 = -9223372036854775808.0; // -2^63, exact
+    const I64_MAX_EXCLUSIVE: f64 = 9223372036854775808.0; // 2^63, exact
+    if f.fract() == 0.0 && (I64_MIN_AS_F64..I64_MAX_EXCLUSIVE).contains(&f) {
+        TAG_INT.hash(state);
+        (f as i64).hash(state);
+    } else {
+        TAG_F64.hash(state);
+        f.to_bits().hash(state);
+    }
+}
+
+fn scalar_ref_is_nan(sr: &ScalarRef<'_>) -> bool {
+    matches!(sr, ScalarRef::F64(f) if f.is_nan())
+}
+
+fn inner_value_is_nan(v: &InnerValue) -> bool {
+    matches!(v, InnerValue::F64(f) if f.is_nan())
+}
+
 /// Hash a `ScalarRef` leaf into the hasher using stable tags.
 /// Covers: Null, Bool, Int, F64, Str, Bin.
 fn hash_scalar_ref(sr: &ScalarRef<'_>, state: &mut impl Hasher) {
@@ -88,8 +122,7 @@ fn hash_scalar_ref(sr: &ScalarRef<'_>, state: &mut impl Hasher) {
             i.hash(state);
         }
         ScalarRef::F64(f) => {
-            TAG_F64.hash(state);
-            f.to_bits().hash(state);
+            hash_f64_canonical(*f, state);
         }
         ScalarRef::Str(s) => {
             TAG_STR.hash(state);
@@ -123,8 +156,7 @@ fn hash_inner_value(v: &InnerValue, state: &mut impl Hasher) {
             i.hash(state);
         }
         InnerValue::F64(f) => {
-            TAG_F64.hash(state);
-            f.to_bits().hash(state);
+            hash_f64_canonical(*f, state);
         }
         InnerValue::Str(s) => {
             TAG_STR.hash(state);
@@ -203,6 +235,9 @@ fn compute_leaf_hashes(
 
         // Fast path: scalar_at is zero-copy.
         if let Some(sr) = rec.scalar_at(&ipath) {
+            if scalar_ref_is_nan(&sr) {
+                return None;
+            }
             hash_scalar_ref(&sr, &mut h1);
             hash_scalar_ref(&sr, &mut h2);
             continue;
@@ -212,6 +247,9 @@ fn compute_leaf_hashes(
         // This is the ONE unavoidable InnerValue usage (RecordRef trait
         // returns InnerValue from materialize_at by design).
         let leaf = rec.materialize_at(&ipath)?;
+        if inner_value_is_nan(&leaf) {
+            return None;
+        }
         hash_inner_value(&leaf, &mut h1);
         hash_inner_value(&leaf, &mut h2);
     }

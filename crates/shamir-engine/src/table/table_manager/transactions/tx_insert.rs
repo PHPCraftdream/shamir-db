@@ -245,10 +245,17 @@ impl TableManager {
                     .validate_unique_for_create_with_released(v, released, &is_record_touched)
                     .await?;
                 for def in &unique_defs {
-                    if let Some(vs) = crate::index::index_keys::extract_index_leaves(v, &def.paths)
-                    {
-                        let key = bincode::serialize(&vs)
-                            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+                    // Canonical batch-local key (RV-FUNCLIB-5FA455F7):
+                    // same numeric encoding as the persisted unique check;
+                    // NaN rows yield None and are skipped (NaN is not a
+                    // conflict).
+                    if let Some(irk) = crate::index::index_keys::build_index_key_from_record(
+                        true,
+                        def.name_interned,
+                        v,
+                        &def.paths,
+                    ) {
+                        let key = irk.to_bytes().to_vec();
                         if !batch_seen.insert((def.name_interned, key)) {
                             return Err(shamir_storage::error::DbError::DuplicateKey(format!(
                                 "Unique index '{}' violated within batch (row {} duplicates an earlier row)",
@@ -464,11 +471,17 @@ impl TableManager {
                     .validate_unique_for_create_with_released(view, released, &is_record_touched)
                     .await?;
                 for def in &unique_defs {
-                    if let Some(vs) =
-                        crate::index::index_keys::extract_index_leaves(view, &def.paths)
-                    {
-                        let key = bincode::serialize(&vs)
-                            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+                    // Canonical batch-local key (RV-FUNCLIB-5FA455F7):
+                    // same numeric encoding as the persisted unique check;
+                    // NaN rows yield None and are skipped (NaN is not a
+                    // conflict).
+                    if let Some(irk) = crate::index::index_keys::build_index_key_from_record(
+                        true,
+                        def.name_interned,
+                        view,
+                        &def.paths,
+                    ) {
+                        let key = irk.to_bytes().to_vec();
                         if !batch_seen.insert((def.name_interned, key)) {
                             return Err(shamir_storage::error::DbError::DuplicateKey(format!(
                                 "Unique index '{}' violated within batch (row {} duplicates an earlier row)",
