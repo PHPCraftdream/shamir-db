@@ -629,6 +629,25 @@ pub(crate) struct WireResumeInit {
     pub binding_mode: u8,
 }
 
+/// Sent by the client as the FIRST frame when resuming with identity
+/// verification (RV-CLIENT-DE75ADDD): asks the server to prove its pinned
+/// Ed25519 identity before the bearer ticket is disclosed.
+#[derive(Serialize)]
+pub(crate) struct WireResumeProofInit {
+    #[serde(with = "serde_bytes")]
+    pub client_nonce: Vec<u8>,
+}
+
+/// Server answer to [`WireResumeProofInit`]: current identity pub key plus
+/// an Ed25519 signature over `RESUME_PROOF_V1 || client_nonce || exporter`.
+#[derive(Deserialize)]
+pub(crate) struct WireResumeProofOk {
+    #[serde(with = "serde_bytes")]
+    pub server_pub_key: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub signature: Vec<u8>,
+}
+
 /// Server response to a successful [`WireResumeInit`].
 #[derive(Deserialize)]
 pub(crate) struct WireResumeOk {

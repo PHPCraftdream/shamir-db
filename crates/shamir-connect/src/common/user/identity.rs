@@ -19,7 +19,7 @@
 
 use crate::common::auth_message::AuthMessage;
 use crate::common::crypto::{ed25519_verify_strict, sha256, Ed25519Keypair};
-use crate::common::domain_tags::IDENTITY_V1;
+use crate::common::domain_tags::{IDENTITY_V1, RESUME_PROOF_V1};
 use crate::common::types::{BindingMode, TransportKind};
 
 /// Build the canonical `identity_input` byte string for signing/verification.
@@ -50,6 +50,18 @@ pub fn build_identity_input(
     out.extend_from_slice(am_bytes);
     out.extend_from_slice(session_id);
     out.extend_from_slice(&expires_at_ns.to_be_bytes());
+    out
+}
+
+/// Canonical byte string for the resume identity-proof preamble
+/// (RV-CLIENT-DE75ADDD): the server Ed25519-signs this with its CURRENT
+/// identity key BEFORE the client sends the bearer ticket, binding the
+/// pinned identity to the resume nonce and this connection's TLS exporter.
+pub fn resume_proof_message(client_nonce: &[u8; 32], tls_exporter: &[u8; 32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(RESUME_PROOF_V1.len() + 64);
+    out.extend_from_slice(RESUME_PROOF_V1);
+    out.extend_from_slice(client_nonce);
+    out.extend_from_slice(tls_exporter);
     out
 }
 

@@ -21,6 +21,9 @@ pub use connect::Client;
 pub use options::{ConnectLocalOptions, ConnectOptions, ResumeOptions};
 
 #[cfg(test)]
+pub(crate) use connect::{resume_wire_exchange, verify_resume_identity_proof};
+
+#[cfg(test)]
 pub(crate) use transport::{
     await_pending_response, connect_tcp, reader_task, HookPoint, Lifecycle, LifecycleHooks,
     ShutdownGuard,
