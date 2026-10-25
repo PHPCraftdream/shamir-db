@@ -175,19 +175,24 @@ async fn ticket_unknown_halts_at_predecessor_and_rejects_commit_before_allocatio
 fn written_durability_failure_is_not_an_abort_or_fail_stop() {
     let gate = shamir_tx::RepoTxGate::fresh();
     assert!(
-        wal_completion(&gate, Err(WalAppendError::WrittenNotDurable))
+        wal_completion(&gate, 108, Err(WalAppendError::WrittenNotDurable))
             .0
             .unwrap()
     );
     assert!(!gate.requires_reopen());
     // NotWritten additionally reports proven_not_written = true (the B3
     // settle trigger); the fail-stop outcomes report false.
-    let (res, proven_not_written) = wal_completion(&gate, Err(WalAppendError::NotWritten));
+    let (res, proven_not_written) = wal_completion(&gate, 109, Err(WalAppendError::NotWritten));
     assert!(matches!(res, Err(TxError::Storage(_))));
     assert!(proven_not_written);
     assert!(!gate.requires_reopen());
-    let (res, proven_not_written) = wal_completion(&gate, Err(WalAppendError::Indeterminate));
-    assert!(matches!(res, Err(TxError::WalRequiresReopen)));
+    let (res, proven_not_written) = wal_completion(&gate, 107, Err(WalAppendError::Indeterminate));
+    assert!(matches!(
+        res,
+        Err(TxError::WalOutcomeUnknown {
+            commit_version: 107
+        })
+    ));
     assert!(!proven_not_written);
     assert!(gate.requires_reopen());
 }
@@ -249,4 +254,25 @@ async fn synced_write_then_sync_failure_publishes_data_before_typed_commit_error
     drainer.drain_all(&repo).await.unwrap();
     assert_eq!(gate.durable_watermark(), gate.last_committed());
     assert_eq!(gate.last_committed(), 2);
+}
+
+// RV-WAL-3B29232E: Unknown/Indeterminate AFTER queueing must map to
+// WalOutcomeUnknown (never WalRequiresReopen/aborted).
+#[test]
+fn rv_wal_3b29232e_unknown_ticket_is_wal_outcome_unknown() {
+    for outcome in [WalAppendError::Unknown, WalAppendError::Indeterminate] {
+        let gate = shamir_tx::RepoTxGate::fresh();
+        let (res, proven_not_written) = wal_completion(&gate, 107, Err(outcome));
+        assert!(
+            matches!(
+                res,
+                Err(TxError::WalOutcomeUnknown {
+                    commit_version: 107
+                })
+            ),
+            "{res:?}"
+        );
+        assert!(!proven_not_written);
+        assert!(gate.requires_reopen());
+    }
 }
