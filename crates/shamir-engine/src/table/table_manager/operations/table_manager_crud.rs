@@ -352,10 +352,11 @@ impl TableManager {
             // (flamegraph: dashmap::Iter::next 3.2% + lock_shared 0.89%).
             let unique_defs: Vec<IndexDefinition> =
                 self.index_manager.iter_unique_indexes().collect();
-            // Map: (unique_index_name_interned, encoded_values_key)
-            // → first index in the batch that claimed it. Cheap
-            // bincode-based key avoids fighting `InnerValue` hash
-            // requirements (Map keyed by interner ids isn't `Hash`).
+            // Map: (unique_index_name_interned, canonical key bytes)
+            // → first index in the batch that claimed it. The key is the
+            // canonical index key (RV-FUNCLIB-5FA455F7) — same numeric
+            // encoding as the persisted unique check; NaN rows yield
+            // None and are skipped (NaN is not a conflict).
             let mut batch_seen: TFxSet<(u64, Vec<u8>)> = TFxSet::default();
             for (i, v) in values.iter().enumerate() {
                 self.index_manager
@@ -364,10 +365,13 @@ impl TableManager {
                 // Now record this row's unique-index claims so the
                 // next iteration sees them.
                 for def in &unique_defs {
-                    if let Some(vs) = crate::index::index_keys::extract_index_leaves(v, &def.paths)
-                    {
-                        let key = bincode::serialize(&vs)
-                            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+                    if let Some(irk) = crate::index::index_keys::build_index_key_from_record(
+                        true,
+                        def.name_interned,
+                        v,
+                        &def.paths,
+                    ) {
+                        let key = irk.to_bytes().to_vec();
                         if !batch_seen.insert((def.name_interned, key)) {
                             return Err(shamir_storage::error::DbError::DuplicateKey(format!(
                                 "Unique index '{}' violated within batch (row {} duplicates an earlier row)",
