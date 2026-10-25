@@ -34,7 +34,7 @@ use std::sync::Arc;
 /// changes in a way that is NOT backward-compatible with existing
 /// on-disk data. The engine checks this on open and triggers a
 /// rebuild when the stored version is older.
-pub const LEGACY_INDEX_FORMAT_VERSION: u32 = 2;
+pub const LEGACY_INDEX_FORMAT_VERSION: u32 = 3;
 
 // The meta key tag "_m.idx" is byte-identical to MetaKey::Indexes.tag() in the engine.
 fn meta_key_indexes() -> RecordId {

@@ -52,7 +52,7 @@ pub(crate) use lens::{reset_scan_steps, scan_steps};
 pub use lens::{FieldIndex, RecordView, RecordViewError, MAX_MSGPACK_DEPTH};
 pub use record_ref::{HavingView, RecordRef};
 pub use record_value::{RawSeq, RawSeqIter, RecordValue};
-pub use scalar_ref::{scalar_ref_cmp, scalar_ref_cmp_qv, ScalarRef};
+pub use scalar_ref::{scalar_ref_cmp, scalar_ref_cmp_qv, scalar_ref_numeric_eq, ScalarRef};
 
 #[cfg(test)]
 mod tests;

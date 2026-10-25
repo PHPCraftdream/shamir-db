@@ -62,7 +62,7 @@ use futures::StreamExt;
 use shamir_query_types::admin::FkAction;
 use shamir_query_types::batch::BatchError;
 use shamir_query_types::filter::Filter;
-use shamir_types::record_view::{scalar_ref_cmp_qv, RecordRef, RecordView, ScalarRef};
+use shamir_types::record_view::{scalar_ref_numeric_eq, RecordRef, RecordView, ScalarRef};
 use shamir_types::types::value::{InnerValue, QueryValue};
 
 use crate::query::batch::TableResolver;
@@ -596,11 +596,12 @@ fn record_field_matches_any_by_id(
     false
 }
 
-fn scalar_ref_matches_qv(actual: &ScalarRef<'_>, value: &QueryValue) -> bool {
-    // Delegate to the cross-type-comparing `scalar_ref_cmp_qv` so that a parent
-    // key stored as `Int(5)` matches a child FK field stored as `F64(5.0)` (and
-    // vice-versa) — consistent with every other comparison layer in the engine.
-    scalar_ref_cmp_qv(*actual, value) == Some(std::cmp::Ordering::Equal)
+pub(crate) fn scalar_ref_matches_qv(actual: &ScalarRef<'_>, value: &QueryValue) -> bool {
+    // Delegate to the EXACT numeric equality predicate (`scalar_ref_numeric_eq`,
+    // RV-FUNCLIB-5FA455F7 S2) so that a parent key stored as `Int(5)` matches a
+    // child FK field stored as `F64(5.0)` (and vice-versa) while Int↔Big stays
+    // exact beyond 2^53 and NaN matches nothing.
+    scalar_ref_numeric_eq(*actual, value)
 }
 
 fn scalar_ref_to_qv(sr: ScalarRef<'_>) -> QueryValue {

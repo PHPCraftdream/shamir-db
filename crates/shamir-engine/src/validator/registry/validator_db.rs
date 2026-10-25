@@ -124,17 +124,14 @@ fn record_field_matches_by_id(
     }
 }
 
-/// Compare a `ScalarRef` against a `QueryValue` for equality.
-fn scalar_ref_matches_query_value(actual: &ScalarRef<'_>, value: &QueryValue) -> bool {
-    match (actual, value) {
-        (ScalarRef::Null, QueryValue::Null) => true,
-        (ScalarRef::Bool(a), QueryValue::Bool(b)) => a == b,
-        (ScalarRef::Int(a), QueryValue::Int(b)) => a == b,
-        (ScalarRef::F64(a), QueryValue::F64(b)) => a == b,
-        (ScalarRef::Str(a), QueryValue::Str(b)) => *a == b.as_str(),
-        (ScalarRef::Bin(a), QueryValue::Bin(b)) => *a == b.as_slice(),
-        _ => false,
-    }
+/// Compare a `ScalarRef` against a `QueryValue` for equality — THE ONE
+/// RULE via [`shamir_types::record_view::scalar_ref_numeric_eq`] (equal
+/// canonical numeric keys AND neither side NaN). This is the funnel every
+/// FK/unique match path (scan, staged probe, index recheck, insert-side
+/// schema FK) goes through. `pub(crate)` so the FK tests can pin the
+/// INSERT-side cross-type matching directly.
+pub(crate) fn scalar_ref_matches_query_value(actual: &ScalarRef<'_>, value: &QueryValue) -> bool {
+    shamir_types::record_view::scalar_ref_numeric_eq(*actual, value)
 }
 
 // ── ValidatorDb ─────────────────────────────────────────────────────────────

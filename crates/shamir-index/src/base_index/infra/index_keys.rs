@@ -27,9 +27,12 @@
 //!
 //! # Index format version
 //!
-//! This hash scheme is VERSION 2 of the legacy index posting format.
-//! The V2 numeric-key encoding changed (Int↔F64 parity, -0.0→0, NaN
-//! unindexed, RV-FUNCLIB-5FA455F7): legacy indexes holding numeric keys
+//! This hash scheme is VERSION 3 of the legacy index posting format.
+//! V3 (S2) extends the V2 numeric-key rule with EXACT Int↔Big/Dec parity:
+//! an integral Big/Dec keys like the equal Int, so indexes holding Big/Dec
+//! keys are REBUILD-REQUIRED. The V2 encoding itself (Int↔F64 parity,
+//! -0.0→0, NaN unindexed, RV-FUNCLIB-5FA455F7): legacy indexes holding
+//! numeric keys
 //! are REBUILD-REQUIRED after upgrading (manual drop/re-create; no
 //! automatic rebuild). Old V1 postings (based on `<Value<InternerKey> as
 //! Hash>` with `std::mem::discriminant` tags) are NOT byte-compatible
@@ -51,6 +54,8 @@ use rustc_hash::FxHasher;
 use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::RecordRef;
 use shamir_types::record_view::ScalarRef;
+use shamir_types::types::numeric_key::decimal_exact_parts;
+use shamir_types::types::numeric_key::NumericKey;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use smallvec::SmallVec;
@@ -76,26 +81,15 @@ const TAG_MAP: u8 = 10;
 // Core hash primitives
 // ============================================================================
 
-/// Canonical numeric key (RV-FUNCLIB-5FA455F7, D1-S1): an integral f64
-/// that fits i64 exactly keys like the equal Int; -0.0 keys like 0;
-/// NaN hashes to one canonical pattern — the write path refuses NaN
-/// (see `compute_leaf_hashes`), so this key only arises on a probe
-/// and matches nothing, same as the scan filter's `partial_cmp`.
+/// Canonical numeric key (RV-FUNCLIB-5FA455F7, D1-S1/S2): an integral f64
+/// that fits i64 exactly keys like the equal Int; -0.0 keys like 0; NaN
+/// keys to its own bit pattern — the write path refuses NaN (see
+/// `compute_leaf_hashes`), so this key only arises on a probe and matches
+/// nothing, same as the scan filter's `partial_cmp`. The rule is the ONE
+/// shared implementation in `shamir_types::types::numeric_key`, also used
+/// by DISTINCT, GROUP BY and FK matching.
 fn hash_f64_canonical(f: f64, state: &mut impl Hasher) {
-    if f.is_nan() {
-        TAG_F64.hash(state);
-        f64::NAN.to_bits().hash(state);
-        return;
-    }
-    const I64_MIN_AS_F64: f64 = -9223372036854775808.0; // -2^63, exact
-    const I64_MAX_EXCLUSIVE: f64 = 9223372036854775808.0; // 2^63, exact
-    if f.fract() == 0.0 && (I64_MIN_AS_F64..I64_MAX_EXCLUSIVE).contains(&f) {
-        TAG_INT.hash(state);
-        (f as i64).hash(state);
-    } else {
-        TAG_F64.hash(state);
-        f.to_bits().hash(state);
-    }
+    NumericKey::from_f64(f).hash_tagged(TAG_INT, TAG_BIG, TAG_F64, state);
 }
 
 fn scalar_ref_is_nan(sr: &ScalarRef<'_>) -> bool {
@@ -167,12 +161,22 @@ fn hash_inner_value(v: &InnerValue, state: &mut impl Hasher) {
             b.hash(state);
         }
         InnerValue::Dec(d) => {
-            TAG_DEC.hash(state);
-            d.hash(state);
+            // Exact Int↔Dec parity (S2): an integral Dec keys like the
+            // equal Int; a non-integral Dec keys by exact decimal value
+            // (normalized mantissa+scale — `0.50` keys as `0.5`).
+            if let Some(key) = NumericKey::from_decimal(d) {
+                key.hash_tagged(TAG_INT, TAG_BIG, TAG_F64, state);
+            } else {
+                TAG_DEC.hash(state);
+                let (mantissa, scale) = decimal_exact_parts(d);
+                mantissa.hash(state);
+                scale.hash(state);
+            }
         }
         InnerValue::Big(b) => {
-            TAG_BIG.hash(state);
-            b.hash(state);
+            // Exact Int↔Big parity (S2): a Big equal to some Int keys like
+            // that Int; a Big beyond i64 keys by sign + magnitude bytes.
+            NumericKey::from_bigint(b).hash_tagged(TAG_INT, TAG_BIG, TAG_F64, state);
         }
         InnerValue::List(l) => {
             TAG_LIST.hash(state);

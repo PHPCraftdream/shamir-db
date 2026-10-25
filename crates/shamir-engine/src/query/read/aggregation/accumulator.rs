@@ -31,6 +31,8 @@ use shamir_types::codecs::interned::{inner_value_to_query_value, query_value_to_
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::{RecordRef, ScalarRef};
 use shamir_types::types::common::new_map_wc;
+use shamir_types::types::numeric_key::decimal_exact_parts;
+use shamir_types::types::numeric_key::NumericKey;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
 // ============================================================================
@@ -134,16 +136,25 @@ impl OwnedScalar {
 /// Typed hashable key fragment used to bucket records under GROUP BY.
 ///
 /// S4: built directly from the lens leaf (`ScalarRef`) — no extra
-/// round-trip per record. Composite (Map/List/Set/Dec/Big) group fields stay
+/// round-trip per record. Composite (Map/List/Set) group fields stay
 /// rare; they fall back to a `Box<str>` canonical form materialised once
 /// at the boundary (one `materialize_at` per row for that field only).
+///
+/// Numeric leaves share the engine-wide canonical numeric key
+/// (`NumericKey`, RV-FUNCLIB-5FA455F7 S2): `Int(1)`, `F64(1.0)`, `-0.0`,
+/// `Big(1)` and `Dec(1.0)` all key as one group; NaN keys per its own bit
+/// pattern (each NaN is its own group); Int↔Big/Dec is exact — distinct
+/// integers beyond `2^53` never collapse.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub(in crate::query::read) enum GroupKeyItem {
     Missing,
     Null,
     Bool(bool),
-    Int(i64),
-    F64Bits(u64),
+    Num(NumericKey),
+    /// A NaN leaf — OCCURRENCE-unique (NaN != NaN): the payload is a
+    /// per-execution counter advanced once per NaN leaf, so every NaN
+    /// forms its own group (GROUP BY per-occurrence NaN, S2 contract).
+    NanOnce(u64),
     Str(Box<str>),
     Bin(Box<[u8]>),
     Complex(Box<str>),
@@ -157,8 +168,8 @@ pub(in crate::query::read) fn group_key_item_scalar(s: Option<ScalarRef<'_>>) ->
         None => GroupKeyItem::Missing,
         Some(ScalarRef::Null) => GroupKeyItem::Null,
         Some(ScalarRef::Bool(b)) => GroupKeyItem::Bool(b),
-        Some(ScalarRef::Int(i)) => GroupKeyItem::Int(i),
-        Some(ScalarRef::F64(f)) => GroupKeyItem::F64Bits(f.to_bits()),
+        Some(ScalarRef::Int(i)) => GroupKeyItem::Num(NumericKey::Int(i)),
+        Some(ScalarRef::F64(f)) => GroupKeyItem::Num(NumericKey::from_f64(f)),
         Some(ScalarRef::Str(s)) => GroupKeyItem::Str(s.into()),
         Some(ScalarRef::Bin(b)) => GroupKeyItem::Bin(b.into()),
     }
@@ -167,16 +178,39 @@ pub(in crate::query::read) fn group_key_item_scalar(s: Option<ScalarRef<'_>>) ->
 /// Build the complex-group-key fallback from an owned `InnerValue` (a
 /// container / Dec / Big leaf materialised once via `materialize_at`).
 ///
-/// Converts `InnerValue` → `QueryValue` via the interner, then serialises to
-/// a canonical string that matches the equivalence classes of the old
-/// string-keyed path — preserving grouping behaviour.
+/// Numeric leaves (Dec/Big) use the shared canonical `NumericKey` (S2):
+/// an integral Dec/Big keys like the equal Int; a non-integral Dec keys
+/// by exact decimal value (normalized mantissa+scale). Other composites
+/// convert to a canonical string that matches the equivalence classes of
+/// the old string-keyed path — preserving grouping behaviour.
+///
+/// NaN occurrence caveat (S2 contract): per-occurrence NaN groups are
+/// guaranteed only for SCALAR group fields (`group_key_item_scalar` →
+/// `GroupKeyItem::NanOnce`). A NaN nested INSIDE a container group field
+/// goes through [`query_value_canonical_str`], which renders every NaN as
+/// the same `"NaN"` string — such NaNs are NOT occurrence-separated (they
+/// share one group). This is a documented limitation of the string-keyed
+/// container fallback, left as-is until a canonical-key container path
+/// exists.
 #[inline]
 pub(in crate::query::read) fn group_key_item_complex(
     val: &InnerValue,
     interner: &Interner,
 ) -> GroupKeyItem {
-    let qv = inner_value_to_query_value(val, interner).unwrap_or(QueryValue::Null);
-    GroupKeyItem::Complex(query_value_canonical_str(&qv).into_boxed_str())
+    match val {
+        InnerValue::Dec(d) => {
+            if let Some(key) = NumericKey::from_decimal(d) {
+                return GroupKeyItem::Num(key);
+            }
+            let (mantissa, scale) = decimal_exact_parts(d);
+            GroupKeyItem::Complex(format!("dec:{mantissa}:{scale}").into_boxed_str())
+        }
+        InnerValue::Big(b) => GroupKeyItem::Num(NumericKey::from_bigint(b)),
+        _ => {
+            let qv = inner_value_to_query_value(val, interner).unwrap_or(QueryValue::Null);
+            GroupKeyItem::Complex(query_value_canonical_str(&qv).into_boxed_str())
+        }
+    }
 }
 
 /// Produce a canonical string for a `QueryValue` that matches the equivalence

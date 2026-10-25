@@ -314,10 +314,51 @@ pub fn apply_pagination<T>(
 // Distinct
 // ============================================================================
 
-/// Remove duplicate `QueryValue` rows using a canonical key for
-/// deduplication. The canonical key reproduces the lossy
-/// coercion applied historically (Dec/Big→String, Bin→Array, Set→Array)
-/// so that e.g. `Dec("1.0")` and `Str("1.0")` deduplicate identically.
+/// Does `qv` contain a NaN leaf at ANY depth (including top level)?
+fn contains_nan_leaf(qv: &QueryValue) -> bool {
+    match qv {
+        QueryValue::F64(f) => f.is_nan(),
+        QueryValue::List(l) => l.iter().any(contains_nan_leaf),
+        QueryValue::Set(s) => s.iter().any(contains_nan_leaf),
+        QueryValue::Map(m) => m.iter().any(|(_, v)| contains_nan_leaf(v)),
+        _ => false,
+    }
+}
+
+/// Replace every NaN leaf (at any depth) with a NaN whose payload bits
+/// encode a globally-unique occurrence id — each NaN becomes its own raw
+/// `F64Bits` key class, so per-OCCURRENCE NaN dedup works at ANY depth.
+/// No `f64` arithmetic: the id is packed into the payload field
+/// (`0x7FF8_0000_0000_0000 | id`, ids up to 2^52 − 1 per call).
+fn assign_nan_ids(qv: &QueryValue, next: &mut u64) -> QueryValue {
+    match qv {
+        QueryValue::F64(f) if f.is_nan() => {
+            let id = (*next & 0x000f_ffff_ffff_ffff) + 1;
+            *next += 1;
+            QueryValue::F64(f64::from_bits(0x7ff8_0000_0000_0000 | id))
+        }
+        QueryValue::List(l) => {
+            QueryValue::List(l.iter().map(|v| assign_nan_ids(v, next)).collect())
+        }
+        QueryValue::Set(s) => QueryValue::Set(s.iter().map(|v| assign_nan_ids(v, next)).collect()),
+        QueryValue::Map(m) => QueryValue::Map(
+            m.iter()
+                .map(|(k, v)| (k.clone(), assign_nan_ids(v, next)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Remove duplicate `QueryValue` rows using the exact canonical numeric
+/// key (`HashableQueryValue`, RV-FUNCLIB-5FA455F7) for deduplication.
+///
+/// NaN is per-OCCURRENCE distinct (NaN != NaN under the ONE rule) at ANY
+/// depth: a pre-pass assigns every NaN leaf (top-level or nested inside a
+/// List/Set/Map) a globally-unique occurrence id encoded in its payload
+/// bits, and dedup runs on the TRANSFORMED records while the ORIGINALS are
+/// returned. The transform (and its clone) happens only when a record
+/// actually contains a NaN leaf — the common no-NaN path stays clone-free.
 pub fn apply_distinct_qv(records: Vec<QueryValue>) -> Vec<QueryValue> {
     // Two-pass borrow pattern: HashableQueryValue<'a> borrows &'a QueryValue,
     // so we can't hold both the map key (reference into records) and own records
@@ -325,14 +366,32 @@ pub fn apply_distinct_qv(records: Vec<QueryValue>) -> Vec<QueryValue> {
     // moves the kept records out by index order. The keep-mask is a single
     // densely-packed Vec<bool> — cheaper than a separate usize-keyed set.
     let n = records.len();
+    let mut next_id: u64 = 0;
+    // Parallel to `records`: the NaN-id-transformed copy, only for records
+    // that contain a NaN leaf (`None` keeps the clone-free fast path).
+    let transformed: Vec<Option<QueryValue>> = records
+        .iter()
+        .map(|record| {
+            if contains_nan_leaf(record) {
+                Some(assign_nan_ids(record, &mut next_id))
+            } else {
+                None
+            }
+        })
+        .collect();
     let mut seen: IndexSet<HashableQueryValue<'_>, shamir_collections::THasher> =
         IndexSet::with_capacity_and_hasher(n, shamir_collections::THasher::default());
     let mut keep = vec![false; n];
     // Pass 1: walk references into records, mark first-occurrence indices.
-    for (i, record) in records.iter().enumerate() {
-        if seen.insert(HashableQueryValue(record)) {
-            keep[i] = true;
-        }
+    for (i, key) in records
+        .iter()
+        .zip(transformed.iter())
+        .map(|(record, t)| HashableQueryValue(t.as_ref().unwrap_or(record)))
+        .enumerate()
+    {
+        // Per-occurrence NaN: the transformed key is occurrence-unique, so
+        // every NaN-bearing record is always kept.
+        keep[i] = seen.insert(key);
     }
     // Pass 2: move kept records out in index order, preserving insertion order.
     records

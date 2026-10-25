@@ -8,7 +8,7 @@ use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_storage::error::DbResult;
 use shamir_types::codecs::interned::inner_value_to_query_value;
 use shamir_types::core::interner::{Interner, InternerKey};
-use shamir_types::record_view::{HavingView, RecordRef, RecordView};
+use shamir_types::record_view::{HavingView, RecordRef, RecordView, ScalarRef};
 use shamir_types::types::common::{new_map_wc, TMap};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
@@ -77,6 +77,9 @@ pub(crate) fn try_apply_group_by(
         (Vec<(RecordId, Bytes)>, Vec<(String, QueryValue)>),
     > = new_map_wc(0);
 
+    // Per-execution counter backing GroupKeyItem::NanOnce — advanced once
+    // per NaN leaf, so each NaN occurrence is its own group (NaN != NaN).
+    let mut nan_counter: u64 = 0;
     for (id, bytes) in records {
         // Per-row lens for the group-key resolution (same hot/fallback pair
         // as the accumulator loop). The bytes are refcounted `Bytes` —
@@ -84,12 +87,16 @@ pub(crate) fn try_apply_group_by(
         let key_items: Vec<GroupKeyItem> = match RecordView::new(bytes) {
             Ok(v) => group_paths
                 .iter()
-                .map(|(_, path)| group_key_from_lens(&v, path.as_deref(), interner))
+                .map(|(_, path)| {
+                    group_key_from_lens(&v, path.as_deref(), interner, &mut nan_counter)
+                })
                 .collect(),
             Err(_) => match InnerValue::from_bytes(bytes.as_ref()) {
                 Ok(iv) => group_paths
                     .iter()
-                    .map(|(_, path)| group_key_from_lens(&iv, path.as_deref(), interner))
+                    .map(|(_, path)| {
+                        group_key_from_lens(&iv, path.as_deref(), interner, &mut nan_counter)
+                    })
                     .collect(),
                 Err(_) => continue, // malformed — skip defensively
             },
@@ -162,11 +169,21 @@ fn group_key_from_lens<R: RecordRef + ?Sized>(
     record: &R,
     path: Option<&[InternerKey]>,
     interner: &Interner,
+    nan_counter: &mut u64,
 ) -> GroupKeyItem {
     let Some(path) = path else {
         return GroupKeyItem::Missing;
     };
     if let Some(s) = record.scalar_at(path) {
+        // Per-occurrence NaN (S2): every NaN leaf gets its own
+        // occurrence-unique key; `group_key_item_scalar` cannot allocate
+        // the id (no counter), so the NaN check happens here.
+        if let ScalarRef::F64(f) = s {
+            if f.is_nan() {
+                *nan_counter += 1;
+                return GroupKeyItem::NanOnce(*nan_counter);
+            }
+        }
         return group_key_item_scalar(Some(s));
     }
     // Container / Dec / Big — materialise this one field only.
