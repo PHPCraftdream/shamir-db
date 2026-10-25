@@ -155,7 +155,7 @@ async fn mvp_full_pipeline_tls_scram_batch_query() {
     // -----------------------------------------------------------------
     let username = NormalizedUsername::from_raw("admin").expect("username");
 
-    let client_cfg = make_client_config_no_ca();
+    let client_cfg = make_client_config_no_ca().unwrap();
     let connector = TlsConnector::from(client_cfg);
     let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
     let tcp = TcpStream::connect(server_addr).await.expect("connect");

@@ -65,7 +65,7 @@ async fn login_capture_ticket(
     Vec<u8>,
 ) {
     let username = NormalizedUsername::from_raw("admin").unwrap();
-    let connector = TlsConnector::from(make_client_config_no_ca());
+    let connector = TlsConnector::from(make_client_config_no_ca().unwrap());
     let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
     let tcp = TcpStream::connect(addr).await.unwrap();
     let tls = connector.connect(server_name, tcp).await.unwrap();
@@ -158,7 +158,7 @@ async fn login_capture_ticket(
 /// one (both are "resume rejected" from the caller's point of view).
 async fn attempt_resume(addr: std::net::SocketAddr, ticket: Vec<u8>) -> bool {
     let (mut r, mut w, _exporter) = {
-        let connector = TlsConnector::from(make_client_config_no_ca());
+        let connector = TlsConnector::from(make_client_config_no_ca().unwrap());
         let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
         let tcp = TcpStream::connect(addr).await.unwrap();
         let tls = connector.connect(server_name, tcp).await.unwrap();

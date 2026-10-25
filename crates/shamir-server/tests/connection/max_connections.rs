@@ -97,7 +97,7 @@ async fn cap_two_refuses_third_concurrent_client() {
     let handle = launcher.launch().await.expect("launcher");
     let addr = handle.first_tls_exporter_addr().expect("bound");
 
-    let connector = TlsConnector::from(make_client_config_no_ca());
+    let connector = TlsConnector::from(make_client_config_no_ca().unwrap());
     let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
 
     // First two — successful TLS handshakes. We HOLD them open (don't

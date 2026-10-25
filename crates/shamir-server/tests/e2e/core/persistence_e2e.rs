@@ -178,7 +178,7 @@ async fn login(
     [u8; 32],
 ) {
     let username = NormalizedUsername::from_raw("admin").expect("username");
-    let client_cfg = make_client_config_no_ca();
+    let client_cfg = make_client_config_no_ca().unwrap();
     let connector = TlsConnector::from(client_cfg);
     let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
     let tcp = TcpStream::connect(addr).await.expect("tcp connect");

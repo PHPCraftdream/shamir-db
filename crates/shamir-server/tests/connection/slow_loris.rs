@@ -98,7 +98,7 @@ async fn silent_client_after_tls_is_dropped_within_timeout() {
     let addr = handle.first_tls_exporter_addr().expect("bound");
 
     // ----- "Silent" client: complete TLS, then never send. -----
-    let connector = TlsConnector::from(make_client_config_no_ca());
+    let connector = TlsConnector::from(make_client_config_no_ca().unwrap());
     let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
     let tcp = TcpStream::connect(addr).await.expect("tcp connect");
     let tls = connector

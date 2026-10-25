@@ -17,5 +17,5 @@ mod tests;
 
 pub use tls::{
     extract_tls_exporter, generate_self_signed_server_cert, make_client_config_no_ca,
-    make_server_config_from_pem,
+    make_server_config_from_pem, TlsConfigError,
 };

@@ -170,7 +170,7 @@ async fn mvp_full_pipeline_ws_native_tls_scram_batch_query() {
         .expect("WS listener should be bound");
 
     // ----- Client: TLS+WS upgrade in one go -----
-    let client_cfg = make_client_config_no_ca();
+    let client_cfg = make_client_config_no_ca().unwrap();
     let connector = Connector::Rustls(client_cfg);
     let url = format!("wss://localhost:{}/shamir/v1", server_addr.port());
 

@@ -7,12 +7,30 @@
 //!   `EXPORTER-ShamirDB-AUTH-v1`.
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::aws_lc_rs;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, ServerConfig};
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::PrivatePkcs8KeyDer;
 use std::sync::Arc;
 use zeroize::Zeroizing;
+
+/// Errors from TLS config / cert material construction.
+#[derive(Debug, thiserror::Error)]
+pub enum TlsConfigError {
+    /// PEM parse failure (cert or key slice was not valid PEM).
+    #[error("pem parse: {0}")]
+    Pem(#[from] rustls_pki_types::pem::Error),
+    /// The key PEM contained no PKCS8 key.
+    #[error("no PKCS8 key in PEM")]
+    NoKeyInPem,
+    /// rustls config build failure (version validation, cert/key mismatch).
+    #[error("rustls: {0}")]
+    Rustls(#[from] rustls::Error),
+    /// Self-signed certificate generation failure.
+    #[error("rcgen: {0}")]
+    Rcgen(#[from] rcgen::Error),
+}
 
 /// TLS exporter label per spec §4.2 / RFC 9266.
 pub const EXPORTER_LABEL: &[u8] = b"EXPORTER-ShamirDB-AUTH-v1";
@@ -27,7 +45,7 @@ pub const EXPORTER_CONTEXT: &[u8] = b"";
 /// returned inside `Zeroizing` so the caller can zeroize it after use.
 pub fn generate_self_signed_server_cert(
     subject_alt_names: Vec<String>,
-) -> Result<(String, Zeroizing<String>), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(String, Zeroizing<String>), TlsConfigError> {
     let key = rcgen::KeyPair::generate()?;
     let mut params = rcgen::CertificateParams::new(subject_alt_names)?;
     params
@@ -41,17 +59,20 @@ pub fn generate_self_signed_server_cert(
 pub fn make_server_config_from_pem(
     cert_pem: &str,
     key_pem: &str,
-) -> Result<Arc<ServerConfig>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Arc<ServerConfig>, TlsConfigError> {
     let certs =
         CertificateDer::pem_slice_iter(cert_pem.as_bytes()).collect::<Result<Vec<_>, _>>()?;
     let key_pem_bytes = Zeroizing::new(key_pem.as_bytes().to_vec());
     let key = PrivatePkcs8KeyDer::pem_slice_iter(key_pem_bytes.as_slice())
         .next()
-        .ok_or("no PKCS8 key in PEM")??;
+        .ok_or(TlsConfigError::NoKeyInPem)??;
     let key = PrivateKeyDer::Pkcs8(key);
 
-    // TLS 1.3 ONLY (TRANSPORT_TCP §3.1 NORMATIVE).
-    let cfg = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+    // TLS 1.3 ONLY (TRANSPORT_TCP §3.1 NORMATIVE). Explicit provider: never
+    // consults (or panics on the absence of) the process-default provider.
+    let provider = Arc::new(aws_lc_rs::default_provider());
+    let cfg = ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
     Ok(Arc::new(cfg))
@@ -60,12 +81,16 @@ pub fn make_server_config_from_pem(
 /// Build a TLS 1.3 client config that **accepts any cert** — identity is
 /// instead pinned by the application via Ed25519 (spec §6.3 +
 /// TRANSPORT_TCP §3.3). TLS 1.3 only — no fallback to TLS 1.2 (§3.1).
-pub fn make_client_config_no_ca() -> Arc<ClientConfig> {
-    let cfg = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+pub fn make_client_config_no_ca() -> Result<Arc<ClientConfig>, TlsConfigError> {
+    // Explicit provider: never consults (or panics on the absence of) the
+    // process-default provider.
+    let provider = Arc::new(aws_lc_rs::default_provider());
+    let cfg = ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(NoCaVerify))
         .with_no_client_auth();
-    Arc::new(cfg)
+    Ok(Arc::new(cfg))
 }
 
 /// Extract the 32-byte TLS exporter for spec §4.2 channel binding.

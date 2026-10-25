@@ -86,7 +86,7 @@ impl Client {
             .map_err(|e| ClientError::InvalidUsername(e.to_string()))?;
 
         // ---- TLS ----
-        let client_cfg = make_client_config_no_ca();
+        let client_cfg = make_client_config_no_ca().map_err(|e| ClientError::Tls(e.to_string()))?;
         let connector = TlsConnector::from(client_cfg);
         let server_name = ServerName::try_from(opts.server_name.clone())
             .map_err(|e| ClientError::Tls(e.to_string()))?;
@@ -478,7 +478,7 @@ impl Client {
         let _ = default_provider().install_default();
 
         // ---- TLS ----
-        let client_cfg = make_client_config_no_ca();
+        let client_cfg = make_client_config_no_ca().map_err(|e| ClientError::Tls(e.to_string()))?;
         let connector = TlsConnector::from(client_cfg);
         let server_name = ServerName::try_from(opts.server_name.clone())
             .map_err(|e| ClientError::Tls(e.to_string()))?;
