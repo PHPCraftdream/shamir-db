@@ -4,6 +4,7 @@ use std::cmp::Ordering;
 
 use shamir_collections::TSet;
 use shamir_types::record_view::ScalarRef;
+use shamir_types::types::numeric_key::numeric_eq_values;
 use shamir_types::types::value::QueryValue;
 
 use indexmap::Equivalent;
@@ -32,13 +33,19 @@ pub(super) fn set_contains_coercing(set: &TSet<QueryValue>, sr: ScalarRef<'_>) -
             // "any f64 equal to n" without a linear scan, and no in-set
             // f64 can equal an out-of-round-trip-range n anyway.
             let f = n as f64;
-            if cmp_i64_f64(n, f) == Some(Ordering::Equal) {
-                set.contains(&QueryValue::F64(f))
-            } else {
-                false
+            if cmp_i64_f64(n, f) == Some(Ordering::Equal) && set.contains(&QueryValue::F64(f)) {
+                return true;
             }
+            // Exact fallback: Dec/Big members equal to `n`.
+            exact_numeric_scan(set, &QueryValue::Int(n))
         }
         ScalarRef::F64(f) => {
+            // NaN matches nothing (the ONE rule) — Value::PartialEq would
+            // hash-equate NaNs, so a NaN probe must not reach the hashed
+            // probes at all; the exact scan also skips NaN probes.
+            if f.is_nan() {
+                return false;
+            }
             // Same-type probe.
             if set.contains(&QueryValue::F64(f)) {
                 return true;
@@ -54,10 +61,14 @@ pub(super) fn set_contains_coercing(set: &TSet<QueryValue>, sr: ScalarRef<'_>) -
             // every candidate `i64` whose `cmp_i64_f64` result is `Equal`.
             if f.is_finite() {
                 if let Some(n) = exact_i64_equal_to_f64(f) {
-                    return set.contains(&QueryValue::Int(n));
+                    if set.contains(&QueryValue::Int(n)) {
+                        return true;
+                    }
                 }
             }
-            false
+            // Exact fallback: Dec/Big members with the exact same value;
+            // a NaN probe already returned above.
+            exact_numeric_scan(set, &QueryValue::F64(f))
         }
         ScalarRef::Null => set.contains(&QueryValue::Null),
         ScalarRef::Bool(b) => set.contains(&QueryValue::Bool(b)),
@@ -135,6 +146,51 @@ fn bin_discriminant() -> std::mem::Discriminant<QueryValue> {
 /// `f.floor() as i64` is the only candidate that could possibly be equal
 /// (any other integer differs from `f` by at least 1), so this is a single
 /// `cmp_i64_f64` probe, not a search.
+/// Whether a probe value needs the exact Dec/Big linear fallback: numeric
+/// probes whose equal member may be stored under a different `QueryValue`
+/// variant (`Dec(1)` member vs `Int(1)` probe, `Dec(0.5)` vs `F64(0.5)`,
+/// etc.) that the variant-strict hashed `TSet` probes cannot reach. NaN
+/// probes match nothing (S2: NaN is never equal), so they skip the scan.
+#[inline]
+fn probe_needs_exact_scan(qv: &QueryValue) -> bool {
+    match qv {
+        QueryValue::F64(f) => f.is_finite(),
+        QueryValue::Int(_) | QueryValue::Dec(_) | QueryValue::Big(_) => true,
+        _ => false,
+    }
+}
+
+/// Linear exact-numeric fallback for set membership (RV-FUNCLIB-5FA455F7
+/// S2): scans the set comparing every numeric member through
+/// `numeric_eq_values` (exact Int↔F64/Dec/Big, F64↔Dec exact binary value,
+/// NaN matches nothing). Callers run it only after the hashed fast probes
+/// missed, so small sets / rare cross-type misses pay the linear cost.
+#[inline]
+fn exact_numeric_scan(set: &TSet<QueryValue>, probe: &QueryValue) -> bool {
+    probe_needs_exact_scan(probe)
+        && set.iter().any(|m| {
+            matches!(
+                m,
+                QueryValue::Int(_) | QueryValue::F64(_) | QueryValue::Dec(_) | QueryValue::Big(_)
+            ) && numeric_eq_values(m, probe)
+        })
+}
+
+/// [`exact_numeric_scan`]'s index-returning sibling for
+/// `ContainsAllSet`'s bitmask scan.
+#[inline]
+fn exact_numeric_scan_index(set: &TSet<QueryValue>, probe: &QueryValue) -> Option<usize> {
+    if !probe_needs_exact_scan(probe) {
+        return None;
+    }
+    set.iter().position(|m| {
+        matches!(
+            m,
+            QueryValue::Int(_) | QueryValue::F64(_) | QueryValue::Dec(_) | QueryValue::Big(_)
+        ) && numeric_eq_values(m, probe)
+    })
+}
+
 #[inline]
 fn exact_i64_equal_to_f64(f: f64) -> Option<i64> {
     const I64_MIN_AS_F64: f64 = -9223372036854775808.0; // -2^63, exact
@@ -187,13 +243,18 @@ pub(super) fn set_contains_coercing_qv(set: &TSet<QueryValue>, qv: &QueryValue) 
             // exactly back to `n` (see `set_contains_coercing`'s `Int` arm
             // for the full derivation of why this guard is required).
             let f = *n as f64;
-            if cmp_i64_f64(*n, f) == Some(Ordering::Equal) {
-                set.contains(&QueryValue::F64(f))
-            } else {
-                false
+            if cmp_i64_f64(*n, f) == Some(Ordering::Equal) && set.contains(&QueryValue::F64(f)) {
+                return true;
             }
+            exact_numeric_scan(set, qv)
         }
         QueryValue::F64(f) => {
+            // NaN matches nothing (the ONE rule) — Value::PartialEq would
+            // hash-equate NaNs, so a NaN probe must not reach the hashed
+            // probes at all; the exact scan also skips NaN probes.
+            if f.is_nan() {
+                return false;
+            }
             // Same-type probe.
             if set.contains(qv) {
                 return true;
@@ -201,11 +262,18 @@ pub(super) fn set_contains_coercing_qv(set: &TSet<QueryValue>, qv: &QueryValue) 
             // Cross-type Int probe — exact via `exact_i64_equal_to_f64`.
             if f.is_finite() {
                 if let Some(n) = exact_i64_equal_to_f64(*f) {
-                    return set.contains(&QueryValue::Int(n));
+                    if set.contains(&QueryValue::Int(n)) {
+                        return true;
+                    }
                 }
             }
-            false
+            // Exact fallback (Dec/Big members); a NaN probe already
+            // returned above.
+            exact_numeric_scan(set, qv)
         }
+        // Dec/Big probes: hashed probe first (exact same-variant), then the
+        // exact numeric fallback for cross-variant members (Int/F64 equal).
+        QueryValue::Dec(_) | QueryValue::Big(_) => set.contains(qv) || exact_numeric_scan(set, qv),
         // All other types: exact match (no coercion in scalar_ref_cmp_qv).
         _ => set.contains(qv),
     }
@@ -229,22 +297,33 @@ fn index_of_coercing_qv(set: &TSet<QueryValue>, qv: &QueryValue) -> Option<usize
             }
             let f = *n as f64;
             if cmp_i64_f64(*n, f) == Some(Ordering::Equal) {
-                set.get_index_of(&QueryValue::F64(f))
-            } else {
-                None
+                if let Some(i) = set.get_index_of(&QueryValue::F64(f)) {
+                    return Some(i);
+                }
             }
+            exact_numeric_scan_index(set, qv)
         }
         QueryValue::F64(f) => {
+            // NaN matches nothing (the ONE rule) — skip the hashed probes
+            // (Value::PartialEq would equate NaNs).
+            if f.is_nan() {
+                return None;
+            }
             if let Some(i) = set.get_index_of(qv) {
                 return Some(i);
             }
             if f.is_finite() {
                 if let Some(n) = exact_i64_equal_to_f64(*f) {
-                    return set.get_index_of(&QueryValue::Int(n));
+                    if let Some(i) = set.get_index_of(&QueryValue::Int(n)) {
+                        return Some(i);
+                    }
                 }
             }
-            None
+            exact_numeric_scan_index(set, qv)
         }
+        QueryValue::Dec(_) | QueryValue::Big(_) => set
+            .get_index_of(qv)
+            .or_else(|| exact_numeric_scan_index(set, qv)),
         _ => set.get_index_of(qv),
     }
 }

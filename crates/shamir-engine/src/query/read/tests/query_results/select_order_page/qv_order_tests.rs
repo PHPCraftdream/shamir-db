@@ -90,9 +90,9 @@ fn distinct_qv_scalar_duplicates() {
 }
 
 #[test]
-fn distinct_qv_dec_vs_str_same_dedup_class() {
-    // Dec("1.0") and Str("1.0") must deduplicate identically because
-    // the canonical-key mapping converts Dec→String ("1.0").
+fn distinct_qv_dec_vs_str_separate_classes() {
+    // D1-S2: Dec and its decimal string are separate DISTINCT classes (a Dec
+    // is an exact numeric class; strings never alias numbers).
     let qvs = vec![
         qv_map(&[("v", QueryValue::Dec("1.0".parse().unwrap()))]),
         qv_map(&[("v", QueryValue::Str("1.0".to_string()))]),
@@ -101,18 +101,14 @@ fn distinct_qv_dec_vs_str_same_dedup_class() {
 
     let result = apply_distinct_qv(qvs);
 
-    // Dec("1.0") and Str("1.0") share the same canonical key → deduplicate
-    assert_eq!(result.len(), 2, "Dec and Str with same string should dedup");
-    // First seen (Dec) is kept; Int(2) is distinct
-    assert!(
-        matches!(&result[0]["v"], QueryValue::Dec(_)),
-        "first row should have Dec value"
-    );
-    assert_eq!(result[1]["v"], QueryValue::Int(2));
+    assert_eq!(result.len(), 3, "Dec and Str form must not dedup");
+    assert!(matches!(&result[0]["v"], QueryValue::Dec(_)));
+    assert!(matches!(&result[1]["v"], QueryValue::Str(_)));
+    assert_eq!(result[2]["v"], QueryValue::Int(2));
 }
 
 #[test]
-fn distinct_qv_big_vs_str_same_dedup_class() {
+fn distinct_qv_big_vs_str_separate_classes() {
     use num_bigint::BigInt;
     let qvs = vec![
         qv_map(&[("v", QueryValue::Big(BigInt::from(42)))]),
@@ -122,13 +118,11 @@ fn distinct_qv_big_vs_str_same_dedup_class() {
 
     let result = apply_distinct_qv(qvs);
 
-    // Big(42) and Str("42") share the same canonical key → deduplicate
-    assert_eq!(result.len(), 2, "Big and Str with same string should dedup");
-    assert!(
-        matches!(&result[0]["v"], QueryValue::Big(_)),
-        "first row should have Big value"
-    );
-    assert_eq!(result[1]["v"], QueryValue::Int(99));
+    // D1-S2: Big(42) is an exact numeric class; the string "42" is not.
+    assert_eq!(result.len(), 3, "Big and Str form must not dedup");
+    assert!(matches!(&result[0]["v"], QueryValue::Big(_)));
+    assert!(matches!(&result[1]["v"], QueryValue::Str(_)));
+    assert_eq!(result[2]["v"], QueryValue::Int(99));
 }
 
 #[test]

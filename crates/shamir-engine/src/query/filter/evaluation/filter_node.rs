@@ -20,7 +20,8 @@ use regex::Regex;
 use shamir_collections::TSet;
 use shamir_types::codecs::interned::inner_value_to_query_value;
 use shamir_types::core::interner::InternerKey;
-use shamir_types::record_view::{scalar_ref_cmp_qv, Kind, RecordRef};
+use shamir_types::record_view::{scalar_ref_cmp_qv, scalar_ref_numeric_eq, Kind, RecordRef};
+use shamir_types::types::numeric_key::numeric_eq_values;
 use shamir_types::types::value::QueryValue;
 use smallvec::SmallVec;
 
@@ -291,8 +292,10 @@ impl FilterNode {
                         .and_then(|iv| inner_value_to_query_value(&iv, ctx.interner).ok());
                     return match (owned_field.as_ref(), filter_val) {
                         (Some(a), Some(b)) => match op {
-                            CompareOp::Eq => compare_values(a, b) == Some(Ordering::Equal),
-                            CompareOp::Ne => compare_values(a, b) != Some(Ordering::Equal),
+                            // Eq/Ne use the EXACT numeric predicate (S2/S3):
+                            // incomparable → numeric_eq false → Ne true.
+                            CompareOp::Eq => numeric_eq_values(a, b),
+                            CompareOp::Ne => !numeric_eq_values(a, b),
                             CompareOp::Gt => compare_values(a, b) == Some(Ordering::Greater),
                             CompareOp::Gte => matches!(
                                 compare_values(a, b),
@@ -312,8 +315,11 @@ impl FilterNode {
 
                 match (field_val, filter_val) {
                     (Some(a), Some(b)) => match op {
-                        CompareOp::Eq => scalar_ref_cmp_qv(a, b) == Some(Ordering::Equal),
-                        CompareOp::Ne => scalar_ref_cmp_qv(a, b) != Some(Ordering::Equal),
+                        // Eq/Ne use the EXACT numeric predicate (S2/S3); the
+                        // lossy ordering helpers stay for Gt/Gte/Lt/Lte only.
+                        // Incomparable → numeric_eq false → Ne true (unchanged).
+                        CompareOp::Eq => scalar_ref_numeric_eq(a, b),
+                        CompareOp::Ne => !scalar_ref_numeric_eq(a, b),
                         CompareOp::Gt => scalar_ref_cmp_qv(a, b) == Some(Ordering::Greater),
                         CompareOp::Gte => matches!(
                             scalar_ref_cmp_qv(a, b),
@@ -336,8 +342,10 @@ impl FilterNode {
                 let rhs = resolve_filter_query(right, record, ctx);
                 match (&lhs, &rhs) {
                     (Some(a), Some(b)) => match op {
-                        CompareOp::Eq => compare_values(a, b) == Some(Ordering::Equal),
-                        CompareOp::Ne => compare_values(a, b) != Some(Ordering::Equal),
+                        // Eq/Ne: EXACT numeric equality (S2/S3); NaN is never
+                        // equal, not even to itself.
+                        CompareOp::Eq => numeric_eq_values(a, b),
+                        CompareOp::Ne => !numeric_eq_values(a, b),
                         CompareOp::Gt => compare_values(a, b) == Some(Ordering::Greater),
                         CompareOp::Gte => matches!(
                             compare_values(a, b),
@@ -439,7 +447,7 @@ impl FilterNode {
                 let mut found = false;
                 for (i, fv) in values.iter().enumerate() {
                     if let Some(pre) = &pre_resolved[i] {
-                        if scalar_ref_cmp_qv(field_val, pre) == Some(Ordering::Equal) {
+                        if scalar_ref_numeric_eq(field_val, pre) {
                             found = true;
                             break;
                         }
@@ -465,7 +473,7 @@ impl FilterNode {
                         continue;
                     }
                     if let Some(resolved) = resolve_filter_query(fv, record, ctx) {
-                        if scalar_ref_cmp_qv(field_val, &resolved) == Some(Ordering::Equal) {
+                        if scalar_ref_numeric_eq(field_val, &resolved) {
                             found = true;
                             break;
                         }
@@ -531,12 +539,12 @@ impl FilterNode {
                     Err(_) => return false,
                 };
                 match &field_qv {
-                    QueryValue::List(list) => list
-                        .iter()
-                        .any(|item| compare_values(item, filter_val) == Some(Ordering::Equal)),
-                    QueryValue::Set(set) => set
-                        .iter()
-                        .any(|item| compare_values(item, filter_val) == Some(Ordering::Equal)),
+                    QueryValue::List(list) => {
+                        list.iter().any(|item| numeric_eq_values(item, filter_val))
+                    }
+                    QueryValue::Set(set) => {
+                        set.iter().any(|item| numeric_eq_values(item, filter_val))
+                    }
                     _ => false,
                 }
             }
@@ -556,12 +564,12 @@ impl FilterNode {
                         None => return false,
                     };
                     match &field_qv {
-                        QueryValue::List(list) => list
-                            .iter()
-                            .any(|item| compare_values(item, &resolved) == Some(Ordering::Equal)),
-                        QueryValue::Set(set) => set
-                            .iter()
-                            .any(|item| compare_values(item, &resolved) == Some(Ordering::Equal)),
+                        QueryValue::List(list) => {
+                            list.iter().any(|item| numeric_eq_values(item, &resolved))
+                        }
+                        QueryValue::Set(set) => {
+                            set.iter().any(|item| numeric_eq_values(item, &resolved))
+                        }
                         _ => false,
                     }
                 })
@@ -602,12 +610,12 @@ impl FilterNode {
                         None => return false,
                     };
                     match &field_qv {
-                        QueryValue::List(list) => list
-                            .iter()
-                            .any(|item| compare_values(item, &resolved) == Some(Ordering::Equal)),
-                        QueryValue::Set(set) => set
-                            .iter()
-                            .any(|item| compare_values(item, &resolved) == Some(Ordering::Equal)),
+                        QueryValue::List(list) => {
+                            list.iter().any(|item| numeric_eq_values(item, &resolved))
+                        }
+                        QueryValue::Set(set) => {
+                            set.iter().any(|item| numeric_eq_values(item, &resolved))
+                        }
                         _ => false,
                     }
                 })
@@ -769,8 +777,8 @@ impl FilterNode {
                     }
                 };
                 match op {
-                    CompareOp::Eq => compare_values(&computed, rhs) == Some(Ordering::Equal),
-                    CompareOp::Ne => compare_values(&computed, rhs) != Some(Ordering::Equal),
+                    CompareOp::Eq => numeric_eq_values(&computed, rhs),
+                    CompareOp::Ne => !numeric_eq_values(&computed, rhs),
                     CompareOp::Gt => compare_values(&computed, rhs) == Some(Ordering::Greater),
                     CompareOp::Gte => matches!(
                         compare_values(&computed, rhs),

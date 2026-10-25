@@ -273,9 +273,15 @@ async fn rv_index_56a505f0_dec_big_bin_hash_distinctly() {
         FunctionalBackend::hash_value(&InnerValue::Dec(Decimal::from(1))),
         FunctionalBackend::hash_value(&InnerValue::Dec(Decimal::from(2)))
     );
-    // Dec vs Big vs Bin.
-    assert_ne!(
+    // Dec vs Big vs Bin. An integral Dec and the equal Big share ONE
+    // canonical numeric key (RV-FUNCLIB-5FA455F7, index format v3); a
+    // non-integral Dec still hashes apart from any Big.
+    assert_eq!(
         FunctionalBackend::hash_value(&InnerValue::Dec(Decimal::from(1))),
+        FunctionalBackend::hash_value(&InnerValue::Big(BigInt::from(1)))
+    );
+    assert_ne!(
+        FunctionalBackend::hash_value(&InnerValue::Dec(Decimal::new(15, 1))),
         FunctionalBackend::hash_value(&InnerValue::Big(BigInt::from(1)))
     );
     assert_ne!(

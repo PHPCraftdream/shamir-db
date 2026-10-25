@@ -23,10 +23,15 @@ detailed engineering log previously kept here lives in
 ### Changed
 - WebSocket endpoints `/shamir/v1` and `/shamir/v1/browser` now require the `shamir-v1` WebSocket subprotocol; requests without it (or offering only incompatible protocols) are rejected with HTTP 400 (RV-TRANSPORT-WS-C0C43A18; alpha policy: no compatibility shim). First-party clients now offer it.
 
+### Changed
+- DISTINCT and GROUP BY now bucket values by the exact shared canonical numeric key: `Int(1)`, `F64(1.0)`, `-0.0`, an equal `Big`/`Dec` form one class; Int↔Big/Dec equality is exact (never through `f64`); each NaN occurrence is its own DISTINCT value / GROUP BY group (NaN != NaN) and never matches a foreign key; the lossy `F64`↔`Dec`/`Big` comparison now applies to ORDERING only (RV-FUNCLIB-5FA455F7). Note: records STORED on disk serialise `Big`/`Dec` as their decimal string, so GROUP BY over stored bytes still groups them with equal-looking strings until D2 changes the wire/storage projection; the exact numeric classes apply to the in-memory path.
+- Equality simplification (RV-FUNCLIB-5FA455F7, round 3 — ONE rule: equal iff equal canonical keys and neither side NaN): an integral finite `f64` of ANY magnitude (e.g. `F64(2^63)`) now equals the same integer as `Int`/`Big`/`Dec`; a NON-integral `F64` and a non-integral `Dec` are separate equality classes (`F64(0.5) != Dec(0.5)` — lossy F64↔Dec stays ordering-only); NaN never equals anything (itself included) at ANY equality decision path (filter Eq/Ne, dynamic IN, `$contains`/`ContainsAny`/`ContainsAll`, DISTINCT per-occurrence NaN at any depth, FK matching on both the batch and INSERT-side validator funnels).
+
 ### Changed (index rebuild required)
 - Functional index posting hashes: computed `Dec`/`Big`/`Bin`/`Set` values now hash by content (previously collapsed to one shared tag-255 hash, RV-INDEX-56A505F0). Existing functional indexes hold postings under the old hashes and MUST be dropped and re-created after upgrading.
 - FTS tokenizers (Whitespace, Full): non-ASCII uppercase words (e.g. Russian/Greek) are now case-folded before hashing (RV-INDEX-A570106D). Existing FTS indexes contain pre-fix token hashes and MUST be dropped and re-created after upgrading.
 - Legacy regular/unique/functional index posting hashes for numeric (Int/F64) keys are canonical now — `Int(1)` and `F64(1.0)` share one key, `-0.0` keys as `0`, NaN is never matched by an equality probe nor a unique conflict (RV-FUNCLIB-5FA455F7). Existing indexes holding numeric keys MUST be dropped and re-created after upgrading (alpha: no in-place upgrade path).
+- Legacy regular/unique/functional index posting hashes for `Big`/`Dec` keys are canonical now (index format version 3): an integral `Big`/`Dec` keys like the equal `Int` (RV-FUNCLIB-5FA455F7). Existing indexes holding `Big`/`Dec` keys MUST be dropped and re-created after upgrading (alpha: no in-place upgrade path; the engine's rebuild-on-open handles the version stamp).
 
 ### Included
 - Single-node server (`shamir-server`): TCP, WebSocket and local IPC listeners; TLS 1.3 + SCRAM-Argon2id; session resumption; rate limiting and lockout.

@@ -12,7 +12,9 @@
 
 use std::cmp::Ordering;
 
+use crate::types::numeric_key::NumericKey;
 use crate::types::value::{InnerValue, QueryValue};
+use num_bigint::BigInt;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 
@@ -84,7 +86,7 @@ impl<'a> Eq for ScalarRef<'a> {}
 /// `shamir-engine::query::filter::numeric_cmp::cmp_i64_f64`'s doc comment
 /// for the full derivation of why this technique is exact.
 #[inline]
-fn cmp_i64_f64(i: i64, f: f64) -> Option<Ordering> {
+pub(crate) fn cmp_i64_f64(i: i64, f: f64) -> Option<Ordering> {
     if f.is_nan() {
         return None;
     }
@@ -164,8 +166,10 @@ pub fn scalar_ref_cmp(a: ScalarRef<'_>, b: &InnerValue) -> Option<Ordering> {
         // fallback (mirrors the Int↔F64 tradeoff).
         (ScalarRef::Int(a), InnerValue::Dec(b)) => Some(Decimal::from(a).cmp(b)),
         (ScalarRef::F64(a), InnerValue::Dec(b)) => a.partial_cmp(&dec_to_f64(b)),
-        // Big cross-type: f64 fallback (precision loss accepted — see `big_to_f64`).
-        (ScalarRef::Int(a), InnerValue::Big(b)) => (a as f64).partial_cmp(&big_to_f64(b)),
+        // Big cross-type: F64↔Big stays the lossy ordering fallback. Int↔Big
+        // is EXACT via `BigInt: Ord` (RV-FUNCLIB-5FA455F7, S2 — the `as f64`
+        // cast equated distinct integers beyond 2^53).
+        (ScalarRef::Int(a), InnerValue::Big(b)) => Some(BigInt::from(a).cmp(b)),
         (ScalarRef::F64(a), InnerValue::Big(b)) => a.partial_cmp(&big_to_f64(b)),
         (ScalarRef::Bin(a), InnerValue::Bin(b)) => Some(a.cmp(b.as_slice())),
         _ => None,
@@ -194,9 +198,50 @@ pub fn scalar_ref_cmp_qv(a: ScalarRef<'_>, b: &QueryValue) -> Option<Ordering> {
         (ScalarRef::Int(a), QueryValue::Dec(b)) => Some(Decimal::from(a).cmp(b)),
         (ScalarRef::F64(a), QueryValue::Dec(b)) => a.partial_cmp(&dec_to_f64(b)),
         // Big cross-type (see `scalar_ref_cmp` for rationale).
-        (ScalarRef::Int(a), QueryValue::Big(b)) => (a as f64).partial_cmp(&big_to_f64(b)),
+        (ScalarRef::Int(a), QueryValue::Big(b)) => Some(BigInt::from(a).cmp(b)),
         (ScalarRef::F64(a), QueryValue::Big(b)) => a.partial_cmp(&big_to_f64(b)),
         (ScalarRef::Bin(a), QueryValue::Bin(b)) => Some(a.cmp(b.as_slice())),
         _ => None,
+    }
+}
+
+/// Arm-per-arm EXACT equality over a borrowed [`ScalarRef`] field value and
+/// a `QueryValue` literal — the predicate FK matching (and any scalar-lens
+/// equality decision) must use instead of
+/// `scalar_ref_cmp_qv(...) == Some(Equal)`.
+///
+/// THE ONE RULE (`types::numeric_key` module docs): two numeric values are
+/// equal iff their canonical [`NumericKey`]s are equal and neither is NaN
+/// — NaN matches nothing, not even itself. Because a `ScalarRef` has no
+/// `Dec`/`Big` variants, a non-integral `Dec`/`Big` literal never equals
+/// any scalar field (e.g. `F64(0.5)` vs `Dec(0.5)` is FALSE — the lossy
+/// `F64` ↔ `Dec` ordering is ordering-only). `Str`/`Bin`/`Bool`/`Null`
+/// compare as themselves; incomparable pairs are `false`, which preserves
+/// the old "incomparable → `Ne` true" behaviour at call sites.
+pub fn scalar_ref_numeric_eq(a: ScalarRef<'_>, b: &QueryValue) -> bool {
+    let a_key = match a {
+        ScalarRef::Int(i) => Some(NumericKey::Int(i)),
+        ScalarRef::F64(f) => Some(NumericKey::from_f64(f)),
+        _ => None,
+    };
+    let b_key = match b {
+        QueryValue::Int(i) => Some(NumericKey::Int(*i)),
+        QueryValue::F64(f) => Some(NumericKey::from_f64(*f)),
+        QueryValue::Big(bi) => Some(NumericKey::from_bigint(bi)),
+        QueryValue::Dec(d) => NumericKey::from_decimal(d),
+        _ => None,
+    };
+    if let (Some(x), Some(y)) = (a_key, b_key) {
+        let nan = matches!(a, ScalarRef::F64(f) if f.is_nan())
+            || matches!(b, QueryValue::F64(f) if f.is_nan());
+        // The ONE rule: equal canonical keys AND neither side NaN.
+        return x == y && !nan;
+    }
+    match (a, b) {
+        (ScalarRef::Null, QueryValue::Null) => true,
+        (ScalarRef::Bool(x), QueryValue::Bool(y)) => x == *y,
+        (ScalarRef::Str(x), QueryValue::Str(y)) => x == y.as_str(),
+        (ScalarRef::Bin(x), QueryValue::Bin(y)) => x == y.as_slice(),
+        _ => false,
     }
 }

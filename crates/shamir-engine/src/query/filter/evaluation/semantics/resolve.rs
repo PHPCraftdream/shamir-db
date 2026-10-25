@@ -7,6 +7,7 @@ use shamir_types::codecs::interned::{inner_value_to_query_value, query_value_to_
 use shamir_types::codecs::CodecError;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::RecordRef;
+use shamir_types::types::numeric_key::numeric_eq_values;
 use shamir_types::types::value::{InnerValue, QueryValue, Value};
 use smallvec::SmallVec;
 
@@ -176,15 +177,15 @@ where
         // replaces) — compare exactly via `BigInt::cmp`, no approximation.
         (Value::Int(a), Value::Big(b)) => Some(BigInt::from(*a).cmp(b)),
         (Value::Big(a), Value::Int(b)) => Some(a.cmp(&BigInt::from(*b))),
-        // Big<->F64: DELIBERATE, accepted approximation — `F64` is itself an
-        // inherently imprecise IEEE-754 column type, so comparing an EXACT
-        // `BigInt` against an APPROXIMATE `f64` has no single "correct"
-        // exact answer beyond "which f64 is this closest to". This is
-        // distinct from the Int/Dec arms above/below: those compare two
-        // EXACT types, where the `f64` intermediate was a genuine
-        // comparison-code bug (now fixed); here the approximation is
-        // inherent to the F64 column's own nature, not introduced by this
-        // comparison code. Left as-is on purpose — do not "fix" this arm.
+        // Big<->F64 / F64<->Dec: DELIBERATE, accepted approximation (S3
+        // contract, RV-FUNCLIB-5FA455F7) — the lossy `F64` <-> `Dec`/`Big`
+        // comparison is for ORDERING ONLY. It is inherent to the imprecise
+        // IEEE-754 `F64` column (not a comparison-code bug) and must never
+        // drive EQUALITY semantics: DISTINCT, GROUP BY and FK matching use
+        // the exact-only shared canonical numeric key
+        // (`shamir_types::types::numeric_key`), where a non-integral `F64`
+        // equals no `Dec`/`Big` at all. Do not "fix" this arm to exact —
+        // and do not reuse it for equality, either.
         (Value::F64(a), Value::Big(b)) => a.partial_cmp(&lossy_f64(b)),
         (Value::Big(a), Value::F64(b)) => lossy_f64(a).partial_cmp(b),
         // Big<->Dec: CR-C5 (#780), SHOULD-fix. Both sides are exact types
@@ -626,17 +627,13 @@ fn eval_filter_expr(
             let [a, b] = args.as_slice() else {
                 return None;
             };
-            Some(QueryValue::Bool(
-                compare_values(a, b) == Some(Ordering::Equal),
-            ))
+            Some(QueryValue::Bool(numeric_eq_values(a, b)))
         }
         FilterExprOp::Ne => {
             let [a, b] = args.as_slice() else {
                 return None;
             };
-            Some(QueryValue::Bool(
-                compare_values(a, b) != Some(Ordering::Equal),
-            ))
+            Some(QueryValue::Bool(!numeric_eq_values(a, b)))
         }
         FilterExprOp::Gt => {
             let [a, b] = args.as_slice() else {

@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use shamir_index::LEGACY_INDEX_FORMAT_VERSION;
 use shamir_query_types::admin::CreateIndexOp;
 use shamir_storage::types::{Repo, Store};
 use shamir_types::core::interner::TouchInd;
@@ -321,7 +322,10 @@ async fn create_does_not_error_or_panic_across_restart() {
     let stamped_before = crate::index2::persistence::load_legacy_index_version(tbl1.info_store())
         .await
         .unwrap();
-    assert_eq!(stamped_before, 2, "first open must stamp version 2");
+    assert_eq!(
+        stamped_before, LEGACY_INDEX_FORMAT_VERSION,
+        "first open must stamp the current legacy index format version"
+    );
 
     drop(tbl1);
     drop(repo1);
@@ -340,7 +344,7 @@ async fn create_does_not_error_or_panic_across_restart() {
         .await
         .unwrap();
     assert_eq!(
-        stamped_after, 2,
+        stamped_after, LEGACY_INDEX_FORMAT_VERSION,
         "marker survives restart and stays current — no wasted repair() re-stamp"
     );
 

@@ -16,19 +16,20 @@ fn eq(a: &QueryValue, b: &QueryValue) -> bool {
     HashableQueryValue(a) == HashableQueryValue(b)
 }
 
-// ── Dec / Str same-class ─────────────────────────────────────────────────
+// ── Dec / Big vs Str: separate classes (exact numeric classes, D1-S2) ────
+//
+// DISTINCT/GROUP BY bucket numbers by the shared canonical NumericKey.
+// An exact numeric class cannot also equal a string form (Big(1) == Int(1)
+// would make Str("1") == Int(1) transitively), so a Dec/Big no longer shares
+// a class with its decimal string. Stored Big/Dec reach these paths as
+// strings until the D2 wire projection; see the numeric_key module docs.
 
 #[test]
-fn dec_str_same_hash_and_eq() {
-    let dec = QueryValue::Dec("1.0".parse::<Decimal>().unwrap());
-    let str = QueryValue::Str("1.0".to_string());
-    assert_eq!(
-        hash_of(&dec),
-        hash_of(&str),
-        "Dec and Str must hash identically"
-    );
-    assert!(eq(&dec, &str), "Dec and Str with same form must be equal");
-    assert!(eq(&str, &dec), "symmetry");
+fn dec_and_str_are_separate_classes() {
+    let dec = QueryValue::Dec("1.5".parse::<Decimal>().unwrap());
+    let str = QueryValue::Str("1.5".to_string());
+    assert!(!eq(&dec, &str), "Dec and Str form must not share a class");
+    assert!(!eq(&str, &dec), "symmetry");
 }
 
 #[test]
@@ -38,19 +39,31 @@ fn dec_str_different_not_eq() {
     assert!(!eq(&dec, &str));
 }
 
-// ── Big / Str same-class ─────────────────────────────────────────────────
+#[test]
+fn dec_equal_values_share_hash_and_class() {
+    let a = QueryValue::Dec("1.50".parse::<Decimal>().unwrap());
+    let b = QueryValue::Dec("1.5".parse::<Decimal>().unwrap());
+    assert_eq!(hash_of(&a), hash_of(&b));
+    assert!(eq(&a, &b));
+}
 
 #[test]
-fn big_str_same_hash_and_eq() {
+fn big_and_str_are_separate_classes() {
     let big = QueryValue::Big(BigInt::from(42));
     let str = QueryValue::Str("42".to_string());
-    assert_eq!(
-        hash_of(&big),
-        hash_of(&str),
-        "Big and Str must hash identically"
-    );
-    assert!(eq(&big, &str), "Big and Str with same form must be equal");
-    assert!(eq(&str, &big), "symmetry");
+    assert!(!eq(&big, &str), "Big and Str form must not share a class");
+    assert!(!eq(&str, &big), "symmetry");
+}
+
+#[test]
+fn big_equals_int_and_integral_dec() {
+    let big = QueryValue::Big(BigInt::from(42));
+    let int = QueryValue::Int(42);
+    let dec = QueryValue::Dec(Decimal::from(42));
+    assert_eq!(hash_of(&big), hash_of(&int));
+    assert_eq!(hash_of(&big), hash_of(&dec));
+    assert!(eq(&big, &int));
+    assert!(eq(&int, &dec));
 }
 
 // ── F64 finite hashes by bits ────────────────────────────────────────────
@@ -66,16 +79,19 @@ fn f64_finite_eq_by_bits() {
 }
 
 #[test]
-fn f64_nonfinite_maps_to_string() {
+fn f64_nonfinite_are_not_strings() {
+    // NaN never equals anything (per-occurrence NaN is applied by the
+    // DISTINCT/GROUP BY drivers); infinities keep their own raw-bits class
+    // and no longer alias the strings "NaN" / "inf".
     let nan = QueryValue::F64(f64::NAN);
     let nan_str = QueryValue::Str("NaN".to_string());
-    assert_eq!(hash_of(&nan), hash_of(&nan_str));
-    assert!(eq(&nan, &nan_str));
+    assert!(!eq(&nan, &nan_str));
 
     let inf = QueryValue::F64(f64::INFINITY);
     let inf_str = QueryValue::Str("inf".to_string());
-    assert_eq!(hash_of(&inf), hash_of(&inf_str));
-    assert!(eq(&inf, &inf_str));
+    assert!(!eq(&inf, &inf_str));
+    assert!(eq(&inf, &QueryValue::F64(f64::INFINITY)));
+    assert!(!eq(&inf, &QueryValue::F64(f64::NEG_INFINITY)));
 }
 
 // ── Bin dedup ────────────────────────────────────────────────────────────
