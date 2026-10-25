@@ -19,7 +19,7 @@ use shamir_types::record_view::RecordRef;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use std::collections::BTreeSet;
-use std::hash::Hasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 pub struct FunctionalBackend {
@@ -129,11 +129,15 @@ impl FunctionalBackend {
 }
 
 /// Hash a computed expression value into the FUNCTIONAL posting key using
-/// EXPLICIT u8 type tags (0..=6, 255), NOT `std::mem::discriminant`.
+/// EXPLICIT u8 type tags (0..=6, plus tags 7..=10 for Dec/Big/Bin/Set),
+/// NOT `std::mem::discriminant`.
 ///
 /// §5b/byte-identity floor: this is the persisted posting hash format —
 /// the tag scheme is part of on-disk index compatibility and must stay
-/// stable. The `InnerValue` here is the owned computed expression result
+/// stable. Tags 7..=10 (Dec/Big/Bin/Set) EXTEND the persisted scheme,
+/// mirroring `base_index::infra::index_keys::hash_inner_value`; the old
+/// wildcard collapsed Dec/Big/Bin/Set to one shared hash. Set hashes are
+/// order-independent (XOR of per-element hashes). The `InnerValue` here is the owned computed expression result
 /// (see `IndexExpr::eval`), not a record materialization.
 fn hash_inner(val: &InnerValue, h: &mut FxHasher) {
     match val {
@@ -170,7 +174,31 @@ fn hash_inner(val: &InnerValue, h: &mut FxHasher) {
                 hash_inner(v, h);
             }
         }
-        _ => h.write_u8(255),
+        InnerValue::Dec(d) => {
+            h.write_u8(7);
+            d.hash(h);
+        }
+        InnerValue::Big(b) => {
+            h.write_u8(8);
+            b.hash(h);
+        }
+        InnerValue::Bin(b) => {
+            h.write_u8(9);
+            h.write_usize(b.len());
+            h.write(b);
+        }
+        InnerValue::Set(s) => {
+            h.write_u8(10);
+            h.write_usize(s.len());
+            // Order-independent: XOR of per-element hashes into fresh hashers.
+            let mut xor: u64 = 0;
+            for item in s {
+                let mut eh = FxHasher::default();
+                hash_inner(item, &mut eh);
+                xor ^= eh.finish();
+            }
+            h.write_u64(xor);
+        }
     }
 }
 
