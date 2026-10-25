@@ -29,9 +29,7 @@ pub(crate) use wasm_function::test_linker_and_store;
 #[cfg(test)]
 pub(crate) use fuel::FuelObserver;
 
-/// Test-only re-export: lets `tests::runtime::compile_tests` exercise the
-/// `JoinError` mapping path of [`WasmFunction::from_binary_blocking`] by
-/// spawning a deliberately panicking closure through the shared
-/// `spawn_blocking` helper.
-#[cfg(test)]
+/// Re-export: lets `compile::compile_rust_source_blocking` offload the
+/// synchronous pipeline via the shared `spawn_blocking` helper, and
+/// `tests::runtime::compile_tests` exercise its `JoinError` mapping path.
 pub(crate) use wasm_function::run_compile_blocking;
