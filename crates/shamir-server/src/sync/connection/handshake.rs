@@ -21,7 +21,6 @@ use shamir_connect::server::lockout::{
     subnet_of, username_hash, FailureOutcome, PairKey, BACKOFF_CAP_MS,
 };
 use shamir_connect::server::rate_limit::RateDecision;
-use shamir_connect::server::resume::{process_resume, ResumeRequest};
 use shamir_connect::server::session::{Session, SessionPermissions, MAX_SESSIONS_PER_USER};
 use shamir_connect::server::user_record::UserRecord;
 
@@ -30,7 +29,7 @@ use shamir_query_types::wire::CURRENT_QUERY_LANG_VERSION;
 use crate::framer::Framer;
 
 use super::request_loop::request_loop;
-use super::user_state_lookup::RedbUserStateLookup;
+use super::session::resume::{run_resume, run_resume_proof};
 use super::wire;
 use super::ConnectionContext;
 
@@ -40,7 +39,7 @@ fn record_auth_attempt(result: &'static str) {
     metrics::counter!("auth_attempts_total", "result" => result).increment(1);
 }
 
-fn audit_emit(
+pub(super) fn audit_emit(
     ctx: &ConnectionContext,
     event: &str,
     user: &str,
@@ -107,14 +106,14 @@ async fn bounded_shutdown<F: Framer>(framer: &mut F) {
     let _ = tokio::time::timeout(SHUTDOWN_GRACE, framer.shutdown()).await;
 }
 
-fn prefix_8(sid: &[u8; 32]) -> [u8; 8] {
+pub(super) fn prefix_8(sid: &[u8; 32]) -> [u8; 8] {
     let mut out = [0u8; 8];
     out.copy_from_slice(&sid[..8]);
     out
 }
 
 #[derive(Debug)]
-enum HandshakeError {
+pub(super) enum HandshakeError {
     Io,
     Decode,
     Policy,
@@ -138,107 +137,6 @@ enum HandshakeError {
     /// Client requested a handshake-protocol version this server does not
     /// implement. Fast-rejected before any Argon2id work.
     UnsupportedVersion,
-}
-
-/// Session-resume fast-path (SESSION_RESUMPTION §5).
-///
-/// Called when the first frame decodes as a [`wire::ResumeInit`] with a
-/// non-empty `ticket`. Calls [`process_resume`] from `shamir-connect`,
-/// inserts the new session, and sends a [`wire::ResumeOkWire`] response.
-///
-/// Success is unpadded — the ticket is opaque AES-256-GCM ciphertext, so
-/// timing the response cannot reveal user existence. A rejection returns
-/// `HandshakeError::Admission` (after emitting the same `auth_failed` audit
-/// event as login); the OUTER handler pads that path to the constant-time
-/// floor before closing.
-async fn run_resume<F: Framer>(
-    ctx: &ConnectionContext,
-    first_frame: &[u8],
-    framer: &mut F,
-    write_scratch: &mut Vec<u8>,
-    subnet: shamir_connect::server::lockout::Subnet,
-    exporter: [u8; 32],
-) -> Result<[u8; 32], HandshakeError> {
-    let init: wire::ResumeInit =
-        rmp_serde::from_slice(first_frame).map_err(|_| HandshakeError::Decode)?;
-
-    if init.client_nonce.len() != 32 {
-        return Err(HandshakeError::Decode);
-    }
-    let mut client_nonce = [0u8; 32];
-    client_nonce.copy_from_slice(&init.client_nonce);
-
-    let binding_mode =
-        BindingMode::from_u8(init.binding_mode).map_err(|_| HandshakeError::Policy)?;
-
-    const RESUMPTION_TICKET_TTL_NS: u64 = 24 * shamir_connect::common::time::ns::HOUR;
-
-    let now_ns = UnixNanos::now().as_u64();
-    let user_lookup = RedbUserStateLookup(&ctx.user_dir);
-
-    let ok = match process_resume(
-        &ResumeRequest {
-            ticket_wire_bytes: &init.ticket,
-            client_nonce,
-            binding_mode_now: binding_mode,
-            channel_binding_now: exporter,
-        },
-        &ctx.resume_config,
-        ctx.consumed_counters.as_ref(),
-        &user_lookup,
-        &ctx.session_store,
-        &ctx.identity,
-        SESSION_MAX_AGE_NS,
-        RESUMPTION_TICKET_TTL_NS,
-        now_ns,
-    ) {
-        Ok(ok) => ok,
-        // Admission rejection is a distinct internal outcome — the SAME
-        // `auth_failed` audit event as login (spec §7.4, RV-CONNECT-
-        // 8AD8B1C8), then the outer handler closes without a success frame;
-        // no backoff registration. There is no proposed sid to log on
-        // rejection (the new session id is only assigned on success), so the
-        // sid prefix is `None` — the same convention as the other resume
-        // failure audit sites.
-        Err(shamir_connect::common::error::Error::AdmissionRejected { reason, username }) => {
-            let reason_str = match reason {
-                AdmitReject::AllActive => "max_sessions",
-                AdmitReject::SidConflict => "sid_conflict",
-            };
-            audit_emit(ctx, "auth_failed", &username, subnet, None, reason_str);
-            return Err(HandshakeError::Admission);
-        }
-        Err(_) => return Err(HandshakeError::BadProof { backoff_ms: 0 }),
-    };
-
-    // Audit the idle sessions the capped admission evicted (same reason
-    // string as login — RV-CONNECT-8AD8B1C8).
-    for victim_sid in &ok.evicted {
-        audit_emit(
-            ctx,
-            "session_evicted",
-            &ok.username,
-            subnet,
-            Some(&prefix_8(victim_sid)),
-            "max_sessions_lru",
-        );
-    }
-
-    // Build and send ResumeOkWire.
-    let wire_ok = wire::ResumeOkWire {
-        session_id: ok.session_id.to_vec(),
-        expires_at_ns: ok.expires_at_ns,
-        resumption_ticket: ok.resumption_ticket.unwrap_or_default(),
-        resumption_expires_at_ns: ok.resumption_expires_at_ns.unwrap_or(0),
-        server_query_version: CURRENT_QUERY_LANG_VERSION as u8,
-    };
-    let bytes = rmp_serde::to_vec(&wire_ok).map_err(|_| HandshakeError::Io)?;
-    framer
-        .write_frame_into(&bytes, write_scratch)
-        .await
-        .map_err(|_| HandshakeError::Io)?;
-
-    Ok(ok.session_id)
 }
 
 /// Run the full SCRAM-Argon2id handshake.
@@ -872,6 +770,36 @@ pub async fn handle_connection<F>(
             );
             bounded_shutdown(&mut framer).await;
             return;
+        }
+    }
+
+    // RV-CLIENT-DE75ADDD: optional resume identity-proof preamble. A client
+    // MAY open with a 1-field `resume_proof` frame to authenticate the
+    // server's pinned Ed25519 identity BEFORE disclosing the bearer ticket;
+    // after answering, the NEXT frame is dispatched exactly like a first
+    // frame. Any other frame shape (arity-decoded) skips this branch.
+    if let Ok(proof_init) = rmp_serde::from_slice::<wire::ResumeProofInit>(&frame_buf) {
+        if proof_init.client_nonce.len() != 32
+            || run_resume_proof(&ctx, &proof_init, &mut framer, &mut write_scratch, exporter)
+                .await
+                .is_err()
+        {
+            bounded_shutdown(&mut framer).await;
+            return;
+        }
+        let read_fut = framer.read_frame_into(MAX_PRE_AUTH_FRAME, &mut frame_buf);
+        match tokio::time::timeout(ctx.auth_init_timeout, read_fut).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::debug!(?e, "post-proof first frame read failed");
+                bounded_shutdown(&mut framer).await;
+                return;
+            }
+            Err(_elapsed) => {
+                tracing::info!(?subnet, "post-proof first frame timeout (slow-loris)",);
+                bounded_shutdown(&mut framer).await;
+                return;
+            }
         }
     }
 

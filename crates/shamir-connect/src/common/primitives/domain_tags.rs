@@ -36,3 +36,9 @@ pub const TLS_EXPORTER_LABEL: &[u8] = b"EXPORTER-ShamirDB-AUTH-v1";
 
 /// Resumption ticket AAD prefix (SESSION_RESUMPTION §2.2).
 pub const TICKET_V1: &[u8] = b"SHAMIR-TICKET-v1";
+
+/// Resume identity-proof prefix (RV-CLIENT-DE75ADDD): the server signs
+/// `RESUME_PROOF_V1 || client_nonce || tls_exporter` with its CURRENT
+/// Ed25519 identity key so a resuming client can authenticate the peer
+/// BEFORE disclosing the bearer ticket.
+pub const RESUME_PROOF_V1: &[u8] = b"SHAMIR-RESUME-PROOF-v1";
