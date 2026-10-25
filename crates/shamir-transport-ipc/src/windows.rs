@@ -72,17 +72,27 @@ impl IpcListener {
     /// pending instance so a subsequent `accept` call can serve the NEXT
     /// client — a single `NamedPipeServer` handle is one-client-only,
     /// unlike a socket listener.
+    ///
+    /// Cancellation-safe: the replacement pending instance is stored in
+    /// `self.next` BEFORE awaiting the connect, so dropping this future at
+    /// any await point leaves the listener usable for the next `accept`.
     pub async fn accept(&mut self) -> io::Result<IpcStream> {
         let pending = self
             .next
             .take()
             .expect("IpcListener::accept: no pending instance — invariant violated");
-        pending.connect().await?;
-        self.next = Some(create_instance(
+        match create_instance(
             &self.name,
             &self.sec_desc,
             /* first_pipe_instance */ false,
-        )?);
+        ) {
+            Ok(replacement) => self.next = Some(replacement),
+            Err(e) => {
+                self.next = Some(pending);
+                return Err(e);
+            }
+        }
+        pending.connect().await?;
         Ok(pending)
     }
 

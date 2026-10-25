@@ -261,3 +261,46 @@ fn len_between_ok_and_bad() {
         "bad_bounds"
     );
 }
+
+// -------------------------------------------------------------------------
+// RV-FUNCLIB-84DD4DA9 — is_json's parser must cap container nesting instead
+// of recursing unbounded on attacker-shaped text.
+// -------------------------------------------------------------------------
+
+#[test]
+fn rv_funclib_84dd4da9_is_json_depth_capped() {
+    let r = reg();
+    // Deep-but-bounded valid nesting (~400 KB) — beyond the cap the
+    // validator must return Bool(false), not recurse to stack overflow.
+    let deep: String = std::iter::repeat_n('[', 200_000)
+        .chain(std::iter::repeat_n(']', 200_000))
+        .collect();
+    assert_eq!(r.call("is_json", &[s(&deep)]).unwrap(), v_bool(false));
+    // Shallow nesting stays valid.
+    assert_eq!(r.call("is_json", &[s("[[[1]]]")]).unwrap(), v_bool(true));
+    assert_eq!(
+        r.call("is_json", &[s("{\"a\":{\"b\":2}}")]).unwrap(),
+        v_bool(true)
+    );
+}
+
+// -------------------------------------------------------------------------
+// RV-FUNCLIB-F1354271 — matches must reuse the shared compiled-regex cache
+// instead of recompiling the pattern on every evaluation.
+// -------------------------------------------------------------------------
+
+#[test]
+fn rv_funclib_f1354271_matches_uses_cached_regex() {
+    let r = reg();
+    assert_eq!(
+        r.call("matches", &[s("abc"), s("a.c")]).unwrap(),
+        v_bool(true)
+    );
+    // The pattern must now be resident in the shared regex cache — the
+    // pre-fix `matches` compiled a fresh Regex inside the closure and never
+    // touched the cache.
+    assert!(
+        crate::functions::text::regex_cache::is_cached("a.c"),
+        "matches must reuse the shared compiled-regex cache"
+    );
+}

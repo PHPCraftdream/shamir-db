@@ -753,3 +753,20 @@ fn test_zerocopy_vs_legacy_equivalence() {
         );
     }
 }
+
+// -------------------------------------------------------------------------
+// RV-TYPES-BB78489C — container preallocation must be capped by the
+// remaining input: a declared count the body cannot back is an error, not a
+// huge `with_capacity`.
+// -------------------------------------------------------------------------
+
+#[test]
+fn rv_types_bb78489c_container_prealloc_capped_by_remaining() {
+    let interner = Interner::new();
+    // Array32 header declaring u32::MAX elements with no body.
+    assert!(msgpack_to_inner(&interner, &[0xdd, 0xff, 0xff, 0xff, 0xff]).is_err());
+    // Map32 header declaring u32::MAX entries with no body.
+    assert!(msgpack_to_inner(&interner, &[0xdf, 0xff, 0xff, 0xff, 0xff]).is_err());
+    // Map16 header declaring u16::MAX entries with no body.
+    assert!(msgpack_to_inner(&interner, &[0xde, 0xff, 0xff]).is_err());
+}

@@ -153,3 +153,30 @@ fn register_builtins_exposes_gen_folder_qualified_names() {
         other => panic!("expected Str, got {other:?}"),
     }
 }
+
+// -------------------------------------------------------------------------
+// RV-FUNCLIB-CDACB2E5 — random_bytes enforces an output-byte ceiling.
+// -------------------------------------------------------------------------
+
+#[test]
+fn rv_funclib_cdacb2e5_random_bytes_capped() {
+    let r = reg();
+    // Above the 1 MiB ceiling the request is rejected before allocation.
+    assert_eq!(
+        r.call("random_bytes", &[QueryValue::Int(1 << 21)])
+            .unwrap_err()
+            .code,
+        "out_of_range"
+    );
+    // Negative stays rejected; small sizes still work.
+    assert_eq!(
+        r.call("random_bytes", &[QueryValue::Int(-1)])
+            .unwrap_err()
+            .code,
+        "out_of_range"
+    );
+    match r.call("random_bytes", &[QueryValue::Int(16)]).unwrap() {
+        QueryValue::Bin(b) => assert_eq!(b.len(), 16, "random_bytes(16) length"),
+        other => panic!("expected Bin, got {other:?}"),
+    }
+}
