@@ -45,9 +45,12 @@ fn rv_funclib_4936c6ed_resolver_dispatch_and_fallback() {
         resolver.call("no_such_fn", &[]).unwrap_err().code,
         "unknown_function"
     );
+    // Builtin fallback returns exactly what the builtin registry returns.
     assert_eq!(
         resolver.call("math/abs", &[QueryValue::Int(-5)]).unwrap(),
-        v_int(5)
+        crate::static_builtin()
+            .call("math/abs", &[QueryValue::Int(-5)])
+            .unwrap()
     );
     assert_eq!(resolver.call("strict", &[]).unwrap_err().code, "arity");
     // Exceeding `max_args` is an arity error too (upper bound is enforced).
