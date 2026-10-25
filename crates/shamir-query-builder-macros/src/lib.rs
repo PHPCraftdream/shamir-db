@@ -10,6 +10,9 @@ mod filter_lower;
 mod query_parse;
 mod query_parse_lower;
 
+#[cfg(test)]
+mod tests;
+
 /// Build a [`Filter`] from a natural boolean expression.
 ///
 /// Comparison operators (`==`, `!=`, `>`, `>=`, `<`, `<=`) map to
@@ -107,7 +110,9 @@ pub fn filter(input: TokenStream) -> TokenStream {
 /// ```
 ///
 /// `fn_name` is a bare ident (`my_proc`) or a string literal
-/// (`"reports/daily"` for folder-qualified names). Arguments are
+/// (`"reports/daily"` for folder-qualified names). A repo-qualified form
+/// `call my_repo.daily(...)` invokes the procedure in repository `my_repo`;
+/// without a qualifier, `repo` defaults to `"main"`. Arguments are
 /// expressions that implement `Into<FilterValue>` — literals, `col()`,
 /// `func()`, `@`-style query refs, etc. Returns a [`CallOp`].
 ///
@@ -129,6 +134,10 @@ pub fn filter(input: TokenStream) -> TokenStream {
 /// (`==`, `!=`, `>`, `>=`, `<`, `<=`), logical operators (`&&`, `||`,
 /// `!`), parenthesised groups, and all 19 predicate calls (`like`,
 /// `in_`, `between`, `fts`, `is_null`, `contains`, `computed`, ...).
+/// Note (30DA1AC8): clause keywords (`select`, `group_by`, `having`,
+/// `order_by`, `limit`, `offset`) are reserved at the start of a
+/// where/having expression, so a field named exactly like a clause
+/// keyword cannot be used there (accepted limitation).
 ///
 /// ## `select` items (comma-separated)
 ///
