@@ -23,6 +23,40 @@ use tokio_tungstenite::WebSocketStream;
 pub const NATIVE_WS_PATH: &str = "/shamir/v1";
 /// Browser WS endpoint path (spec TRANSPORT_WS §2).
 pub const BROWSER_WS_PATH: &str = "/shamir/v1/browser";
+/// Mandatory WebSocket subprotocol (spec TRANSPORT_WS §2, RV-TRANSPORT-WS-C0C43A18).
+pub const WS_SUBPROTOCOL: &str = "shamir-v1";
+
+/// 400 for a missing/incompatible subprotocol offer.
+fn subprotocol_reject(msg: &'static str) -> ErrorResponse {
+    let mut err = ErrorResponse::new(Some(msg.to_string()));
+    *err.status_mut() = http::StatusCode::BAD_REQUEST;
+    err
+}
+
+/// RV-TRANSPORT-WS-C0C43A18: require the client to offer [`WS_SUBPROTOCOL`]
+/// and echo it back in the response. Absent header or no matching token → 400.
+#[allow(clippy::result_large_err)] // Err type is tungstenite's Callback trait contract
+fn negotiate_subprotocol(req: &Request, resp: Response) -> Result<Response, ErrorResponse> {
+    // Validate EVERY header value (non-text is a 400) before selecting.
+    let mut offered = false;
+    for val in req.headers().get_all(http::header::SEC_WEBSOCKET_PROTOCOL) {
+        let text = val
+            .to_str()
+            .map_err(|_| subprotocol_reject("non-text Sec-WebSocket-Protocol header"))?;
+        offered |= text.split(',').map(str::trim).any(|p| p == WS_SUBPROTOCOL);
+    }
+    if offered {
+        let (mut parts, body) = resp.into_parts();
+        parts.headers.insert(
+            http::header::SEC_WEBSOCKET_PROTOCOL,
+            http::HeaderValue::from_static(WS_SUBPROTOCOL),
+        );
+        return Ok(Response::from_parts(parts, body));
+    }
+    Err(subprotocol_reject(
+        "client must offer the shamir-v1 WebSocket subprotocol",
+    ))
+}
 
 /// Build the [`WebSocketConfig`] applied to every accepted server stream.
 ///
@@ -125,7 +159,7 @@ where
                     return Err(err);
                 }
             }
-            Ok(resp)
+            negotiate_subprotocol(req, resp)
         },
         Some(server_ws_config()),
     )
@@ -188,7 +222,7 @@ where
                 .get(http::header::ORIGIN)
                 .and_then(|v| v.to_str().ok());
             match validate_origin(&policy, origin) {
-                Ok(()) => Ok(resp),
+                Ok(()) => negotiate_subprotocol(req, resp),
                 Err(rej) => {
                     let (status, msg) = match rej {
                         OriginRejected::Missing => (

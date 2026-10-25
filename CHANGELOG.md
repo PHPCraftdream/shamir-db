@@ -20,6 +20,9 @@ First public alpha in preparation (`0.1.0-alpha.1`, not yet tagged). The
 detailed engineering log previously kept here lives in
 `docs/dev-artifacts/checkpoints/2026-08-engineering-log.md`.
 
+### Changed
+- WebSocket endpoints `/shamir/v1` and `/shamir/v1/browser` now require the `shamir-v1` WebSocket subprotocol; requests without it (or offering only incompatible protocols) are rejected with HTTP 400 (RV-TRANSPORT-WS-C0C43A18; alpha policy: no compatibility shim). First-party clients now offer it.
+
 ### Changed (index rebuild required)
 - Functional index posting hashes: computed `Dec`/`Big`/`Bin`/`Set` values now hash by content (previously collapsed to one shared tag-255 hash, RV-INDEX-56A505F0). Existing functional indexes hold postings under the old hashes and MUST be dropped and re-created after upgrading.
 - FTS tokenizers (Whitespace, Full): non-ASCII uppercase words (e.g. Russian/Greek) are now case-folded before hashing (RV-INDEX-A570106D). Existing FTS indexes contain pre-fix token hashes and MUST be dropped and re-created after upgrading.

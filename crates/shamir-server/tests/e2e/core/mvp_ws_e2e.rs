@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use shamir_types::mpack;
 use tempfile::TempDir;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::{Connector, MaybeTlsStream};
 use zeroize::Zeroizing;
 
@@ -180,7 +181,11 @@ async fn mvp_full_pipeline_ws_native_tls_scram_batch_query() {
     let tcp = tokio::net::TcpStream::connect(server_addr)
         .await
         .expect("tcp");
-    let req = url.into_client_request().expect("uri");
+    let mut req = url.into_client_request().expect("uri");
+    req.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        HeaderValue::from_static("shamir-v1"),
+    );
 
     let (ws, _resp) = tokio_tungstenite::client_async_tls_with_config(
         req,

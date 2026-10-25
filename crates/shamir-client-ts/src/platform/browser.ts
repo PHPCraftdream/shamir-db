@@ -114,8 +114,9 @@ export const BrowserPlatform: Platform = {
   ): Promise<Socket> {
     return new Promise((resolve, reject) => {
       // Browser WebSocket: TLS policy is enforced by the browser; no
-      // rejectUnauthorized option (self-signed certs must be trusted at OS level).
-      const ws = new WebSocket(url);
+      // rejectUnauthorized option (self-signed certs must be trusted at OS
+      // level). Offers the mandatory `shamir-v1` subprotocol.
+      const ws = new WebSocket(url, ['shamir-v1']);
       ws.binaryType = 'arraybuffer';
       const onOpen = () => {
         ws.removeEventListener('error', onError);
