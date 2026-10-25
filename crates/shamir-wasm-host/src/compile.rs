@@ -104,11 +104,10 @@ pub const WASM_COMPILE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Macros that read files or the host environment at *compile* time and
 /// are therefore forbidden in untrusted guest source.
 ///
-/// Each entry is matched as a Rust macro invocation: a preceding
-/// non-identifier character (or start of input) followed by the name and
-/// a literal `!`. The scan skips string/byte-string/raw-string literals
-/// and `//` + `/* */` comments so that the *text* of a string or comment
-/// cannot trigger a false positive.
+/// Each entry is matched as a Rust macro invocation found by TOKEN
+/// recognition (RV-WASM-HOST-5E65E165): the exact identifier token
+/// (whitespace and comments between the name and `!` are skipped; literal
+/// contents never produce tokens; longer identifiers never match).
 const FORBIDDEN_MACROS: &[&str] = &[
     "include",
     "include_str",
@@ -120,24 +119,89 @@ const FORBIDDEN_MACROS: &[&str] = &[
 /// Scan untrusted Rust source for forbidden compile-time macros.
 ///
 /// Returns the first forbidden macro name found, or `None` if the source
-/// is clean. The scan walks the source while skipping:
+/// is clean. The scan is a conservative Rust LEXER (RV-WASM-HOST-5E65E165):
+/// it recognizes identifier TOKENS — not textual substrings — so
 ///
-/// - line comments (`// …`) and block comments (`/* … */`, nested),
-/// - string literals (`"…"`), byte-string literals (`b"…"`),
-///   raw strings (`r"…"`, `r#"…"#`) and raw byte strings (`br"…"`),
-/// - char and byte literals (`'…'` / `b'…'`).
+/// - whitespace and comments (`// …`, nested `/* … */`) between the name
+///   and the `!` do NOT hide an invocation,
+/// - a longer identifier (`environment`, `xinclude`, a Unicode identifier
+///   like `envé`) is never a match (token identity is exact),
+/// - the contents of every string/byte-string/C-string literal (plain and
+///   raw, `r`/`br`/`cr` with 0..=255 hashes) and char/byte literals never
+///   contribute tokens, and a literal between a name and
+///   its `!` breaks the invocation shape,
+/// - raw identifiers (`r#env!`) are still matched (that IS the macro).
 ///
-/// so a forbidden name appearing *inside* a string or comment does NOT
-/// trigger a match. A real invocation like `env!("HOME")` (preceded by a
-/// non-identifier char or start-of-input, followed by `!`) does.
-///
-/// As noted in the module docs this is a defense-in-depth check, not a
-/// sandbox: it does not stop a proc-macro dependency from reading the
-/// environment, nor does it parse the full Rust grammar (e.g. attribute
-/// tokens). It exists to close the cheapest exfiltration paths.
+/// Unicode is handled on `char` boundaries throughout (no byte slicing on
+/// non-boundary offsets), so multi-byte identifiers cannot panic.
 fn find_forbidden_macro(source: &str) -> Option<&'static str> {
-    let cleaned = strip_strings_and_comments(source);
-    find_forbidden_macro_in_clean(&cleaned)
+    let b = source.as_bytes();
+    let n = b.len();
+    let mut i = 0usize;
+    while i < n {
+        match b[i] {
+            b'/' if i + 1 < n && b[i + 1] == b'/' => {
+                // Line comment — skip past the newline.
+                i += 2;
+                while i < n && b[i] != b'\n' {
+                    i += 1;
+                }
+                if i < n {
+                    i += 1;
+                }
+            }
+            b'/' if i + 1 < n && b[i + 1] == b'*' => {
+                // Block comment — nesting-aware. Unterminated → clean (the
+                // compiler, not this scanner, is the authority on errors).
+                i = skip_block_comment(b, i)?;
+            }
+            b'"' | b'b' | b'c' | b'r' if is_string_literal_start(b, i) => {
+                // String literal — plain `"…"` / `b"…"` / `c"…"` or
+                // raw `r…` / `br…` / `cr…` (0..=255 hashes). Consumed as
+                // ONE token; contents never produce tokens.
+                i += try_consume_string_literal(b, i)
+                    .expect("prefix checked by is_string_literal_start");
+            }
+            b'\'' => {
+                // Char literal (`'a'`, `'\n'`, `'\u{…}'`) or a lifetime /
+                // loop label (`'a`, `'static`). Only a literal is skipped
+                // as one token; a lifetime continues below.
+                if let Some(end) = find_char_literal_end(b, source, i) {
+                    i = end + 1;
+                } else {
+                    // Lifetime: skip `'` + identifier token.
+                    i = skip_identifier(b, source, i + 1);
+                }
+            }
+            b'r' | b'b' | b'c' => {
+                // Not a literal prefix (e.g. the identifiers `b`, `c`,
+                // `br#tag`, `cr` not followed by a quote): plain token scan.
+                let (name, end) = read_identifier_token(b, source, i);
+                if let Some(name) = name {
+                    // A forbidden identifier TOKEN followed (across Rust
+                    // whitespace and comments only) by `!` is a macro
+                    // invocation. A literal or any other token in between
+                    // breaks the shape.
+                    if FORBIDDEN_MACROS.contains(&name) && next_token_is_bang(b, source, end) {
+                        return Some(name);
+                    }
+                }
+                i = end;
+            }
+            _ => {
+                // Any other byte: identifier-token scan (a no-op advance
+                // when it does not start an identifier).
+                let (name, end) = read_identifier_token(b, source, i);
+                if let Some(name) = name {
+                    if FORBIDDEN_MACROS.contains(&name) && next_token_is_bang(b, source, end) {
+                        return Some(name);
+                    }
+                }
+                i = end;
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -145,238 +209,316 @@ pub(crate) fn test_find_forbidden_macro(source: &str) -> Option<&'static str> {
     find_forbidden_macro(source)
 }
 
-/// Strip Rust string/char/byte literals and comments, replacing their
-/// bodies with spaces (preserving length & newline positions so byte
-/// offsets stay meaningful). The result contains only "code" characters.
-fn strip_strings_and_comments(src: &str) -> String {
-    let b = src.as_bytes();
+/// Skip a (possibly nested) block comment starting at the `/*` at `i`.
+/// Returns the index just past the matching `*/`, or `None` when the
+/// comment is unterminated (the source cannot lex cleanly past it).
+fn skip_block_comment(b: &[u8], mut i: usize) -> Option<usize> {
     let n = b.len();
-    let mut out: Vec<u8> = b.to_vec();
-    let mut i = 0usize;
-    while i < n {
-        match b[i] {
-            b'/' if i + 1 < n && b[i + 1] == b'/' => {
-                // Line comment — blank until newline (keep the newline).
-                out[i] = b' ';
-                out[i + 1] = b' ';
-                i += 2;
-                while i < n && b[i] != b'\n' {
-                    out[i] = b' ';
-                    i += 1;
-                }
-            }
-            b'/' if i + 1 < n && b[i + 1] == b'*' => {
-                // Block comment — supports nesting. Blank until matching
-                // close. Unterminated → blank to EOF.
-                out[i] = b' ';
-                out[i + 1] = b' ';
-                i += 2;
-                let mut depth = 1usize;
-                while i < n && depth > 0 {
-                    if i + 1 < n && b[i] == b'/' && b[i + 1] == b'*' {
-                        depth += 1;
-                        out[i] = b' ';
-                        out[i + 1] = b' ';
-                        i += 2;
-                    } else if i + 1 < n && b[i] == b'*' && b[i + 1] == b'/' {
-                        depth -= 1;
-                        out[i] = b' ';
-                        out[i + 1] = b' ';
-                        i += 2;
-                    } else {
-                        if b[i] == b'\n' {
-                            // preserve newlines for offset accuracy
-                        } else {
-                            out[i] = b' ';
-                        }
-                        i += 1;
-                    }
-                }
-            }
-            // Raw string / raw byte string: optional `b`, `r`, then `#`*
-            // then `"`.
-            ch @ (b'r' | b'b') => {
-                let (consumed, is_string) = match try_consume_raw_string(b, i) {
-                    Some(len) => (len, true),
-                    None => (0, false),
-                };
-                if !is_string {
-                    // Fall through to normal handling (could be a regular
-                    // identifier/byte literal).
-                    if ch == b'b' && i + 1 < n && b[i + 1] == b'\'' {
-                        // byte literal `b'…'`
-                        out[i] = b' ';
-                        i += 1;
-                        i = blank_until_quote(b, &mut out, i, b'\'');
-                    } else {
-                        i += 1;
-                    }
-                } else {
-                    // Blank the whole raw-string span (preserving newlines).
-                    for k in out.iter_mut().skip(i).take(consumed) {
-                        if *k != b'\n' {
-                            *k = b' ';
-                        }
-                    }
-                    i += consumed;
-                }
-            }
-            b'"' => {
-                out[i] = b' ';
-                i += 1;
-                i = blank_until_quote(b, &mut out, i, b'"');
-            }
-            b'\'' => {
-                // Could be a lifetime/label (`'a`, `'static`) — those have
-                // an identifier char after the quote and are NOT string
-                // literals. Heuristic: only treat as a char literal when
-                // the closing `'` is found on the same "short" span.
-                if let Some(end) = find_char_literal_end(b, i) {
-                    for k in out.iter_mut().take(end + 1).skip(i) {
-                        if *k != b'\n' {
-                            *k = b' ';
-                        }
-                    }
-                    i = end + 1;
-                } else {
-                    i += 1;
-                }
-            }
-            _ => {
-                i += 1;
-            }
+    let mut depth = 1usize;
+    i += 2;
+    while i < n && depth > 0 {
+        if i + 1 < n && b[i] == b'/' && b[i + 1] == b'*' {
+            depth += 1;
+            i += 2;
+        } else if i + 1 < n && b[i] == b'*' && b[i + 1] == b'/' {
+            depth -= 1;
+            i += 2;
+        } else {
+            i += 1;
         }
     }
-    // SAFETY: we only replaced ASCII bytes with ASCII spaces/newlines,
-    // preserving UTF-8 well-formedness of the unchanged bytes.
-    String::from_utf8(out).unwrap_or_default()
+    (depth == 0).then_some(i)
 }
 
-/// Blank bytes from `i` until the closing `quote`, honouring `\` escapes.
-/// Returns the index just past the closing quote (or `n` if EOF).
-fn blank_until_quote(b: &[u8], out: &mut [u8], mut i: usize, quote: u8) -> usize {
+/// Skip a double-quoted string literal starting at the opening `quote` at
+/// `i`, honoring `\` escapes. Returns the index just past the closing
+/// quote (or `n` at EOF).
+fn skip_string_literal(b: &[u8], mut i: usize, quote: u8) -> usize {
     let n = b.len();
+    i += 1;
     while i < n {
-        let c = b[i];
-        if c == b'\\' {
-            if c != b'\n' {
-                out[i] = b' ';
-            }
-            i += 1;
-            if i < n && b[i] != b'\n' {
-                out[i] = b' ';
-            }
-            i += 1;
+        if b[i] == b'\\' {
+            i += 2; // skip the escape and the escaped byte
             continue;
         }
-        if c == quote {
-            out[i] = b' ';
+        if b[i] == quote {
             return i + 1;
-        }
-        if c != b'\n' {
-            out[i] = b' ';
         }
         i += 1;
     }
-    i
+    n
 }
 
-/// If a raw string (`r"…"`, `r#"…"#`) or raw byte string (`br"…"`) starts
-/// at `i`, return its total byte length; otherwise `None`.
-fn try_consume_raw_string(b: &[u8], i: usize) -> Option<usize> {
+/// Whether a string literal starts at byte `i` — the unified
+/// literal-prefix dispatch (RV-WASM-HOST-5E65E165, C-string fix): every
+/// current Rust string-literal prefix,
+///
+/// * plain: `"` / `b"` / `c"`,
+/// * raw: `r` / `br` / `cr` followed by 0..=255 `#` and a `"`,
+///
+/// used to disambiguate them from identifiers (`req`, `b`, `c`, the raw
+/// identifier `r#tag`, and `cr…` identifiers not followed by a quote).
+/// A `cr#name` sequence WITHOUT a closing quote shape falls through to the
+/// identifier scanner (raw-identifier path), while `cr#"…"#` is the raw
+/// C-string literal.
+fn is_string_literal_start(b: &[u8], i: usize) -> bool {
+    try_consume_string_literal(b, i).is_some()
+}
+
+/// If a string literal (see [`is_string_literal_start`] for the full
+/// prefix set) starts at `i`, return its total byte length; else `None`.
+/// Raw forms are matched by their exact `"` + hashes close pattern (same
+/// matcher for every raw prefix); quoted forms honor `\` escapes so an
+/// escaped quote cannot desync the scanner. Unterminated raw strings are
+/// consumed to EOF; for quoted forms [`skip_string_literal`] owns that
+/// fallback.
+fn try_consume_string_literal(b: &[u8], i: usize) -> Option<usize> {
     let n = b.len();
     let mut j = i;
-    if j >= n {
-        return None;
-    }
-    if b[j] == b'b' {
+    // Optional prefix: exactly ONE of `b` or `c` (Rust has no `bc`
+    // literal form — a `bc…` sequence is identifier + prefix, not one
+    // literal, so accepting it here would mis-skip tokens).
+    if j < n && (b[j] == b'b' || b[j] == b'c') {
         j += 1;
     }
-    if j >= n || b[j] != b'r' {
-        return None;
-    }
-    j += 1;
-    // Count opening `#`s.
-    let mut hashes = 0usize;
-    while j < n && b[j] == b'#' {
-        hashes += 1;
+    if j < n && b[j] == b'r' {
+        // Raw form: r / br / cr + `#`* + `"`.
         j += 1;
-    }
-    if j >= n || b[j] != b'"' {
-        return None;
-    }
-    j += 1;
-    let close_pattern: Vec<u8> = {
-        let mut p = vec![b'"'];
-        p.extend(std::iter::repeat_n(b'#', hashes));
-        p
-    };
-    while j + close_pattern.len() <= n {
-        if &b[j..j + close_pattern.len()] == close_pattern.as_slice() {
-            return Some(j + close_pattern.len() - i);
+        let mut hashes = 0usize;
+        while j < n && b[j] == b'#' {
+            hashes += 1;
+            j += 1;
+        }
+        // Rust bounds raw hashes at 255; a longer `#` run is NOT a valid
+        // raw-string start — fall through to the identifier scanner (the
+        // conservative direction: real tokens stay scannable).
+        if hashes > 255 || j >= n || b[j] != b'"' {
+            return None;
         }
         j += 1;
+        let mut close_pattern = Vec::with_capacity(hashes + 1);
+        close_pattern.push(b'"');
+        close_pattern.extend(std::iter::repeat_n(b'#', hashes));
+        while j + close_pattern.len() <= n {
+            if &b[j..j + close_pattern.len()] == close_pattern.as_slice() {
+                return Some(j + close_pattern.len() - i);
+            }
+            j += 1;
+        }
+        // Unterminated raw string — consume to EOF.
+        Some(n - i)
+    } else if j < n && b[j] == b'"' {
+        // Plain quoted form: `"` / `b"` / `c"` — escape-aware skip.
+        Some(skip_string_literal(b, j, b'"') - i)
+    } else {
+        None
     }
-    // Unterminated raw string — consume to EOF.
-    Some(n - i)
 }
 
-/// Heuristic end-index (inclusive) of a char literal starting at the `'`
-/// at index `i`. Returns `None` if this looks like a lifetime/label
-/// (`'a`) rather than a literal.
-fn find_char_literal_end(b: &[u8], i: usize) -> Option<usize> {
+/// End-index (inclusive) of a char literal starting at the `'` at index
+/// `i`. Returns `None` if the bytes at `i` do not form a complete char
+/// literal — in particular for a lifetime/label (`'a`, `'static`), which
+/// the caller then treats as a lifetime, never as a token boundary to
+/// skip across. Handles backslash escapes (RV-WASM-HOST-5E65E165 fix: the
+/// escaped-literal branch keys on the BACKSLASH, not on the quote — the
+/// old `b'\''` check sent every escape sequence (`'\''`, `'\n'`, `'\\'`,
+/// `'\xNN'`) down the plain-char path and mis-parsed it as a lifetime,
+/// letting a later `env!` hide behind the mis-skipped token), including
+/// the multi-char `'\u{…}'` form and multi-byte literal chars (`'é'`): a
+/// lifetime heuristic that mis-parses either would skip real code (or
+/// worse, fail to advance and spin).
+fn find_char_literal_end(b: &[u8], source: &str, i: usize) -> Option<usize> {
     let n = b.len();
     let mut j = i + 1;
     if j >= n {
         return None;
     }
-    // `'\`… — escaped char literal, e.g. `'\n`, `'\\`, `'\u{...}`.
     if b[j] == b'\\' {
-        j += 1;
-        while j < n && b[j] != b'\'' {
-            j += 1;
+        // Escape sequence: `\'`, `\"`, `\\`, `\n`, `\xNN`, `\u{…}`, ...
+        j += 1; // past the backslash
+        if j >= n {
+            return None;
         }
-        return if j < n { Some(j) } else { None };
-    }
-    // Single ASCII char then `'`.
-    if j + 1 < n && b[j + 1] == b'\'' {
-        return Some(j + 1);
-    }
-    None
-}
-
-/// Run the forbidden-macro lexeme search over source that has already had
-/// strings and comments blanked.
-fn find_forbidden_macro_in_clean(clean: &str) -> Option<&'static str> {
-    let bytes = clean.as_bytes();
-    for name in FORBIDDEN_MACROS {
-        let needle = name.as_bytes();
-        let mut from = 0usize;
-        while from < bytes.len() {
-            let found = match clean[from..].find(name) {
-                Some(idx) => from + idx,
-                None => break,
-            };
-            let after = found + needle.len();
-            // Must be immediately followed by `!` to be a macro invocation.
-            // `after == bytes.len()` (needle is a buffer suffix) is a valid,
-            // in-bounds "no `!` follows" case — bounds-check before
-            // indexing rather than relying on the loop guard to exclude it.
-            if after < bytes.len() && bytes[after] == b'!' {
-                let preceded_by_ident = found > 0 && is_ident_continue(bytes[found - 1]);
-                if !preceded_by_ident {
-                    return Some(name);
-                }
+        if b[j] == b'u' && j + 1 < n && b[j + 1] == b'{' {
+            // `\u{…}` — skip to the closing brace.
+            while j < n && b[j] != b'}' {
+                j += 1;
             }
-            from = found + needle.len();
+            if j >= n {
+                return None;
+            }
+            j += 1;
+        } else if b[j] == b'x' {
+            // `\xNN` — two hex digits (not valid hex here is not valid
+            // Rust; the scanner consumes the two bytes and lets the
+            // compiler, the authority, reject the source).
+            if j + 2 >= n {
+                return None;
+            }
+            j += 3;
+        } else {
+            // Single escaped char (ASCII escapes; a multi-byte char after
+            // the backslash is not valid Rust but is consumed safely).
+            j += char_len_at(source, j);
         }
+    } else {
+        // Single (possibly multi-byte) literal char — skip one char.
+        j += char_len_at(source, j);
     }
-    None
+    if j < n && b[j] == b'\'' {
+        Some(j)
+    } else {
+        None
+    }
 }
 
-/// Rust identifier-continuation byte predicate (ascii alnum + `_`).
-fn is_ident_continue(b: u8) -> bool {
-    matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')
+/// Read the identifier token starting at byte `i`.
+///
+/// Returns `(Some(matched_forbidden_name), end)` when the token text
+/// equals one of the fixed [`FORBIDDEN_MACROS`] names (a `r#` raw-
+/// identifier prefix is stripped first — `r#env!` IS the macro), and
+/// `(None, end)` otherwise; `end` is always the index to resume scanning
+/// from (one full char forward when `i` does not start an identifier).
+/// Identifier-continue is `XID`-approximated by `char::is_alphanumeric`
+/// plus `_` — a conservative superset of Rust's grammar, the safe
+/// direction here: a longer token is never a false match.
+fn read_identifier_token(b: &[u8], source: &str, i: usize) -> (Option<&'static str>, usize) {
+    let end = skip_identifier(b, source, i);
+    if end == i {
+        // Not an identifier start: advance exactly one char (boundary-safe).
+        return (None, i + char_len_at(source, i));
+    }
+    // Raw identifier `r#name` — compare the stripped name.
+    let name_start = if b[i] == b'r' && i + 1 < b.len() && b[i + 1] == b'#' {
+        i + 2
+    } else {
+        i
+    };
+    let matched = source
+        .get(name_start..end)
+        .and_then(|name| FORBIDDEN_MACROS.iter().copied().find(|m| *m == name));
+    (matched, end)
+}
+
+/// Advance past an identifier token starting at `i` (or return `start`
+/// unchanged if there is none). Handles the `r#` raw-identifier prefix.
+fn skip_identifier(b: &[u8], source: &str, start: usize) -> usize {
+    let n = b.len();
+    let mut i = start;
+    if i < n && b[i] == b'r' && i + 1 < n && b[i + 1] == b'#' {
+        i += 2;
+    }
+    if i >= n || !is_ident_start(source, i) {
+        return start;
+    }
+    i += char_len_at(source, i);
+    while i < n && is_ident_continue(source, i) {
+        i += char_len_at(source, i);
+    }
+    i
+}
+
+/// Rust identifier-start approximation: ASCII letter/`_`, or — the
+/// CONSERVATIVE direction for this scanner — any other non-ASCII char
+/// that is not whitespace or a control char. A superset of `XID_Start`
+/// can only ever lengthen a candidate token, never split one, so a real
+/// `env!` can never be hidden by it.
+fn is_ident_start(source: &str, i: usize) -> bool {
+    match source.get(i..).and_then(|s| s.chars().next()) {
+        Some(c) => c == '_' || c.is_ascii_alphabetic() || is_conservative_non_ascii(c),
+        None => false,
+    }
+}
+
+/// Rust identifier-continue approximation: ASCII alnum/`_`, or any
+/// non-ASCII char that is not Rust whitespace/control — a deliberate SUPERSET
+/// of `XID_Continue` (it includes combining marks, e.g. `env\u{301}`,
+/// which real Rust also folds into one identifier). The complementary
+/// property is what matters: only EXACT Rust whitespace (the
+/// [`is_rust_whitespace`] `Pattern_White_Space` set — a set that neither
+/// contains nor is contained in `char::is_whitespace`) ends a token, so a
+/// forbidden name separated from its `!` by Rust whitespace is still
+/// found by `next_token_is_bang`. Note the approximation is COARSER than
+/// real Rust: chars like U+00A0/U+3000 are invalid identifier-continue
+/// characters in Rust (the lexer rejects them outright, not absorbs
+/// them), while this scanner extends one non-matching token over them.
+fn is_ident_continue(source: &str, i: usize) -> bool {
+    match source.get(i..).and_then(|s| s.chars().next()) {
+        Some(c) => c == '_' || c.is_ascii_alphanumeric() || is_conservative_non_ascii(c),
+        None => false,
+    }
+}
+
+/// Whether the char is in Rust's EXACT whitespace set — Unicode
+/// `Pattern_White_Space` and nothing else: U+0009..U+000D, U+0020,
+/// U+0085, U+200E, U+200F, U+2028, U+2029. This is a DIFFERENT set from
+/// `char::is_whitespace` — neither contains the other: `is_whitespace`
+/// adds NBSP U+00A0, IDEOGRAPHIC SPACE U+3000, …, but MISSES
+/// U+200E/U+200F, which are Rust whitespace. Only this exact set
+/// may be skipped as a token gap; every other char (including those
+/// `char::is_whitespace` accepts) must break the name–`!` shape here.
+fn is_rust_whitespace(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0009}'
+            ..='\u{000D}'
+                | '\u{0020}'
+                | '\u{0085}'
+                | '\u{200E}'
+                | '\u{200F}'
+                | '\u{2028}'
+                | '\u{2029}'
+    )
+}
+
+fn is_conservative_non_ascii(c: char) -> bool {
+    !c.is_ascii() && !is_rust_whitespace(c) && !c.is_control()
+}
+
+/// Length in bytes of the char at boundary `i` (1 as the EOF/invalid
+/// fallback — the scanner never calls this off-boundary).
+fn char_len_at(source: &str, i: usize) -> usize {
+    source
+        .get(i..)
+        .and_then(|s| s.chars().next())
+        .map_or(1, char::len_utf8)
+}
+
+/// Whether the next TOKEN after `from` is `!` — skipping EXACT Rust
+/// whitespace ([`is_rust_whitespace`], the `Pattern_White_Space` set —
+/// the same set rustc's lexer skips; NOT `char::is_whitespace`, which is
+/// a different set that both adds NBSP/U+3000-class chars and misses
+/// U+200E/U+200F) and comments only. Any other token (including a
+/// literal) between the name and the `!` breaks the invocation shape.
+fn next_token_is_bang(b: &[u8], source: &str, mut i: usize) -> bool {
+    let n = b.len();
+    loop {
+        while i < n {
+            let Some(c) = source.get(i..).and_then(|s| s.chars().next()) else {
+                return false;
+            };
+            if is_rust_whitespace(c) {
+                i += c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if i + 1 < n && b[i] == b'/' && b[i + 1] == b'/' {
+            while i < n && b[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if i + 1 < n && b[i] == b'/' && b[i + 1] == b'*' {
+            i = match skip_block_comment(b, i) {
+                Some(next) => next,
+                None => return false,
+            };
+            continue;
+        }
+        break;
+    }
+    i < n && b[i] == b'!'
 }
 
 /// Build the allowlisted environment for the guest `cargo build`.
