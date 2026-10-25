@@ -130,7 +130,7 @@ async fn full_handshake_over_tcp_tls() {
     // ---- TLS configs ----
     let (cert_pem, key_pem) = generate_self_signed_server_cert(vec!["localhost".into()]).unwrap();
     let server_cfg = make_server_config_from_pem(&cert_pem, &key_pem).unwrap();
-    let client_cfg = make_client_config_no_ca();
+    let client_cfg = make_client_config_no_ca().unwrap();
 
     // ---- Listener ----
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

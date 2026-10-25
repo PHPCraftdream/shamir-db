@@ -455,8 +455,9 @@ async fn apply_staged_vector_deletes_double_writes_to_compaction_target() {
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    // Arm a compaction target (Step 2 of run_background_compaction) — a
-    // fresh HnswAdapter with `compaction_deleted_rids` set.
+    // Arm a compaction target (Step 2 of run_background_compaction) — an
+    // armed routing slot carrying a fresh HnswAdapter target with
+    // `compaction_deleted_rids` set.
     let target_adapter: Arc<dyn VectorAdapter> = Arc::new(HnswAdapter::new_compaction_target(
         3,
         VectorMetric::Cosine,
@@ -466,11 +467,11 @@ async fn apply_staged_vector_deletes_double_writes_to_compaction_target() {
     // to tombstone (mirrors Step 4a of run_background_compaction).
     target_adapter.upsert(r1, &[1.0, 0.0, 0.0]).await.unwrap();
 
-    backend
-        .compaction_target_for_test()
-        .store(Some(Arc::new(AdapterSlot {
-            adapter: Arc::clone(&target_adapter),
-        })));
+    let current = backend.slot_for_test();
+    backend.set_slot_for_test(AdapterSlot::armed(
+        Arc::clone(&current.adapter),
+        crate::vector::vector_backend::CompactionTarget::new(Arc::clone(&target_adapter)),
+    ));
 
     // Promote the staged delete — must tombstone r1 on BOTH the live graph
     // AND the compaction target (double-write).
