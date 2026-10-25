@@ -29,7 +29,71 @@ use shamir_types::mpack;
 
 use crate::db_handler::config::NodeMode;
 use crate::db_handler::handler::{DbResponse, ShamirDbHandler};
+use crate::tx_registry::InteractiveTx;
 use crate::version::CURRENT_QUERY_LANG_VERSION;
+
+/// Match the lifecycle fixture's roomy stack for deep engine async frames.
+fn on_big_stack<F, Fut>(body: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime")
+                .block_on(body())
+        })
+        .expect("spawn test thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+}
+
+/// RV-SERVER-C73466A7 fixture: a `ReadOnly` handler over a shared in-memory
+/// `ShamirDb` with a real interactive transaction already parked in the
+/// registry (opened directly against the engine). The `db` handle is
+/// returned so tests can stage writes at the engine level, bypassing
+/// TxExecute, to prove the commit-time gate.
+async fn readonly_tx_fixture() -> (Arc<ShamirDb>, ShamirDbHandler, Session, u64) {
+    let session = alice_session();
+    let db = Arc::new(ShamirDb::init_memory().await.expect("init shamir"));
+    let owner = Actor::User(principal64([0xAB; 16]));
+    db.create_db_as("app", owner.clone())
+        .await
+        .expect("create_db");
+    db.add_repo_as(
+        "app",
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items")),
+        owner.clone(),
+    )
+    .await
+    .expect("add repo");
+    let (tx, guard) = db
+        .tx_begin_as(owner, "app", "main", "snapshot")
+        .await
+        .expect("begin real transaction");
+    let handle = tx.tx_id.0;
+    let handler = ShamirDbHandler::new(db.clone()).with_node_mode(NodeMode::ReadOnly);
+    handler
+        .tx_registry
+        .register(
+            handle,
+            InteractiveTx::new(
+                tx,
+                guard,
+                session.session_id,
+                session.user_id,
+                "app".into(),
+                "main".into(),
+                std::time::Duration::from_secs(60),
+            ),
+        )
+        .expect("park transaction");
+    (db, handler, session, handle)
+}
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -225,4 +289,144 @@ async fn readonly_rejects_mixed_batch() {
         }
         other => panic!("ReadOnly node should reject mixed batch, got: {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// RV-SERVER-C73466A7 — the interactive-tx path must honour `NodeMode::ReadOnly`
+// the same way `execute` does: WRITES are refused with `read_only_replica`
+// while permitted READS keep working inside transactions (P0.md: TxBegin is
+// not mode-gated; TxExecute classifies with the same `is_write` visitor as
+// `execute`; a tx with staged writes never commits).
+// ---------------------------------------------------------------------------
+
+/// TxBegin on a `ReadOnly` node is ALLOWED — opening a snapshot transaction
+/// is read-capable and the replica must keep serving reads.
+#[test]
+fn rv_server_c73466a7_readonly_tx_begin_allows_snapshot_transaction() {
+    on_big_stack(|| async {
+        let handler = build_handler(NodeMode::ReadOnly).await;
+        let session = alice_session();
+
+        let resp = handler
+            .tx_begin(&session, CURRENT_QUERY_LANG_VERSION, "app", "main", None)
+            .await;
+
+        assert!(
+            matches!(resp, DbResponse::TxOpened { .. }),
+            "ReadOnly node must still open read transactions, got: {resp:?}",
+        );
+    });
+}
+
+/// TxExecute with a SELECT on a `ReadOnly` node is ACCEPTED — reads are
+/// preserved inside transactions. Fails on the blanket-gate variant of the
+/// fix (which rejected every TxExecute) and on the unfixed code only if
+/// the engine refused reads (it does not).
+#[test]
+fn rv_server_c73466a7_readonly_tx_execute_accepts_select() {
+    on_big_stack(|| async {
+        let (_db, handler, session, handle) = readonly_tx_fixture().await;
+
+        let resp = handler
+            .tx_execute(
+                &session,
+                CURRENT_QUERY_LANG_VERSION,
+                "app",
+                handle,
+                read_batch_select(),
+            )
+            .await;
+
+        assert!(
+            matches!(resp, DbResponse::TxBatch { .. }),
+            "ReadOnly node must serve SELECT inside a tx, got: {resp:?}",
+        );
+    });
+}
+
+/// TxExecute with an INSERT on a `ReadOnly` node → `read_only_replica`,
+/// the same contract and classifier as non-transactional `execute`.
+/// Fails if ONLY the TxExecute classification is reverted.
+#[test]
+fn rv_server_c73466a7_readonly_tx_execute_rejects_insert() {
+    on_big_stack(|| async {
+        let (_db, handler, session, handle) = readonly_tx_fixture().await;
+
+        let resp = handler
+            .tx_execute(
+                &session,
+                CURRENT_QUERY_LANG_VERSION,
+                "app",
+                handle,
+                write_batch_insert(),
+            )
+            .await;
+
+        match resp {
+            DbResponse::Error { code, message } => {
+                assert_eq!(code, "read_only_replica", "wrong code; message: {message}");
+            }
+            other => panic!("ReadOnly node must reject TxExecute INSERT, got: {other:?}"),
+        }
+    });
+}
+
+/// TxCommit of a transaction that staged NO writes succeeds on a
+/// `ReadOnly` node — refusing it would strand legitimate read-only txs.
+#[test]
+fn rv_server_c73466a7_readonly_tx_commit_without_writes_succeeds() {
+    on_big_stack(|| async {
+        let (_db, handler, session, handle) = readonly_tx_fixture().await;
+
+        let resp = handler.tx_commit(&session, "app", handle).await;
+
+        assert!(
+            matches!(resp, DbResponse::TxCommitted { .. }),
+            "ReadOnly node must commit a write-free tx, got: {resp:?}",
+        );
+    });
+}
+
+/// TxCommit of a transaction that DID stage writes (staged at engine level,
+/// bypassing TxExecute) is REFUSED on a `ReadOnly` node — the write must
+/// never land. Fails if ONLY the commit gate is reverted.
+#[test]
+fn rv_server_c73466a7_readonly_tx_commit_with_staged_writes_rejected() {
+    on_big_stack(|| async {
+        let (db, handler, session, handle) = readonly_tx_fixture().await;
+
+        // Stage a write directly against the engine, bypassing the
+        // handler's TxExecute gate.
+        let it = handler
+            .tx_registry
+            .get_owned(handle, &session.session_id)
+            .expect("owned handle");
+        let insert = write_batch_insert();
+        {
+            let mut guard = it.ctx().lock().await;
+            let tx = guard.as_mut().expect("tx still open");
+            db.tx_execute_as(
+                shamir_db::access::Actor::User(shamir_db::access::principal64([0xAB; 16])),
+                "app",
+                &insert,
+                tx,
+            )
+            .await
+            .expect("stage insert at engine level");
+        }
+        drop(it);
+
+        let resp = handler.tx_commit(&session, "app", handle).await;
+
+        match resp {
+            DbResponse::Error { code, message } => {
+                assert_eq!(code, "read_only_replica", "wrong code; message: {message}");
+                assert!(
+                    message.contains("staged writes"),
+                    "commit gate must name the staged writes; message: {message}"
+                );
+            }
+            other => panic!("ReadOnly node must refuse committing staged writes, got: {other:?}"),
+        }
+    });
 }
