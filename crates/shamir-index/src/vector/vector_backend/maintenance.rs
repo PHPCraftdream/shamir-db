@@ -272,6 +272,12 @@ impl Drop for CompactionFlightGuard {
 }
 
 impl VectorBackend {
+    /// Current background-snapshot delta threshold. Test-only.
+    #[cfg(test)]
+    pub(crate) fn snapshot_threshold_for_test(&self) -> u64 {
+        self.snapshot_threshold.load(Ordering::Acquire)
+    }
+
     /// V4.2 (#408) — check whether compaction should trigger and spawn it.
     pub(crate) fn trigger_compaction_check(&self, info_store: &Arc<dyn Store>) {
         let adapter_arc = Arc::clone(&self.adapter.load_full().adapter);

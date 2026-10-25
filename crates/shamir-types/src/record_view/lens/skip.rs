@@ -1,3 +1,5 @@
+#[cfg(test)]
+use super::cursor::bump_scan;
 use super::cursor::{read_be, read_u8};
 use super::{RecordViewError, MAX_MSGPACK_DEPTH};
 
@@ -13,6 +15,8 @@ use super::{RecordViewError, MAX_MSGPACK_DEPTH};
 /// `depth` bounds recursion — deeper than [`MAX_MSGPACK_DEPTH`] returns
 /// [`RecordViewError::DepthExceeded`] (matches the canonical decoder's guard).
 pub(crate) fn skip_value(buf: &[u8], pos: &mut usize, depth: usize) -> Result<(), RecordViewError> {
+    #[cfg(test)]
+    bump_scan();
     if depth > MAX_MSGPACK_DEPTH {
         return Err(RecordViewError::DepthExceeded(RecordViewError::depth_cap()));
     }
@@ -180,8 +184,12 @@ pub(crate) fn skip_value(buf: &[u8], pos: &mut usize, depth: usize) -> Result<()
         }
         0xc9 => {
             let n = read_be::<4>(buf, pos)? as usize;
+            // Chain the adds: `1 + n` overflows on 32-bit targets when
+            // n = u32::MAX. (RV-TYPES-6866D8B8)
             *pos = pos
-                .checked_add(1 + n)
+                .checked_add(1)
+                .ok_or(RecordViewError::Truncated(start))?
+                .checked_add(n)
                 .ok_or(RecordViewError::Truncated(start))?;
             Ok(())
         }
