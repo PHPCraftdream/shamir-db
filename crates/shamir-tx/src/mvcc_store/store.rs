@@ -529,7 +529,7 @@ impl MvccStore {
     /// RV-TX-2CB455A7: fail-stop refusal once a failed write's compensating
     /// cleanup could not settle its versions.
     fn ensure_writable(&self) -> DbResult<()> {
-        if self.gate.requires_reopen() {
+        if self.gate.writes_fenced() {
             return Err(DbError::RepoRequiresReopen(
                 "failed-write cleanup left versions unsettled; writes refused".into(),
             ));
@@ -560,7 +560,7 @@ impl MvccStore {
                 // committed floor stalls below them (fail-stop).
                 std::mem::forget(guard);
             }
-            self.gate.set_requires_reopen();
+            self.gate.fence_writes();
             log::warn!("failed-write cleanup failed ({e}); store requires reopen");
         } else {
             drop(guards);

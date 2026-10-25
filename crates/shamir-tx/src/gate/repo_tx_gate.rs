@@ -199,6 +199,10 @@ pub struct RepoTxGate {
     orphan_entries: Arc<scc::HashMap<u64, Arc<WalEntryV2>, THasher>>,
     wal_unresolved: Arc<scc::HashMap<u64, Unresolved, THasher>>,
     requires_reopen: Arc<AtomicBool>,
+    /// Set only when a failed write's compensating cleanup could not settle
+    /// its versions; new writes are refused (unlike `requires_reopen`, which
+    /// still lets a write commit and report a pending-visibility exception).
+    writes_fenced: Arc<AtomicBool>,
     orphaned_post_wal: Arc<scc::HashMap<u64, (), THasher>>,
     orphan_max: Arc<AtomicU64>,
     active_post_wal: Arc<scc::HashMap<u64, (), THasher>>,
@@ -339,6 +343,7 @@ impl RepoTxGate {
             orphan_entries: Arc::new(scc::HashMap::with_hasher(THasher::default())),
             wal_unresolved: Arc::new(scc::HashMap::with_hasher(THasher::default())),
             requires_reopen: Arc::new(AtomicBool::new(false)),
+            writes_fenced: Arc::new(AtomicBool::new(false)),
             orphaned_post_wal: Arc::new(scc::HashMap::with_hasher(THasher::default())),
             orphan_max: Arc::new(AtomicU64::new(0)),
             active_post_wal: Arc::new(scc::HashMap::with_hasher(THasher::default())),
@@ -693,6 +698,16 @@ impl RepoTxGate {
 
     pub fn requires_reopen(&self) -> bool {
         self.requires_reopen.load(Ordering::Acquire)
+    }
+
+    /// Fail-stop: refuse new writes and require reopen.
+    pub fn fence_writes(&self) {
+        self.writes_fenced.store(true, Ordering::Release);
+        self.set_requires_reopen();
+    }
+
+    pub fn writes_fenced(&self) -> bool {
+        self.writes_fenced.load(Ordering::Acquire)
     }
 
     /// Highest version ever registered as a post-WAL orphan (zero if none).
