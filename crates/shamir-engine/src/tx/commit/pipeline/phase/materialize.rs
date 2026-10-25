@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use futures::future::join_all;
 use shamir_collections::TFxMap;
+use shamir_storage::error::DbError;
 use shamir_tunables::instance_defaults::INTERNER_CHECKPOINT_INTERVAL;
-use shamir_tx::{RepoTxGate, TxContext};
+use shamir_tx::{RepoTxGate, TxContext, VectorDeltaAck};
 
 use crate::repo::RepoInstance;
 use crate::tx::commit::maybe_crash;
@@ -12,6 +13,9 @@ use crate::tx::commit_phases::{
     persist_markers, retry_materialize, MATERIALIZE_ATTEMPTS,
 };
 use crate::tx::tx_outcome::MaterializationState;
+
+#[cfg(test)]
+use super::commit_phases::{FAIL_VECTOR_DELTA_TX_ID, FAIL_VECTOR_PROMOTE_TX_ID};
 
 #[cfg(test)]
 pub(in crate::tx) static TEST_PRE_MATERIALIZE_REPO: std::sync::OnceLock<String> =
@@ -479,4 +483,144 @@ pub(crate) async fn interner_delta_safe_to_truncate(
         return Ok(false);
     }
     Ok(true)
+}
+
+/// Promote one table's staged HNSW vectors + vector deletes into the live
+/// in-RAM graph (Phase 5d GRAPH half, post-lock — see [`promote_vectors`]).
+///
+/// gap#1 / HIGH-6: `deleted` is this table's slice of staged vector-delete
+/// rids (`tx.staged_vector_deletes_for(token)`). The promote order is
+/// delete-then-insert: a replace (delete old + insert new on the same rid)
+/// converges to the NEW vector live (HNSW `upsert` re-inserts a tombstoned
+/// node; `delete` on a not-yet-inserted node is a no-op, so either order is
+/// safe, but delete-then-insert matches the replace intent literally).
+///
+/// #426 (VR-4 variant A): this is the GRAPH half only. The DURABLE delta
+/// chunk (`DeltaOp::Upsert`/`Delete`) is appended PRE-publish by
+/// [`apply_vector_delta_batch`] (called from [`apply_vector_delta_phase`]),
+/// so a post-lock graph-promote failure leaves the mutation durable in the
+/// delta-log — `restore_on_open::replay_delta` re-materializes it on the
+/// next open.
+pub(crate) async fn apply_vector_graph_batch(
+    repo: &RepoInstance,
+    token: u64,
+    vecs: &[(shamir_types::types::record_id::RecordId, Vec<f32>)],
+    deleted: &[shamir_types::types::record_id::RecordId],
+    _tx_id: u64,
+) -> Result<(), DbError> {
+    // Test-only failure injection: simulate a persistent post-lock HNSW
+    // graph-promote error for a specific tx so the III.5 contract (a failed
+    // graph promote after the lock + Phase 7 does NOT defer the tx) can be
+    // exercised in-process. Armed via `FAIL_VECTOR_PROMOTE_TX_ID`. NOTE:
+    // this injection fires ONLY for the graph half; the delta half has its
+    // own injection (`FAIL_VECTOR_DELTA_TX_ID`) and its own (Deferred)
+    // failure contract.
+    #[cfg(test)]
+    if _tx_id != 0 && FAIL_VECTOR_PROMOTE_TX_ID.load(std::sync::atomic::Ordering::SeqCst) == _tx_id
+    {
+        return Err(DbError::Internal(format!(
+            "injected Phase 5d (hnsw graph promote) failure for tx {_tx_id}"
+        )));
+    }
+
+    if let Some(tbl) = repo.table_by_token(token).await? {
+        for backend in tbl.index2_registry().all_backends().await {
+            // gap#1: tombstone the deleted rids on the live graph FIRST,
+            // so a replace (same rid) leaves the NEW vector live after the
+            // insert promote below. `apply_staged_vector_deletes` is a
+            // no-op for non-vector backends.
+            if !deleted.is_empty() {
+                backend
+                    .apply_staged_vector_deletes(deleted)
+                    .await
+                    .map_err(|e| {
+                        DbError::Internal(format!(
+                            "hnsw apply_staged_vector_deletes at commit: {e}"
+                        ))
+                    })?;
+            }
+            backend.apply_staged_vectors(vecs).await.map_err(|e| {
+                DbError::Internal(format!("hnsw apply_staged_vectors at commit: {e}"))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Append one table's durable delta-log chunk for its staged vectors +
+/// deletes (Phase 5d DELTA half, pre-publish — see
+/// [`apply_vector_delta_phase`]).
+///
+/// #426 (VR-4 variant A): this is the DELTA half only. It runs BEFORE
+/// `version_guard.commit()` so the delta chunk is durable by the time the
+/// tx is reader-visible. A restart loads snapshot + delta via
+/// `restore_on_open::replay_delta` and re-materializes the vectors. The
+/// GRAPH half ([`apply_vector_graph_batch`]) stays post-lock.
+///
+/// Idempotency: `replay_delta` applies ops via `adapter.upsert/delete`
+/// (last-write-wins); a duplicate chunk on retry overwrites the same
+/// `next_delta_idx` key (`Store::set` is last-writer-wins).
+pub(crate) async fn apply_vector_delta_batch(
+    repo: &RepoInstance,
+    token: u64,
+    vecs: &[(shamir_types::types::record_id::RecordId, Vec<f32>)],
+    deleted: &[shamir_types::types::record_id::RecordId],
+    _tx_id: u64,
+) -> Result<Vec<VectorDeltaAck>, DbError> {
+    // Test-only failure injection (#426, VR-4 variant A): simulate a
+    // persistent PRE-publish delta-append error for a specific tx so the
+    // Deferred-failure contract (a failed delta append surfaces as
+    // `MaterializationState::Deferred`, NOT a silent Complete) can be
+    // exercised in-process. Armed via `FAIL_VECTOR_DELTA_TX_ID`. This is
+    // DISTINCT from `FAIL_VECTOR_PROMOTE_TX_ID` (graph half): a delta-half
+    // failure loses the durable bridge, so it MUST be reported; a
+    // graph-half failure leaves the delta durable, so it stays Complete.
+    #[cfg(test)]
+    if _tx_id != 0 && FAIL_VECTOR_DELTA_TX_ID.load(std::sync::atomic::Ordering::SeqCst) == _tx_id {
+        return Err(DbError::Internal(format!(
+            "injected Phase 5d (delta-append) failure for tx {_tx_id}"
+        )));
+    }
+
+    let mut acks: Vec<VectorDeltaAck> = Vec::new();
+    if let Some(tbl) = repo.table_by_token(token).await? {
+        let info_store = tbl.info_store().clone();
+        for backend in tbl.index2_registry().all_backends().await {
+            // V2.3 (#402) — durable delta-log append + snapshot trigger.
+            // The delta chunk captures the vectors just promoted AND the
+            // deletes just tombstoned so a restart replays both over the
+            // base snapshot. The append is ONE `Store::set` (§5.6 — cheap,
+            // runs on the ack path). The snapshot trigger is a
+            // `tokio::spawn` when the threshold is crossed (§5.6 — the
+            // dump itself is off the ack path).
+            //
+            // gap#1 (variant-A, landed): tx-path vector deletes are now
+            // staged in `TxContext::staged_vector_deletes`, and handed
+            // here as `deleted` so the delta chunk carries a durable
+            // `DeltaOp::Delete` per rid. A restart replays the delete over
+            // the base snapshot (`replay_delta` applies `DeltaOp::Delete`
+            // via `adapter.delete`), closing the post-restart ghost. The
+            // mechanism was proven by
+            // `delta_log_tests::append_vector_delta_with_deleted_slice_persists_and_replays_delete`.
+            //
+            // #426 (VR-4 variant A): this call was MOVED here from the old
+            // post-lock `apply_vector_batch` so the chunk is durable
+            // PRE-publish. The graph-side `apply_staged_vector_deletes` +
+            // `apply_staged_vectors` stayed post-lock in
+            // `apply_vector_graph_batch`.
+            let reserved = backend
+                .append_vector_delta(&info_store, vecs, deleted)
+                .await
+                .map_err(|e| DbError::Internal(format!("delta append at commit: {e}")))?;
+            backend.trigger_snapshot_check(&info_store);
+            if let Some(idx) = reserved {
+                // P0 delta-prune: hand the caller an acknowledgement closure.
+                // It is called ONLY after this table's graph promote succeeded,
+                // which is what makes the chunk prunable.
+                let b = Arc::clone(&backend);
+                acks.push(Arc::new(move || b.mark_delta_applied(idx)));
+            }
+        }
+    }
+    Ok(acks)
 }
