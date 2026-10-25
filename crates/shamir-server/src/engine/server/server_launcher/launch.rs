@@ -27,6 +27,8 @@ use shamir_transport_tcp::listener::{
     bind_validated as bind_tcp, ListenerProfile as TcpListenerProfile,
 };
 use shamir_transport_ws::listener::{bind_validated as bind_ws, WsListenerProfile};
+use shamir_transport_ws::server::{BROWSER_WS_PATH, NATIVE_WS_PATH};
+use shamir_transport_ws::BrowserOriginPolicy;
 
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
@@ -54,7 +56,7 @@ use crate::user_directory::FjallUserDirectory;
 
 use super::accept_loops::{
     accept_loop_ipc, accept_loop_plain, accept_loop_tcp, accept_loop_ws_browser,
-    accept_loop_ws_native,
+    accept_loop_ws_native, WsAcceptParams,
 };
 use super::helpers::{
     browser_origin_policy_from, default_node_id, kdf_from_config, log_bootstrap_outcome,
@@ -804,8 +806,17 @@ impl ServerLauncher {
 
                     let limiter = conn_limiter.clone();
                     let per_ip = per_ip_limiter.clone();
+                    let path = l.path.clone().unwrap_or_else(|| NATIVE_WS_PATH.to_string());
+                    let policy =
+                        BrowserOriginPolicy::allow(l.browser_origin_allowlist.iter().cloned());
                     listener_tasks.push(tokio::spawn(accept_loop_ws_native(
-                        listener, acceptor, ctx, token, limiter, per_ip,
+                        listener,
+                        acceptor,
+                        ctx,
+                        token,
+                        limiter,
+                        per_ip,
+                        WsAcceptParams { path, policy },
                     )));
                     local_addr
                 }
@@ -841,8 +852,18 @@ impl ServerLauncher {
 
                     let limiter = conn_limiter.clone();
                     let per_ip = per_ip_limiter.clone();
+                    let path = l
+                        .path
+                        .clone()
+                        .unwrap_or_else(|| BROWSER_WS_PATH.to_string());
                     listener_tasks.push(tokio::spawn(accept_loop_ws_browser(
-                        listener, acceptor, ctx, token, limiter, per_ip, policy,
+                        listener,
+                        acceptor,
+                        ctx,
+                        token,
+                        limiter,
+                        per_ip,
+                        WsAcceptParams { path, policy },
                     )));
                     local_addr
                 }

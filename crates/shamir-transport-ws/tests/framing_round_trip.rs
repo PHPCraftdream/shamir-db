@@ -1,10 +1,13 @@
 //! WS framing round-trip via `tokio-tungstenite` over a duplex pipe.
 
+use futures_util::{SinkExt, StreamExt};
 use shamir_transport_ws::framing::{
     ws_recv, ws_recv_into, ws_recv_into_stream, ws_send, ws_send_sink, MAX_WS_FRAME_SIZE,
 };
+use shamir_transport_ws::WsFrameError;
 use tokio::io::duplex;
 use tokio_tungstenite::tungstenite::protocol::Role;
+use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
 #[tokio::test]
@@ -66,7 +69,16 @@ async fn rejects_oversized_frame() {
         ws_send(&mut client, &[0xa5u8; 200]).await.unwrap();
     });
     let result = ws_recv(&mut server, 100).await;
-    assert!(result.is_err());
+    assert!(
+        matches!(
+            result,
+            Err(WsFrameError::TooLarge {
+                actual: 200,
+                max: 100
+            })
+        ),
+        "expected TooLarge {{ actual: 200, max: 100 }}, got {result:?}"
+    );
     writer.await.unwrap();
 }
 
@@ -94,8 +106,6 @@ async fn many_frames_in_sequence() {
 // ---------------------------------------------------------------------------
 // Split-half tests — ws_send_sink / ws_recv_into_stream
 // ---------------------------------------------------------------------------
-
-use futures_util::{SinkExt, StreamExt};
 
 /// Split a WebSocketStream into halves; send from the sink half and receive
 /// from the stream half — both on the same task (sequential).
@@ -191,4 +201,32 @@ async fn sink_send_received_by_whole_stream_recv() {
 
     assert_eq!(buf, payload);
     sender.await.unwrap();
+}
+
+/// RV-TRANSPORT-WS-4FC6BCDD (d): the framing layer's length-prefix
+/// invariant — a BINARY WS message whose inner 4-byte BE length prefix
+/// disagrees with the body length must be rejected with exactly
+/// `WsFrameError::LengthMismatch`, never silently accepted.
+#[tokio::test]
+async fn rv_transport_ws_4fc6bcdd_length_prefix_mismatch_is_length_mismatch() {
+    let (a, b) = duplex(64 * 1024);
+    let mut server = WebSocketStream::from_raw_socket(a, Role::Server, None).await;
+    let mut client = WebSocketStream::from_raw_socket(b, Role::Client, None).await;
+
+    // Body of 5 bytes but the prefix declares 10 — must NOT validate via
+    // ws_send (it checks), so send the raw message directly.
+    let mut msg = vec![0u8, 0, 0, 10];
+    msg.extend_from_slice(b"12345");
+    client
+        .send(Message::Binary(msg.into()))
+        .await
+        .expect("send raw frame");
+
+    match ws_recv(&mut server, MAX_WS_FRAME_SIZE).await {
+        Err(WsFrameError::LengthMismatch { declared, actual }) => {
+            assert_eq!(declared, 10, "declared comes from the prefix");
+            assert_eq!(actual, 5, "actual comes from the body length");
+        }
+        other => panic!("expected LengthMismatch, got {other:?}"),
+    }
 }
