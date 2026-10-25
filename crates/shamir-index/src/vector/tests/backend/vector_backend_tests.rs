@@ -55,8 +55,8 @@ fn make_backend(interner: &Interner) -> VectorBackend {
 /// Fails if backend initialisation goes back to the compiled-in constant or
 /// the env helper stops reading the variable. (Tests run one per process
 /// under nextest, so the process-global env write cannot leak.)
-#[test]
-fn rv_tunables_a3d3695d_backend_new_reads_snapshot_threshold_env() {
+#[tokio::test]
+async fn rv_tunables_a3d3695d_backend_new_reads_snapshot_threshold_env() {
     use shamir_tunables::instance_defaults::{
         VECTOR_SNAPSHOT_DELTA_THRESHOLD, VECTOR_SNAPSHOT_DELTA_THRESHOLD_ENV,
     };
