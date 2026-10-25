@@ -117,7 +117,8 @@ export const NodePlatform: Platform = {
     opts: { rejectUnauthorized?: boolean; origin?: string },
   ): Promise<Socket> {
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(url, {
+      // `ws` takes subprotocols as the 2nd argument (not an options field).
+      const ws = new WebSocket(url, ['shamir-v1'], {
         rejectUnauthorized: opts.rejectUnauthorized ?? true,
         origin: opts.origin,
       });
