@@ -269,13 +269,17 @@ async fn cascade_index_fast_path_propagates_read_error() {
     insert_helper(
         &resolver,
         "parent",
-        doc().set("id", 1_i64).set("name", "p1"),
+        doc().set("id", 1_i64).unwrap().set("name", "p1").unwrap(),
     )
     .await;
     insert_helper(
         &resolver,
         "child",
-        doc().set("cid", 100_i64).set("parent_id", 1_i64),
+        doc()
+            .set("cid", 100_i64)
+            .unwrap()
+            .set("parent_id", 1_i64)
+            .unwrap(),
     )
     .await;
 
@@ -344,13 +348,17 @@ async fn on_update_index_fast_path_propagates_read_error() {
     insert_helper(
         &resolver,
         "parent",
-        doc().set("id", 5_i64).set("name", "p5"),
+        doc().set("id", 5_i64).unwrap().set("name", "p5").unwrap(),
     )
     .await;
     insert_helper(
         &resolver,
         "child",
-        doc().set("cid", 1_i64).set("parent_id", 5_i64),
+        doc()
+            .set("cid", 1_i64)
+            .unwrap()
+            .set("parent_id", 5_i64)
+            .unwrap(),
     )
     .await;
 
@@ -369,7 +377,7 @@ async fn on_update_index_fast_path_propagates_read_error() {
         "upd",
         write::update("parent")
             .where_(filter::eq("id", 5_i64))
-            .set(doc().set("id", 99_i64)),
+            .set(doc().set("id", 99_i64).unwrap()),
     )
     .unwrap();
     let result = execute_batch(&b.build(), &resolver, None, None, Actor::System, "test").await;
@@ -492,9 +500,19 @@ async fn setup_grandchild_cascade_chain() -> FkTestResolver {
         registry,
     };
 
-    insert_helper(&resolver, "a", doc().set("id", 1_i64)).await;
-    insert_helper(&resolver, "b", doc().set("id", 2_i64).set("a_id", 1_i64)).await;
-    insert_helper(&resolver, "c", doc().set("id", 3_i64).set("b_id", 2_i64)).await;
+    insert_helper(&resolver, "a", doc().set("id", 1_i64).unwrap()).await;
+    insert_helper(
+        &resolver,
+        "b",
+        doc().set("id", 2_i64).unwrap().set("a_id", 1_i64).unwrap(),
+    )
+    .await;
+    insert_helper(
+        &resolver,
+        "c",
+        doc().set("id", 3_i64).unwrap().set("b_id", 2_i64).unwrap(),
+    )
+    .await;
 
     resolver
 }

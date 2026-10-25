@@ -10,7 +10,7 @@ fn after_sets_field_on_dependent_entry() {
     let mk = b.create_table("mk_tbl", ddl::create_table("users").repo("main"));
     let rows = b.insert(
         "rows",
-        write::insert("users").row(doc().set("name", "Alice")),
+        write::insert("users").row(doc().set("name", "Alice").unwrap()),
     );
     b.after(&rows, &mk);
 
@@ -29,7 +29,7 @@ fn after_wire_contains_after_for_dependent_only() {
     let mk = b.create_table("mk_tbl", ddl::create_table("users").repo("main"));
     let rows = b.insert(
         "rows",
-        write::insert("users").row(doc().set("name", "Alice")),
+        write::insert("users").row(doc().set("name", "Alice").unwrap()),
     );
     b.after(&rows, &mk);
 
@@ -113,7 +113,7 @@ fn try_build_catches_after_path_tail() {
     let _mk = b.create_table("mk_tbl", ddl::create_table("users").repo("main"));
     let rows = b.insert(
         "rows",
-        write::insert("users").row(doc().set("name", "Alice")),
+        write::insert("users").row(doc().set("name", "Alice").unwrap()),
     );
     // Manually push a garbage path-tail into `after` (bypassing the fluent
     // API, mirroring how the planner-side test constructs this case).
@@ -154,7 +154,7 @@ fn insert_after_registers_dependency_equivalent_to_post_hoc_after() {
     let mk = b.create_table("mk_tbl", ddl::create_table("users").repo("main"));
     let rows = b.insert_after(
         "rows",
-        write::insert("users").row(doc().set("name", "Alice")),
+        write::insert("users").row(doc().set("name", "Alice").unwrap()),
         &[&mk],
     );
 
@@ -165,7 +165,7 @@ fn insert_after_registers_dependency_equivalent_to_post_hoc_after() {
     let mk2 = b2.create_table("mk_tbl", ddl::create_table("users").repo("main"));
     let rows2 = b2.insert(
         "rows",
-        write::insert("users").row(doc().set("name", "Alice")),
+        write::insert("users").row(doc().set("name", "Alice").unwrap()),
     );
     b2.after(&rows2, &mk2);
     let via_post_hoc = b2.build().queries.get(rows2.alias()).unwrap().after.clone();
@@ -212,7 +212,7 @@ fn query_after_and_batch_after_coexist_without_naming_conflict() {
     let mk = b.create_table("mk_tbl", ddl::create_table("users").repo("main"));
     let rows = b.insert(
         "rows",
-        write::insert("users").row(doc().set("name", "Alice")),
+        write::insert("users").row(doc().set("name", "Alice").unwrap()),
     );
     b.after(&rows, &mk);
     let req = b.build();

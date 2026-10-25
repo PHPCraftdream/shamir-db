@@ -43,7 +43,7 @@ async fn request_synced_makes_its_write_immediately_servable() {
         .durability(Durability::Synced);
     batch.insert(
         "written",
-        write::insert("items").row(doc().set("name", "v")),
+        write::insert("items").row(doc().set("name", "v").unwrap()),
     );
     let resolver = Resolver(fx.repo.clone());
     let task = tokio::spawn(async move {

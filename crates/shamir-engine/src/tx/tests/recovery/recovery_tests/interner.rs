@@ -27,7 +27,7 @@ async fn stage_i_cross_table_shared_interner_id() {
 
     // Insert into alpha with "shared_field".
     let op_a = write::insert("alpha")
-        .row(doc().set("shared_field", "a_val"))
+        .row(doc().set("shared_field", "a_val").unwrap())
         .build();
     let (mut tx_a, _g_a) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     alpha
@@ -44,7 +44,7 @@ async fn stage_i_cross_table_shared_interner_id() {
 
     // Insert into beta with the SAME "shared_field" name.
     let op_b = write::insert("beta")
-        .row(doc().set("shared_field", "b_val"))
+        .row(doc().set("shared_field", "b_val").unwrap())
         .build();
     let (mut tx_b, _g_b) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     beta.execute_insert_tx(

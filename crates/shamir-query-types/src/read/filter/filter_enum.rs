@@ -222,6 +222,23 @@ enum DepthNode<'a> {
 
 /// Validate that a filter tree does not exceed `MAX_FILTER_DEPTH`.
 ///
+/// Thin wrapper over [`check_filter_depth_at`] seeded at depth 1; see that
+/// function for the full semantics and rationale.
+pub fn check_filter_depth(filter: &Filter) -> Result<(), String> {
+    check_filter_depth_at(filter, 1)
+}
+
+/// Validate that a filter tree does not exceed `MAX_FILTER_DEPTH`, with the
+/// root considered to already sit at `start_depth` levels of accumulated
+/// nesting.
+///
+/// Callers that check a SUBTREE embedded in a larger structure (e.g. the
+/// `condition` of a `FilterValue::Cond` encountered at depth `d` in
+/// `shamir-query-builder`'s `Doc::set` guard) must pass the ACCUMULATED
+/// depth as `start_depth` (e.g. `d + 1`), so an outer chain near the limit
+/// plus a legal-looking condition subtree cannot jointly exceed
+/// `MAX_FILTER_DEPTH`.
+///
 /// Walks BOTH the `Filter` (`And`/`Or`/`Not`) nesting AND every embedded
 /// `FilterValue` subtree that a comparison/membership operator's value(s)
 /// may carry (`$cond`/`$expr`/`$fn` args, `Array` elements, `$cond`'s own
@@ -236,8 +253,8 @@ enum DepthNode<'a> {
 /// recursion) so the checker itself cannot stack-overflow on the very
 /// input it exists to reject. Returns `Ok(())` if the tree is within
 /// bounds.
-pub fn check_filter_depth(filter: &Filter) -> Result<(), String> {
-    let mut stack: Vec<(DepthNode<'_>, usize)> = vec![(DepthNode::Filter(filter), 1)];
+pub fn check_filter_depth_at(filter: &Filter, start_depth: usize) -> Result<(), String> {
+    let mut stack: Vec<(DepthNode<'_>, usize)> = vec![(DepthNode::Filter(filter), start_depth)];
     while let Some((current, depth)) = stack.pop() {
         if depth > MAX_FILTER_DEPTH {
             return Err(format!("filter nesting depth exceeds {}", MAX_FILTER_DEPTH));

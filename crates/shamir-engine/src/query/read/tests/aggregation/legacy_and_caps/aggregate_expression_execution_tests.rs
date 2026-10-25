@@ -46,7 +46,14 @@ async fn setup() -> Resolver {
     let mut seed = Batch::new();
     seed.insert(
         "seed",
-        write::insert("rows").row(write::doc().set("v", 3).set("m", 7).build()),
+        write::insert("rows").row(
+            write::doc()
+                .set("v", 3)
+                .unwrap()
+                .set("m", 7)
+                .unwrap()
+                .build(),
+        ),
     );
     execute_batch_unchecked(&seed.build(), &resolver, None, None, Actor::System, "test")
         .await
@@ -100,10 +107,38 @@ async fn grouped_expression_sums_accumulate_multiple_rows_without_group_leakage(
     batch.insert(
         "seed_groups",
         write::insert("rows").rows([
-            write::doc().set("g", "a").set("v", 2).set("m", 3).build(),
-            write::doc().set("g", "b").set("v", 5).set("m", 2).build(),
-            write::doc().set("g", "a").set("v", 4).set("m", 3).build(),
-            write::doc().set("g", "b").set("v", 7).set("m", 2).build(),
+            write::doc()
+                .set("g", "a")
+                .unwrap()
+                .set("v", 2)
+                .unwrap()
+                .set("m", 3)
+                .unwrap()
+                .build(),
+            write::doc()
+                .set("g", "b")
+                .unwrap()
+                .set("v", 5)
+                .unwrap()
+                .set("m", 2)
+                .unwrap()
+                .build(),
+            write::doc()
+                .set("g", "a")
+                .unwrap()
+                .set("v", 4)
+                .unwrap()
+                .set("m", 3)
+                .unwrap()
+                .build(),
+            write::doc()
+                .set("g", "b")
+                .unwrap()
+                .set("v", 7)
+                .unwrap()
+                .set("m", 2)
+                .unwrap()
+                .build(),
         ]),
     );
     execute_batch_unchecked(&batch.build(), &resolver, None, None, Actor::System, "test")
@@ -223,8 +258,8 @@ async fn min_max_expression_overrides_indexed_field_and_explain_shortcut() {
     seed.insert(
         "more_rows",
         write::insert("rows").rows([
-            write::doc().set("v", 8).build(),
-            write::doc().set("v", 5).build(),
+            write::doc().set("v", 8).unwrap().build(),
+            write::doc().set("v", 5).unwrap().build(),
         ]),
     );
     execute_batch_unchecked(&seed.build(), &resolver, None, None, Actor::System, "test")

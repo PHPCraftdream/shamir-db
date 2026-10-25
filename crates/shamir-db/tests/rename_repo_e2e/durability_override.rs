@@ -443,7 +443,7 @@ async fn alter_repo_synced_commit_has_recoverable_prefix_after_return() {
     batch.id(4);
     batch.insert(
         "insert_item",
-        Insert::with_repo("r1", "items").row(doc().set("value", 1)),
+        Insert::with_repo("r1", "items").row(doc().set("value", 1).unwrap()),
     );
     db.execute("testdb", &batch.to_request_via_msgpack())
         .await

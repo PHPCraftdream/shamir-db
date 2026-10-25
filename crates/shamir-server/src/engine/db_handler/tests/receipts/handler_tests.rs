@@ -66,7 +66,7 @@ async fn bounded_startup_default_applies_and_pending_reservation_shrinks_then_re
     let mut batch = Batch::new();
     batch.insert(
         "written",
-        Insert::with_repo("main", "items").row(doc().set("n", 1)),
+        Insert::with_repo("main", "items").row(doc().set("n", 1).unwrap()),
     );
     let request = DbRequest::Execute {
         query_version: 4,

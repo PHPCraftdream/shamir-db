@@ -29,7 +29,7 @@ async fn r2_actor_flows_through_filter_context() {
     b.id(1);
     b.op_silent(
         "ins",
-        write::insert("users").row(doc().set("name", "Alice").set("age", 30)),
+        write::insert("users").row(doc().set("name", "Alice").unwrap().set("age", 30).unwrap()),
     );
     let seed_req = b.build();
     execute_batch(&seed_req, &resolver, None, None, Actor::System, "test_db")
@@ -106,10 +106,34 @@ async fn rls_read_returns_only_matching_rows() {
     b.op_silent(
         "seed",
         write::insert("users")
-            .row(doc().set("name", "Alice").set("status", "active"))
-            .row(doc().set("name", "Bob").set("status", "inactive"))
-            .row(doc().set("name", "Carol").set("status", "active"))
-            .row(doc().set("name", "Dave").set("status", "pending")),
+            .row(
+                doc()
+                    .set("name", "Alice")
+                    .unwrap()
+                    .set("status", "active")
+                    .unwrap(),
+            )
+            .row(
+                doc()
+                    .set("name", "Bob")
+                    .unwrap()
+                    .set("status", "inactive")
+                    .unwrap(),
+            )
+            .row(
+                doc()
+                    .set("name", "Carol")
+                    .unwrap()
+                    .set("status", "active")
+                    .unwrap(),
+            )
+            .row(
+                doc()
+                    .set("name", "Dave")
+                    .unwrap()
+                    .set("status", "pending")
+                    .unwrap(),
+            ),
     );
     let seed_req = b.build();
     execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
@@ -161,9 +185,27 @@ async fn rls_delete_only_removes_matching_rows() {
     b.op_silent(
         "seed",
         write::insert("users")
-            .row(doc().set("name", "Alice").set("status", "active"))
-            .row(doc().set("name", "Bob").set("status", "inactive"))
-            .row(doc().set("name", "Carol").set("status", "active")),
+            .row(
+                doc()
+                    .set("name", "Alice")
+                    .unwrap()
+                    .set("status", "active")
+                    .unwrap(),
+            )
+            .row(
+                doc()
+                    .set("name", "Bob")
+                    .unwrap()
+                    .set("status", "inactive")
+                    .unwrap(),
+            )
+            .row(
+                doc()
+                    .set("name", "Carol")
+                    .unwrap()
+                    .set("status", "active")
+                    .unwrap(),
+            ),
     );
     let seed_req = b.build();
     execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
@@ -223,9 +265,27 @@ async fn rls_superadmin_sees_all_rows() {
     b.op_silent(
         "seed",
         write::insert("users")
-            .row(doc().set("name", "Alice").set("status", "active"))
-            .row(doc().set("name", "Bob").set("status", "inactive"))
-            .row(doc().set("name", "Carol").set("status", "pending")),
+            .row(
+                doc()
+                    .set("name", "Alice")
+                    .unwrap()
+                    .set("status", "active")
+                    .unwrap(),
+            )
+            .row(
+                doc()
+                    .set("name", "Bob")
+                    .unwrap()
+                    .set("status", "inactive")
+                    .unwrap(),
+            )
+            .row(
+                doc()
+                    .set("name", "Carol")
+                    .unwrap()
+                    .set("status", "pending")
+                    .unwrap(),
+            ),
     );
     let seed_req = b.build();
     execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
@@ -260,8 +320,20 @@ async fn rls_update_only_affects_matching_rows() {
     b.op_silent(
         "seed",
         write::insert("users")
-            .row(doc().set("name", "Alice").set("status", "active"))
-            .row(doc().set("name", "Bob").set("status", "inactive")),
+            .row(
+                doc()
+                    .set("name", "Alice")
+                    .unwrap()
+                    .set("status", "active")
+                    .unwrap(),
+            )
+            .row(
+                doc()
+                    .set("name", "Bob")
+                    .unwrap()
+                    .set("status", "inactive")
+                    .unwrap(),
+            ),
     );
     let seed_req = b.build();
     execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
@@ -273,7 +345,7 @@ async fn rls_update_only_affects_matching_rows() {
     b.id(2);
     b.try_update(
         "upd",
-        write::update("users").set(doc().set("tag", "updated")),
+        write::update("users").set(doc().set("tag", "updated").unwrap()),
     )
     .unwrap();
     let update_req = b.build();

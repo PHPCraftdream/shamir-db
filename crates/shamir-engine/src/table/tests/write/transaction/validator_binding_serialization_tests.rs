@@ -169,7 +169,7 @@ async fn concurrent_bind_bind_preserves_both_and_invokes_both() {
 
     assert_binding_sets(&table, &[id_a, id_b]).await;
     let op = write::insert("users")
-        .row(doc().set("name", "Alice"))
+        .row(doc().set("name", "Alice").unwrap())
         .build();
     let result = insert_via_tx(&repo, &table.clone(), &op, false)
         .await
@@ -188,7 +188,7 @@ async fn concurrent_bind_unbind_preserves_add_and_removal_effects() {
     let id_b = RecordId::system("binding_b");
     table.add_validator_binding(binding(id_b)).await.unwrap();
     let before = write::insert("users")
-        .row(doc().set("name", "Before"))
+        .row(doc().set("name", "Before").unwrap())
         .build();
     let result = insert_via_tx(&repo, &table, &before, false).await.unwrap();
     assert_eq!(result.affected, 1);
@@ -213,7 +213,7 @@ async fn concurrent_bind_unbind_preserves_add_and_removal_effects() {
 
     assert_binding_sets(&table, &[id_a]).await;
     let after = write::insert("users")
-        .row(doc().set("name", "After"))
+        .row(doc().set("name", "After").unwrap())
         .build();
     let result = insert_via_tx(&repo, &table.clone(), &after, false)
         .await

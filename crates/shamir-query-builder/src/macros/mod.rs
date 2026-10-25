@@ -11,6 +11,11 @@
 /// [`write::doc()`](crate::write::doc) + `.set(...)` — it is equally
 /// expressive. From downstream crates `doc!` works as shown.
 ///
+/// **Note:** over-deep literal values (nesting beyond `MAX_FILTER_DEPTH`)
+/// PANIC at construction — `doc!` unwraps the fallible `Doc::set`. Use
+/// [`Doc::set`](crate::write::Doc::set) directly when the error must be
+/// handled.
+///
 /// # Example
 ///
 /// ```ignore
@@ -26,7 +31,11 @@ macro_rules! doc {
     ( $( $key:expr => $val:expr ),* $(,)? ) => {{
         #[allow(unused_mut)]
         let mut __doc = $crate::write::doc();
-        $( __doc = __doc.set($key, $val); )*
+        $( __doc = match __doc.set($key, $val) {
+            ::core::result::Result::Ok(d) => d,
+            ::core::result::Result::Err(e) =>
+                ::core::panic!("doc! construction failed: {e}"),
+        }; )*
         __doc
     }};
 }

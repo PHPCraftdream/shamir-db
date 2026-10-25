@@ -1,3 +1,4 @@
+use crate::error::client_batch_error;
 use crate::{BatchResponse, Client, ClientError};
 
 impl Client {
@@ -15,7 +16,8 @@ impl Client {
         };
         let mut batch = shamir_query_builder::batch::Batch::new();
         batch.create_repo("create_repo", builder);
-        self.execute(db, batch.build()).await
+        self.execute(db, batch.try_build().map_err(client_batch_error)?)
+            .await
     }
 
     /// Patch repository durability settings.
@@ -30,7 +32,8 @@ impl Client {
             "alter_repo",
             shamir_query_builder::ddl::alter_repo(repo).durability(durability),
         );
-        self.execute(db, batch.build()).await
+        self.execute(db, batch.try_build().map_err(client_batch_error)?)
+            .await
     }
 
     /// Describe a repository and return its engine, path and durability.
@@ -40,6 +43,7 @@ impl Client {
             "describe_repo",
             shamir_query_builder::ddl::describe_repo(repo),
         );
-        self.execute(db, batch.build()).await
+        self.execute(db, batch.try_build().map_err(client_batch_error)?)
+            .await
     }
 }

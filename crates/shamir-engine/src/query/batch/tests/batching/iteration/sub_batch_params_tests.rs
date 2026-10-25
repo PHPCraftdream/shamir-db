@@ -38,7 +38,13 @@ async fn param_in_insert_values() {
     seed.id(0);
     seed.op_silent(
         "seed_user",
-        write::insert("users").row(doc().set("name", "p3b_alice").set("user_id", 42i64)),
+        write::insert("users").row(
+            doc()
+                .set("name", "p3b_alice")
+                .unwrap()
+                .set("user_id", 42i64)
+                .unwrap(),
+        ),
     );
     execute_batch(&seed.build(), &resolver, None, None, Actor::System, "test")
         .await
@@ -419,7 +425,13 @@ async fn sub_batch_bind_user_scalar_resolves_correctly() {
     seed.id(0);
     seed.op_silent(
         "seed",
-        write::insert("users").row(doc().set("name", "bind_scalar").set("score", 42i64)),
+        write::insert("users").row(
+            doc()
+                .set("name", "bind_scalar")
+                .unwrap()
+                .set("score", 42i64)
+                .unwrap(),
+        ),
     );
     execute_batch(&seed.build(), &resolver, None, None, Actor::System, "test")
         .await

@@ -10,8 +10,14 @@ async fn test_execute_set_insert_new() {
     let (table, repo) = setup_empty_table().await;
 
     let op = write::upsert("users")
-        .key(doc().set("email", "alice@example.com"))
-        .value(doc().set("email", "alice@example.com").set("name", "Alice"))
+        .key(doc().set("email", "alice@example.com").unwrap())
+        .value(
+            doc()
+                .set("email", "alice@example.com")
+                .unwrap()
+                .set("name", "Alice")
+                .unwrap(),
+        )
         .build()
         .unwrap();
 
@@ -38,12 +44,15 @@ async fn test_execute_set_update_existing() {
 
     // Alice exists with status=active. Upsert by name.
     let op = write::upsert("users")
-        .key(doc().set("name", "Alice"))
+        .key(doc().set("name", "Alice").unwrap())
         .value(
             doc()
                 .set("name", "Alice")
+                .unwrap()
                 .set("status", "vip")
-                .set("score", 100_i64),
+                .unwrap()
+                .set("score", 100_i64)
+                .unwrap(),
         )
         .build()
         .unwrap();
@@ -74,8 +83,14 @@ async fn test_execute_set_no_match_inserts() {
     let (table, repo) = setup_table_with_users().await;
 
     let op = write::upsert("users")
-        .key(doc().set("name", "Zara"))
-        .value(doc().set("name", "Zara").set("age", 22_i64))
+        .key(doc().set("name", "Zara").unwrap())
+        .value(
+            doc()
+                .set("name", "Zara")
+                .unwrap()
+                .set("age", 22_i64)
+                .unwrap(),
+        )
         .build()
         .unwrap();
 

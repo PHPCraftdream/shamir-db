@@ -73,7 +73,7 @@ async fn restrict_race_closed_end_to_end_via_execute_batch() {
     b.id(1);
     b.insert(
         "ins_parent",
-        write::insert("parent").row(doc().set("id", 1).set("name", "Alice")),
+        write::insert("parent").row(doc().set("id", 1).unwrap().set("name", "Alice").unwrap()),
     );
     execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
         .await
@@ -86,7 +86,13 @@ async fn restrict_race_closed_end_to_end_via_execute_batch() {
     wb.id("writer");
     wb.insert(
         "ins_child_race",
-        write::insert("child").row(doc().set("parent_id", 1).set("label", "race")),
+        write::insert("child").row(
+            doc()
+                .set("parent_id", 1)
+                .unwrap()
+                .set("label", "race")
+                .unwrap(),
+        ),
     );
     *resolver.writer.lock().await = Some(InjectedWriter {
         req: wb.build(),
@@ -184,7 +190,7 @@ async fn cascade_race_closed_end_to_end_via_execute_batch() {
     b.id(1);
     b.insert(
         "ins_parent",
-        write::insert("parent").row(doc().set("id", 1).set("name", "Alice")),
+        write::insert("parent").row(doc().set("id", 1).unwrap().set("name", "Alice").unwrap()),
     );
     execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
         .await
@@ -194,7 +200,13 @@ async fn cascade_race_closed_end_to_end_via_execute_batch() {
     wb.id("writer");
     wb.insert(
         "ins_child_race",
-        write::insert("child").row(doc().set("parent_id", 1).set("label", "race")),
+        write::insert("child").row(
+            doc()
+                .set("parent_id", 1)
+                .unwrap()
+                .set("label", "race")
+                .unwrap(),
+        ),
     );
     *resolver.writer.lock().await = Some(InjectedWriter {
         req: wb.build(),
@@ -273,7 +285,7 @@ async fn quiescent_restrict_delete_does_not_spuriously_abort() {
         b.id(1);
         b.insert(
             "ins_parent",
-            write::insert("parent").row(doc().set("id", 1).set("name", "Alice")),
+            write::insert("parent").row(doc().set("id", 1).unwrap().set("name", "Alice").unwrap()),
         );
         execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
             .await
@@ -318,7 +330,7 @@ async fn resolved_race_retried_transparently_no_client_visible_error() {
     b.id(1);
     b.insert(
         "ins_parent",
-        write::insert("parent").row(doc().set("id", 1).set("name", "Alice")),
+        write::insert("parent").row(doc().set("id", 1).unwrap().set("name", "Alice").unwrap()),
     );
     execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
         .await
@@ -336,7 +348,13 @@ async fn resolved_race_retried_transparently_no_client_visible_error() {
     wb.id("writer");
     wb.insert(
         "ins_child_race",
-        write::insert("child").row(doc().set("parent_id", 1).set("label", "race")),
+        write::insert("child").row(
+            doc()
+                .set("parent_id", 1)
+                .unwrap()
+                .set("label", "race")
+                .unwrap(),
+        ),
     );
     wb.try_delete(
         "del_child_race",
@@ -399,7 +417,7 @@ async fn never_interned_child_field_still_records_predicate_and_catches_race() {
     b.id(1);
     b.insert(
         "ins_parent",
-        write::insert("parent").row(doc().set("id", 1).set("name", "Alice")),
+        write::insert("parent").row(doc().set("id", 1).unwrap().set("name", "Alice").unwrap()),
     );
     execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
         .await
@@ -417,7 +435,13 @@ async fn never_interned_child_field_still_records_predicate_and_catches_race() {
     wb.id("writer");
     wb.insert(
         "ins_child_first_ever",
-        write::insert("child").row(doc().set("parent_id", 1).set("label", "first")),
+        write::insert("child").row(
+            doc()
+                .set("parent_id", 1)
+                .unwrap()
+                .set("label", "first")
+                .unwrap(),
+        ),
     );
     *resolver.writer.lock().await = Some(InjectedWriter {
         req: wb.build(),

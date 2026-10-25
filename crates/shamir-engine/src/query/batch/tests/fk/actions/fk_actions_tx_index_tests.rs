@@ -55,8 +55,11 @@ async fn self_referential_set_null_nulls_direct_subordinates() {
         "employees",
         doc()
             .set("id", 1_i64)
+            .unwrap()
             .set("name", "CEO")
-            .set("manager_id", QueryValue::Null),
+            .unwrap()
+            .set("manager_id", QueryValue::Null)
+            .unwrap(),
     )
     .await;
     insert_helper(
@@ -64,8 +67,11 @@ async fn self_referential_set_null_nulls_direct_subordinates() {
         "employees",
         doc()
             .set("id", 2_i64)
+            .unwrap()
             .set("name", "Mgr")
-            .set("manager_id", 1_i64),
+            .unwrap()
+            .set("manager_id", 1_i64)
+            .unwrap(),
     )
     .await;
     insert_helper(
@@ -73,8 +79,11 @@ async fn self_referential_set_null_nulls_direct_subordinates() {
         "employees",
         doc()
             .set("id", 3_i64)
+            .unwrap()
             .set("name", "Worker")
-            .set("manager_id", 2_i64),
+            .unwrap()
+            .set("manager_id", 2_i64)
+            .unwrap(),
     )
     .await;
 
@@ -159,7 +168,12 @@ async fn transactional_insert_child_then_delete_parent_cascades_no_orphan() {
     };
 
     // Parent already exists (committed, autocommit).
-    insert_helper(&resolver, "parent", doc().set("id", 1_i64).set("name", "P")).await;
+    insert_helper(
+        &resolver,
+        "parent",
+        doc().set("id", 1_i64).unwrap().set("name", "P").unwrap(),
+    )
+    .await;
     assert_eq!(count_rows(&resolver, "parent").await, 1);
     assert_eq!(count_rows(&resolver, "child").await, 0);
 
@@ -175,8 +189,11 @@ async fn transactional_insert_child_then_delete_parent_cascades_no_orphan() {
         write::insert("child").row(
             doc()
                 .set("cid", 10_i64)
+                .unwrap()
                 .set("parent_id", 1_i64)
-                .set("label", "c1"),
+                .unwrap()
+                .set("label", "c1")
+                .unwrap(),
         ),
     );
     b.try_delete(
@@ -251,13 +268,13 @@ async fn transactional_update_then_delete_parent_cascade_uses_updated_reference(
     insert_helper(
         &resolver,
         "parent",
-        doc().set("id", 1_i64).set("name", "P1"),
+        doc().set("id", 1_i64).unwrap().set("name", "P1").unwrap(),
     )
     .await;
     insert_helper(
         &resolver,
         "parent",
-        doc().set("id", 2_i64).set("name", "P2"),
+        doc().set("id", 2_i64).unwrap().set("name", "P2").unwrap(),
     )
     .await;
     insert_helper(
@@ -265,8 +282,11 @@ async fn transactional_update_then_delete_parent_cascade_uses_updated_reference(
         "child",
         doc()
             .set("cid", 10_i64)
+            .unwrap()
             .set("parent_id", 1_i64)
-            .set("label", "c1"),
+            .unwrap()
+            .set("label", "c1")
+            .unwrap(),
     )
     .await;
 
@@ -281,7 +301,7 @@ async fn transactional_update_then_delete_parent_cascade_uses_updated_reference(
         "update_child_fk",
         write::update("child")
             .where_(filter::eq("parent_id", 1_i64))
-            .set(doc().set("parent_id", 2_i64)),
+            .set(doc().set("parent_id", 2_i64).unwrap()),
     )
     .unwrap();
     b.try_delete(
@@ -360,7 +380,12 @@ async fn transactional_insert_child_with_index_then_delete_parent_restrict_sees_
     };
 
     // Parent exists (committed).
-    insert_helper(&resolver, "parent", doc().set("id", 1_i64).set("name", "P")).await;
+    insert_helper(
+        &resolver,
+        "parent",
+        doc().set("id", 1_i64).unwrap().set("name", "P").unwrap(),
+    )
+    .await;
 
     // Build an index covering the child's FK field (`parent_id`) so the
     // RESTRICT gate's `child_has_reference` takes the index fast-path.
@@ -379,7 +404,13 @@ async fn transactional_insert_child_with_index_then_delete_parent_restrict_sees_
     b.transactional();
     b.insert(
         "ins_child",
-        write::insert("child").row(doc().set("parent_id", 1_i64).set("label", "x")),
+        write::insert("child").row(
+            doc()
+                .set("parent_id", 1_i64)
+                .unwrap()
+                .set("label", "x")
+                .unwrap(),
+        ),
     );
     b.try_delete(
         "del_parent",
@@ -499,12 +530,21 @@ async fn cascade_with_index_fast_path_falls_back_to_scan_for_staged_child_writes
         registry,
     };
 
-    insert_helper(&resolver, "parent", doc().set("id", 1_i64).set("name", "P")).await;
+    insert_helper(
+        &resolver,
+        "parent",
+        doc().set("id", 1_i64).unwrap().set("name", "P").unwrap(),
+    )
+    .await;
     // One COMMITTED child referencing parent 1.
     insert_helper(
         &resolver,
         "child",
-        doc().set("cid", 10_i64).set("parent_id", 1_i64),
+        doc()
+            .set("cid", 10_i64)
+            .unwrap()
+            .set("parent_id", 1_i64)
+            .unwrap(),
     )
     .await;
 
@@ -525,7 +565,13 @@ async fn cascade_with_index_fast_path_falls_back_to_scan_for_staged_child_writes
     b.transactional();
     b.insert(
         "ins_child2",
-        write::insert("child").row(doc().set("cid", 11_i64).set("parent_id", 1_i64)),
+        write::insert("child").row(
+            doc()
+                .set("cid", 11_i64)
+                .unwrap()
+                .set("parent_id", 1_i64)
+                .unwrap(),
+        ),
     );
     b.try_delete(
         "del_parent",
@@ -588,14 +634,22 @@ async fn set_null_with_index_fast_path_nulls_same_children() {
         registry,
     };
 
-    insert_helper(&resolver, "parent", doc().set("id", 1_i64).set("name", "P")).await;
+    insert_helper(
+        &resolver,
+        "parent",
+        doc().set("id", 1_i64).unwrap().set("name", "P").unwrap(),
+    )
+    .await;
     insert_helper(
         &resolver,
         "child",
         doc()
             .set("cid", 10_i64)
+            .unwrap()
             .set("parent_id", 1_i64)
-            .set("label", "c1"),
+            .unwrap()
+            .set("label", "c1")
+            .unwrap(),
     )
     .await;
     insert_helper(
@@ -603,8 +657,11 @@ async fn set_null_with_index_fast_path_nulls_same_children() {
         "child",
         doc()
             .set("cid", 11_i64)
+            .unwrap()
             .set("parent_id", 1_i64)
-            .set("label", "c2"),
+            .unwrap()
+            .set("label", "c2")
+            .unwrap(),
     )
     .await;
 

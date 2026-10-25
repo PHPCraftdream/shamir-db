@@ -23,7 +23,6 @@ use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::{RepoConfig, RepoInstance};
 use crate::table::{TableConfig, TableManager};
 use shamir_storage::error::DbResult;
-
 // ============================================================================
 // Shared infrastructure
 // ============================================================================
@@ -31,7 +30,6 @@ use shamir_storage::error::DbResult;
 pub(super) struct TestResolver {
     db: DbInstance,
 }
-
 #[async_trait::async_trait]
 impl TableResolver for TestResolver {
     async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
@@ -60,7 +58,6 @@ pub(super) async fn setup() -> TestResolver {
 pub(super) struct TxTestResolver {
     pub(super) repo: RepoInstance,
 }
-
 #[async_trait::async_trait]
 impl TableResolver for TxTestResolver {
     async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
@@ -71,7 +68,6 @@ impl TableResolver for TxTestResolver {
         Ok(self.repo.clone())
     }
 }
-
 // ============================================================================
 // Fix 2 — resolver variant with a user-registered scalar for bind tests.
 // ============================================================================
@@ -99,7 +95,6 @@ pub(super) struct TestResolverWithScalars {
     db: DbInstance,
     scalars: ScalarResolver,
 }
-
 #[async_trait::async_trait]
 impl TableResolver for TestResolverWithScalars {
     async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
@@ -129,13 +124,11 @@ pub(super) async fn setup_with_scalars() -> TestResolverWithScalars {
         scalars: resolver_with_user_scalar(),
     }
 }
-
 // ============================================================================
 // Test 1: sub_batch_runs_and_outer_reads_result
 //
 // Outer: a sub-batch inserts a row; an outer read sees it via $query @sub.
 // ============================================================================
-
 #[tokio::test]
 async fn sub_batch_runs_and_outer_reads_result() {
     let resolver = setup().await;
@@ -145,7 +138,13 @@ async fn sub_batch_runs_and_outer_reads_result() {
     inner_b.id(10);
     inner_b.insert(
         "ins",
-        write::insert("users").row(doc().set("name", "p3_alice").set("score", 99i64)),
+        write::insert("users").row(
+            doc()
+                .set("name", "p3_alice")
+                .unwrap()
+                .set("score", 99i64)
+                .unwrap(),
+        ),
     );
     let inner_req = inner_b.build();
 
@@ -215,14 +214,12 @@ async fn sub_batch_runs_and_outer_reads_result() {
         "sub-batch result must carry a value field"
     );
 }
-
 // ============================================================================
 // Test 2: sub_batch_bind_injects_param
 //
 // Outer: @user reads one user; sub-batch has bind: { uid: $query @user[0].score }
 // Inner op uses $param uid in its WHERE clause.
 // ============================================================================
-
 #[tokio::test]
 async fn sub_batch_bind_injects_param() {
     let resolver = setup().await;
@@ -232,7 +229,13 @@ async fn sub_batch_bind_injects_param() {
     seed.id(0);
     seed.op_silent(
         "seed",
-        write::insert("users").row(doc().set("name", "param_alice").set("score", 42i64)),
+        write::insert("users").row(
+            doc()
+                .set("name", "param_alice")
+                .unwrap()
+                .set("score", 42i64)
+                .unwrap(),
+        ),
     );
     execute_batch(&seed.build(), &resolver, None, None, Actor::System, "test")
         .await
@@ -354,13 +357,11 @@ async fn sub_batch_bind_injects_param() {
         "the returned record should have score=42"
     );
 }
-
 // ============================================================================
 // Test 3: sub_batch_atomic
 //
 // A transactional sub-batch whose second op fails rolls back the first.
 // ============================================================================
-
 #[tokio::test]
 async fn sub_batch_atomic() {
     use futures::StreamExt;
@@ -471,7 +472,6 @@ async fn sub_batch_atomic() {
         count
     );
 }
-
 // ============================================================================
 // #661 — thread the outer tx into Batch (sub-batch) body recursion.
 //
@@ -491,7 +491,6 @@ async fn sub_batch_atomic() {
 // flows through the SAME outer `TxContext`, so the outer tx's RAII
 // rollback-on-error genuinely undoes it.
 // ============================================================================
-
 #[tokio::test]
 async fn sub_batch_partial_writes_roll_back_on_later_top_level_failure() {
     use futures::StreamExt;
@@ -663,7 +662,6 @@ async fn sub_batch_partial_writes_roll_back_on_later_top_level_failure() {
         count
     );
 }
-
 // ============================================================================
 // Test 4: tx_in_tx_rejected
 //
@@ -674,7 +672,6 @@ async fn sub_batch_partial_writes_roll_back_on_later_top_level_failure() {
 // `BatchOp::Batch(transactional=true)` into an already-open TxContext.
 // The runner has `tx: Some(...)` so the guard fires.
 // ============================================================================
-
 #[tokio::test]
 async fn tx_in_tx_rejected() {
     use crate::query::batch::execute_in_open_tx_unchecked as execute_in_open_tx;
@@ -778,14 +775,12 @@ async fn tx_in_tx_rejected() {
         err
     );
 }
-
 // ============================================================================
 // Test 5: unbound_param_in_filter_is_silent_miss
 //
 // A $param used inside the inner filter with no binding → the param resolves
 // to None, the filter matches nothing (0 records). Not an error — silent miss.
 // ============================================================================
-
 #[tokio::test]
 async fn unbound_param_in_filter_is_silent_miss() {
     let resolver = setup().await;
@@ -795,8 +790,11 @@ async fn unbound_param_in_filter_is_silent_miss() {
     seed.id(0);
     seed.op_silent(
         "s",
-        shamir_query_builder::write::insert("users")
-            .row(shamir_query_builder::write::doc().set("score", 7i64)),
+        shamir_query_builder::write::insert("users").row(
+            shamir_query_builder::write::doc()
+                .set("score", 7i64)
+                .unwrap(),
+        ),
     );
     execute_batch(&seed.build(), &resolver, None, None, Actor::System, "test")
         .await
@@ -893,13 +891,11 @@ async fn unbound_param_in_filter_is_silent_miss() {
         inner_records
     );
 }
-
 // ============================================================================
 // Test 5b: unbound_param_in_bind_errors
 //
 // $param in bind map (outer scope has no such param) → unbound_param error.
 // ============================================================================
-
 #[tokio::test]
 async fn unbound_param_in_bind_errors() {
     let resolver = setup().await;

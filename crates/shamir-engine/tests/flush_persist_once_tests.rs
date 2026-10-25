@@ -38,7 +38,7 @@ fn flush_buffers_persists_once_per_pass_and_data_survives_reopen() {
         .await
         .unwrap();
         let table = repo.get_table("a").await.unwrap();
-        let request = doc().set("k", "v").build();
+        let request = doc().set("k", "v").unwrap().build();
         let permit = repo.write_domain().admit().await.unwrap();
         let value = table
             .intern_query_value_admitted(&permit, &request)
@@ -94,7 +94,7 @@ fn flush_buffers_persists_once_per_pass_and_data_survives_reopen() {
             .unwrap();
         assert_eq!(
             interner.inner_to_query_value(&reopened).unwrap(),
-            doc().set("k", "v").build()
+            doc().set("k", "v").unwrap().build()
         );
     });
     drop(runtime);

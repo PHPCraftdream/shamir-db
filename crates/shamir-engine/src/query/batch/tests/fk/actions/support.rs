@@ -217,7 +217,11 @@ pub(super) async fn build_cascade_index_scenario(with_index: bool) -> FkTestReso
         insert_helper(
             &resolver,
             "parent",
-            doc().set("id", pid).set("name", format!("p{pid}")),
+            doc()
+                .set("id", pid)
+                .unwrap()
+                .set("name", format!("p{pid}"))
+                .unwrap(),
         )
         .await;
     }
@@ -226,7 +230,11 @@ pub(super) async fn build_cascade_index_scenario(with_index: bool) -> FkTestReso
         insert_helper(
             &resolver,
             "child",
-            doc().set("cid", cid).set("parent_id", 1_i64),
+            doc()
+                .set("cid", cid)
+                .unwrap()
+                .set("parent_id", 1_i64)
+                .unwrap(),
         )
         .await;
         cid += 1;
@@ -234,14 +242,22 @@ pub(super) async fn build_cascade_index_scenario(with_index: bool) -> FkTestReso
     insert_helper(
         &resolver,
         "child",
-        doc().set("cid", cid).set("parent_id", 2_i64),
+        doc()
+            .set("cid", cid)
+            .unwrap()
+            .set("parent_id", 2_i64)
+            .unwrap(),
     )
     .await;
     cid += 1;
     insert_helper(
         &resolver,
         "child",
-        doc().set("cid", cid).set("parent_id", 3_i64),
+        doc()
+            .set("cid", cid)
+            .unwrap()
+            .set("parent_id", 3_i64)
+            .unwrap(),
     )
     .await;
 

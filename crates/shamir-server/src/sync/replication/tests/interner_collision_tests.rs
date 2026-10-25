@@ -110,7 +110,12 @@ async fn separate_table_index_occupies_ids_but_named_select_converges() {
         .await
         .unwrap()
         .unwrap();
-    let expected = doc().set("label", "leader").set("v", 20_i64).build();
+    let expected = doc()
+        .set("label", "leader")
+        .unwrap()
+        .set("v", 20_i64)
+        .unwrap()
+        .build();
     let mut write = Batch::new();
     write.transactional();
     write.insert("write", insert("items").rows([expected.clone()]));
