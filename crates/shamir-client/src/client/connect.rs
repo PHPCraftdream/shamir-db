@@ -2,12 +2,11 @@
 //! [`Client::connect_local`] (IPC+SCRAM) and [`Client::resume`]
 //! (ticket-based resumption).
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8};
+use std::sync::atomic::{AtomicU32, AtomicU8};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use rustls::crypto::aws_lc_rs::default_provider;
 use rustls::pki_types::ServerName;
-use shamir_collections::TFxMap;
 use tokio::io::split;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsConnector;
@@ -22,13 +21,26 @@ use shamir_transport_tcp::framing::{read_frame, write_frame, MAX_FRAME_SIZE_DEFA
 use shamir_transport_tcp::tls::{extract_tls_exporter, make_client_config_no_ca};
 
 use crate::client::options::{ConnectLocalOptions, ConnectOptions, ResumeOptions};
-use crate::client::subscription::{EarlyBuffer, SubscriptionMap};
-use crate::client::transport::{connect_ipc, connect_tcp, reader_task, PendingMap, WriteSink};
+use crate::client::transport::{
+    connect_ipc, connect_tcp, reader_task, Lifecycle, LifecycleHooks, WriteSink,
+};
 use crate::client::transport::{
     WireAuthInit, WireAuthOk, WireChallenge, WireClientProof, WireResumeInit, WireResumeOk,
 };
 use crate::error::ClientError;
 use crate::interner_cache::InternerCacheRegistry;
+
+/// Session metadata shared by every client-construction path; consumed by
+/// [`Client::assemble`].
+pub(crate) struct SessionMeta {
+    pub(crate) session_id: [u8; 32],
+    pub(crate) pinned_hash: [u8; 32],
+    pub(crate) expires_at_ns: u64,
+    pub(crate) resumption_ticket: Option<Zeroizing<Vec<u8>>>,
+    pub(crate) resumption_expires_at_ns: Option<u64>,
+    pub(crate) server_query_version: u8,
+    pub(crate) request_timeout: Option<std::time::Duration>,
+}
 
 /// Connected, authenticated client.
 ///
@@ -51,14 +63,10 @@ pub struct Client {
     pub(super) resumption_ticket: Option<Zeroizing<Vec<u8>>>,
     pub(super) resumption_expires_at_ns: Option<u64>,
     pub(super) next_request_id: AtomicU32,
-    /// Outstanding oneshot senders keyed by request_id.
-    pub(super) pending: PendingMap,
-    /// Active subscription channels keyed by sub_id.
-    pub(super) subscriptions: SubscriptionMap,
-    /// Early-buffered pushes for subs not yet registered via `subscribe_push`.
-    pub(super) early_buffer: EarlyBuffer,
-    /// True once the reader task has encountered EOF or I/O error.
-    pub(super) closed: Arc<AtomicBool>,
+    /// The ONE closeable lifecycle state: pending-request registry,
+    /// subscription registry (+ early buffer) and the `closed_hint` fast
+    /// path. See `transport::Lifecycle`.
+    pub(super) state: Lifecycle,
     /// §B21: JoinHandle is stored so we can abort on close/drop.
     pub(super) reader_handle: Option<JoinHandle<()>>,
     /// Per-`(db, repo)` interner field-map cache (Stage 5 minimal). Lock-free
@@ -73,9 +81,51 @@ pub struct Client {
     /// [`ConnectOptions::request_timeout`]. `None` = unbounded wait
     /// (prior behaviour). Applied in [`Self::roundtrip`].
     pub(super) request_timeout: Option<std::time::Duration>,
+    /// Test-only lifecycle hooks (P0 C1). The type is zero-sized in
+    /// production; the fields (and this field's readers) are test-only.
+    #[cfg(test)]
+    pub(super) hooks: LifecycleHooks,
 }
 
 impl Client {
+    /// Shared finalisation for every construction path (TCP, IPC, resume,
+    /// tests): builds the lifecycle state, spawns the reader task with its
+    /// shutdown guard, and assembles the [`Client`].
+    pub(crate) fn assemble<R>(
+        reader: R,
+        write_sink: WriteSink,
+        meta: SessionMeta,
+        hooks: LifecycleHooks,
+    ) -> Self
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    {
+        let state = Lifecycle::new();
+        // §B21: store JoinHandle — never drop silently. The shutdown guard
+        // is constructed BEFORE the task can be spawned (or dropped
+        // unpolled): every exit path of `reader_task` — including
+        // cancellation before the first poll — closes the lifecycle.
+        let guard = crate::client::transport::ShutdownGuard::new(state.clone());
+        let reader_handle = tokio::spawn(reader_task(reader, state.clone(), guard, hooks.clone()));
+
+        Self {
+            write: tokio::sync::Mutex::new(write_sink),
+            session_id: meta.session_id,
+            pinned_hash: meta.pinned_hash,
+            expires_at_ns: meta.expires_at_ns,
+            resumption_ticket: meta.resumption_ticket,
+            resumption_expires_at_ns: meta.resumption_expires_at_ns,
+            next_request_id: AtomicU32::new(1),
+            state,
+            reader_handle: Some(reader_handle),
+            interner_cache: Arc::new(InternerCacheRegistry::new()),
+            server_query_version: AtomicU8::new(meta.server_query_version),
+            request_timeout: meta.request_timeout,
+            #[cfg(test)]
+            hooks,
+        }
+    }
+
     /// Run the full TCP→TLS→SCRAM handshake and return a ready client.
     pub async fn connect(opts: ConnectOptions) -> Result<Self, ClientError> {
         // Install rustls crypto provider once. `install_default` is a
@@ -245,38 +295,20 @@ impl Client {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .expect("either trusted_pin pre-set or TOFU callback fired");
 
-        // ---- Spawn background reader ----
-        let pending: PendingMap = Arc::new(StdMutex::new(TFxMap::default()));
-        let subscriptions: SubscriptionMap = Arc::new(StdMutex::new(TFxMap::default()));
-        let early_buffer: EarlyBuffer = Arc::new(StdMutex::new(TFxMap::default()));
-        let closed = Arc::new(AtomicBool::new(false));
-
-        // §B21: store JoinHandle — never drop silently.
-        let reader_handle = tokio::spawn(reader_task(
+        Ok(Self::assemble(
             r,
-            pending.clone(),
-            closed.clone(),
-            subscriptions.clone(),
-            early_buffer.clone(),
-        ));
-
-        Ok(Self {
-            write: tokio::sync::Mutex::new(WriteSink::Tls(w)),
-            session_id: success.session_id,
-            pinned_hash,
-            expires_at_ns: success.expires_at_ns,
-            resumption_ticket: resumption_ticket.map(Zeroizing::new),
-            resumption_expires_at_ns,
-            next_request_id: AtomicU32::new(1),
-            pending,
-            subscriptions,
-            early_buffer,
-            closed,
-            reader_handle: Some(reader_handle),
-            interner_cache: Arc::new(InternerCacheRegistry::new()),
-            server_query_version: AtomicU8::new(ok_wire.server_query_version),
-            request_timeout: opts.request_timeout,
-        })
+            WriteSink::Tls(w),
+            SessionMeta {
+                session_id: success.session_id,
+                pinned_hash,
+                expires_at_ns: success.expires_at_ns,
+                resumption_ticket: resumption_ticket.map(Zeroizing::new),
+                resumption_expires_at_ns,
+                server_query_version: ok_wire.server_query_version,
+                request_timeout: opts.request_timeout,
+            },
+            LifecycleHooks::default(),
+        ))
     }
 
     /// Run the full IPC→SCRAM handshake (no TLS) over a local Unix domain
@@ -431,37 +463,20 @@ impl Client {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .expect("either trusted_pin pre-set or TOFU callback fired");
 
-        // ---- Spawn background reader ----
-        let pending: PendingMap = Arc::new(StdMutex::new(TFxMap::default()));
-        let subscriptions: SubscriptionMap = Arc::new(StdMutex::new(TFxMap::default()));
-        let early_buffer: EarlyBuffer = Arc::new(StdMutex::new(TFxMap::default()));
-        let closed = Arc::new(AtomicBool::new(false));
-
-        let reader_handle = tokio::spawn(reader_task(
+        Ok(Self::assemble(
             r,
-            pending.clone(),
-            closed.clone(),
-            subscriptions.clone(),
-            early_buffer.clone(),
-        ));
-
-        Ok(Self {
-            write: tokio::sync::Mutex::new(WriteSink::Ipc(w)),
-            session_id: success.session_id,
-            pinned_hash,
-            expires_at_ns: success.expires_at_ns,
-            resumption_ticket: resumption_ticket.map(Zeroizing::new),
-            resumption_expires_at_ns,
-            next_request_id: AtomicU32::new(1),
-            pending,
-            subscriptions,
-            early_buffer,
-            closed,
-            reader_handle: Some(reader_handle),
-            interner_cache: Arc::new(InternerCacheRegistry::new()),
-            server_query_version: AtomicU8::new(ok_wire.server_query_version),
-            request_timeout: opts.request_timeout,
-        })
+            WriteSink::Ipc(w),
+            SessionMeta {
+                session_id: success.session_id,
+                pinned_hash,
+                expires_at_ns: success.expires_at_ns,
+                resumption_ticket: resumption_ticket.map(Zeroizing::new),
+                resumption_expires_at_ns,
+                server_query_version: ok_wire.server_query_version,
+                request_timeout: opts.request_timeout,
+            },
+            LifecycleHooks::default(),
+        ))
     }
 
     /// Resume a session using a previously-issued resumption ticket, bypassing
@@ -533,35 +548,59 @@ impl Client {
             )
         };
 
-        // ---- Spawn background reader ----
-        let pending: PendingMap = Arc::new(StdMutex::new(TFxMap::default()));
-        let subscriptions: SubscriptionMap = Arc::new(StdMutex::new(TFxMap::default()));
-        let early_buffer: EarlyBuffer = Arc::new(StdMutex::new(TFxMap::default()));
-        let closed = Arc::new(AtomicBool::new(false));
-        let reader_handle = tokio::spawn(reader_task(
+        Ok(Self::assemble(
             r,
-            pending.clone(),
-            closed.clone(),
-            subscriptions.clone(),
-            early_buffer.clone(),
-        ));
+            WriteSink::Tls(w),
+            SessionMeta {
+                session_id,
+                pinned_hash: opts.pinned_hash,
+                expires_at_ns: ok_wire.expires_at_ns,
+                resumption_ticket: resumption_ticket.map(Zeroizing::new),
+                resumption_expires_at_ns,
+                server_query_version: ok_wire.server_query_version,
+                request_timeout: None,
+            },
+            LifecycleHooks::default(),
+        ))
+    }
+}
 
-        Ok(Self {
-            write: tokio::sync::Mutex::new(WriteSink::Tls(w)),
-            session_id,
-            pinned_hash: opts.pinned_hash,
-            expires_at_ns: ok_wire.expires_at_ns,
-            resumption_ticket: resumption_ticket.map(Zeroizing::new),
-            resumption_expires_at_ns,
-            next_request_id: AtomicU32::new(1),
-            pending,
-            subscriptions,
-            early_buffer,
-            closed,
-            reader_handle: Some(reader_handle),
-            interner_cache: Arc::new(InternerCacheRegistry::new()),
-            server_query_version: AtomicU8::new(ok_wire.server_query_version),
-            request_timeout: None,
-        })
+#[cfg(test)]
+impl Client {
+    /// Test-only constructor (P0 C1): build a client over injected
+    /// simplex/duplex pipe halves, going through the SAME
+    /// [`Self::assemble`] path (real lifecycle state + reader task).
+    /// `reader` is the server→client half; `writer` the client→server half.
+    pub(crate) fn for_test<R, W>(reader: R, writer: W, hooks: LifecycleHooks) -> Self
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
+        Self::assemble(
+            reader,
+            WriteSink::Test(Box::new(writer)),
+            SessionMeta {
+                session_id: [0u8; 32],
+                pinned_hash: [0u8; 32],
+                expires_at_ns: 0,
+                resumption_ticket: None,
+                resumption_expires_at_ns: None,
+                server_query_version: 0,
+                request_timeout: None,
+            },
+            hooks,
+        )
+    }
+
+    /// Test accessor: take the reader task's join handle so tests can await
+    /// the reader's completion deterministically (no sleeps).
+    pub(crate) fn take_reader_handle(&mut self) -> Option<JoinHandle<()>> {
+        self.reader_handle.take()
+    }
+
+    /// Test accessor: the client's lifecycle state (`pub(super)` fields are
+    /// not visible from the crate-root tests module).
+    pub(crate) fn lifecycle_for_test(&self) -> &Lifecycle {
+        &self.state
     }
 }

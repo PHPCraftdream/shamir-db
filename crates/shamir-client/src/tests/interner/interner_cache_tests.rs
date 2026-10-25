@@ -4,18 +4,29 @@
 //! `tests/smoke.rs` uses) and exercise the cache ops against the production
 //! server path. They MUST run with `--full` (integration/e2e scope).
 
-use shamir_collections::TFxSet;
+use shamir_collections::{new_map, TFxSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
+use futures::future::join_all;
 use shamir_types::mpack;
+use shamir_types::types::value::Value;
 use tempfile::TempDir;
+use tokio::io::{duplex, split};
 use zeroize::Zeroizing;
 
+use shamir_connect::common::envelope::{RequestEnvelope, ResponseEnvelope};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_builder::write::insert;
+use shamir_query_types::batch::{BatchOp, BatchResponse};
+use shamir_query_types::read::{QueryRecord, QueryResult};
+use shamir_query_types::wire::{DbRequest, DbResponse};
+use shamir_transport_tcp::framing::{read_frame, write_frame, MAX_FRAME_SIZE_DEFAULT};
 
+use crate::client::LifecycleHooks;
 use crate::{Client, ConnectOptions};
 
 use shamir_server::config::{
@@ -346,4 +357,110 @@ async fn execute_with_touch_warms_cache() {
         client
     })
     .await;
+}
+
+/// RV-CLIENT-47644B74 (drain/stampede portion): 8 concurrent COLD `dump_repo`
+/// callers on a never-dumped repo must coalesce onto the per-`FieldMap`
+/// `OnceCell` stampede guard. REAL frame-count oracle: the client runs over
+/// `Client::for_test` duplex pipes and an emulated server decodes every
+/// client→server frame, counts the `interner_dump` Execute requests and
+/// replies with a valid dump response the parser accepts.
+///
+/// REVERT ORACLE: reverting the OnceCell stampede guard in
+/// `FieldMap::ensure_populated` (fetching unconditionally) makes the count 8
+/// and this test fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rv_client_47644b74_concurrent_cold_dump_single_fetch() {
+    // client→server: the client writes; the emulated server reads.
+    let (c2s_client_side, mut c2s_server_side) = duplex(64 * 1024);
+    // server→client: the emulated server writes; the client reads.
+    let (s2c_client_side, mut s2c_server_side) = duplex(512 * 1024);
+    let (client_reader, _unused_s2c_write) = split(s2c_client_side);
+    let (_unused_c2s_read, client_writer) = split(c2s_client_side);
+    let client = Client::for_test(client_reader, client_writer, LifecycleHooks::default());
+
+    let dumps_seen = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&dumps_seen);
+    let server = tokio::spawn(async move {
+        loop {
+            let frame = match read_frame(&mut c2s_server_side, MAX_FRAME_SIZE_DEFAULT).await {
+                Ok(f) => f,
+                Err(_) => break, // client dropped — connection over
+            };
+            let env = RequestEnvelope::from_msgpack(&frame).expect("request envelope");
+            let req: DbRequest = rmp_serde::from_slice(&env.req).expect("decode DbRequest");
+            let DbRequest::Execute { batch, .. } = &req else {
+                panic!("emulated server: unexpected request {req:?}");
+            };
+            let mut dump_alias = None;
+            for (alias, entry) in &batch.queries {
+                if matches!(entry.op, BatchOp::InternerDump(_)) {
+                    dump_alias = Some(alias.clone());
+                }
+            }
+            let Some(alias) = dump_alias else {
+                panic!("emulated server: unexpected non-dump request {req:?}");
+            };
+            seen.fetch_add(1, Ordering::SeqCst);
+
+            // Craft a valid `interner_dump` response the client parser
+            // accepts: `{ "epoch": u64, "entries": [[id, name], ...] }`.
+            let mut fields = new_map();
+            fields.insert("epoch".to_string(), Value::Int(1));
+            fields.insert(
+                "entries".to_string(),
+                Value::List(vec![
+                    Value::List(vec![Value::Int(1), Value::Str("sku".into())]),
+                    Value::List(vec![Value::Int(2), Value::Str("qty".into())]),
+                ]),
+            );
+            let mut result = QueryResult::default();
+            result.records.push(QueryRecord::Direct(Value::Map(fields)));
+            let mut results = new_map();
+            results.insert(alias, result);
+            let response = BatchResponse {
+                id: Value::Null,
+                results,
+                execution_plan: Vec::new(),
+                edge_provenance: new_map(),
+                execution_time_us: 0,
+                transaction: None,
+                interner_delta: new_map(),
+            };
+            let payload =
+                rmp_serde::to_vec_named(&DbResponse::Batch { response }).expect("encode response");
+            let bytes = ResponseEnvelope::ok(env.request_id, payload)
+                .to_msgpack()
+                .expect("encode envelope");
+            write_frame(&mut s2c_server_side, &bytes)
+                .await
+                .expect("write reply");
+        }
+    });
+
+    // 8 concurrent COLD dump_repo callers (futures created BEFORE polling).
+    let dumps: Vec<_> = (0..8).map(|_| client.dump_repo("ic", "main")).collect();
+    for r in join_all(dumps).await {
+        r.expect("concurrent cold dump must not fail");
+    }
+
+    // THE frame-count oracle: exactly ONE dump request reached the server.
+    assert_eq!(
+        dumps_seen.load(Ordering::SeqCst),
+        1,
+        "OnceCell stampede guard must coalesce 8 cold dumps into ONE fetch"
+    );
+
+    // Convergence: all dumped entries resolve consistently.
+    let sku = client
+        .resolve_field("ic", "main", "sku")
+        .expect("sku resolved from the coalesced dump");
+    assert_eq!(client.field_name("ic", "main", sku).as_deref(), Some("sku"));
+    let qty = client
+        .resolve_field("ic", "main", "qty")
+        .expect("qty resolved from the coalesced dump");
+    assert_eq!(client.field_name("ic", "main", qty).as_deref(), Some("qty"));
+
+    drop(client);
+    server.await.expect("emulated server task panicked");
 }
