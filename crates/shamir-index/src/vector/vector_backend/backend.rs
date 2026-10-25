@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use shamir_storage::types::Store;
 use shamir_tunables::instance_defaults::{
-    VECTOR_COMPACTION_MIN_LIVE, VECTOR_COMPACTION_RATIO_THRESHOLD, VECTOR_SNAPSHOT_DELTA_THRESHOLD,
+    vector_snapshot_delta_threshold, VECTOR_COMPACTION_MIN_LIVE, VECTOR_COMPACTION_RATIO_THRESHOLD,
 };
 use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::{RecordRef, ScalarRef};
@@ -104,7 +104,7 @@ pub struct VectorBackend {
     /// tests (via `set_snapshot_threshold_for_test`) so the full
     /// trigger → spawn → `run_background_snapshot` path can be exercised
     /// deterministically without appending 10k real vectors.
-    snapshot_threshold: AtomicU64,
+    pub(super) snapshot_threshold: AtomicU64,
     /// V4.2 (#408) — single-flight guard for the background compaction task.
     pub(super) compaction_in_flight: Arc<AtomicBool>,
     /// RV-INDEX-9F62C8DF — publication signal. Writers parked on a sealed
@@ -148,7 +148,7 @@ impl VectorBackend {
             delta_count: Arc::new(AtomicU64::new(0)),
             snapshot_in_flight: Arc::new(AtomicBool::new(false)),
             next_delta_idx: Arc::new(AtomicU64::new(0)),
-            snapshot_threshold: AtomicU64::new(VECTOR_SNAPSHOT_DELTA_THRESHOLD),
+            snapshot_threshold: AtomicU64::new(vector_snapshot_delta_threshold()),
             compaction_in_flight: Arc::new(AtomicBool::new(false)),
             published: Arc::new(Notify::new()),
             #[cfg(test)]
