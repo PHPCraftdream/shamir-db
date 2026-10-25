@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::access::{Action, Actor, ResourceMeta, ResourcePath};
 use crate::{DbError, DbResult};
 use shamir_engine::function::{
-    compile_rust_source, BatchContext, CreateFunctionOptions, FnAdapter, FnBatch, FnCtx,
+    compile_rust_source_blocking, BatchContext, CreateFunctionOptions, FnAdapter, FnBatch, FnCtx,
     FunctionError, FunctionMeta, FunctionRegistry, GlobalVars, Params, ShamirFunction,
     WasmFunction, WasmLimits,
 };
@@ -169,12 +169,14 @@ impl ShamirDb {
                 self.authorize_access(&actor, &ResourcePath::WasmCompiler, Action::Execute)
                     .await
                     .map_err(|e| DbError::Function(e.to_string()))?;
-                let compiled = compile_rust_source(src).map_err(|e| match e {
-                    FunctionError::ToolchainUnavailable(msg) => {
-                        DbError::Function(format!("toolchain unavailable: {}", msg))
-                    }
-                    other => DbError::Function(other.to_string()),
-                })?;
+                let compiled = compile_rust_source_blocking(src)
+                    .await
+                    .map_err(|e| match e {
+                        FunctionError::ToolchainUnavailable(msg) => {
+                            DbError::Function(format!("toolchain unavailable: {}", msg))
+                        }
+                        other => DbError::Function(other.to_string()),
+                    })?;
                 (compiled, "rust", Some(src.to_string()))
             }
         };

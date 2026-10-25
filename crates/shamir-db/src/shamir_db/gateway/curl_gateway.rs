@@ -15,6 +15,32 @@ use shamir_engine::function::{
 use std::path::Path;
 use tokio::io::AsyncReadExt;
 
+/// Reject any guest-controlled curl-config string containing CR, LF, other
+/// C0 controls or DEL — these would start new directives in the config file
+/// (RV-DB-C9444758, CRLF/config-directive injection).
+fn reject_control_chars(field: &str, label: &str) -> Result<(), String> {
+    for &b in field.as_bytes() {
+        let bad = b == 0x7F || (b < 0x20 && b != b'\t');
+        if bad {
+            return Err(format!(
+                "egress: invalid control character (0x{b:02X}) in {label}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate every guest-controlled string that reaches the curl config file:
+/// method and each header name/value. Tab is allowed in header values.
+pub(crate) fn validate_curl_request(req: &HttpRequest) -> Result<(), String> {
+    reject_control_chars(&req.method, "request method")?;
+    for (name, value) in &req.headers {
+        reject_control_chars(name, "header name")?;
+        reject_control_chars(value, "header value")?;
+    }
+    Ok(())
+}
+
 /// Network gateway that delegates to the system `curl` binary.
 ///
 /// Holds an allowlist of host patterns. Empty allowlist = deny everything.
@@ -32,6 +58,11 @@ impl CurlNetGateway {
 #[async_trait]
 impl NetGateway for CurlNetGateway {
     async fn fetch(&self, req: HttpRequest) -> Result<HttpResponse, String> {
+        // 0. Config-directive injection guard (RV-DB-C9444758): reject
+        //    CR/LF/controls in guest-controlled method/header strings BEFORE
+        //    the SSRF guard, so no network/DNS is touched on rejection.
+        validate_curl_request(&req)?;
+
         // 1. Allowlist + DNS-resolved SSRF guard — reject before any network
         //    I/O. `check_url_allowed_resolved` resolves the host and rejects a
         //    hostname that resolves to a private/loopback IP (finding 2c),

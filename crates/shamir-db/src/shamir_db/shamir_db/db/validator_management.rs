@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use crate::access::{Actor, ResourceMeta};
 use crate::{DbError, DbResult};
-use shamir_engine::function::{compile_rust_source, FunctionError, WasmFunction, WasmLimits};
+use shamir_engine::function::{
+    compile_rust_source_blocking, FunctionError, WasmFunction, WasmLimits,
+};
 use shamir_engine::validator::{
     NativeRecordValidator, RecordFields, RecordValidator, Validation, ValidatorBinding,
     ValidatorCtx, ValidatorRegistry, WasmRecordValidator, WriteOp,
@@ -211,12 +213,14 @@ impl ShamirDb {
         let (wasm, lang_tag, source_str) = match source {
             FunctionSource::Wasm(bytes) => (bytes.to_vec(), "wasm", None),
             FunctionSource::Source(src) => {
-                let compiled = compile_rust_source(src).map_err(|e| match e {
-                    FunctionError::ToolchainUnavailable(msg) => {
-                        DbError::Validation(format!("toolchain unavailable: {}", msg))
-                    }
-                    other => DbError::Validation(other.to_string()),
-                })?;
+                let compiled = compile_rust_source_blocking(src)
+                    .await
+                    .map_err(|e| match e {
+                        FunctionError::ToolchainUnavailable(msg) => {
+                            DbError::Validation(format!("toolchain unavailable: {}", msg))
+                        }
+                        other => DbError::Validation(other.to_string()),
+                    })?;
                 (compiled, "rust", Some(src.to_string()))
             }
         };

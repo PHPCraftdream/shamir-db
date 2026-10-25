@@ -6,7 +6,7 @@ use crate::{
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
 
-const DOUBLE_SOURCE: &str = r#"
+pub(super) const DOUBLE_SOURCE: &str = r#"
 use shamir::prelude::*;
 
 #[shamir::function]
