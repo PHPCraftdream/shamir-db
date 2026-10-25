@@ -251,6 +251,39 @@ fn ve(e: VectorError) -> IndexError {
     IndexError::Backend(e.to_string())
 }
 
+impl VectorBackend {
+    /// RV-INDEX-2F3CBCA3 on the rebuild fallback: the rebuilt graph comes
+    /// from the data store, but `next_delta_idx` must still start above the
+    /// persisted absorption boundary and any surviving chunk, or the next
+    /// `append_delta` lands below the boundary and is skipped by replay.
+    /// A scan error is propagated (never defaulted to 0).
+    async fn seed_delta_idx_for_fallback(
+        &self,
+        info_store: &Arc<dyn Store>,
+        keyspace: &str,
+        manifest: Option<&SnapshotManifest>,
+    ) -> Result<(), IndexError> {
+        let stored_hwm = snapshot::highest_delta_index(info_store, keyspace)
+            .await
+            .map_err(|e| {
+                IndexError::Backend(format!(
+                    "delta HWM scan failed for index {} (keyspace {}): {} —                      refusing to seed next_delta_idx below the surviving chunks",
+                    self.descriptor.name, keyspace, e
+                ))
+            })?;
+        // Fresh index (no manifest, no chunks): keep the constructor seed.
+        if manifest.is_none() && stored_hwm == 0 {
+            return Ok(());
+        }
+        let boundary = manifest.map_or(0, |m| m.delta_applied_upto);
+        self.next_delta_idx.store(
+            boundary.max(stored_hwm).saturating_add(1),
+            Ordering::Release,
+        );
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl IndexBackend for VectorBackend {
     fn as_any(&self) -> &dyn std::any::Any {
@@ -608,12 +641,20 @@ impl IndexBackend for VectorBackend {
     ///    the empty placeholder adapter that `build_index2_backend_*`
     ///    constructed. NO data-store scan runs, so
     ///    [`rebuild_count`] stays at 0. This is the O(load) fast path.
-    ///    **V2.3:** after the swap, we replay every delta chunk with index
-    ///    > `manifest.delta_applied_upto` against the freshly-loaded adapter
-    ///    so the graph reflects every mutation committed since the snapshot
-    ///    was taken. The in-memory HWM (`next_delta_idx`) is seeded from the
-    ///    highest chunk index in the store so the next `append_delta` does
-    ///    not collide.
+    ///    **V2.3:** before the swap, we replay every delta chunk with index
+    ///    >= `manifest.delta_applied_upto` against the FRESHLY-loaded
+    ///    adapter (the boundary is EXCLUSIVE: it counts the absorbed
+    ///    chunks `0..delta_applied_upto`), so the graph reflects every
+    ///    mutation committed since
+    ///    the snapshot was taken. **P0 RV-INDEX-4651AA00:** the replay
+    ///    runs BEFORE the adapter is published and a replay failure is
+    ///    FAIL-CLOSED — publishing an incomplete graph would let the next
+    ///    generation flip permanently prune the unreplayed chunks.
+    ///    **P0 RV-INDEX-2F3CBCA3:** the in-memory HWM (`next_delta_idx`)
+    ///    is seeded to `max(replayed boundary, highest surviving chunk) + 1`
+    ///    so the next `append_delta` never lands at or below the persisted
+    ///    absorption watermark; HWM-scan errors propagate (never default
+    ///    to 0).
     /// 2. **`Err(NotFound)`** — no snapshot exists for this keyspace (a
     ///    fresh index, or the first open after the feature shipped). Fall
     ///    back to the legacy full-scan [`rebuild`] against the data store.
@@ -664,54 +705,91 @@ impl IndexBackend for VectorBackend {
         };
         match snapshot::load_snapshot(&info_store, &keyspace).await {
             Ok(loaded) => {
-                // O(load) fast path: hand the rebuilt adapter to the live
-                // backend. `ArcSwap::store` is wait-free; a concurrent query
-                // grabbing `load()` either sees the old empty adapter or the
-                // new one — never a torn state.
+                // O(load) fast path. P0 RV-INDEX-4651AA00: replay runs on
+                // the FRESH adapter BEFORE it is stored live — a failure
+                // below must never leave a half-replayed graph published.
                 let adapter_arc: Arc<dyn VectorAdapter> = Arc::new(loaded);
+
+                // V2.3 + P0 RV-INDEX-4651AA00: replay delta chunks past the
+                // snapshot's base (`delta_applied_upto` from the manifest we
+                // just read — load_snapshot validated it but does not return
+                // it). A replay failure FAILS THE OPEN: the omitted
+                // post-snapshot mutations would otherwise be permanently
+                // pruned by the next generation flip.
+                let replayed_hwm: Option<u64> = match (manifest_opt, adapter_arc.as_hnsw_adapter()) {
+                    (Some(manifest), Some(hnsw)) => Some(
+                        snapshot::replay_delta(
+                            &info_store,
+                            &keyspace,
+                            manifest.delta_applied_upto,
+                            hnsw,
+                        )
+                        .await
+                        .map_err(|e| {
+                            IndexError::Backend(format!(
+                                "vector delta replay failed for index {} (keyspace {}): {} — failing the open closed; omitting these mutations would let the next snapshot prune their delta chunks",
+                                self.descriptor.name, keyspace, e
+                            ))
+                        })?,
+                    ),
+                    // RV-INDEX-4651AA00/2F3CBCA3: a snapshot loaded although
+                    // the up-front manifest read failed would be published
+                    // without its absorption boundary — replay skipped and
+                    // the allocator seeded from surviving chunks alone.
+                    // Refuse instead of publishing it.
+                    (None, Some(_)) => {
+                        return Err(IndexError::Backend(format!(
+                            "vector snapshot loaded for index {} (keyspace {}) but its manifest could not be read first; refusing to publish a graph without its replay boundary",
+                            self.descriptor.name, keyspace
+                        )));
+                    }
+                    // Non-HNSW adapters have no snapshot and no delta log
+                    // (see the trigger guard) — nothing to replay.
+                    (_, None) => None,
+                };
+
+                // P0 RV-INDEX-2F3CBCA3: seed the in-memory delta HWM from
+                // BOTH the replayed absorption boundary and the highest
+                // surviving chunk in the store, so the next `append_delta`
+                // cannot land at or below the persisted watermark and
+                // overwrite a surviving unabsorbed chunk. A scan error is
+                // PROPAGATED — defaulting it to 0 seeded `next_delta_idx = 1`
+                // and let appends clobber surviving chunks.
+                // Publication happens only AFTER replay AND this seed
+                // succeeded: a failed restore must never publish the
+                // recovered graph.
+                let stored_hwm = snapshot::highest_delta_index(&info_store, &keyspace)
+                    .await
+                    .map_err(|e| {
+                        IndexError::Backend(format!(
+                            "delta HWM scan failed for index {} (keyspace {}): {} — \
+                             refusing to seed next_delta_idx below the surviving chunks",
+                            self.descriptor.name, keyspace, e
+                        ))
+                    })?;
+                // Conservative fold: gaps between the replayed boundary and
+                // surviving chunks only ever raise the seed (safe, never
+                // lossy). `highest_delta_index` returns 0 when no chunks
+                // exist (fresh snapshot).
+                let hwm = replayed_hwm.map_or(stored_hwm, |r| r.max(stored_hwm));
+                self.next_delta_idx
+                    .store(hwm.saturating_add(1), Ordering::Release);
+
+                // Publish the fully-replayed adapter + seeded HWM.
+                // `ArcSwap::store` is wait-free; a concurrent query grabbing
+                // `load()` either sees the old empty adapter or the new one
+                // — never a torn state.
                 self.adapter.store(Arc::new(AdapterSlot {
                     adapter: Arc::clone(&adapter_arc),
                 }));
-
-                // V2.3: replay delta chunks past the snapshot's base. The
-                // `delta_applied_upto` comes from the manifest we just read
-                // (load_snapshot validated it but does not return it).
-                if let Some(manifest) = manifest_opt {
-                    let delta_upto = manifest.delta_applied_upto;
-                    if let Some(hnsw) = adapter_arc.as_hnsw_adapter() {
-                        if let Err(e) =
-                            snapshot::replay_delta(&info_store, &keyspace, delta_upto, hnsw).await
-                        {
-                            // A delta-replay failure is recoverable: the base
-                            // graph is intact, only the post-snapshot
-                            // mutations were lost. Warn and continue — the
-                            // next snapshot flip will capture a fresh base.
-                            log::warn!(
-                                "vector delta replay failed for index {} (keyspace {}): {} — \
-                                 base snapshot loaded, post-snapshot mutations may be missing \
-                                 until the next snapshot",
-                                self.descriptor.name,
-                                keyspace,
-                                e
-                            );
-                        }
-                    }
-                }
-
-                // Seed the in-memory delta HWM so the next `append_delta`
-                // does not collide with an existing chunk. `highest_delta_index`
-                // returns 0 when no chunks exist (fresh snapshot).
-                let hwm = snapshot::highest_delta_index(&info_store, &keyspace)
-                    .await
-                    .unwrap_or(0);
-                self.next_delta_idx
-                    .store(hwm.saturating_add(1), Ordering::Release);
 
                 Ok(())
             }
             Err(SnapshotError::NotFound) => {
                 // No snapshot for this index — fresh index or first open.
                 // Fall through to a full rebuild scan.
+                self.seed_delta_idx_for_fallback(&info_store, &keyspace, manifest_opt.as_ref())
+                    .await?;
                 self.rebuild(data_store).await
             }
             Err(e) => {
@@ -726,6 +804,8 @@ impl IndexBackend for VectorBackend {
                     keyspace,
                     e
                 );
+                self.seed_delta_idx_for_fallback(&info_store, &keyspace, manifest_opt.as_ref())
+                    .await?;
                 self.rebuild(data_store).await
             }
         }

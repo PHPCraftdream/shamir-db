@@ -637,7 +637,13 @@ impl SortedIndexManager {
         let sys_id = RecordId::system("sorted_indexes");
         let bytes = match self.info_store.get(sys_id.to_bytes().into()).await {
             Ok(b) => b,
-            Err(_) => return Ok(()),
+            // A missing record = no sorted indexes yet (fresh table).
+            Err(shamir_storage::error::DbError::NotFound(_)) => return Ok(()),
+            // P0 RV-INDEX-86978429: any other store error is propagated —
+            // mapping it to Ok(()) would silently initialize with zero
+            // definitions, and a later persist_defs would overwrite the
+            // unread blob with the empty registry.
+            Err(e) => return Err(e),
         };
         if bytes.is_empty() {
             return Ok(());
