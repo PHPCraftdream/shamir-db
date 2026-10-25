@@ -171,7 +171,7 @@ fn rv_funclib_5fa455f7_numeric_key_equality_transitivity_table() {
             vec![
                 Value::F64(9_223_372_036_854_775_808.0),
                 Value::Dec(Decimal::from_i128_with_scale(1 << 63, 0)),
-                Value::Big(BigInt::from(1 << 63)),
+                Value::Big(BigInt::from(1_i128 << 63)),
             ],
         ),
     ];
@@ -229,7 +229,7 @@ fn rv_funclib_5fa455f7_numeric_key_equality_transitivity_table() {
         (Value::F64(-0.0), Value::Int(0), true),
         (
             Value::F64(9_223_372_036_854_775_808.0),
-            Value::Big(BigInt::from(1 << 63)),
+            Value::Big(BigInt::from(1_i128 << 63)),
             true,
         ),
         (Value::F64(0.5), Value::Dec(Decimal::new(5, 1)), false),
