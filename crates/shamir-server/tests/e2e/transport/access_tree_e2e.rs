@@ -88,6 +88,7 @@ async fn access_tree_over_the_wire_as_admin() {
         accept_new_host: true,
         trusted_pin: None,
         connect_timeout: None,
+        handshake_timeout: None,
         request_timeout: None,
     })
     .await

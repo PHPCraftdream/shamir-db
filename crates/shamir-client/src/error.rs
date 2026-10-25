@@ -92,6 +92,13 @@ pub enum ClientError {
     /// `ConnectOptions::request_timeout` budget.
     #[error("request timed out after {0:?}")]
     RequestTimeout(std::time::Duration),
+
+    /// The handshake (or its DNS stage) did not complete within the
+    /// configured `ConnectOptions::handshake_timeout` budget. The phase
+    /// string is the stage the handshake was actually in when the deadline
+    /// elapsed (`dns`, `tcp`, `tls`, `scram`, `kdf`) — never guessed.
+    #[error("handshake timed out after {0:?} (phase: {1})")]
+    HandshakeTimeout(std::time::Duration, std::sync::Arc<str>),
 }
 
 /// Why the connection reached its terminal closed state. Shared by every

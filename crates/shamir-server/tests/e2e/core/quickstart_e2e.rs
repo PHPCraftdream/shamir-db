@@ -30,6 +30,7 @@ async fn quickstart_kv_in_default_store() {
         accept_new_host: true,
         trusted_pin: None,
         connect_timeout: None,
+        handshake_timeout: None,
         request_timeout: None,
     })
     .await

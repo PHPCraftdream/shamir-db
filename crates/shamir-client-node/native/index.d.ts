@@ -97,4 +97,14 @@ export interface ConnectOptions {
    * supplied, mismatch fails the handshake.
    */
   trustedPin?: Buffer
+  /** Deadline (ms) for the TCP connect attempt. */
+  connectTimeoutMs?: number
+  /**
+   * Deadline (ms) for the WHOLE TCP→TLS→SCRAM handshake — covers the
+   * TLS and SCRAM awaits that `connectTimeoutMs` does not
+   * (RV-CLIENT-NODE-1CFB3796). Omitted = unbounded (prior behaviour).
+   */
+  handshakeTimeoutMs?: number
+  /** Deadline (ms) for each request/response round-trip after connect. */
+  requestTimeoutMs?: number
 }

@@ -90,6 +90,7 @@ async fn setup_data_with_table() -> (tempfile::TempDir, PathBuf) {
         accept_new_host: true,
         trusted_pin: None,
         connect_timeout: None,
+        handshake_timeout: None,
         request_timeout: None,
     })
     .await

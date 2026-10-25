@@ -30,6 +30,7 @@ async fn connect_admin(addr: std::net::SocketAddr, admin_pw: &[u8]) -> Client {
         accept_new_host: true,
         trusted_pin: None,
         connect_timeout: None,
+        handshake_timeout: None,
         request_timeout: None,
     })
     .await

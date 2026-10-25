@@ -54,6 +54,7 @@ async fn bootstrap_token_file_exists_then_consumed_on_first_login() {
         accept_new_host: true,
         trusted_pin: None,
         connect_timeout: None,
+        handshake_timeout: None,
         request_timeout: None,
     })
     .await
@@ -108,6 +109,7 @@ async fn second_login_with_same_token_after_first_login_fails() {
         accept_new_host: true,
         trusted_pin: None,
         connect_timeout: None,
+        handshake_timeout: None,
         request_timeout: None,
     })
     .await
@@ -124,6 +126,7 @@ async fn second_login_with_same_token_after_first_login_fails() {
         accept_new_host: true,
         trusted_pin: None,
         connect_timeout: None,
+        handshake_timeout: None,
         request_timeout: None,
     })
     .await;
@@ -208,6 +211,7 @@ async fn ttl_sweep_rotates_unused_expired_token_credential() {
         accept_new_host: true,
         trusted_pin: None,
         connect_timeout: None,
+        handshake_timeout: None,
         request_timeout: None,
     })
     .await;
@@ -378,6 +382,7 @@ async fn login_rejected_when_outstanding_bootstrap_token_has_already_expired() {
         accept_new_host: true,
         trusted_pin: None,
         connect_timeout: None,
+        handshake_timeout: None,
         request_timeout: None,
     })
     .await;

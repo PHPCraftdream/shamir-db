@@ -49,6 +49,7 @@ async fn concurrent_pings_resolve_all() {
         accept_new_host: true,
         trusted_pin: None,
         connect_timeout: None,
+        handshake_timeout: None,
         request_timeout: None,
     })
     .await
@@ -89,6 +90,7 @@ async fn concurrent_executes_return_correct_results() {
         accept_new_host: true,
         trusted_pin: None,
         connect_timeout: None,
+        handshake_timeout: None,
         request_timeout: None,
     })
     .await
@@ -179,6 +181,7 @@ async fn lock_step_mode_still_works() {
         accept_new_host: true,
         trusted_pin: None,
         connect_timeout: None,
+        handshake_timeout: None,
         request_timeout: None,
     })
     .await
@@ -221,6 +224,7 @@ async fn resume_then_concurrent() {
         accept_new_host: true,
         trusted_pin: None,
         connect_timeout: None,
+        handshake_timeout: None,
         request_timeout: None,
     })
     .await
