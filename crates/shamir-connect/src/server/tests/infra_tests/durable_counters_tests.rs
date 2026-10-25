@@ -117,6 +117,27 @@ mod inner {
         assert!(s.peek(&uid, &fam).is_none());
     }
 
+    /// RV-CONNECT-2FADEBC4: a malformed persisted value (length != 16) must
+    /// not panic `unpack_value`. `try_advance` must treat it as corruption
+    /// (StorageFailed), and `peek` must return None.
+    #[test]
+    fn rv_counters_2fadebc4_malformed_persisted_value_does_not_panic() {
+        let (_dir, s) = fresh_store();
+        let uid = [7u8; 16];
+        let fam = [8u8; 16];
+        s.write_raw(&uid, &fam, &[0u8; 8]);
+        assert_eq!(
+            s.peek(&uid, &fam),
+            None,
+            "malformed value must read as None, not panic"
+        );
+        assert_eq!(
+            s.try_advance(&uid, &fam, 1),
+            AdvanceOutcome::StorageFailed,
+            "malformed persisted value is corruption, not a replay"
+        );
+    }
+
     /// RV-CONNECT-ECE3E157: every real fjall storage failure must map to
     /// `StorageFailed`, not `Replayed`. Fault-injects each real branch
     /// (get / insert / persist) on a fresh store; a control run proves the

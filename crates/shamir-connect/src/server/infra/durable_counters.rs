@@ -122,12 +122,32 @@ impl FjallConsumedCounters {
         v
     }
 
-    fn unpack_value(v: &[u8]) -> (u64, u64) {
+    fn unpack_value(v: &[u8]) -> Option<(u64, u64)> {
+        if v.len() != 16 {
+            return None;
+        }
         let mut c = [0u8; 8];
         let mut t = [0u8; 8];
         c.copy_from_slice(&v[..8]);
         t.copy_from_slice(&v[8..16]);
-        (u64::from_be_bytes(c), u64::from_be_bytes(t))
+        Some((u64::from_be_bytes(c), u64::from_be_bytes(t)))
+    }
+
+    /// Test-only: write a raw (possibly malformed) value for a key (RV-CONNECT-2FADEBC4).
+    #[cfg(test)]
+    pub(crate) fn write_raw(
+        &self,
+        user_id: &[u8; 16],
+        family_id: &[u8; limits::TICKET_FAMILY_ID_BYTES],
+        raw: &[u8],
+    ) {
+        let key = Self::key(user_id, family_id);
+        self.keyspace
+            .insert(&key[..], raw)
+            .expect("test raw insert");
+        self.db
+            .persist(PersistMode::SyncAll)
+            .expect("test raw persist");
     }
 
     /// Test helper: snapshot the current counter for a key.
@@ -138,7 +158,7 @@ impl FjallConsumedCounters {
     ) -> Option<u64> {
         let key = Self::key(user_id, family_id);
         let slice = self.keyspace.get(&key[..]).ok().flatten()?;
-        Some(Self::unpack_value(&slice).0)
+        Self::unpack_value(&slice).map(|(c, _)| c)
     }
 }
 
@@ -170,7 +190,14 @@ impl ConsumedCounterStore for FjallConsumedCounters {
                 return AdvanceOutcome::StorageFailed;
             }
         };
-        let prior_counter = prior.map(|s| Self::unpack_value(&s).0);
+        let prior_counter = match prior.map(|s| Self::unpack_value(&s)) {
+            Some(Some((c, _))) => Some(c),
+            Some(None) => {
+                log::warn!("durable_counters::try_advance: malformed persisted value (len != 16)");
+                return AdvanceOutcome::StorageFailed;
+            }
+            None => None,
+        };
         let accept = match prior_counter {
             Some(c) => new_counter > c,
             None => true,
@@ -219,10 +246,12 @@ impl ConsumedCounterStore for FjallConsumedCounters {
                 let Ok((k, v)) = guard.into_inner() else {
                     continue;
                 };
-                if k.len() != 32 || v.len() != 16 {
+                if k.len() != 32 {
                     continue;
                 }
-                let (_, last) = Self::unpack_value(&v);
+                let Some((_, last)) = Self::unpack_value(&v) else {
+                    continue;
+                };
                 if last < cutoff {
                     let mut kk = [0u8; 32];
                     kk.copy_from_slice(&k);
