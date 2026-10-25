@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use scc::hash_map::Entry;
 use scc::HashMap as SccHashMap;
 use shamir_collections::THasher;
 
@@ -22,8 +23,8 @@ use shamir_types::types::value::QueryValue;
 /// Per-database user scalar table. Lives behind an `Arc` so a
 /// [`ScalarResolver`] can hold a cheap reference on the hot filter path.
 ///
-/// Registration is lock-free via `scc::HashMap` (optimistic CAS). Lookups are
-/// read-only hash probes with no locking.
+/// Registration takes the bucket's writer lock (`entry_sync`, rare admin
+/// path); lookups take a short shared bucket read lock via `read_sync`.
 pub struct UserScalarLayer {
     fns: SccHashMap<String, FnEntry, THasher>,
 }
@@ -38,12 +39,19 @@ impl UserScalarLayer {
 
     /// Register (or replace) a user scalar under `name`.
     pub fn register(&self, name: impl Into<String>, entry: FnEntry) {
-        let _ = self.fns.insert_sync(name.into(), entry);
+        match self.fns.entry_sync(name.into()) {
+            Entry::Occupied(mut occupied) => {
+                let _ = occupied.insert(entry);
+            }
+            Entry::Vacant(vacant) => {
+                vacant.insert_entry(entry);
+            }
+        }
     }
 
     /// Look up an entry by name.
     pub fn get(&self, name: &str) -> Option<FnEntry> {
-        self.fns.get_sync(name).map(|e| e.get().clone())
+        self.fns.read_sync(name, |_, e| e.clone())
     }
 
     /// Whether the layer holds any functions.
@@ -108,7 +116,7 @@ impl ScalarResolver {
     /// builtin registry. Arity validation follows the same semantics as
     /// [`ScalarRegistry::call`](crate::registry::ScalarRegistry::call).
     pub fn call(&self, name: &str, args: &[QueryValue]) -> ScalarResult {
-        // Fast path: user layer (lock-free read, typically empty → one hash-miss).
+        // Fast path: user layer (shared bucket read lock, typically empty → one hash-miss).
         if let Some(entry) = self.user.get(name) {
             return dispatch_entry(&entry, args);
         }
