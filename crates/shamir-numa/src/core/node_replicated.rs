@@ -24,7 +24,10 @@ use crate::core::topology::Topology;
 /// lost-update-safe shape proven in the #292 / #304 `ArcSwap` migrations — then
 /// mirrors the winning value to the remaining nodes. Between the node-0 commit
 /// and the last mirror store (a few nanoseconds) different nodes may observe
-/// old-vs-new: **eventual consistency**. This is sound for read-mostly
+/// old-vs-new: **eventual consistency**. Each mirror store re-reads node 0
+/// and only completes while node 0 still holds the stored value, so a
+/// publisher whose node-0 commit was superseded cannot leave an older value
+/// behind. This is sound for read-mostly
 /// registries (index definitions, validator bindings, interner snapshots);
 /// data needing strong cross-node consistency must coordinate separately and is
 /// out of scope here.
@@ -40,6 +43,23 @@ pub struct NodeReplicated<T> {
     topology: Arc<dyn Topology>,
     /// One cell per node; `replicas.len() == max(num_nodes, 1)`.
     replicas: Box<[CachePadded<ArcSwap<T>>]>,
+    /// Deterministic pause gate for the mirror regression tests; compiled
+    /// out in production (no size or runtime cost).
+    #[cfg(test)]
+    gate: MirrorGate,
+}
+
+/// Deterministic pause gate for the mirror regression tests
+/// (`cfg(test)` only): when armed, the FIRST mirror that reaches the gate
+/// pauses after capturing node 0's value and before storing it into a
+/// replica until released (one-shot), so a test can interleave a newer
+/// publish inside that window.
+#[cfg(test)]
+#[derive(Default)]
+struct MirrorGate {
+    armed: std::sync::atomic::AtomicBool,
+    paused: std::sync::atomic::AtomicBool,
+    release: std::sync::atomic::AtomicBool,
 }
 
 impl<T: Send + Sync + 'static> NodeReplicated<T> {
@@ -53,7 +73,12 @@ impl<T: Send + Sync + 'static> NodeReplicated<T> {
             .map(|_| CachePadded::new(ArcSwap::from(Arc::clone(&shared))))
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        Self { topology, replicas }
+        Self {
+            topology,
+            replicas,
+            #[cfg(test)]
+            gate: MirrorGate::default(),
+        }
     }
 
     /// Number of per-node replicas (`== max(num_nodes, 1)`).
@@ -79,11 +104,12 @@ impl<T: Send + Sync + 'static> NodeReplicated<T> {
     }
 
     /// Publish `value` to **every** replica (copy-on-write, all nodes).
+    /// Each mirror store re-reads node 0 and only completes while node 0
+    /// still holds this publish's value, so a superseded publisher cannot
+    /// leave an older value behind.
     pub fn store(&self, value: T) {
-        let next = Arc::new(value);
-        for r in self.replicas.iter() {
-            r.0.store(Arc::clone(&next));
-        }
+        self.replicas[0].0.store(Arc::new(value));
+        self.mirror_from_node0();
     }
 
     /// Copy-on-write update applied to every replica.
@@ -91,20 +117,85 @@ impl<T: Send + Sync + 'static> NodeReplicated<T> {
     /// `f` receives the current node-0 value and returns the replacement. The
     /// update is linearised on the node-0 cell with a CAS retry loop (so
     /// concurrent `rcu` callers retry instead of clobbering each other), then
-    /// the winning value is mirrored to the other nodes. `f` may run more than
+    /// the winning value is mirrored to the other nodes. Each mirror store
+    /// re-reads node 0 and only completes while node 0 still holds the value
+    /// it stored, so a publisher whose node-0 commit was superseded cannot
+    /// overwrite a newer value on a non-zero node. `f` may run more than
     /// once under contention — it must recompute purely from its argument.
     pub fn rcu(&self, mut f: impl FnMut(&T) -> T) {
         // CAS loop on the node-0 cell — mirror of `IndexInfo::add_index` (#292).
         self.replicas[0].0.rcu(|cur| f(cur));
-        if self.replicas.len() > 1 {
-            // Mirror whatever node 0 now holds to the remaining nodes. Reading
-            // it back (rather than capturing inside the closure) keeps the
-            // mirror consistent with the value that actually won the CAS.
-            let published = self.replicas[0].0.load_full();
-            for r in self.replicas.iter().skip(1) {
-                r.0.store(Arc::clone(&published));
+        self.mirror_from_node0();
+    }
+
+    /// Mirror node 0's current value to every other replica. Each store
+    /// re-reads node 0 and only completes when node 0 still holds the value
+    /// it stored, so a publisher whose node-0 commit was later superseded
+    /// cannot leave an older value behind: the final writer per cell always
+    /// stores a value read from current node 0.
+    fn mirror_from_node0(&self) {
+        let node0 = &self.replicas[0].0;
+        for r in self.replicas.iter().skip(1) {
+            loop {
+                let p = node0.load_full();
+                // Test seam: park the FIRST publisher that reaches here with
+                // its captured value, before the replica store (the real
+                // race window between reading node 0 and storing).
+                #[cfg(test)]
+                self.gate_pause();
+                r.0.store(Arc::clone(&p));
+                if Arc::ptr_eq(&node0.load_full(), &p) {
+                    break;
+                }
             }
         }
+    }
+
+    #[cfg(test)]
+    fn gate_pause(&self) {
+        if self
+            .gate
+            .armed
+            .compare_exchange(
+                true,
+                false,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            self.gate
+                .paused
+                .store(true, std::sync::atomic::Ordering::Release);
+            while !self.gate.release.load(std::sync::atomic::Ordering::Acquire) {
+                std::hint::spin_loop();
+            }
+        }
+    }
+
+    /// Arm the gate: the next mirror pauses between its node-0 read and its replica store (one-shot).
+    #[cfg(test)]
+    pub(crate) fn arm_mirror_gate(&self) {
+        self.gate
+            .release
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.gate
+            .armed
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_mirror_paused(&self) {
+        while !self.gate.paused.load(std::sync::atomic::Ordering::Acquire) {
+            std::hint::spin_loop();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn release_mirror_gate(&self) {
+        self.gate
+            .release
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Overwrite a **single** node's replica, leaving the others untouched.
