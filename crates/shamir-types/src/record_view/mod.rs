@@ -47,6 +47,8 @@ mod scalar_ref;
 
 pub use kind::Kind;
 pub(crate) use lens::skip_value;
+#[cfg(test)]
+pub(crate) use lens::{reset_scan_steps, scan_steps};
 pub use lens::{FieldIndex, RecordView, RecordViewError, MAX_MSGPACK_DEPTH};
 pub use record_ref::{HavingView, RecordRef};
 pub use record_value::{RawSeq, RawSeqIter, RecordValue};

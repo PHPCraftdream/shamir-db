@@ -159,3 +159,19 @@ fn err_malformed_does_not_break_subsequent_safe_use() {
     let missing = InternerKey::new(999);
     assert_eq!(lens.get_int(missing), None);
 }
+
+#[test]
+fn rv_types_6866d8b8_ext32_skip_overflow_no_panic() {
+    // fixmap{1}: key bin8 len1 id 0, value = ext32 marker (0xc9) with length
+    // 0xFFFFFFFF and no payload. On 32-bit targets `1 + n` (n = u32::MAX)
+    // overflowed and panicked in skip_value; the lens must return Err instead.
+    let buf = &[0x81, 0xc4, 0x01, 0x00, 0xc9, 0xff, 0xff, 0xff, 0xff];
+    let lens = RecordView::new(buf).unwrap();
+    let key = InternerKey::new(0);
+    assert!(matches!(
+        lens.get_with_err(key.clone()).unwrap_err(),
+        RecordViewError::Truncated(_)
+    ));
+    // The same skip runs under the direct projection path.
+    assert_eq!(lens.field_value_bytes(key), None);
+}

@@ -254,3 +254,159 @@ fn projection_parity_with_direct_build() {
         "projection parity failed:\n  decoded:  {decoded:?}\n  expected: {expected_qv:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// RV-TYPES-93D11F4F: projection via the offset index (behavioural parity)
+// ---------------------------------------------------------------------------
+
+/// Behavioural parity lock for the indexed projection (perf card — the
+/// O(fields × selected) → O(fields + selected) property itself is structural).
+#[test]
+fn rv_types_93d11f4f_projection_indexed_parity() {
+    let interner = Interner::new();
+    let ka = ik(&interner, "alpha");
+    let kb = ik(&interner, "bravo");
+    let kc = ik(&interner, "charlie");
+    let kd = ik(&interner, "delta");
+    let ke = ik(&interner, "echo");
+    let kf = ik(&interner, "foxtrot");
+    let kg = ik(&interner, "golf");
+    let kh = ik(&interner, "hotel");
+
+    let mut m = new_map_wc(8);
+    m.insert(ka.clone(), InnerValue::Int(1));
+    m.insert(kb.clone(), InnerValue::Str("vb".to_owned()));
+    m.insert(kc.clone(), InnerValue::Bool(true));
+    m.insert(kd.clone(), InnerValue::Str("vd".to_owned()));
+    m.insert(ke.clone(), InnerValue::Int(5));
+    m.insert(kf.clone(), InnerValue::Bool(false));
+    m.insert(kg.clone(), InnerValue::Str("vg".to_owned()));
+    m.insert(kh.clone(), InnerValue::Int(8));
+
+    let record_bytes = InnerValue::Map(m).to_bytes().expect("to_bytes");
+    let view = RecordView::new(&record_bytes).expect("RecordView::new");
+
+    // Project a subset in non-record order, including one absent id.
+    let absent = ik(&interner, "india");
+    let selected = vec![kc.clone(), kh.clone(), ka.clone(), absent, ke.clone()];
+    let projected = record_view_to_id_msgpack(&view, &selected).expect("record_view_to_id_msgpack");
+
+    let proj_view = RecordView::new(&projected).expect("RecordView::new projected");
+    let decoded = record_view_to_query_value(&proj_view, &interner).expect("decode projected");
+
+    let mut expected = new_map_wc(4);
+    expected.insert("charlie".to_owned(), Value::Bool(true));
+    expected.insert("hotel".to_owned(), Value::Int(8));
+    expected.insert("alpha".to_owned(), Value::Int(1));
+    expected.insert("echo".to_owned(), Value::Int(5));
+    assert_eq!(decoded, QueryValue::Map(expected));
+
+    // Output order follows selected_ids order (absent id omitted).
+    let order: Vec<String> = proj_view
+        .fields()
+        .map(|(k, _)| interner.get_str(&k).expect("interned").to_string())
+        .collect();
+    assert_eq!(order, vec!["charlie", "hotel", "alpha", "echo"]);
+
+    // Parity between the new O(1) probe and the scanning field_value_bytes.
+    let index = view.index();
+    for (k, v) in [
+        (&ka, InnerValue::Int(1)),
+        (&kb, InnerValue::Str("vb".to_owned())),
+        (&kc, InnerValue::Bool(true)),
+        (&kd, InnerValue::Str("vd".to_owned())),
+    ] {
+        let bytes = index.value_bytes(k.clone()).expect("indexed probe");
+        assert_eq!(
+            InnerValue::from_bytes(bytes).unwrap(),
+            v,
+            "value_bytes parity mismatch for {k:?}"
+        );
+        assert_eq!(
+            view.field_value_bytes(k.clone()),
+            Some(bytes),
+            "probe vs scan mismatch for {k:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RV-TYPES-93D11F4F: deterministic single-top-level-pass bound
+// ---------------------------------------------------------------------------
+
+/// The indexed projection performs ONE top-level pass to build the index
+/// (2 scan steps/field: read_bin_len + skip_value) then O(1) probes per
+/// selected id. Reverting to per-id `field_value_bytes` rescans ~half the
+/// record per lookup (~n·k steps) and blows the bound.
+#[test]
+fn rv_types_93d11f4f_projection_single_top_level_pass() {
+    let interner = Interner::new();
+    let n = 60usize;
+    let mut m = new_map_wc(n);
+    let mut keys = Vec::with_capacity(n);
+    for i in 0..n {
+        let k = ik(&interner, &format!("field_{i}"));
+        m.insert(k.clone(), InnerValue::Int(i as i64));
+        keys.push(k);
+    }
+    let record_bytes = InnerValue::Map(m).to_bytes().expect("to_bytes");
+    let view = RecordView::new(&record_bytes).expect("RecordView::new");
+
+    // Scrambled present ids + 2 absent ids.
+    let absent1 = ik(&interner, "absent_one");
+    let absent2 = ik(&interner, "absent_two");
+    let selected: Vec<InternerKey> = vec![
+        keys[41].clone(),
+        keys[7].clone(),
+        keys[23].clone(),
+        absent1,
+        keys[2].clone(),
+        keys[59].clone(),
+        absent2,
+        keys[15].clone(),
+    ];
+    let k = selected.len();
+
+    crate::record_view::reset_scan_steps();
+    let projected = record_view_to_id_msgpack(&view, &selected).expect("record_view_to_id_msgpack");
+    let steps = crate::record_view::scan_steps();
+
+    // Output: the right subset, in selected order (absent omitted).
+    let proj_view = RecordView::new(&projected).expect("RecordView::new projected");
+    let order: Vec<u64> = proj_view.fields().map(|(key, _)| key.id()).collect();
+    let expected_order: Vec<u64> = selected
+        .iter()
+        .filter(|s| keys.iter().any(|pk| pk == *s))
+        .map(|s| s.id())
+        .collect();
+    assert_eq!(order, expected_order, "projected subset/order mismatch");
+    assert_eq!(proj_view.len(), 6, "6 present ids expected");
+
+    // Linear bound: one index pass (2 steps/field) + ≤ 1 skip per probe.
+    assert!(
+        steps <= 2 * n as u64 + k as u64 + 10,
+        "scan work {steps} exceeds bound {} — projection reverted to per-id rescan?",
+        2 * n as u64 + k as u64 + 10
+    );
+}
+
+// ---------------------------------------------------------------------------
+// RV-TYPES-93D11F4F: header-declared count must not reach a huge allocation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rv_types_93d11f4f_projection_header_prealloc_bounded() {
+    // map32 header declaring 0xFFFFFFFF entries with an EMPTY body — five
+    // bytes. RecordView::new accepts it (header-only validation); the index
+    // must cap its preallocation by the bytes actually present instead of
+    // allocating from the declared count.
+    let buf = [0xdf_u8, 0xff, 0xff, 0xff, 0xff];
+    let view = RecordView::new(&buf).expect("header-only record constructs");
+    // Empty selection: must return an empty id-keyed map (0x80), not abort.
+    let empty = record_view_to_id_msgpack(&view, &[]).expect("empty projection");
+    assert_eq!(empty.as_ref(), &[0x80]);
+    // Non-empty selection over the empty body: nothing present, still empty map.
+    let selected = vec![InternerKey::new(1)];
+    let projected = record_view_to_id_msgpack(&view, &selected).expect("selection projection");
+    assert_eq!(projected.as_ref(), &[0x80]);
+}

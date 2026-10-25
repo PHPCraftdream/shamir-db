@@ -334,8 +334,13 @@ impl<'a> RecordView<'a> {
     /// [`index`](Self::index) once and probe it. Uses [`THasher`] per the
     /// workspace default.
     pub fn index(&self) -> FieldIndex<'a> {
-        let mut map: TFxMap<u64, u32> =
-            TFxMap::with_capacity_and_hasher(self.n_entries, THasher::default());
+        // Cap prealloc by body size: `n_entries` is untrusted (raw header
+        // count, never validated) and each wire entry consumes ≥ 2 bytes
+        // (bin8 key header alone) — same bounded-prealloc rule as the msgpack
+        // decoders.
+        let prealloc = self.n_entries.min(self.body.len() / 2);
+        let mut map: TFxMap<u64, (usize, usize)> =
+            TFxMap::with_capacity_and_hasher(prealloc, THasher::default());
         let mut pos = 0usize;
         for _ in 0..self.n_entries {
             let klen = match read_bin_len(self.body, &mut pos) {
@@ -370,12 +375,12 @@ impl<'a> RecordView<'a> {
                 ]),
                 _ => break,
             };
-            // Record the value's offset, then skip it.
-            let value_offset = pos as u32;
+            // Record the value's span, then skip it.
+            let value_offset = pos;
             if skip_value(self.body, &mut pos, 0).is_err() {
                 break;
             }
-            map.insert(id, value_offset);
+            map.insert(id, (value_offset, pos));
         }
         FieldIndex::new(self.body, map)
     }
@@ -396,6 +401,53 @@ impl<'a> RecordView<'a> {
     #[inline]
     pub fn field_value_bytes(&self, id: InternerKey) -> Option<&'a [u8]> {
         self.value_bytes_at(std::slice::from_ref(&id))
+    }
+
+    /// Single-pass byte-range walk over the top-level map entries: calls `f`
+    /// with each `(key, raw value byte slice)` in record order — O(fields)
+    /// total, no per-field re-scan and no value decode. `Err` entries
+    /// (malformed) terminate the walk.
+    pub(crate) fn for_each_field_bytes(&self, f: &mut dyn FnMut(InternerKey, &[u8])) {
+        let mut pos = 0usize;
+        for _ in 0..self.n_entries {
+            let klen = match read_bin_len(self.body, &mut pos) {
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            let kstart = pos;
+            let kend = match kstart.checked_add(klen) {
+                Some(e) => e,
+                None => break,
+            };
+            if kend > self.body.len() {
+                break;
+            }
+            let key_bytes = &self.body[kstart..kend];
+            pos = kend;
+            // Decode the interned id from LE bytes.
+            let id = match klen {
+                1 => key_bytes[0] as u64,
+                2 => u16::from_le_bytes([key_bytes[0], key_bytes[1]]) as u64,
+                4 => u32::from_le_bytes([key_bytes[0], key_bytes[1], key_bytes[2], key_bytes[3]])
+                    as u64,
+                8 => u64::from_le_bytes([
+                    key_bytes[0],
+                    key_bytes[1],
+                    key_bytes[2],
+                    key_bytes[3],
+                    key_bytes[4],
+                    key_bytes[5],
+                    key_bytes[6],
+                    key_bytes[7],
+                ]),
+                _ => break, // invalid key length
+            };
+            let val_start = pos;
+            if skip_value(self.body, &mut pos, 0).is_err() {
+                break;
+            }
+            f(InternerKey::new(id), &self.body[val_start..pos]);
+        }
     }
 
     /// Return the raw msgpack byte slice for the value at `path` (navigating

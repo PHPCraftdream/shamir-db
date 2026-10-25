@@ -40,3 +40,6 @@ pub use field_index::FieldIndex;
 pub(crate) use read_value::read_value;
 pub(crate) use skip::skip_value;
 pub use view::RecordView;
+
+#[cfg(test)]
+pub(crate) use cursor::{reset_scan_steps, scan_steps};
