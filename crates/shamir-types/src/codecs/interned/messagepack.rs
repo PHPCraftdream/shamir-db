@@ -302,7 +302,10 @@ fn decode_array(
     len: usize,
     depth: usize,
 ) -> Result<InnerValue, CodecError> {
-    let mut arr = Vec::with_capacity(len);
+    // Cap preallocation by the remaining input: every element consumes at
+    // least one byte, so a declared count beyond it cannot be satisfied.
+    let remaining = cur.get_ref().len().saturating_sub(cur.position() as usize);
+    let mut arr = Vec::with_capacity(len.min(remaining));
     for _ in 0..len {
         arr.push(decode_value(cur, interner, depth + 1)?);
     }
@@ -315,7 +318,10 @@ fn decode_map(
     len: usize,
     depth: usize,
 ) -> Result<InnerValue, CodecError> {
-    let mut map = new_map_wc(len);
+    // Cap preallocation by the remaining input: every entry consumes at
+    // least one byte, so a declared count beyond it cannot be satisfied.
+    let remaining = cur.get_ref().len().saturating_sub(cur.position() as usize);
+    let mut map = new_map_wc(len.min(remaining));
     for _ in 0..len {
         // Read key — must be a string
         let key_marker = read_marker(cur)
@@ -578,11 +584,16 @@ pub fn merge_storage_bytes(
         val_end: usize,
     }
 
-    let mut entries: Vec<Entry> = Vec::with_capacity(n_old);
+    // Cap preallocation by the remaining bytes: each entry consumes at
+    // least two bytes (key marker + payload), so a declared count beyond
+    // `remaining` cannot be backed by the body.
+    let remaining = old_bytes.len().saturating_sub(pos);
+    let prealloc = n_old.min(remaining);
+    let mut entries: Vec<Entry> = Vec::with_capacity(prealloc);
     // Build a set of old ids for fast lookup: id → index in entries vec.
     // TFxMap<u64, usize> — standard workspace fast-hash map (no untrusted input risk).
     let mut old_ids: TFxMap<u64, usize> =
-        TFxMap::with_capacity_and_hasher(n_old, THasher::default());
+        TFxMap::with_capacity_and_hasher(prealloc, THasher::default());
 
     for idx in 0..n_old {
         let key_start = pos;

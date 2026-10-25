@@ -19,6 +19,10 @@
 use crate::registry::{arg_i64, v_bytes, v_f64, v_str, FnEntry, ScalarError, ScalarRegistry};
 use rand::RngCore;
 
+/// Ceiling on `random_bytes(n)` output size — bounds allocation
+/// amplification from an attacker-controlled `n`.
+const MAX_RANDOM_BYTES: usize = 1 << 20;
+
 /// Generate a v4 UUID: 16 random bytes with the RFC-4122 §4.4 version
 /// (bits 48-51 → `0100`) and variant (top 2 bits of byte 8 → `10`) fixups,
 /// formatted as the canonical lowercase hyphenated hex string.
@@ -69,7 +73,7 @@ pub fn register(reg: &mut ScalarRegistry) {
         FnEntry {
             f: std::sync::Arc::new(|a: &[_]| {
                 let n = arg_i64(a, 0)?;
-                if n < 0 {
+                if n < 0 || n > MAX_RANDOM_BYTES as i64 {
                     return Err(ScalarError::new("out_of_range"));
                 }
                 let mut buf = vec![0u8; n as usize];

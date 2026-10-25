@@ -18,6 +18,7 @@
 //!   `ScalarError("bad_pattern")`.
 //! - All functions are pure + deterministic (indexable).
 
+use crate::functions::text::regex_cache;
 use crate::registry::{arg_i64, arg_str, v_bool, FnEntry, ScalarError, ScalarRegistry};
 use regex::Regex;
 use shamir_types::types::value::QueryValue;
@@ -86,7 +87,11 @@ fn luhn_valid(s: &str) -> bool {
 /// requires only trailing whitespace.
 fn is_text_encoded_str(s: &str) -> bool {
     let bytes = s.as_bytes();
-    let mut p = TextFormatParser { b: bytes, i: 0 };
+    let mut p = TextFormatParser {
+        b: bytes,
+        i: 0,
+        depth: 0,
+    };
     p.skip_ws();
     if !p.value() {
         return false;
@@ -95,9 +100,14 @@ fn is_text_encoded_str(s: &str) -> bool {
     p.i == bytes.len()
 }
 
+/// Maximum container nesting accepted by the validator — a `{`/`[` deeper
+/// than this is rejected instead of driving unbounded mutual recursion.
+const MAX_JSON_DEPTH: usize = 128;
+
 struct TextFormatParser<'a> {
     b: &'a [u8],
     i: usize,
+    depth: usize,
 }
 
 impl TextFormatParser<'_> {
@@ -122,8 +132,19 @@ impl TextFormatParser<'_> {
 
     fn value(&mut self) -> bool {
         match self.b.get(self.i) {
-            Some(b'{') => self.object(),
-            Some(b'[') => self.array(),
+            Some(b'{') if self.depth < MAX_JSON_DEPTH => {
+                self.depth += 1;
+                let ok = self.object();
+                self.depth -= 1;
+                ok
+            }
+            Some(b'[') if self.depth < MAX_JSON_DEPTH => {
+                self.depth += 1;
+                let ok = self.array();
+                self.depth -= 1;
+                ok
+            }
+            Some(b'{') | Some(b'[') => false,
             Some(b'"') => self.string(),
             Some(b't') => self.eat(b"true"),
             Some(b'f') => self.eat(b"false"),
@@ -339,7 +360,7 @@ pub fn register(reg: &mut ScalarRegistry) {
             |a| {
                 let s = arg_str(a, 0)?;
                 let pat = arg_str(a, 1)?;
-                let re = Regex::new(pat).map_err(|_| ScalarError::new("bad_pattern"))?;
+                let re = regex_cache::compile(pat).map_err(|_| ScalarError::new("bad_pattern"))?;
                 Ok(v_bool(re.is_match(s)))
             },
             2,

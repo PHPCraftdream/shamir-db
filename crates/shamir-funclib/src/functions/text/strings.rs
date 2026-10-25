@@ -18,14 +18,16 @@
 //! - Regexes are compiled once and cached by pattern (Rust `regex` is
 //!   ReDoS-safe, so no input-size guard is needed).
 
+use super::regex_cache;
 use crate::registry::{
     arg_i64, arg_str, v_bool, v_int, v_list, v_str, FnEntry, ScalarError, ScalarRegistry,
     ScalarResult,
 };
-use regex::Regex;
-use shamir_collections::TFxMap;
 use shamir_types::types::value::QueryValue;
-use std::sync::{Mutex, OnceLock};
+
+/// Ceiling on any single string-scalar output (repeat / pad) — bounds
+/// amplification from attacker-controlled sizes before allocation.
+const MAX_STRING_OUTPUT_BYTES: usize = 1 << 20;
 
 /// Register the `/strings` functions.
 pub fn register(reg: &mut ScalarRegistry) {
@@ -234,6 +236,14 @@ pub fn register(reg: &mut ScalarRegistry) {
                 if n < 0 {
                     return Err(ScalarError::new("out_of_range"));
                 }
+                // Byte ceiling before allocation (checked mul first).
+                let total = s
+                    .len()
+                    .checked_mul(n as usize)
+                    .ok_or_else(|| ScalarError::new("out_of_range"))?;
+                if total > MAX_STRING_OUTPUT_BYTES {
+                    return Err(ScalarError::new("out_of_range"));
+                }
                 Ok(v_str(s.repeat(n as usize)))
             },
             2,
@@ -259,7 +269,7 @@ pub fn register(reg: &mut ScalarRegistry) {
         "is_reg_match",
         FnEntry::pure(
             |a| {
-                let re = compile(arg_str(a, 1)?)?;
+                let re = regex_cache::compile(arg_str(a, 1)?)?;
                 Ok(v_bool(re.is_match(arg_str(a, 0)?)))
             },
             2,
@@ -271,7 +281,7 @@ pub fn register(reg: &mut ScalarRegistry) {
         FnEntry::pure(
             |a| {
                 let s = arg_str(a, 0)?;
-                let re = compile(arg_str(a, 1)?)?;
+                let re = regex_cache::compile(arg_str(a, 1)?)?;
                 match re.find(s) {
                     Some(m) => Ok(v_str(m.as_str().to_string())),
                     None => Err(ScalarError::new("no_match")),
@@ -286,7 +296,7 @@ pub fn register(reg: &mut ScalarRegistry) {
         FnEntry::pure(
             |a| {
                 let s = arg_str(a, 0)?;
-                let re = compile(arg_str(a, 1)?)?;
+                let re = regex_cache::compile(arg_str(a, 1)?)?;
                 let items = re
                     .find_iter(s)
                     .map(|m| v_str(m.as_str().to_string()))
@@ -304,7 +314,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 // Capture groups of the first match (group 0 = whole match).
                 // A non-participating group yields "". No match -> no_match.
                 let s = arg_str(a, 0)?;
-                let re = compile(arg_str(a, 1)?)?;
+                let re = regex_cache::compile(arg_str(a, 1)?)?;
                 match re.captures(s) {
                     Some(caps) => {
                         let items = caps
@@ -325,7 +335,7 @@ pub fn register(reg: &mut ScalarRegistry) {
         FnEntry::pure(
             |a| {
                 let s = arg_str(a, 0)?;
-                let re = compile(arg_str(a, 1)?)?;
+                let re = regex_cache::compile(arg_str(a, 1)?)?;
                 let repl = arg_str(a, 2)?;
                 Ok(v_str(re.replace_all(s, repl).into_owned()))
             },
@@ -338,7 +348,7 @@ pub fn register(reg: &mut ScalarRegistry) {
         FnEntry::pure(
             |a| {
                 let s = arg_str(a, 0)?;
-                let re = compile(arg_str(a, 1)?)?;
+                let re = regex_cache::compile(arg_str(a, 1)?)?;
                 let items = re.split(s).map(|p| v_str(p.to_string())).collect();
                 Ok(v_list(items))
             },
@@ -351,7 +361,7 @@ pub fn register(reg: &mut ScalarRegistry) {
         FnEntry::pure(
             |a| {
                 let s = arg_str(a, 0)?;
-                let re = compile(arg_str(a, 1)?)?;
+                let re = regex_cache::compile(arg_str(a, 1)?)?;
                 Ok(v_int(re.find_iter(s).count() as i64))
             },
             2,
@@ -364,7 +374,7 @@ pub fn register(reg: &mut ScalarRegistry) {
             |a| {
                 // 0-based char index of the first match start, or -1.
                 let s = arg_str(a, 0)?;
-                let re = compile(arg_str(a, 1)?)?;
+                let re = regex_cache::compile(arg_str(a, 1)?)?;
                 let idx = match re.find(s) {
                     Some(m) => s[..m.start()].chars().count() as i64,
                     None => -1,
@@ -403,32 +413,20 @@ fn pad(args: &[QueryValue], side: Pad) -> ScalarResult {
     if cur >= target {
         return Ok(v_str(s.to_string()));
     }
+    // Byte ceiling before building the intermediate fill string. The real
+    // output is s.len() + (target - cur) pad chars (NOT target) — counting
+    // `target` chars spuriously rejects already-large inputs just under the
+    // cap.
+    let out_bytes = (target - cur)
+        .saturating_mul(ch.len_utf8())
+        .saturating_add(s.len());
+    if out_bytes > MAX_STRING_OUTPUT_BYTES {
+        return Err(ScalarError::new("out_of_range"));
+    }
     let fill: String = std::iter::repeat_n(ch, target - cur).collect();
     let out = match side {
         Pad::Left => format!("{fill}{s}"),
         Pad::Right => format!("{s}{fill}"),
     };
     Ok(v_str(out))
-}
-
-/// Compile `pat`, caching by pattern string. Rust's `regex` engine has linear
-/// time guarantees, so a shared cache is ReDoS-safe. Invalid patterns ->
-/// `ScalarError("bad_regex")`.
-fn compile(pat: &str) -> Result<Regex, ScalarError> {
-    static CACHE: OnceLock<Mutex<TFxMap<String, Regex>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(TFxMap::default()));
-    // Lock is poison-tolerant: a panic-while-compiling cannot corrupt the map
-    // (Regex compilation does not mutate it under the guard), so recover the
-    // inner map either way.
-    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(re) = guard.get(pat) {
-        return Ok(re.clone());
-    }
-    let re = Regex::new(pat).map_err(|_| ScalarError::new("bad_regex"))?;
-    // Bound the cache to avoid unbounded growth from adversarial pattern churn.
-    if guard.len() >= 256 {
-        guard.clear();
-    }
-    guard.insert(pat.to_string(), re.clone());
-    Ok(re)
 }

@@ -693,3 +693,253 @@ fn when_query_ref_participates_in_dag_as_dataflow() {
          check; got check_stage={check_stage}, orders_stage={orders_stage}"
     );
 }
+
+// -------------------------------------------------------------------------
+// RV-QUERY-TYPES-8257ACB4 — planner walks over attacker-shaped inputs must
+// be iterative / depth-bounded, not unbounded native recursion.
+// -------------------------------------------------------------------------
+
+#[test]
+fn rv_query_types_8257acb4_long_alias_chain_is_iteratively_walked() {
+    // 50k-long acyclic `after` chain: the pre-fix recursive cycle/depth DFS
+    // overflowed the stack BEFORE the depth check could reject the plan.
+    let n = 50_000usize;
+    let mut queries: TMap<String, QueryEntry> = new_map();
+    for i in 0..n {
+        let mut e = read_entry("t");
+        if i + 1 < n {
+            e.after = vec![format!("q{}", i + 1)];
+        }
+        queries.insert(format!("q{i}"), e);
+    }
+    let limits = BatchLimits {
+        max_queries: n,
+        max_total_queries: n,
+        max_total_work: u64::MAX,
+        ..BatchLimits::default()
+    };
+    let res = BatchPlanner::plan(&queries, &limits);
+    assert!(
+        matches!(res, Err(BatchError::TooDeep { .. })),
+        "long acyclic chain must be rejected by the depth check, not overflow the stack"
+    );
+}
+
+#[test]
+fn rv_query_types_8257acb4_depth_wave_direction_chain_of_three() {
+    // Deterministic direction check for `calculate_max_depth`: an `after`
+    // chain q0 <- q1 <- q2 has dependency depth 2 (q2 depends on q1 which
+    // depends on q0). With max_dependency_depth = 1 the 2-node chain
+    // (depth 1) must plan OK while the 3-node chain (depth 2) must be
+    // rejected as TooDeep{depth: 2, max: 1} — a wave walk in the wrong
+    // direction yields 0 and silently passes both.
+    let mk_queries = |n: usize| {
+        let mut queries: TMap<String, QueryEntry> = new_map();
+        for i in 0..n {
+            let mut e = read_entry("t");
+            if i + 1 < n {
+                e.after = vec![format!("q{}", i + 1)];
+            }
+            queries.insert(format!("q{i}"), e);
+        }
+        queries
+    };
+
+    // Within limit: 2-node chain, depth 1, max 1 → Ok with 2 stages.
+    let limits = BatchLimits {
+        max_queries: 2,
+        max_total_queries: 2,
+        max_total_work: u64::MAX,
+        max_dependency_depth: 1,
+        ..BatchLimits::default()
+    };
+    let plan = BatchPlanner::plan(&mk_queries(2), &limits).expect("depth-1 chain must plan");
+    assert_eq!(plan.stages.len(), 2, "chain of 2 = 2 sequential stages");
+
+    // Over limit: 3-node chain, depth 2 > max 1 → TooDeep{2, 1}.
+    let limits = BatchLimits {
+        max_queries: 3,
+        max_total_queries: 3,
+        max_total_work: u64::MAX,
+        max_dependency_depth: 1,
+        ..BatchLimits::default()
+    };
+    let res = BatchPlanner::plan(&mk_queries(3), &limits);
+    match res {
+        Err(BatchError::TooDeep { depth, max }) => {
+            assert_eq!((depth, max), (2, 1), "chain of 3 has depth 2");
+        }
+        other => panic!("expected TooDeep{{depth:2, max:1}}, got {other:?}"),
+    }
+}
+
+#[test]
+fn rv_query_types_8257acb4_deep_write_value_extraction_is_depth_bounded() {
+    // 200k-deep nested List in a `Set` write value: dependency extraction
+    // must hit the depth bound instead of recursing to stack overflow. The
+    // tree is leaked (forget) because dropping it is itself recursive.
+    let mut v = QueryValue::Int(1);
+    for _ in 0..200_000 {
+        v = QueryValue::List(vec![v]);
+    }
+    let op = BatchOp::Set(crate::write::SetOp {
+        set: crate::TableRef::new("t"),
+        key: QueryValue::Int(1),
+        value: v,
+    });
+    let mut queries: TMap<String, QueryEntry> = new_map();
+    queries.insert(
+        "q0".to_string(),
+        QueryEntry {
+            op,
+            return_result: true,
+            after: Vec::new(),
+            when: None,
+        },
+    );
+    let res = BatchPlanner::plan(&queries, &BatchLimits::default());
+    std::mem::forget(queries);
+    assert!(
+        matches!(res, Err(BatchError::NestingTooDeep { .. })),
+        "deep write value must hit the extraction depth bound"
+    );
+}
+
+#[test]
+fn rv_query_types_8257acb4_deep_select_expr_conversion_is_gated() {
+    // 200k-deep `SelectExpr` in a `SelectItem::Expression`: the depth-bounded
+    // extractor only guards `to_filter_value()`'s OUTPUT — the conversion
+    // itself recurses through Add children with no depth state, so the INPUT
+    // tree must be probed iteratively FIRST. Tree leaked (forget): dropping
+    // it is itself recursive. Without the probe+early-return this
+    // stack-overflows inside `to_filter_value`.
+    let mut expr = crate::read::SelectExpr::Literal {
+        value: crate::read::SelectExprValue::Int(1),
+    };
+    for _ in 0..200_000 {
+        expr = crate::read::SelectExpr::Add {
+            left: Box::new(expr),
+            right: Box::new(crate::read::SelectExpr::Literal {
+                value: crate::read::SelectExprValue::Int(1),
+            }),
+        };
+    }
+    let q = ReadQuery {
+        from: crate::TableRef::new("t"),
+        r#where: None,
+        select: crate::read::Select {
+            items: vec![crate::read::SelectItem::Expression { expr, alias: None }],
+            distinct: false,
+        },
+        order_by: None,
+        pagination: crate::read::Pagination::default(),
+        group_by: None,
+        count_total: false,
+        temporal: crate::read::Temporal::default(),
+        with_version: false,
+        explain: false,
+    };
+    let mut queries: TMap<String, QueryEntry> = new_map();
+    queries.insert(
+        "q0".to_string(),
+        QueryEntry {
+            op: BatchOp::Read(q),
+            return_result: true,
+            after: Vec::new(),
+            when: None,
+        },
+    );
+    let res = BatchPlanner::plan(&queries, &BatchLimits::default());
+    std::mem::forget(queries);
+    assert!(
+        matches!(res, Err(BatchError::NestingTooDeep { .. })),
+        "deep select expression must be rejected before to_filter_value runs"
+    );
+}
+
+#[test]
+fn rv_query_types_8257acb4_deep_when_comparison_walk_is_bounded() {
+    // 200k-deep nested `Filter::Not` wrapping an inner field-based
+    // comparison, set as a query's `when`: `contains_field_based_comparison`
+    // must hit its depth cap (returning conservative `true`) instead of
+    // recursing to stack overflow — the conservative-true converts the deep
+    // filter into `InvalidWhenFilter`. Tree leaked (forget): dropping it is
+    // itself recursive. Fails (stack overflow) if ONLY the depth guards in
+    // `contains_field_based_comparison`/
+    // `filter_value_contains_field_based_comparison` are reverted.
+    let mut f = crate::filter::Filter::Eq {
+        field: vec!["a".to_string()],
+        value: FilterValue::Int(1),
+    };
+    for _ in 0..200_000 {
+        f = crate::filter::Filter::Not {
+            filter: Box::new(f),
+        };
+    }
+    let mut queries: TMap<String, QueryEntry> = new_map();
+    queries.insert(
+        "q0".to_string(),
+        QueryEntry {
+            op: BatchOp::Read(crate::read::ReadQuery {
+                from: crate::TableRef::new("t"),
+                r#where: None,
+                select: crate::read::Select::all(),
+                order_by: None,
+                pagination: crate::read::Pagination::default(),
+                group_by: None,
+                count_total: false,
+                temporal: crate::read::Temporal::default(),
+                with_version: false,
+                explain: false,
+            }),
+            return_result: true,
+            after: Vec::new(),
+            when: Some(f),
+        },
+    );
+    let res = BatchPlanner::plan(&queries, &BatchLimits::default());
+    std::mem::forget(queries);
+    assert!(
+        matches!(res, Err(BatchError::InvalidWhenFilter { .. })),
+        "over-deep `when` filter must be conservatively rejected as InvalidWhenFilter"
+    );
+}
+
+#[test]
+fn rv_query_types_8257acb4_deep_marker_value_skips_serde() {
+    // 200k-deep nested List wrapped as a `$expr` marker map in a `Set` value:
+    // the marker path calls `rmp_serde::to_vec_named(value)` — which
+    // serializes the ENTIRE tree recursively — so it must be gated by
+    // `value_height_bounded` first. Over-deep markers fall through to the
+    // depth-bounded plain recursion and are rejected with NestingTooDeep.
+    // Without ONLY the `value_height_bounded` guard, serde recurses to stack
+    // overflow. Tree leaked (forget): dropping it is itself recursive.
+    let mut v = QueryValue::Int(1);
+    for _ in 0..200_000 {
+        v = QueryValue::List(vec![v]);
+    }
+    let mut marker: TMap<String, QueryValue> = new_map();
+    marker.insert("$expr".to_string(), v);
+    let value = QueryValue::Map(marker);
+    let op = BatchOp::Set(crate::write::SetOp {
+        set: crate::TableRef::new("t"),
+        key: QueryValue::Int(1),
+        value,
+    });
+    let mut queries: TMap<String, QueryEntry> = new_map();
+    queries.insert(
+        "q0".to_string(),
+        QueryEntry {
+            op,
+            return_result: true,
+            after: Vec::new(),
+            when: None,
+        },
+    );
+    let res = BatchPlanner::plan(&queries, &BatchLimits::default());
+    std::mem::forget(queries);
+    assert!(
+        matches!(res, Err(BatchError::NestingTooDeep { .. })),
+        "over-deep marker value must skip serde and hit the extraction depth bound"
+    );
+}
