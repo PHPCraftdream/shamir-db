@@ -31,6 +31,31 @@ pub enum FrameError {
     /// Peer sent a graceful-close (length == 0).
     #[error("peer requested close")]
     PeerClose,
+    /// Peer ended the stream while the 4-byte length header was being read
+    /// (clean EOF at a frame boundary) — an abrupt disconnect, distinct
+    /// from a graceful close and from a mid-body truncation (`Io`).
+    #[error("peer eof")]
+    PeerEof,
+}
+
+/// Read the 4-byte length header. EOF before the first header byte is
+/// [`FrameError::PeerEof`] (peer disconnected between frames); EOF after one
+/// to three header bytes is a truncated frame (`Io(UnexpectedEof)`).
+async fn read_len_header<R: AsyncRead + Unpin>(reader: &mut R) -> Result<usize, FrameError> {
+    let mut len_buf = [0u8; 4];
+    let mut got = 0;
+    while got < len_buf.len() {
+        let n = reader.read(&mut len_buf[got..]).await?;
+        if n == 0 {
+            return Err(if got == 0 {
+                FrameError::PeerEof
+            } else {
+                FrameError::Io(std::io::ErrorKind::UnexpectedEof.into())
+            });
+        }
+        got += n;
+    }
+    Ok(u32::from_be_bytes(len_buf) as usize)
 }
 
 /// Read one frame: `[u32_be length][bytes]`.
@@ -46,9 +71,7 @@ pub async fn read_frame<R: AsyncRead + Unpin>(
     reader: &mut R,
     max_frame_size: usize,
 ) -> Result<Vec<u8>, FrameError> {
-    let mut len_buf = [0u8; 4];
-    reader.read_exact(&mut len_buf).await?;
-    let len = u32::from_be_bytes(len_buf) as usize;
+    let len = read_len_header(reader).await?;
 
     if len == 0 {
         return Err(FrameError::PeerClose);
@@ -97,9 +120,7 @@ pub async fn read_frame_into<R: AsyncRead + Unpin>(
     max_frame_size: usize,
     buf: &mut Vec<u8>,
 ) -> Result<(), FrameError> {
-    let mut len_buf = [0u8; 4];
-    reader.read_exact(&mut len_buf).await?;
-    let len = u32::from_be_bytes(len_buf) as usize;
+    let len = read_len_header(reader).await?;
 
     if len == 0 {
         return Err(FrameError::PeerClose);

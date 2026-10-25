@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
@@ -16,9 +17,62 @@ use shamir_query_types::wire::repl::{ReplRequest, ReplResponse};
 use shamir_query_types::wire::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
 
 use crate::client::subscription::{SubscriptionHandle, CLIENT_SUB_CHANNEL_CAP};
-use crate::client::transport::await_pending_response;
+use crate::client::transport::{await_pending_response, Lifecycle};
 use crate::client::Client;
-use crate::error::ClientError;
+use crate::error::{ClientError, CloseCause};
+
+/// Cancellation-safety guard for a registered pending entry (P0 write-phase):
+/// created right after the locked insert; its `Drop` removes the entry IF it
+/// is still present — a no-op once the reader resolved/drained it or the
+/// request timeout removed it.
+struct RegistrationGuard {
+    state: Lifecycle,
+    rid: u32,
+}
+
+impl Drop for RegistrationGuard {
+    fn drop(&mut self) {
+        let mut reg = self.state.pending.lock().unwrap_or_else(|p| p.into_inner());
+        reg.map.remove(&self.rid);
+    }
+}
+
+/// Cancellation-safety guard for the write phase (P0 C1): armed right after
+/// the writer is acquired and the authoritative recheck passed. If the
+/// caller's future is DROPPED mid-frame (unexpected cancellation), `Drop`
+/// shuts the lifecycle down irreversibly — the connection must never stay
+/// reusable after a partially written frame. Every normal exit path defuses
+/// the guard first; `Lifecycle::shutdown` is idempotent (first cause wins),
+/// so a defused-vs-explicit overlap is harmless.
+struct WriteCancelGuard {
+    state: Lifecycle,
+    cause: std::cell::Cell<Option<CloseCause>>,
+}
+
+impl WriteCancelGuard {
+    fn new(state: &Lifecycle) -> Self {
+        Self {
+            state: state.clone(),
+            cause: std::cell::Cell::new(Some(CloseCause::Io(Arc::from(
+                "write cancelled mid-frame",
+            )))),
+        }
+    }
+
+    /// Normal completion (including the closed_wait branch — the existing
+    /// cause wins): prevent the Drop shutdown.
+    fn defuse(&self) {
+        self.cause.set(None);
+    }
+}
+
+impl Drop for WriteCancelGuard {
+    fn drop(&mut self) {
+        if let Some(cause) = self.cause.take() {
+            self.state.shutdown(cause);
+        }
+    }
+}
 
 impl Client {
     /// 32-byte session id assigned by the server.
@@ -64,34 +118,44 @@ impl Client {
     /// The caller must have already sent a subscribe request to the server
     /// and obtained the `sub_id`. Push frames arriving for this `sub_id`
     /// will be routed to the returned handle.
+    ///
+    /// On a closed client, returns an already-ended handle (empty stream,
+    /// [`SubscriptionHandle::termination`] carrying the close cause).
     pub fn subscribe_push(&self, sub_id: u64) -> SubscriptionHandle {
         let (tx, rx) = tokio::sync::mpsc::channel(CLIENT_SUB_CHANNEL_CAP);
+        let (term_tx, term_rx) = tokio::sync::oneshot::channel();
         {
-            let mut map = self.subscriptions.lock().unwrap_or_else(|p| p.into_inner());
-            map.insert(sub_id, tx.clone());
-        }
-        // Flush any early-buffered pushes that arrived before registration.
-        {
-            let mut buf = self.early_buffer.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(buffered) = buf.remove(&sub_id) {
-                for envelope in buffered {
-                    match tx.try_send(envelope) {
-                        Ok(()) => {}
-                        Err(tokio::sync::mpsc::error::TrySendError::Full(env)) => {
-                            tracing::warn!(
-                                "client mpsc full for sub={} while flushing early buffer; dropping push",
-                                env.sub
-                            );
-                        }
-                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                            // Receiver gone before we finished flushing — bail.
-                            break;
+            // ONE subs lock: closed check, sender insert and early-buffer
+            // flush are atomic w.r.t. push routing and shutdown.
+            // §B2 audit: std::sync::Mutex, no .await while held — fine.
+            let mut subs = self.state.subs.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(cause) = subs.closed.clone() {
+                // Closed client: return an already-ended handle (drop tx).
+                let _ = term_tx.send(cause);
+            } else {
+                subs.live.insert(sub_id, tx.clone());
+                // The handle learns its typed termination cause from here.
+                subs.terminal.insert(sub_id, term_tx);
+                if let Some(buffered) = subs.early.remove(&sub_id) {
+                    for envelope in buffered {
+                        match tx.try_send(envelope) {
+                            Ok(()) => {}
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(env)) => {
+                                tracing::warn!(
+                                    "client mpsc full for sub={} while flushing early buffer; dropping push",
+                                    env.sub
+                                );
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                // Receiver gone before we finished flushing — bail.
+                                break;
+                            }
                         }
                     }
                 }
             }
         }
-        SubscriptionHandle::new(sub_id, rx, self.subscriptions.clone())
+        SubscriptionHandle::new(sub_id, rx, self.state.subs.clone(), term_rx)
     }
 
     /// Health check.
@@ -297,6 +361,16 @@ impl Client {
         }
     }
 
+    /// Test-only seam (P0 C1 write-phase): take and HOLD the write mutex so
+    /// a spawned request parks on writer acquisition. The test drops the
+    /// returned guard to release the writer.
+    #[cfg(test)]
+    pub(crate) async fn hold_writer_for_test(
+        &self,
+    ) -> tokio::sync::MutexGuard<'_, crate::client::transport::WriteSink> {
+        self.write.lock().await
+    }
+
     /// Send a request and route the response via the rid-demux pending map.
     ///
     /// 1. Allocate rid and register the oneshot **before** writing (no race
@@ -308,8 +382,16 @@ impl Client {
     /// `cursor_stream`'s `CursorStream` — can drive their own
     /// request/response cycles without duplicating this primitive.
     pub(crate) async fn roundtrip(&self, req: &DbRequest) -> Result<DbResponse, ClientError> {
-        if self.closed.load(Ordering::Acquire) {
-            return Err(ClientError::ConnectionClosed);
+        // FAST PATH ONLY: `closed_hint` is not authoritative; the locked
+        // recheck below is the authoritative closed check.
+        if self.state.closed_hint.load(Ordering::Acquire) {
+            return Err(ClientError::ConnectionClosed(
+                self.state.cause().unwrap_or(CloseCause::ReaderCancelled),
+            ));
+        }
+        #[cfg(test)]
+        if let Some(hook) = &self.hooks.after_fast_check {
+            hook.fire().await;
         }
 
         // T-cl-1: thread-local scratch buffer for request serialisation.
@@ -334,32 +416,99 @@ impl Client {
             .map_err(|e| ClientError::Protocol(format!("envelope encode: {e}")))?;
 
         // Register BEFORE writing — avoid a race where the server sends the
-        // response before we reach the oneshot registration.
+        // response before we reach the oneshot registration. The closed
+        // recheck and the insert happen ATOMICALLY under the same registry
+        // lock that publishes the close cause (P0 RV-CLIENT-B42B8576).
         let (tx, rx) = oneshot::channel();
-        {
+        let registration_guard = {
             // §B2 audit: std::sync::Mutex, no .await while held — fine.
-            let mut map = self.pending.lock().unwrap_or_else(|p| p.into_inner());
-            map.insert(rid, tx);
+            let mut reg = self.state.pending.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(cause) = reg.closed.clone() {
+                return Err(ClientError::ConnectionClosed(cause));
+            }
+            reg.map.insert(rid, tx);
+            RegistrationGuard {
+                state: self.state.clone(),
+                rid,
+            }
+        };
+        #[cfg(test)]
+        if let Some(hook) = &self.hooks.after_register {
+            hook.fire().await;
         }
 
-        // Send the request.  If write fails, remove the pending entry and
-        // propagate the error so the caller is not left waiting on a dead rx.
-        {
-            let mut write = self.write.lock().await;
-            if let Err(e) = write_frame(&mut *write, &envelope_bytes).await {
-                // Clean up pending entry.
-                let mut map = self.pending.lock().unwrap_or_else(|p| p.into_inner());
-                map.remove(&rid);
-                return Err(ClientError::Transport(format!("send: {e}")));
+        // Send the request. Writer acquisition and the write itself are BOTH
+        // raced against closure (watch channel), so a shutdown while we are
+        // blocked on either unblocks us instead of hanging (P0 write-phase).
+        let write_result = {
+            let mut write = tokio::select! {
+                w = self.write.lock() => w,
+                cause = self.state.closed_wait() => {
+                    return Err(ClientError::ConnectionClosed(cause));
+                }
+            };
+            // Authoritative recheck AFTER acquiring the writer: the fast
+            // path above is only a hint.
+            if let Some(cause) = self
+                .state
+                .pending
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .closed
+                .clone()
+            {
+                return Err(ClientError::ConnectionClosed(cause));
             }
+            #[cfg(test)]
+            if let Some(hook) = &self.hooks.after_writer_acquired {
+                hook.fire().await;
+            }
+            // Mid-frame cancellation safety: only an UNEXPECTED drop of this
+            // future leaves the guard armed — every resolved arm defuses it.
+            let cancel_guard = WriteCancelGuard::new(&self.state);
+            tokio::select! {
+                // Biased: a pending closure beats a write onto a dying
+                // connection, so a released hook never emits wire bytes.
+                biased;
+                cause = self.state.closed_wait() => {
+                    cancel_guard.defuse();
+                    drop(write);
+                    return Err(ClientError::ConnectionClosed(cause));
+                }
+                r = write_frame(&mut *write, &envelope_bytes) => {
+                    // On Err the shared shutdown(Io) below runs with the real
+                    // transport cause — the guard must not double-close.
+                    cancel_guard.defuse();
+                    r.map(|_| ())
+                }
+            }
+        };
+        if let Err(e) = write_result {
+            // Real transport failure: run the shared shutdown FIRST (so the
+            // lifecycle records the Io cause and drains all waiters), then
+            // remove OUR entry. If it is already gone, the drain resolved it
+            // — surface the drained result; otherwise the transport error.
+            let cause: Arc<str> = Arc::from(format!("send: {e}"));
+            self.state.shutdown(CloseCause::Io(cause));
+            let removed = {
+                let mut reg = self.state.pending.lock().unwrap_or_else(|p| p.into_inner());
+                reg.map.remove(&rid)
+            };
+            if removed.is_none() {
+                let payload = await_pending_response(rx, None, &self.state, rid).await?;
+                let response: DbResponse = rmp_serde::from_slice(&payload)?;
+                return crate::visibility::map_response(response);
+            }
+            return Err(ClientError::Transport(format!("send: {e}")));
         }
 
         // Await our oneshot.  The reader task delivers Ok(payload) or Err.
         // When `request_timeout` is set, bound the wait: a server that
         // accepts the connection but never answers this rid must not hang
         // the caller forever. `None` preserves the original unbounded await.
-        let payload = await_pending_response(rx, self.request_timeout, &self.pending, rid).await?;
+        let payload = await_pending_response(rx, self.request_timeout, &self.state, rid).await?;
 
+        drop(registration_guard);
         let response: DbResponse = rmp_serde::from_slice(&payload)?;
         crate::visibility::map_response(response)
     }
@@ -369,7 +518,10 @@ impl Client {
     /// After this call the session is dead on the server side too
     /// (TCP close → session evicted).
     pub async fn close(mut self) {
-        // Abort reader task first — then shut down write half.
+        // Terminal transition FIRST: every pending request fails with
+        // `LocalClose` and every subscription handle ends BEFORE the reader
+        // is torn down, so no consumer can outlive its cause.
+        self.state.shutdown(CloseCause::LocalClose);
         if let Some(handle) = self.reader_handle.take() {
             handle.abort();
         }
@@ -380,6 +532,9 @@ impl Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
+        // Terminal transition BEFORE aborting the reader (P0 C1): Drop must
+        // close subscriptions and fail pending requests with ClientDropped.
+        self.state.shutdown(CloseCause::ClientDropped);
         // §B21: abort the reader task when the Client drops without an
         // explicit `close()` call so the task does not outlive the Client.
         if let Some(handle) = self.reader_handle.take() {
