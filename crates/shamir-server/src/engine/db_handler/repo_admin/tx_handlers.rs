@@ -7,6 +7,36 @@ use crate::tx_registry::{InteractiveTx, TxRegistryError};
 use super::admin::{check_destructive_hmacs, is_coarse_admin_gate_exempt};
 use super::handler::{DbResponse, ShamirDbHandler, INTERACTIVE_TX_MAX_LIFETIME};
 
+use crate::db_handler::config::NodeMode;
+
+/// RV-SERVER-C73466A7: `execute`'s read-only replica gate applied to the
+/// interactive path (same contract, same classifier). A `ReadOnly` node
+/// still SERVES reads inside transactions — the card explicitly preserves
+/// permitted reads (P0.md, "сохранении actor DAC и разрешённых reads") —
+/// so a tx batch is rejected with the existing `read_only_replica` error
+/// only when it contains a mutating operation, classified by the SAME
+/// `BatchOp::is_write` visitor the non-transactional `execute` uses
+/// (`handler.rs`). No-op for `ReadWrite`.
+fn read_only_tx_write_gate(node_mode: NodeMode, batch: &BatchRequest) -> Option<DbResponse> {
+    if node_mode != NodeMode::ReadOnly {
+        return None;
+    }
+    for visit in BatchTreeVisitor::new(&batch.queries).filter(|visit| visit.body_depth().is_none())
+    {
+        let (alias, entry) = (visit.alias, visit.entry);
+        if entry.op.is_write() {
+            return Some(DbResponse::Error {
+                code: "read_only_replica".into(),
+                message: format!(
+                    "query '{}' is a write; this node is a read-only replica",
+                    alias
+                ),
+            });
+        }
+    }
+    None
+}
+
 impl ShamirDbHandler {
     /// Phase B BEGIN — open an interactive tx, park it in the registry bound
     /// to this session, reply with the minted handle + snapshot version.
@@ -24,6 +54,10 @@ impl ShamirDbHandler {
                 message: e.to_string(),
             };
         }
+        // RV-SERVER-C73466A7: TxBegin is NOT mode-gated — opening a
+        // snapshot transaction is read-capable and a read-only replica must
+        // keep serving reads inside interactive transactions. Writes are
+        // refused per-op at TxExecute and at commit (below).
         let iso = isolation.unwrap_or(IsolationLevel::Snapshot);
 
         let actor = super::handler::session_actor(session);
@@ -89,6 +123,10 @@ impl ShamirDbHandler {
                 code: "unsupported_query_version".into(),
                 message: e.to_string(),
             };
+        }
+
+        if let Some(resp) = read_only_tx_write_gate(self.node_mode, &batch) {
+            return resp;
         }
 
         let nested_override =
@@ -288,6 +326,23 @@ impl ShamirDbHandler {
             return DbResponse::Error {
                 code: "tx_wrong_db".into(),
                 message: format!("handle pinned to db '{}', got '{}'", it.db(), db_name),
+            };
+        }
+
+        // RV-SERVER-C73466A7: a read-only node must never land staged
+        // writes. The commit is refused ONLY when the tx actually staged a
+        // write; a read-only (snapshot) tx commits normally.
+        let staged_bytes = {
+            let guard = it.ctx().lock().await;
+            guard.as_ref().map_or(0, |tx| tx.staged_bytes())
+        };
+        if self.node_mode == NodeMode::ReadOnly && staged_bytes > 0 {
+            return DbResponse::Error {
+                code: "read_only_replica".into(),
+                message: format!(
+                    "transaction has staged writes ({} bytes); this node is a read-only replica",
+                    staged_bytes
+                ),
             };
         }
 
