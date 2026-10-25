@@ -76,5 +76,12 @@ pub use shamir_query_types::read::{At, OrderDirection, Temporal};
 pub use batch::subscribe::{SourceBuilder, Subscribe};
 pub use shamir_query_types::subscribe::{DeliverMode, EventMask};
 
+// Re-export the `q!(call ...)` expansion types so the macro expansion only
+// references `::shamir_query_builder` paths (RV-QUERY-BUILDER-MACROS-36328515).
+#[doc(hidden)]
+pub use shamir_query_types::call::CallOp;
+#[doc(hidden)]
+pub use shamir_query_types::filter::FilterValue;
+
 // Re-export proc-macros so users get `shamir_query_builder::{filter, q}`.
 pub use shamir_query_builder_macros::{filter, q};

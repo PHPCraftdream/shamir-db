@@ -152,10 +152,13 @@ pub(crate) struct UpsertMacro {
     pub(crate) value_doc: DocMapAst,
 }
 
-/// `q!(call <fn_name>(arg1, arg2, ...))`.
+/// `q!(call <fn_name>(arg1, arg2, ...))` or `q!(call <repo>.<fn_name>(...))`.
 pub(crate) struct CallMacro {
     /// Function name — ident or string literal.
     pub(crate) name: CallName,
+    /// Repository qualifier — the ident before the dot in
+    /// `call my_repo.daily(...)`; defaults to `"main"`.
+    pub(crate) repo: Option<Ident>,
     /// Positional arguments (each is an expression → `FilterValue`).
     pub(crate) args: Vec<Expr>,
 }
@@ -207,7 +210,7 @@ impl Parse for QueryMacro {
         // -- where <expr> (optional) --
         let where_clause = if input.peek(Token![where]) {
             input.parse::<Token![where]>()?;
-            let expr = parse_filter_expr(input)?;
+            let expr = parse_filter_expr(input, "where")?;
             Some(expr)
         } else {
             None
@@ -230,7 +233,7 @@ impl Parse for QueryMacro {
         // -- having <expr> (optional, after group_by) --
         let having_clause = if input.peek(kw::having) {
             input.parse::<kw::having>()?;
-            let expr = parse_filter_expr(input)?;
+            let expr = parse_filter_expr(input, "having")?;
             Some(expr)
         } else {
             None
@@ -303,6 +306,10 @@ impl Parse for QueryMacro {
             ));
         }
 
+        // Reject duplicate select output keys (FB738525): the engine would
+        // silently overwrite one aggregate with another sharing its alias.
+        check_duplicate_select_keys(&select_items)?;
+
         Ok(QueryMacro {
             table,
             where_clause,
@@ -345,6 +352,48 @@ fn parse_table_arg(input: ParseStream) -> syn::Result<TableArg> {
     Ok(TableArg::Simple(TableName::Ident(first)))
 }
 
+/// Output key a select item produces (alias, or the dotted field path).
+fn select_item_key(item: &SelectItemAst) -> Option<String> {
+    match item {
+        SelectItemAst::All => None,
+        SelectItemAst::Field { segments, alias } => Some(match alias {
+            Some(a) => a.to_string(),
+            None => segments
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .join("."),
+        }),
+        SelectItemAst::CountAll { alias } => Some(match alias {
+            Some(a) => a.to_string(),
+            None => "count".to_owned(),
+        }),
+        SelectItemAst::BuiltinAgg { alias, .. }
+        | SelectItemAst::AggFn { alias, .. }
+        | SelectItemAst::Func { alias, .. } => Some(alias.to_string()),
+    }
+}
+
+/// Reject two select items producing the same output key.
+fn check_duplicate_select_keys(items: &[SelectItemAst]) -> syn::Result<()> {
+    let mut seen: Vec<String> = Vec::new();
+    for item in items {
+        if let Some(key) = select_item_key(item) {
+            if seen.contains(&key) {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!(
+                        "q!: duplicate select output key `{key}`; give each \
+                         aggregate a distinct `as` alias"
+                    ),
+                ));
+            }
+            seen.push(key);
+        }
+    }
+    Ok(())
+}
+
 /// Parse a single select item.
 ///
 /// Forms:
@@ -379,12 +428,14 @@ fn parse_select_item(input: ParseStream) -> syn::Result<SelectItemAst> {
                     // count(*) or count(field)
                     if content.peek(Token![*]) {
                         content.parse::<Token![*]>()?;
+                        require_exhausted(&content, "count")?;
                         let alias = parse_optional_as(input)?;
                         return Ok(SelectItemAst::CountAll { alias });
                     }
 
                     // count(field)
                     let field_segs = parse_dotted_ident_from(&content)?;
+                    require_exhausted(&content, "count")?;
                     let alias = parse_required_as(input, "count")?;
                     return Ok(SelectItemAst::BuiltinAgg {
                         func: "count".to_owned(),
@@ -397,6 +448,7 @@ fn parse_select_item(input: ParseStream) -> syn::Result<SelectItemAst> {
                     let content;
                     syn::parenthesized!(content in input);
                     let field_segs = parse_dotted_ident_from(&content)?;
+                    require_exhausted(&content, &id_str)?;
                     let alias = parse_required_as(input, &id_str)?;
                     return Ok(SelectItemAst::BuiltinAgg {
                         func: id_str,
@@ -411,6 +463,7 @@ fn parse_select_item(input: ParseStream) -> syn::Result<SelectItemAst> {
                     let name: LitStr = content.parse()?;
                     content.parse::<Token![,]>()?;
                     let field_segs = parse_dotted_ident_from(&content)?;
+                    require_exhausted(&content, "agg_fn")?;
                     let alias = parse_required_as(input, "agg_fn")?;
                     return Ok(SelectItemAst::AggFn {
                         name,
@@ -425,11 +478,20 @@ fn parse_select_item(input: ParseStream) -> syn::Result<SelectItemAst> {
                     let name: LitStr = content.parse()?;
                     content.parse::<Token![,]>()?;
                     let args: Expr = content.parse()?;
+                    require_exhausted(&content, "func")?;
                     let alias = parse_required_as(input, "func")?;
                     return Ok(SelectItemAst::Func { name, args, alias });
                 }
                 _ => {
-                    // Not a known function — fall through to field parsing
+                    // Unknown function-like select item: report precisely
+                    // instead of falling through to the clause-order error.
+                    return Err(syn::Error::new(
+                        id.span(),
+                        format!(
+                            "q!: unknown select function `{id_str}`; \
+                             supported: count, sum, avg, min, max, agg_fn, func"
+                        ),
+                    ));
                 }
             }
         }
@@ -451,6 +513,17 @@ fn parse_select_item(input: ParseStream) -> syn::Result<SelectItemAst> {
 
     let alias = parse_optional_as(input)?;
     Ok(SelectItemAst::Field { segments, alias })
+}
+
+/// Require a parenthesised select-function content stream to be fully
+/// consumed (E24D5F62); otherwise report precise trailing-token error.
+fn require_exhausted(input: ParseStream, id_str: &str) -> syn::Result<()> {
+    if !input.is_empty() {
+        return Err(input.error(format!(
+            "q!: unexpected trailing tokens inside `{id_str}(...)`"
+        )));
+    }
+    Ok(())
 }
 
 /// Parse `as <ident>` if present.
@@ -480,6 +553,9 @@ fn parse_dotted_ident_from(input: ParseStream) -> syn::Result<Vec<Ident>> {
     let mut segs = vec![input.parse::<Ident>()?];
     while input.peek(Token![.]) {
         input.parse::<Token![.]>()?;
+        if !input.peek(Ident) {
+            return Err(input.error("expected field name after `.`"));
+        }
         segs.push(input.parse::<Ident>()?);
     }
     Ok(segs)
@@ -488,13 +564,18 @@ fn parse_dotted_ident_from(input: ParseStream) -> syn::Result<Vec<Ident>> {
 /// Parse a filter expression that ends when we hit a clause keyword at
 /// the top level or end-of-input. We collect tokens into a buffer, then
 /// parse that buffer as a `syn::Expr`.
-fn parse_filter_expr(input: ParseStream) -> syn::Result<Expr> {
+fn parse_filter_expr(input: ParseStream, clause: &str) -> syn::Result<Expr> {
     // Collect raw token trees, stopping at clause keywords.
     let mut tokens = TokenStream2::new();
 
     while !input.is_empty() {
-        // At depth 0, check for clause keywords that terminate the where expr.
-        if is_clause_keyword(input) {
+        // At depth 0, check for clause keywords that terminate the expr.
+        // A keyword only terminates if the tokens collected so far already
+        // form a complete expression; otherwise it is part of the expression
+        // itself (e.g. dotted segment `foo.select` or RHS `x == group_by`).
+        if is_clause_keyword(input)
+            && (tokens.is_empty() || syn::parse2::<Expr>(tokens.clone()).is_ok())
+        {
             break;
         }
 
@@ -535,7 +616,7 @@ fn parse_filter_expr(input: ParseStream) -> syn::Result<Expr> {
     }
 
     if tokens.is_empty() {
-        return Err(input.error("q!: expected a filter expression after `where`"));
+        return Err(input.error(format!("q!: expected a filter expression after `{clause}`")));
     }
 
     syn::parse2::<Expr>(tokens)
@@ -578,6 +659,10 @@ fn parse_doc_map(input: ParseStream) -> syn::Result<DocMapAst> {
         pairs.push((key, val));
         if content.peek(Token![,]) {
             content.parse::<Token![,]>()?;
+        } else if !content.is_empty() {
+            return Err(content.error(
+                "q!: unexpected trailing tokens in doc map; expected \"key\" => value pairs separated by `,`",
+            ));
         } else {
             break;
         }
@@ -611,7 +696,7 @@ impl Parse for UpdateMacro {
         let set_doc = parse_doc_map(input)?;
         let where_clause = if input.peek(Token![where]) {
             input.parse::<Token![where]>()?;
-            let expr = parse_filter_expr(input)?;
+            let expr = parse_filter_expr(input, "where")?;
             Some(expr)
         } else {
             None
@@ -638,7 +723,7 @@ impl Parse for DeleteMacro {
             );
         }
         input.parse::<Token![where]>()?;
-        let where_clause = parse_filter_expr(input)?;
+        let where_clause = parse_filter_expr(input, "where")?;
         if !input.is_empty() {
             return Err(input.error("q!(delete ...): unexpected tokens after where clause"));
         }
@@ -672,11 +757,26 @@ impl Parse for CallMacro {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         input.parse::<kw::call>()?;
 
-        // Function name: ident or string literal.
-        let name = if input.peek(LitStr) {
-            CallName::Lit(input.parse()?)
+        // Function name: string literal, bare ident, or `<repo>.<name>` —
+        // the qualifier before the dot is the repository, the ident after
+        // the dot is the procedure name (2C459E8E).
+        let (name, repo) = if input.peek(LitStr) {
+            (CallName::Lit(input.parse()?), None)
         } else {
-            CallName::Ident(input.parse()?)
+            let first: Ident = input.parse()?;
+            if input.peek(Token![.]) {
+                let fork = input.fork();
+                fork.parse::<Token![.]>()?;
+                if fork.peek(Ident) {
+                    input.parse::<Token![.]>()?;
+                    let second: Ident = input.parse()?;
+                    (CallName::Ident(second), Some(first))
+                } else {
+                    (CallName::Ident(first), None)
+                }
+            } else {
+                (CallName::Ident(first), None)
+            }
         };
 
         // Arguments in parentheses: (arg1, arg2, ...)
@@ -688,6 +788,10 @@ impl Parse for CallMacro {
                 args.push(content.parse::<Expr>()?);
                 if content.peek(Token![,]) {
                     content.parse::<Token![,]>()?;
+                } else if !content.is_empty() {
+                    return Err(content.error(
+                        "q!(call ...): unexpected trailing tokens in argument list; separate arguments with `,`",
+                    ));
                 } else {
                     break;
                 }
@@ -701,6 +805,6 @@ impl Parse for CallMacro {
             return Err(input.error("q!(call ...): unexpected tokens after arguments"));
         }
 
-        Ok(CallMacro { name, args })
+        Ok(CallMacro { name, repo, args })
     }
 }

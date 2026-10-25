@@ -14,7 +14,7 @@ use crate::query_parse::{
 // ── code generation ────────────────────────────────────────────────
 
 impl QueryMacro {
-    fn to_tokens(&self) -> syn::Result<TokenStream2> {
+    pub(crate) fn to_tokens(&self) -> syn::Result<TokenStream2> {
         // -- from --
         let mut chain = match &self.table {
             TableArg::Simple(name) => {
@@ -153,7 +153,7 @@ fn write_table_tokens(
 }
 
 impl InsertMacro {
-    fn to_tokens(&self) -> syn::Result<TokenStream2> {
+    pub(crate) fn to_tokens(&self) -> syn::Result<TokenStream2> {
         let mut chain = write_table_tokens(
             &self.table,
             quote! { ::shamir_query_builder::write::Insert },
@@ -168,7 +168,7 @@ impl InsertMacro {
 }
 
 impl UpdateMacro {
-    fn to_tokens(&self) -> syn::Result<TokenStream2> {
+    pub(crate) fn to_tokens(&self) -> syn::Result<TokenStream2> {
         let mut chain = write_table_tokens(
             &self.table,
             quote! { ::shamir_query_builder::write::Update },
@@ -185,7 +185,7 @@ impl UpdateMacro {
 }
 
 impl DeleteMacro {
-    fn to_tokens(&self) -> syn::Result<TokenStream2> {
+    pub(crate) fn to_tokens(&self) -> syn::Result<TokenStream2> {
         let mut chain = write_table_tokens(
             &self.table,
             quote! { ::shamir_query_builder::write::Delete },
@@ -198,7 +198,7 @@ impl DeleteMacro {
 }
 
 impl UpsertMacro {
-    fn to_tokens(&self) -> syn::Result<TokenStream2> {
+    pub(crate) fn to_tokens(&self) -> syn::Result<TokenStream2> {
         let mut chain = write_table_tokens(
             &self.table,
             quote! { ::shamir_query_builder::write::Upsert },
@@ -212,7 +212,7 @@ impl UpsertMacro {
 }
 
 impl CallMacro {
-    fn to_tokens(&self) -> syn::Result<TokenStream2> {
+    pub(crate) fn to_tokens(&self) -> syn::Result<TokenStream2> {
         let name_expr = match &self.name {
             CallName::Ident(id) => {
                 let s = id.to_string();
@@ -222,21 +222,31 @@ impl CallMacro {
         };
 
         let args = &self.args;
+        let repo_expr = match &self.repo {
+            Some(id) => {
+                let r = id.to_string();
+                quote! { #r }
+            }
+            None => quote! { "main" },
+        };
 
+        // Expansion paths must live under `::shamir_query_builder` only
+        // (RV-QUERY-BUILDER-MACROS-36328515); the builder re-exports the
+        // `shamir-query-types` items as `#[doc(hidden)]`.
         Ok(quote! {
-            ::shamir_query_types::call::CallOp {
+            ::shamir_query_builder::CallOp {
                 call: ::std::string::String::from(#name_expr),
                 params: ::std::vec![#(
-                    ::std::convert::Into::<::shamir_query_types::filter::FilterValue>::into(#args)
+                    ::std::convert::Into::<::shamir_query_builder::FilterValue>::into(#args)
                 ),*],
-                repo: ::std::string::String::from("main"),
+                repo: ::std::string::String::from(#repo_expr),
             }
         })
     }
 }
 
 impl QMacro {
-    fn to_tokens(&self) -> syn::Result<TokenStream2> {
+    pub(crate) fn to_tokens(&self) -> syn::Result<TokenStream2> {
         match self {
             QMacro::Read(qm) => qm.to_tokens(),
             QMacro::Insert(im) => im.to_tokens(),
@@ -331,4 +341,10 @@ pub fn q_macro(input: TokenStream) -> TokenStream {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }
+}
+
+/// Render a parsed [`QMacro`] to its expansion string (unit-test helper).
+#[cfg(test)]
+pub(crate) fn render(qm: &QMacro) -> syn::Result<String> {
+    qm.to_tokens().map(|ts| ts.to_string())
 }
