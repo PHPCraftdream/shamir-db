@@ -1,7 +1,7 @@
 //! Atomic target coalescing; successful generation evidence outlives waiters.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use shamir_storage::error::{DbError, DbResult};
@@ -29,6 +29,16 @@ pub struct SyncCoordinator {
     successful: AtomicU64,
     has_success: AtomicBool,
     failure_epoch: AtomicU64,
+    // ERROR PATH ONLY. Contention model: written once per failed sync cycle
+    // by the single worker, read once by a waiter observing a failure epoch;
+    // never held across `.await`; not a hot path. Enforced property: the
+    // worker stores `(epoch.load()+1, cause)` strictly before the guard drop
+    // bumps `failure_epoch` to that value, so a waiter only accepts a cause
+    // whose stored cycle equals the epoch it read just before cloning the
+    // slot. With interleaved failures the waiter (still uncovered) may report
+    // a failure later than the one that first woke it, or fall back to the
+    // generic text; it never reports a cause older than the epoch it read.
+    failure_cause: Mutex<Option<(u64, Arc<DbError>)>>,
     pub(super) done: Notify,
     waiters: AtomicUsize,
     pub(super) rounds: AtomicU64,
@@ -50,6 +60,7 @@ impl SyncCoordinator {
             successful: AtomicU64::new(0),
             has_success: AtomicBool::new(false),
             failure_epoch: AtomicU64::new(0),
+            failure_cause: Mutex::new(None),
             done: Notify::new(),
             waiters: AtomicUsize::new(0),
             rounds: AtomicU64::new(0),
@@ -128,7 +139,15 @@ impl SyncCoordinator {
             self.metric_duration_ns.fetch_add(ns, Ordering::Relaxed);
             SYNC_LEADER_ROUNDS.fetch_add(1, Ordering::Relaxed);
             SYNC_NOW_DURATION_NS.fetch_add(ns, Ordering::Relaxed);
-            if result.is_err() {
+            if let Err(err) = result {
+                // Preserve the underlying sink error for `demand()`'s failure
+                // branch. Store BEFORE returning so the guard drop below
+                // publishes the new failure epoch only after the matching
+                // cause is in place (a waiter that sees the epoch bump must
+                // also see this cause).
+                let cycle = self.failure_epoch.load(Ordering::Acquire) + 1;
+                *self.failure_cause.lock().expect("failure cause mutex") =
+                    Some((cycle, Arc::new(err)));
                 // Drop publishes failure and relinquishes leadership; do not
                 // retry a permanently failing disk in this worker loop.
                 return;
@@ -154,6 +173,17 @@ impl SyncCoordinator {
 
     /// cancel-safe: yes â€” target publication belongs to detached work.
     async fn demand(self: &Arc<Self>) -> DbResult<u64> {
+        // Legacy wrapper: stringify the owned cause to keep the PUBLIC
+        // `sync_now()` DbResult surface's documented shape (same precedent
+        // as the legacy `DbResult` entry points in wal_ticket.rs). Internal
+        // callers use `demand_inner` to keep the original error.
+        self.demand_inner()
+            .await
+            .map_err(|cause| DbError::Storage(format!("coalesced WAL sync failed: {cause}")))
+    }
+
+    /// cancel-safe; target publication belongs to detached work.
+    async fn demand_inner(self: &Arc<Self>) -> Result<u64, Arc<DbError>> {
         let epoch = self.failure_epoch.load(Ordering::Acquire);
         let target = self.written_generation.load(Ordering::Acquire);
         self.requested.fetch_max(target, Ordering::SeqCst);
@@ -176,9 +206,29 @@ impl SyncCoordinator {
                 if self.covers(target) {
                     continue;
                 }
-                return Err(DbError::Storage(
+                // `observed` is re-read just before cloning the slot; a later
+                // failure may have bumped it since the wake-up above. A
+                // matching cycle proves the slot holds that epoch's cause.
+                let observed = self.failure_epoch.load(Ordering::Acquire);
+                let stored = self
+                    .failure_cause
+                    .lock()
+                    .expect("failure cause mutex")
+                    .clone();
+                if let Some((cycle, cause)) = stored {
+                    // A later failure may already have replaced the slot;
+                    // then the cycles differ and we fall through to the
+                    // generic text instead of misattributing.
+                    if cycle == observed {
+                        return Err(cause);
+                    }
+                }
+                // Epoch bumped without a matching stored cause (guard dropped
+                // on the cancellation path, or a later failure raced in):
+                // fall back to the generic text.
+                return Err(Arc::new(DbError::Storage(
                     "coalesced WAL sync failed or worker stopped".into(),
-                ));
+                )));
             }
             if !counted_coalesced && self.leader.load(Ordering::Acquire) {
                 self.metric_coalesced.fetch_add(1, Ordering::Relaxed);
@@ -364,15 +414,15 @@ impl WalGroupCommit {
     /// coalesce and no detached worker: finish in the leader's poll
     /// (current-thread commit atomicity; R follows W via `memory_completed`).
     /// File sinks share the coalesced worker with timer and pull demands.
-    pub(super) async fn sync_window(&self) -> DbResult<()> {
+    pub(super) async fn sync_window(&self) -> Result<(), Arc<DbError>> {
         if self.is_mem_sink() {
             let res = self.sink.sync().await;
             self.sync.rounds.fetch_add(1, Ordering::Relaxed);
             if res.is_ok() {
                 self.sync.dirty_since_sync.store(false, Ordering::Release);
             }
-            return res;
+            return res.map_err(Arc::new);
         }
-        self.sync.demand().await.map(|_| ())
+        self.sync.demand_inner().await.map(|_| ())
     }
 }
