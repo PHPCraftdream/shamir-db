@@ -26,7 +26,8 @@ struct PushEnvelopeRef<'a> {
     push: PushKind,
     sub: u64,
     seq: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// RV-CONNECT-60D4DAB1: bin encoding, matching `PushEnvelope`.
+    #[serde(skip_serializing_if = "Option::is_none", with = "serde_bytes")]
     data: Option<&'a [u8]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     gap_at: Option<u64>,

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::access::Actor;
-use crate::engine::function::{DbGateway, NetGateway};
+use crate::engine::function::{DbGateway, DbGatewayError, NetGateway};
 use crate::engine::query::batch::{BatchError, BatchOp, BatchRequest, QueryEntry, ResultEncoding};
 use crate::engine::query::read::{ReadQuery, Temporal};
 use crate::engine::query::write::InsertOp;
@@ -85,9 +85,31 @@ impl FacadeDbGateway {
             }),
         }
     }
+}
 
-    fn batch_err_to_string(e: BatchError) -> String {
-        format!("{e:?}")
+/// Classify the gateway failure while retaining the original batch error.
+pub(crate) fn classify_batch_error(e: BatchError) -> DbGatewayError {
+    match &e {
+        BatchError::QueryError {
+            message,
+            code: Some(code),
+            ..
+        } if code == "not_found" => DbGatewayError::NotFound {
+            message: message.clone(),
+            source: Box::new(e),
+        },
+        BatchError::QueryError {
+            message,
+            code: Some(code),
+            ..
+        } if code == "access_denied" => DbGatewayError::Permission {
+            message: message.clone(),
+            source: Box::new(e),
+        },
+        _ => DbGatewayError::ExecutionSource {
+            message: format!("{e:?}"),
+            source: Box::new(e),
+        },
     }
 }
 
@@ -98,7 +120,7 @@ impl DbGateway for FacadeDbGateway {
         repo: &str,
         table: &str,
         key: QueryValue,
-    ) -> Result<Option<QueryValue>, String> {
+    ) -> Result<Option<QueryValue>, DbGatewayError> {
         let where_clause = Self::key_to_filter(&key);
         let table_ref = if repo == "main" {
             TableRef::new(table)
@@ -149,7 +171,7 @@ impl DbGateway for FacadeDbGateway {
             .shamir
             .execute_as(self.actor.clone(), &self.db_name, &req)
             .await
-            .map_err(Self::batch_err_to_string)?;
+            .map_err(classify_batch_error)?;
 
         let result = match resp.results.get("r") {
             Some(r) => r,
@@ -162,7 +184,12 @@ impl DbGateway for FacadeDbGateway {
         }
     }
 
-    async fn insert(&self, repo: &str, table: &str, doc: QueryValue) -> Result<QueryValue, String> {
+    async fn insert(
+        &self,
+        repo: &str,
+        table: &str,
+        doc: QueryValue,
+    ) -> Result<QueryValue, DbGatewayError> {
         let table_ref = if repo == "main" {
             TableRef::new(table)
         } else {
@@ -206,16 +233,22 @@ impl DbGateway for FacadeDbGateway {
             .shamir
             .execute_as(self.actor.clone(), &self.db_name, &req)
             .await
-            .map_err(Self::batch_err_to_string)?;
+            .map_err(classify_batch_error)?;
 
         let result = match resp.results.get("i") {
             Some(r) => r,
-            None => return Err("insert: no result returned".to_string()),
+            None => {
+                return Err(DbGatewayError::Execution(
+                    "insert: no result returned".to_string(),
+                ))
+            }
         };
 
         match result.records.first() {
             Some(rec) => Ok(rec.as_value().into_owned()),
-            None => Err("insert: empty result".to_string()),
+            None => Err(DbGatewayError::Execution(
+                "insert: empty result".to_string(),
+            )),
         }
     }
 
@@ -224,7 +257,7 @@ impl DbGateway for FacadeDbGateway {
         repo: &str,
         table: &str,
         filter: Option<QueryValue>,
-    ) -> Result<Vec<QueryValue>, String> {
+    ) -> Result<Vec<QueryValue>, DbGatewayError> {
         let table_ref = if repo == "main" {
             TableRef::new(table)
         } else {
@@ -276,7 +309,7 @@ impl DbGateway for FacadeDbGateway {
             .shamir
             .execute_as(self.actor.clone(), &self.db_name, &req)
             .await
-            .map_err(Self::batch_err_to_string)?;
+            .map_err(classify_batch_error)?;
 
         let result = match resp.results.get("q") {
             Some(r) => r,
@@ -290,15 +323,21 @@ impl DbGateway for FacadeDbGateway {
             .collect())
     }
 
-    async fn execute(&self, request: &[u8]) -> Result<Vec<u8>, String> {
-        let req: BatchRequest = rmp_serde::from_slice(request)
-            .map_err(|e| format!("execute: request decode error: {e}"))?;
+    async fn execute(&self, request: &[u8]) -> Result<Vec<u8>, DbGatewayError> {
+        let req: BatchRequest =
+            rmp_serde::from_slice(request).map_err(|e| DbGatewayError::ExecutionSource {
+                message: format!("execute: request decode error: {e}"),
+                source: Box::new(e),
+            })?;
         let resp = self
             .shamir
             .execute_as(self.actor.clone(), &self.db_name, &req)
             .await
-            .map_err(Self::batch_err_to_string)?;
-        rmp_serde::to_vec_named(&resp).map_err(|e| format!("execute: response encode error: {e}"))
+            .map_err(classify_batch_error)?;
+        rmp_serde::to_vec_named(&resp).map_err(|e| DbGatewayError::ExecutionSource {
+            message: format!("execute: response encode error: {e}"),
+            source: Box::new(e),
+        })
     }
 }
 

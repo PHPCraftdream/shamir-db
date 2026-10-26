@@ -21,11 +21,11 @@ use crate::common::crypto::{constant_time_eq, random_array, sha256};
 use crate::common::error::{Error, Result};
 use crate::common::identity::{build_identity_input, verify_identity};
 use crate::common::kdf_params::{validate_client_kdf_safe, KdfParams};
+use crate::common::password::WipeOnDrop;
 use crate::common::scram::{build_client_proof, build_server_signature, ClientProof, DerivedKeys};
 use crate::common::types::{limits, BindingMode, ProtocolVersion, TransportKind};
 use crate::common::username::NormalizedUsername;
 use crate::common::wire::RotationInProgressPayload;
-use zeroize::Zeroize;
 
 /// Server-supplied challenge fields.
 #[derive(Debug, Clone)]
@@ -204,6 +204,10 @@ impl ClientHandshake {
         challenge: &ServerChallenge,
         password: &mut [u8],
     ) -> Result<(ClientProof, DerivedKeys, AuthMessage)> {
+        // Wipe on every exit path, including early-error returns
+        // (RV-CONNECT-226DEDF4).
+        let pw = WipeOnDrop::new(password);
+
         // (1) Validate KDF params per spec §5.1.1, then the outer
         //     defense-in-depth client safety cap (M-tier audit M1).
         challenge.kdf_params.validate_client_limits()?;
@@ -228,8 +232,7 @@ impl ClientHandshake {
         })?;
 
         // (3) Argon2id derive (~2s) + HMAC + SHA-256
-        let derived = DerivedKeys::derive(password, &challenge.salt, &challenge.kdf_params)?;
-        password.zeroize();
+        let derived = DerivedKeys::derive(pw.as_slice(), &challenge.salt, &challenge.kdf_params)?;
 
         // (4) client_proof
         let proof = build_client_proof(&derived.client_key, &derived.stored_key, &am);

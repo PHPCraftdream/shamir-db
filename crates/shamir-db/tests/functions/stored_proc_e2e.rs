@@ -132,7 +132,7 @@ impl ShamirFunction for TableReader {
         let rows = gw
             .query("main", "secrets", None)
             .await
-            .map_err(FunctionError::Compute)?;
+            .map_err(|e| FunctionError::Compute(e.to_string()))?;
         Ok(QueryValue::Int(rows.len() as i64))
     }
 }

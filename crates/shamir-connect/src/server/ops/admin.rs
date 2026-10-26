@@ -295,6 +295,11 @@ pub fn unlock_user<A: AuditSink, F: FnOnce(&str)>(
 #[derive(Debug, Default)]
 pub struct InMemoryUserDirectory {
     by_name: dashmap::DashMap<String, ([u8; 16], UserRecord), FxBuild>,
+    /// Monotonic user-id allocator (RV-CONNECT-34144ECE contention model):
+    /// rare-path (user creation) mutex held only for a read-increment, never
+    /// across a map write or I/O; lock order in `insert()` below is the
+    /// DashMap entry shard (held by `entry()`) first, then `next_id` second
+    /// while the vacant entry is held.
     next_id: parking_lot::Mutex<u128>,
 }
 

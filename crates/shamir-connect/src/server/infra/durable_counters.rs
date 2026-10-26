@@ -58,8 +58,10 @@ pub struct FjallConsumedCounters {
     db: Arc<Database>,
     keyspace: Keyspace,
     /// Serialises `try_advance` and `gc` so concurrent advancers don't
-    /// race on the get-then-conditional-insert sequence. Not held across
-    /// the fsync — fjall's `persist` is synchronous and short.
+    /// race on the get-then-conditional-insert sequence. Held across the
+    /// `persist(SyncAll)` fsync (RV-CONNECT-EAB07B19): acceptance and its
+    /// durability are one serialized step — `persist` is synchronous and
+    /// short, so no `try_lock` fast path exists.
     write_lock: Mutex<()>,
     /// Test-only fault injection (RV-CONNECT-ECE3E157 regression): 0 = none,
     /// `FaultPoint as u8 + 1` = inject at that call site.

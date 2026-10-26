@@ -187,7 +187,7 @@ async fn transport_timeout_sends_exactly_once_and_never_replays() {
                 .push(rmp_serde::to_vec_named(&req).unwrap());
             let state = Lifecycle::new();
             let (tx, rx) = oneshot::channel();
-            state.pending.lock().unwrap().map.insert(1, tx);
+            let _ = state.pending.map.insert_sync(1, tx);
             async move {
                 let payload = await_pending_response(
                     rx,

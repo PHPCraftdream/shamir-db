@@ -11,6 +11,12 @@ use shamir_query_types::admin::{ReplDirection, ReplMode};
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
+/// Not a latency assertion: these tests need the clean shutdown to finish.
+/// Windows CI runners stall every process's fsync for 10+ s at times, so any
+/// wall-clock budget here is a false failure; nextest's per-test timeout is
+/// the hang detector and names the test.
+const BOOT_TEST_FLUSH_BUDGET: std::time::Duration = std::time::Duration::from_secs(3600);
+
 const TEST_WASM: &str = r#"
 (module
   (memory (export "memory") 2)
@@ -327,7 +333,7 @@ async fn rv_db_a7a29b02_boot_rejects_missing_parent_repository() {
         .await
         .unwrap();
     db.system_store()
-        .flush_buffers_with_quiesce_timeout(std::time::Duration::from_secs(1))
+        .flush_buffers_with_quiesce_timeout(BOOT_TEST_FLUSH_BUDGET)
         .await
         .unwrap();
     drop(db);
@@ -362,7 +368,7 @@ async fn rv_db_d378c582_boot_rejects_builtin_name_collision() {
         .await
         .unwrap();
     db.system_store()
-        .flush_buffers_with_quiesce_timeout(std::time::Duration::from_secs(1))
+        .flush_buffers_with_quiesce_timeout(BOOT_TEST_FLUSH_BUDGET)
         .await
         .unwrap();
     drop(db);
