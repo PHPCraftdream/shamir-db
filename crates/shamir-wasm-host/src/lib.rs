@@ -34,8 +34,8 @@ pub use compile::{
     WASM_COMPILE_TIMEOUT,
 };
 pub use gateway::{
-    check_url_allowed, check_url_allowed_resolved, DbGateway, EnvPolicy, HttpRequest, HttpResponse,
-    NetGateway, ResolvedPin,
+    check_url_allowed, check_url_allowed_resolved, DbGateway, DbGatewayError, EnvPolicy,
+    HttpRequest, HttpResponse, NetGateway, NetGatewayError, ResolvedPin,
 };
 pub use runtime::{
     BatchContext, FnAdapter, FnBatch, FnCtx, FnResult, FunctionError, FunctionRegistry, GlobalVars,

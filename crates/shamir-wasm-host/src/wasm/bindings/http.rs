@@ -23,20 +23,22 @@ pub(crate) fn decode_http_request(val: &QueryValue) -> Result<HttpRequest, Strin
         _ => return Err("http_fetch: request must be a Map".to_string()),
     };
 
-    let get_str = |key: &str| -> Result<String, String> {
-        map.get(key)
-            .map(|v| match v {
-                QueryValue::Str(s) => Ok(s.clone()),
-                _ => Err(format!("http_fetch: {key} must be a string")),
-            })
-            .transpose()
-            .map(|o| o.unwrap_or_default())
+    let get_req_str = |key: &str| -> Result<String, String> {
+        match map.get(key) {
+            Some(QueryValue::Str(s)) if !s.is_empty() => Ok(s.clone()),
+            Some(QueryValue::Str(_)) => {
+                Err(format!("http_fetch: {key} must be a non-empty string"))
+            }
+            Some(_) => Err(format!("http_fetch: {key} must be a string")),
+            None => Err(format!("http_fetch: missing {key}")),
+        }
     };
 
-    let method = get_str("method")?;
-    let url = get_str("url")?;
+    let method = get_req_str("method")?;
+    let url = get_req_str("url")?;
 
     let headers = match map.get("headers") {
+        None => Vec::new(),
         Some(QueryValue::Map(entries)) => entries
             .iter()
             .map(|(k, v)| match v {
@@ -61,12 +63,17 @@ pub(crate) fn decode_http_request(val: &QueryValue) -> Result<HttpRequest, Strin
                 _ => Err("http_fetch: header items must be [name, value] pairs".to_string()),
             })
             .collect::<Result<Vec<_>, String>>()?,
-        _ => Vec::new(),
+        Some(_) => {
+            return Err(
+                "http_fetch: headers must be a Map or a List of [name, value] pairs".to_string(),
+            )
+        }
     };
 
     let body = match map.get("body") {
+        None => Vec::new(),
         Some(QueryValue::Bin(b)) => b.clone(),
-        _ => Vec::new(),
+        Some(_) => return Err("http_fetch: body must be binary".to_string()),
     };
 
     Ok(HttpRequest {
@@ -150,7 +157,13 @@ pub(in crate::wasm) fn host_http_fetch(
                 QueryValue::Bool(true),
                 encode_http_response(http_resp),
             ]),
-            Err(msg) => QueryValue::List(vec![QueryValue::Bool(false), QueryValue::Str(msg)]),
+            Err(err) => {
+                // Guest-facing envelope stays a string.
+                QueryValue::List(vec![
+                    QueryValue::Bool(false),
+                    QueryValue::Str(err.to_string()),
+                ])
+            }
         };
 
         // Phase 3: encode and write result back.

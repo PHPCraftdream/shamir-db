@@ -11,8 +11,9 @@
 //!
 //! 1. **Scheme** — only `http` and `https` are permitted.
 //! 2. **Allowlist match** — the host must match at least one allowlist entry.
-//! 3. **SSRF hygiene** — loopback / private IPs (`127.0.0.0/8`, `::1`,
-//!    `10/8`, `172.16/12`, `192.168/16`, `169.254/16`) are permitted ONLY
+//! 3. **SSRF hygiene** — loopback / private / unspecified IPs (`0.0.0.0`,
+//!    `127.0.0.0/8`, `::`, `::1`, `10/8`, `172.16/12`, `192.168/16`,
+//!    `169.254/16`) are permitted ONLY
 //!    by an EXACT (non-wildcard) allowlist entry. A wildcard like
 //!    `*.example.com` must NOT cover a private IP that happens to resolve
 //!    from that domain. This lets tests allow `127.0.0.1` explicitly while
@@ -20,6 +21,35 @@
 
 use async_trait::async_trait;
 use std::net::{IpAddr, Ipv4Addr};
+
+use super::env_policy::glob_matches;
+
+/// Typed error for [`NetGateway`] and the egress guards
+/// (RV-WASM-HOST-DF4AD1DA). Replaces the previous stringly-typed errors so
+/// callers can classify allowlist/SSRF denials vs. DNS vs. transport failures.
+#[derive(Debug, thiserror::Error)]
+pub enum NetGatewayError {
+    /// Request denied by the allowlist / SSRF guard (or bad URL/scheme).
+    #[error("{0}")]
+    NotAllowed(String),
+    /// DNS resolution failed.
+    #[error("egress: DNS resolution failed for {host}: {source}")]
+    Dns {
+        host: String,
+        #[source]
+        source: std::io::Error,
+    },
+    /// The underlying transport (curl) failed.
+    #[error("{0}")]
+    Transport(String),
+    /// Local I/O failed while preparing or reading a transport request.
+    #[error("egress: {operation}: {source}")]
+    Io {
+        operation: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+}
 
 /// An HTTP request to send through the gateway.
 #[derive(Debug, Clone)]
@@ -57,7 +87,7 @@ pub trait NetGateway: Send + Sync {
     ///
     /// The implementation MUST run the allowlist / SSRF guard before
     /// performing any network I/O.
-    async fn fetch(&self, req: HttpRequest) -> Result<HttpResponse, String>;
+    async fn fetch(&self, req: HttpRequest) -> Result<HttpResponse, NetGatewayError>;
 }
 
 // ── SSRF guard ───────────────────────────────────────────────────────
@@ -66,9 +96,11 @@ pub trait NetGateway: Send + Sync {
 /// hygiene rules.
 ///
 /// Returns `Ok(())` if permitted, `Err(reason)` otherwise.
-pub fn check_host_allowed(host: &str, allowlist: &[String]) -> Result<(), String> {
+pub fn check_host_allowed(host: &str, allowlist: &[String]) -> Result<(), NetGatewayError> {
     if allowlist.is_empty() {
-        return Err(format!("egress to {host} not allowed"));
+        return Err(NetGatewayError::NotAllowed(format!(
+            "egress to {host} not allowed"
+        )));
     }
 
     // Find the best matching allowlist entry.
@@ -86,15 +118,17 @@ pub fn check_host_allowed(host: &str, allowlist: &[String]) -> Result<(), String
     }
 
     if !matched_wildcard && !matched_exact {
-        return Err(format!("egress to {host} not allowed"));
+        return Err(NetGatewayError::NotAllowed(format!(
+            "egress to {host} not allowed"
+        )));
     }
 
     // SSRF hygiene: if the host looks like a loopback / private IP,
     // it must be matched by an EXACT (non-wildcard) entry.
     if is_private_or_loopback_host(host) && !matched_exact {
-        return Err(format!(
+        return Err(NetGatewayError::NotAllowed(format!(
             "egress to {host} not allowed (private/loopback IP requires exact allowlist entry)"
-        ));
+        )));
     }
 
     Ok(())
@@ -107,7 +141,7 @@ pub fn check_host_allowed(host: &str, allowlist: &[String]) -> Result<(), String
 /// Callers performing real network egress MUST additionally run
 /// [`check_url_allowed_resolved`] (which resolves DNS and rejects
 /// private/loopback resolution results) before connecting — see finding 2c.
-pub fn check_url_allowed(url: &str, allowlist: &[String]) -> Result<(), String> {
+pub fn check_url_allowed(url: &str, allowlist: &[String]) -> Result<(), NetGatewayError> {
     let parsed = parse_url(url)?;
     check_host_allowed(&parsed.host, allowlist)
 }
@@ -157,7 +191,7 @@ pub struct ResolvedPin {
 pub async fn check_url_allowed_resolved(
     url: &str,
     allowlist: &[String],
-) -> Result<ResolvedPin, String> {
+) -> Result<ResolvedPin, NetGatewayError> {
     let parsed = parse_url(url)?;
     // 1. String-level allowlist + SSRF-on-literal-host check.
     check_host_allowed(&parsed.host, allowlist)?;
@@ -179,16 +213,20 @@ pub async fn check_url_allowed_resolved(
     let addrs: Vec<std::net::SocketAddr> =
         tokio::net::lookup_host((parsed.host.as_str(), parsed.port))
             .await
-            .map_err(|e| format!("egress: DNS resolution failed for {}: {e}", parsed.host))?
+            .map_err(|e| NetGatewayError::Dns {
+                host: parsed.host.clone(),
+                source: e,
+            })?
             .collect();
     let mut pinned_ips: Vec<IpAddr> = Vec::with_capacity(addrs.len());
     for addr in &addrs {
         if is_private_or_loopback_ip(addr.ip()) {
-            return Err(format!(
+            // GUARD DENIAL, not a DNS failure: classification reworked.
+            return Err(NetGatewayError::NotAllowed(format!(
                 "egress to {} not allowed (resolves to private/loopback IP {})",
                 parsed.host,
                 addr.ip()
-            ));
+            )));
         }
         // Dedup while preserving resolution order.
         if !pinned_ips.contains(&addr.ip()) {
@@ -196,10 +234,10 @@ pub async fn check_url_allowed_resolved(
         }
     }
     if pinned_ips.is_empty() {
-        return Err(format!(
-            "egress: DNS resolution for {} returned no addresses",
-            parsed.host
-        ));
+        return Err(NetGatewayError::Dns {
+            host: parsed.host,
+            source: std::io::Error::other("DNS resolution returned no addresses"),
+        });
     }
     Ok(ResolvedPin {
         host: parsed.host,
@@ -227,16 +265,16 @@ pub(crate) struct ParsedUrl {
 
 /// Minimal URL parser — extract scheme and host. Does not depend on the
 /// `url` crate (keeps the binary lean).
-pub(crate) fn parse_url(url: &str) -> Result<ParsedUrl, String> {
+pub(crate) fn parse_url(url: &str) -> Result<ParsedUrl, NetGatewayError> {
     // Find "://"
-    let scheme_end = url
-        .find("://")
-        .ok_or_else(|| format!("egress: invalid URL (no scheme): {url}"))?;
+    let scheme_end = url.find("://").ok_or_else(|| {
+        NetGatewayError::NotAllowed(format!("egress: invalid URL (no scheme): {url}"))
+    })?;
     let scheme = &url[..scheme_end];
     if scheme != "http" && scheme != "https" {
-        return Err(format!(
+        return Err(NetGatewayError::NotAllowed(format!(
             "egress: scheme '{scheme}' not allowed (only http/https)"
-        ));
+        )));
     }
     let default_port: u16 = if scheme == "https" { 443 } else { 80 };
 
@@ -254,9 +292,9 @@ pub(crate) fn parse_url(url: &str) -> Result<ParsedUrl, String> {
     // Strip bracket-enclosed IPv6, capturing an explicit port if present.
     let (host, port_str) = if host_port.starts_with('[') {
         // IPv6: [::1]:port
-        let close = host_port
-            .find(']')
-            .ok_or_else(|| format!("egress: invalid IPv6 host in URL: {url}"))?;
+        let close = host_port.find(']').ok_or_else(|| {
+            NetGatewayError::NotAllowed(format!("egress: invalid IPv6 host in URL: {url}"))
+        })?;
         let after = &host_port[close + 1..];
         let port = after.strip_prefix(':');
         (host_port[1..close].to_string(), port)
@@ -272,13 +310,15 @@ pub(crate) fn parse_url(url: &str) -> Result<ParsedUrl, String> {
     };
 
     if host.is_empty() {
-        return Err(format!("egress: empty host in URL: {url}"));
+        return Err(NetGatewayError::NotAllowed(format!(
+            "egress: empty host in URL: {url}"
+        )));
     }
 
     let port = match port_str {
-        Some(p) if !p.is_empty() => p
-            .parse::<u16>()
-            .map_err(|_| format!("egress: invalid port in URL: {url}"))?,
+        Some(p) if !p.is_empty() => p.parse::<u16>().map_err(|_| {
+            NetGatewayError::NotAllowed(format!("egress: invalid port in URL: {url}"))
+        })?,
         _ => default_port,
     };
 
@@ -451,7 +491,7 @@ fn unmap_v4(ip: IpAddr) -> IpAddr {
     }
 }
 
-/// Whether an IP address is loopback, private, or link-local.
+/// Whether an IP address is loopback, private, unspecified, or link-local.
 fn is_private_or_loopback_ip(ip: IpAddr) -> bool {
     // Fold IPv4-mapped/compatible IPv6 down to IPv4 so the v4 ranges apply
     // to forms like `::ffff:169.254.169.254`.
@@ -468,6 +508,9 @@ fn is_private_or_loopback_ip(ip: IpAddr) -> bool {
             || (octets[0] == 192 && octets[1] == 168)
             // 169.254.0.0/16
             || (octets[0] == 169 && octets[1] == 254)
+            // 0.0.0.0 (unspecified) — a wildcard must not reach it
+            // (RV-WASM-HOST-E62F8E2C)
+            || octets == [0, 0, 0, 0]
         }
         IpAddr::V6(v6) => {
             v6.is_loopback()
@@ -478,37 +521,4 @@ fn is_private_or_loopback_ip(ip: IpAddr) -> bool {
             || (v6.segments()[0] & 0xfe00) == 0xfc00
         }
     }
-}
-
-/// Tiny `*`-only glob matcher — reuses the same logic as `EnvPolicy`.
-///
-/// A pattern is split at `*` into literal segments that must appear
-/// consecutively in `text`. A single `*` matches zero or more characters.
-fn glob_matches(pattern: &str, text: &str) -> bool {
-    if !pattern.contains('*') {
-        return pattern == text;
-    }
-    let parts: Vec<&str> = pattern.split('*').collect();
-    if parts.is_empty() {
-        return true;
-    }
-    let mut cursor = 0usize;
-    for (i, part) in parts.iter().enumerate() {
-        if part.is_empty() {
-            continue;
-        }
-        match text[cursor..].find(part) {
-            Some(pos) => {
-                if i == 0 && !pattern.starts_with('*') && pos != 0 {
-                    return false;
-                }
-                cursor += pos + part.len();
-            }
-            None => return false,
-        }
-    }
-    if !pattern.ends_with('*') && cursor != text.len() {
-        return false;
-    }
-    true
 }

@@ -34,6 +34,36 @@
 use async_trait::async_trait;
 use shamir_types::types::value::QueryValue;
 
+/// Typed error for [`DbGateway`] (RV-WASM-HOST-DF4AD1DA). Replaces the
+/// previous stringly-typed errors so callers can classify failures.
+#[derive(Debug, thiserror::Error)]
+pub enum DbGatewayError {
+    /// The requested table/record does not exist.
+    #[error("db gateway: not found: {message}")]
+    NotFound {
+        message: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// The effective actor lacks permission for the operation.
+    #[error("db gateway: permission denied: {message}")]
+    Permission {
+        message: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// Execution failure with only a human-readable message.
+    #[error("db gateway: execution failed: {0}")]
+    Execution(String),
+    /// Execution failure retaining its underlying error.
+    #[error("db gateway: execution failed: {message}")]
+    ExecutionSource {
+        message: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+}
+
 /// Async gateway that lets a WASM function read/write database tables.
 ///
 /// Implemented once in the `shamir-db` crate (`FacadeDbGateway`) by routing
@@ -62,11 +92,16 @@ pub trait DbGateway: Send + Sync {
         repo: &str,
         table: &str,
         key: QueryValue,
-    ) -> Result<Option<QueryValue>, String>;
+    ) -> Result<Option<QueryValue>, DbGatewayError>;
 
     /// Insert a document. The `doc` must be a `Value::Map`. Returns the
     /// stored record (as returned by the batch executor).
-    async fn insert(&self, repo: &str, table: &str, doc: QueryValue) -> Result<QueryValue, String>;
+    async fn insert(
+        &self,
+        repo: &str,
+        table: &str,
+        doc: QueryValue,
+    ) -> Result<QueryValue, DbGatewayError>;
 
     /// Query records with an optional filter. `filter = None` means "all
     /// records". Returns zero or more records.
@@ -75,7 +110,7 @@ pub trait DbGateway: Send + Sync {
         repo: &str,
         table: &str,
         filter: Option<QueryValue>,
-    ) -> Result<Vec<QueryValue>, String>;
+    ) -> Result<Vec<QueryValue>, DbGatewayError>;
 
     /// Execute a full msgpack-encoded `BatchRequest`, returning the
     /// msgpack-encoded `BatchResponse`. The general form of
@@ -83,5 +118,5 @@ pub trait DbGateway: Send + Sync {
     /// query builder and the host runs it through the same executor a wire
     /// client uses, AS the function's effective actor. Inherits the
     /// autocommit-per-call semantics documented above.
-    async fn execute(&self, request: &[u8]) -> Result<Vec<u8>, String>;
+    async fn execute(&self, request: &[u8]) -> Result<Vec<u8>, DbGatewayError>;
 }

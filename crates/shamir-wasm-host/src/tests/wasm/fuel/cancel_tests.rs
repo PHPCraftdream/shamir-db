@@ -25,7 +25,7 @@
 use super::support::{
     assert_settled, echo_child_wat, fn_from_wat, pool, CALL_GATED_CHILD_WAT, GATED_DB_CHILD_WAT,
 };
-use crate::gateway::db_gateway::DbGateway;
+use crate::gateway::db_gateway::{DbGateway, DbGatewayError};
 use crate::{
     FnBatch, FnCtx, FuelObserver, FunctionError, FunctionRegistry, Params, ShamirFunction,
     WasmEngine,
@@ -53,23 +53,23 @@ impl DbGateway for GatedDb {
         _repo: &str,
         _table: &str,
         _key: QueryValue,
-    ) -> Result<Option<QueryValue>, String> {
+    ) -> Result<Option<QueryValue>, DbGatewayError> {
         self.hit.store(true, Ordering::SeqCst);
-        std::future::pending::<Result<Option<QueryValue>, String>>().await
+        std::future::pending::<Result<Option<QueryValue>, DbGatewayError>>().await
     }
-    async fn insert(&self, _: &str, _: &str, _: QueryValue) -> Result<QueryValue, String> {
-        Err("unused".into())
+    async fn insert(&self, _: &str, _: &str, _: QueryValue) -> Result<QueryValue, DbGatewayError> {
+        Err(DbGatewayError::Execution("unused".into()))
     }
     async fn query(
         &self,
         _: &str,
         _: &str,
         _: Option<QueryValue>,
-    ) -> Result<Vec<QueryValue>, String> {
-        Err("unused".into())
+    ) -> Result<Vec<QueryValue>, DbGatewayError> {
+        Err(DbGatewayError::Execution("unused".into()))
     }
-    async fn execute(&self, _: &[u8]) -> Result<Vec<u8>, String> {
-        Err("unused".into())
+    async fn execute(&self, _: &[u8]) -> Result<Vec<u8>, DbGatewayError> {
+        Err(DbGatewayError::Execution("unused".into()))
     }
 }
 

@@ -74,7 +74,7 @@ fn issue_and_decode(
     identity: &ServerIdentityState,
 ) -> (Vec<u8>, [u8; 16], u64) {
     let (ticket, _) = issue_initial_ticket(
-        &cfg.ticket_key,
+        cfg.ticket_key(),
         USER,
         "u".into(),
         BindingMode::TlsExporter.as_u8(),
@@ -86,7 +86,7 @@ fn issue_and_decode(
     )
     .unwrap();
     let plain = decrypt_ticket(
-        &cfg.ticket_key,
+        cfg.ticket_key(),
         None,
         &TicketWire::from_bytes(&ticket).expect("parse issued ticket"),
     )

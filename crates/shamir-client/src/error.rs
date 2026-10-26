@@ -8,19 +8,53 @@ pub enum ClientError {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("tls: {0}")]
-    Tls(String),
+    #[error("tls: {context}: {source}")]
+    Tls {
+        /// What failed (`client config`, `server name`, `rustls`).
+        context: &'static str,
+        /// Typed TLS-layer source (rustls / pki-types / config error).
+        /// `Box<dyn Error>` is the sanctioned boundary last resort here: the
+        /// client boundary aggregates TLS sources of several distinct
+        /// concrete types (rustls::Error, InvalidDnsNameError,
+        /// TlsConfigError), none of which this crate owns.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
-    #[error("transport: {0}")]
-    Transport(String),
+    #[error("transport: {context}: {source}")]
+    Transport {
+        /// Wire phase that failed (`send auth_init`, `read challenge`, …).
+        context: &'static str,
+        /// The real framing/IO failure (`FrameError::Io` wraps the typed
+        /// `std::io::Error` one hop further down the chain).
+        #[source]
+        source: shamir_transport_tcp::framing::FrameError,
+    },
 
-    #[error("handshake: {0}")]
-    Handshake(String),
+    #[error("handshake: {context}")]
+    Handshake {
+        /// Failure description (SCRAM stage, exporter availability, …).
+        context: String,
+        /// Typed SCRAM/KDF source when one exists (`model::Error`,
+        /// `JoinError`). `Box<dyn Error>` is the sanctioned boundary last
+        /// resort: the handshake mixes sources of unrelated concrete types
+        /// (shamir-connect `model::Error`, tokio `JoinError`) that this
+        /// crate does not own.
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// Server replied but the response shape is not what we expected
     /// (e.g. `Pong` for an `Execute`, or msgpack decode failed).
     #[error("protocol: {0}")]
     Protocol(String),
+
+    /// Server replied with an envelope-level error. The envelope carries a
+    /// single string which IS the spec §14 code (e.g. `session_expired`,
+    /// `session_invalidated`, `rate_limited`) — there is no separate
+    /// message field to surface.
+    #[error("server error [{code}]")]
+    Server { code: String },
 
     /// Server returned a typed `DbResponse::Error`.
     #[error("db error [{code}]: {message}")]
@@ -133,7 +167,59 @@ impl std::fmt::Display for CloseCause {
 
 impl From<rustls::Error> for ClientError {
     fn from(e: rustls::Error) -> Self {
-        ClientError::Tls(e.to_string())
+        ClientError::Tls {
+            context: "rustls",
+            source: Box::new(e),
+        }
+    }
+}
+
+impl ClientError {
+    /// TLS failure with a typed source (rustls, pki-types, config build).
+    pub(crate) fn tls(
+        context: &'static str,
+        source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Self {
+        ClientError::Tls {
+            context,
+            source: source.into(),
+        }
+    }
+
+    /// Wire send/read failure; the typed `std::io::Error` source survives.
+    pub(crate) fn transport(
+        context: &'static str,
+        source: shamir_transport_tcp::framing::FrameError,
+    ) -> Self {
+        ClientError::Transport { context, source }
+    }
+
+    /// Handshake failure carrying no typed source (plain diagnostic).
+    pub(crate) fn handshake(context: impl Into<String>) -> Self {
+        ClientError::Handshake {
+            context: context.into(),
+            source: None,
+        }
+    }
+
+    /// Handshake failure carrying a typed source (SCRAM `model::Error`,
+    /// tokio `JoinError`, …); the source joins the error chain.
+    pub(crate) fn handshake_with(
+        context: impl Into<String>,
+        source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Self {
+        let source = source.into();
+        let detail = source.to_string();
+        let context = context.into();
+        let context = if context == detail {
+            context
+        } else {
+            format!("{context}: {detail}")
+        };
+        ClientError::Handshake {
+            context,
+            source: Some(source),
+        }
     }
 }
 

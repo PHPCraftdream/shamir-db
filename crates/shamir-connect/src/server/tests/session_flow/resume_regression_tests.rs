@@ -8,7 +8,7 @@ use crate::common::types::limits;
 use crate::common::types::BindingMode;
 use crate::server::resume::{
     issue_initial_ticket, new_user_state_map, process_resume, AdvanceOutcome, ConsumedCounterStore,
-    InMemoryUserStateMap, ResumeConfig, ResumeRequest, ResumeUserState,
+    InMemoryConsumedCounters, InMemoryUserStateMap, ResumeConfig, ResumeRequest, ResumeUserState,
 };
 use crate::server::rotation::ServerIdentityState;
 use crate::server::session::SessionStore;
@@ -72,7 +72,7 @@ fn rv_counters_ece3e157_persistence_failure_is_not_replay_rejection() {
     let now = ns::HOUR * 1_000;
 
     let (ticket, _) = issue_initial_ticket(
-        &cfg.ticket_key,
+        cfg.ticket_key(),
         USER,
         "u".into(),
         BindingMode::TlsExporter.as_u8(),
@@ -106,4 +106,55 @@ fn rv_counters_ece3e157_persistence_failure_is_not_replay_rejection() {
         0,
         "no session may be created on storage failure"
     );
+}
+
+/// RV-CONNECT-B11F48CA: ticket keys are immutable after construction — the
+/// public `OnceLock` cipher caches are warmed on first use, so a previously
+/// mutable key field could be swapped after warming and leave ciphers bound
+/// to the OLD key serving resumes. Keys are now private; the read-only
+/// accessors always agree with the warmed caches.
+#[test]
+fn rv_connect_b11f48ca_resume_keys_immutable() {
+    let cfg = ResumeConfig::new([0xa1u8; 32], Some([0xb2u8; 32]), true, false);
+
+    // Warm the permanent cipher caches first (the hazard window).
+    let (current, previous) = cfg.ciphers();
+    assert!(!std::ptr::eq(current, previous.unwrap()));
+
+    // The accessor view matches the keys the caches were scheduled from.
+    assert_eq!(cfg.ticket_key(), &[0xa1u8; 32]);
+    assert_eq!(cfg.ticket_key_previous(), Some(&[0xb2u8; 32]));
+
+    // Functional anchor: a ticket minted under `ticket_key()` is accepted by
+    // `process_resume`, proving the caches and the accessor agree.
+    let users = lookup_map();
+    let store = SessionStore::new();
+    let identity = ServerIdentityState::fresh();
+    let now = ns::HOUR * 1_000;
+    let (ticket, _) = issue_initial_ticket(
+        cfg.ticket_key(),
+        USER,
+        "u".into(),
+        BindingMode::TlsExporter.as_u8(),
+        BindingMode::TlsExporter.as_u8(),
+        [0x77u8; 32],
+        0,
+        now,
+        ns::HOUR,
+    )
+    .unwrap();
+    let req = request(&ticket, [0xabu8; 32]);
+    let outcome = process_resume(
+        &req,
+        &cfg,
+        &InMemoryConsumedCounters::default(),
+        &users,
+        &store,
+        &identity,
+        24 * ns::HOUR,
+        1_000,
+        now,
+    )
+    .expect("resume with the immutable key must succeed");
+    assert_eq!(outcome.username, "u");
 }

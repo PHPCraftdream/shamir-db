@@ -205,3 +205,80 @@ async fn create_function_from_wasm_does_not_require_wasm_compiler_permission() {
         "FunctionSource::Wasm must not require WasmCompiler Execute permission; got {result:?}"
     );
 }
+
+// ============================================================================
+// 6. Card RV-WASM-HOST-9D8C5F97 — the validator Source path must be gated by
+//    the same WasmCompiler permission as the function Source path.
+// ============================================================================
+
+#[tokio::test]
+async fn create_validator_9d8c5f97_source_denied_under_hardened_wasm_compiler() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let owner = Actor::User(1);
+    let actor = Actor::User(999);
+
+    shamir
+        .set_resource_meta(
+            &ResourcePath::WasmCompiler,
+            &ResourceMeta {
+                owner,
+                group: None,
+                mode: 0o700,
+            },
+        )
+        .await
+        .unwrap();
+
+    let err = shamir
+        .create_validator_from_source_as("val_denied", DOUBLE_SOURCE, false, actor)
+        .await
+        .unwrap_err();
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("access denied") && msg.contains("EXECUTE"),
+        "expected a permission-denial error (access denied / EXECUTE) BEFORE \
+         compilation was attempted, got: {msg}"
+    );
+    assert!(
+        !msg.contains("toolchain"),
+        "expected the permission gate to fire before any toolchain check, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn create_validator_9d8c5f97_wasm_does_not_require_wasm_compiler_permission() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let owner = Actor::User(1);
+    let actor = Actor::User(999);
+
+    shamir
+        .set_resource_meta(
+            &ResourcePath::WasmCompiler,
+            &ResourceMeta {
+                owner,
+                group: None,
+                mode: 0o700,
+            },
+        )
+        .await
+        .unwrap();
+
+    let wasm = wat::parse_str(
+        r#"(module
+            (memory (export "memory") 2)
+            (func (export "shamir_alloc") (param i32) (result i32) i32.const 1024)
+            (func (export "shamir_call") (param i32 i32) (result i64) i64.const 0)
+        )"#,
+    )
+    .unwrap();
+
+    let result = shamir
+        .create_validator_from_wasm_as("val_wasm_upload", &wasm, false, actor)
+        .await;
+    assert!(
+        result.is_ok(),
+        "validator FunctionSource::Wasm must not require WasmCompiler Execute \
+         permission; got {result:?}"
+    );
+}

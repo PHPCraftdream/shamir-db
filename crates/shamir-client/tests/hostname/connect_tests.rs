@@ -78,10 +78,10 @@ async fn rv_client_node_8fb7d9bf_connect_entry_reaches_tcp_via_hostname() {
     };
     match Client::connect(opts).await {
         Err(
-            ClientError::Tls(_)
+            ClientError::Tls { .. }
             | ClientError::Io(_)
-            | ClientError::Transport(_)
-            | ClientError::Handshake(_),
+            | ClientError::Transport { .. }
+            | ClientError::Handshake { .. },
         ) => {}
         Err(other) => panic!("expected a transport-phase error, got {other:?}"),
         Ok(_) => panic!("a peer that closes immediately cannot complete a handshake"),
@@ -129,10 +129,10 @@ async fn rv_client_node_8fb7d9bf_connect_host_reaches_local_listener() {
     .await;
     match raced.expect("connect_host must stay bounded") {
         Err(
-            ClientError::Tls(_)
+            ClientError::Tls { .. }
             | ClientError::Io(_)
-            | ClientError::Transport(_)
-            | ClientError::Handshake(_)
+            | ClientError::Transport { .. }
+            | ClientError::Handshake { .. }
             | ClientError::HandshakeTimeout(..),
         ) => {}
         Err(other) => panic!("expected a transport-phase error, got {other:?}"),

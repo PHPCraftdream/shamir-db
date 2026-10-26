@@ -1,5 +1,8 @@
 //! Client-side of the connection protocol.
 
+#[cfg(test)]
+mod tests;
+
 pub mod bootstrap;
 pub mod changepw;
 pub mod handshake;

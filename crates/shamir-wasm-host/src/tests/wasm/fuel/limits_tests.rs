@@ -21,7 +21,7 @@
 use super::support::{
     d_params, echo_child_wat, fn_from_wat, relay_wat, GATED_DB_CHILD_WAT, INFINITE_LOOP_WAT,
 };
-use crate::gateway::db_gateway::DbGateway;
+use crate::gateway::db_gateway::{DbGateway, DbGatewayError};
 use crate::{
     FnBatch, FnCtx, FuelObserver, FunctionError, Params, ShamirFunction, WasmEngine, WasmFunction,
 };
@@ -47,7 +47,7 @@ impl DbGateway for EpochKickDb {
         _repo: &str,
         _table: &str,
         _key: QueryValue,
-    ) -> Result<Option<QueryValue>, String> {
+    ) -> Result<Option<QueryValue>, DbGatewayError> {
         self.hit.store(true, Ordering::SeqCst);
         // Test-controlled epoch increment at a guest-verified
         // checkpoint (twice: strict and non-strict deadline compares).
@@ -55,19 +55,19 @@ impl DbGateway for EpochKickDb {
         self.engine.engine().increment_epoch();
         Ok(None)
     }
-    async fn insert(&self, _: &str, _: &str, _: QueryValue) -> Result<QueryValue, String> {
-        Err("unused".into())
+    async fn insert(&self, _: &str, _: &str, _: QueryValue) -> Result<QueryValue, DbGatewayError> {
+        Err(DbGatewayError::Execution("unused".into()))
     }
     async fn query(
         &self,
         _: &str,
         _: &str,
         _: Option<QueryValue>,
-    ) -> Result<Vec<QueryValue>, String> {
-        Err("unused".into())
+    ) -> Result<Vec<QueryValue>, DbGatewayError> {
+        Err(DbGatewayError::Execution("unused".into()))
     }
-    async fn execute(&self, _: &[u8]) -> Result<Vec<u8>, String> {
-        Err("unused".into())
+    async fn execute(&self, _: &[u8]) -> Result<Vec<u8>, DbGatewayError> {
+        Err(DbGatewayError::Execution("unused".into()))
     }
 }
 
@@ -85,23 +85,23 @@ impl DbGateway for PendForeverDb {
         _repo: &str,
         _table: &str,
         _key: QueryValue,
-    ) -> Result<Option<QueryValue>, String> {
+    ) -> Result<Option<QueryValue>, DbGatewayError> {
         self.hit.store(true, Ordering::SeqCst);
-        std::future::pending::<Result<Option<QueryValue>, String>>().await
+        std::future::pending::<Result<Option<QueryValue>, DbGatewayError>>().await
     }
-    async fn insert(&self, _: &str, _: &str, _: QueryValue) -> Result<QueryValue, String> {
-        Err("unused".into())
+    async fn insert(&self, _: &str, _: &str, _: QueryValue) -> Result<QueryValue, DbGatewayError> {
+        Err(DbGatewayError::Execution("unused".into()))
     }
     async fn query(
         &self,
         _: &str,
         _: &str,
         _: Option<QueryValue>,
-    ) -> Result<Vec<QueryValue>, String> {
-        Err("unused".into())
+    ) -> Result<Vec<QueryValue>, DbGatewayError> {
+        Err(DbGatewayError::Execution("unused".into()))
     }
-    async fn execute(&self, _: &[u8]) -> Result<Vec<u8>, String> {
-        Err("unused".into())
+    async fn execute(&self, _: &[u8]) -> Result<Vec<u8>, DbGatewayError> {
+        Err(DbGatewayError::Execution("unused".into()))
     }
 }
 
@@ -657,7 +657,7 @@ impl DbGateway for TwoStageGateDb {
         _repo: &str,
         _table: &str,
         _key: QueryValue,
-    ) -> Result<Option<QueryValue>, String> {
+    ) -> Result<Option<QueryValue>, DbGatewayError> {
         match self.calls.fetch_add(1, Ordering::SeqCst) {
             0 => {
                 self.stage1_hit.store(true, Ordering::SeqCst);
@@ -666,22 +666,22 @@ impl DbGateway for TwoStageGateDb {
             }
             _ => {
                 self.stage2_hit.store(true, Ordering::SeqCst);
-                std::future::pending::<Result<Option<QueryValue>, String>>().await
+                std::future::pending::<Result<Option<QueryValue>, DbGatewayError>>().await
             }
         }
     }
-    async fn insert(&self, _: &str, _: &str, _: QueryValue) -> Result<QueryValue, String> {
-        Err("unused".into())
+    async fn insert(&self, _: &str, _: &str, _: QueryValue) -> Result<QueryValue, DbGatewayError> {
+        Err(DbGatewayError::Execution("unused".into()))
     }
     async fn query(
         &self,
         _: &str,
         _: &str,
         _: Option<QueryValue>,
-    ) -> Result<Vec<QueryValue>, String> {
-        Err("unused".into())
+    ) -> Result<Vec<QueryValue>, DbGatewayError> {
+        Err(DbGatewayError::Execution("unused".into()))
     }
-    async fn execute(&self, _: &[u8]) -> Result<Vec<u8>, String> {
-        Err("unused".into())
+    async fn execute(&self, _: &[u8]) -> Result<Vec<u8>, DbGatewayError> {
+        Err(DbGatewayError::Execution("unused".into()))
     }
 }

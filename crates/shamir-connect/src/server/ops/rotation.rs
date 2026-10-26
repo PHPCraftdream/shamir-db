@@ -147,55 +147,97 @@ impl ServerIdentityState {
 
     /// Execute `rotateServerIdentity` (spec §12.2):
     /// - Pre-condition: not already in overlap (HIGH-5 fix).
-    /// - Atomic: previous = current; current = new; rotation_until = now + 7d.
+    /// - Atomic (RV-CONNECT-F8A5E821): check-then-act runs inside
+    ///   `ArcSwap::rcu`, so a concurrent rotation cannot interleave between
+    ///   the overlap check and the publish — the closure is retried against
+    ///   the freshest snapshot whenever another writer wins. Whether the
+    ///   call was rejected is derived from the outcome after `rcu`, so no
+    ///   per-attempt out-flag can leak a stale `rejected` state into a
+    ///   retried winning attempt. The version mirror is published only after
+    ///   a transition that actually won, via [`Self::publish_version`],
+    ///   which updates it monotonically (`fetch_max`): an older rotation
+    ///   finishing last can never regress the mirror below the newest
+    ///   published version.
     pub fn rotate(&self, now_ns: u64) -> Result<RotationOutcome> {
-        let current = (**self.inner.load()).clone();
-        if let Some(t) = current.rotation_until_ns {
-            if now_ns < t {
-                return Err(Error::InvalidInput("rotation_in_progress_already"));
+        // No per-attempt out-flag: whether the call was rejected is derived
+        // from `outcome` after `rcu`, so a retry that wins can never be
+        // mistaken for a rejection (the old `rejected` flag was never reset
+        // on a successful retry).
+        let mut outcome: Option<RotationOutcome> = None;
+        self.inner.rcu(|current: &Arc<ServerIdentityInner>| {
+            // Per-attempt state: a retry that ends in rejection must not keep
+            // the candidate built by an earlier, losing attempt.
+            outcome = None;
+            if let Some(t) = current.rotation_until_ns {
+                if now_ns < t {
+                    return Arc::clone(current);
+                }
             }
+            let old_pub = current.current.public_bytes();
+            let new_keypair = Ed25519Keypair::generate();
+            let new_pub = new_keypair.public_bytes();
+            let transition_until_ns = now_ns.saturating_add(ROTATION_OVERLAP_NS);
+            let new_version = current.current_version.saturating_add(1);
+            outcome = Some(RotationOutcome {
+                old_pub,
+                new_pub,
+                transition_until_ns,
+                new_version,
+            });
+            Arc::new(ServerIdentityInner {
+                current: new_keypair,
+                previous: Some(current.current.clone()),
+                rotation_until_ns: Some(transition_until_ns),
+                current_version: new_version,
+            })
+        });
+        if outcome.is_none() {
+            return Err(Error::InvalidInput("rotation_in_progress_already"));
         }
-        let old_pub = current.current.public_bytes();
-        let new_keypair = Ed25519Keypair::generate();
-        let new_pub = new_keypair.public_bytes();
-        let transition_until_ns = now_ns.saturating_add(ROTATION_OVERLAP_NS);
-        let new_version = current.current_version.saturating_add(1);
-        let new_inner = ServerIdentityInner {
-            current: new_keypair,
-            previous: Some(current.current),
-            rotation_until_ns: Some(transition_until_ns),
-            current_version: new_version,
-        };
-        self.inner.store(Arc::new(new_inner));
         // Keep atomic mirror in sync so `is_ticket_version_acceptable` sees
-        // the updated version without loading the Arc.
+        // the updated version without loading the Arc. Published after the
+        // rcu swap via `publish_version`, which updates the mirror
+        // monotonically: an older rotation finishing last cannot regress it.
+        let outcome = outcome.expect("rcu runs the closure at least once");
+        self.publish_version(outcome.new_version);
+        Ok(outcome)
+    }
+
+    /// Publish `v` to the lock-free version mirror (RV-CONNECT-F8A5E821).
+    ///
+    /// Monotonic by construction: `fetch_max(Release)` guarantees the mirror
+    /// never regresses even when an older rotation's publication lands after
+    /// a newer one (versions only grow).
+    pub(crate) fn publish_version(&self, v: u64) {
         self.current_version_atomic
-            .store(new_version, std::sync::atomic::Ordering::Relaxed);
-        Ok(RotationOutcome {
-            old_pub,
-            new_pub,
-            transition_until_ns,
-            new_version,
-        })
+            .fetch_max(v, std::sync::atomic::Ordering::Release);
     }
 
     /// Background task: when `now_ns >= rotation_until_ns`, zeroize previous
     /// and clear the overlap state. Returns `true` if cleanup happened.
+    /// Atomic via `rcu` (RV-CONNECT-F8A5E821): competes safely with a
+    /// concurrent `rotate` — whichever CAS wins last is based on the freshest
+    /// snapshot, and the overlap check is re-evaluated on every retry.
     pub fn try_finalize(&self, now_ns: u64) -> bool {
-        let current = (**self.inner.load()).clone();
-        match current.rotation_until_ns {
-            Some(t) if now_ns >= t => {
-                let new_inner = ServerIdentityInner {
-                    current: current.current,
-                    previous: None,
-                    rotation_until_ns: None,
-                    current_version: current.current_version,
-                };
-                self.inner.store(Arc::new(new_inner));
-                true
-            }
-            _ => false,
-        }
+        let mut finalized = false;
+        self.inner.rcu(
+            |current: &Arc<ServerIdentityInner>| match current.rotation_until_ns {
+                Some(t) if now_ns >= t => {
+                    finalized = true;
+                    Arc::new(ServerIdentityInner {
+                        current: current.current.clone(),
+                        previous: None,
+                        rotation_until_ns: None,
+                        current_version: current.current_version,
+                    })
+                }
+                _ => {
+                    finalized = false;
+                    Arc::clone(current)
+                }
+            },
+        );
+        finalized
     }
 }
 

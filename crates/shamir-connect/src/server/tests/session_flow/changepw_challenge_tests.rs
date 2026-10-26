@@ -8,7 +8,12 @@
 //! `load` + `store(None)` would reintroduce a TOCTOU race where two callers
 //! each see `Some` before either clears it).
 
+use crate::common::crypto::StoredKey;
+use crate::common::error::Error;
+use crate::common::kdf_params::KdfParams;
+use crate::common::types::limits;
 use crate::common::types::{BindingMode, TransportKind};
+use crate::server::auth::changepw::{verify_change_password_request_with_sid, ChangePwRequest};
 use crate::server::session::{PendingChangePwChallenge, Session, SessionPermissions};
 use std::sync::Arc;
 
@@ -115,4 +120,38 @@ fn reissue_overwrites_prior_challenge() {
     // Still single-use after reissue.
     let second = s.pending_changepw_challenge.swap(None);
     assert!(second.as_deref().is_none());
+}
+
+/// RV-CONNECT-C9066D95: a backwards clock (`now_ns < issued_at_ns`) must be
+/// rejected as `AuthFailed`, never wrap through the unsigned TTL subtraction
+/// into a huge "elapsed" value (a debug-build overflow panic pre-fix).
+#[test]
+fn rv_connect_c9066d95_backwards_clock_rejected_without_underflow() {
+    let s = fresh_session();
+    let pending = PendingChangePwChallenge {
+        server_nonce_cp: [0xAA; 32],
+        client_nonce_cp: [0xBB; 32],
+        issued_at_ns: 2_000, // issued "in the future" relative to now
+    };
+    s.pending_changepw_challenge.store(Some(Arc::new(pending)));
+
+    let err = verify_change_password_request_with_sid(
+        &s,
+        &[0x01u8; limits::SESSION_ID_BYTES],
+        [0u8; limits::SALT_BYTES],
+        &StoredKey([0u8; 32]),
+        KdfParams::DEFAULT,
+        &ChangePwRequest {
+            client_proof_old: [0u8; 32],
+            new_salt: [0u8; limits::SALT_BYTES],
+            new_stored_key: [0u8; 32],
+            new_server_key: [0u8; 32],
+        },
+        KdfParams::DEFAULT,
+        1_000, // now BEFORE issued_at
+    );
+    assert!(
+        matches!(err, Err(Error::AuthFailed)),
+        "reversed timestamps must be rejected without underflow"
+    );
 }
