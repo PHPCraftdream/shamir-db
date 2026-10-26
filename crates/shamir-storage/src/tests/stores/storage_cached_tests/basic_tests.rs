@@ -1,13 +1,19 @@
 #![allow(deprecated)]
 
+use crate::error::{DbError, DbResult};
 use crate::storage_cached::CachedStore;
+use crate::storage_cached::COMMAND_CHANNEL_CAPACITY;
+use crate::storage_cached::QUEUED_PAYLOAD_BUDGET_BYTES;
 use crate::storage_in_memory::InMemoryStore;
-use crate::tests::types_tests::collect_stream;
+use crate::tests::types_tests::{collect_stream, run_batch_store_tests};
 use crate::types::{KvOp, RecordKey, Store};
+use async_trait::async_trait;
 use bytes::Bytes;
+use futures::stream::Stream;
 use futures::StreamExt;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 /// Regression: `flush` must work through `Arc<dyn Store>`. The
@@ -597,3 +603,232 @@ async fn test_transact_set_many_populates_all() {
 // iter_stream / scan_prefix_stream: incremental correctness preserved
 // (audit 2026-07-06-perf-radical-o-notation §1.3)
 // ============================================================================
+
+// ============================================================================
+// RV-STORAGE-007DEF6B / E02C8A80 / FA461E63 remediation (2026-10-26)
+// ============================================================================
+
+/// Test-only inner store advertising `supports_atomic_transact() == true`
+/// (like the pre-withdrawal fjall shim once did) while delegating
+/// everything else to an `InMemoryStore`.
+struct AtomicTransactInner {
+    inner: Arc<InMemoryStore>,
+}
+
+type RecordStream = Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>;
+
+#[async_trait]
+impl Store for AtomicTransactInner {
+    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
+        self.inner.insert(value).await
+    }
+    async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
+        self.inner.set(key, value).await
+    }
+    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
+        self.inner.get(key).await
+    }
+    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
+        self.inner.remove(key).await
+    }
+    async fn transact(&self, ops: Vec<KvOp>) -> DbResult<()> {
+        self.inner.transact(ops).await
+    }
+    fn supports_atomic_transact(&self) -> bool {
+        true
+    }
+    fn iter_stream(&self, batch_size: usize) -> RecordStream {
+        self.inner.iter_stream(batch_size)
+    }
+    fn scan_prefix_stream(&self, prefix: Bytes, batch_size: usize) -> RecordStream {
+        self.inner.scan_prefix_stream(prefix, batch_size)
+    }
+}
+
+/// RV-STORAGE-007DEF6B: CachedStore must NOT advertise whole-batch
+/// visibility atomicity even when the inner backend claims it — the cache
+/// layer republishes a committed transaction's cache actions one key at a
+/// time and cache-hit reads trust an unfenced mirror probe, so a reader
+/// during the publication window can see new A with old B. The capability
+/// is withdrawn at the cache layer (never re-derived from inner).
+#[tokio::test]
+async fn rv_storage_007def6b_cached_store_withdraws_atomic_transact_capability() {
+    let atomic_inner: Arc<dyn Store> = Arc::new(AtomicTransactInner {
+        inner: Arc::new(InMemoryStore::new()),
+    });
+    assert!(
+        atomic_inner.supports_atomic_transact(),
+        "the mock inner must advertise the capability so the wrapper's \
+         withdrawal is what the test observes"
+    );
+
+    let cached_sync = CachedStore::new_sync(atomic_inner.clone()).await.unwrap();
+    assert!(
+        !cached_sync.supports_atomic_transact(),
+        "CachedStore must withdraw the atomic-transact capability at the \
+         cache layer (Sync mode)"
+    );
+
+    let cached_async = CachedStore::new_async(atomic_inner).await.unwrap();
+    assert!(
+        !cached_async.supports_atomic_transact(),
+        "CachedStore must withdraw the atomic-transact capability at the \
+         cache layer (Async mode)"
+    );
+}
+
+/// RV-STORAGE-E02C8A80: the owner command channel must be BOUNDED. With
+/// the owner paused (never dequeuing), exactly
+/// `COMMAND_CHANNEL_CAPACITY` value-bearing-capable commands can be
+/// admitted; further admission is refused so a stalled owner cannot grow
+/// the queue (and its retained payloads) without bound. Releasing the
+/// owner must drain the fillers FIFO and serve a new command — bounded
+/// admission must not deadlock.
+#[tokio::test]
+async fn rv_storage_e02c8a80_owner_command_channel_is_bounded() {
+    let inner = Arc::new(InMemoryStore::new());
+    let (store, gate) = CachedStore::new_sync_paused_owner_for_tests(inner)
+        .await
+        .unwrap();
+
+    let admitted = store.fill_command_channel_for_tests();
+    assert_eq!(
+        admitted, COMMAND_CHANNEL_CAPACITY,
+        "the owner command channel must be bounded at \
+         COMMAND_CHANNEL_CAPACITY; an UNBOUNDED channel admits past the \
+         4x sanity cap instead"
+    );
+
+    // Liveness: bounded admission is a cooperative retry loop, not a
+    // deadlock — releasing the paused owner drains the fillers and the
+    // next command completes.
+    gate.notify_one();
+    let key: RecordKey = Bytes::from_static(b"e02c8a80-key").into();
+    assert!(
+        store.set(key, Bytes::from_static(b"v")).await.unwrap(),
+        "a new set must be served after the owner is released"
+    );
+}
+
+/// RV-STORAGE-FA461E63: register the backend-agnostic batch contract
+/// suite (`run_batch_store_tests`) for CachedStore in BOTH write modes —
+/// the suite previously ran only against InMemory, MemBuffer and Fjall.
+#[tokio::test]
+async fn rv_storage_fa461e63_batch_contract_suite_both_write_modes() {
+    let sync: Arc<dyn Store> = Arc::new(
+        CachedStore::new_sync(Arc::new(InMemoryStore::new()))
+            .await
+            .unwrap(),
+    );
+    run_batch_store_tests(sync).await;
+
+    let async_mode: Arc<dyn Store> = Arc::new(
+        CachedStore::new_async(Arc::new(InMemoryStore::new()))
+            .await
+            .unwrap(),
+    );
+    run_batch_store_tests(async_mode).await;
+}
+
+/// RV-STORAGE-E02C8A80 round 2: the count bound alone is not a MEMORY
+/// bound. With the owner paused, repeatedly admitting a 1 MiB `Set` must
+/// saturate the retained-BYTE budget (`QUEUED_PAYLOAD_BUDGET_BYTES`) after
+/// exactly BUDGET / 1 MiB commands — far below the 1024-command cap —
+/// proving the byte budget is the binding constraint. A further admit is
+/// refused, so a stalled owner cannot retain payloads without bound even
+/// when each individual command is small relative to the command cap.
+#[tokio::test]
+async fn rv_storage_e02c8a80_byte_budget_blocks_before_command_cap() {
+    let inner = Arc::new(InMemoryStore::new());
+    let (store, _gate) = CachedStore::new_sync_paused_owner_for_tests(inner)
+        .await
+        .unwrap();
+
+    // Keys count toward the byte budget (round 3), so use fixed-width
+    // keys and shrink each value by the key length: every admitted
+    // command then charges EXACTLY 1 MiB and the budget binds after
+    // exactly BUDGET / 1 MiB commands.
+    let mib = 1024 * 1024;
+    let key_len = format!("e02c8a80-byte-{:04}", 0).len();
+    let value = Bytes::from(vec![0u8; mib - key_len]);
+    let mut admitted = 0;
+    while admitted < 4 * COMMAND_CHANNEL_CAPACITY {
+        let key: RecordKey = Bytes::from(format!("e02c8a80-byte-{:04}", admitted)).into();
+        if !store.try_admit_set_for_tests(key, value.clone()) {
+            break;
+        }
+        admitted += 1;
+    }
+    assert_eq!(
+        admitted,
+        QUEUED_PAYLOAD_BUDGET_BYTES / mib,
+        "the retained-BYTE budget must bind after BUDGET/MiB 1 MiB sets, far \
+         below the {} command cap",
+        COMMAND_CHANNEL_CAPACITY
+    );
+    // One further admit must still be refused.
+    let key: RecordKey = Bytes::from_static(b"e02c8a80-byte-over").into();
+    assert!(
+        !store.try_admit_set_for_tests(key, value),
+        "admission must stay refused once the byte budget is exhausted"
+    );
+}
+
+/// RV-STORAGE-E02C8A80 round 2: a single command whose payload alone
+/// exceeds the whole budget is admitted ONLY into an EMPTY queue (the
+/// empty-queue exception) so no value is ever undeliverable; afterwards
+/// the store must stay live once the owner is released.
+#[tokio::test]
+async fn rv_storage_e02c8a80_oversized_command_admitted_on_empty_queue() {
+    let inner = Arc::new(InMemoryStore::new());
+    let (store, gate) = CachedStore::new_sync_paused_owner_for_tests(inner)
+        .await
+        .unwrap();
+
+    let value = Bytes::from(vec![0u8; QUEUED_PAYLOAD_BUDGET_BYTES + 1]);
+    let key: RecordKey = Bytes::from_static(b"e02c8a80-oversized").into();
+    assert!(
+        store.try_admit_set_for_tests(key, value),
+        "an oversized command must be admitted into an EMPTY queue"
+    );
+
+    // Liveness: the oversized command drains and a follow-up small set
+    // completes — the byte budget must not deadlock the owner.
+    gate.notify_one();
+    let key: RecordKey = Bytes::from_static(b"e02c8a80-after-oversized").into();
+    assert!(
+        store.set(key, Bytes::from_static(b"v")).await.unwrap(),
+        "a small set must complete after the oversized command drains"
+    );
+}
+
+/// RV-STORAGE-E02C8A80 round 2: queued payloads charge the shared byte
+/// counter on admission and the OWNER releases the charge on dequeue, so
+/// after the queue fully drains the counter must return to exactly zero —
+/// no leaked byte accounting across the admit/dequeue lifecycle.
+#[tokio::test]
+async fn rv_storage_e02c8a80_byte_budget_returns_to_zero_after_drain() {
+    let inner = Arc::new(InMemoryStore::new());
+    let (store, gate) = CachedStore::new_sync_paused_owner_for_tests(inner)
+        .await
+        .unwrap();
+
+    for i in 0..4 {
+        let key: RecordKey = Bytes::from(format!("e02c8a80-drain-{i}")).into();
+        assert!(store.try_admit_set_for_tests(key, Bytes::from(vec![0u8; 4096])));
+    }
+    assert!(
+        store.queued_bytes_for_tests() > 0,
+        "queued payloads must charge the byte counter"
+    );
+
+    gate.notify_one();
+    // FIFO barrier: `flush` is served only after every earlier queued set
+    // was dequeued (and its charge released), so the counter must be 0.
+    store.flush().await.unwrap();
+    assert_eq!(
+        store.queued_bytes_for_tests(),
+        0,
+        "the byte counter must return to zero after the queue drains"
+    );
+}

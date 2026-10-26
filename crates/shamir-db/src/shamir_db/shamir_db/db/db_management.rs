@@ -659,15 +659,18 @@ impl ShamirDb {
                 .await
             {
                 Ok(Some(rec)) => {
-                    let enable_indexes = rec
-                        .get("enable_indexes")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    let table_meta = ResourceMeta::from_record(&rec);
-                    // RV-DB-6540DC7B: persistence failures propagate.
-                    self.system_store
-                        .save_table(db_name, to, table_name, enable_indexes, &table_meta)
-                        .await?;
+                    let mut new_rec = rec.clone();
+                    if let QueryValue::Map(fields) = &mut new_rec {
+                        fields.insert("db_name".to_string(), QueryValue::Str(db_name.to_string()));
+                        fields.insert("repo_name".to_string(), QueryValue::Str(to.to_string()));
+                    } else {
+                        return Err(DbError::Internal(format!(
+                            "table catalogue row for '{}/{}/{}' is not a map",
+                            db_name, from, table_name
+                        )));
+                    }
+                    // Re-key the complete row so schema and validator fields survive.
+                    self.system_store.save_table_meta(&new_rec).await?;
                     self.system_store
                         .remove_table(db_name, from, table_name)
                         .await?;

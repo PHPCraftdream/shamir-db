@@ -142,7 +142,7 @@ pub struct ReplicationConfig {
     /// Password for [`Self::replicator_user`]. Without it (and a user) the
     /// wire source cannot connect — reconcile logs and skips.
     #[serde(default)]
-    pub replicator_password: Option<String>,
+    pub replicator_password: Option<crate::replication::ReplicatorPassword>,
     /// Decode replicated Put payloads before allocating a version. Adds per-Put
     /// decoding cost; rejects undecodable records without schema/validator/DAC
     /// checks. Defaults to false (Trusted, preserving existing behavior).

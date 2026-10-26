@@ -79,7 +79,8 @@ pub(super) fn seg_file_name(seq: u64) -> String {
 /// is not a numeric `.wal` segment.
 fn parse_seg_seq(name: &str) -> Option<u64> {
     let stem = name.strip_suffix(".wal")?;
-    stem.parse::<u64>().ok()
+    let seq = stem.parse::<u64>().ok()?;
+    (seg_file_name(seq) == name).then_some(seq)
 }
 
 impl SegmentSet {
@@ -106,10 +107,21 @@ impl SegmentSet {
                 if let Some(name) = entry.file_name().to_str() {
                     if let Some(seq) = parse_seg_seq(name) {
                         out.push(seq);
+                    } else if let Some(stem) = name.strip_suffix(".wal") {
+                        if stem.parse::<u64>().is_ok() {
+                            return Err(DbError::Storage(format!(
+                                "SegmentSet discovered non-canonical segment name {name:?} in {scan_dir:?}; refusing to open (possible sequence alias)"
+                            )));
+                        }
                     }
                 }
             }
             out.sort_unstable();
+            if out.windows(2).any(|pair| pair[0] == pair[1]) {
+                return Err(DbError::Storage(
+                    "SegmentSet contains multiple filenames for the same segment sequence".into(),
+                ));
+            }
             Ok(out)
         })
         .await
@@ -160,8 +172,7 @@ impl SegmentSet {
                     // so a CRC failure (corruption in a fully-fsync'd segment)
                     // is a loud open error. Audit §2.4: PermissionDenied is a
                     // hard error at startup (no concurrent truncation expected).
-                    let seg = WalSegment::open(path.clone()).await?;
-                    let entries = seg.replay_sealed_at_startup().await?;
+                    let entries = WalSegment::replay_path(path.clone(), true, false, false).await?;
                     entries.iter().map(|e| e.commit_version).max().unwrap_or(0)
                 }
             };
@@ -203,6 +214,14 @@ impl SegmentSet {
         // only one that can have one. Removing it now keeps the next
         // `append_batch` window from being stranded behind it on replay.
         active.repair_torn_tail().await?;
+        let active_max = active
+            .replay_at_startup()
+            .await?
+            .iter()
+            .map(|entry| entry.commit_version)
+            .max()
+            .unwrap_or(0);
+        active.restore_max_committed(active_max);
 
         // Cleanup only (RV-WAL-A025886E): with the sidecar-never-changes rule
         // the active segment can no longer carry a VALID sidecar (a highest
@@ -281,11 +300,11 @@ impl SegmentSet {
                 Ok(last_seq)
             }
             Err(e) => {
-                // The append failed (write error → the segment poisoned
-                // itself inside WalSegment::append_batch, OR the segment was
-                // poisoned by a prior sync failure between our is_poisoned
-                // check and our call). Rotate to a fresh segment and retry
-                // the batch ONCE so the leader is not stuck on a dead fd.
+                if !active.is_poisoned() {
+                    return Err(e);
+                }
+                // A write or sync failure poisoned this segment. Rotate once
+                // and retry on a fresh segment; non-poisoning errors returned above.
                 log::error!(
                     "SegmentSet append failed on active segment; rotating and \
                      retrying once. Original error: {e}"
@@ -462,17 +481,9 @@ impl SegmentSet {
     /// active segment last. Byte-identical to a single segment holding the
     /// same data in the same append order.
     ///
-    /// **Audit §2.4:** this is the cold-start recovery path — the only
-    /// caller is `RepoWalManager::recover()`, invoked once at repo boot
-    /// (verified: `WalGroupCommit::replay`/`WalSink::replay` have no other
-    /// callers). There is no concurrent `truncate_below` racing a fresh
-    /// process at startup, so every segment here is replayed with the
-    /// `_at_startup` variants — `PermissionDenied` is a hard error (a real
-    /// ACL denial or antivirus/backup-held file, NOT the Windows
-    /// delete-pending race that justifies tolerance during a LIVE
-    /// concurrent truncate). Using the tolerant `replay()`/`replay_sealed()`
-    /// here would silently treat a real permission failure as an empty WAL,
-    /// exactly the bug this finding closes.
+    /// Used for startup and live gap recovery. Sealed reads never create files;
+    /// `NotFound` is tolerated for concurrent truncation, while `PermissionDenied`
+    /// is retried a bounded number of times and then returned as an error.
     pub async fn replay(&self) -> DbResult<Vec<WalEntryV2>> {
         // Snapshot sealed metadata + active Arc under the lock; do I/O after.
         let (mut sealed, active) = {
@@ -485,14 +496,7 @@ impl SegmentSet {
         sealed.sort_unstable_by_key(|m| m.seq);
         let mut out = Vec::new();
         for meta in &sealed {
-            let seg = WalSegment::open(meta.path.clone()).await?;
-            // Audit §1.8 + §2.4: sealed segments are fully fsync'd (I4), so
-            // a CRC mismatch is on-disk corruption, not a crash tail —
-            // replay it in "sealed" mode so a CRC failure is a loud
-            // recovery error (operator decision) instead of a silent warn
-            // that discards the valid tail. "_at_startup" additionally
-            // hard-fails PermissionDenied (see method doc above).
-            out.extend(seg.replay_sealed_at_startup().await?);
+            out.extend(WalSegment::replay_path(meta.path.clone(), true, false, false).await?);
         }
         out.extend(active.replay_at_startup().await?);
         Ok(out)

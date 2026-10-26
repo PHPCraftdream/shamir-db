@@ -20,7 +20,9 @@ use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
 
 use shamir_transport_tcp::framing::{read_frame, write_frame, MAX_FRAME_SIZE_DEFAULT};
-use shamir_transport_tcp::tls::{extract_tls_exporter, make_client_config_no_ca};
+use shamir_transport_tcp::tls::{
+    extract_tls_exporter, make_client_config_app_authenticated, AppLayerServerAuth,
+};
 
 use shamir_server::config::{
     Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ProfileKind, SecurityConfig,
@@ -141,7 +143,8 @@ async fn new_tls_conn(
     impl tokio::io::AsyncWrite + Unpin,
     [u8; 32],
 ) {
-    let client_cfg = make_client_config_no_ca().unwrap();
+    let client_cfg =
+        make_client_config_app_authenticated(AppLayerServerAuth::exporter_bound()).unwrap();
     let connector = TlsConnector::from(client_cfg);
     let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
     let tcp = TcpStream::connect(addr).await.expect("connect");

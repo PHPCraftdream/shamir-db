@@ -14,6 +14,7 @@ use crate::core::interner::{Interner, InternerKey};
 use crate::record_view::{RawSeq, RecordValue, RecordView};
 use crate::types::common::{new_map_wc, TSet};
 use crate::types::value::{InnerValue, QueryValue, Value};
+use num_bigint::BigInt;
 use std::sync::{Arc, OnceLock};
 
 /// Converts a [`QueryValue`] (string-keyed) to [`InnerValue`] (interned keys).
@@ -151,7 +152,7 @@ fn record_view_to_query_value_with_rev(
     view: &RecordView<'_>,
     rev: &[OnceLock<Arc<str>>],
 ) -> Result<QueryValue, CodecError> {
-    let mut obj = new_map_wc(view.len());
+    let mut obj = new_map_wc(view.len().min(view.body_len()));
     for (interned_key, rv) in view.fields() {
         let idx = interned_key.id() as usize;
         let key_str = rev
@@ -176,6 +177,7 @@ fn record_value_to_query_value_with_rev(
         RecordValue::Null => Ok(QueryValue::Null),
         RecordValue::Bool(b) => Ok(QueryValue::Bool(*b)),
         RecordValue::Int(i) => Ok(QueryValue::Int(*i)),
+        RecordValue::Big(u) => Ok(QueryValue::Big(BigInt::from(*u))),
         RecordValue::F64(f) => Ok(QueryValue::F64(*f)),
         RecordValue::Str(cow) => Ok(QueryValue::Str(cow.as_ref().to_owned())),
         RecordValue::Bin(b) => Ok(QueryValue::Bin(b.to_vec())),
@@ -189,7 +191,7 @@ fn convert_raw_seq_to_query_value(
     seq: &RawSeq<'_>,
     rev: &[OnceLock<Arc<str>>],
 ) -> Result<QueryValue, CodecError> {
-    let mut items = Vec::with_capacity(seq.len());
+    let mut items = Vec::with_capacity(seq.len().min(seq.as_bytes().len()));
     for elem in seq.iter() {
         items.push(record_value_to_query_value_with_rev(&elem, rev)?);
     }
@@ -224,7 +226,7 @@ pub fn record_view_deintern_with<F>(
 where
     F: Fn(u64) -> Option<String>,
 {
-    let mut obj = new_map_wc(view.len());
+    let mut obj = new_map_wc(view.len().min(view.body_len()));
     for (interned_key, rv) in view.fields() {
         let id = interned_key.id();
         let key_str = resolve(id).ok_or_else(|| {
@@ -244,6 +246,7 @@ where
         RecordValue::Null => Ok(QueryValue::Null),
         RecordValue::Bool(b) => Ok(QueryValue::Bool(*b)),
         RecordValue::Int(i) => Ok(QueryValue::Int(*i)),
+        RecordValue::Big(u) => Ok(QueryValue::Big(BigInt::from(*u))),
         RecordValue::F64(f) => Ok(QueryValue::F64(*f)),
         RecordValue::Str(cow) => Ok(QueryValue::Str(cow.as_ref().to_owned())),
         RecordValue::Bin(b) => Ok(QueryValue::Bin(b.to_vec())),
@@ -257,7 +260,7 @@ fn rv_deintern_seq_with<F>(seq: &RawSeq<'_>, resolve: &F) -> Result<QueryValue, 
 where
     F: Fn(u64) -> Option<String>,
 {
-    let mut items = Vec::with_capacity(seq.len());
+    let mut items = Vec::with_capacity(seq.len().min(seq.as_bytes().len()));
     for elem in seq.iter() {
         items.push(rv_deintern_value_with(&elem, resolve)?);
     }

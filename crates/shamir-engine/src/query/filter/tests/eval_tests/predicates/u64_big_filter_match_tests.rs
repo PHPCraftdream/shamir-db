@@ -9,8 +9,8 @@
 //! extracts the record field via `RecordRef::scalar_at`, which returns `None`
 //! for a promoted `Big` value on BOTH read paths:
 //! - **Lens / hot path** (`RecordView`): `uint_to_record_value` maps the raw
-//!   bytes to `RecordValue::Str(Cow::Owned(decimal_string))` — `scalar_at`
-//!   cannot borrow an owned `String` into `ScalarRef::Str(&'a str)`.
+//!   bytes to `RecordValue::Big(u64)` without allocation; the variant is
+//!   non-comparable and materializes to `InnerValue::Big`.
 //! - **Tree / cold (MVCC-Owned) path** (`InnerValue`): the field decodes to
 //!   `InnerValue::Big(BigInt)`, and `ScalarRef` has no `Big` variant by
 //!   design (see `scalar_ref.rs`).
@@ -35,6 +35,8 @@
 use crate::query::filter::eval::{compile_filter, resolve_filter_query};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::{Filter, FilterValue};
+use shamir_index::base_index::index_info_item::IndexInfoItem;
+use shamir_index::base_index::index_keys::build_index_key_from_record;
 use shamir_query_builder::val::lit_u64;
 use shamir_types::core::interner::Interner;
 use shamir_types::record_view::{RecordRef, RecordView};
@@ -43,7 +45,6 @@ use shamir_types::types::value::InnerValue;
 
 use crate::query::filter::tests::eval_tests::shared::helpers::empty_refs;
 use num_bigint::BigInt;
-
 /// Build a raw msgpack map `{ <bin key for `field`>: <uint64 value> }` — the
 /// exact storage shape a non-Rust encoder emits on the wire. Bypasses the
 /// Rust builder's `i64`-typed surface so a genuine `uint64 > i64::MAX`
@@ -72,10 +73,36 @@ fn tree_big_record(interner: &Interner, field: &str, value: u64) -> InnerValue {
     InnerValue::Map(map)
 }
 
+#[test]
+fn rv_types_18ac0cfc_index_key_raw_u64_parity() {
+    let interner = Interner::new();
+    let field = interner.touch_ind("n").unwrap().into_key();
+    let name_interned = interner.touch_ind("n_index").unwrap().into_key().id();
+    let paths = [IndexInfoItem::new(vec![field.id()])];
+
+    for value in [
+        i64::MAX as u64,
+        i64::MAX as u64 + 1,
+        i64::MAX as u64 + 3,
+        u64::MAX,
+    ] {
+        let blob = raw_uint64_record(&interner, "n", value);
+        let view = RecordView::new(&blob).expect("RecordView decodes uint64 record");
+        let tree = InnerValue::from_bytes(&blob).expect("tree decodes uint64 record");
+        let view_key = build_index_key_from_record(false, name_interned, &view, &paths)
+            .expect("present raw field has an index key");
+        let tree_key = build_index_key_from_record(false, name_interned, &tree, &paths)
+            .expect("present tree field has an index key");
+        assert_eq!(view_key.hash1, tree_key.hash1, "hash1 for {value}");
+        assert_eq!(view_key.hash2, tree_key.hash2, "hash2 for {value}");
+        assert_eq!(view_key.is_unique, tree_key.is_unique);
+        assert_eq!(view_key.name_interned, tree_key.name_interned);
+    }
+}
+
 // ── Positive: representation is lossless on both paths ───────────────────────
 
-/// The lens decodes a raw `uint64` field to a lossless decimal `Str`
-/// (`Cow::Owned` — the value is NOT corrupted to `-1` or `i64::MAX`).
+/// The lens decodes a raw `uint64` field as its exact nonallocating Big value.
 #[test]
 fn fg1_lens_decodes_uint64_losslessly() {
     let interner = Interner::new();
@@ -85,10 +112,10 @@ fn fg1_lens_decodes_uint64_losslessly() {
     let key = interner.touch_ind("n").unwrap().into_key();
     let lens_val = view.get(key);
     match lens_val {
-        Some(shamir_types::record_view::RecordValue::Str(s)) => {
-            assert_eq!(s.as_ref(), "18446744073709551615");
+        Some(shamir_types::record_view::RecordValue::Big(value)) => {
+            assert_eq!(value, u64::MAX);
         }
-        other => panic!("lens must map uint64>max to Str(decimal), got {other:?}"),
+        other => panic!("lens must map uint64>max to Big, got {other:?}"),
     }
 }
 
