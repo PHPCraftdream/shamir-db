@@ -1,6 +1,7 @@
 use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
+use shamir_tx::ChangelogError;
 use shamir_tx::{ChangelogStore, JournalRead};
 
 /// One ascending journal page, limited to the confirmed completion prefix.
@@ -41,14 +42,18 @@ impl ErrorPreservingJournalStore {
 
 #[async_trait::async_trait]
 impl ChangelogStore for ErrorPreservingJournalStore {
-    async fn put(&self, key: Bytes, value: Bytes) -> Result<(), String> {
+    async fn put(&self, key: Bytes, value: Bytes) -> Result<(), ChangelogError> {
         self.inner.put(key, value).await
     }
 
-    async fn range_from(&self, from_key: Bytes, limit: usize) -> Result<Vec<Bytes>, String> {
+    async fn range_from(
+        &self,
+        from_key: Bytes,
+        limit: usize,
+    ) -> Result<Vec<Bytes>, ChangelogError> {
         let result = self.inner.range_from(from_key, limit).await;
         if let Err(error) = &result {
-            let _ = self.error.set(error.clone());
+            let _ = self.error.set(error.to_string());
         }
         result
     }

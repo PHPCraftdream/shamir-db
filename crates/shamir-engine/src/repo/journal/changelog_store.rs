@@ -12,6 +12,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::Store;
+use shamir_tx::ChangelogError;
 
 #[cfg(test)]
 mod tests;
@@ -65,7 +66,7 @@ impl StoreChangelog {
 
 #[async_trait::async_trait]
 impl shamir_tx::ChangelogStore for StoreChangelog {
-    async fn put(&self, key: Bytes, value: Bytes) -> Result<(), String> {
+    async fn put(&self, key: Bytes, value: Bytes) -> Result<(), ChangelogError> {
         let is_clean = key == shamir_tx::changefeed::clean_horizon_key();
         let is_marker = key == shamir_tx::changefeed::gap_marker_key() || is_clean;
         if is_clean {
@@ -73,24 +74,28 @@ impl shamir_tx::ChangelogStore for StoreChangelog {
             self.store
                 .flush()
                 .await
-                .map_err(|e| format!("changelog checkpoint flush: {e}"))?;
+                .map_err(|e| ChangelogError::Journal(format!("changelog checkpoint flush: {e}")))?;
         }
         self.store
             .set(key.into(), value)
             .await
-            .map_err(|e| format!("changelog store set: {e}"))?;
+            .map_err(|e| ChangelogError::Journal(format!("changelog store set: {e}")))?;
         if is_marker {
             // Store::set is only eventually durable. Marker success means
             // the backend's explicit durability boundary has completed.
             self.store
                 .flush()
                 .await
-                .map_err(|e| format!("changelog marker flush: {e}"))?;
+                .map_err(|e| ChangelogError::Journal(format!("changelog marker flush: {e}")))?;
         }
         Ok(())
     }
 
-    async fn range_from(&self, from_key: Bytes, limit: usize) -> Result<Vec<Bytes>, String> {
+    async fn range_from(
+        &self,
+        from_key: Bytes,
+        limit: usize,
+    ) -> Result<Vec<Bytes>, ChangelogError> {
         // `Store::iter_stream` is a workspace-wide MUST-ascending contract
         // (`shamir-storage/src/types.rs` doc on `iter_stream`), and every
         // `iter_range_stream` this crate can be handed upholds it too: the
@@ -114,7 +119,8 @@ impl shamir_tx::ChangelogStore for StoreChangelog {
             let Some(chunk) = stream.next().await else {
                 break;
             };
-            let chunk = chunk.map_err(|e| format!("changelog store range: {e}"))?;
+            let chunk = chunk
+                .map_err(|e| ChangelogError::Journal(format!("changelog store range: {e}")))?;
             for (key, v) in chunk {
                 if key.as_ref() == shamir_tx::changefeed::gap_marker_key().as_ref()
                     || key.as_ref() == shamir_tx::changefeed::clean_horizon_key().as_ref()
@@ -123,7 +129,7 @@ impl shamir_tx::ChangelogStore for StoreChangelog {
                 }
                 if v.len() > remaining_bytes {
                     if values.is_empty() {
-                        return Err(format!("changelog event exceeds {max_bytes} byte budget"));
+                        return Err(ChangelogError::Oversized { budget: max_bytes });
                     }
                     return Ok(values);
                 }

@@ -10,7 +10,8 @@ use shamir_storage::error::DbError;
 use tokio::sync::Notify;
 
 use super::super::{
-    decode_gap_marker, encode_gap_marker, gap_marker_key, ChangelogStore, RepoChangefeed,
+    decode_gap_marker, encode_gap_marker, gap_marker_key, ChangelogError, ChangelogStore,
+    RepoChangefeed,
 };
 
 #[derive(Default)]
@@ -45,7 +46,7 @@ impl RepairStore {
 
 #[async_trait::async_trait]
 impl ChangelogStore for RepairStore {
-    async fn put(&self, key: Bytes, value: Bytes) -> Result<(), String> {
+    async fn put(&self, key: Bytes, value: Bytes) -> Result<(), ChangelogError> {
         assert_eq!(key, gap_marker_key());
         self.calls.fetch_add(1, Ordering::AcqRel);
         if self.hold.swap(false, Ordering::AcqRel) {
@@ -53,17 +54,17 @@ impl ChangelogStore for RepairStore {
             self.release.notified().await;
         }
         if self.fail_write.load(Ordering::Acquire) {
-            return Err("injected write failure".into());
+            return Err(ChangelogError::Journal("injected write failure".into()));
         }
         *self.staged.lock().unwrap() = Some(value.clone());
         if self.fail_flush.load(Ordering::Acquire) {
-            return Err("injected flush failure".into());
+            return Err(ChangelogError::Journal("injected flush failure".into()));
         }
         *self.durable.lock().unwrap() = Some(value);
         Ok(())
     }
 
-    async fn range_from(&self, _: Bytes, _: usize) -> Result<Vec<Bytes>, String> {
+    async fn range_from(&self, _: Bytes, _: usize) -> Result<Vec<Bytes>, ChangelogError> {
         Ok(Vec::new())
     }
 }

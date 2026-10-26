@@ -65,7 +65,7 @@ pub use feed::events::{
     encode_gap_marker, gap_marker_key, nontx_event, project_event, version_key, ChangeOp,
     ChangelogEvent, RecordChange, BROADCAST_CAPACITY, JOURNAL_CHANNEL_CAPACITY,
 };
-pub use feed::{ChangelogStore, RepoChangefeed};
+pub use feed::{ChangelogError, ChangelogResult, ChangelogStore, RepoChangefeed};
 pub use journal_read::JournalRead;
 pub use repair_pending::RepairPending;
 

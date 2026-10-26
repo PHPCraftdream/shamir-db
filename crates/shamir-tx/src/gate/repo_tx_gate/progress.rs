@@ -68,12 +68,13 @@ impl RepoTxGate {
     /// with `dep`. Called by `pre_commit` Phase 2-bis UNDER `commit_lock`.
     ///
     /// Walks ONLY records with `snapshot < commit_version <= last_committed`.
-    /// The upper bound `last_committed` is important for non-tx footprints:
-    /// non-tx writes append to the log via `record_nontx_ssi_footprint` at
-    /// the version assigned by `set_versioned` / `delete_versioned`, but they
-    /// do NOT call `publish_committed`. So their version may be higher than
-    /// `last_committed`. Such a record is "pending" and must NOT be treated as
-    /// a concurrent committed write relative to this tx's predicate window.
+    /// The upper bound is the publication floor that ALL writers advance:
+    /// tx commits via `publish_committed` / watermark sync, non-tx writes
+    /// via their successful `guard.commit` materialisation (both feed the
+    /// same contiguous completion watermark that `last_committed_version`
+    /// tracks). A record above the floor has not yet been marked
+    /// materialized — it is "pending" and must NOT be treated as a
+    /// concurrent committed write relative to this tx's predicate window.
     ///
     /// Uses `(snapshot + 1)..=last_committed` to express the exclusive lower
     /// / inclusive upper bound (snapshot is always far from `u64::MAX` in
@@ -450,9 +451,14 @@ pub fn record_conflicts(rec: &CommitWriteRecord, dep: &crate::predicate_set::Pre
             lo,
             hi,
         } => rec.per_table.get(table_token).is_some_and(|f| {
-            f.inserted_index_keys
-                .iter()
-                .any(|k| crate::predicate_set::key_in_interval(k, *index_id, lo, hi))
+            // Keys are sorted ascending (build_footprint_from_tx) — use the
+            // bounded interval search instead of a linear scan.
+            crate::predicate_set::index_range_overlaps_sorted(
+                &f.inserted_index_keys,
+                *index_id,
+                lo,
+                hi,
+            )
         }),
     }
 }

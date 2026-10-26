@@ -87,7 +87,7 @@ pub(crate) async fn drain_repair_pending(repo: &RepoInstance) -> DbResult<usize>
             .store
             .range_from(key, 1)
             .await
-            .map_err(DbError::Storage)?;
+            .map_err(|e| DbError::Storage(e.to_string()))?;
         if let Some(bytes) = rows.first() {
             let found =
                 rmp_serde::from_slice::<shamir_tx::ChangelogEvent>(bytes).map_err(|error| {

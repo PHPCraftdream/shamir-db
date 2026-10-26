@@ -71,7 +71,7 @@ pub(in crate::tx::drain::drainer) async fn repair_event(
         .store
         .range_from(key.clone(), 1)
         .await
-        .map_err(DbError::Storage)?;
+        .map_err(|e| DbError::Storage(e.to_string()))?;
     if let Some(bytes) = rows.first() {
         let found = rmp_serde::from_slice::<shamir_tx::ChangelogEvent>(bytes)
             .map_err(|error| DbError::Codec(format!("orphan {version} event decode: {error}")))?;
@@ -107,7 +107,7 @@ pub(in crate::tx::drain::drainer) async fn repair_event(
         .store
         .range_from(key, 1)
         .await
-        .map_err(DbError::Storage)?;
+        .map_err(|e| DbError::Storage(e.to_string()))?;
     let Some(bytes) = rows.first() else {
         return Ok(Outcome::Gap(GapReason::WriterGap));
     };

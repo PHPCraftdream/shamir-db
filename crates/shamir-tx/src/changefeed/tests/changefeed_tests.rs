@@ -7,8 +7,8 @@ use scc::HashMap as SccMap;
 use shamir_types::access::Actor;
 
 use crate::changefeed::{
-    project_event, version_key, ChangeOp, ChangelogEvent, ChangelogStore, RecordChange,
-    RepoChangefeed,
+    project_event, version_key, ChangeOp, ChangelogError, ChangelogEvent, ChangelogStore,
+    RecordChange, RepoChangefeed,
 };
 use crate::staging_store::StagingStore;
 use crate::types::{IsolationLevel, TxId};
@@ -24,12 +24,16 @@ struct MemChangelogStore {
 
 #[async_trait::async_trait]
 impl ChangelogStore for MemChangelogStore {
-    async fn put(&self, key: Bytes, value: Bytes) -> Result<(), String> {
+    async fn put(&self, key: Bytes, value: Bytes) -> Result<(), ChangelogError> {
         let _ = self.inner.upsert_sync(key.to_vec(), value.to_vec());
         Ok(())
     }
 
-    async fn range_from(&self, from_key: Bytes, limit: usize) -> Result<Vec<Bytes>, String> {
+    async fn range_from(
+        &self,
+        from_key: Bytes,
+        limit: usize,
+    ) -> Result<Vec<Bytes>, ChangelogError> {
         let from = from_key.to_vec();
         let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         self.inner.iter_sync(|k, v| {

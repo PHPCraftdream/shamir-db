@@ -12,8 +12,9 @@ use shamir_types::access::Actor;
 use tokio::sync::{broadcast, mpsc, Notify};
 
 use super::super::{
-    drain_and_persist, gap_marker_key, journal_writer_loop, version_key, ChangelogEvent,
-    ChangelogStore, GapMarker, JournalMsg, RepairPending, RepoChangefeed, BROADCAST_CAPACITY,
+    drain_and_persist, gap_marker_key, journal_writer_loop, version_key, ChangelogError,
+    ChangelogEvent, ChangelogStore, GapMarker, JournalMsg, RepairPending, RepoChangefeed,
+    BROADCAST_CAPACITY,
 };
 
 #[derive(Default)]
@@ -26,20 +27,24 @@ struct BarrierStore {
 
 #[async_trait::async_trait]
 impl ChangelogStore for BarrierStore {
-    async fn put(&self, key: Bytes, value: Bytes) -> Result<(), String> {
+    async fn put(&self, key: Bytes, value: Bytes) -> Result<(), ChangelogError> {
         if key == version_key(10) {
             if self.hold_ten.swap(false, Ordering::AcqRel) {
                 self.release_ten.notified().await;
             }
             if self.fail_ten.swap(false, Ordering::AcqRel) {
-                return Err("failed put(10)".into());
+                return Err(ChangelogError::Journal("failed put(10)".into()));
             }
         }
         self.rows.lock().unwrap().insert(key, value);
         Ok(())
     }
 
-    async fn range_from(&self, from_key: Bytes, limit: usize) -> Result<Vec<Bytes>, String> {
+    async fn range_from(
+        &self,
+        from_key: Bytes,
+        limit: usize,
+    ) -> Result<Vec<Bytes>, ChangelogError> {
         Ok(self
             .rows
             .lock()

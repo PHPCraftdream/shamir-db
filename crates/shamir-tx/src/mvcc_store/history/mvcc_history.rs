@@ -434,12 +434,10 @@ impl MvccStore {
         // `apply_committed_visible`) is in `pending_ts` before
         // `write_committed_to_history` consumes it — otherwise the drain-half
         // would fall back to `now_millis()` and leave a stale, never-consumed
-        // stamp behind. In this combined (test/direct) path both halves run
-        // synchronously at commit time, so the ordering carries no durability
-        // window: the visible state and the history write happen together, and
-        // a history error propagates via `?` (the cell/overlay are then ahead,
-        // exactly as the production ack-path intentionally is until the drainer
-        // catches up).
+        // stamp behind. The history write is awaited here, so a history error
+        // propagates via `?` with the cell/overlay already ahead — exactly as
+        // the production ack-path intentionally is until the drainer
+        // catches up.
         self.apply_committed_visible(&ops, commit_version);
         self.write_committed_to_history(&ops, commit_version)
             .await?;
