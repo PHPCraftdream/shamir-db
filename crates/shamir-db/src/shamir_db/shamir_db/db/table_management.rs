@@ -41,6 +41,27 @@ impl ShamirDb {
         enable_indexes: bool,
         actor: Actor,
     ) -> DbResult<()> {
+        let _namespace_guard = self.lock_replication_control().await;
+        self.add_table_as_locked(
+            db_name,
+            repo_name,
+            table_name,
+            enable_indexes,
+            actor,
+            &_namespace_guard,
+        )
+        .await
+    }
+
+    pub(crate) async fn add_table_as_locked(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+        enable_indexes: bool,
+        actor: Actor,
+        _namespace_guard: &crate::shamir_db::shamir_db::ReplicationControlGuard<'_>,
+    ) -> DbResult<()> {
         let db = self
             .get_db(db_name)
             .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
@@ -73,6 +94,18 @@ impl ShamirDb {
         db_name: &str,
         repo_name: &str,
         table_name: &str,
+    ) -> DbResult<bool> {
+        let _control = self.lock_replication_control().await;
+        self.drop_table_locked(db_name, repo_name, table_name, &_control)
+            .await
+    }
+
+    pub(crate) async fn drop_table_locked(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+        _control: &crate::shamir_db::shamir_db::ReplicationControlGuard<'_>,
     ) -> DbResult<bool> {
         let db = self
             .get_db(db_name)
@@ -109,6 +142,18 @@ impl ShamirDb {
         repo_name: &str,
         table_name: &str,
     ) -> DbResult<bool> {
+        let _control = self.lock_replication_control().await;
+        self.drop_table_cleaning_validators_locked(db_name, repo_name, table_name, &_control)
+            .await
+    }
+
+    pub(crate) async fn drop_table_cleaning_validators_locked(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+        control: &crate::shamir_db::shamir_db::ReplicationControlGuard<'_>,
+    ) -> DbResult<bool> {
         // 1. Clean validator bound_in references.
         let table_ref = Self::table_ref_str(db_name, repo_name, table_name);
         let affected = self.validators.unbind_all_for_table(&table_ref);
@@ -121,7 +166,8 @@ impl ShamirDb {
         self.drop_schema_validator(db_name, repo_name, table_name);
 
         // 3. Drop the table itself.
-        self.drop_table(db_name, repo_name, table_name).await
+        self.drop_table_locked(db_name, repo_name, table_name, control)
+            .await
     }
 
     /// Rename a table. Convenience wrapper around [`rename_table_as`]
@@ -189,8 +235,21 @@ impl ShamirDb {
         to: &str,
         _actor: Actor,
     ) -> DbResult<()> {
+        let _control = self.lock_replication_control().await;
+        self.rename_table_as_locked(db_name, repo_name, from, to, _actor, &_control)
+            .await
+    }
+
+    pub(crate) async fn rename_table_as_locked(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        from: &str,
+        to: &str,
+        _actor: Actor,
+        _control: &crate::shamir_db::shamir_db::ReplicationControlGuard<'_>,
+    ) -> DbResult<()> {
         // F-68 (#895) cluster D / task #124 diagnostic instrumentation:
-        // timestamped entry/exit around the whole rename so a hung CI run
         // (e.g. `rename_populated_survives_cold_restart`, TIMEOUT 600.016s
         // on ubuntu-latest) shows whether the stall is inside this call at
         // all, and if so how far it got before the last log line. NOT a
@@ -243,37 +302,8 @@ impl ShamirDb {
         // Reverse-FK guard: refuse if another table in this repo
         // references `from` as `ref_table`. The child's persisted schema
         // stores the parent name literally, so renaming would dangle it.
-        let table_names = db.list_tables(repo_name).unwrap_or_default();
-        for name in &table_names {
-            if name == from {
-                continue;
-            }
-            let rec = match self
-                .system_store
-                .load_table_record(db_name, repo_name, name)
-                .await
-            {
-                Ok(Some(r)) => r,
-                _ => continue,
-            };
-            let rules = match rec.get(SCHEMA_FIELD) {
-                Some(QueryValue::List(rules)) => rules,
-                _ => continue,
-            };
-            for rule in rules {
-                let refs_from = rule
-                    .get("foreign_key")
-                    .and_then(|fk| fk.get("ref_table"))
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|rt| rt == from);
-                if refs_from {
-                    return Err(DbError::Validation(format!(
-                        "cannot rename table '{}': still referenced by a foreign key in '{}'",
-                        from, name
-                    )));
-                }
-            }
-        }
+        let catalogue = self.table_catalogue_snapshot(db_name, repo_name).await?;
+        Self::check_fk_snapshot(&catalogue, from)?;
 
         // Preserve ResourceMeta (owner/group/mode) across the re-key.
         let existing_meta = ResourceMeta::from_record(&old_record);
@@ -299,10 +329,12 @@ impl ShamirDb {
             "rename_table_as: rename_table_stores returned after {:?}",
             stores_started.elapsed()
         );
-        debug_assert!(
-            existed,
-            "rename_table_stores returned false despite has_table guard"
-        );
+        if !existed {
+            return Err(DbError::NotFound(format!(
+                "Table '{}/{}/{}' not found",
+                db_name, repo_name, from
+            )));
+        }
 
         // 2. Re-key the catalogue row. Write the new row first so a crash
         //    between the two leaves the new table resolvable on reboot;
@@ -370,5 +402,119 @@ impl ShamirDb {
             .await?;
         table.set_validator_registry(self.validators().clone());
         Ok(table)
+    }
+}
+
+impl ShamirDb {
+    pub(crate) async fn reject_drop_if_fk_reference(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+    ) -> DbResult<()> {
+        let snapshot = self.table_catalogue_snapshot(db_name, repo_name).await?;
+        Self::check_fk_snapshot(&snapshot, table_name)
+    }
+
+    pub(crate) async fn table_catalogue_snapshot(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+    ) -> DbResult<shamir_collections::TFxMap<String, QueryValue>> {
+        let db = self
+            .get_db(db_name)
+            .ok_or_else(|| DbError::NotFound(format!("Database '{db_name}' not found")))?;
+        let live_names = db
+            .list_tables(repo_name)
+            .map_err(|e| DbError::Internal(e.to_string()))?;
+        let records = self.system_store.load_tables().await?;
+        let mut snapshot = shamir_collections::TFxMap::default();
+        for record in records {
+            let QueryValue::Map(map) = record else {
+                return Err(DbError::Internal(
+                    "malformed table catalogue record".to_string(),
+                ));
+            };
+            let (Some(db), Some(repo), Some(table)) = (
+                map.get("db_name").and_then(QueryValue::as_str),
+                map.get("repo_name").and_then(QueryValue::as_str),
+                map.get("table_name").and_then(QueryValue::as_str),
+            ) else {
+                return Err(DbError::Internal(
+                    "malformed table catalogue identity".to_string(),
+                ));
+            };
+            if db == db_name
+                && repo == repo_name
+                && snapshot
+                    .insert(table.to_string(), QueryValue::Map(map.clone()))
+                    .is_some()
+            {
+                return Err(DbError::Internal(format!(
+                    "duplicate table catalogue record '{db}/{repo}/{table}'"
+                )));
+            }
+        }
+        for name in live_names {
+            if !snapshot.contains_key(&name) {
+                return Err(DbError::NotFound(format!(
+                    "table catalogue record for '{db_name}/{repo_name}/{name}' not found"
+                )));
+            }
+        }
+        Ok(snapshot)
+    }
+
+    pub(crate) fn check_fk_snapshot(
+        snapshot: &shamir_collections::TFxMap<String, QueryValue>,
+        target_table: &str,
+    ) -> DbResult<()> {
+        for (name, record) in snapshot {
+            if name == target_table {
+                continue;
+            }
+            let Some(schema) = record.get(SCHEMA_FIELD) else {
+                continue;
+            };
+            if matches!(schema, QueryValue::Null) {
+                continue;
+            }
+            let QueryValue::List(rules) = schema else {
+                return Err(DbError::Validation(format!(
+                    "unreadable schema in table '{name}'"
+                )));
+            };
+            for rule in rules {
+                let QueryValue::Map(rule) = rule else {
+                    return Err(DbError::Validation(format!(
+                        "malformed schema rule in table '{name}'"
+                    )));
+                };
+                let Some(fk) = rule.get("foreign_key") else {
+                    continue;
+                };
+                let QueryValue::Map(fk) = fk else {
+                    return Err(DbError::Validation(format!(
+                        "malformed foreign key schema in table '{name}'"
+                    )));
+                };
+                let Some(ref_table) = fk.get("ref_table") else {
+                    return Err(DbError::Validation(format!(
+                        "missing foreign key ref_table in table '{name}'"
+                    )));
+                };
+                let Some(ref_table) = ref_table.as_str() else {
+                    return Err(DbError::Validation(format!(
+                        "malformed foreign key reference in table '{name}'"
+                    )));
+                };
+                if ref_table == target_table {
+                    return Err(DbError::Validation(format!(
+                        "table '{target_table}' is referenced by a foreign key in '{name}'"
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 }
