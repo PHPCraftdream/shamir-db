@@ -6,9 +6,7 @@ use crate::backend::{IndexBackend, IndexError, IndexQuery, IndexResult};
 use crate::descriptor::IndexDescriptor;
 use crate::vector::adapter::VectorAdapter;
 use crate::vector::snapshot::{self, SnapshotError, SnapshotManifest};
-use crate::vector::vector_backend::maintenance::{
-    run_background_snapshot, ve, SnapshotFlightGuard,
-};
+use crate::vector::vector_backend::maintenance::ve;
 use crate::vector::vector_backend::slot::AdapterSlot;
 use crate::write_ops::IndexWriteOp;
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -60,6 +58,7 @@ pub struct VectorBackend {
     ///
     /// `Arc<ArcSwap<AdapterSlot>>` — see [`super::slot`].
     pub(crate) adapter: Arc<ArcSwap<AdapterSlot>>,
+    info_store: std::sync::OnceLock<Arc<dyn Store>>,
     /// Full-scan rebuild counter (V2.2 / #401 instrumentation). Incremented
     /// on EVERY fallback to a data-store-scan rebuild; NOT on a snapshot
     /// load. Exposed via [`rebuild_count`] (tests prove the snapshot path).
@@ -167,11 +166,17 @@ impl VectorBackend {
         descriptor: IndexDescriptor,
         field_path: Vec<u64>,
         adapter: Arc<dyn VectorAdapter>,
+        info_store: Option<Arc<dyn Store>>,
     ) -> Self {
+        let store_lock = std::sync::OnceLock::new();
+        if let Some(s) = &info_store {
+            let _ = store_lock.set(Arc::clone(s));
+        }
         Self {
             descriptor,
             field_path,
             adapter: Arc::new(ArcSwap::from(Arc::new(AdapterSlot::live(adapter)))),
+            info_store: store_lock,
             full_rebuild_count: AtomicU64::new(0),
             delta_count: Arc::new(AtomicU64::new(0)),
             snapshot_in_flight: Arc::new(AtomicBool::new(false)),
@@ -211,6 +216,13 @@ impl VectorBackend {
     #[cfg(test)]
     pub(crate) fn snapshot_in_flight_for_test(&self) -> bool {
         self.snapshot_in_flight.load(Ordering::Acquire)
+    }
+
+    /// Test-only access to the live adapter (e.g. to assert restored
+    /// build config in builder regression tests).
+    #[cfg(test)]
+    pub(crate) fn adapter_for_test(&self) -> Arc<dyn VectorAdapter> {
+        Arc::clone(&self.adapter.load_full().adapter)
     }
 
     /// Snapshot keyspace for this backend's index: `__vec_snap__<id>`.
@@ -358,7 +370,7 @@ impl IndexBackend for VectorBackend {
                 // concurrent `backfill_if_absent` cannot re-introduce a
                 // permanent ghost (full rationale in the V4.2 history).
                 if let Some(hnsw) = t.adapter.as_hnsw_adapter() {
-                    if let Some(ref del_rids) = hnsw.compaction_deleted_rids {
+                    if let Some(ref del_rids) = hnsw.state.compaction_deleted_rids {
                         // `insert_sync`, NOT `insert_async` — the map is
                         // probed via sync accessors on the same worker
                         // threads (#589 class deadlock).
@@ -392,7 +404,7 @@ impl IndexBackend for VectorBackend {
             // ORDER (ghost-race fix): record `compaction_deleted_rids` BEFORE
             // the mirror delete — see `plan_update` (insert_sync: #589).
             if let Some(hnsw) = t.adapter.as_hnsw_adapter() {
-                if let Some(ref del_rids) = hnsw.compaction_deleted_rids {
+                if let Some(ref del_rids) = hnsw.state.compaction_deleted_rids {
                     let _ = del_rids.insert_sync(rid, ());
                 }
             }
@@ -476,7 +488,12 @@ impl IndexBackend for VectorBackend {
         _rid: RecordId,
         rec: &(dyn RecordRef + Sync + '_),
     ) -> Option<Vec<f32>> {
-        self.extract_vec(rec)
+        let vec = self.extract_vec(rec)?;
+        let expected = self.adapter.load().adapter.dim();
+        if vec.len() != expected as usize {
+            return None;
+        }
+        Some(vec)
     }
 
     async fn lookup(&self, query: IndexQuery) -> Result<IndexResult, IndexError> {
@@ -567,7 +584,7 @@ impl IndexBackend for VectorBackend {
                 }
                 // Ghost-race guard ordering + insert_sync: see `plan_update`.
                 if let Some(hnsw) = t.adapter.as_hnsw_adapter() {
-                    if let Some(ref del_rids) = hnsw.compaction_deleted_rids {
+                    if let Some(ref del_rids) = hnsw.state.compaction_deleted_rids {
                         let _ = del_rids.insert_sync(rid, ());
                     }
                 }
@@ -685,7 +702,8 @@ impl IndexBackend for VectorBackend {
         data_store: Arc<dyn Store>,
     ) -> Result<(), IndexError> {
         let keyspace = self.snapshot_keyspace();
-        // Read the manifest UP FRONT so we know `delta_applied_upto` for the
+        let _ = self.info_store.set(Arc::clone(&info_store));
+        // so we know `delta_applied_upto` for the
         // replay even if `load_snapshot` later swaps the adapter in. A
         // missing manifest is the `NotFound` branch — same as load_snapshot.
         let manifest_opt: Option<SnapshotManifest> = match snapshot::read_manifest(
@@ -839,8 +857,23 @@ impl IndexBackend for VectorBackend {
     }
 
     async fn drop_all(&self) -> Result<(), IndexError> {
-        // Adapter doesn't have a "clear" method — for now noop.
-        // Full impl would iterate all rids and delete.
+        let store = self
+            .info_store
+            .get()
+            .cloned()
+            .ok_or_else(|| IndexError::Backend("vector info store is not configured".into()))?;
+        // Trailing-dot delimiter: `__vec_snap__9.` cannot match index 90/91.
+        let prefix = format!("{}.", self.snapshot_keyspace());
+        let mut stream = store.scan_prefix_stream(prefix.clone().into(), 1024);
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.map_err(|e| IndexError::Storage(e.to_string()))?;
+            for (key, _) in batch {
+                store
+                    .remove(key)
+                    .await
+                    .map_err(|e| IndexError::Storage(e.to_string()))?;
+            }
+        }
         Ok(())
     }
 
@@ -923,75 +956,12 @@ impl IndexBackend for VectorBackend {
     /// V2.3 (#402) — check the delta counter against the threshold and, if
     /// crossed, spawn a single-flight background snapshot task.
     ///
-    /// See [`IndexBackend::trigger_snapshot_check`] for the contract. The
-    /// task is a `tokio::spawn` (NOT awaited) so the commit-ack path returns
-    /// immediately (§5.6). The single-flight `AtomicBool` prevents two
-    /// concurrent dumps from racing on the same keyspace.
+    /// Delegates to the extracted implementation in
+    /// [`super::maintenance`] (same body, sibling file).
     fn trigger_snapshot_check(&self, info_store: &Arc<dyn Store>) {
-        let count = self.delta_count.load(Ordering::Acquire);
-        if count < self.snapshot_threshold.load(Ordering::Acquire) {
-            return;
-        }
-        // V4.2: skip if compaction is in flight (coordination)
-        if self.compaction_in_flight.load(Ordering::Acquire) {
-            return;
-        }
-        // Single-flight: a crossing while a dump is already running is a
-        // no-op. The counter keeps climbing and the next ack re-arms once
-        // the in-flight task clears the flag.
-        if self
-            .snapshot_in_flight
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return;
-        }
-        // Capture the CURRENT adapter (an `Arc<dyn VectorAdapter>` inside an
-        // `AdapterSlot`) by cloning the slot's Arc. The spawned task holds
-        // this Arc for the duration of the dump; a concurrent
-        // `restore_on_open` swap would install a NEW slot, but the task's
-        // dump reflects the adapter state at capture time — correct, because
-        // the dump is a point-in-time snapshot of the graph.
-        let adapter_arc = Arc::clone(&self.adapter.load_full().adapter);
-        // The background snapshot needs the concrete HnswAdapter. If the
-        // current adapter is not an HnswAdapter (BruteForce, future external
-        // adapters), there is no snapshot to take — clear the flag and
-        // return without spawning.
-        if adapter_arc.as_hnsw_adapter().is_none() {
-            self.snapshot_in_flight.store(false, Ordering::Release);
-            return;
-        }
-        let keyspace = self.snapshot_keyspace();
-        let info_store = Arc::clone(info_store);
-        let applied_prefix = self.prune_boundary();
-        let delta_count = Arc::clone(&self.delta_count);
-        // Move the flag into a drop-guard so it is cleared on EVERY exit of the
-        // task — normal return, `Err`, OR panic (unwind still runs `Drop`). A
-        // bare `store(false)` at the end would be skipped on panic, leaving the
-        // flag stuck `true` forever → snapshots silently disabled for the life
-        // of the process and the delta-log growing unbounded.
-        let flight_guard = SnapshotFlightGuard(Arc::clone(&self.snapshot_in_flight));
-        tokio::spawn(async move {
-            let _flight_guard = flight_guard; // cleared on drop (incl. unwind)
-            let res =
-                run_background_snapshot(&info_store, &keyspace, &adapter_arc, &applied_prefix)
-                    .await;
-            match res {
-                Ok(()) => {
-                    // Reset the mutation counter — the new snapshot absorbed
-                    // every chunk up to the current HWM.
-                    delta_count.store(0, Ordering::Release);
-                }
-                Err(e) => {
-                    log::warn!(
-                        "vector background snapshot failed for keyspace {}: {} — \
-                         will retry on the next threshold crossing",
-                        keyspace,
-                        e
-                    );
-                }
-            }
-        });
+        // Path form: resolves to the inherent impl in
+        // [`super::maintenance`], not back into this trait method.
+        Self::trigger_snapshot_check_impl(self, info_store);
     }
 
     fn trigger_compaction_check(&self, info_store: &Arc<dyn Store>) {

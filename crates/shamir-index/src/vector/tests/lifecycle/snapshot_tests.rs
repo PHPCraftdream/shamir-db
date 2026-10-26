@@ -13,7 +13,8 @@ use crate::meta_envelope::MetaEnvelope;
 use crate::vector::adapter::{SearchOpts, VectorAdapter};
 use crate::vector::hnsw_adapter::{HnswAdapter, HnswConfig};
 use crate::vector::snapshot::{
-    self, load_snapshot, SnapshotError, SnapshotSidecar, HNSW_RS_VERSION, SNAPSHOT_FORMAT_VERSION,
+    self, chunk_key_for_test, flip_generation, load_snapshot, read_manifest, OldGenerationChunks,
+    SnapshotError, SnapshotManifest, SnapshotSidecar, HNSW_RS_VERSION, SNAPSHOT_FORMAT_VERSION,
 };
 use bytes::Bytes;
 use shamir_collections::TFxSet;
@@ -445,3 +446,59 @@ async fn rid_map_and_next_id_restored() {
 // special-casing the graph-section to skip `file_dump` entirely and
 // re-seed an empty `Hnsw::new` at load — added complexity for a case the
 // engine never drives. Leave it out of V2.1; revisit if #401 needs it.
+
+// ----------------------------------------------------------------------
+// RV-INDEX-07424EF0 — generation-flip pruning of quantized sections
+// (same theme as the codec flip tests above: the old generation's
+// chunks must not survive the flip).
+// ----------------------------------------------------------------------
+
+#[tokio::test]
+async fn rv_index_07424ef0_flip_prunes_old_quantized_generation_chunks() {
+    let store = mem_store();
+    let keyspace = "__vec_snap__07424ef0";
+    let adapter = HnswAdapter::new(2, VectorMetric::L2, HnswConfig::default());
+    snapshot::dump_snapshot(&adapter, &store, keyspace)
+        .await
+        .unwrap();
+    let old: SnapshotManifest = read_manifest(&store, keyspace).await.unwrap();
+    let qg = chunk_key_for_test(keyspace, old.gen, "qgraph", 0);
+    let qd = chunk_key_for_test(keyspace, old.gen, "qdata", 0);
+    store
+        .set(qg.clone(), Bytes::from_static(b"old-qgraph"))
+        .await
+        .unwrap();
+    store
+        .set(qd.clone(), Bytes::from_static(b"old-qdata"))
+        .await
+        .unwrap();
+    let written = SnapshotManifest {
+        gen: old.gen + 1,
+        qgraph_chunks: 0,
+        qdata_chunks: 0,
+        ..old.clone()
+    };
+    flip_generation(
+        &store,
+        keyspace,
+        old.gen,
+        OldGenerationChunks {
+            graph: old.graph_chunks,
+            data: old.data_chunks,
+            qgraph: 1,
+            qdata: 1,
+        },
+        written,
+        0,
+    )
+    .await
+    .unwrap();
+    assert!(
+        store.get(qg).await.is_err(),
+        "old qgraph chunk must be pruned"
+    );
+    assert!(
+        store.get(qd).await.is_err(),
+        "old qdata chunk must be pruned"
+    );
+}

@@ -54,6 +54,10 @@
 
 mod codec;
 mod load;
+mod manifest;
+mod quantized_load;
+#[cfg(test)]
+mod tests;
 
 #[cfg(test)]
 pub(crate) use codec::chunk_key_for_test;
@@ -65,7 +69,9 @@ pub use codec::SnapshotError;
 pub use codec::SnapshotManifest;
 pub use codec::SnapshotSidecar;
 #[cfg(test)]
-pub(crate) use codec::{HNSW_RS_VERSION, SNAPSHOT_FORMAT_VERSION};
+pub(crate) use codec::HNSW_RS_VERSION;
+#[cfg(test)]
+pub(crate) use codec::SNAPSHOT_FORMAT_VERSION;
 pub use load::append_delta;
 pub use load::flip_generation;
 pub use load::highest_delta_index;
@@ -73,6 +79,7 @@ pub use load::load_snapshot;
 pub use load::read_manifest;
 pub use load::replay_delta;
 pub use load::DeltaOp;
+pub use manifest::OldGenerationChunks;
 
 // Re-export QuantMeta so callers (and tests) can reach it as
 // `crate::vector::snapshot::QuantMeta` — the snapshot codec owns the
