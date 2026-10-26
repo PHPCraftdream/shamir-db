@@ -90,7 +90,7 @@ async fn backfill_if_absent_skips_deleted_rids() {
     // Simulate double-write delete: upsert then delete, recording in deleted_rids
     adapter.upsert(rid(1), &[1.0, 0.0, 0.0]).await.unwrap();
     adapter.delete(rid(1)).await.unwrap();
-    if let Some(ref del_rids) = adapter.compaction_deleted_rids {
+    if let Some(ref del_rids) = adapter.state.compaction_deleted_rids {
         let _ = del_rids.insert_sync(rid(1), ());
     }
 
@@ -98,6 +98,23 @@ async fn backfill_if_absent_skips_deleted_rids() {
     let items = vec![(rid(1), vec![1.0, 0.0, 0.0])];
     adapter.backfill_if_absent(&items).await.unwrap();
     assert_eq!(adapter.len(), 0);
+}
+
+#[tokio::test]
+async fn rv_index_fab4e4e5_compaction_retains_tuning() {
+    let config = HnswConfig {
+        max_elements: 2000,
+        m: 12,
+        max_layer: 7,
+        ef_construction: 77,
+        ef_search: 31,
+    };
+    let adapter = HnswAdapter::new(3, VectorMetric::L2, config.clone());
+    let rebuilt = adapter.build_config();
+    assert_eq!(rebuilt.m, config.m);
+    assert_eq!(rebuilt.max_layer, config.max_layer);
+    assert_eq!(rebuilt.ef_construction, config.ef_construction);
+    assert_eq!(rebuilt.ef_search, config.ef_search);
 }
 
 #[tokio::test]
@@ -226,12 +243,12 @@ async fn step4b_reconcile_prevents_resurrect() {
     assert_eq!(new_hnsw.live_count(), 1);
 
     // Now simulate the double-write delete that was recorded in compaction_deleted_rids
-    if let Some(ref del_rids) = new_hnsw.compaction_deleted_rids {
+    if let Some(ref del_rids) = new_hnsw.state.compaction_deleted_rids {
         let _ = del_rids.insert_sync(rid(5), ());
     }
 
     // Step 4b: reconcile-deletes
-    if let Some(ref del_rids) = new_hnsw.compaction_deleted_rids {
+    if let Some(ref del_rids) = new_hnsw.state.compaction_deleted_rids {
         let mut rids_to_delete: Vec<RecordId> = Vec::new();
         del_rids.iter_sync(|rid, ()| {
             rids_to_delete.push(*rid);
@@ -340,7 +357,7 @@ async fn stress_concurrent_mutations_during_compaction() {
                     old_adapter.delete(r).await.unwrap();
                     if let Some(t) = &slot.target {
                         if let Some(hnsw) = t.adapter.as_hnsw_adapter() {
-                            if let Some(ref del_rids) = hnsw.compaction_deleted_rids {
+                            if let Some(ref del_rids) = hnsw.state.compaction_deleted_rids {
                                 let _ = del_rids.insert_sync(r, ());
                             }
                         }
@@ -376,7 +393,7 @@ async fn stress_concurrent_mutations_during_compaction() {
             new_hnsw.backfill_if_absent(&live_pairs).await.unwrap();
 
             // Step 4b: reconcile-deletes
-            if let Some(ref del_rids) = new_hnsw.compaction_deleted_rids {
+            if let Some(ref del_rids) = new_hnsw.state.compaction_deleted_rids {
                 let mut rids_to_delete: Vec<RecordId> = Vec::new();
                 del_rids.iter_sync(|rid, ()| {
                     rids_to_delete.push(*rid);
@@ -485,6 +502,7 @@ async fn stress_concurrent_mutations_during_quantized_compaction() {
             .await
             .unwrap();
     }
+    crate::vector::hnsw_adapter::await_fitted(&old_adapter).await;
     assert!(
         old_adapter.is_quantized(),
         "test setup: old adapter must have fitted (n_initial > FIT_THRESHOLD)"
@@ -549,7 +567,7 @@ async fn stress_concurrent_mutations_during_quantized_compaction() {
                     old_adapter.delete(r).await.unwrap();
                     if let Some(t) = &slot.target {
                         if let Some(hnsw) = t.adapter.as_hnsw_adapter() {
-                            if let Some(ref del_rids) = hnsw.compaction_deleted_rids {
+                            if let Some(ref del_rids) = hnsw.state.compaction_deleted_rids {
                                 let _ = del_rids.insert_sync(r, ());
                             }
                         }
@@ -587,7 +605,7 @@ async fn stress_concurrent_mutations_during_quantized_compaction() {
                 old_adapter.delete(r).await.unwrap();
                 if let Some(t) = &slot.target {
                     if let Some(hnsw) = t.adapter.as_hnsw_adapter() {
-                        if let Some(ref del_rids) = hnsw.compaction_deleted_rids {
+                        if let Some(ref del_rids) = hnsw.state.compaction_deleted_rids {
                             let _ = del_rids.insert_sync(r, ());
                         }
                     }
@@ -619,7 +637,7 @@ async fn stress_concurrent_mutations_during_quantized_compaction() {
             let new_hnsw = new_adapter_arc.as_hnsw_adapter().unwrap();
             new_hnsw.backfill_if_absent(&live_pairs).await.unwrap();
 
-            if let Some(ref del_rids) = new_hnsw.compaction_deleted_rids {
+            if let Some(ref del_rids) = new_hnsw.state.compaction_deleted_rids {
                 let mut rids_to_delete: Vec<RecordId> = Vec::new();
                 del_rids.iter_sync(|rid, ()| {
                     rids_to_delete.push(*rid);
@@ -644,6 +662,7 @@ async fn stress_concurrent_mutations_during_quantized_compaction() {
 
     // The target MUST have fitted — quantization survived the compaction
     // under concurrent load (the #428 fix's whole point).
+    crate::vector::hnsw_adapter::await_fitted(new_hnsw).await;
     assert!(
         new_hnsw.is_quantized(),
         "compaction target failed to fit under concurrent load — \

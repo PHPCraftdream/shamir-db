@@ -5,7 +5,7 @@ use crate::vector::quantized_dist::{RescoreCtx, ShamirDistU8};
 use crate::vector::sq8::Sq8Quantizer;
 use hnsw_rs::hnsw::Hnsw;
 use shamir_types::types::record_id::RecordId;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 // #424 (Б-4) — test-only hook for deterministically reproducing the
@@ -66,6 +66,48 @@ pub(crate) fn clear_test_search_f32_gate() {
     TEST_SEARCH_F32_GATE.store(None);
 }
 
+#[cfg(test)]
+pub(crate) fn install_fit_test_hook(adapter: &HnswAdapter) -> Arc<super::adapter::FitTestHook> {
+    let hook = Arc::new(super::adapter::FitTestHook {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        fail_before_publish: std::sync::atomic::AtomicBool::new(false),
+        fail_after_publish: std::sync::atomic::AtomicBool::new(false),
+        recorded_failure: std::sync::Mutex::new(None),
+    });
+    *adapter.state.fit_test_hook.lock().expect("fit hook lock") = Some(Arc::clone(&hook));
+    hook
+}
+
+#[cfg(test)]
+pub(crate) fn clear_fit_test_hook(adapter: &HnswAdapter) {
+    *adapter.state.fit_test_hook.lock().expect("fit hook lock") = None;
+}
+
+#[cfg(test)]
+pub(crate) async fn wait_for_fit(adapter: &HnswAdapter) {
+    loop {
+        if adapter.is_quantized() && !adapter.state.fit_in_flight.load(Ordering::Acquire) {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn await_fitted(adapter: &HnswAdapter) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    // Quantized is published before catch-up and f32-graph teardown; wait for
+    // the fit to leave flight too, so callers observe the converged state.
+    while !adapter.is_quantized() || adapter.state.fit_in_flight.load(Ordering::Acquire) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "adapter never finished fitting"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
 impl HnswAdapter {
     /// Try to fit the SQ8 quantizer and build the u8 graph.
     ///
@@ -113,44 +155,22 @@ impl HnswAdapter {
     /// Convergence is counted by `migrated_pre_flip` (only internals
     /// `< next_id_at_flip`), NOT by `vectors_u8.len()` — see Б-3.
     ///
-    /// Returns `Ok(())` if the fit completed OR if another caller was
-    /// already fitting (the single-flight loser). Errors only on graph
-    /// build failure (a `spawn_blocking` panic).
+    /// Returns `Err` only when fitting or graph construction fails.
     pub(super) async fn try_fit_and_rebuild(&self) -> Result<(), VectorError> {
-        // Only quantization-enabled adapters ever fit.
         if self.quantization.is_none() {
             return Ok(());
         }
-        // Single-flight: the first caller to CAS false→true wins.
-        if self
-            .fit_in_flight
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-            .is_err()
-        {
-            return Ok(()); // another caller is fitting
-        }
-
-        // Drop-guard: no matter how we exit, clear the flag so a later
-        // threshold crossing (e.g. after a mass delete + re-insert) can
-        // fit again. (In #411 fit is one-shot — once fitted, the flag
-        // stays true — but the guard is defensive.)
-        struct FitGuard<'a>(&'a AtomicBool);
-        impl Drop for FitGuard<'_> {
-            fn drop(&mut self) {
-                self.0.store(false, Ordering::Release);
-            }
-        }
-        let _guard = FitGuard(&self.fit_in_flight);
-
+        // This runs only from a background fit task holding an owned adapter clone;
+        // the scheduler in fit.rs owns the fit-in-flight RAII guard.
         // Snapshot the f32 buffer (internal, vec) pairs. We read under a
         // plain scc scan — no entry guard held across the await below.
         let mut snapshot: Vec<(usize, Vec<f32>)> = Vec::new();
-        self.vectors.iter_sync(|internal, vec| {
+        self.state.vectors.iter_sync(|internal, vec| {
             // Skip tombstoned internals — their codes must NOT enter the
             // u8 graph (a tombstoned internal is never resurrectated:
             // next_id is monotonic, so a brand-new internal never aliases
             // a tombstoned one).
-            if !self.deleted.contains_sync(internal) {
+            if !self.state.deleted.contains_sync(internal) {
                 snapshot.push((*internal, vec.clone()));
             }
             true
@@ -162,19 +182,52 @@ impl HnswAdapter {
             return Ok(());
         }
 
+        #[cfg(test)]
+        {
+            // Clone the hook out of the lock so the `MutexGuard` temporary is
+            // dropped before the `.await` below (the spawned task must stay
+            // `Send`).
+            let hook = self
+                .state
+                .fit_test_hook
+                .lock()
+                .expect("fit hook lock")
+                .clone();
+            if let Some(hook) = hook {
+                hook.entered.notify_one();
+                hook.release.notified().await;
+            }
+        }
+
         let dim = self.dim as usize;
         let metric = self.metric;
-        let ef_construction = self.ef_search.max(64);
-        let m = 16usize;
-        let max_layer = 16usize;
+        let ef_construction = self.ef_construction;
+        let m = self.m;
+        let max_layer = self.max_layer;
 
         // Phase 1+2: fit + build. The graph INSERT is deferred until AFTER
         // the snapshot codes are claimed into `vectors_u8` so that the
         // claim (Ok/Err) is the exact authority for "does this internal
         // already have a graph node" — see [`claim_and_publish_u8`].
+        #[cfg(test)]
+        {
+            let hook = self
+                .state
+                .fit_test_hook
+                .lock()
+                .expect("fit hook lock")
+                .clone();
+            if let Some(hook) = hook {
+                if hook.fail_before_publish.swap(false, Ordering::AcqRel) {
+                    return Err(VectorError::Internal(
+                        "before fitted publication: injected fit failure".into(),
+                    ));
+                }
+            }
+        }
         let training: Vec<Vec<f32>> = snapshot.iter().map(|(_, v)| v.clone()).collect();
         // #418 — the f32 graph is NO LONGER retained here. The pre-#418 code
-        // held an explicit `Arc::clone(&self.hnsw)` "to keep the f32 graph
+        // held an explicit `Arc::clone(&self.state.hnsw)` "to keep the f32 graph
         // alive", which was exactly the bug that defeated SQ8's memory win
         // (the graph stayed resident for the adapter's lifetime). We now drop
         // it post-fit (see the drop at the end of this fn) — the snapshot
@@ -231,8 +284,8 @@ impl HnswAdapter {
             snapshot.iter().map(|(i, _)| *i).collect();
         let mut graph_batch_delta: Vec<(usize, Vec<u8>)> = Vec::new();
         let mut delta_claimed = 0usize;
-        self.vectors.iter_sync(|internal, vec| {
-            if !snapshot_ids.contains(internal) && !self.deleted.contains_sync(internal) {
+        self.state.vectors.iter_sync(|internal, vec| {
+            if !snapshot_ids.contains(internal) && !self.state.deleted.contains_sync(internal) {
                 let codes = quantizer_arc.quantize(vec);
                 if self
                     .claim_and_publish_u8(*internal, codes.clone())
@@ -285,7 +338,28 @@ impl HnswAdapter {
         build_result?;
 
         // === PUBLISH quantizer (needed for self-migration quantize) ===
-        let _ = self.quantizer.set(Arc::clone(&quantizer_arc));
+        #[cfg(test)]
+        {
+            let hook = self
+                .state
+                .fit_test_hook
+                .lock()
+                .expect("fit hook lock")
+                .clone();
+            if let Some(hook) = hook {
+                if hook.fail_before_publish.swap(false, Ordering::AcqRel) {
+                    return Err(VectorError::Internal(
+                        "before fitted publication: injected fit failure".into(),
+                    ));
+                }
+            }
+        }
+        self.state
+            .quantizer
+            .set(Arc::clone(&quantizer_arc))
+            .map_err(|_| {
+                VectorError::Internal("quantizer already published before fit flip".into())
+            })?;
 
         // === FLIP is_fitted + store graph ===
         // After this, new upserts go u8-path. In-flight pre-flip upserts
@@ -294,7 +368,7 @@ impl HnswAdapter {
         // Capture next_id at flip time: all internals < this value were
         // allocated pre-flip and must end up in vectors_u8 (unless
         // tombstoned). Used by the catch-up convergence check (Б-3).
-        let next_id_at_flip = self.next_id.load(Ordering::Acquire);
+        let next_id_at_flip = self.state.next_id.load(Ordering::Acquire);
         // Deleted count AT FLIP: every tombstone counted here is of an
         // internal `< next_id_at_flip` (an internal must exist — i.e. have
         // been allocated by `next_id.fetch_add`, which only increases —
@@ -304,7 +378,7 @@ impl HnswAdapter {
         // Folded into the `migrated_pre_flip` seed below — see the seed
         // comment for why pre-flip tombstones are counted as "accounted
         // for" alongside pre-flip claims.
-        let deleted_count_at_flip = self.deleted_count.load(Ordering::Acquire);
+        let deleted_count_at_flip = self.state.deleted_count.load(Ordering::Acquire);
         // Б-3 convergence seed + target. Every pre-flip internal (id <
         // next_id_at_flip) ends up in EXACTLY ONE of two disjoint states:
         // (a) claimed into vectors_u8 (via snapshot/delta/catch-up/
@@ -316,7 +390,7 @@ impl HnswAdapter {
         //     `old_internal < next_id_at_flip`, using the exact same
         //     sentinel-then-seed trick as claims: see those call sites).
         // A tombstoned internal is excluded from the live snapshot/delta
-        // scan (`self.deleted.contains` guards both), so (a) and (b) never
+        // scan (`self.state.deleted.contains` guards both), so (a) and (b) never
         // double-count the SAME internal — the seed below is exact, not
         // an over/under-approximation.
         //
@@ -349,14 +423,31 @@ impl HnswAdapter {
         // preceded the `next_id_at_flip` release-store in program order.
         // So a concurrent claim/tombstone can only ever see (and
         // `fetch_add` on top of) the seed — never race under it.
-        self.migrated_pre_flip.store(
+        self.state.migrated_pre_flip.store(
             snapshot_claimed + delta_claimed + deleted_count_at_flip,
             Ordering::Release,
         );
-        self.next_id_at_flip
+        self.state
+            .next_id_at_flip
             .store(next_id_at_flip, Ordering::Release);
-        self.hnsw_u8.store(Some(Arc::clone(&hnsw_u8)));
-        self.is_fitted.store(true, Ordering::Release);
+        self.state.hnsw_u8.store(Some(Arc::clone(&hnsw_u8)));
+        self.state.is_fitted.store(true, Ordering::Release);
+        #[cfg(test)]
+        {
+            let hook = self
+                .state
+                .fit_test_hook
+                .lock()
+                .expect("fit hook lock")
+                .clone();
+            if let Some(hook) = hook {
+                if hook.fail_after_publish.swap(false, Ordering::AcqRel) {
+                    return Err(VectorError::Internal(
+                        "after fitted publication: injected fit failure".into(),
+                    ));
+                }
+            }
+        }
 
         // === CONVERGING CATCH-UP LOOP (post-publish) ===
         //
@@ -393,8 +484,8 @@ impl HnswAdapter {
         let mut spins: u32 = 0;
         loop {
             // Claim any pre-flip internals still sitting in the f32 buffer.
-            self.vectors.iter_sync(|internal, vec| {
-                if !self.deleted.contains_sync(internal) {
+            self.state.vectors.iter_sync(|internal, vec| {
+                if !self.state.deleted.contains_sync(internal) {
                     let codes = quantizer_arc.quantize(vec);
                     if self
                         .claim_and_publish_u8(*internal, codes.clone())
@@ -412,14 +503,14 @@ impl HnswAdapter {
             // concurrent self-migration upsert). Both paths remove from
             // `vectors`; whichever runs first wins, the second is a no-op.
             let mut internals_to_drop: Vec<usize> = Vec::new();
-            self.vectors.iter_sync(|internal, _| {
-                if self.vectors_u8.contains_sync(internal) {
+            self.state.vectors.iter_sync(|internal, _| {
+                if self.state.vectors_u8.contains_sync(internal) {
                     internals_to_drop.push(*internal);
                 }
                 true
             });
             for internal in &internals_to_drop {
-                let _ = self.vectors.remove_sync(internal);
+                let _ = self.state.vectors.remove_sync(internal);
             }
 
             // Convergence: migrated_pre_flip is bumped only for claims on
@@ -428,7 +519,7 @@ impl HnswAdapter {
             // has been claimed into vectors_u8 — by this loop OR by a
             // concurrent self-migration upsert (both bump the same
             // counter, since both go through claim_and_publish_u8).
-            let migrated = self.migrated_pre_flip.load(Ordering::Acquire);
+            let migrated = self.state.migrated_pre_flip.load(Ordering::Acquire);
             if migrated >= target {
                 break;
             }
@@ -457,7 +548,7 @@ impl HnswAdapter {
         // in `pending_graph_inserts` — we lost those claims). So this batch
         // contains exactly the nodes we owe, no duplicates, no omissions.
         //
-        // This runs BEFORE `self.hnsw.store(None)`: by the time the f32
+        // This runs BEFORE `self.state.hnsw.store(None)`: by the time the f32
         // graph is dropped, every internal in `vectors_u8` has a node in
         // `hnsw_u8`. Before this fix, the catch-up loop and self-migration
         // populated `vectors_u8` WITHOUT inserting graph nodes — a vector
@@ -506,7 +597,7 @@ impl HnswAdapter {
         // early when `quantization.is_none()`), so the f32 graph of a
         // non-quant adapter is retained for its full lifetime — bit-for-bit
         // back-compat.
-        self.hnsw.store(None);
+        self.state.hnsw.store(None);
 
         Ok(())
     }
@@ -570,7 +661,7 @@ impl HnswAdapter {
         internal: usize,
         vec: &[f32],
     ) -> Result<(), VectorError> {
-        if self.deleted.contains_sync(&internal) {
+        if self.state.deleted.contains_sync(&internal) {
             // A concurrent same-rid upsert/delete tombstoned this internal
             // (it already bumped `migrated_pre_flip` via the tombstone site).
             // Skip both the claim and the graph insert.
@@ -613,6 +704,7 @@ impl HnswAdapter {
         k: u32,
     ) -> Result<Vec<(RecordId, f32)>, VectorError> {
         let quantizer = self
+            .state
             .quantizer
             .get()
             .expect("quantized_active but quantizer unset");
@@ -630,7 +722,7 @@ impl HnswAdapter {
         // cross-map nesting inside the bucket-lock-held callback.
         let ctx = RescoreCtx::new(self.metric, quantizer, query);
         let mut pairs: Vec<(usize, f32)> = Vec::with_capacity(256);
-        self.vectors_u8.iter_sync(|i, c| {
+        self.state.vectors_u8.iter_sync(|i, c| {
             pairs.push((*i, ctx.score(c)));
             true
         });
@@ -641,14 +733,14 @@ impl HnswAdapter {
             // written via `insert_sync` (upsert/upsert_batch/delete) and
             // scanned via `iter_sync` (`for_each_deleted`, snapshot
             // serialisation) on the SAME worker threads.
-            if self.deleted.contains_sync(&internal) {
+            if self.state.deleted.contains_sync(&internal) {
                 continue;
             }
             // DEADLOCK FIX (same class as #589, commit `7a4abf62`; H3
             // commit `dcfaf825`): `read_sync`, NOT `read_async` —
             // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
             // (snapshot serialisation) on the SAME worker threads.
-            if let Some(rid) = self.rid_map.read_sync(&internal, |_, r| *r) {
+            if let Some(rid) = self.state.rid_map.read_sync(&internal, |_, r| *r) {
                 out.push((rid, score));
             }
         }
@@ -670,6 +762,7 @@ impl HnswAdapter {
         ef: usize,
     ) -> Result<Vec<(RecordId, f32)>, VectorError> {
         let quantizer = self
+            .state
             .quantizer
             .get()
             .expect("quantized_active but quantizer unset");
@@ -704,20 +797,23 @@ impl HnswAdapter {
             // DEADLOCK FIX (#589 class, commit `7a4abf62`):
             // `contains_sync`, NOT `contains_async` — same `deleted` map
             // hazard as `search_quantized_bruteforce`.
-            if self.deleted.contains_sync(&n.d_id) {
+            if self.state.deleted.contains_sync(&n.d_id) {
                 continue;
             }
             // DEADLOCK FIX (#589 class): `read_sync`, NOT `read_async` —
             // `vectors_u8` is scanned via `iter_sync` (this fn's bruteforce
             // twin, fit catch-up drain) and read via `read_sync`
             // (`collect_live_vectors`) on the SAME worker threads.
-            let score_opt = self.vectors_u8.read_sync(&n.d_id, |_, c| ctx.score(c));
+            let score_opt = self
+                .state
+                .vectors_u8
+                .read_sync(&n.d_id, |_, c| ctx.score(c));
             if let Some(exact) = score_opt {
                 // DEADLOCK FIX (same class as #589, commit `7a4abf62`; H3
                 // commit `dcfaf825`): `read_sync`, NOT `read_async` —
                 // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
                 // (snapshot serialisation) on the SAME worker threads.
-                if let Some(rid) = self.rid_map.read_sync(&n.d_id, |_, v| *v) {
+                if let Some(rid) = self.state.rid_map.read_sync(&n.d_id, |_, v| *v) {
                     out.push((rid, exact));
                 }
             }
@@ -742,6 +838,7 @@ impl HnswAdapter {
         allow_set: Arc<shamir_collections::TFxSet<usize>>,
     ) -> Result<Vec<(RecordId, f32)>, VectorError> {
         let quantizer = self
+            .state
             .quantizer
             .get()
             .expect("quantized_active but quantizer unset");
@@ -775,13 +872,16 @@ impl HnswAdapter {
             // (`search_quantized_bruteforce`, fit catch-up drain) and
             // mutated via `insert_sync`/`remove_sync` on the SAME worker
             // threads.
-            let score_opt = self.vectors_u8.read_sync(&n.d_id, |_, c| ctx.score(c));
+            let score_opt = self
+                .state
+                .vectors_u8
+                .read_sync(&n.d_id, |_, c| ctx.score(c));
             if let Some(exact) = score_opt {
                 // DEADLOCK FIX (same class as #589, commit `7a4abf62`; H3
                 // commit `dcfaf825`): `read_sync`, NOT `read_async` —
                 // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
                 // (snapshot serialisation) on the SAME worker threads.
-                if let Some(rid) = self.rid_map.read_sync(&n.d_id, |_, v| *v) {
+                if let Some(rid) = self.state.rid_map.read_sync(&n.d_id, |_, v| *v) {
                     out.push((rid, exact));
                 }
             }

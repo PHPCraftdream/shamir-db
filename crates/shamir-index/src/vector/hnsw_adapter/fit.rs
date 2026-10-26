@@ -1,15 +1,22 @@
 use super::adapter::HnswAdapter;
 use super::config::{HnswConfig, FIT_THRESHOLD};
 use crate::kind::{VectorMetric, VectorQuantization};
-use crate::vector::adapter::VectorAdapter;
 use crate::vector::adapter::VectorError;
 use crate::vector::quantized_dist::ShamirDistU8;
 use crate::vector::sq8::Sq8Quantizer;
 use hnsw_rs::hnsw::Hnsw;
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+struct FitFlightGuard(Arc<AtomicBool>);
+
+impl Drop for FitFlightGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
 
 impl HnswAdapter {
     /// V4.2 (#408) — Collect all live (non-tombstoned) (rid, vector) pairs.
@@ -29,20 +36,20 @@ impl HnswAdapter {
         let mut result: Vec<(RecordId, Vec<f32>)> = Vec::new();
         // Post-fit: dequantize codes. Pre-fit/unquantized: f32 buffer.
         let quantizer = if self.is_quantized() {
-            self.quantizer.get().cloned()
+            self.state.quantizer.get().cloned()
         } else {
             None
         };
-        self.rid_to_internal.iter_sync(|rid, internal| {
+        self.state.rid_to_internal.iter_sync(|rid, internal| {
             // Skip tombstoned internals
-            if self.deleted.contains_sync(internal) {
+            if self.state.deleted.contains_sync(internal) {
                 return true;
             }
             if let Some(q) = quantizer.as_ref() {
-                if let Some(codes) = self.vectors_u8.read_sync(internal, |_, c| c.clone()) {
+                if let Some(codes) = self.state.vectors_u8.read_sync(internal, |_, c| c.clone()) {
                     result.push((*rid, q.dequantize(&codes)));
                 }
-            } else if let Some(vec) = self.vectors.read_sync(internal, |_, v| v.clone()) {
+            } else if let Some(vec) = self.state.vectors.read_sync(internal, |_, v| v.clone()) {
                 result.push((*rid, vec));
             }
             true
@@ -76,7 +83,7 @@ impl HnswAdapter {
     ) -> Result<(), VectorError> {
         for (rid, vec) in items {
             // Skip if this rid was deleted via double-write
-            if let Some(ref del_rids) = self.compaction_deleted_rids {
+            if let Some(ref del_rids) = self.state.compaction_deleted_rids {
                 if del_rids.contains_sync(rid) {
                     continue;
                 }
@@ -105,16 +112,16 @@ impl HnswAdapter {
             // `entry_async`), a worker can no longer PARK while owning the
             // `rid_to_internal` bucket across an `.await`, so it cannot
             // chain a second map (e.g. `deleted`) into the deadlock.
-            match self.rid_to_internal.entry_sync(*rid) {
+            match self.state.rid_to_internal.entry_sync(*rid) {
                 Occupied(_) => continue, // double-write already placed a fresher value
                 Vacant(vac) => {
                     // Re-check deleted_rids under the entry lock to close the race
-                    if let Some(ref del_rids) = self.compaction_deleted_rids {
+                    if let Some(ref del_rids) = self.state.compaction_deleted_rids {
                         if del_rids.contains_sync(rid) {
                             continue;
                         }
                     }
-                    let internal = self.next_id.fetch_add(1, Ordering::Relaxed);
+                    let internal = self.state.next_id.fetch_add(1, Ordering::Relaxed);
                     vac.insert_entry(internal);
 
                     // VR-9 follow-up (discovered by the final 10x stress
@@ -130,8 +137,8 @@ impl HnswAdapter {
                     // (see the identical check in `upsert`/`upsert_batch`)
                     // WHILE this loop is between iterations. That fit call
                     // one-shot-flips `is_fitted` and drops the f32 graph
-                    // (`self.hnsw.store(None)`) — this loop's next
-                    // `self.hnsw.load_full()` then observed `None` and
+                    // (`self.state.hnsw.store(None)`) — this loop's next
+                    // `self.state.hnsw.load_full()` then observed `None` and
                     // errored out, aborting the entire backfill.
                     //
                     // Fix: dispatch per item exactly like `upsert` does —
@@ -170,11 +177,11 @@ impl HnswAdapter {
                         // can whole-runtime deadlock. `insert_sync` holds the lock
                         // only while a thread is RUNNING. The fn stays `async`
                         // (call sites unchanged); this call no longer suspends.
-                        let _ = self.rid_map.insert_sync(internal, *rid);
+                        let _ = self.state.rid_map.insert_sync(internal, *rid);
                         continue;
                     }
 
-                    let hnsw = self.hnsw.load_full().ok_or_else(|| {
+                    let hnsw = self.state.hnsw.load_full().ok_or_else(|| {
                         VectorError::Internal(
                             "backfill_if_absent: f32 graph absent on compaction target".into(),
                         )
@@ -193,13 +200,13 @@ impl HnswAdapter {
                     // and read via `read_sync` on the SAME runtime worker
                     // threads. `insert_async`'s handoff wait path risks a
                     // whole-runtime deadlock against those sync readers.
-                    let _ = self.vectors.insert_sync(internal, vec.clone());
+                    let _ = self.state.vectors.insert_sync(internal, vec.clone());
                     // DEADLOCK FIX (same class as #589, commit `7a4abf62`; H3
                     // commit `dcfaf825`): `insert_sync`, NOT `insert_async` —
                     // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
                     // (snapshot serialisation) on the SAME worker threads; same
                     // hazard as the sibling `rid_map.insert_sync` above in this fn.
-                    let _ = self.rid_map.insert_sync(internal, *rid);
+                    let _ = self.state.rid_map.insert_sync(internal, *rid);
 
                     // Self-migration re-check (mirrors `upsert`, Б-1/#423):
                     // a concurrent fit may have flipped `is_fitted` true
@@ -211,7 +218,7 @@ impl HnswAdapter {
                     //
                     // @sh adversarial review (post-fix-1 stress gate) — the
                     // FIRST version of this block omitted the
-                    // `!self.deleted.contains(&internal)` guard that
+                    // `!self.state.deleted.contains(&internal)` guard that
                     // `upsert` (L2142-ish) carries for exactly this reason:
                     // a concurrent `delete(r)` on the SAME rid (reachable
                     // via the double-write compaction protocol — a worker
@@ -224,7 +231,7 @@ impl HnswAdapter {
                     // TIME, risking the catch-up loop's `migrated >= target`
                     // firing early — and inserting a live graph node for an
                     // internal that is already deleted.
-                    if self.quantization.is_some() && self.is_fitted.load(Ordering::Acquire) {
+                    if self.quantization.is_some() && self.state.is_fitted.load(Ordering::Acquire) {
                         // #433 — the `!deleted` guard scopes ONLY the claim
                         // (mirroring `upsert`'s nested structure), NOT the
                         // `vectors` cleanup. The cleanup below MUST stay
@@ -239,7 +246,7 @@ impl HnswAdapter {
                         // only in `rid_map`) — a pre-flip internal that never
                         // bumps `migrated_pre_flip` → catch-up loop hangs
                         // forever (`backfill_delete_same_rid_race_no_double_count`).
-                        if !self.deleted.contains_sync(&internal) {
+                        if !self.state.deleted.contains_sync(&internal) {
                             let codes = self.quantize(vec);
                             if self
                                 .claim_and_publish_u8_async(internal, codes.clone())
@@ -256,7 +263,7 @@ impl HnswAdapter {
                         // DEADLOCK FIX (#589 class): `remove_sync`, not
                         // `remove_async` — same `vectors` map hazard as
                         // the `insert_sync` above.
-                        let _ = self.vectors.remove_sync(&internal);
+                        let _ = self.state.vectors.remove_sync(&internal);
                     }
                 }
             }
@@ -270,27 +277,74 @@ impl HnswAdapter {
         // adapter). `try_fit_and_rebuild` is single-flight and a no-op when
         // `quantization.is_none()`, so this block is safe for non-quant
         // targets too (it just returns early).
-        if self.quantization.is_some() && !self.is_quantized() && self.len() >= FIT_THRESHOLD {
-            // Best-effort: a fit failure is logged inside `try_fit_and_rebuild`
-            // and does not fail the backfill — the target continues on the f32
-            // path, which is always correct (just slower and 4× the memory).
-            let _ = self.try_fit_and_rebuild().await;
-        }
+        // #7BB73DA5: claim once, then schedule a task with its own adapter/state Arc.
+        Self::schedule_fit(self);
         Ok(())
+    }
+
+    pub(crate) fn schedule_fit(&self) {
+        if self.quantization.is_none() || self.is_quantized() || self.live_count() < FIT_THRESHOLD {
+            return;
+        }
+        if self
+            .state
+            .fit_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        let adapter = self.clone_for_fit();
+        let flight_guard = FitFlightGuard(Arc::clone(&self.state.fit_in_flight));
+        // fire-and-forget: detached by design — fit is owned by this task and errors are logged.
+        // NOTE: the task is spawned under the caller's span, which is implicitly lost across
+        // the spawn boundary (no tracing dependency here); failures are reported via the
+        // plain `log::error!` in `report_fit_failure` below instead.
+        tokio::spawn(async move {
+            let _flight_guard = flight_guard;
+            let result = adapter.try_fit_and_rebuild().await;
+            if let Err(error) = result {
+                let phase: &'static str = if adapter.is_quantized() {
+                    "after fitted publication"
+                } else {
+                    "before fitted publication"
+                };
+                adapter.report_fit_failure(phase, &error);
+            }
+        });
+    }
+
+    /// Single reporting path for a failed background SQ8 fit. Production
+    /// reports via `log::error!`; test builds additionally record the
+    /// diagnosed phase on the fit hook so tests can assert the phase.
+    fn report_fit_failure(&self, phase: &'static str, error: &VectorError) {
+        log::error!("SQ8 background fit failed {phase}: {error}");
+        #[cfg(test)]
+        if let Some(hook) = self
+            .state
+            .fit_test_hook
+            .lock()
+            .expect("fit hook lock")
+            .as_ref()
+        {
+            *hook.recorded_failure.lock().expect("fit failure lock") =
+                Some((phase, error.to_string()));
+        }
     }
 
     /// V4.2 (#408) — Clone the build config for compaction rebuild.
     pub(crate) fn build_config(&self) -> HnswConfig {
         HnswConfig {
             max_elements: self
+                .state
                 .next_id
                 .load(Ordering::Relaxed)
-                .saturating_sub(self.deleted_count.load(Ordering::Relaxed))
+                .saturating_sub(self.state.deleted_count.load(Ordering::Relaxed))
                 .max(1000)
                 + 1000, // 10%+ buffer
-            m: 16,
-            max_layer: 16,
-            ef_construction: 200,
+            m: self.m,
+            max_layer: self.max_layer,
+            ef_construction: self.ef_construction,
             ef_search: self.ef_search,
         }
     }
@@ -309,7 +363,9 @@ impl HnswAdapter {
         config: HnswConfig,
     ) -> Self {
         let mut adapter = Self::new(dim, metric, config);
-        adapter.compaction_deleted_rids =
+        Arc::get_mut(&mut adapter.state)
+            .expect("new adapter state is unique")
+            .compaction_deleted_rids =
             Some(Arc::new(scc::HashMap::with_hasher(THasher::default())));
         adapter
     }
@@ -333,7 +389,9 @@ impl HnswAdapter {
         q: Option<VectorQuantization>,
     ) -> Self {
         let mut adapter = Self::new_with_quantization(dim, metric, config, q);
-        adapter.compaction_deleted_rids =
+        Arc::get_mut(&mut adapter.state)
+            .expect("new adapter state is unique")
+            .compaction_deleted_rids =
             Some(Arc::new(scc::HashMap::with_hasher(THasher::default())));
         adapter
     }
@@ -353,13 +411,14 @@ impl HnswAdapter {
     /// graph is live. `false` for unquantized adapters (always f32) and
     /// for quantized adapters below the threshold.
     pub(crate) fn is_quantized(&self) -> bool {
-        self.is_fitted.load(Ordering::Acquire)
+        self.state.is_fitted.load(Ordering::Acquire)
     }
 
     /// The opt-in quantization mode the adapter was constructed with.
     /// `None` = legacy f32 path, bit-for-bit. Used by the background
     /// compaction path (#428) to decide whether the compaction target
     /// should be a quantization-enabled adapter.
+    #[allow(dead_code)]
     pub(crate) fn quantization_mode(&self) -> Option<VectorQuantization> {
         self.quantization
     }
@@ -369,13 +428,13 @@ impl HnswAdapter {
     /// snapshot codec (#412) and introspection.
     #[allow(dead_code)] // API for #412 snapshot codec
     pub(crate) fn quantizer(&self) -> Option<&Arc<Sq8Quantizer>> {
-        self.quantizer.get()
+        self.state.quantizer.get()
     }
 
     /// Read-only handle to the u8 graph, if fitted.
     #[allow(dead_code)] // API for #412 snapshot codec
     pub(crate) fn hnsw_u8_handle(&self) -> Option<Arc<Hnsw<'static, u8, ShamirDistU8>>> {
-        self.hnsw_u8.load_full()
+        self.state.hnsw_u8.load_full()
     }
 
     /// Iterate `(internal -> u8 codes)` pairs for snapshot serialisation
@@ -385,7 +444,7 @@ impl HnswAdapter {
         if !self.is_quantized() {
             return;
         }
-        self.vectors_u8.iter_sync(|internal, codes| {
+        self.state.vectors_u8.iter_sync(|internal, codes| {
             f(*internal, codes);
             true
         });
@@ -398,7 +457,11 @@ impl HnswAdapter {
     /// Panics if the adapter is not fitted (callers must gate on
     /// [`Self::is_quantized`]).
     pub(super) fn quantize(&self, vec: &[f32]) -> Vec<u8> {
-        let q = self.quantizer.get().expect("quantize called before fit");
+        let q = self
+            .state
+            .quantizer
+            .get()
+            .expect("quantize called before fit");
         q.quantize(vec)
     }
 
@@ -444,12 +507,12 @@ impl HnswAdapter {
     /// bit-identical; keeping the existing one is correct).
     #[allow(clippy::disallowed_methods)] // scc::HashMap::insert is lock-free (CAS)
     pub(super) fn claim_and_publish_u8(&self, internal: usize, codes: Vec<u8>) -> Option<()> {
-        if self.vectors_u8.insert_sync(internal, codes).is_ok() {
+        if self.state.vectors_u8.insert_sync(internal, codes).is_ok() {
             // Won the claim — this internal is new to vectors_u8. Bump
             // the pre-flip migration counter if this is a pre-flip internal.
-            let nif = self.next_id_at_flip.load(Ordering::Acquire);
+            let nif = self.state.next_id_at_flip.load(Ordering::Acquire);
             if internal < nif {
-                self.migrated_pre_flip.fetch_add(1, Ordering::Relaxed);
+                self.state.migrated_pre_flip.fetch_add(1, Ordering::Relaxed);
             }
             Some(())
         } else {
@@ -479,10 +542,10 @@ impl HnswAdapter {
         internal: usize,
         codes: Vec<u8>,
     ) -> Option<()> {
-        if self.vectors_u8.insert_sync(internal, codes).is_ok() {
-            let nif = self.next_id_at_flip.load(Ordering::Acquire);
+        if self.state.vectors_u8.insert_sync(internal, codes).is_ok() {
+            let nif = self.state.next_id_at_flip.load(Ordering::Acquire);
             if internal < nif {
-                self.migrated_pre_flip.fetch_add(1, Ordering::Relaxed);
+                self.state.migrated_pre_flip.fetch_add(1, Ordering::Relaxed);
             }
             Some(())
         } else {
@@ -506,9 +569,9 @@ impl HnswAdapter {
     /// and the catch-up loop would spin forever waiting for a target that
     /// excluded it. See the seed comment in `try_fit_and_rebuild`.
     pub(super) fn bump_migrated_on_tombstone(&self, internal: usize) {
-        let nif = self.next_id_at_flip.load(Ordering::Acquire);
+        let nif = self.state.next_id_at_flip.load(Ordering::Acquire);
         if internal < nif {
-            self.migrated_pre_flip.fetch_add(1, Ordering::Relaxed);
+            self.state.migrated_pre_flip.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -523,7 +586,7 @@ impl HnswAdapter {
     /// release builds.
     #[cfg(test)]
     pub(crate) fn test_force_publish_u8(&self, internal: usize, codes: Vec<u8>) {
-        let _ = self.vectors_u8.insert_sync(internal, codes);
+        let _ = self.state.vectors_u8.insert_sync(internal, codes);
     }
 
     /// VR-8 (#430, Б-6) — test-only: does `vectors_u8` hold a code for
@@ -533,7 +596,7 @@ impl HnswAdapter {
     /// away in release builds.
     #[cfg(test)]
     pub(crate) fn test_vectors_u8_contains(&self, internal: usize) -> bool {
-        self.vectors_u8.contains_sync(&internal)
+        self.state.vectors_u8.contains_sync(&internal)
     }
 
     /// Post-VR-8-follow-up (delete-vs-backfill same-rid race) — test-only:
@@ -550,8 +613,8 @@ impl HnswAdapter {
     #[cfg(test)]
     pub(crate) fn test_convergence_counters(&self) -> (usize, usize) {
         (
-            self.migrated_pre_flip.load(Ordering::Acquire),
-            self.next_id_at_flip.load(Ordering::Acquire),
+            self.state.migrated_pre_flip.load(Ordering::Acquire),
+            self.state.next_id_at_flip.load(Ordering::Acquire),
         )
     }
 
@@ -572,6 +635,6 @@ impl HnswAdapter {
         // (`concurrent_upsert_across_threshold_no_loss` under nextest load).
         // A false negative (stale `false`) only routes ONE request through the
         // still-live f32 path — harmless. false→true flips exactly once.
-        self.is_fitted.load(Ordering::Acquire) && self.quantization.is_some()
+        self.state.is_fitted.load(Ordering::Acquire) && self.quantization.is_some()
     }
 }

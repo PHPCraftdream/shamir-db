@@ -866,7 +866,7 @@ async fn rv_index_l3_delta_prune_failed_promote_never_acks_chunk() {
             },
         ));
     let restarted =
-        shamir_index::vector::vector_backend::VectorBackend::new(desc, vec![emb_id], adapter);
+        shamir_index::vector::vector_backend::VectorBackend::new(desc, vec![emb_id], adapter, None);
     shamir_index::backend::IndexBackend::restore_on_open(
         &restarted,
         Arc::clone(&info_store),

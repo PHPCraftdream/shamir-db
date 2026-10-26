@@ -21,7 +21,8 @@ use super::codec::{
     chunk_key, manifest_key, map_meta_err, sidecar_key, ChunkHeader, HNSW_RS_VERSION,
     QUANT_METHOD_SQ8, SNAPSHOT_SUPPORTED_VERSIONS,
 };
-use super::{QuantMeta, SnapshotError, SnapshotManifest, SnapshotSidecar};
+use super::quantized_load::load_quantized_graph;
+use super::{OldGenerationChunks, QuantMeta, SnapshotError, SnapshotManifest, SnapshotSidecar};
 
 // ============================================================================
 // Load path
@@ -55,7 +56,7 @@ pub async fn read_manifest(
 /// Load the snapshot stored under `keyspace` and rebuild a working
 /// `HnswAdapter`. Reads manifest → chunks (with per-chunk crc verify) →
 /// sidecar (with cross-section crc verify) → temp files → `HnswIo` →
-/// `Box::leak` → `Hnsw<'static>` → `HnswAdapter::from_parts`.
+/// `Box::leak` for loader lifetime → `Hnsw<'static>` → adapter.
 ///
 /// V5.3 (#412): for a quantized v2 snapshot (`sidecar.quantization.is_some()`
 /// AND `manifest.qgraph_chunks > 0`), this ALSO:
@@ -253,11 +254,9 @@ pub async fn load_snapshot(
             // MUST STAY NON-MMAP. `HnswIo::new` defaults to `datamap: false`, so
             // `load_hnsw_with_dist` reads the graph fully INTO MEMORY — the
             // returned `Hnsw` borrows the leaked `HnswIo` struct, NOT the
-            // on-disk files. That is why it is safe for `load_dir` (this
-            // TempDir) to drop when the closure returns: the files are already
-            // resident. If anyone enables mmap (`set_mmap(true)`) here, the
-            // graph would borrow the deleted temp files → UAF; `load_dir`
-            // would then have to be leaked too.
+            // on-disk files. That is why `load_dir` can be dropped when the
+            // closure returns: the graph is already resident. Enabling mmap
+            // here would require keeping the files alive too.
             let leaked_io: &'static HnswIo =
                 Box::leak(Box::new(HnswIo::new(load_dir.path(), &basename)));
             let hnsw: Hnsw<'static, f32, ShamirDist> =
@@ -294,42 +293,19 @@ pub async fn load_snapshot(
             // Reconstruct the quantizer from the stored params.
             let quantizer = Arc::new(meta.to_quantizer());
             let qbasename = manifest.qbasename.clone();
-            // The u8 graph temp files live in a SECOND TempDir so the f32
-            // TempDir's drop (which happens when the f32 spawn_blocking closure
-            // returns) does NOT delete the u8 files before we load them. We
-            // leak this TempDir for the same reason we leak the HnswIo: boot-
-            // only, one per shard. (The HnswIo loads the data INTO MEMORY, so
-            // the files are not needed after load completes — but the leak is
-            // defensive: if anyone enables mmap, the files survive.)
             let qload_dir = tempfile::tempdir()?;
-            let qgraph_path = qload_dir.path().join(format!("{qbasename}.hnsw.graph"));
-            let qdata_path = qload_dir.path().join(format!("{qbasename}.hnsw.data"));
             let qgraph_bytes_move = qgraph_bytes.clone();
             let qdata_bytes_move = qdata_bytes.clone();
             let quantizer_for_load = Arc::clone(&quantizer);
             let hnsw_u8 = tokio::task::spawn_blocking(move || {
-                let mut qgf = std::fs::File::create(&qgraph_path)?;
-                qgf.write_all(&qgraph_bytes_move)?;
-                qgf.flush()?;
-                let mut qdf = std::fs::File::create(&qdata_path)?;
-                qdf.write_all(&qdata_bytes_move)?;
-                qdf.flush()?;
-                drop(qgf);
-                drop(qdf);
-
-                // Leak the TempDir so its files survive the HnswIo load. See the
-                // f32 path's leak comment for the rationale. The qload_dir
-                // itself is cheap (~a path + a dir handle); leaking one per shard
-                // at boot is acceptable.
-                let leaked_qdir: &'static tempfile::TempDir = Box::leak(Box::new(qload_dir));
-                let leaked_qio: &'static HnswIo =
-                    Box::leak(Box::new(HnswIo::new(leaked_qdir.path(), &qbasename)));
-                let dist_for_load = ShamirDistU8::new(quantizer_for_load, metric);
-                let hnsw_u8: Hnsw<'static, u8, ShamirDistU8> =
-                    leaked_qio.load_hnsw_with_dist(dist_for_load).map_err(|e| {
-                        SnapshotError::Io(format!("hnsw_rs load_hnsw_with_dist (u8) failed: {e}"))
-                    })?;
-                Ok::<_, SnapshotError>(Arc::new(hnsw_u8))
+                load_quantized_graph(
+                    qload_dir,
+                    &qbasename,
+                    &qgraph_bytes_move,
+                    &qdata_bytes_move,
+                    quantizer_for_load,
+                    metric,
+                )
             })
             .await
             .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??;
@@ -612,8 +588,7 @@ pub async fn flip_generation(
     store: &Arc<dyn Store>,
     keyspace: &str,
     old_gen: u32,
-    old_graph_chunks: u32,
-    old_data_chunks: u32,
+    old_chunks: OldGenerationChunks,
     new_manifest: SnapshotManifest,
     new_delta_applied_upto: u64,
 ) -> Result<(), SnapshotError> {
@@ -621,11 +596,17 @@ pub async fn flip_generation(
 
     // Prune the OLD generation's chunks + sidecar. The manifest's chunk
     // counts tell us exactly how many keys to remove — no scan needed.
-    for i in 0..old_graph_chunks as usize {
+    for i in 0..old_chunks.graph as usize {
         ops.push(KvOp::Remove(chunk_key(keyspace, old_gen, "graph", i)));
     }
-    for i in 0..old_data_chunks as usize {
+    for i in 0..old_chunks.data as usize {
         ops.push(KvOp::Remove(chunk_key(keyspace, old_gen, "data", i)));
+    }
+    for i in 0..old_chunks.qgraph as usize {
+        ops.push(KvOp::Remove(chunk_key(keyspace, old_gen, "qgraph", i)));
+    }
+    for i in 0..old_chunks.qdata as usize {
+        ops.push(KvOp::Remove(chunk_key(keyspace, old_gen, "qdata", i)));
     }
     ops.push(KvOp::Remove(sidecar_key(keyspace, old_gen)));
 

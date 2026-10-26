@@ -2,6 +2,7 @@ use crate::backend::{FtsMode, IndexBackend, IndexQuery, IndexResult};
 use crate::descriptor::IndexDescriptor;
 use crate::fts_backend::FtsBackend;
 use crate::kind::{IndexKind, TokenizerKind};
+use crate::tests::backends::remove_fail_store::RemoveFailStore;
 use crate::tokenizer::token_hash;
 use crate::write_ops::IndexWriteOp;
 use futures::StreamExt;
@@ -74,6 +75,26 @@ fn make_fts(interner: &Interner, store: Arc<dyn Store>) -> FtsBackend {
     FtsBackend::new(desc, vec![intern(interner, "body")], store)
 }
 
+#[tokio::test]
+async fn rv_index_0b756318_fts_drop_propagates_remove_failure() {
+    let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    // Seed a key under the FTS drop prefix (descriptor id 10, raw le-bytes)
+    // so the scan actually yields and the injected remove failure fires.
+    let id: u32 = 10;
+    let mut seed_key = id.to_le_bytes().to_vec();
+    seed_key.push(b'x');
+    inner
+        .set(
+            bytes::Bytes::from(seed_key).into(),
+            bytes::Bytes::from_static(b"junk"),
+        )
+        .await
+        .unwrap();
+    let fault = Arc::new(RemoveFailStore::new(inner));
+    let i = Interner::new();
+    let fts = make_fts(&i, fault);
+    assert!(fts.drop_all().await.is_err());
+}
 #[tokio::test]
 async fn and_query() {
     let i = Interner::new();

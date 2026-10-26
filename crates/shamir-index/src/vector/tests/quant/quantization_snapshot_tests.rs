@@ -142,6 +142,7 @@ async fn build_fitted_quant_adapter(
         .map(|(i, v)| (rid(i), v.clone()))
         .collect();
     adapter.upsert_batch(&items).await.unwrap();
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(adapter.is_quantized(), "test setup: adapter did not fit");
     (adapter, data)
 }
@@ -635,6 +636,7 @@ async fn snapshot_round_trip_after_concurrent_fit_no_node_loss() {
     for h in handles {
         h.await.unwrap();
     }
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(adapter.is_quantized(), "adapter did not fit under load");
     let live_before = adapter.len();
     assert!(

@@ -191,7 +191,7 @@ async fn restarted_backend(
                 ..Default::default()
             },
         ));
-    let restarted = VectorBackend::new(desc, vec![emb_id], adapter);
+    let restarted = VectorBackend::new(desc, vec![emb_id], adapter, None);
     IndexBackend::restore_on_open(&restarted, Arc::clone(info_store), Arc::clone(data_store))
         .await
         .unwrap();

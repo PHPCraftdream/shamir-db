@@ -121,6 +121,7 @@ async fn build_fitted_bruteforce_adapter() -> Arc<HnswAdapter> {
             .await
             .expect("pre-populate upsert");
     }
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(
         adapter.is_quantized(),
         "test setup: adapter must have fitted (n > FIT_THRESHOLD)"

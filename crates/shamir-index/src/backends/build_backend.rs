@@ -50,18 +50,33 @@ pub fn build_index2_backend_with_resolver(
             }
         }
         IndexKind::Vector(cfg) => {
-            let adapter = Arc::new(HnswAdapter::new(
+            let (m, ef_construction) = match &cfg.backend {
+                crate::kind::VectorBackendRef::InProcessHnsw { m, ef_construct } => {
+                    (*m as usize, *ef_construct as usize)
+                }
+                crate::kind::VectorBackendRef::External { .. } => {
+                    log::warn!("external vector backend is unsupported by index2; using in-process HNSW fallback");
+                    (16, 200)
+                }
+            };
+            let adapter = Arc::new(HnswAdapter::new_with_quantization(
                 cfg.dim,
                 cfg.metric,
                 HnswConfig {
                     max_elements: 100_000,
-                    m: 16,
-                    ef_construction: 200,
+                    m,
+                    ef_construction,
                     ef_search: 50,
                     ..Default::default()
                 },
+                cfg.quantization,
             ));
-            Arc::new(crate::vector::VectorBackend::new(desc, first_path, adapter))
+            Arc::new(crate::vector::VectorBackend::new(
+                desc,
+                first_path,
+                adapter,
+                Some(Arc::clone(info_store)),
+            ))
         }
         crate::kind::IndexKind::Btree { .. } => {
             unreachable!("Btree indexes are handled by the base_index index manager")

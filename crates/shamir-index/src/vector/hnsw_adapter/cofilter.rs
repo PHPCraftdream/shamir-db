@@ -73,7 +73,8 @@ impl HnswAdapter {
         let quantized = self.quantized_active();
         let quantizer = if quantized {
             Some(
-                self.quantizer
+                self.state
+                    .quantizer
                     .get()
                     .expect("quantized_active but quantizer unset"),
             )
@@ -93,14 +94,14 @@ impl HnswAdapter {
             // scanned via `iter_sync` (snapshot serialisation,
             // `collect_live_vectors`) and probed via `contains_sync` on the
             // SAME worker threads.
-            let internal = match self.rid_to_internal.read_sync(&rid, |_, v| *v) {
+            let internal = match self.state.rid_to_internal.read_sync(&rid, |_, v| *v) {
                 Some(i) => i,
                 None => continue,
             };
             // DEADLOCK FIX (#589 class): `contains_sync`, NOT
             // `contains_async` — `deleted` is mutated via `insert_sync`
             // and scanned via `iter_sync` on the SAME worker threads.
-            if self.deleted.contains_sync(&internal) {
+            if self.state.deleted.contains_sync(&internal) {
                 continue;
             }
             if let Some(ctx) = &rescore_ctx {
@@ -108,7 +109,10 @@ impl HnswAdapter {
                 // DEADLOCK FIX (#589 class): `read_sync`, NOT `read_async`
                 // — `vectors_u8` is scanned via `iter_sync` and mutated via
                 // `insert_sync`/`remove_sync` on the SAME worker threads.
-                let d_opt = self.vectors_u8.read_sync(&internal, |_, c| ctx.score(c));
+                let d_opt = self
+                    .state
+                    .vectors_u8
+                    .read_sync(&internal, |_, c| ctx.score(c));
                 if let Some(d) = d_opt {
                     scored.push((rid, d));
                 }
@@ -118,6 +122,7 @@ impl HnswAdapter {
                 // delta/catch-up) and mutated via `insert_sync`/`remove_sync`
                 // on the SAME worker threads.
                 let d_opt = self
+                    .state
                     .vectors
                     .read_sync(&internal, |_, v| dist.eval(query, v));
                 if let Some(d) = d_opt {
@@ -221,8 +226,8 @@ impl HnswAdapter {
             // Both `rid_to_internal` and `deleted` are accessed via sync
             // accessors (`iter_sync`, `insert_sync`, `contains_sync`) on
             // the SAME worker threads.
-            if let Some(internal) = self.rid_to_internal.read_sync(&rid, |_, v| *v) {
-                if !self.deleted.contains_sync(&internal) {
+            if let Some(internal) = self.state.rid_to_internal.read_sync(&rid, |_, v| *v) {
+                if !self.state.deleted.contains_sync(&internal) {
                     allow_set.insert(internal);
                 }
             }
@@ -283,7 +288,7 @@ impl HnswAdapter {
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             gate.notify.notified().await;
         }
-        let hnsw = match self.hnsw.load_full() {
+        let hnsw = match self.state.hnsw.load_full() {
             Some(h) => h,
             None => {
                 // #424 (Б-4) — transient flip during this request.
@@ -313,7 +318,7 @@ impl HnswAdapter {
             // commit `dcfaf825`): `read_sync`, NOT `read_async` —
             // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
             // (snapshot serialisation) on the SAME worker threads.
-            if let Some(rid) = self.rid_map.read_sync(&n.d_id, |_, v| *v) {
+            if let Some(rid) = self.state.rid_map.read_sync(&n.d_id, |_, v| *v) {
                 out.push((rid, n.distance));
             }
         }

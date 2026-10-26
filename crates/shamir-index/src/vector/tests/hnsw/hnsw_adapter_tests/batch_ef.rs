@@ -227,9 +227,10 @@ async fn upsert_batch_concurrent_with_upsert_no_duplicate() {
         // (a) Direct state invariant: exactly one live internal for target.
         let mut live_internals = 0usize;
         adapter
+            .state
             .rid_map
             .iter_async(|internal, mapped_rid| {
-                if *mapped_rid == target && !adapter.deleted.contains_sync(internal) {
+                if *mapped_rid == target && !adapter.state.deleted.contains_sync(internal) {
                     live_internals += 1;
                 }
                 true
@@ -296,9 +297,10 @@ async fn upsert_batch_duplicate_rid_within_batch_last_wins() {
     // Exactly one live internal maps to target.
     let mut live = 0usize;
     adapter
+        .state
         .rid_map
         .iter_async(|internal, mapped| {
-            if *mapped == target && !adapter.deleted.contains_sync(internal) {
+            if *mapped == target && !adapter.state.deleted.contains_sync(internal) {
                 live += 1;
             }
             true
@@ -647,7 +649,7 @@ async fn deleted_count_mirror_matches_map_len() {
     }
 
     #[allow(clippy::disallowed_methods)] // O(N) ack: test-only mirror invariant check
-    let map_len = adapter.deleted.len();
+    let map_len = adapter.state.deleted.len();
     assert_eq!(adapter.deleted_count(), map_len);
 }
 

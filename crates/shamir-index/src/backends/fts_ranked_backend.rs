@@ -406,7 +406,10 @@ impl IndexBackend for FtsRankedBackend {
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result.map_err(|e| IndexError::Storage(e.to_string()))?;
             for (key_bytes, _) in batch {
-                let _ = self.store.remove(key_bytes).await;
+                self.store
+                    .remove(key_bytes)
+                    .await
+                    .map_err(|e| IndexError::Storage(e.to_string()))?;
             }
         }
         Ok(())

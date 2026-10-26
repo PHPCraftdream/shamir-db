@@ -101,6 +101,7 @@ async fn build_fitted_sq8_dirty(
         .map(|(i, v)| (rid(i as u16), v.clone()))
         .collect();
     adapter.upsert_batch(&items).await.unwrap();
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(adapter.is_quantized(), "test setup: adapter did not fit");
     for i in 0..n_delete {
         adapter.delete(rid(i as u16)).await.unwrap();
@@ -137,6 +138,7 @@ async fn vr6_sq8_compaction_produces_quantized_target() {
     let new = compaction_rebuild(&old, dim).await;
 
     // Variant A: the target re-fit on the 300 survivors → quantized.
+    crate::vector::hnsw_adapter::await_fitted(&new).await;
     assert!(
         new.is_quantized(),
         "#428: SQ8 compaction target did not re-fit — quantization lost"
@@ -167,6 +169,7 @@ async fn vr6_sq8_compaction_recall_smoke() {
     let dim = 32u32;
     let (old, data) = build_fitted_sq8_dirty(400, 100, dim, 0xB0B).await;
     let new = compaction_rebuild(&old, dim).await;
+    crate::vector::hnsw_adapter::await_fitted(&new).await;
     assert!(new.is_quantized());
 
     let opts = SearchOpts {
@@ -216,6 +219,7 @@ async fn vr6_sq8_compaction_snapshot_is_v2() {
     let dim = 32u32;
     let (old, _data) = build_fitted_sq8_dirty(400, 100, dim, 0xC0FFEE).await;
     let new = compaction_rebuild(&old, dim).await;
+    crate::vector::hnsw_adapter::await_fitted(&new).await;
     assert!(new.is_quantized(), "precondition: target re-fitted");
 
     let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());

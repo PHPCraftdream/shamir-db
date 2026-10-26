@@ -69,12 +69,23 @@ pub(super) async fn run_background_snapshot(
     // Read the current manifest to learn the active gen + chunk counts. A
     // missing manifest means no snapshot exists yet — we dump gen 1 and the
     // flip's "old gen" prune is a no-op (old_gen=0, 0 chunks).
-    let (old_gen, old_graph_chunks, old_data_chunks): (u32, u32, u32) =
-        match snapshot::read_manifest(info_store, keyspace).await {
-            Ok(m) => (m.gen, m.graph_chunks, m.data_chunks),
-            Err(SnapshotError::NotFound) => (0, 0, 0),
-            Err(e) => return Err(e),
-        };
+    let (old_gen, old_graph_chunks, old_data_chunks, old_qgraph_chunks, old_qdata_chunks): (
+        u32,
+        u32,
+        u32,
+        u32,
+        u32,
+    ) = match snapshot::read_manifest(info_store, keyspace).await {
+        Ok(m) => (
+            m.gen,
+            m.graph_chunks,
+            m.data_chunks,
+            m.qgraph_chunks,
+            m.qdata_chunks,
+        ),
+        Err(SnapshotError::NotFound) => (0, 0, 0, 0, 0),
+        Err(e) => return Err(e),
+    };
     let new_gen = old_gen.wrapping_add(1);
 
     // The new snapshot absorbs every delta chunk the graph has APPLIED so
@@ -125,8 +136,12 @@ pub(super) async fn run_background_snapshot(
         info_store,
         keyspace,
         old_gen,
-        old_graph_chunks,
-        old_data_chunks,
+        snapshot::OldGenerationChunks {
+            graph: old_graph_chunks,
+            data: old_data_chunks,
+            qgraph: old_qgraph_chunks,
+            qdata: old_qdata_chunks,
+        },
         final_manifest,
         new_delta_applied_upto,
     )
@@ -504,7 +519,7 @@ pub(crate) async fn run_background_compaction(
     // old primary — the historical tombstone set records "deleted
     // sometime", not "currently absent", so a blanket delete would undo a
     // successful re-insertion. A mirror error fails the target.
-    if let Some(ref del_rids) = new_hnsw.compaction_deleted_rids {
+    if let Some(ref del_rids) = new_hnsw.state.compaction_deleted_rids {
         let mut rids_to_delete: Vec<RecordId> = Vec::new();
         del_rids.iter_sync(|rid, ()| {
             rids_to_delete.push(*rid);
@@ -722,7 +737,7 @@ impl VectorBackend {
             if let Some(t) = &target {
                 // Ghost-race guard ordering + insert_sync: see `plan_update`.
                 if let Some(hnsw) = t.adapter.as_hnsw_adapter() {
-                    if let Some(ref del_rids) = hnsw.compaction_deleted_rids {
+                    if let Some(ref del_rids) = hnsw.state.compaction_deleted_rids {
                         let _ = del_rids.insert_sync(rid, ());
                     }
                 }
@@ -780,5 +795,81 @@ impl Drop for DeltaReservationGuard<'_> {
         if !self.disarmed {
             self.backend.turn_release(self.idx);
         }
+    }
+}
+
+impl VectorBackend {
+    /// V2.3 (#402) — check the delta counter against the threshold and, if
+    /// crossed, spawn a single-flight background snapshot task.
+    ///
+    /// See [`crate::backend::IndexBackend::trigger_snapshot_check`] for the contract. The
+    /// task is a `tokio::spawn` (NOT awaited) so the commit-ack path returns
+    /// immediately (§5.6). The single-flight `AtomicBool` prevents two
+    /// concurrent dumps from racing on the same keyspace.
+    pub(super) fn trigger_snapshot_check_impl(&self, info_store: &Arc<dyn Store>) {
+        let count = self.delta_count.load(Ordering::Acquire);
+        if count < self.snapshot_threshold.load(Ordering::Acquire) {
+            return;
+        }
+        // V4.2: skip if compaction is in flight (coordination)
+        if self.compaction_in_flight.load(Ordering::Acquire) {
+            return;
+        }
+        // Single-flight: a crossing while a dump is already running is a
+        // no-op. The counter keeps climbing and the next ack re-arms once
+        // the in-flight task clears the flag.
+        if self
+            .snapshot_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        // Capture the CURRENT adapter (an `Arc<dyn VectorAdapter>` inside an
+        // `AdapterSlot`) by cloning the slot's Arc. The spawned task holds
+        // this Arc for the duration of the dump; a concurrent
+        // `restore_on_open` swap would install a NEW slot, but the task's
+        // dump reflects the adapter state at capture time — correct, because
+        // the dump is a point-in-time snapshot of the graph.
+        let adapter_arc = Arc::clone(&self.adapter.load_full().adapter);
+        // The background snapshot needs the concrete HnswAdapter. If the
+        // current adapter is not an HnswAdapter (BruteForce, future external
+        // adapters), there is no snapshot to take — clear the flag and
+        // return without spawning.
+        if adapter_arc.as_hnsw_adapter().is_none() {
+            self.snapshot_in_flight.store(false, Ordering::Release);
+            return;
+        }
+        let keyspace = self.snapshot_keyspace();
+        let info_store = Arc::clone(info_store);
+        let applied_prefix = self.prune_boundary();
+        let delta_count = Arc::clone(&self.delta_count);
+        // Move the flag into a drop-guard so it is cleared on EVERY exit of the
+        // task — normal return, `Err`, OR panic (unwind still runs `Drop`). A
+        // bare `store(false)` at the end would be skipped on panic, leaving the
+        // flag stuck `true` forever → snapshots silently disabled for the life
+        // of the process and the delta-log growing unbounded.
+        let flight_guard = SnapshotFlightGuard(Arc::clone(&self.snapshot_in_flight));
+        tokio::spawn(async move {
+            let _flight_guard = flight_guard; // cleared on drop (incl. unwind)
+            let res =
+                run_background_snapshot(&info_store, &keyspace, &adapter_arc, &applied_prefix)
+                    .await;
+            match res {
+                Ok(()) => {
+                    // Reset the mutation counter — the new snapshot absorbed
+                    // every chunk up to the current HWM.
+                    delta_count.store(0, Ordering::Release);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "vector background snapshot failed for keyspace {}: {} — \
+                         will retry on the next threshold crossing",
+                        keyspace,
+                        e
+                    );
+                }
+            }
+        });
     }
 }

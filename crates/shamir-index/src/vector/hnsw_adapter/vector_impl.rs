@@ -50,16 +50,16 @@ impl VectorAdapter for HnswAdapter {
         // `entry_sync` (not `entry_async`) ensures a worker can never PARK
         // while owning the `rid_to_internal` bucket, closing the
         // cross-map chain into `deleted`.
-        let internal = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let internal = self.state.next_id.fetch_add(1, Ordering::Relaxed);
         let mut replaced: Option<usize> = None;
         {
             use scc::hash_map::Entry::{Occupied, Vacant};
-            match self.rid_to_internal.entry_sync(rid) {
+            match self.state.rid_to_internal.entry_sync(rid) {
                 Occupied(mut occ) => {
                     let old_internal = *occ.get();
                     // Tombstone the previous (or concurrently-serialised) internal.
-                    if self.deleted.insert_sync(old_internal, ()).is_ok() {
-                        self.deleted_count.fetch_add(1, Ordering::Relaxed);
+                    if self.state.deleted.insert_sync(old_internal, ()).is_ok() {
+                        self.state.deleted_count.fetch_add(1, Ordering::Relaxed);
                         self.bump_migrated_on_tombstone(old_internal);
                     }
                     *occ.get_mut() = internal;
@@ -88,13 +88,13 @@ impl VectorAdapter for HnswAdapter {
                 // DEADLOCK FIX (#589 class): `remove_sync`, not
                 // `remove_async` — `vectors_u8` is scanned via `iter_sync`
                 // and read via `read_sync` on the SAME worker threads.
-                let _ = self.vectors_u8.remove_sync(&old);
+                let _ = self.state.vectors_u8.remove_sync(&old);
             }
             // DEADLOCK FIX (same class as #589, commit `7a4abf62`; H3
             // commit `dcfaf825`): `insert_sync`, NOT `insert_async` —
             // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
             // (snapshot serialisation) on the SAME worker threads.
-            let _ = self.rid_map.insert_sync(internal, rid);
+            let _ = self.state.rid_map.insert_sync(internal, rid);
             return Ok(());
         }
 
@@ -102,7 +102,7 @@ impl VectorAdapter for HnswAdapter {
         // (the quantized branch above returned early). f32 graph is always
         // present in that state; None is an invariant violation → error
         // (NOT panic — upsert must propagate failure cleanly).
-        let hnsw = self.hnsw.load_full().ok_or_else(|| {
+        let hnsw = self.state.hnsw.load_full().ok_or_else(|| {
             VectorError::Internal("upsert: f32 graph absent on non-quantized path".into())
         })?;
         let vec_owned = vec.to_vec();
@@ -119,18 +119,21 @@ impl VectorAdapter for HnswAdapter {
         // DEADLOCK FIX (#589 class): `insert_sync`, not `insert_async` —
         // `vectors` is scanned via `iter_sync` (fit snapshot/delta/catch-up)
         // and read via `read_sync` on the SAME worker threads.
-        let _ = self.vectors.insert_sync(internal, vec_for_store.clone());
+        let _ = self
+            .state
+            .vectors
+            .insert_sync(internal, vec_for_store.clone());
         if let Some(old) = replaced {
             // Drop the superseded vector so brute-force never scans stale data
             // and memory stays bounded under upsert churn.
             // DEADLOCK FIX (#589 class): `remove_sync`, not `remove_async`.
-            let _ = self.vectors.remove_sync(&old);
+            let _ = self.state.vectors.remove_sync(&old);
         }
         // DEADLOCK FIX (same class as #589, commit `7a4abf62`; H3
         // commit `dcfaf825`): `insert_sync`, NOT `insert_async` —
         // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
         // (snapshot serialisation) on the SAME worker threads.
-        let _ = self.rid_map.insert_sync(internal, rid);
+        let _ = self.state.rid_map.insert_sync(internal, rid);
 
         // #423 (Б-1) — self-migration re-check: if `is_fitted` flipped
         // true between our initial `quantized_active()` check and now, our
@@ -150,8 +153,8 @@ impl VectorAdapter for HnswAdapter {
         // parallel_insert handles graph connectivity" — that code did not
         // exist, so the vector was silently dropped from the graph.
         //
-        if self.quantization.is_some() && self.is_fitted.load(Ordering::Acquire) {
-            // #423 (Б-3, adversarial-review finding) — `!self.deleted.contains`
+        if self.quantization.is_some() && self.state.is_fitted.load(Ordering::Acquire) {
+            // #423 (Б-3, adversarial-review finding) — `!self.state.deleted.contains`
             // guard around the CLAIM, mirroring the three scan-based claim
             // sites (fit snapshot, delta, catch-up loop). Without it: a
             // concurrent `upsert` on the SAME rid can tombstone THIS
@@ -170,7 +173,7 @@ impl VectorAdapter for HnswAdapter {
             // the f32 `vectors` map (the catch-up scan and every other
             // claim path also skip `deleted` entries, so nothing else
             // would ever remove it).
-            if !self.deleted.contains_sync(&internal) {
+            if !self.state.deleted.contains_sync(&internal) {
                 let codes = self.quantize(&vec_for_store);
                 if self
                     .claim_and_publish_u8_async(internal, codes.clone())
@@ -187,7 +190,7 @@ impl VectorAdapter for HnswAdapter {
             // (whether we claimed it, lost the claim, or it was already
             // tombstoned by a concurrent racer).
             // DEADLOCK FIX (#589 class): `remove_sync`, not `remove_async`.
-            let _ = self.vectors.remove_sync(&internal);
+            let _ = self.state.vectors.remove_sync(&internal);
             return Ok(());
         }
 
@@ -197,10 +200,7 @@ impl VectorAdapter for HnswAdapter {
         // so the just-upserted vector is in the buffer the fitter will
         // snapshot.
         if self.quantization.is_some() && !self.is_quantized() && self.len() >= FIT_THRESHOLD {
-            // Best-effort: a fit failure is logged but does not fail the
-            // upsert — the adapter continues on the f32 path, which is
-            // always correct (just slower and 4× the memory).
-            let _ = self.try_fit_and_rebuild().await;
+            Self::schedule_fit(self);
         }
         Ok(())
     }
@@ -230,10 +230,10 @@ impl VectorAdapter for HnswAdapter {
         }
         // Atomic dim validation: fail before touching anything.
         for (_, v) in items {
-            if v.len() as u32 != self.dim {
+            if v.len() != self.dim as usize {
                 return Err(VectorError::DimMismatch {
                     expected: self.dim,
-                    got: v.len() as u32,
+                    got: u32::try_from(v.len()).unwrap_or(u32::MAX),
                 });
             }
         }
@@ -248,22 +248,22 @@ impl VectorAdapter for HnswAdapter {
         let mut insert_rows: Vec<(usize, RecordId, Vec<f32>)> = Vec::with_capacity(items.len());
         let mut replaced: Vec<usize> = Vec::with_capacity(items.len());
         for (rid, vec) in items {
-            let internal = self.next_id.fetch_add(1, Ordering::Relaxed);
+            let internal = self.state.next_id.fetch_add(1, Ordering::Relaxed);
             {
                 use scc::hash_map::Entry::{Occupied, Vacant};
                 // DEADLOCK FIX (#589 class, commit `7a4abf62`, H1+H2 commit
                 // `621776bd`): `entry_sync`, NOT `entry_async` — same
                 // rationale as single `upsert` (amplifier: this guard is
                 // held across the `deleted.insert_sync` tombstone below).
-                match self.rid_to_internal.entry_sync(*rid) {
+                match self.state.rid_to_internal.entry_sync(*rid) {
                     Occupied(mut occ) => {
                         let old_internal = *occ.get();
                         // Tombstone the previous (or concurrently-serialised /
                         // earlier-in-this-batch) internal. Same rationale as
                         // single `upsert`: the transition is atomic per rid
                         // while the entry is held.
-                        if self.deleted.insert_sync(old_internal, ()).is_ok() {
-                            self.deleted_count.fetch_add(1, Ordering::Relaxed);
+                        if self.state.deleted.insert_sync(old_internal, ()).is_ok() {
+                            self.state.deleted_count.fetch_add(1, Ordering::Relaxed);
                             self.bump_migrated_on_tombstone(old_internal);
                         }
                         *occ.get_mut() = internal;
@@ -282,6 +282,7 @@ impl VectorAdapter for HnswAdapter {
         // (or unquantized) falls through to the f32 path below.
         if self.quantized_active() {
             let quantizer = self
+                .state
                 .quantizer
                 .get()
                 .expect("quantized_active but quantizer unset");
@@ -303,7 +304,7 @@ impl VectorAdapter for HnswAdapter {
             // runs for every row (published, claimed by us or not).
             let mut graph_batch: Vec<(usize, Vec<u8>)> = Vec::with_capacity(code_rows.len());
             for (internal, rid, codes) in code_rows {
-                if !self.deleted.contains_sync(&internal)
+                if !self.state.deleted.contains_sync(&internal)
                     && self
                         .claim_and_publish_u8_async(internal, codes.clone())
                         .await
@@ -315,7 +316,7 @@ impl VectorAdapter for HnswAdapter {
                 // commit `dcfaf825`): `insert_sync`, NOT `insert_async` —
                 // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
                 // (snapshot serialisation) on the SAME worker threads.
-                let _ = self.rid_map.insert_sync(internal, rid);
+                let _ = self.state.rid_map.insert_sync(internal, rid);
             }
             if !graph_batch.is_empty() {
                 let hnsw_u8 = self
@@ -333,7 +334,7 @@ impl VectorAdapter for HnswAdapter {
                 // DEADLOCK FIX (#589 class): `remove_sync`, not
                 // `remove_async` — `vectors_u8` has sync accessors on the
                 // SAME worker threads (see `claim_and_publish_u8_async` doc).
-                let _ = self.vectors_u8.remove_sync(&old);
+                let _ = self.state.vectors_u8.remove_sync(&old);
             }
             return Ok(());
         }
@@ -347,7 +348,7 @@ impl VectorAdapter for HnswAdapter {
         // #418 — f32 batch-insert path. Reached ONLY when `!quantized_active()`
         // (the quantized branch above returned early). f32 graph is always
         // present in that state; None is an invariant violation → error.
-        let hnsw = self.hnsw.load_full().ok_or_else(|| {
+        let hnsw = self.state.hnsw.load_full().ok_or_else(|| {
             VectorError::Internal("upsert_batch: f32 graph absent on non-quantized path".into())
         })?;
         let insert_rows = tokio::task::spawn_blocking(move || {
@@ -383,24 +384,24 @@ impl VectorAdapter for HnswAdapter {
             // DEADLOCK FIX (#589 class): `insert_sync`, not `insert_async`
             // — `vectors` is scanned via `iter_sync` on the SAME worker
             // threads.
-            let _ = self.vectors.insert_sync(internal, vec.clone());
+            let _ = self.state.vectors.insert_sync(internal, vec.clone());
             // DEADLOCK FIX (same class as #589, commit `7a4abf62`; H3
             // commit `dcfaf825`): `insert_sync`, NOT `insert_async` —
             // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
             // (snapshot serialisation) on the SAME worker threads.
-            let _ = self.rid_map.insert_sync(internal, rid);
+            let _ = self.state.rid_map.insert_sync(internal, rid);
 
-            if self.quantization.is_some() && self.is_fitted.load(Ordering::Acquire) {
+            if self.quantization.is_some() && self.state.is_fitted.load(Ordering::Acquire) {
                 any_migrated = true;
                 // #423 (Б-3, adversarial-review finding) — same
-                // `!self.deleted.contains` guard as the single-`upsert`
+                // `!self.state.deleted.contains` guard as the single-`upsert`
                 // self-migration re-check: a concurrent `upsert`/batch on
                 // the SAME rid can tombstone THIS freshly-allocated
                 // `internal` between this batch publishing it (in the
                 // `entry_async` loop above) and this loop reaching it. The
                 // tombstone already bumped `migrated_pre_flip`; claiming a
                 // tombstoned internal here would double-bump the counter.
-                if !self.deleted.contains_sync(&internal) {
+                if !self.state.deleted.contains_sync(&internal) {
                     let codes = self.quantize(&vec);
                     if self
                         .claim_and_publish_u8_async(internal, codes.clone())
@@ -412,7 +413,7 @@ impl VectorAdapter for HnswAdapter {
                 }
                 // DEADLOCK FIX (#589 class): `remove_sync`, not
                 // `remove_async`.
-                let _ = self.vectors.remove_sync(&internal);
+                let _ = self.state.vectors.remove_sync(&internal);
             }
         }
         // #423 (Б-1) — install the graph nodes for the rows this batch
@@ -432,13 +433,13 @@ impl VectorAdapter for HnswAdapter {
         }
         for old in replaced {
             // DEADLOCK FIX (#589 class): `remove_sync`, not `remove_async`.
-            let _ = self.vectors.remove_sync(&old);
+            let _ = self.state.vectors.remove_sync(&old);
         }
 
         // V5.2 (#411) — deferred fit trigger (same rationale as single
         // `upsert`). Checked AFTER the f32 inserts land in the buffer.
         if self.quantization.is_some() && !self.is_quantized() && self.len() >= FIT_THRESHOLD {
-            let _ = self.try_fit_and_rebuild().await;
+            Self::schedule_fit(self);
         }
         Ok(())
     }
@@ -454,13 +455,13 @@ impl VectorAdapter for HnswAdapter {
         // call's lock-HANDOFF wait with those sync accessors risks a
         // whole-runtime deadlock. The fn stays `async` (trait shape
         // unchanged); it no longer suspends.
-        if let Some(internal) = self.rid_to_internal.read_sync(&rid, |_, v| *v) {
-            if self.deleted.insert_sync(internal, ()).is_ok() {
-                self.deleted_count.fetch_add(1, Ordering::Relaxed);
+        if let Some(internal) = self.state.rid_to_internal.read_sync(&rid, |_, v| *v) {
+            if self.state.deleted.insert_sync(internal, ()).is_ok() {
+                self.state.deleted_count.fetch_add(1, Ordering::Relaxed);
                 self.bump_migrated_on_tombstone(internal);
             }
-            let _ = self.rid_to_internal.remove_sync(&rid);
-            let _ = self.vectors.remove_sync(&internal);
+            let _ = self.state.rid_to_internal.remove_sync(&rid);
+            let _ = self.state.vectors.remove_sync(&internal);
             // V5.2 (#411) — also drop codes from the u8 buffer post-fit.
             // The graph node stays (hnsw_rs has no delete) but search
             // filters tombstoned internals, so it's invisible.
@@ -477,7 +478,7 @@ impl VectorAdapter for HnswAdapter {
             // `false`. `scc::HashMap::remove_sync` on a missing key is a
             // no-op (returns `None`), so this is safe both pre-fit
             // (buffer empty) and post-fit.
-            let _ = self.vectors_u8.remove_sync(&internal);
+            let _ = self.state.vectors_u8.remove_sync(&internal);
         }
         Ok(())
     }
@@ -496,6 +497,21 @@ impl VectorAdapter for HnswAdapter {
             });
         }
 
+        // Validate every staged vector before distance evaluation.
+        if let Some(staged) = staged {
+            for (_, vector) in staged {
+                if vector.len() != self.dim as usize {
+                    return Err(VectorError::DimMismatch {
+                        expected: self.dim,
+                        got: u32::try_from(vector.len()).unwrap_or(u32::MAX),
+                    });
+                }
+            }
+        }
+
+        // P1 — clamp untrusted k (restored from master): a huge k must not
+        // blow up `overscan`/`with_capacity`. Results are truncated to the
+        // caller's k downstream, so early clamping is behaviour-identical.
         let k = if k == 0 {
             return Ok(vec![]);
         } else {
@@ -558,7 +574,7 @@ impl VectorAdapter for HnswAdapter {
                 };
                 // Snapshot (internal, vector) pairs — the index is tiny here.
                 let mut pairs: Vec<(usize, Vec<f32>)> = Vec::with_capacity(128);
-                self.vectors.iter_sync(|i, v| {
+                self.state.vectors.iter_sync(|i, v| {
                     pairs.push((*i, v.clone()));
                     true
                 });
@@ -568,14 +584,14 @@ impl VectorAdapter for HnswAdapter {
                     // `contains_sync`, NOT `contains_async` — `deleted` is
                     // mutated via `insert_sync` and scanned via `iter_sync`
                     // on the SAME worker threads.
-                    if self.deleted.contains_sync(&internal) {
+                    if self.state.deleted.contains_sync(&internal) {
                         continue;
                     }
                     // DEADLOCK FIX (same class as #589, commit `7a4abf62`; H3
                     // commit `dcfaf825`): `read_sync`, NOT `read_async` —
                     // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
                     // (snapshot serialisation) on the SAME worker threads.
-                    if let Some(rid) = self.rid_map.read_sync(&internal, |_, r| *r) {
+                    if let Some(rid) = self.state.rid_map.read_sync(&internal, |_, r| *r) {
                         out.push((rid, dist.eval(query, &v)));
                     }
                 }
@@ -627,7 +643,7 @@ impl VectorAdapter for HnswAdapter {
                     // permit is stored and `notified()` resolves immediately.
                     gate.notify.notified().await;
                 }
-                let hnsw = match self.hnsw.load_full() {
+                let hnsw = match self.state.hnsw.load_full() {
                     Some(h) => h,
                     None => {
                         // #424 (Б-4) — transient flip during this request. Re-check
@@ -658,14 +674,14 @@ impl VectorAdapter for HnswAdapter {
                     // DEADLOCK FIX (#589 class, commit `7a4abf62`):
                     // `contains_sync`, NOT `contains_async` — same
                     // `deleted` map hazard as the bruteforce branch above.
-                    if self.deleted.contains_sync(&n.d_id) {
+                    if self.state.deleted.contains_sync(&n.d_id) {
                         continue;
                     }
                     // DEADLOCK FIX (same class as #589, commit `7a4abf62`; H3
                     // commit `dcfaf825`): `read_sync`, NOT `read_async` —
                     // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
                     // (snapshot serialisation) on the SAME worker threads.
-                    if let Some(rid) = self.rid_map.read_sync(&n.d_id, |_, v| *v) {
+                    if let Some(rid) = self.state.rid_map.read_sync(&n.d_id, |_, v| *v) {
                         out.push((rid, n.distance));
                     }
                 }
@@ -678,8 +694,14 @@ impl VectorAdapter for HnswAdapter {
             let dist = ShamirDist {
                 metric: self.metric,
             };
-            for (rid, vec) in staged {
-                let d = dist.eval(query, vec);
+            for (rid, vector) in staged {
+                if vector.len() != self.dim as usize {
+                    return Err(VectorError::DimMismatch {
+                        expected: self.dim,
+                        got: u32::try_from(vector.len()).unwrap_or(u32::MAX),
+                    });
+                }
+                let d = dist.eval(query, vector);
                 results.push((*rid, d));
             }
         }
@@ -699,9 +721,10 @@ impl VectorAdapter for HnswAdapter {
         // `saturating_sub`: two independent Relaxed loads; a stale `next_id`
         // with a fresher `deleted_count` under concurrent replace/delete
         // would underflow a plain subtraction (see `live_count`).
-        self.next_id
+        self.state
+            .next_id
             .load(Ordering::Relaxed)
-            .saturating_sub(self.deleted_count.load(Ordering::Relaxed))
+            .saturating_sub(self.state.deleted_count.load(Ordering::Relaxed))
     }
 
     /// V2.3 (#402) — `HnswAdapter` IS the snapshot-able adapter. The

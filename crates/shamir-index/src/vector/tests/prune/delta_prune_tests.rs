@@ -79,7 +79,7 @@ pub(crate) fn make_backend(interner: &Interner, id: u32) -> VectorBackend {
             ..Default::default()
         },
     ));
-    VectorBackend::new(desc, vec![intern(interner, "embedding")], adapter)
+    VectorBackend::new(desc, vec![intern(interner, "embedding")], adapter, None)
 }
 
 /// Seed a gen-0 base snapshot with 10 base vectors and open `backend` from
