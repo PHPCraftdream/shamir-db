@@ -289,8 +289,11 @@ impl Default for GlobalVars {
 /// When the gateway is `None`, db host imports trap with a clear error.
 ///
 /// Slice 9 adds `secret_grants` — the list of `env.*` variable names the
-/// function is allowed to read. `global_get("env.X")` returns absent when
-/// `X` is not in `secret_grants`; non-`env.` globals are ungated.
+/// function is allowed to read. This is enforced at the WASM host-import
+/// boundary: the `global_get` host import returns absent for `env.X` when
+/// `X` is not in `secret_grants` (see `wasm/bindings/globals.rs`). The
+/// native Rust `FnCtx::global_get` performs NO secret-grant filtering and
+/// is for trusted native callers; non-`env.` globals are ungated.
 ///
 /// R2 adds `actor` — the [`Actor`] that initiated the invocation, threaded
 /// from the facade. Defaults to `Actor::System`.
@@ -396,8 +399,10 @@ impl FnCtx {
 
     /// Builder: set the secret grants for `env.*` global reads (slice 9).
     ///
-    /// Only env variable names listed here can be read via `global_get`
-    /// with an `env.`-prefixed key. Non-`env.` globals are ungated.
+    /// These grants are enforced at the WASM host-import boundary (`global_get`
+    /// host import): only env variable names listed here can be read by a guest
+    /// via an `env.`-prefixed key. The native Rust `FnCtx::global_get` does NOT
+    /// filter on grants. Non-`env.` globals are ungated.
     pub fn with_secret_grants(mut self, grants: impl IntoIterator<Item = String>) -> Self {
         self.secret_grants = Arc::new(grants.into_iter().collect());
         self
@@ -443,7 +448,9 @@ impl FnCtx {
         &self.actor
     }
 
-    /// Read a global variable (cloned out).
+    /// Read a global variable (cloned out). Performs NO secret-grant
+    /// filtering — `secret_grants` are enforced only at the WASM host-import
+    /// boundary; this API is for trusted native callers.
     pub fn global_get(&self, key: &str) -> Option<QueryValue> {
         self.globals.get(key)
     }

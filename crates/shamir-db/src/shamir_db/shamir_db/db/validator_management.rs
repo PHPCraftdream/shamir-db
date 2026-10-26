@@ -2,7 +2,7 @@ use base64::Engine;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use crate::access::{Actor, ResourceMeta};
+use crate::access::{Action, Actor, ResourceMeta, ResourcePath};
 use crate::{DbError, DbResult};
 use shamir_engine::function::{
     compile_rust_source_blocking, FunctionError, WasmFunction, WasmLimits,
@@ -213,6 +213,11 @@ impl ShamirDb {
         let (wasm, lang_tag, source_str) = match source {
             FunctionSource::Wasm(bytes) => (bytes.to_vec(), "wasm", None),
             FunctionSource::Source(src) => {
+                // Compiling Rust source runs a host compiler process — gate it
+                // (mirrors the function_management WasmCompiler check).
+                self.authorize_access(&actor, &ResourcePath::WasmCompiler, Action::Execute)
+                    .await
+                    .map_err(|e| DbError::Validation(e.to_string()))?;
                 let compiled = compile_rust_source_blocking(src)
                     .await
                     .map_err(|e| match e {

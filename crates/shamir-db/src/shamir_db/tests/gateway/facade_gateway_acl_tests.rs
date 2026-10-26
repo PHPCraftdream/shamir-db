@@ -10,6 +10,11 @@
 //! This test would *pass* with the old `execute()` path (System bypasses)
 //! and *fail* (correctly) only after the fix that threads the real actor.
 
+use std::error::Error;
+
+use crate::engine::function::DbGatewayError;
+use crate::engine::query::batch::BatchError;
+use crate::shamir_db::shamir_db::classify_batch_error;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::Query;
 
@@ -158,3 +163,93 @@ async fn execute_as_user_denied_on_restricted_table() {
 // Combined with the structural change (FacadeDbGateway now carries `actor`
 // and every method calls `execute_as(self.actor.clone(), ...)`), this gives
 // sufficient coverage for the privilege-escalation fix.
+
+// ============================================================================
+// rv_wasm_host_df4ad1da: BatchError → DbGatewayError classification
+// ============================================================================
+
+/// Exercises production classification and retained `BatchError` sources; reverting
+/// `classify_batch_error` to unconditional `Execution` makes classified assertions fail.
+#[test]
+fn rv_wasm_host_df4ad1da_batch_error_classification() {
+    let not_found_source = BatchError::QueryError {
+        alias: "r".into(),
+        message: "no such record".into(),
+        code: Some("not_found".into()),
+    };
+    let not_found = classify_batch_error(not_found_source);
+    assert!(
+        matches!(not_found, DbGatewayError::NotFound { ref message, .. } if message == "no such record")
+    );
+    let source = not_found
+        .source()
+        .unwrap()
+        .downcast_ref::<BatchError>()
+        .unwrap();
+    assert!(
+        matches!(source, BatchError::QueryError { message, code: Some(code), .. } if message == "no such record" && code == "not_found")
+    );
+
+    let denied = classify_batch_error(BatchError::QueryError {
+        alias: "r".into(),
+        message: "acl denied".into(),
+        code: Some("access_denied".into()),
+    });
+    assert!(
+        matches!(denied, DbGatewayError::Permission { ref message, .. } if message == "acl denied")
+    );
+    let source = denied
+        .source()
+        .unwrap()
+        .downcast_ref::<BatchError>()
+        .unwrap();
+    assert!(
+        matches!(source, BatchError::QueryError { message, code: Some(code), .. } if message == "acl denied" && code == "access_denied")
+    );
+
+    let uncoded = classify_batch_error(BatchError::QueryError {
+        alias: "r".into(),
+        message: "boom".into(),
+        code: None,
+    });
+    assert!(
+        matches!(uncoded, DbGatewayError::ExecutionSource { ref message, .. } if message.starts_with("QueryError") && message.contains("boom"))
+    );
+    let source = uncoded
+        .source()
+        .unwrap()
+        .downcast_ref::<BatchError>()
+        .unwrap();
+    assert!(
+        matches!(source, BatchError::QueryError { message, code: None, .. } if message == "boom")
+    );
+
+    let validation = classify_batch_error(BatchError::QueryError {
+        alias: "r".into(),
+        message: "invalid value".into(),
+        code: Some("validation".into()),
+    });
+    assert!(
+        matches!(validation, DbGatewayError::ExecutionSource { ref message, .. } if message.starts_with("QueryError"))
+    );
+    let source = validation
+        .source()
+        .unwrap()
+        .downcast_ref::<BatchError>()
+        .unwrap();
+    assert!(
+        matches!(source, BatchError::QueryError { message, code: Some(code), .. } if message == "invalid value" && code == "validation")
+    );
+
+    let limit = classify_batch_error(BatchError::TooManyQueries { count: 9, max: 8 });
+    assert!(matches!(limit, DbGatewayError::ExecutionSource { .. }));
+    let source = limit
+        .source()
+        .unwrap()
+        .downcast_ref::<BatchError>()
+        .unwrap();
+    assert!(matches!(
+        source,
+        BatchError::TooManyQueries { count: 9, max: 8 }
+    ));
+}
