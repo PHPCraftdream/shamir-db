@@ -857,11 +857,11 @@ fn f28fafbf_golden_big_beyond_i64_is_msgpack_str() {
 #[test]
 fn f28fafbf_golden_big_negative_is_msgpack_str() {
     let interner = Interner::new();
-    let s = "-99999999999999999999999999"; // 26 chars incl. sign
+    let s = "-99999999999999999999999999"; // 27 chars incl. sign
     let v = InnerValue::Big(BigInt::from_str(s).unwrap());
     let bytes = inner_to_msgpack(&interner, &v).unwrap();
-    // fixstr(len=26): 0xa0 | 26 = 0xba
-    let mut expected = vec![0xba];
+    // fixstr(len=27): 0xa0 | 27 = 0xbb
+    let mut expected = vec![0xbb];
     expected.extend_from_slice(b"-99999999999999999999999999");
     assert_eq!(bytes, expected);
     assert_eq!(
