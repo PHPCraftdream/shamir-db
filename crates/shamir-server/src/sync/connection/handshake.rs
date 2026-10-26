@@ -33,6 +33,10 @@ use super::session::resume::{run_resume, run_resume_proof};
 use super::wire;
 use super::ConnectionContext;
 
+pub(crate) fn checked_query_version(version: u32) -> Result<u8, std::num::TryFromIntError> {
+    u8::try_from(version)
+}
+
 /// Helper for the auth_attempts_total counter — keeps the result label
 /// values consistent across emit sites.
 fn record_auth_attempt(result: &'static str) {
@@ -668,7 +672,8 @@ async fn run_handshake<F: Framer>(
         expires_at_ns: auth_ok.expires_at_ns,
         resumption_ticket: ticket_bytes,
         resumption_expires_at_ns: ticket_expires_at_ns,
-        server_query_version: CURRENT_QUERY_LANG_VERSION as u8,
+        server_query_version: checked_query_version(CURRENT_QUERY_LANG_VERSION)
+            .map_err(|_| HandshakeError::Io)?,
     }) {
         Ok(b) => b,
         Err(_) => return Err(HandshakeError::Io),

@@ -31,6 +31,10 @@ use std::time::Duration;
 #[derive(Default)]
 struct CountingCounterStore {
     gc_calls: AtomicUsize,
+    /// D3-card: when set to 1, the next `gc()` panics once (and clears the
+    /// flag) — used to prove a panicking tick does not kill the scheduler
+    /// task (`safe_run` catch_unwind), so later ticks still run.
+    panic_once: AtomicUsize,
 }
 
 impl ConsumedCounterStore for CountingCounterStore {
@@ -44,6 +48,9 @@ impl ConsumedCounterStore for CountingCounterStore {
     }
 
     fn gc(&self, _now_ns: u64) {
+        if self.panic_once.swap(0, Ordering::SeqCst) == 1 {
+            panic!("intentional first scheduler tick panic");
+        }
         self.gc_calls.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -244,5 +251,38 @@ async fn rate_limit_gc_runs_at_interval() {
         calls >= 1,
         "rate_limit_gc should have been called at least once; got {}",
         calls
+    );
+}
+
+/// Regression (RV-SERVER-D card 1): a panic inside one scheduler tick must
+/// not kill the background task — `Scheduler::spawn` wraps each tick in
+/// `safe_run` (`catch_unwind`), so the task survives and later ticks still
+/// fire. Revert-fails: removing the `safe_run` wrapper makes the first
+/// (panicking) tick abort the spawned task; the second advance never runs
+/// and `gc_calls` stays 0.
+#[tokio::test(start_paused = true)]
+async fn rv_server_024b9bc4_panicking_tick_does_not_kill_scheduler() {
+    let counters_concrete: Arc<CountingCounterStore> = Arc::new(CountingCounterStore::default());
+    counters_concrete.panic_once.store(1, Ordering::SeqCst);
+    let counters: Arc<dyn ConsumedCounterStore> = counters_concrete.clone();
+    let lockout: Arc<dyn LockoutStore> = Arc::new(InMemoryLockoutStore::new());
+    let rate_limit: Arc<dyn RateLimiter> = Arc::new(InMemoryRateLimiter::new(0));
+    let appender: Arc<dyn AuditAppender> = Arc::new(MockAuditAppender::default());
+
+    let inputs = build_inputs(counters, lockout, rate_limit, appender);
+    let scheduler = Scheduler::spawn(inputs, fast_config());
+
+    // First 50ms tick: gc() panics; `safe_run` swallows it. Yield once so
+    // the spawned task observes the (already-advanced) clock.
+    tokio::time::advance(Duration::from_millis(100)).await;
+    tokio::task::yield_now().await;
+    // Second tick: must still fire now that the panic flag is cleared.
+    tokio::time::advance(Duration::from_millis(100)).await;
+    scheduler.shutdown().await;
+
+    let calls = counters_concrete.gc_calls.load(Ordering::SeqCst);
+    assert!(
+        calls >= 1,
+        "scheduler must survive a panicking tick; got {calls} later gc() calls"
     );
 }
