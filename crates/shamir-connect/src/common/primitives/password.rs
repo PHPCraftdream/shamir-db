@@ -13,6 +13,30 @@
 
 use crate::common::error::{Error, Result};
 use crate::common::types::limits::{PASSWORD_MAX_CHARS, PASSWORD_MIN_CHARS};
+use zeroize::Zeroize;
+
+/// Scope guard (RV-CONNECT-226DEDF4): zeroizes the borrowed password buffer
+/// on drop, so every early-error return wipes the secret. Bind the guard and
+/// access the buffer through it for the remainder of the scope.
+pub struct WipeOnDrop<'a>(&'a mut [u8]);
+
+impl<'a> WipeOnDrop<'a> {
+    /// Bind the guard to a borrowed password buffer.
+    pub fn new(password: &'a mut [u8]) -> Self {
+        Self(password)
+    }
+
+    /// Shared view of the buffer for KDF/derivation calls.
+    pub fn as_slice(&self) -> &[u8] {
+        self.0
+    }
+}
+
+impl Drop for WipeOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
 
 /// Validate `password` against spec §3.2 policy. Returns `Err` with a stable
 /// (non-secret) reason string on failure. The password itself is never

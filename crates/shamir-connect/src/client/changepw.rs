@@ -5,11 +5,11 @@ use crate::common::crypto::{hmac_sha256, random_array};
 use crate::common::error::Result;
 use crate::common::kdf_params::KdfParams;
 use crate::common::password::validate_password;
+use crate::common::password::WipeOnDrop;
 use crate::common::scram::DerivedKeys;
 use crate::common::types::{limits, BindingMode, TransportKind};
 use crate::common::username::NormalizedUsername;
 use crate::common::wire::ChangePwRequest;
-use zeroize::Zeroize;
 
 /// Step 1: client emits `changePasswordChallenge { client_nonce_cp }`.
 pub fn build_challenge_request() -> [u8; 32] {
@@ -35,12 +35,16 @@ pub fn build_request(
     new_password: &mut [u8],
     new_kdf_params_recommendation: KdfParams,
 ) -> Result<ChangePwRequest> {
+    // Wipe both buffers on every exit path, including early-error returns
+    // (RV-CONNECT-226DEDF4).
+    let old_pw = WipeOnDrop::new(old_password);
+    let new_pw = WipeOnDrop::new(new_password);
     // Spec §3.2: only the NEW password must satisfy the policy. The OLD
     // password may have been issued under a previous (looser) policy and is
     // about to be discarded — validating it here would lock legitimate users
     // out of their own changePassword flow. Per spec the policy check
     // applies to the password being SET.
-    validate_password(new_password)?;
+    validate_password(new_pw.as_slice())?;
     new_kdf_params_recommendation.validate_client_limits()?;
 
     // Build canonical auth_message_cp.
@@ -57,8 +61,7 @@ pub fn build_request(
     })?;
 
     // Derive material from OLD password to build proof_old.
-    let derived_old = DerivedKeys::derive(old_password, salt, &kdf_params)?;
-    old_password.zeroize();
+    let derived_old = DerivedKeys::derive(old_pw.as_slice(), salt, &kdf_params)?;
 
     let signature = hmac_sha256(&derived_old.stored_key.0, &am_cp);
     let mut proof = [0u8; 32];
@@ -68,8 +71,8 @@ pub fn build_request(
 
     // Derive material from NEW password (with recommended params).
     let new_salt = random_array::<{ limits::SALT_BYTES }>();
-    let derived_new = DerivedKeys::derive(new_password, &new_salt, &new_kdf_params_recommendation)?;
-    new_password.zeroize();
+    let derived_new =
+        DerivedKeys::derive(new_pw.as_slice(), &new_salt, &new_kdf_params_recommendation)?;
 
     let mut new_server_key = [0u8; 32];
     new_server_key.copy_from_slice(&derived_new.server_key[..]);

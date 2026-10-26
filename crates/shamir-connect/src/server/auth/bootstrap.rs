@@ -42,6 +42,10 @@ use zeroize::Zeroizing;
 /// the hash itself is sensitive: equality lets an attacker confirm a
 /// guessed token).
 pub struct BootstrapState {
+    /// Whole-state mutex (RV-CONNECT-34144ECE contention model): bootstrap
+    /// is a rare-path lifecycle operation (at most once per server
+    /// lifetime); the lock is held for in-memory checks/mutations only,
+    /// never across I/O, and there is no other lock ordering (single lock).
     inner: Mutex<BootstrapInner>,
 }
 

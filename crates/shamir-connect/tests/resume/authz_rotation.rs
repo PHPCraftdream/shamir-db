@@ -50,7 +50,7 @@ fn resumed_session_permissions_come_from_directory_lookup_not_ticket() {
     let now = UnixNanos::now().as_u64();
     // No `roles` argument — the ticket structurally cannot carry authorization.
     let (ticket_bytes, _) = issue_initial_ticket(
-        &cfg.ticket_key,
+        cfg.ticket_key(),
         user_id,
         "admin".into(),
         BindingMode::TlsExporter.as_u8(),
@@ -124,7 +124,7 @@ fn refresh_ticket_carries_no_authorization_session_reads_directory_each_resume()
 
     let now = UnixNanos::now().as_u64();
     let (ticket_v1, _) = issue_initial_ticket(
-        &cfg.ticket_key,
+        cfg.ticket_key(),
         user_id,
         "admin".into(),
         BindingMode::TlsExporter.as_u8(),
@@ -272,7 +272,7 @@ fn revoked_superuser_resolves_to_non_admin_without_epoch_bump() {
     // The ticket (v2) carries no roles/superuser at all; even if it could, the
     // directory now says superuser == false.
     let (ticket_bytes, _) = issue_initial_ticket(
-        &cfg.ticket_key,
+        cfg.ticket_key(),
         user_id,
         "was-admin".into(),
         BindingMode::TlsExporter.as_u8(),
@@ -330,7 +330,7 @@ fn pre_rotation_ticket_rejected_during_overlap_per_diagram_12() {
     assert_eq!(identity.current_version(), 0);
     let now = UnixNanos::now().as_u64();
     let (ticket_v0, _) = issue_initial_ticket(
-        &cfg.ticket_key,
+        cfg.ticket_key(),
         user_id,
         "alice".into(),
         BindingMode::TlsExporter.as_u8(),
@@ -389,7 +389,7 @@ fn post_rotation_ticket_accepted_during_overlap() {
 
     // Brand-new ticket issued under post-rotation version (1).
     let (ticket_v1, _) = issue_initial_ticket(
-        &cfg.ticket_key,
+        cfg.ticket_key(),
         user_id,
         "alice".into(),
         BindingMode::TlsExporter.as_u8(),
@@ -436,7 +436,7 @@ fn pre_rotation_ticket_rejected_after_overlap_finalize() {
     let identity = ServerIdentityState::fresh();
     let now = UnixNanos::now().as_u64();
     let (ticket_v0, _) = issue_initial_ticket(
-        &cfg.ticket_key,
+        cfg.ticket_key(),
         user_id,
         "alice".into(),
         BindingMode::TlsExporter.as_u8(),

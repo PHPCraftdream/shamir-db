@@ -29,7 +29,9 @@ pub struct PushEnvelope {
     /// Monotonic sequence number within the subscription.
     pub seq: u64,
     /// Optional payload (MessagePack-encoded records, keys, etc.).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// RV-CONNECT-60D4DAB1: `data` is a binary field — encoded as msgpack
+    /// `bin`, not a `u8` array; `PushEnvelopeRef` (server) matches this.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_bytes")]
     pub data: Option<Vec<u8>>,
     /// For `Gap` pushes — the version at which the gap starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]

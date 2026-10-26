@@ -44,6 +44,19 @@ pub trait RequestHandler: Send + Sync {
     ) -> HandlerFuture<'a>;
 }
 
+/// RV-CONNECT-2A423D73: handler `Err(String)` diagnostics (e.g. response
+/// encode errors that may embed payload fragments) never reach the wire
+/// verbatim — they collapse to the fixed `application_error` code here.
+/// Structured `DbResponse::Error` paths bypass this (already wire-safe).
+const APPLICATION_ERROR_CODE: &str = "application_error";
+
+/// Safe application-error boundary: maps an arbitrary handler failure
+/// reason to a generic, disclosure-safe [`ErrorEnvelope`].
+fn application_error_boundary(request_id: Option<u32>, reason: String) -> DispatchOutcome {
+    let _ = reason; // dropped on purpose — never forwarded
+    DispatchOutcome::Error(ErrorEnvelope::new(request_id, APPLICATION_ERROR_CODE))
+}
+
 /// Lookup hook: returns `tickets_invalid_before_ns` for a given user_id.
 /// Caller wires this to whatever store backs `__system__/users`.
 pub type TicketsInvalidBeforeLookup = dyn Fn(&[u8; 16]) -> u64 + Send + Sync;
@@ -114,10 +127,7 @@ pub async fn dispatch_request<H: RequestHandler + ?Sized, F: Fn(&[u8; 16]) -> u6
             envelope.request_id,
             res_bytes,
         ))),
-        Err(err) => Ok(DispatchOutcome::Error(ErrorEnvelope::new(
-            envelope.request_id,
-            err,
-        ))),
+        Err(err) => Ok(application_error_boundary(envelope.request_id, err)),
     }
 }
 
@@ -177,9 +187,6 @@ pub async fn dispatch_request_view<H: RequestHandler + ?Sized, F: Fn(&[u8; 16]) 
             view.request_id,
             res_bytes,
         ))),
-        Err(err) => Ok(DispatchOutcome::Error(ErrorEnvelope::new(
-            view.request_id,
-            err,
-        ))),
+        Err(err) => Ok(application_error_boundary(view.request_id, err)),
     }
 }

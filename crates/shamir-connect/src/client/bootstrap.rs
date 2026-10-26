@@ -10,6 +10,7 @@ use crate::common::error::{Error, Result};
 use crate::common::identity::verify_identity;
 use crate::common::kdf_params::KdfParams;
 use crate::common::password::validate_password;
+use crate::common::password::WipeOnDrop;
 use crate::common::scram::DerivedKeys;
 use crate::common::time::ns;
 use crate::common::types::{limits, TransportKind};
@@ -17,7 +18,7 @@ use crate::common::username::NormalizedUsername;
 use crate::common::wire::{
     make_bootstrap_challenge, BootstrapChallenge, BootstrapHello, BootstrapRequest,
 };
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 /// Maximum allowed clock skew between client and server during bootstrap.
 /// Per spec §11.3.4 (d).
@@ -88,13 +89,15 @@ pub fn build_request(
     password: &mut [u8],
     kdf_params: KdfParams,
 ) -> Result<BootstrapRequest> {
+    // Wipe on every exit path, including early-error returns
+    // (RV-CONNECT-226DEDF4).
+    let pw = WipeOnDrop::new(password);
     // Spec §3.2: enforce password policy BEFORE running Argon2id (server
     // cannot validate; this is the client's only chance).
-    validate_password(password)?;
+    validate_password(pw.as_slice())?;
     kdf_params.validate_client_limits()?;
     let salt = random_array::<{ limits::SALT_BYTES }>();
-    let derived = DerivedKeys::derive(password, &salt, &kdf_params)?;
-    password.zeroize();
+    let derived = DerivedKeys::derive(pw.as_slice(), &salt, &kdf_params)?;
 
     let mut server_key_bytes = [0u8; 32];
     server_key_bytes.copy_from_slice(&derived.server_key[..]);
