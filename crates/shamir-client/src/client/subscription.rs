@@ -1,12 +1,11 @@
 //! Push-frame demultiplexing for live subscriptions.
 
-use std::sync::{Arc, Mutex as StdMutex};
-
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
 use shamir_connect::common::push_envelope::PushEnvelope;
 
+use crate::client::transport::SubsMap;
 use crate::error::CloseCause;
 
 /// Per-subscription channel capacity. A stalled consumer can no longer
@@ -26,9 +25,13 @@ pub type PushReceiver = mpsc::Receiver<PushEnvelope>;
 
 pub(crate) const EARLY_BUFFER_CAP: usize = 256;
 
-/// Subscription registry (live senders + early buffer + close cause). See
-/// [`crate::client::transport::SubsInner`] for the contention model.
-pub(crate) type SubsMap = Arc<StdMutex<crate::client::transport::SubsInner>>;
+/// RV-CLIENT-D5B9F8A3: aggregate cap over ALL early-buffer entries combined
+/// (not per key). The set of subscription ids is server-controlled, so
+/// per-key caps alone leave total memory unbounded for the connection's
+/// life; pushes past this total are dropped (with a `tracing::debug!`).
+/// Budget frees naturally: `subscribe_push` removes its key's buffer on
+/// registration.
+pub(crate) const EARLY_BUFFER_TOTAL_CAP: usize = 1024;
 
 /// Handle to a live subscription stream. Yields push envelopes as they
 /// arrive; after the connection terminates, queued items drain and the
@@ -38,6 +41,7 @@ pub struct SubscriptionHandle {
     /// Server-assigned subscription id.
     pub sub_id: u64,
     rx: PushReceiver,
+    owner: mpsc::WeakSender<PushEnvelope>,
     registry: SubsMap,
     /// Typed termination channel: resolved by `Lifecycle::shutdown` (or
     /// pre-resolved when the handle was created on a closed client).
@@ -51,12 +55,14 @@ impl SubscriptionHandle {
     pub(crate) fn new(
         sub_id: u64,
         rx: PushReceiver,
+        owner: mpsc::WeakSender<PushEnvelope>,
         registry: SubsMap,
         termination: oneshot::Receiver<CloseCause>,
     ) -> Self {
         Self {
             sub_id,
             rx,
+            owner,
             registry,
             term_rx: Some(termination),
             terminal: None,
@@ -94,8 +100,14 @@ impl Drop for SubscriptionHandle {
     fn drop(&mut self) {
         // Remove from registry so no more pushes are routed here and no
         // terminal send is attempted on a dead handle.
-        let mut subs = self.registry.lock().unwrap_or_else(|p| p.into_inner());
-        subs.live.remove(&self.sub_id);
-        subs.terminal.remove(&self.sub_id);
+        let mut registry = self.registry.lock().unwrap_or_else(|p| p.into_inner());
+        if registry.live.get(&self.sub_id).is_some_and(|tx| {
+            self.owner
+                .upgrade()
+                .is_some_and(|owner| tx.same_channel(&owner))
+        }) {
+            registry.live.remove(&self.sub_id);
+            registry.terminal.remove(&self.sub_id);
+        }
     }
 }

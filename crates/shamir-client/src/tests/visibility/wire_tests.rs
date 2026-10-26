@@ -61,7 +61,7 @@ async fn commit_transport_timeout_has_one_request_and_no_replay() {
             .push(rmp_serde::to_vec_named(&request).unwrap());
         let state = Lifecycle::new();
         let (tx, rx) = oneshot::channel();
-        state.pending.lock().unwrap().map.insert(1, tx);
+        let _ = state.pending.map.insert_sync(1, tx);
         let response =
             await_pending_response(rx, Some(Duration::from_millis(50)), &state, 1).await?;
         rmp_serde::from_slice(&response).map_err(ClientError::from)

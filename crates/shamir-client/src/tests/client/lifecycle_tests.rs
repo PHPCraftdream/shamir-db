@@ -624,3 +624,252 @@ async fn rv_client_b42b8576_no_write_midframe_after_close() {
     drop(client);
     assert_no_bytes_written(&mut ends.server_in).await;
 }
+
+// ─── RV-CLIENT-E16A04E5 — borrowed roundtrip envelope ──────────────────────
+
+#[test]
+fn rv_client_e16a04e5_roundtrip_serialize_uses_borrowed_request_bytes() {
+    let source = include_str!("../../client/api.rs");
+    let start = source
+        .find("thread_local! {")
+        .expect("scratch serializer exists");
+    let end = source[start..]
+        .find("let (tx, rx)")
+        .expect("registration follows encoding");
+    let serializer = &source[start..start + end];
+    assert!(serializer.contains("RequestEnvelopeRef"));
+    assert!(serializer.contains("req: &buf"));
+    assert!(!serializer.contains("buf.clone()"));
+}
+
+/// Structural synchronization guard: scopes contain lock acquisition through
+/// route/install operations; this is a source-shape guard, not a forced-interleaving proof.
+#[test]
+fn rv_client_b80c0d09_subscription_routing_install_share_mutex_structural_guard() {
+    let transport = include_str!("../../client/transport.rs");
+    let start = transport
+        .find("let mut subs = state.subs.lock()")
+        .expect("routing lock");
+    let end = transport[start..]
+        .find("if let PushAction::Live(res) = action")
+        .expect("route")
+        + start;
+    let route = &transport[start..end];
+    assert!(route.contains("subs.live.get(&envelope.sub)"));
+    assert!(route.contains("subs.early.entry(envelope.sub)"));
+    assert!(!route.contains("drop(subs)"));
+    assert!(!route.contains("drop(guard)"));
+    assert!(!route.contains("drop(_guard)"));
+    let api = include_str!("../../client/api.rs");
+    let start = api
+        .find("let mut subs = self.state.subs.lock()")
+        .expect("install lock");
+    let end = api[start..].find("SubscriptionHandle::new").expect("flush") + start;
+    let install = &api[start..end];
+    assert!(install.contains("subs.live.insert(sub_id, tx.clone())"));
+    assert!(install.contains("subs.early.remove(&sub_id)"));
+    assert!(install.contains("subs.early_total -= buffered.len()"));
+    assert!(install.contains("tx.try_send(envelope)"));
+    assert!(!install.contains("drop(subs)"));
+    assert!(!install.contains("drop(guard)"));
+    assert!(!install.contains("drop(_guard)"));
+}
+
+/// Real wire flow uses response markers to order early and live pushes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rv_client_b80c0d09_real_subscription_fifo_flush_count_and_shutdown() {
+    let (mut client, mut ends) = setup(LifecycleHooks::default());
+    let reader = client.take_reader_handle().expect("reader handle");
+    write_push(&mut ends.server_out, &push(17, 1)).await;
+    let early_marker = async {
+        let frame = read_frame(&mut ends.server_in, MAX_FRAME_SIZE_DEFAULT)
+            .await
+            .expect("ping frame");
+        let request: shamir_connect::common::envelope::RequestEnvelope =
+            rmp_serde::from_slice(&frame).expect("decode ping");
+        write_response(
+            &mut ends.server_out,
+            request.request_id.expect("rid"),
+            &pong_payload(),
+        )
+        .await;
+    };
+    let (ping_result, ()) = tokio::join!(client.ping(), early_marker);
+    ping_result.expect("early marker response");
+    let mut handle = client.subscribe_push(17);
+    assert_eq!(
+        client
+            .lifecycle_for_test()
+            .subs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .early_total,
+        0
+    );
+
+    write_push(&mut ends.server_out, &push(17, 2)).await;
+    let live_marker = async {
+        let frame = read_frame(&mut ends.server_in, MAX_FRAME_SIZE_DEFAULT)
+            .await
+            .expect("second ping frame");
+        let request: shamir_connect::common::envelope::RequestEnvelope =
+            rmp_serde::from_slice(&frame).expect("decode second ping");
+        write_response(
+            &mut ends.server_out,
+            request.request_id.expect("rid"),
+            &pong_payload(),
+        )
+        .await;
+    };
+    let (ping_result, ()) = tokio::join!(client.ping(), live_marker);
+    ping_result.expect("live marker response");
+    assert_eq!(handle.next().await.expect("flushed early push").seq, 1);
+    assert_eq!(handle.next().await.expect("live push").seq, 2);
+    drop(ends.server_out);
+    reader.await.expect("reader task");
+    assert!(handle.next().await.is_none());
+    assert_eq!(handle.termination(), Some(CloseCause::PeerEof));
+    assert_eq!(
+        client
+            .lifecycle_for_test()
+            .subs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .early_total,
+        0
+    );
+}
+
+/// Fill the aggregate early budget through the real client, then prove that
+/// registration frees one slot for a new unknown subscription; shutdown clears it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rv_client_b80c0d09_real_early_budget_reuse_and_shutdown_count() {
+    let (mut client, mut ends) = setup(LifecycleHooks::default());
+    let reader = client.take_reader_handle().expect("reader handle");
+    let cap = crate::client::subscription::EARLY_BUFFER_TOTAL_CAP;
+    for sub in 0..cap as u64 {
+        write_push(&mut ends.server_out, &push(sub, sub)).await;
+    }
+    let first_marker = async {
+        let frame = read_frame(&mut ends.server_in, MAX_FRAME_SIZE_DEFAULT)
+            .await
+            .expect("ping frame");
+        let req: shamir_connect::common::envelope::RequestEnvelope =
+            rmp_serde::from_slice(&frame).expect("decode ping");
+        write_response(
+            &mut ends.server_out,
+            req.request_id.expect("rid"),
+            &pong_payload(),
+        )
+        .await;
+    };
+    let (ping_result, ()) = tokio::join!(client.ping(), first_marker);
+    ping_result.expect("initial budget marker response");
+    assert_eq!(
+        client
+            .lifecycle_for_test()
+            .subs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .early_total,
+        cap
+    );
+
+    let mut handle = client.subscribe_push(17);
+    assert_eq!(
+        client
+            .lifecycle_for_test()
+            .subs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .early_total,
+        cap - 1
+    );
+    write_push(&mut ends.server_out, &push(cap as u64 + 7, 1)).await;
+    let second_marker = async {
+        let frame = read_frame(&mut ends.server_in, MAX_FRAME_SIZE_DEFAULT)
+            .await
+            .expect("ping frame");
+        let req: shamir_connect::common::envelope::RequestEnvelope =
+            rmp_serde::from_slice(&frame).expect("decode ping");
+        write_response(
+            &mut ends.server_out,
+            req.request_id.expect("rid"),
+            &pong_payload(),
+        )
+        .await;
+    };
+    let (ping_result, ()) = tokio::join!(client.ping(), second_marker);
+    ping_result.expect("budget reuse marker response");
+    assert_eq!(
+        client
+            .lifecycle_for_test()
+            .subs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .early_total,
+        cap
+    );
+
+    drop(ends.server_out);
+    reader.await.expect("reader task");
+    assert_eq!(handle.next().await.expect("buffered push drains").seq, 17);
+    assert!(handle.next().await.is_none());
+    assert_eq!(handle.termination(), Some(CloseCause::PeerEof));
+    assert_eq!(
+        client
+            .lifecycle_for_test()
+            .subs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .early_total,
+        0
+    );
+}
+
+/// Real roundtrip paused after fast check; shutdown completes before its
+/// registration attempt, which must leave no pending entry or wire bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rv_client_b80c0d09_real_roundtrip_after_fast_check_closed_before_insert() {
+    let (hook, mut reached, release) = HookPoint::new();
+    let hooks = LifecycleHooks {
+        after_fast_check: Some(hook),
+        ..Default::default()
+    };
+    let (mut client, mut ends) = setup(hooks);
+    let reader = client.take_reader_handle().expect("reader handle");
+    {
+        let mut ping = pin!(client.ping());
+        tokio::select! { r = &mut ping => panic!("ping resolved before release: {r:?}"), _ = &mut reached => {} }
+        drop(ends.server_out);
+        reader.await.expect("reader task");
+        release.send(()).expect("release fast check");
+        assert_closed(&ping.await.expect_err("must close"), &CloseCause::PeerEof);
+        assert!(client.lifecycle_for_test().pending.map.is_empty());
+    }
+    drop(client);
+    assert_no_bytes_written(&mut ends.server_in).await;
+}
+
+/// Real roundtrip paused after pending registration; shutdown completes before release.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rv_client_b80c0d09_real_roundtrip_register_after_shutdown_fails_with_cause() {
+    let (hook, mut reached, release) = HookPoint::new();
+    let hooks = LifecycleHooks {
+        after_register: Some(hook),
+        ..Default::default()
+    };
+    let (mut client, mut ends) = setup(hooks);
+    let reader = client.take_reader_handle().expect("reader handle");
+    {
+        let mut ping = pin!(client.ping());
+        tokio::select! { r = &mut ping => panic!("ping resolved before release: {r:?}"), _ = &mut reached => {} }
+        drop(ends.server_out);
+        reader.await.expect("reader task");
+        release.send(()).expect("release registration");
+        assert_closed(&ping.await.expect_err("must close"), &CloseCause::PeerEof);
+        assert!(client.lifecycle_for_test().pending.map.is_empty());
+    }
+    drop(client);
+    assert_no_bytes_written(&mut ends.server_in).await;
+}

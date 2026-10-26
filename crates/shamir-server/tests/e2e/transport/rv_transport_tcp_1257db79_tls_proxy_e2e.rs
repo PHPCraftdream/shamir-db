@@ -202,7 +202,7 @@ async fn rv_transport_tcp_1257db79_tls_terminating_relay_rejects_relayed_proof()
         "relay rejection must be an AUTHENTICATION failure, not a timeout: {err:?}"
     );
     assert!(
-        matches!(err, ClientError::Transport(_) | ClientError::Handshake(_)),
+        matches!(err, ClientError::Transport { .. } | ClientError::Handshake { .. }),
         "relayed connect must fail on the rejected SCRAM proof (Transport: origin rejects the proof and closes without auth_ok; Handshake: typed auth rejection), got {err:?}"
     );
 

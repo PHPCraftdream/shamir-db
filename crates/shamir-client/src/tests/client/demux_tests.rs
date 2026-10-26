@@ -11,10 +11,72 @@ use shamir_connect::common::envelope::{ErrorEnvelope, ResponseEnvelope};
 use shamir_connect::common::push_envelope::{PushEnvelope, PushKind};
 use shamir_transport_tcp::framing::write_frame;
 
+use crate::client::subscription::EARLY_BUFFER_TOTAL_CAP;
+use crate::client::transport::await_pending_response;
 use crate::client::{reader_task, Lifecycle, LifecycleHooks, ShutdownGuard};
 use crate::error::{ClientError, CloseCause};
 use crate::subscription::SubscriptionHandle;
 
+#[tokio::test]
+async fn rv_client_b80c0d09_response_payload_wins_close_with_timeout() {
+    let state = Lifecycle::new();
+    let (tx, rx) = oneshot::channel();
+    let _ = state.pending.map.insert_sync(79, tx);
+    let response = state.pending.map.remove_sync(&79).expect("registered").1;
+    response
+        .send(Ok(b"payload".to_vec()))
+        .expect("deliver payload");
+    state.shutdown(CloseCause::PeerEof);
+    let result =
+        await_pending_response(rx, Some(std::time::Duration::from_secs(1)), &state, 79).await;
+    assert_eq!(result.expect("payload wins close"), b"payload");
+}
+
+#[tokio::test]
+async fn rv_client_b80c0d09_response_wins_close_when_both_ready_without_timeout() {
+    let state = Lifecycle::new();
+    let (tx, rx) = oneshot::channel();
+    let _ = state.pending.map.insert_sync(77, tx);
+    let response = state
+        .pending
+        .map
+        .remove_sync(&77)
+        .expect("registered response")
+        .1;
+    response
+        .send(Ok(b"payload".to_vec()))
+        .expect("deliver response");
+    state.shutdown(CloseCause::PeerEof);
+    let result = await_pending_response(rx, None, &state, 77).await;
+    assert_eq!(result.expect("response wins"), b"payload");
+}
+
+#[tokio::test]
+async fn rv_client_b80c0d09_response_wins_close_when_both_ready_with_timeout() {
+    let state = Lifecycle::new();
+    let (tx, rx) = oneshot::channel();
+    let _ = state.pending.map.insert_sync(78, tx);
+    let response = state
+        .pending
+        .map
+        .remove_sync(&78)
+        .expect("registered response")
+        .1;
+    response
+        .send(Err(ClientError::Server {
+            code: "expired".into(),
+        }))
+        .expect("deliver typed server error");
+    state.shutdown(CloseCause::PeerEof);
+    let result = crate::client::transport::await_pending_response(
+        rx,
+        Some(std::time::Duration::from_secs(1)),
+        &state,
+        78,
+    )
+    .await;
+    assert!(matches!(result, Err(ClientError::Server { code }) if code == "expired"));
+}
 /// Write a [`ResponseEnvelope`] as a length-prefixed frame into `writer`.
 async fn write_response(writer: &mut (impl AsyncWriteExt + Unpin), rid: u32, payload: &[u8]) {
     let env = ResponseEnvelope::ok(Some(rid), payload.to_vec());
@@ -47,12 +109,7 @@ fn make_state() -> Lifecycle {
 
 fn register(state: &Lifecycle, rid: u32) -> oneshot::Receiver<Result<Vec<u8>, ClientError>> {
     let (tx, rx) = oneshot::channel();
-    state
-        .pending
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .map
-        .insert(rid, tx);
+    let _ = state.pending.map.insert_sync(rid, tx);
     rx
 }
 
@@ -202,7 +259,8 @@ async fn demux_eof_drains_all_pending() {
 }
 
 /// An error envelope (server-level error) is routed to the matching waiter
-/// as a `ClientError::Protocol`.
+/// as the typed `ClientError::Server { code }` (RV-CLIENT-AE50D83D: the
+/// envelope's single string IS the spec §14 code).
 #[tokio::test]
 async fn demux_error_envelope_routed_to_waiter() {
     let state = make_state();
@@ -224,9 +282,100 @@ async fn demux_error_envelope_routed_to_waiter() {
 
     let err = rx.await.unwrap().unwrap_err();
     assert!(
-        matches!(err, ClientError::Protocol(ref msg) if msg.contains("session_expired")),
+        matches!(err, ClientError::Server { ref code } if code == "session_expired"),
         "unexpected error: {err:?}"
     );
+}
+
+/// RV-CLIENT-AE50D83D: an envelope-level server error surfaces as the typed
+/// `ClientError::Server` carrying the spec §14 code — NOT the old
+/// stringly-typed `ClientError::Protocol(format!("server error envelope: …"))`.
+#[tokio::test]
+async fn rv_client_ae50d83d_server_error_envelope_typed() {
+    let state = make_state();
+    let rx = register(&state, 9);
+
+    let (mut writer, reader) = tokio::io::duplex(4096);
+    let task = tokio::spawn(reader_task(
+        reader,
+        state.clone(),
+        make_guard(&state),
+        make_hooks(),
+    ));
+
+    write_error(&mut writer, Some(9), "session_expired").await;
+    writer.shutdown().await.expect("shutdown");
+    task.await.expect("reader_task panicked");
+
+    let err = rx.await.unwrap().unwrap_err();
+    match err {
+        ClientError::Server { code } => assert_eq!(code, "session_expired"),
+        other => {
+            panic!("expected ClientError::Server {{ code: \"session_expired\" }}, got {other:?}")
+        }
+    }
+}
+
+/// RV-CLIENT-D5B9F8A3: pushes for MANY DISTINCT unknown sub ids must be
+/// bounded by the AGGREGATE early-buffer cap, not just the per-key cap —
+/// one push per key keeps every per-key buffer tiny while the number of
+/// keys (server-controlled) grows without bound. Post-fix the total number
+/// of buffered envelopes never exceeds `EARLY_BUFFER_TOTAL_CAP`.
+#[tokio::test]
+async fn rv_client_d5b9f8a3_early_buffer_aggregate_bound() {
+    let state = make_state();
+    let rx = register(&state, 1);
+
+    // Large buffer: all frames must be writable without backpressure
+    // deadlocking the sequential writer loop.
+    let (mut writer, reader) = tokio::io::duplex(256 * 1024);
+    let task = tokio::spawn(reader_task(
+        reader,
+        state.clone(),
+        make_guard(&state),
+        make_hooks(),
+    ));
+
+    // More DISTINCT keys than the aggregate bound — one push each, so the
+    // per-key cap (256) is never the binding constraint.
+    let distinct = EARLY_BUFFER_TOTAL_CAP + 256;
+    for sub in 0..distinct as u64 {
+        let push = PushEnvelope {
+            push: PushKind::Event,
+            sub,
+            seq: 0,
+            data: None,
+            gap_at: None,
+        };
+        write_push(&mut writer, &push).await;
+    }
+
+    // In-order sync point: the rid=1 response proves every push frame was
+    // already routed (the reader processes frames in order).
+    write_response(&mut writer, 1, b"ok").await;
+    assert_eq!(rx.await.unwrap().unwrap(), b"ok");
+
+    {
+        let mut total: usize = 0;
+        let mut over_key_cap = false;
+        {
+            let subs = state.subs.lock().unwrap_or_else(|p| p.into_inner());
+            for v in subs.early.values() {
+                total += v.len();
+                over_key_cap |= v.len() > crate::client::subscription::EARLY_BUFFER_CAP;
+            }
+            assert_eq!(subs.early_total, total);
+        }
+        assert!(
+            total <= EARLY_BUFFER_TOTAL_CAP,
+            "aggregate early buffer must be <= {EARLY_BUFFER_TOTAL_CAP}, got {total}"
+        );
+        // Each admitted key still respects the per-key cap.
+        assert!(!over_key_cap, "per-key early cap violated");
+    }
+
+    writer.shutdown().await.expect("shutdown");
+    task.await.expect("reader_task panicked");
 }
 
 /// A late response for a rid that no longer has a waiter (e.g., timed-out
@@ -329,18 +478,27 @@ async fn push_frame_for_unknown_sub_is_buffered() {
     assert_eq!(rx1.await.unwrap().unwrap(), b"ok");
 
     // Early buffer holds the push WHILE the reader is running.
-    {
-        let subs = state.subs.lock().unwrap();
-        assert_eq!(subs.early.get(&999).map(|v| v.len()), Some(1));
-    }
+    assert_eq!(
+        state
+            .subs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .early
+            .get(&999)
+            .map(Vec::len),
+        Some(1)
+    );
 
     // Terminate the reader: its shutdown transition clears the early buffer.
     writer.shutdown().await.expect("shutdown");
     task.await.expect("reader_task panicked");
-    let subs = state.subs.lock().unwrap();
-    assert_eq!(
-        subs.early.get(&999),
-        None,
+    assert!(
+        !state
+            .subs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .early
+            .contains_key(&999),
         "shutdown must clear the early buffer"
     );
 }
@@ -413,9 +571,10 @@ async fn subscription_handle_drop_removes_from_registry() {
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .live
-        .insert(7, tx);
+        .insert(7, tx.clone());
 
-    let handle = SubscriptionHandle::new(7, rx, subs_lifecycle.subs.clone(), term_rx);
+    let handle =
+        SubscriptionHandle::new(7, rx, tx.downgrade(), subs_lifecycle.subs.clone(), term_rx);
     assert!(subs_lifecycle
         .subs
         .lock()
