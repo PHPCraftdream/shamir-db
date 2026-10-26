@@ -6,7 +6,7 @@
 //!
 //! ## Chain construction
 //!
-//! ```
+//! ```text
 //! entry.hmac = HMAC-SHA256(audit_chain_key, canonical_bytes(entry_without_hmac))
 //! ```
 //!
