@@ -27,8 +27,8 @@ impl SystemStore {
         };
         self.set_via_implicit_tx(&table, &op).await?;
         self.persist_table_interner(&table, None).await?;
-        // Durable DDL — see save_repository.
-        table.data_store_read_view().flush().await?;
+        // Durable DDL — sync_wal + flush via shared helper.
+        self.flush_system_repo_durable(&table).await?;
         Ok(())
     }
 
@@ -46,8 +46,8 @@ impl SystemStore {
             expected_version: None,
         };
         self.delete_via_implicit_tx(&table, &op).await?;
-        // Durable DDL — see save_repository.
-        table.data_store_read_view().flush().await?;
+        // Durable DDL — sync_wal + flush via shared helper.
+        self.flush_system_repo_durable(&table).await?;
         Ok(())
     }
 
@@ -73,6 +73,12 @@ impl SystemStore {
         let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let query = crate::query::read::ReadQuery::new(TABLE_FUNCTIONS);
         let result = table.read(&query, &ctx).await?;
+        if !result.corrupt_records.is_empty() {
+            return Err(DbError::Internal(format!(
+                "corrupt function catalogue: {} unreadable record(s)",
+                result.corrupt_records.len()
+            )));
+        }
         Ok(result
             .records
             .into_iter()
@@ -92,6 +98,12 @@ impl SystemStore {
             },
         );
         let result = table.read(&query, &ctx).await?;
+        if !result.corrupt_records.is_empty() {
+            return Err(DbError::Internal(format!(
+                "corrupt function catalogue: {} unreadable record(s)",
+                result.corrupt_records.len()
+            )));
+        }
         Ok(result
             .records
             .into_iter()
