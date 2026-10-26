@@ -3,6 +3,7 @@ use super::test_stores::counting_store::CountingStore;
 use crate::mvcc_store::{MvccStore, Retention};
 use crate::version_codec::encode_version_key;
 use bytes::Bytes;
+use shamir_storage::error::DbError;
 use shamir_storage::types::RecordKey;
 use shamir_storage::types::Store;
 use std::sync::atomic::Ordering;
@@ -247,9 +248,12 @@ async fn rv_mvcc_gc_1480f306_scan_vacuum_selects_by_original_key() {
         "child_v2 physical history key must survive the parent's vacuum scan"
     );
     let child_v1_key = encode_version_key(&child, child_v1);
-    let child_v1_physical = mvcc.history_store().get(child_v1_key.into()).await.unwrap();
+    // A reclaimed physical key reads back as NotFound.
     assert!(
-        child_v1_physical.is_empty(),
+        matches!(
+            mvcc.history_store().get(child_v1_key.into()).await,
+            Err(DbError::NotFound(_))
+        ),
         "child_v1 physical history key must be reclaimed by its own vacuum"
     );
 }
