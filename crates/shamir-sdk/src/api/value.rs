@@ -14,15 +14,29 @@
 //! `indexmap` dependency. Serialization order is preserved; deserialization
 //! order matches.
 
-use serde::de::{self, MapAccess, SeqAccess, Visitor};
+use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::ser::{SerializeMap, SerializeSeq, Serializer};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+
+const MAX_NESTING: usize = 32;
+
+// Planning estimate only, not measured frame size or a stack-safety guarantee:
+// on wasm32 the Value enum is expected to be about 24 bytes (String/Vec are
+// 12-byte headers), with ValueSeed/ValueVisitor, SeqAccess/MapAccess state,
+// deserializer references, child temporaries, error construction, and serde
+// frames also live during recursive descent. Allowing a conservative 4 KiB per
+// active container gives 32 * 4096 = 128 KiB, before caller headroom. No
+// repository wasm32 stack-size pin was found; the toolchain default is not a
+// repository promise. Plan for at least 128 KiB plus caller budget; this is not
+// target-specific proof of actual stack use.
 
 /// A ShamirDB value.
 ///
 /// Wire-compatible with `shamir_types::QueryValue` via MessagePack for the
 /// supported variants (Null, Bool, Int, F64, Str, Bin, List, Map).
+/// Deserialization accepts at most 32 nested list/map containers. This is a
+/// codec nesting limit; it is not a proof about guest stack usage.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Null,
@@ -65,7 +79,21 @@ impl Serialize for Value {
     }
 }
 
-struct ValueVisitor;
+struct ValueSeed {
+    depth: usize,
+}
+
+impl<'de> de::DeserializeSeed<'de> for ValueSeed {
+    type Value = Value;
+
+    fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
+        deserializer.deserialize_any(ValueVisitor { depth: self.depth })
+    }
+}
+
+struct ValueVisitor {
+    depth: usize,
+}
 
 impl<'de> Visitor<'de> for ValueVisitor {
     type Value = Value;
@@ -95,7 +123,11 @@ impl<'de> Visitor<'de> for ValueVisitor {
     }
 
     fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
-        Ok(Value::Int(v as i64))
+        if v <= i64::MAX as u64 {
+            Ok(Value::Int(v as i64))
+        } else {
+            Ok(Value::Str(v.to_string()))
+        }
     }
 
     fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
@@ -119,16 +151,25 @@ impl<'de> Visitor<'de> for ValueVisitor {
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-        let mut list = Vec::with_capacity(seq.size_hint().unwrap_or(0));
-        while let Some(elem) = seq.next_element()? {
+        let depth = self.depth + 1;
+        if depth > MAX_NESTING {
+            return Err(de::Error::custom("maximum Value nesting depth exceeded"));
+        }
+        let mut list = Vec::new();
+        while let Some(elem) = seq.next_element_seed(ValueSeed { depth })? {
             list.push(elem);
         }
         Ok(Value::List(list))
     }
 
     fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
-        let mut entries = Vec::with_capacity(map.size_hint().unwrap_or(0));
-        while let Some((key, value)) = map.next_entry()? {
+        let depth = self.depth + 1;
+        if depth > MAX_NESTING {
+            return Err(de::Error::custom("maximum Value nesting depth exceeded"));
+        }
+        let mut entries = Vec::new();
+        while let Some(key) = map.next_key()? {
+            let value = map.next_value_seed(ValueSeed { depth })?;
             entries.push((key, value));
         }
         Ok(Value::Map(entries))
@@ -137,6 +178,6 @@ impl<'de> Visitor<'de> for ValueVisitor {
 
 impl<'de> Deserialize<'de> for Value {
     fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(ValueVisitor)
+        ValueSeed { depth: 0 }.deserialize(deserializer)
     }
 }

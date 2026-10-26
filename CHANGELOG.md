@@ -16,6 +16,9 @@ This file follows [Keep a Changelog](https://keepachangelog.com) conventions loo
 
 ## [Unreleased]
 
+### RU7
+- Decode raw MessagePack `u64` values above `i64::MAX` as exact `Big` values across shamir-types codecs and RecordView lenses; the existing v1 decimal-text encoding projection is unchanged.
+
 First public alpha in preparation (`0.1.0-alpha.1`, not yet tagged). The
 detailed engineering log previously kept here lives in
 `docs/dev-artifacts/checkpoints/2026-08-engineering-log.md`.

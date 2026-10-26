@@ -67,6 +67,12 @@ impl<'a> RecordView<'a> {
         self.n_entries
     }
 
+    /// Remaining bytes in the map body, bounding header-derived allocations.
+    #[inline]
+    pub fn body_len(&self) -> usize {
+        self.body.len()
+    }
+
     /// `true` iff the header reported zero entries.
     #[inline]
     pub fn is_empty(&self) -> bool {

@@ -276,7 +276,7 @@ pub fn inner_to_msgpack(interner: &Interner, value: &InnerValue) -> Result<Vec<u
 **Note:** Uses `rmpv` crate for value representation, then converts to InnerValue.
 
 **Special Cases:**
-- **Large u64**: Same as legacy text format - store as Int if fits, else as string.
+- **Large u64**: Decoded as `Int` when it fits in `i64`, otherwise exact `Big(BigInt)`. On the v1 MessagePack encode path, `Big` projects to decimal text.
 - **Very large integers**: Stored as strings.
 - **Extension types**: Stored as `Bin` for now.
 - **Map keys**: Must be strings in MessagePack, error otherwise.

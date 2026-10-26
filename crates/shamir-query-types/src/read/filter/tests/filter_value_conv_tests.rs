@@ -14,7 +14,45 @@ use crate::filter::filter_enum::Filter;
 use crate::filter::filter_value::{filter_value_to_query_value, query_value_to_filter_value};
 use crate::filter::FilterValue;
 
-// ── direct literal conversions ───────────────────────────────────────────────
+#[test]
+fn rv_types_18ac0cfc_filter_value_numeric_wire_parity() {
+    let large = u64::MAX;
+    let bytes = [0xcf, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
+    assert_eq!(
+        rmp_serde::from_slice::<FilterValue>(&bytes).unwrap(),
+        FilterValue::String(large.to_string())
+    );
+    assert_eq!(
+        rmp_serde::from_slice::<Vec<FilterValue>>(&rmp_serde::to_vec(&vec![large]).unwrap())
+            .unwrap(),
+        vec![FilterValue::String(large.to_string())]
+    );
+    assert_eq!(
+        rmp_serde::from_slice::<FilterValue>(&rmp_serde::to_vec(&i64::MAX).unwrap()).unwrap(),
+        FilterValue::Int(i64::MAX)
+    );
+    let array = vec![FilterValue::Int(1), FilterValue::String("x".to_string())];
+    assert_eq!(
+        rmp_serde::from_slice::<FilterValue>(&rmp_serde::to_vec(&array).unwrap()).unwrap(),
+        FilterValue::Array(vec![
+            FilterValue::Int(1),
+            FilterValue::String("x".to_string())
+        ])
+    );
+    for float in [1.5, -0.0, f64::NAN] {
+        let value: FilterValue =
+            rmp_serde::from_slice(&rmp_serde::to_vec(&float).unwrap()).unwrap();
+        match value {
+            FilterValue::Float(decoded) if float.is_nan() => assert!(decoded.is_nan()),
+            FilterValue::Float(decoded) => assert_eq!(decoded.to_bits(), float.to_bits()),
+            other => panic!("expected Float, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        rmp_serde::from_slice::<FilterValue>(&rmp_serde::to_vec(&1u64).unwrap()).unwrap(),
+        FilterValue::Int(1)
+    );
+}
 
 #[test]
 fn qv_to_fv_null() {
@@ -332,4 +370,14 @@ fn array_value_still_decodes_as_array_not_binary() {
         ),
         other => panic!("expected Filter::Eq, got {other:?}"),
     }
+}
+
+#[test]
+fn rv_types_18ac0cfc_oversized_array_element_decodes_as_decimal_string() {
+    let mut bytes = vec![0x91];
+    bytes.extend_from_slice(&[0xcf, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+    assert_eq!(
+        rmp_serde::from_slice::<FilterValue>(&bytes).unwrap(),
+        FilterValue::Array(vec![FilterValue::String(u64::MAX.to_string())])
+    );
 }
