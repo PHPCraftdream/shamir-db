@@ -383,6 +383,11 @@ path = "tests/e2e/transport/rv_connect_0a42f42c_capped_login_reject_e2e.rs"
 harness = true
 
 [[test]]
+name = "rv_transport_tcp_1257db79_tls_proxy_e2e"
+path = "tests/e2e/transport/rv_transport_tcp_1257db79_tls_proxy_e2e.rs"
+harness = true
+
+[[test]]
 name = "audit_appender"
 path = "tests/misc/audit_log/audit_appender.rs"
 harness = true
