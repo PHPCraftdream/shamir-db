@@ -116,7 +116,13 @@ pub(super) async fn accept_loop_tcp(
                             return;
                         }
                     };
-                    let exporter = extract_tls_exporter(&tls).unwrap_or([0u8; 32]);
+                    let exporter = match extract_tls_exporter(&tls) {
+                        Ok(exporter) => exporter,
+                        Err(e) => {
+                            tracing::warn!(?peer_addr, ?e, "TLS exporter unavailable; closing connection");
+                            return;
+                        }
+                    };
                     let framer = TcpFramer::new(tls);
                     handle_connection(ctx, peer_addr, framer, exporter).await;
                 }));
@@ -338,7 +344,13 @@ pub(super) async fn accept_loop_ws_native(
                     // CRITICAL: extract exporter BEFORE the WS upgrade
                     // consumes `tls`. After upgrade the TLS state is owned
                     // by the WebSocketStream and not directly accessible.
-                    let exporter = extract_tls_exporter(&tls).unwrap_or([0u8; 32]);
+                    let exporter = match extract_tls_exporter(&tls) {
+                        Ok(exporter) => exporter,
+                        Err(e) => {
+                            tracing::warn!(?peer_addr, ?e, "TLS exporter unavailable; closing connection");
+                            return;
+                        }
+                    };
                     let ws = match tokio::time::timeout(
                         ctx.auth_init_timeout,
                         accept_native_ws(tls, &params.path, &params.policy),

@@ -10,6 +10,7 @@ use crate::batch::{
     BatchRequest, BatchResponse, IsolationLevel, TransactionInfo, VisibilityState, VisibilityWait,
 };
 use crate::read::{QueryResult, ReadQuery};
+use crate::wire::change_password_secrets::ChangePasswordSecrets;
 use crate::wire::cursor_id::CursorId;
 use crate::wire::repl::{ReplRequest, ReplResponse};
 
@@ -42,6 +43,11 @@ fn default_query_version() -> u32 {
 
 /// Application-layer DB request (msgpack-encoded payload of
 /// `RequestEnvelope.req`).
+///
+/// `ChangePasswordVerify`'s secret material lives in
+/// [`ChangePasswordSecrets`], whose manual `Debug` redacts every byte
+/// field — so the derived `Debug` here is safe for logging on every
+/// variant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)] // dispatch enum: rarely on the stack; mirrors BatchOp::Read(ReadQuery)
@@ -191,21 +197,7 @@ pub enum DbRequest {
     /// server persists the new credentials, bumps
     /// `tickets_invalid_before_ns`, and kills every other live session for
     /// this user (spec §12.5.3).
-    ChangePasswordVerify {
-        /// SCRAM proof recovered from the OLD password, bound to the
-        /// pending challenge issued by [`DbRequest::ChangePasswordChallenge`].
-        #[serde(with = "serde_bytes")]
-        client_proof_old: Vec<u8>,
-        /// New per-user salt (CSPRNG, client-generated).
-        #[serde(with = "serde_bytes")]
-        new_salt: Vec<u8>,
-        /// New `stored_key = SHA256(HMAC(new_salted_pw, "Client Key"))`.
-        #[serde(with = "serde_bytes")]
-        new_stored_key: Vec<u8>,
-        /// New `server_key = HMAC(new_salted_pw, "Server Key")`.
-        #[serde(with = "serde_bytes")]
-        new_server_key: Vec<u8>,
-    },
+    ChangePasswordVerify(ChangePasswordSecrets),
 
     /// Grant or revoke superuser status on an existing SCRAM-directory
     /// account. Requires an already-superuser session AND an HMAC

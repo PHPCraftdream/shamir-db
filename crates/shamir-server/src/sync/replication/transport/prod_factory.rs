@@ -38,13 +38,14 @@ use super::source::ReplSource;
 use super::wire_source::WireReplSource;
 use crate::replication::error::ReplError;
 use crate::replication::supervisor::{ReplSourceFactory, Subscription};
+use crate::sync::replication::transport::replicator_password::ReplicatorPassword;
 
 /// Replicator credentials + TLS SNI resolved once from `[replication]` config
 /// and shared (cheaply cloned) into every source the factory builds.
 #[derive(Clone)]
 struct ReplicatorCreds {
     user: String,
-    password: Arc<str>,
+    password: ReplicatorPassword,
     server_name: String,
 }
 
@@ -55,16 +56,16 @@ struct ReplicatorCreds {
 /// then logs and is skipped by reconcile until creds are configured).
 pub fn build_prod_factory(
     user: Option<String>,
-    password: Option<String>,
+    password: Option<ReplicatorPassword>,
     server_name: String,
 ) -> Option<ReplSourceFactory> {
     let (user, password) = match (user, password) {
-        (Some(u), Some(p)) if !u.is_empty() && !p.is_empty() => (u, p),
+        (Some(u), Some(p)) if !u.is_empty() && !p.reveal().is_empty() => (u, p),
         _ => return None,
     };
     let creds = ReplicatorCreds {
         user,
-        password: Arc::from(password.as_str()),
+        password,
         server_name,
     };
     let factory: ReplSourceFactory = Arc::new(move |sub: &Subscription| {
@@ -109,7 +110,7 @@ impl LazyWireSource {
             addr,
             server_name: self.creds.server_name.clone(),
             username: self.creds.user.clone(),
-            password: Zeroizing::new(self.creds.password.as_bytes().to_vec()),
+            password: Zeroizing::new(self.creds.password.reveal().as_bytes().to_vec()),
             // Trust-on-first-use: the follower has no pre-pinned leader key in
             // 386-c. Persisting a leader pin is future work (#388).
             accept_new_host: true,

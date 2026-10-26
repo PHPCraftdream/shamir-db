@@ -200,7 +200,19 @@ impl InMemoryRateLimiter {
 
     /// New limiter with an explicit base rate. `startup_at_ns` should be
     /// `UnixNanos::now()` at server boot.
+    ///
+    /// Zero-rate construction is explicitly DEFINED (RV-CONNECT-064F9FE7),
+    /// not a soft-degenerate mode: `rate_per_sec == 0` would make the token
+    /// bucket capacity zero (`rate × 1e9`), underflowing the full-bucket
+    /// initializer and throttling every request forever. A zero rate is
+    /// therefore clamped to [`RATE_LIMIT_AUTH_INIT_PER_SECOND`] — a
+    /// configuration typo can never disable the limiter's capacity math.
     pub fn with_rate(startup_at_ns: u64, rate_per_sec: u32) -> Self {
+        let rate_per_sec = if rate_per_sec == 0 {
+            RATE_LIMIT_AUTH_INIT_PER_SECOND
+        } else {
+            rate_per_sec
+        };
         Self {
             buckets: DashMap::with_hasher(SubnetHasher::default()),
             startup_at_ns,
@@ -239,12 +251,19 @@ impl InMemoryRateLimiter {
     /// Create a limiter backed by `sink`, anchored at a fresh
     /// `startup_at_ns`, with an explicit base rate.
     ///
-    /// See [`Self::with_snapshot_sink`] for semantics.
+    /// Zero-rate construction is explicitly DEFINED (RV-CONNECT-064F9FE7):
+    /// `rate_per_sec == 0` is clamped to [`RATE_LIMIT_AUTH_INIT_PER_SECOND`],
+    /// matching [`Self::with_rate`].
     pub fn with_snapshot_sink_and_rate(
         sink: Arc<dyn RateLimitSnapshotSink>,
         startup_at_ns: u64,
         rate_per_sec: u32,
     ) -> Self {
+        let rate_per_sec = if rate_per_sec == 0 {
+            RATE_LIMIT_AUTH_INIT_PER_SECOND
+        } else {
+            rate_per_sec
+        };
         let limiter = Self {
             buckets: DashMap::with_hasher(SubnetHasher::default()),
             startup_at_ns,

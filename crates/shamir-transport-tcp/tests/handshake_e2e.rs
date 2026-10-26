@@ -9,7 +9,11 @@
 
 use std::sync::Arc;
 
-use rustls::crypto::aws_lc_rs::default_provider;
+use rustls::crypto::aws_lc_rs::{default_provider, sign::any_supported_type};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::server::ResolvesServerCert;
+use rustls::sign::CertifiedKey;
 use shamir_connect::client::handshake::{HandshakeBuilder, ServerAuthOk, ServerChallenge};
 use shamir_connect::common::crypto::{sha256, Ed25519Keypair};
 use shamir_connect::common::kdf_params::KdfParams;
@@ -23,8 +27,8 @@ use shamir_connect::server::user_record::UserRecord;
 
 use shamir_transport_tcp::framing::{read_frame, write_frame, MAX_FRAME_SIZE_DEFAULT};
 use shamir_transport_tcp::tls::{
-    extract_tls_exporter, generate_self_signed_server_cert, make_client_config_no_ca,
-    make_server_config_from_pem,
+    extract_tls_exporter, generate_self_signed_server_cert, make_client_config_app_authenticated,
+    make_server_config_from_pem, AppLayerServerAuth,
 };
 
 use serde::{Deserialize, Serialize};
@@ -130,7 +134,8 @@ async fn full_handshake_over_tcp_tls() {
     // ---- TLS configs ----
     let (cert_pem, key_pem) = generate_self_signed_server_cert(vec!["localhost".into()]).unwrap();
     let server_cfg = make_server_config_from_pem(&cert_pem, &key_pem).unwrap();
-    let client_cfg = make_client_config_no_ca().unwrap();
+    let client_cfg =
+        make_client_config_app_authenticated(AppLayerServerAuth::exporter_bound()).unwrap();
 
     // ---- Listener ----
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -321,4 +326,148 @@ async fn full_handshake_over_tcp_tls() {
     // Cleanly close.
     let _ = w.shutdown().await;
     server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn rv_transport_tcp_1257db79_matched_certificate_key_control_completes_tls() {
+    let _ = default_provider().install_default();
+    let (cert_pem, key_pem) = generate_self_signed_server_cert(vec!["localhost".into()]).unwrap();
+    let server_cfg = make_server_config_from_pem(&cert_pem, &key_pem).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let acceptor = TlsAcceptor::from(server_cfg);
+    let task = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        acceptor.accept(tcp).await
+    });
+    let cfg = make_client_config_app_authenticated(AppLayerServerAuth::exporter_bound()).unwrap();
+    let tls = TlsConnector::from(cfg)
+        .connect(
+            rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+            TcpStream::connect(addr).await.unwrap(),
+        )
+        .await
+        .expect("matching certificate/signing key connects");
+    assert!(extract_tls_exporter(&tls).is_ok());
+    drop(tls);
+    assert!(task.await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn rv_transport_tcp_1257db79_certificate_verify_rejects_mismatched_resolver_key() {
+    #[derive(Debug)]
+    struct FixedResolver(Arc<CertifiedKey>);
+    impl ResolvesServerCert for FixedResolver {
+        fn resolve(&self, _hello: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+            Some(self.0.clone())
+        }
+    }
+    let _ = default_provider().install_default();
+    let (cert_pem, _) = generate_self_signed_server_cert(vec!["localhost".into()]).unwrap();
+    let other_key = rcgen::KeyPair::generate().unwrap();
+    let certs = rustls::pki_types::CertificateDer::pem_slice_iter(cert_pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(other_key.serialize_der()));
+    let signing = any_supported_type(&der).unwrap();
+    let resolver = Arc::new(FixedResolver(Arc::new(CertifiedKey::new(certs, signing))));
+    let provider = Arc::new(default_provider());
+    let server = rustls::ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .with_no_client_auth()
+        .with_cert_resolver(resolver);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let acceptor = TlsAcceptor::from(Arc::new(server));
+    let task = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        acceptor.accept(tcp).await
+    });
+    let cfg = make_client_config_app_authenticated(AppLayerServerAuth::exporter_bound()).unwrap();
+    let result = TlsConnector::from(cfg)
+        .connect(
+            rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+            TcpStream::connect(addr).await.unwrap(),
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "client must reject CertificateVerify signature from unrelated key"
+    );
+    assert!(task.await.unwrap().is_err());
+}
+
+#[tokio::test]
+async fn rv_transport_tcp_1257db79_proxy_leg_exporter_binding_is_rejected() {
+    let _ = default_provider().install_default();
+    let (server_cert, server_key) =
+        generate_self_signed_server_cert(vec!["localhost".into()]).unwrap();
+    let origin = TlsAcceptor::from(make_server_config_from_pem(&server_cert, &server_key).unwrap());
+    let (proxy_cert, proxy_key) =
+        generate_self_signed_server_cert(vec!["localhost".into()]).unwrap();
+    let proxy = TlsAcceptor::from(make_server_config_from_pem(&proxy_cert, &proxy_key).unwrap());
+    let origin_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin_addr = origin_listener.local_addr().unwrap();
+    let origin_task = tokio::spawn(async move {
+        let (tcp, _) = origin_listener.accept().await.unwrap();
+        origin.accept(tcp).await.unwrap()
+    });
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let proxy_task =
+        tokio::spawn(async move {
+            let (tcp, _) = proxy_listener.accept().await.unwrap();
+            let inbound = proxy.accept(tcp).await.unwrap();
+            let client = TlsConnector::from(
+                make_client_config_app_authenticated(AppLayerServerAuth::exporter_bound()).unwrap(),
+            );
+            let outbound = client
+                .connect(
+                    rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+                    TcpStream::connect(origin_addr).await.unwrap(),
+                )
+                .await
+                .unwrap();
+            let inbound_exporter = extract_tls_exporter(&inbound).unwrap();
+            let outbound_exporter = extract_tls_exporter(&outbound).unwrap();
+            let (mut proxy_reader, mut proxy_writer) = tokio::io::split(inbound);
+            let (mut target_reader, mut target_writer) = tokio::io::split(outbound);
+            let first = tokio::spawn(async move {
+                tokio::io::copy(&mut proxy_reader, &mut target_writer).await
+            });
+            let second = tokio::spawn(async move {
+                tokio::io::copy(&mut target_reader, &mut proxy_writer).await
+            });
+            (inbound_exporter, outbound_exporter, first, second)
+        });
+    let connector = TlsConnector::from(
+        make_client_config_app_authenticated(AppLayerServerAuth::exporter_bound()).unwrap(),
+    );
+    let tls = connector
+        .connect(
+            rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+            TcpStream::connect(proxy_addr).await.unwrap(),
+        )
+        .await
+        .unwrap();
+    let client_exporter = extract_tls_exporter(&tls).unwrap();
+    let (proxy_inbound_exporter, proxy_outbound_exporter, _first, _second) =
+        proxy_task.await.unwrap();
+    assert_ne!(
+        client_exporter, proxy_outbound_exporter,
+        "distinct TLS legs have distinct exporters"
+    );
+    assert_ne!(proxy_inbound_exporter, proxy_outbound_exporter);
+    let proof =
+        shamir_connect::common::identity::resume_proof_message(&[0x11; 32], &client_exporter);
+    assert_ne!(
+        proof,
+        shamir_connect::common::identity::resume_proof_message(
+            &[0x11; 32],
+            &proxy_outbound_exporter
+        )
+    );
+    drop(tls);
+    drop(origin_task);
 }
