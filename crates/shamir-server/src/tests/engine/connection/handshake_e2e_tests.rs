@@ -347,6 +347,28 @@ fn proof_frame(proof: [u8; 32]) -> Vec<u8> {
 // spec budget deterministically (no real sleeps).
 // ---------------------------------------------------------------------------
 
+#[test]
+fn rv_transport_tcp_d1882068_resume_proof_is_exporter_bound() {
+    let identity = Ed25519Keypair::generate();
+    let nonce = [0x61; 32];
+    let exporter_x = [0x71; 32];
+    let exporter_y = [0x72; 32];
+    let signed_x = shamir_connect::common::identity::resume_proof_message(&nonce, &exporter_x);
+    let signature = identity.sign(&signed_x);
+    let verified_x = shamir_connect::common::crypto::ed25519_verify_strict(
+        &identity.public_bytes(),
+        &signed_x,
+        &signature,
+    );
+    assert!(verified_x);
+    let signed_y = shamir_connect::common::identity::resume_proof_message(&nonce, &exporter_y);
+    assert!(!shamir_connect::common::crypto::ed25519_verify_strict(
+        &identity.public_bytes(),
+        &signed_y,
+        &signature
+    ));
+}
+
 /// RV-TRANSPORT-TCP-B5244FA2 — a peer that completes `auth_init`, receives
 /// the challenge, and then goes SILENT must be dropped once the spec §8
 /// handshake budget elapses.
