@@ -39,6 +39,13 @@ impl WasmEngine {
     }
 
     fn build(cache_dir: Option<PathBuf>) -> FnResult<Self> {
+        Self::build_with_ticker(cache_dir, Self::spawn_epoch_ticker)
+    }
+
+    pub(crate) fn build_with_ticker(
+        cache_dir: Option<PathBuf>,
+        spawn_ticker: impl FnOnce(&Engine) -> FnResult<()>,
+    ) -> FnResult<Self> {
         let store = cache_dir.map(|dir| Arc::new(DiskCacheStore::new(dir)));
         let mut config = wasmtime::Config::new();
         config.consume_fuel(true);
@@ -118,7 +125,7 @@ impl WasmEngine {
                 log::warn!("Wasm incremental cache disabled: {error}");
             }
         }
-        Self::spawn_epoch_ticker(&engine);
+        spawn_ticker(&engine)?;
         Ok(Self {
             engine,
             #[cfg(test)]
@@ -153,9 +160,9 @@ impl WasmEngine {
     /// epoch-ticker pattern) and exits on the first tick after the last
     /// strong `Engine` is dropped, so short-lived engines (tests, benches)
     /// neither leak a ticker thread nor keep their allocator alive.
-    fn spawn_epoch_ticker(engine: &Engine) {
+    fn spawn_epoch_ticker(engine: &Engine) -> FnResult<()> {
         let weak = engine.weak();
-        std::thread::Builder::new()
+        let spawn_result = std::thread::Builder::new()
             .name("wasm-epoch-ticker".into())
             .spawn(move || loop {
                 std::thread::sleep(Self::EPOCH_TICK);
@@ -163,8 +170,10 @@ impl WasmEngine {
                     Some(engine) => engine.increment_epoch(),
                     None => break,
                 }
-            })
-            .ok();
+            });
+        spawn_result.map(|_| ()).map_err(|error| {
+            FunctionError::Compute(format!("failed to spawn Wasm epoch ticker: {error}"))
+        })
     }
 
     /// Build a [`PoolingAllocationConfig`] whose limits are compatible
