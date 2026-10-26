@@ -7,6 +7,7 @@ use crate::vector::sq8::Sq8Quantizer;
 use hnsw_rs::hnsw::Hnsw;
 use hnsw_rs::hnswio::HnswIo;
 use std::io::Write;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 pub(super) fn load_quantized_graph(
@@ -30,7 +31,11 @@ pub(super) fn load_quantized_graph(
 
     let loader: &'static HnswIo = Box::leak(Box::new(HnswIo::new(temp_dir.path(), basename)));
     let distance = ShamirDistU8::new(quantizer, metric);
-    let graph = loader.load_hnsw_with_dist(distance).map_err(|error| {
+    // hnsw_rs unwraps while parsing the description, so a corrupt/truncated
+    // dump panics instead of returning Err; contain it as a load error.
+    let loaded = catch_unwind(AssertUnwindSafe(|| loader.load_hnsw_with_dist(distance)))
+        .map_err(|_| SnapshotError::Io("hnsw_rs load_hnsw_with_dist (u8) panicked".into()))?;
+    let graph = loaded.map_err(|error| {
         SnapshotError::Io(format!("hnsw_rs load_hnsw_with_dist (u8) failed: {error}"))
     })?;
     Ok(Arc::new(graph))
