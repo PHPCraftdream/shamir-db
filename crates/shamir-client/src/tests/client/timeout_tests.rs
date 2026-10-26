@@ -96,7 +96,7 @@ async fn request_timeout_fires_and_cleans_pending() {
     // in the map, otherwise the receiver would resolve with
     // `ConnectionClosed` instead of timing out.
     let (tx, rx) = oneshot::channel::<Result<Vec<u8>, ClientError>>();
-    state.pending.lock().unwrap().map.insert(rid, tx);
+    let _ = state.pending.map.insert_sync(rid, tx);
 
     let budget = Duration::from_millis(200);
     let start = Instant::now();
@@ -113,7 +113,7 @@ async fn request_timeout_fires_and_cleans_pending() {
     );
     // The orphaned pending entry must have been removed on timeout.
     assert!(
-        !state.pending.lock().unwrap().map.contains_key(&rid),
+        !state.pending.map.contains_sync(&rid),
         "timed-out request left a dead sender in the pending map"
     );
 }
@@ -128,7 +128,7 @@ async fn request_none_preserves_unbounded_wait_then_delivers() {
     let state = make_state();
     let rid: u32 = 3;
     let (tx, rx) = oneshot::channel::<Result<Vec<u8>, ClientError>>();
-    state.pending.lock().unwrap().map.insert(rid, tx);
+    let _ = state.pending.map.insert_sync(rid, tx);
 
     let fut = await_pending_response(rx, None, &state, rid);
     tokio::pin!(fut);
@@ -145,10 +145,9 @@ async fn request_none_preserves_unbounded_wait_then_delivers() {
     //    with the payload — the unbounded path still works end-to-end.
     let sender = state
         .pending
-        .lock()
-        .unwrap()
         .map
-        .remove(&rid)
+        .remove_sync(&rid)
+        .map(|(_, tx)| tx)
         .expect("sender present");
     sender
         .send(Ok(b"late-but-delivered".to_vec()))
@@ -168,7 +167,7 @@ async fn request_timeout_generous_delivers_normally() {
     let state = make_state();
     let rid: u32 = 11;
     let (tx, rx) = oneshot::channel::<Result<Vec<u8>, ClientError>>();
-    state.pending.lock().unwrap().map.insert(rid, tx);
+    let _ = state.pending.map.insert_sync(rid, tx);
 
     // Answer shortly after the await starts, well within the generous budget.
     let deliver = {
@@ -177,10 +176,9 @@ async fn request_timeout_generous_delivers_normally() {
             tokio::time::sleep(Duration::from_millis(20)).await;
             let sender = state
                 .pending
-                .lock()
-                .unwrap()
                 .map
-                .remove(&rid)
+                .remove_sync(&rid)
+                .map(|(_, tx)| tx)
                 .expect("sender present");
             sender.send(Ok(b"ok".to_vec())).expect("send");
         })
