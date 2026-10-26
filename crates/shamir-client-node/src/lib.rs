@@ -35,8 +35,11 @@ use std::sync::Arc;
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use tokio::sync::Mutex;
+use tokio::sync::{watch, RwLock};
 use zeroize::Zeroizing;
+
+mod request_state;
+use request_state::{Closed, State};
 
 use shamir_client as core;
 use shamir_query_types::wire::repl::ReplRequest;
@@ -77,16 +80,22 @@ pub struct ConnectOptions {
     pub request_timeout_ms: Option<u32>,
 }
 
+type SharedState = State<core::Client>;
+type ClientFuture<'a, T> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = std::result::Result<T, core::ClientError>> + Send + 'a>,
+>;
+
 // --------------------------------------------------------------------------
-// Client wrapper — holds the connected core::Client behind an async
-// Mutex so that close() can `take()` it (since core::Client::close
-// consumes self).
+// Client wrapper — holds the connected core::Client behind an async RwLock
+// so that close() can `take()` it (since core::Client::close consumes self)
+// while shared read guards let requests multiplex.
 // --------------------------------------------------------------------------
 
 /// Connected, authenticated client over TLS 1.3 + SCRAM-Argon2id.
 #[napi]
 pub struct ShamirClient {
-    inner: Arc<Mutex<Option<core::Client>>>,
+    inner: SharedState,
+    shutdown: watch::Sender<bool>,
     /// Cached at connect time so JS callers can read it without the
     /// async lock — useful for persisting the TOFU pin.
     pin: [u8; 32],
@@ -104,8 +113,11 @@ pub struct ShamirClient {
 impl ShamirClient {
     /// Run the full TCP→TLS→SCRAM handshake; resolves to a connected
     /// client.
-    #[napi(factory)]
-    pub async fn connect(opts: ConnectOptions) -> Result<ShamirClient> {
+    #[napi]
+    pub fn connect<'env>(
+        env: &'env Env,
+        opts: ConnectOptions,
+    ) -> Result<PromiseRaw<'env, ShamirClient>> {
         let port = u16::try_from(opts.port)
             .map_err(|_| Error::from_reason(format!("port out of range: {}", opts.port)))?;
         let req_timeout = opts
@@ -117,23 +129,12 @@ impl ShamirClient {
 
         let trusted_pin = match opts.trusted_pin {
             None => None,
-            Some(b) => {
-                let bytes: &[u8] = &b;
-                if bytes.len() != 32 {
-                    return Err(Error::from_reason(format!(
-                        "trustedPin must be 32 bytes, got {}",
-                        bytes.len()
-                    )));
-                }
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(bytes);
-                Some(arr)
-            }
+            Some(buffer) => Some(copy_pin(&buffer)?),
         };
 
         // Single production hostname path: resolution + connect live in the
         // core (`connect_host`); the Node layer parses nothing.
-        let host = opts.host.clone();
+        let host = opts.host;
         let core_opts = core::ConnectOptions {
             // Overwritten by `connect_host` from host:port — never used.
             addr: std::net::SocketAddr::new(
@@ -151,24 +152,28 @@ impl ShamirClient {
             handshake_timeout: hs_timeout,
             request_timeout: req_timeout,
         };
-        let client = core::Client::connect_host(&host, port, core_opts)
-            .await
-            .map_err(infra_error)?;
+        env.spawn_future(async move {
+            let client = core::Client::connect_host(&host, port, core_opts)
+                .await
+                .map_err(infra_error)?;
 
-        let pin = client.server_pub_key_pin();
-        let session_id = client.session_id();
-        let expires_at_ns = client.expires_at_ns();
-        let resumption_ticket = client.resumption_ticket().map(|s| s.to_vec());
-        let resumption_expires_at_ns = client.resumption_expires_at_ns();
+            let pin = client.server_pub_key_pin();
+            let session_id = client.session_id();
+            let expires_at_ns = client.expires_at_ns();
+            let resumption_ticket = client.resumption_ticket().map(|s| s.to_vec());
+            let resumption_expires_at_ns = client.resumption_expires_at_ns();
+            let (shutdown, _) = watch::channel(false);
 
-        Ok(ShamirClient {
-            inner: Arc::new(Mutex::new(Some(client))),
-            pin,
-            session_id,
-            expires_at_ns,
-            resumption_ticket,
-            resumption_expires_at_ns,
-            request_timeout: req_timeout,
+            Ok(ShamirClient {
+                inner: Arc::new(RwLock::new(Some(client))),
+                shutdown,
+                pin,
+                session_id,
+                expires_at_ns,
+                resumption_ticket,
+                resumption_expires_at_ns,
+                request_timeout: req_timeout,
+            })
         })
     }
 
@@ -208,125 +213,105 @@ impl ShamirClient {
 
     /// Health check.
     #[napi]
-    pub async fn ping(&self) -> Result<()> {
-        let deadline = self.request_deadline();
-        match core::bound_until(deadline, async {
-            let guard = self.inner.lock().await;
-            let client = guard
-                .as_ref()
-                .ok_or_else(|| core::ClientError::Transport("client closed".into()))?;
-            client.ping().await
+    pub fn ping<'env>(&self, env: &'env Env) -> Result<PromiseRaw<'env, ()>> {
+        let (state, mut shutdown, deadline, timeout) = self.request_parts();
+        env.spawn_future(async move {
+            let result: std::result::Result<(), core::ClientError> =
+                run_request(&state, &mut shutdown, deadline, timeout, |client| {
+                    Box::pin(client.ping())
+                })
+                .await?;
+            result.map_err(infra_error)
         })
-        .await
-        {
-            Ok(Some(Ok(()))) => Ok(()),
-            Ok(Some(Err(e))) => Err(infra_error(e)),
-            Ok(None) => Err(self.request_timeout_error()),
-            Err(e) => Err(infra_error(e)),
-        }
     }
 
     /// Execute a `BatchRequest` (passed as a MessagePack-encoded `Buffer`)
     /// against the named database. Returns the full `BatchResponse` as a
     /// MessagePack-encoded `Buffer`.
     #[napi]
-    pub async fn execute(&self, db: String, batch: Buffer) -> Result<Buffer> {
-        let deadline = self.request_deadline();
-        // Domain-level DB errors (ClientError::Db) are routed through
-        // [`encode_db_error`] as a marker Buffer instead of thrown as a plain
-        // napi Error — the JS wrapper (js/wrapper.js) decodes the marker and throws
-        // a typed ShamirDbError with `.code` / `.retryable`. See task #519.
-        match core::bound_until(deadline, async {
-            // Decoding sits INSIDE the deadline: the budget covers the whole call.
-            let batch_req: core::BatchRequest = rmp_serde::from_slice(&batch[..])
-                .map_err(|e| core::ClientError::Transport(format!("invalid batch payload: {e}")))?;
-            let guard = self.inner.lock().await;
-            let client = guard
-                .as_ref()
-                .ok_or_else(|| core::ClientError::Transport("client closed".into()))?;
-            client.execute(&db, batch_req).await
+    pub fn execute<'env>(
+        &self,
+        env: &'env Env,
+        db: String,
+        batch: Buffer,
+    ) -> Result<PromiseRaw<'env, Buffer>> {
+        let (state, mut shutdown, deadline, timeout) = self.request_parts();
+        // Owned snapshot before dispatch: JS may mutate the Buffer after
+        // this call returns but before the worker reads it (067017c8).
+        let batch = snapshot_bytes(&batch);
+        env.spawn_future(async move {
+            let request: core::BatchRequest = rmp_serde::from_slice(&batch)
+                .map_err(|error| Error::from_reason(format!("invalid batch payload: {error}")))?;
+            let result: std::result::Result<core::BatchResponse, core::ClientError> =
+                run_request(&state, &mut shutdown, deadline, timeout, |client| {
+                    Box::pin(async move { client.execute(&db, request).await })
+                })
+                .await?;
+            match result {
+                Ok(response) => encode_buffer(&response, "encode response"),
+                Err(core::ClientError::Db { code, message }) => encode_db_error(code, message),
+                Err(error) => Err(infra_error(error)),
+            }
         })
-        .await
-        {
-            Ok(Some(Ok(response))) => {
-                let bytes = rmp_serde::to_vec_named(&response)
-                    .map_err(|e| Error::from_reason(format!("encode response: {e}")))?;
-                Ok(Buffer::from(bytes))
-            }
-            Ok(Some(Err(core::ClientError::Db { code, message }))) => {
-                encode_db_error(code, message)
-            }
-            Ok(Some(Err(e))) => Err(infra_error(e)),
-            Ok(None) => Err(self.request_timeout_error()),
-            Err(e) => Err(infra_error(e)),
-        }
     }
 
     /// Privileged replication pull-API (REPLICATION §5). Takes a msgpack
     /// `ReplRequest` Buffer, returns a msgpack `ReplResponse` Buffer. The
     /// session must hold the `replicator` role (or be superuser).
     #[napi]
-    pub async fn repl(&self, req: Buffer) -> Result<Buffer> {
-        // FFI boundary — raw serde is the sanctioned exception (CLAUDE.md):
-        // we deserialize a request that ARRIVED as bytes, not construct a query.
+    pub fn repl<'env>(&self, env: &'env Env, req: Buffer) -> Result<PromiseRaw<'env, Buffer>> {
         let deadline = self.request_deadline();
-        // FFI boundary — raw serde is the sanctioned exception (CLAUDE.md):
-        // we deserialize a request that ARRIVED as bytes, not construct a query.
-        match core::bound_until(deadline, async {
-            let repl_req: ReplRequest = rmp_serde::from_slice(&req[..])
-                .map_err(|e| core::ClientError::Transport(format!("invalid repl payload: {e}")))?;
-            let guard = self.inner.lock().await;
-            let client = guard
-                .as_ref()
-                .ok_or_else(|| core::ClientError::Transport("client closed".into()))?;
-            client.repl(repl_req).await
+        let timeout = self.request_timeout;
+        // Owned snapshot before dispatch (067017c8): the caller's Buffer is
+        // copied synchronously on the JS thread before the worker reads it.
+        let req = snapshot_bytes(&req);
+        let state = Arc::clone(&self.inner);
+        let mut shutdown = self.shutdown.subscribe();
+        env.spawn_future(async move {
+            let request: ReplRequest = rmp_serde::from_slice(&req)
+                .map_err(|error| Error::from_reason(format!("invalid repl payload: {error}")))?;
+            let result = run_request(&state, &mut shutdown, deadline, timeout, |client| {
+                Box::pin(async move { client.repl(request).await })
+            })
+            .await?;
+            match result {
+                Ok(response) => encode_buffer(&response, "encode repl response"),
+                Err(core::ClientError::Db { code, message }) => encode_db_error(code, message),
+                Err(error) => Err(infra_error(error)),
+            }
         })
-        .await
-        {
-            Ok(Some(Ok(resp))) => {
-                let bytes = rmp_serde::to_vec_named(&resp)
-                    .map_err(|e| Error::from_reason(format!("encode repl response: {e}")))?;
-                Ok(Buffer::from(bytes))
-            }
-            Ok(Some(Err(core::ClientError::Db { code, message }))) => {
-                encode_db_error(code, message)
-            }
-            Ok(Some(Err(e))) => Err(infra_error(e)),
-            Ok(None) => Err(self.request_timeout_error()),
-            Err(e) => Err(infra_error(e)),
-        }
     }
 
     /// Create a new SCRAM-authenticatable user. Requires the current
     /// session to belong to a superuser. Returns the stable 16-byte
     /// `user_id` as a Buffer.
     #[napi]
-    pub async fn create_scram_user(
+    pub fn create_scram_user<'env>(
         &self,
+        env: &'env Env,
         name: String,
         password: String,
         roles: Vec<String>,
-    ) -> Result<Buffer> {
+    ) -> Result<PromiseRaw<'env, Buffer>> {
         let deadline = self.request_deadline();
-        match core::bound_until(deadline, async {
-            let guard = self.inner.lock().await;
-            let client = guard
-                .as_ref()
-                .ok_or_else(|| core::ClientError::Transport("client closed".into()))?;
-            client
-                .create_scram_user(&name, Zeroizing::new(password), roles)
-                .await
-        })
-        .await
-        {
-            Ok(Some(Ok(user_id))) => Ok(Buffer::from(user_id)),
-            Ok(Some(Err(core::ClientError::Db { code, message }))) => {
-                encode_db_error(code, message)
+        let timeout = self.request_timeout;
+        let state = Arc::clone(&self.inner);
+        let mut shutdown = self.shutdown.subscribe();
+        env.spawn_future(async move {
+            let result = run_request(&state, &mut shutdown, deadline, timeout, |client| {
+                Box::pin(async move {
+                    client
+                        .create_scram_user(&name, Zeroizing::new(password), roles)
+                        .await
+                })
+            })
+            .await?;
+            match result {
+                Ok(user_id) => Ok(Buffer::from(user_id)),
+                Err(core::ClientError::Db { code, message }) => encode_db_error(code, message),
+                Err(error) => Err(infra_error(error)),
             }
-            Ok(Some(Err(e))) => Err(infra_error(e)),
-            Ok(None) => Err(self.request_timeout_error()),
-            Err(e) => Err(infra_error(e)),
-        }
+        })
     }
 
     /// Grant or revoke the `replicator` role on an existing SCRAM user via
@@ -339,64 +324,83 @@ impl ShamirClient {
     /// convention as `create_scram_user` / `repl` — the JS wrapper decodes the
     /// returned `Buffer` and throws a typed `ShamirDbError`.
     #[napi]
-    pub async fn set_replicator(&self, user: String, on: bool) -> Result<Buffer> {
+    pub fn set_replicator<'env>(
+        &self,
+        env: &'env Env,
+        user: String,
+        on: bool,
+    ) -> Result<PromiseRaw<'env, Buffer>> {
         let deadline = self.request_deadline();
-        match core::bound_until(deadline, async {
-            let guard = self.inner.lock().await;
-            let client = guard
-                .as_ref()
-                .ok_or_else(|| core::ClientError::Transport("client closed".into()))?;
-            client.set_replicator(&user, on).await
+        let timeout = self.request_timeout;
+        let user_for_echo = user.clone();
+        let state = Arc::clone(&self.inner);
+        let mut shutdown = self.shutdown.subscribe();
+        env.spawn_future(async move {
+            let result = run_request(&state, &mut shutdown, deadline, timeout, |client| {
+                Box::pin(async move { client.set_replicator(&user, on).await })
+            })
+            .await?;
+            match result {
+                Ok(()) => {
+                    let resp = DbResponse::ReplicatorSet {
+                        user: user_for_echo,
+                        on,
+                    };
+                    let bytes = rmp_serde::to_vec_named(&resp).map_err(|e| {
+                        Error::from_reason(format!("encode set_replicator response: {e}"))
+                    })?;
+                    Ok(Buffer::from(bytes))
+                }
+                Err(core::ClientError::Db { code, message }) => encode_db_error(code, message),
+                Err(error) => Err(infra_error(error)),
+            }
         })
-        .await
-        {
-            Ok(Some(Ok(()))) => {
-                // Success: encode the echoed `ReplicatorSet { user, on }` so
-                // the JS wrapper can `decodeOrThrow` for the error marker,
-                // matching `create_scram_user`'s `Result<Buffer>` convention.
-                // The server echoes exactly these values on a confirmed
-                // grant/revoke — the core client already verified the
-                // `ReplicatorSet` variant before returning.
-                let resp = DbResponse::ReplicatorSet { user, on };
-                let bytes = rmp_serde::to_vec_named(&resp).map_err(|e| {
-                    Error::from_reason(format!("encode set_replicator response: {e}"))
-                })?;
-                Ok(Buffer::from(bytes))
-            }
-            Ok(Some(Err(core::ClientError::Db { code, message }))) => {
-                encode_db_error(code, message)
-            }
-            Ok(Some(Err(e))) => Err(infra_error(e)),
-            Ok(None) => Err(self.request_timeout_error()),
-            Err(e) => Err(infra_error(e)),
-        }
     }
 
     /// Close the TLS write half cleanly. Idempotent — second call is
     /// a no-op.
     #[napi]
-    pub async fn close(&self) -> Result<()> {
+    pub fn close<'env>(&self, env: &'env Env) -> Result<PromiseRaw<'env, ()>> {
         let deadline = self.request_deadline();
-        match core::bound_until(deadline, async {
-            let mut guard = self.inner.lock().await;
-            if let Some(client) = guard.take() {
-                client.close().await;
+        self.shutdown.send_replace(true);
+        let timeout = self.request_timeout;
+        let state = Arc::clone(&self.inner);
+        env.spawn_future(async move {
+            let closing = async move {
+                let client = { state.write().await.take() };
+                if let Some(client) = client {
+                    client.close().await;
+                }
+                Ok::<(), core::ClientError>(())
+            };
+            match core::bound_until(deadline, closing).await {
+                Ok(Some(Ok(()))) => Ok(()),
+                Ok(Some(Err(error))) => Err(infra_error(error)),
+                Ok(None) => Err(request_timeout_error(timeout)),
+                Err(error) => Err(infra_error(error)),
             }
-            Ok::<(), core::ClientError>(())
         })
-        .await
-        {
-            Ok(Some(Ok(()))) => Ok(()),
-            // `close()`'s future is infallible; the arm exists only for
-            // exhaustiveness.
-            Ok(Some(Err(e))) => Err(infra_error(e)),
-            Ok(None) => Err(self.request_timeout_error()),
-            Err(e) => Err(infra_error(e)),
-        }
     }
 }
 
 impl ShamirClient {
+    /// Shared-request-state parts, captured before dispatch (105a725d).
+    fn request_parts(
+        &self,
+    ) -> (
+        SharedState,
+        watch::Receiver<bool>,
+        Option<tokio::time::Instant>,
+        Option<std::time::Duration>,
+    ) {
+        (
+            Arc::clone(&self.inner),
+            self.shutdown.subscribe(),
+            self.request_deadline(),
+            self.request_timeout,
+        )
+    }
+
     /// Absolute per-request deadline, captured at the FIRST statement of
     /// every async method so the budget covers decoding, the client-mutex
     /// wait, the write and the response wait (RV-CLIENT-NODE-1CFB3796).
@@ -404,13 +408,60 @@ impl ShamirClient {
         self.request_timeout
             .map(|d| tokio::time::Instant::now() + d)
     }
+}
 
-    fn request_timeout_error(&self) -> Error {
-        Error::from_reason(format!(
-            "request timed out after {:?}",
-            self.request_timeout.unwrap_or_default()
-        ))
+/// Race request admission and execution against close. The read guard is
+/// dropped when the request completes or shutdown cancellation wins
+/// (105a725d / f90a248f).
+async fn run_request<T, F>(
+    state: &SharedState,
+    shutdown: &mut watch::Receiver<bool>,
+    deadline: Option<tokio::time::Instant>,
+    timeout: Option<std::time::Duration>,
+    operation: F,
+) -> Result<std::result::Result<T, core::ClientError>>
+where
+    F: for<'a> FnOnce(&'a core::Client) -> ClientFuture<'a, T>,
+{
+    match core::bound_until(deadline, request_state::request(state, shutdown, operation)).await {
+        Ok(Some(Ok(result))) => Ok(result),
+        Ok(Some(Err(Closed))) => Err(Error::from_reason("client closed")),
+        Ok(None) => Err(request_timeout_error(timeout)),
+        Err(error) => Err(infra_error(error)),
     }
+}
+
+fn request_timeout_error(timeout: Option<std::time::Duration>) -> Error {
+    Error::from_reason(format!(
+        "request timed out after {:?}",
+        timeout.unwrap_or_default()
+    ))
+}
+
+/// Snapshot mutable Node-owned bytes before dispatching work to a Tokio
+/// worker (067017c8).
+fn snapshot_bytes(bytes: &[u8]) -> Vec<u8> {
+    bytes.to_vec()
+}
+
+/// Copy the JS-owned trust pin synchronously before worker dispatch
+/// (067017c8).
+fn copy_pin(buffer: &[u8]) -> Result<[u8; 32]> {
+    if buffer.len() != 32 {
+        return Err(Error::from_reason(format!(
+            "trustedPin must be 32 bytes, got {}",
+            buffer.len()
+        )));
+    }
+    let mut pin = [0u8; 32];
+    pin.copy_from_slice(buffer);
+    Ok(pin)
+}
+
+fn encode_buffer<T: serde::Serialize>(value: &T, context: &str) -> Result<Buffer> {
+    rmp_serde::to_vec_named(value)
+        .map(Buffer::from)
+        .map_err(|error| Error::from_reason(format!("{context}: {error}")))
 }
 
 // -----------------------------------------------------------------------
