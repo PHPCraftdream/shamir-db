@@ -50,5 +50,5 @@ async fn oversized_first_event_is_an_error_not_a_successful_empty_page() {
         .await
         .unwrap();
     let error = journal.range_from(Bytes::new(), 1).await.unwrap_err();
-    assert!(error.contains("byte budget"), "{error}");
+    assert!(error.to_string().contains("byte budget"), "{error}");
 }
