@@ -458,6 +458,11 @@ async fn rv_index_07424ef0_flip_prunes_old_quantized_generation_chunks() {
     let store = mem_store();
     let keyspace = "__vec_snap__07424ef0";
     let adapter = HnswAdapter::new(2, VectorMetric::L2, HnswConfig::default());
+    // hnsw_rs::file_dump refuses an empty graph ("unexpected error" — no
+    // entry point); seed a few points so the f32 dump succeeds.
+    for i in 0..3u8 {
+        adapter.upsert(rid(i), &lcg_vec(2, i as u64)).await.unwrap();
+    }
     snapshot::dump_snapshot(&adapter, &store, keyspace)
         .await
         .unwrap();

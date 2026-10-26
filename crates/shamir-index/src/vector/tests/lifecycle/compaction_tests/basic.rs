@@ -502,6 +502,7 @@ async fn stress_concurrent_mutations_during_quantized_compaction() {
             .await
             .unwrap();
     }
+    crate::vector::hnsw_adapter::await_fitted(&old_adapter).await;
     assert!(
         old_adapter.is_quantized(),
         "test setup: old adapter must have fitted (n_initial > FIT_THRESHOLD)"
@@ -661,6 +662,7 @@ async fn stress_concurrent_mutations_during_quantized_compaction() {
 
     // The target MUST have fitted — quantization survived the compaction
     // under concurrent load (the #428 fix's whole point).
+    crate::vector::hnsw_adapter::await_fitted(new_hnsw).await;
     assert!(
         new_hnsw.is_quantized(),
         "compaction target failed to fit under concurrent load — \

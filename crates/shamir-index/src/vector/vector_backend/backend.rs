@@ -58,7 +58,10 @@ pub struct VectorBackend {
     ///
     /// `Arc<ArcSwap<AdapterSlot>>` — see [`super::slot`].
     pub(crate) adapter: Arc<ArcSwap<AdapterSlot>>,
-    info_store: std::sync::OnceLock<Arc<dyn Store>>,
+    // Weak on purpose (P1 reopen fix): a strong Arc here would keep the
+    // engine's Fjall keyspace alive after the repo drops its own handle,
+    // making a reopen fail with `FjallError: Locked`. Upgrade in `drop_all`.
+    info_store: std::sync::OnceLock<std::sync::Weak<dyn Store>>,
     /// Full-scan rebuild counter (V2.2 / #401 instrumentation). Incremented
     /// on EVERY fallback to a data-store-scan rebuild; NOT on a snapshot
     /// load. Exposed via [`rebuild_count`] (tests prove the snapshot path).
@@ -170,7 +173,7 @@ impl VectorBackend {
     ) -> Self {
         let store_lock = std::sync::OnceLock::new();
         if let Some(s) = &info_store {
-            let _ = store_lock.set(Arc::clone(s));
+            let _ = store_lock.set(Arc::downgrade(s));
         }
         Self {
             descriptor,
@@ -702,7 +705,7 @@ impl IndexBackend for VectorBackend {
         data_store: Arc<dyn Store>,
     ) -> Result<(), IndexError> {
         let keyspace = self.snapshot_keyspace();
-        let _ = self.info_store.set(Arc::clone(&info_store));
+        let _ = self.info_store.set(Arc::downgrade(&info_store));
         // so we know `delta_applied_upto` for the
         // replay even if `load_snapshot` later swaps the adapter in. A
         // missing manifest is the `NotFound` branch — same as load_snapshot.
@@ -860,8 +863,10 @@ impl IndexBackend for VectorBackend {
         let store = self
             .info_store
             .get()
-            .cloned()
-            .ok_or_else(|| IndexError::Backend("vector info store is not configured".into()))?;
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| {
+                IndexError::Backend("vector info store is not configured or no longer alive".into())
+            })?;
         // Trailing-dot delimiter: `__vec_snap__9.` cannot match index 90/91.
         let prefix = format!("{}.", self.snapshot_keyspace());
         let mut stream = store.scan_prefix_stream(prefix.clone().into(), 1024);

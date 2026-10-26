@@ -94,6 +94,20 @@ pub(crate) async fn wait_for_fit(adapter: &HnswAdapter) {
     }
 }
 
+#[cfg(test)]
+pub(crate) async fn await_fitted(adapter: &HnswAdapter) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    // Quantized is published before catch-up and f32-graph teardown; wait for
+    // the fit to leave flight too, so callers observe the converged state.
+    while !adapter.is_quantized() || adapter.state.fit_in_flight.load(Ordering::Acquire) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "adapter never finished fitting"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
 impl HnswAdapter {
     /// Try to fit the SQ8 quantizer and build the u8 graph.
     ///

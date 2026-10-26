@@ -124,6 +124,11 @@ pub(crate) fn sidecar_key_for_test(keyspace: &str, gen: u32) -> RecordKey {
     sidecar_key(keyspace, gen)
 }
 
+#[cfg(test)]
+pub(crate) fn manifest_key_for_test(keyspace: &str) -> RecordKey {
+    manifest_key(keyspace)
+}
+
 // ============================================================================
 // On-wire types (bincode inside a MetaEnvelope)
 // ============================================================================

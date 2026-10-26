@@ -10,7 +10,8 @@ fn dumped_u8_graph() -> (String, Vec<u8>, Vec<u8>, Arc<Sq8Quantizer>) {
     let points = [vec![0.0f32, 1.0], vec![1.0, 0.0], vec![0.5, 0.5]];
     let quantizer = Arc::new(Sq8Quantizer::fit(&points, 2));
     let distance = ShamirDistU8::new(Arc::clone(&quantizer), VectorMetric::L2);
-    let graph = Hnsw::<u8, ShamirDistU8>::new(8, 16, 8, 32, distance);
+    // hnsw_rs dumps only graphs built with NB_LAYER_MAX (16) layers.
+    let graph = Hnsw::<u8, ShamirDistU8>::new(8, 16, 16, 32, distance);
     let codes: Vec<(Vec<u8>, usize)> = points
         .iter()
         .enumerate()

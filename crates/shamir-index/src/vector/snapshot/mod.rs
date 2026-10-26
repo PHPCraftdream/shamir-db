@@ -64,6 +64,8 @@ pub(crate) use codec::chunk_key_for_test;
 pub use codec::dump_snapshot;
 pub use codec::dump_snapshot_with_gen;
 #[cfg(test)]
+pub(crate) use codec::manifest_key_for_test;
+#[cfg(test)]
 pub(crate) use codec::sidecar_key_for_test;
 pub use codec::SnapshotError;
 pub use codec::SnapshotManifest;

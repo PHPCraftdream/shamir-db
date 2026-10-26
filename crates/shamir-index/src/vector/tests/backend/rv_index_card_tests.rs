@@ -17,18 +17,32 @@ use crate::backends::build_backend::build_index2_backend;
 use crate::descriptor::IndexDescriptor;
 use crate::kind::{IndexKind, VectorBackendRef, VectorConfig, VectorMetric};
 use crate::vector::brute_force::BruteForceAdapter;
+use crate::vector::snapshot::{chunk_key_for_test, manifest_key_for_test, sidecar_key_for_test};
 use crate::vector::vector_backend::VectorBackend;
 use bytes::Bytes;
 use shamir_storage::storage_in_memory::InMemoryStore;
-use shamir_storage::types::Store;
+use shamir_storage::types::{RecordKey, Store};
 use shamir_types::core::interner::{Interner, TouchInd};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use smallvec::SmallVec;
 use std::sync::Arc;
 
-fn key(suffix: &str) -> Bytes {
-    Bytes::from(format!("__vec_snap__{suffix}").into_bytes())
+/// Real per-index snapshot keyspace: `__vec_snap__<id>` (SNAPSHOT_KEYSPACE_PREFIX).
+fn snap_ks(id: u32) -> String {
+    format!("__vec_snap__{id}")
+}
+
+fn mkey(id: u32) -> RecordKey {
+    manifest_key_for_test(&snap_ks(id))
+}
+
+fn ckey(id: u32, gen: u32, section: &str, idx: usize) -> RecordKey {
+    chunk_key_for_test(&snap_ks(id), gen, section, idx)
+}
+
+fn skey(id: u32, gen: u32) -> RecordKey {
+    sidecar_key_for_test(&snap_ks(id), gen)
 }
 
 fn vector_desc(id: u32, name: &str) -> IndexDescriptor {
@@ -58,11 +72,8 @@ fn vector_desc_tuned(id: u32, name: &str, dim: u32, m: u32, ef_construct: u32) -
 async fn rv_index_0b756318_vector_drop_all_sweeps_snapshot_namespace() {
     let desc = vector_desc(916, "drop_idx");
     let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-    for k in ["916.manifest", "916.g1.qdata.000000"] {
-        store
-            .set(key(k).into(), Bytes::from_static(b"data"))
-            .await
-            .unwrap();
+    for k in [mkey(916), ckey(916, 1, "qdata", 0)] {
+        store.set(k, Bytes::from_static(b"data")).await.unwrap();
     }
     let backend = VectorBackend::new(
         desc,
@@ -70,13 +81,16 @@ async fn rv_index_0b756318_vector_drop_all_sweeps_snapshot_namespace() {
         Arc::new(BruteForceAdapter::new(2, VectorMetric::L2)),
         Some(Arc::clone(&store)),
     );
+    // Snapshot metadata lives in the info store; record rows (scanned by the
+    // rebuild fallback after the corrupt manifest) live in a separate store.
+    let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     backend
-        .restore_on_open(Arc::clone(&store), Arc::clone(&store))
+        .restore_on_open(Arc::clone(&store), data_store)
         .await
         .unwrap();
     backend.drop_all().await.unwrap();
-    assert!(store.get(key("916.manifest").into()).await.is_err());
-    assert!(store.get(key("916.g1.qdata.000000").into()).await.is_err());
+    assert!(store.get(mkey(916)).await.is_err());
+    assert!(store.get(ckey(916, 1, "qdata", 0)).await.is_err());
 }
 
 #[tokio::test]
@@ -135,15 +149,12 @@ async fn rv_index_0b756318_drop_index_9_spares_indexes_90_and_91() {
     let desc = vector_desc(9, "n9");
     let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     for k in [
-        "9.manifest",
-        "9.g0.data.000000",
-        "90.manifest",
-        "91.g0.qgraph.000000",
+        mkey(9),
+        ckey(9, 0, "data", 0),
+        mkey(90),
+        ckey(91, 0, "qgraph", 0),
     ] {
-        store
-            .set(key(k).into(), Bytes::from_static(b"data"))
-            .await
-            .unwrap();
+        store.set(k, Bytes::from_static(b"data")).await.unwrap();
     }
     let backend = VectorBackend::new(
         desc,
@@ -152,10 +163,10 @@ async fn rv_index_0b756318_drop_index_9_spares_indexes_90_and_91() {
         Some(Arc::clone(&store)),
     );
     backend.drop_all().await.unwrap();
-    assert!(store.get(key("9.manifest").into()).await.is_err());
-    assert!(store.get(key("9.g0.data.000000").into()).await.is_err());
-    assert!(store.get(key("90.manifest").into()).await.is_ok());
-    assert!(store.get(key("91.g0.qgraph.000000").into()).await.is_ok());
+    assert!(store.get(mkey(9)).await.is_err());
+    assert!(store.get(ckey(9, 0, "data", 0)).await.is_err());
+    assert!(store.get(mkey(90)).await.is_ok());
+    assert!(store.get(ckey(91, 0, "qgraph", 0)).await.is_ok());
 }
 
 // drop_all on a freshly built backend (no restore_on_open) must sweep too:
@@ -164,11 +175,8 @@ async fn rv_index_0b756318_drop_index_9_spares_indexes_90_and_91() {
 async fn rv_index_0b756318_create_then_drop_without_reopen() {
     let desc = vector_desc(920, "n920");
     let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-    for k in ["920.manifest", "920.g0.sidecar"] {
-        store
-            .set(key(k).into(), Bytes::from_static(b"data"))
-            .await
-            .unwrap();
+    for k in [mkey(920), skey(920, 0)] {
+        store.set(k, Bytes::from_static(b"data")).await.unwrap();
     }
     let backend = build_index2_backend(desc, &store);
     let vb = backend
@@ -176,6 +184,6 @@ async fn rv_index_0b756318_create_then_drop_without_reopen() {
         .downcast_ref::<crate::vector::VectorBackend>()
         .expect("vector descriptor must build a VectorBackend");
     IndexBackend::drop_all(vb).await.unwrap();
-    assert!(store.get(key("920.manifest").into()).await.is_err());
-    assert!(store.get(key("920.g0.sidecar").into()).await.is_err());
+    assert!(store.get(mkey(920)).await.is_err());
+    assert!(store.get(skey(920, 0)).await.is_err());
 }

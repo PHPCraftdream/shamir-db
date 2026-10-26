@@ -263,6 +263,7 @@ async fn concurrent_upsert_across_threshold_no_loss_body() {
     phase("concurrent_upsert_no_loss", "tasks joined");
 
     // The adapter MUST have fitted (400 > 256).
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(adapter.is_quantized(), "adapter did not fit under load");
 
     // Every upserted rid must be RETRIEVABLE — this test verifies no vector
@@ -347,6 +348,7 @@ async fn concurrent_upsert_across_threshold_no_duplicate_rids_body() {
         h.await.unwrap();
     }
 
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(adapter.is_quantized(), "adapter did not fit under load");
 
     // Search with large k — if a rid appears twice, it means a duplicate
@@ -401,6 +403,7 @@ async fn cosine_quantized_graph_no_panic_body() {
         .map(|(i, v)| (rid(i as u64), v.clone()))
         .collect();
     adapter.upsert_batch(&items).await.unwrap();
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(adapter.is_quantized(), "adapter did not fit");
 
     // Search must not panic (the clamp prevents negative distances).
@@ -446,6 +449,7 @@ async fn delete_on_quantized_index_body() {
         .map(|(i, v)| (rid(i as u64), v.clone()))
         .collect();
     adapter.upsert_batch(&items).await.unwrap();
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(adapter.is_quantized());
 
     // Delete rid(5).
