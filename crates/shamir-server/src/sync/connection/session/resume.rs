@@ -10,7 +10,7 @@ use shamir_query_types::wire::CURRENT_QUERY_LANG_VERSION;
 
 use crate::framer::Framer;
 
-use super::super::handshake::{audit_emit, prefix_8, HandshakeError};
+use super::super::handshake::{audit_emit, checked_query_version, prefix_8, HandshakeError};
 use super::super::user_state_lookup::RedbUserStateLookup;
 use super::wire;
 use super::ConnectionContext;
@@ -105,7 +105,8 @@ pub(crate) async fn run_resume<F: Framer>(
         expires_at_ns: ok.expires_at_ns,
         resumption_ticket: ok.resumption_ticket.unwrap_or_default(),
         resumption_expires_at_ns: ok.resumption_expires_at_ns.unwrap_or(0),
-        server_query_version: CURRENT_QUERY_LANG_VERSION as u8,
+        server_query_version: checked_query_version(CURRENT_QUERY_LANG_VERSION)
+            .map_err(|_| HandshakeError::Io)?,
     };
     let bytes = rmp_serde::to_vec(&wire_ok).map_err(|_| HandshakeError::Io)?;
     framer

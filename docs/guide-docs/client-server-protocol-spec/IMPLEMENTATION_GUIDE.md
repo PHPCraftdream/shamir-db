@@ -345,9 +345,10 @@ Audit-line (одна запись на строку, no inner whitespace в prod
 #### Chain construction
 
 ```
-hmac = HMAC-SHA256(audit_chain_key, 
-                   prev_hmac || canonical(entry_without_hmac))
+hmac = HMAC-SHA256(audit_chain_key, canonical(entry_without_hmac))
 ```
+
+`canonical(...)` завершает сериализацию 32 байтами `prev_hmac`; поэтому ссылка на предыдущую запись уже аутентифицирована. Реализации MUST NOT добавлять отдельный префикс `prev_hmac`: это дублирует те же байты и меняет существующие HMAC без выигрыша в безопасности. Это исправление текста спецификации, а не изменение формата или миграция.
 
 `audit_chain_key` хранится в `server_meta` (§1.2). Первая запись использует `prev_hmac = bytes(32) zeros`, `seq = 1`. Каждая последующая — `prev_hmac` предыдущей записи, `seq = prev_seq + 1`.
 
@@ -366,6 +367,39 @@ canonical = u64_be(seq)
 ```
 
 `details_canonical_msgpack` — msgpack с lex-sorted map keys, smallest int encoding (как ticket_plain в SESSION_RESUMPTION §2.1). Гарантирует bit-exact reproducibility между имплементациями.
+
+#### RU4 independent test vectors
+
+The fixed key is the full 32-byte value `0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b`. V1 fields: `seq=1`, `ts_ns=0`, `event="e"`, `transport="t"`, empty user and IP, session prefix `0000000000000000`, `result="ok"`, empty details, zero predecessor. V1 canonical hex groups, in order:
+
+```text
+0000000000000001 0000000000000000 0001 65 01 74 00 00 0000000000000000 02 6f6b 00000000 0000000000000000000000000000000000000000000000000000000000000000
+```
+
+V2 fields: `seq=2`, `ts_ns=1`, `event="e"`, `transport="t"`, UTF-8 user `é` (`c3a9`), empty IP, session prefix `0102030405060708`, `result="ok"`, details `80`; the final 32 bytes are V1's expected HMAC. V2 canonical prefix groups:
+
+```text
+0000000000000002 0000000000000001 0001 65 01 74 02 c3a9 00 0102030405060708 02 6f6b 00000001 80 <RU4_V1_EXPECTED_HMAC: 64 hex characters>
+```
+
+Canonical layout method **a** is pinned independently for V1 and V2; V2's standalone layout test uses a documented fixed `11` × 32-byte predecessor and does not serve as a chained HMAC vector. HMAC fallback method **c** is used for both vectors: the Rust constants `RU4_V1_EXPECTED_HMAC` and `RU4_V2_EXPECTED_HMAC` hold the outputs of the standalone Python recipe below (V1 `e19384884a5e7ae49c2937b2a5201172a7c0d0ba2141ab12c627547a5c2f3fc2`, V2 `bc7ac9783498c88914bfe945503dfa0050cd0a29a1e5c380ef8faa678dd30818`); the test helper fails loudly if either is absent. No method **b** is claimed.
+
+Run this standalone Python standard-library recipe; it constructs the bytes from the field groups above, never calls code under test, prints both constant assignments, and does not derive input from the implementation:
+
+```python
+import hashlib, hmac
+key = bytes.fromhex("0b" * 32)
+v1_prefix = bytes.fromhex("0000000000000001 0000000000000000 0001 65 01 74 00 00 0000000000000000 02 6f6b 00000000".replace(" ", ""))
+v1 = v1_prefix + bytes(32)
+v1_hmac = hmac.new(key, v1, hashlib.sha256).digest()
+v2_prefix = bytes.fromhex("0000000000000002 0000000000000001 0001 65 01 74 02 c3a9 00 0102030405060708 02 6f6b 00000001 80".replace(" ", ""))
+v2 = v2_prefix + v1_hmac
+v2_hmac = hmac.new(key, v2, hashlib.sha256).digest()
+print(f'RU4_V1_EXPECTED_HMAC = Some("{v1_hmac.hex()}")')
+print(f'RU4_V2_EXPECTED_HMAC = Some("{v2_hmac.hex()}")')
+```
+
+This pins the existing canonical-bytes HMAC formula; it is not a production regression claim.
 
 #### Tamper detection
 

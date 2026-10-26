@@ -189,6 +189,15 @@ fn exec_insert(keyspace: &Keyspace, value: Bytes) -> DbResult<RecordKey> {
 
 /// Execute `transact` synchronously on the worker thread — native atomic
 /// `OwnedWriteBatch` commit.
+///
+/// RV-STORAGE-EC3A171B (upstream-blocked): fjall 3.1.6
+/// `WriteBatch::commit` discards `journal_writer.write_batch`'s Result
+/// (fjall-3.1.6 src/batch/mod.rs:117) before persist + memtable apply, so
+/// a transient partial journal write followed by a successful persist
+/// returns Ok — the batch can be acknowledged with an incomplete journal
+/// suffix. `Keyspace::insert`/`remove` DO propagate the journal error but
+/// are per-op; no multi-op atomic batch API exposes it. Fix requires an
+/// upstream fjall change or a version bump.
 fn exec_transact(db: &Arc<Database>, keyspace: &Keyspace, ops: Vec<KvOp>) -> DbResult<()> {
     let mut batch = db.batch();
     for op in ops {
@@ -333,26 +342,36 @@ impl AtomicBatch for FjallAtomicBatch {
 
 /// Submit a job to the worker and await its oneshot reply.
 ///
-/// `build` receives the reply-sender and returns the fully-constructed
-/// [`WriteJob`]. Both failure modes — the bounded channel's `send` failing
-/// (worker thread gone) and the oneshot being dropped without a reply — map
+/// Worker-gone (`try_send` `Disconnected`) and dropped-reply failures map
 /// onto `DbError::Internal`, matching the old `spawn_blocking` path's
 /// `JoinError → DbError::Internal` mapping so error shapes are unchanged.
 ///
-/// `send` on a `SyncSender` blocks only when the bounded queue is full; the
-/// worker drains it continuously, so under normal load this returns
-/// immediately. Enqueuing is a cheap, non-blocking-in-practice synchronous op,
-/// so it runs directly on the async caller — the whole point of the worker is
-/// to REMOVE the per-op `spawn_blocking` hop, so we must not reintroduce one
-/// just to enqueue.
+/// RV-STORAGE-9E9A0A71: admission never blocks the executing runtime
+/// thread — `try_send` first; only when the bounded queue is full do we
+/// cooperatively `yield_now` and retry, so saturation parks this TASK,
+/// never the executor thread.
 async fn submit<T>(
     tx: &SyncSender<WriteJob>,
     build: impl FnOnce(oneshot::Sender<DbResult<T>>) -> WriteJob,
 ) -> DbResult<T> {
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(build(reply_tx)).map_err(|_| {
-        DbError::Internal("fjall write worker channel closed (worker thread gone)".to_string())
-    })?;
+    let mut job = build(reply_tx);
+    loop {
+        match tx.try_send(job) {
+            Ok(()) => break,
+            Err(std::sync::mpsc::TrySendError::Full(returned)) => {
+                job = returned;
+                #[cfg(test)]
+                write_worker_test_seam::notify_submit_full_for_tests();
+                task::yield_now().await;
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                return Err(DbError::Internal(
+                    "fjall write worker channel closed (worker thread gone)".to_string(),
+                ));
+            }
+        }
+    }
     match reply_rx.await {
         Ok(result) => result,
         Err(_) => Err(DbError::Internal(
@@ -682,11 +701,15 @@ impl Store for FjallStore {
         .await
     }
 
-    /// `true` — fjall's native `OwnedWriteBatch` commits the whole
-    /// `transact` batch atomically (all-or-nothing, and a concurrent
-    /// reader never observes a partially-applied batch). F-77 (#904).
+    /// `false` — RV-STORAGE-CC8D9EB5: pinned fjall 3.1.6
+    /// `WriteBatch::commit` applies batch items to memtables individually
+    /// and only then publishes the snapshot watermark, while this store's
+    /// raw reads (`Keyspace::get`/`range`/`prefix`) read at `SeqNo::MAX`
+    /// unclamped by the watermark — a reader can observe a
+    /// partially-applied batch, so the advertised atomic-visibility
+    /// guarantee is withdrawn until reads are publication-bounded.
     fn supports_atomic_transact(&self) -> bool {
-        true
+        false
     }
 
     /// `true` — raw fjall backend: the repo-wide atomic batch writes
@@ -921,6 +944,10 @@ impl Store for FjallStore {
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[cfg(test)]
+#[path = "../tests/stores/storage_fjall_tests/write_worker_seam.rs"]
+pub(crate) mod write_worker_test_seam;
 
 #[cfg(test)]
 pub(crate) mod atomic_batch_test_seam {
