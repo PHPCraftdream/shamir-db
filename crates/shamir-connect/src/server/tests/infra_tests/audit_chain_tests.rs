@@ -5,9 +5,12 @@ use crate::server::audit_chain::{
 };
 use std::sync::Arc;
 
-// CI fills these with independently derived HMAC-SHA256 outputs; never guess them.
-const RU4_V1_EXPECTED_HMAC: Option<&str> = None;
-const RU4_V2_EXPECTED_HMAC: Option<&str> = None;
+// Independently derived HMAC-SHA256 outputs: the stdlib Python recipe in
+// IMPLEMENTATION_GUIDE.md (never the code under test) produced these values.
+const RU4_V1_EXPECTED_HMAC: Option<&str> =
+    Some("e19384884a5e7ae49c2937b2a5201172a7c0d0ba2141ab12c627547a5c2f3fc2");
+const RU4_V2_EXPECTED_HMAC: Option<&str> =
+    Some("bc7ac9783498c88914bfe945503dfa0050cd0a29a1e5c380ef8faa678dd30818");
 const RU4_KEY: [u8; 32] = [0x0b; 32];
 
 fn ru4_expected_hmac(value: Option<&str>, name: &str) -> [u8; 32] {

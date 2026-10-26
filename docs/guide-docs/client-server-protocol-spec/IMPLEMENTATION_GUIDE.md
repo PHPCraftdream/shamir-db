@@ -382,9 +382,9 @@ V2 fields: `seq=2`, `ts_ns=1`, `event="e"`, `transport="t"`, UTF-8 user `é` (`c
 0000000000000002 0000000000000001 0001 65 01 74 02 c3a9 00 0102030405060708 02 6f6b 00000001 80 <RU4_V1_EXPECTED_HMAC: 64 hex characters>
 ```
 
-Canonical layout method **a** is pinned independently for V1 and V2; V2's standalone layout test uses a documented fixed `11` × 32-byte predecessor and does not serve as a chained HMAC vector. HMAC fallback method **c** is used for both vectors: Rust constants `RU4_V1_EXPECTED_HMAC` and `RU4_V2_EXPECTED_HMAC` stay `None` until filled independently in CI. Their test helper fails loudly if either is absent. The legacy-chain resume test likewise remains blocked until both constants are filled. No method **b** is claimed.
+Canonical layout method **a** is pinned independently for V1 and V2; V2's standalone layout test uses a documented fixed `11` × 32-byte predecessor and does not serve as a chained HMAC vector. HMAC fallback method **c** is used for both vectors: the Rust constants `RU4_V1_EXPECTED_HMAC` and `RU4_V2_EXPECTED_HMAC` hold the outputs of the standalone Python recipe below (V1 `e19384884a5e7ae49c2937b2a5201172a7c0d0ba2141ab12c627547a5c2f3fc2`, V2 `bc7ac9783498c88914bfe945503dfa0050cd0a29a1e5c380ef8faa678dd30818`); the test helper fails loudly if either is absent. No method **b** is claimed.
 
-In CI only, run this standalone Python standard-library recipe; it constructs the bytes from the field groups above, never calls code under test, prints both constant assignments, and does not derive input from the implementation:
+Run this standalone Python standard-library recipe; it constructs the bytes from the field groups above, never calls code under test, prints both constant assignments, and does not derive input from the implementation:
 
 ```python
 import hashlib, hmac
