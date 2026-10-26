@@ -1,5 +1,6 @@
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use shamir_storage::error::DbError;
 use tokio::sync::Notify;
@@ -52,6 +53,11 @@ impl From<WalAppendError> for DbError {
 pub struct WalTicket {
     state: AtomicU8,
     done: AtomicBool,
+    /// Underlying sink failure cause (plan P1.5): `DbError` is not `Clone`,
+    /// so one window's failure is shared as an `Arc` and published BEFORE any
+    /// `done` store — a waiter observing a terminal state (Acquire) also
+    /// observes the cause.
+    cause: OnceLock<Arc<DbError>>,
     pub(crate) notify: Notify,
 }
 
@@ -60,6 +66,7 @@ impl WalTicket {
         Self {
             state: AtomicU8::new(WalTicketState::Pending as u8),
             done: AtomicBool::new(false),
+            cause: OnceLock::new(),
             notify: Notify::new(),
         }
     }
@@ -73,6 +80,7 @@ impl WalTicket {
         Self {
             state: AtomicU8::new(state as u8),
             done: AtomicBool::new(state != WalTicketState::Pending),
+            cause: OnceLock::new(),
             notify: Notify::new(),
         }
     }
@@ -113,6 +121,17 @@ impl WalTicket {
             self.notify.notify_waiters();
             self.notify.notify_one();
         }
+    }
+
+    /// Preserve the underlying sink failure for this frame. Call BEFORE any
+    /// `complete`/`written` publication of a terminal state.
+    pub(crate) fn set_cause(&self, cause: Arc<DbError>) {
+        let _ = self.cause.set(cause);
+    }
+
+    /// The preserved underlying sink failure, if this frame failed.
+    pub fn failure_cause(&self) -> Option<Arc<DbError>> {
+        self.cause.get().cloned()
     }
 
     pub(crate) fn outcome(&self) -> Option<Result<(), WalAppendError>> {

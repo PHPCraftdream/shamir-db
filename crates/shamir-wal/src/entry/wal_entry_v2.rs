@@ -11,9 +11,8 @@
 //! data_store update never landed. The body bytes are the exact
 //! payload the tx intended to write.
 //!
-//! Both V1 and V2 entries live under the same `WalActiveKey` prefix
-//! in info_store; recovery distinguishes them by sniffing the
-//! magic prefix on each value (stage 0.8 will wire this).
+//! Frames are self-describing: every V2 entry is prefixed with the
+//! `WAL2` magic, so recovery identifies a frame without decoding its body.
 //!
 //! ## Envelope
 //!
@@ -140,9 +139,8 @@ mod serde_bytes_bytes {
 /// `commit_version` carries the MVCC commit version this tx was
 /// assigned in Phase 3 of `commit_tx`. Recovery sorts inflight
 /// entries by this field so multi-tx replay applies them in the
-/// same order the original commit pipeline did — `txn_id` (the
-/// `WalActiveKey` byte order) is NOT a safe proxy because
-/// `txn_id != commit_version`.
+/// same order the original commit pipeline did — `txn_id` is NOT a
+/// safe proxy because `txn_id != commit_version`.
 ///
 /// Entries authored before Stage 7.1's HIGH-5 fix carry
 /// `commit_version = 0`; mixed-version corpora sort the legacy
@@ -234,10 +232,10 @@ fn decode_legacy_v1(bytes: &[u8]) -> DbResult<WalEntryV2> {
             interner_delta: vec![],
             event: None,
         }),
-        (Ok(_), Ok(_)) => Err(DbError::Internal(
+        (Ok(_), Ok(_)) => Err(DbError::Codec(
             "wal_v2 decode v1: ambiguous legacy shape".into(),
         )),
-        (Err(old), Err(new)) => Err(DbError::Internal(format!("wal_v2 decode v1: {old}; {new}"))),
+        (Err(old), Err(new)) => Err(DbError::Codec(format!("wal_v2 decode v1: {old}; {new}"))),
     }
 }
 
@@ -296,7 +294,7 @@ impl WalEntryV2 {
         out.extend_from_slice(&WAL_V2_MAGIC);
         out.push(WAL_V2_VERSION);
         bincode::serialize_into(&mut out, self)
-            .map_err(|e| DbError::Internal(format!("wal_v2 encode: {e}")))?;
+            .map_err(|e| DbError::Codec(format!("wal_v2 encode: {e}")))?;
         Ok(out)
     }
 
@@ -327,10 +325,10 @@ impl WalEntryV2 {
     /// their historical trailing-byte behavior.
     pub fn decode(bytes: &[u8]) -> DbResult<Self> {
         if bytes.len() < 5 {
-            return Err(DbError::Internal("wal_v2 decode: too short".into()));
+            return Err(DbError::Codec("wal_v2 decode: too short".into()));
         }
         if bytes[..4] != WAL_V2_MAGIC {
-            return Err(DbError::Internal(format!(
+            return Err(DbError::Codec(format!(
                 "wal_v2 decode: bad magic {:?}",
                 &bytes[..4]
             )));
@@ -340,7 +338,7 @@ impl WalEntryV2 {
             WAL_V2_VERSION_LEGACY => decode_legacy_v1(&bytes[5..]),
             WAL_V2_VERSION_PRE_EVENT => {
                 let pre: WalEntryV2PreEvent = bincode::deserialize(&bytes[5..])
-                    .map_err(|e| DbError::Internal(format!("wal_v2 decode v2: {e}")))?;
+                    .map_err(|e| DbError::Codec(format!("wal_v2 decode v2: {e}")))?;
                 Ok(Self {
                     txn_id: pre.txn_id,
                     repo_id_interned: pre.repo_id_interned,
@@ -352,17 +350,10 @@ impl WalEntryV2 {
                 })
             }
             WAL_V2_VERSION => bincode::deserialize(&bytes[5..])
-                .map_err(|e| DbError::Internal(format!("wal_v2 decode v3: {e}"))),
-            _ => Err(DbError::Internal(format!(
+                .map_err(|e| DbError::Codec(format!("wal_v2 decode v3: {e}"))),
+            _ => Err(DbError::Codec(format!(
                 "wal_v2 decode: unsupported version {version}"
             ))),
         }
-    }
-
-    /// Returns true if these bytes start with the V2 magic prefix.
-    /// Used by `WalManager` (stage 0.8) to dispatch between V1 and V2
-    /// without fully decoding.
-    pub fn looks_like_v2(bytes: &[u8]) -> bool {
-        bytes.len() >= 5 && bytes[..4] == WAL_V2_MAGIC
     }
 }

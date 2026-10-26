@@ -97,12 +97,15 @@ fn fsync_parent_dir(_path: &std::path::Path) -> DbResult<()> {
 /// ONLY on the blocking thread inside `spawn_blocking` (`append_batch` /
 /// `sync`), NEVER across an `.await`. (b) the `Arc` is mandatory regardless
 /// of the lock — `spawn_blocking` needs a `'static` handle, so the file must
-/// be reference-counted to cross the closure boundary. (c) MEASURED
-/// non-bottleneck: the WAL-append contention bench (`benches/wal_append.rs`,
-/// baseline `2e3bd51`) shows file-sink throughput SCALING with concurrency
-/// (7.2K→80.2K appends/s, N=1→64) exactly like the lockless mem sink — a
-/// lock-bound path would flatten. fsync dominates a durable append ~63×; the
-/// marginal ~10µs/append is `spawn_blocking` + `Notify`, not this sub-µs lock.
+/// be reference-counted to cross the closure boundary. (c) Historical bench
+/// observation: the WAL-append bench (`benches/wal_append.rs`, baseline
+/// `2e3bd51`) recorded file-sink throughput rising with concurrency
+/// (7.2K→80.2K appends/s, N=1→64); these raw endpoints are observations
+/// only, and any derived scaling ratio is UNVERIFIED. The historical "fsync
+/// dominates a durable append ~63×" ratio is likewise UNVERIFIED (no
+/// reproducible measurement in this repo); treat fsync as dominant by
+/// construction, not by a cited number.
+/// The marginal ~10µs/append figure is likewise historical and unverified.
 ///
 /// A single-writer-task rewrite (CAPSTONE, `docs/dev-artifacts/perf/capstone-subplan.md`)
 /// would drop the `Mutex` (single ownership becomes type-level) but keep the
@@ -174,7 +177,15 @@ impl WalSegment {
                 .read(true)
                 .append(true)
                 .open(&p)
-                .map_err(|e| DbError::Storage(format!("WalSegment open {p:?}: {e}")))?;
+                // Preserve the io::ErrorKind across the wrap boundary
+                // (RV-WAL-5839FF0D): DbError::Io keeps the typed cause that
+                // DbError::Storage(format!) destroyed.
+                .map_err(|e| {
+                    DbError::Io(std::io::Error::new(
+                        e.kind(),
+                        format!("WalSegment open {p:?}: {e}"),
+                    ))
+                })?;
             // Audit §1.9: on first creation, fsync the parent directory so the
             // directory entry is durable. Without this, a power loss on
             // ext4/xfs can lose the freshly-created segment entirely even
@@ -187,7 +198,12 @@ impl WalSegment {
             // segment reports its true length for rotation decisions.
             let len = f
                 .metadata()
-                .map_err(|e| DbError::Storage(format!("WalSegment open metadata {p:?}: {e}")))?
+                .map_err(|e| {
+                    DbError::Io(std::io::Error::new(
+                        e.kind(),
+                        format!("WalSegment open metadata {p:?}: {e}"),
+                    ))
+                })?
                 .len();
             Ok((f, len))
         })

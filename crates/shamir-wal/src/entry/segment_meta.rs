@@ -61,8 +61,8 @@ const META_VERSION: u8 = 2;
 
 /// On-disk layout: `[magic:4][version:1][max_version:8 LE][crc32:4 LE]`.
 /// The CRC covers the first 13 bytes (magic ‖ version ‖ max_version).
-const META_BODY_LEN: usize = 4 + 1 + 8;
-const META_TOTAL_LEN: usize = META_BODY_LEN + 4;
+pub(crate) const META_BODY_LEN: usize = 4 + 1 + 8;
+pub(crate) const META_TOTAL_LEN: usize = META_BODY_LEN + 4;
 
 /// Derive the sidecar path (`NNNNNNNN.meta`) for a segment file
 /// (`NNNNNNNN.wal`). Same stem, `.meta` extension.
@@ -76,7 +76,7 @@ fn meta_tmp_path_for(seg_path: &Path) -> PathBuf {
 }
 
 /// Serialise the sidecar body + CRC into a fixed-size buffer.
-fn encode(max_version: u64) -> [u8; META_TOTAL_LEN] {
+pub(crate) fn encode(max_version: u64) -> [u8; META_TOTAL_LEN] {
     let mut buf = [0u8; META_TOTAL_LEN];
     buf[0..4].copy_from_slice(&META_MAGIC);
     buf[4] = META_VERSION;
@@ -142,7 +142,7 @@ pub(crate) fn read_blocking(seg_path: &Path) -> DbResult<Option<u64>> {
 
 /// Parse + validate sidecar bytes. `None` on any malformation (see
 /// [`read_blocking`]). Split out so tests can exercise it directly.
-fn decode(buf: &[u8]) -> Option<u64> {
+pub(crate) fn decode(buf: &[u8]) -> Option<u64> {
     if buf.len() != META_TOTAL_LEN {
         return None; // truncated, empty, or trailing garbage
     }
@@ -193,65 +193,5 @@ pub(crate) fn remove_blocking(seg_path: &Path, context: &str) {
         Err(e) => {
             log::warn!("segment meta remove {path:?} failed ({e}); {context}");
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn roundtrip_encode_decode() {
-        for v in [0u64, 1, 42, u64::MAX, 1 << 40] {
-            let bytes = encode(v);
-            assert_eq!(decode(&bytes), Some(v), "roundtrip for {v}");
-        }
-    }
-
-    #[test]
-    fn decode_rejects_bad_magic() {
-        let mut bytes = encode(99);
-        bytes[0] = b'X';
-        assert_eq!(decode(&bytes), None);
-    }
-
-    #[test]
-    fn decode_rejects_bad_version() {
-        // Version 3 is not the current version (2) nor any known one — the
-        // sidecar must read as absent so open falls back to replay.
-        let mut bytes = encode(99);
-        bytes[4] = 3;
-        assert_eq!(decode(&bytes), None);
-    }
-
-    #[test]
-    fn decode_rejects_wmt1_magic() {
-        // Hand-build a well-formed LEGACY WMT1 sidecar: same layout, only the
-        // magic/version differ. It must never decode (never trusted).
-        let mut buf = [0u8; META_TOTAL_LEN];
-        buf[0..4].copy_from_slice(b"WMT1");
-        buf[4] = 1;
-        buf[5..13].copy_from_slice(&99u64.to_le_bytes());
-        let crc = crc32fast::hash(&buf[0..META_BODY_LEN]);
-        buf[13..17].copy_from_slice(&crc.to_le_bytes());
-        assert_eq!(decode(&buf), None);
-    }
-
-    #[test]
-    fn decode_rejects_bad_crc() {
-        let mut bytes = encode(99);
-        // Flip a byte in the max_version field without fixing the CRC.
-        bytes[5] ^= 0xFF;
-        assert_eq!(decode(&bytes), None);
-    }
-
-    #[test]
-    fn decode_rejects_wrong_length() {
-        let bytes = encode(99);
-        assert_eq!(decode(&bytes[..META_TOTAL_LEN - 1]), None, "truncated");
-        let mut extended = bytes.to_vec();
-        extended.push(0);
-        assert_eq!(decode(&extended), None, "trailing garbage");
-        assert_eq!(decode(&[]), None, "empty");
     }
 }

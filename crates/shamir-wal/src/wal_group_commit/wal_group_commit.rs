@@ -106,13 +106,14 @@ pub struct WalGroupCommit {
     // concurrent committer + one `mem::take` per drain window — sub-µs
     // under lock.
     //
-    // SINGLE-WRITER BY CONSTRUCTION + MEASURED non-bottleneck. The rotating
-    // leader (CAS on `flushing`) makes exactly one task drain at a time, so
-    // this lock simulates a single writer out of many equal committers. The
-    // WAL-append bench (`benches/wal_append.rs`, baseline `2e3bd51`) confirms
-    // it is not the ceiling: mem-sink append SCALES 4.4× with concurrency
-    // (20.5K→91.2K, N=1→64) — a lock-bound path would plateau/regress;
-    // group-commit coalescing makes each added committer CHEAPER.
+    // SINGLE-WRITER BY CONSTRUCTION. The rotating leader (CAS on `flushing`)
+    // makes exactly one task drain at a time, so this lock simulates a single
+    // writer out of many equal committers. Historical bench observation
+    // (`benches/wal_append.rs`, baseline `2e3bd51`): mem-sink append
+    // throughput rose with concurrency (20.5K→91.2K, N=1→64). The historical
+    // "4.4×" ratio is UNVERIFIED — no reproducible measurement exists in this
+    // repo, so the ratio is withdrawn; group-commit coalescing makes each
+    // added committer CHEAPER.
     //
     // A single-writer-task replacement (this `Mutex` → bounded MPSC, leader
     // CAS deleted) is designed in `docs/dev-artifacts/perf/capstone-subplan.md`. It was
@@ -317,11 +318,16 @@ impl WalGroupCommit {
             }
             // One write() for the whole window (level 2). The window's max
             // commit_version is the watermark folded into the sink (F6).
-            let write_ok = self
-                .sink
-                .append_batch(payloads, batch_max_version)
-                .await
-                .is_ok();
+            let write_result = self.sink.append_batch(payloads, batch_max_version).await;
+            // Preserve the underlying failure cause for every waiter in this
+            // window BEFORE any completion publishes `done` (plan P1.5).
+            let write_cause: Option<Arc<DbError>> = write_result.err().map(Arc::new);
+            if let Some(cause) = &write_cause {
+                for (_, ticket) in &guard.metas {
+                    ticket.set_cause(Arc::clone(cause));
+                }
+            }
+            let write_ok = write_cause.is_none();
             // A File sink error does not prove rollback: SegmentSet can fail
             // rotating AFTER a successful write, and rollback failure is not
             // typed by WalSegment. Conservatively fail-stop those outcomes.
@@ -353,10 +359,24 @@ impl WalGroupCommit {
             }
             // One fsync for the window iff any Synced waiter is present.
             let needs_fsync = guard.metas.iter().any(|(t, _)| *t == WalDurability::Synced);
-            let sync_ok = if write_ok && needs_fsync {
+            let sync_cause = if write_ok && needs_fsync {
                 // Synced appends share the same cancellation-independent
                 // worker as timer and pull demands; never call sink.sync here.
-                self.sync_window().await.is_ok()
+                // Already an Arc<DbError>: the ORIGINAL sink error, no
+                // stringification — set_cause preserves variant/kind/source.
+                self.sync_window().await.err()
+            } else {
+                None
+            };
+            if let Some(cause) = &sync_cause {
+                for (tier, ticket) in &guard.metas {
+                    if *tier == WalDurability::Synced {
+                        ticket.set_cause(Arc::clone(cause));
+                    }
+                }
+            }
+            let sync_ok = if write_ok && needs_fsync {
+                sync_cause.is_none()
             } else {
                 write_ok
             };

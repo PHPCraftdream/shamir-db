@@ -21,17 +21,24 @@
 //!   only add wait time, never remove it). Kept here only for its original
 //!   purpose: proving `append_batch` stays correct under worst-case,
 //!   all-N-contend concurrency.
-//! - `sustained_append/n_*` — the actual PER-ACQUISITION cost measurement.
-//!   Each of the `N` concurrent tasks performs `APPENDS_PER_TASK` sequential
-//!   `append_batch` calls in a loop; the one-time `tokio::spawn`/join
-//!   overhead is paid once per task and amortized over many real lock
-//!   acquisitions (not once per acquisition, as `raw_append` effectively
-//!   does at n_1). The harness reports `ns/op` treating the WHOLE n-task
+//! - `sustained_append/n_*` — sustained END-TO-END append throughput under
+//!   contention. Each of the `N` concurrent tasks performs `APPENDS_PER_TASK`
+//!   sequential `append_batch` calls in a loop; the one-time `tokio::spawn`/join
+//!   overhead is paid once per task and amortized over many appends.
+//!   **This is NOT an isolated mutex-acquisition measurement**: the timed
+//!   region includes payload clone, append framing/validation, blocking
+//!   dispatch (`spawn_blocking`) and file writes. `SegmentSet::inner` is
+//!   `pub(super)`, so the bench cannot time bare lock/unlock; no per-
+//!   acquisition lock-cost figure is claimed from this scenario. Historical
+//!   ratios cited elsewhere (4.4× mem-sink scaling, ~63× fsync dominance)
+//!   are UNVERIFIED here — no reproducible measurement exists in this repo
+//!   and none is invented by this bench.
+//!   The harness reports `ns/op` treating the WHOLE n-task
 //!   run as one op (it has no visibility into the nested loop) — divide the
-//!   printed `ns/op` by `N * APPENDS_PER_TASK` by hand to get genuine mean
-//!   per-append cost while N tasks sustain contention throughout the whole
-//!   timed window. See `fan_out_sustained`'s doc comment for the exact
-//!   arithmetic.
+//!   printed `ns/op` by `N * APPENDS_PER_TASK` by hand to get mean
+//!   per-append END-TO-END cost while N tasks sustain contention throughout
+//!   the whole timed window. See `fan_out_sustained`'s doc comment for the
+//!   exact arithmetic.
 //!
 //! **IMPORTANT**: Both scenarios create an ARTIFICIAL situation that never
 //! occurs in production (the real system serializes all `SegmentSet` access
@@ -45,6 +52,11 @@
 //! leader ever calls into `SegmentSet` — is what actually establishes
 //! "negligible in production today"; see `CLAUDE.md`'s
 //! `SegmentSet::inner` entry.
+//!
+//! **Withdrawn claims**: no number printed by this bench reproduces the
+//! historical "4.4×" or "~63×" ratios, and none of them measures isolated
+//! mutex acquisition. Until a workload that locks `SegmentSet::inner`
+//! directly is possible, lock cost is UNMEASURED, not small.
 
 #![allow(clippy::needless_borrow)]
 
@@ -65,10 +77,14 @@ const SEG_MAX_BYTES: u64 = 1 << 30; // 1 GiB
 /// Sequential `append_batch` calls per task in the `sustained_append`
 /// scenario. Large enough that the one-time `tokio::spawn` + final
 /// `JoinHandle::await` overhead per task (paid once) is negligible next to
-/// the aggregate cost of `APPENDS_PER_TASK` real lock acquisitions (paid
-/// `APPENDS_PER_TASK` times) — i.e. large enough to actually isolate
-/// per-acquisition cost rather than re-measuring spawn/join overhead under
-/// a different name.
+/// the aggregate cost of `APPENDS_PER_TASK` real appends (paid
+/// `APPENDS_PER_TASK` times) — i.e. large enough to measure sustained
+/// per-append end-to-end cost rather than re-measuring spawn/join overhead
+/// under a different name.
+///
+/// The payload template is encoded ONCE at setup and cloned per append, so the
+/// timed region contains no bincode encode work — only the unavoidable
+/// per-append clone, framing, blocking dispatch and file writes.
 const APPENDS_PER_TASK: usize = 2_000;
 
 fn payload() -> Vec<u8> {
@@ -117,21 +133,33 @@ async fn fan_out_raw(segset: Arc<SegmentSet>, n: usize, version_base: u64) {
 /// Run `n` concurrent tasks, each performing `APPENDS_PER_TASK` SEQUENTIAL
 /// `append_batch` calls in a loop, then join all `n`. All `n` tasks run for
 /// the entire duration, so — unlike `fan_out_raw` — this sustains real
-/// contention on `SegmentSet::inner` across many acquisitions per task, not
+/// contention on `SegmentSet::inner` across many appends per task, not
 /// just one.
+///
+/// Workload scope: this times END-TO-END sustained appends — payload clone,
+/// frame validation, blocking dispatch (`spawn_blocking`) and the file
+/// write. It does NOT isolate `SegmentSet::inner` mutex acquisition (the
+/// field is `pub(super)` and unreachable from a bench); do not read its
+/// output as a lock-cost figure.
 ///
 /// The caller (the harness, via `bench_async`) times this whole function —
 /// spawn loop, `n * APPENDS_PER_TASK` real appends, and join loop — as ONE
-/// "op". To read genuine per-acquisition cost, divide the harness's
+/// "op". To read the mean per-append END-TO-END cost, divide the harness's
 /// reported `ns/op` for a given `n` by `n * APPENDS_PER_TASK`: the one-time
 /// `tokio::spawn`/join overhead (paid once per task, `n` times total) is
-/// amortized over `n * APPENDS_PER_TASK` real lock acquisitions instead of
-/// just `n` of them, so it no longer dominates the way it does in
-/// `fan_out_raw` at low `n`.
-async fn fan_out_sustained(segset: Arc<SegmentSet>, n: usize, version_base: u64) {
+/// amortized over `n * APPENDS_PER_TASK` appends instead of just `n` of
+/// them, so it no longer dominates the way it does in `fan_out_raw` at low
+/// `n`.
+async fn fan_out_sustained(
+    segset: Arc<SegmentSet>,
+    n: usize,
+    version_base: u64,
+    payload_template: Vec<u8>,
+) {
     let mut handles = Vec::with_capacity(n);
     for w in 0..n {
         let segset = Arc::clone(&segset);
+        let payload_template = payload_template.clone();
         // Each task owns a disjoint version range so `max_version` stays
         // monotonically non-decreasing per task without any cross-task
         // coordination (SegmentSet does not require globally monotonic
@@ -141,7 +169,7 @@ async fn fan_out_sustained(segset: Arc<SegmentSet>, n: usize, version_base: u64)
         handles.push(tokio::spawn(async move {
             for i in 0..APPENDS_PER_TASK {
                 segset
-                    .append_batch(vec![payload()], base + i as u64)
+                    .append_batch(vec![payload_template.clone()], base + i as u64)
                     .await
                     .expect("SegmentSet append_batch");
             }
@@ -191,13 +219,20 @@ fn main() {
         });
     }
 
-    // ── Sustained-contention per-acquisition cost measurement (#1109) ────
+    // ── Sustained END-TO-END append under contention (#1109) ─────────────
     //
     // Each of the `n` concurrent tasks performs `APPENDS_PER_TASK`
     // SEQUENTIAL `append_batch` calls, so the one-shot spawn/join overhead
-    // (paid once per task) is amortized over many real lock acquisitions
+    // (paid once per task) is amortized over many real appends
     // instead of just one — unlike `raw_append`, where it is paid once per
-    // SINGLE acquisition.
+    // SINGLE append. Payloads are pre-encoded at setup (see `payload()`),
+    // so the timed region excludes encode work.
+    //
+    // **Not a lock-cost measurement**: this times the full append pipeline
+    // (payload clone, framing, blocking dispatch, file writes). Isolated
+    // `SegmentSet::inner` mutex-acquisition cost is unmeasured — `inner` is
+    // `pub(super)` and cannot be locked from a bench. Do not derive a
+    // per-acquisition lock figure from these numbers.
     //
     // **Unit note**: the harness's own `ns/op` column treats one call to
     // this closure (i.e. one whole "spawn `n` tasks, each does
@@ -220,14 +255,18 @@ fn main() {
         let segset = Arc::new(segset);
         let counter = Cell::new(0u64);
         let id = format!("segment_set_lock/sustained_append/n_{n}");
+        // Payload production is deliberately OUTSIDE the timed workload:
+        // encode once here, clone per append inside the loop.
+        let payload_template = payload();
         h.bench_async(&id, move || {
             let _keep_alive = &dir;
             let i = counter.get();
             counter.set(i + 1);
             let base = i * (n as u64) * (APPENDS_PER_TASK as u64) + 1;
+            let template = payload_template.clone();
             let segset = Arc::clone(&segset);
             async move {
-                fan_out_sustained(segset, n, base).await;
+                fan_out_sustained(segset, n, base, template).await;
             }
         });
     }

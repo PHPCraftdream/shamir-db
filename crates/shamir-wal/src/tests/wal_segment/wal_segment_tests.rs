@@ -531,3 +531,25 @@ async fn startup_replay_persistent_permission_denial_stays_a_hard_error() {
     assert!(err.contains("PermissionDenied"), "unexpected error: {err}");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 }
+
+// Red before the fix (RV-WAL-5839FF0D): the file-open error was stringified
+// into DbError::Storage, destroying the typed io::ErrorKind at the wrap
+// boundary.
+#[tokio::test]
+async fn rv_wal_5839ff0d_open_error_preserves_io_kind() {
+    let dir = TempDir::new().unwrap();
+    // Opening an existing DIRECTORY fails at File::open; the wrap boundary
+    // must surface DbError::Io with the OS ErrorKind intact.
+    let err = match WalSegment::open(dir.path().to_path_buf()).await {
+        Ok(_) => panic!("opening a directory must fail"),
+        Err(e) => e,
+    };
+    let kind = match &err {
+        shamir_storage::error::DbError::Io(e) => e.kind(),
+        other => panic!("expected DbError::Io, got: {other}"),
+    };
+    assert!(
+        kind == std::io::ErrorKind::IsADirectory || kind == std::io::ErrorKind::PermissionDenied,
+        "expected preserved ErrorKind, got: {err}"
+    );
+}
