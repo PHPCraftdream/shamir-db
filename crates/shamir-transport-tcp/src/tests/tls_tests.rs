@@ -3,11 +3,24 @@
 //! consult, install, or depend on the process-default provider.
 
 use crate::tls::{
-    generate_self_signed_server_cert, make_client_config_no_ca, make_server_config_from_pem,
-    TlsConfigError,
+    generate_self_signed_server_cert, make_client_config_app_authenticated,
+    make_server_config_from_pem, AppLayerServerAuth, TlsConfigError,
 };
 
 use rustls::crypto::CryptoProvider;
+
+/// RV-TRANSPORT-TCP-A38C5274: a mismatched certificate/private key pair is
+/// rejected by the TLS config constructor with rustls's discriminating cause.
+#[test]
+fn rv_transport_tcp_a38c5274_certificate_key_mismatch_is_rejected() {
+    let (cert, _) = generate_self_signed_server_cert(vec!["localhost".into()]).unwrap();
+    let (_, other_key) = generate_self_signed_server_cert(vec!["localhost".into()]).unwrap();
+    let error = make_server_config_from_pem(&cert, &other_key).unwrap_err();
+    match error {
+        TlsConfigError::Rustls(rustls::Error::InconsistentKeys(_)) => {}
+        other => panic!("expected certificate/key mismatch, got {other:?}"),
+    }
+}
 
 /// The client config must build Ok WITHOUT installing (or consulting) the
 /// process-default provider: with the old implicit
@@ -21,7 +34,7 @@ fn rv_transport_tcp_0a23323d_client_config_builds_without_global_provider() {
         CryptoProvider::get_default().is_none(),
         "precondition: no process-default provider installed"
     );
-    let cfg = make_client_config_no_ca();
+    let cfg = make_client_config_app_authenticated(AppLayerServerAuth::exporter_bound());
     assert!(cfg.is_ok());
     assert!(
         CryptoProvider::get_default().is_none(),
@@ -63,7 +76,7 @@ fn rv_transport_tcp_0a23323d_server_config_rejects_cert_only_pem() {
 /// `get_default()` staying `None`.
 #[test]
 fn rv_transport_tcp_0a23323d_explicit_provider_ignores_ambient_install() {
-    assert!(make_client_config_no_ca().is_ok());
+    assert!(make_client_config_app_authenticated(AppLayerServerAuth::exporter_bound()).is_ok());
     let (cert_pem, key_pem) = generate_self_signed_server_cert(vec!["localhost".into()]).unwrap();
     assert!(make_server_config_from_pem(&cert_pem, &key_pem).is_ok());
     assert!(

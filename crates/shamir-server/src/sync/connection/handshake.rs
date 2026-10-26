@@ -53,7 +53,7 @@ pub(super) fn audit_emit(
 ) {
     let now_ns = UnixNanos::now().as_u64();
     let prefix = sid_prefix.copied().unwrap_or([0u8; 8]);
-    ctx.audit.append(
+    if let Err(error) = ctx.audit.append(
         event,
         match ctx.transport_kind {
             TransportKind::Tcp => "tcp",
@@ -66,7 +66,9 @@ pub(super) fn audit_emit(
         result,
         Vec::new(),
         now_ns,
-    );
+    ) {
+        tracing::error!(%error, "audit append rejected event");
+    }
 }
 
 /// Test-only clock seam (RV-SERVER-17329FC9): when non-zero, this value

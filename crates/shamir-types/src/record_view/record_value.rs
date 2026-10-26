@@ -1,35 +1,11 @@
 //! Borrowed scalar/aggregate value produced by the [`RecordView`](super::RecordView)
 //! lens over canonical (id-keyed) MessagePack record bytes.
 //!
-//! One primary export: [`RecordValue`]. Variants mirror the marker set the
-//! production encoder/decoder pair (`codecs::interned::messagepack`) accepts,
-//! with the same value-shape decisions:
+//! * all integer widths that fit in i64 collapse to `Int(i64)`; larger unsigned
+//!   values use `Big(u64)` without allocation;
+//! * strings borrow the payload bytes; `Str` is never owned;
+//! * arrays and maps are exposed lazily as cursors over raw bytes.
 //!
-//! * all integer widths collapse to `Int(i64)` (positive/negative fixint,
-//!   `u8`/`u16`/`u32`/`u64`, `i8`/`i16`/`i32`/`i64`) — exactly as the tree
-//!   decoder's `decode_value` does;
-//! * `F32` and `F64` collapse to `F64(f64)` (the tree stores both as `F64`);
-//! * strings (`FixStr`/`Str8`/`Str16`/`Str32`) borrow the payload bytes as a
-//!   `&str` — zero-copy, no `String` allocation;
-//! * `Bin8`/`Bin16`/`Bin32` and all ext types borrow the payload as `&[u8]`
-//!   (the tree decoder stores ext payloads as `Bin`, so the lens does too);
-//! * arrays and maps are exposed lazily as [`RawSeq`] / nested
-//!   [`RecordView`](super::RecordView) cursors over the raw value bytes — no
-//!   element materialisation;
-//! * `Null` / `True` / `False` are decoded inline.
-//!
-//! ## The U64 > `i64::MAX` edge
-//! The tree decoder maps a `u64` that does not fit in `i64` to
-//! `InnerValue::Str(decimal_string)` (see `messagepack.rs::decode_value`,
-//! `Marker::U64` arm). The lens mirrors that mapping so `RecordView::get`
-//! agrees with `msgpack_to_inner` for *every* input the encoder can produce.
-//! Because the decimal text does not exist in the buffer (the bytes are a raw
-//! `u64`), this single edge case must own its text: the [`Str`] variant is
-//! therefore a `Cow<'a, str>` — borrowed for the overwhelmingly common path
-//! (real string fields) and owned only for this synthetic decimal. No other
-//! scalar variant allocates.
-//!
-//! [`Str`]: RecordValue::Str
 
 use super::RecordView;
 use std::borrow::Cow;
@@ -133,14 +109,13 @@ pub enum RecordValue<'a> {
     Null,
     /// `True` (`0xc3`) / `False` (`0xc2`).
     Bool(bool),
-    /// Any integer width (fixint±, `u8`/`u16`/`u32`/`u64` ≤ `i64::MAX`,
-    /// `i8`/`i16`/`i32`/`i64`).
+    /// `Int(i64)`.
     Int(i64),
+    /// Exact unsigned integer above `i64::MAX`, without allocating.
+    Big(u64),
     /// `F32` (widened) / `F64`.
     F64(f64),
-    /// `FixStr`/`Str8`/`Str16`/`Str32`. Borrows the payload for real string
-    /// fields; owns the decimal text only for the U64 > `i64::MAX` edge (see
-    /// [module docs](self)).
+    /// `FixStr`/`Str8`/`Str16`/`Str32`. Borrows the payload of actual strings.
     Str(Cow<'a, str>),
     /// `Bin8`/`Bin16`/`Bin32` and all ext-type payloads (the tree decoder
     /// collapses ext to `Bin`, so the lens does too).

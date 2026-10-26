@@ -14,6 +14,7 @@ use crate::record_view::skip_value;
 use crate::types::common::{new_map_wc, TMap};
 use crate::types::value::{InnerValue, QueryValue, Value};
 use bytes::Bytes;
+use num_bigint::BigInt;
 use rmp::decode::{read_marker, RmpRead};
 use rmp::Marker;
 #[cfg(test)]
@@ -185,7 +186,7 @@ fn decode_value(
             if u <= i64::MAX as u64 {
                 Ok(InnerValue::Int(u as i64))
             } else {
-                Ok(InnerValue::Str(u.to_string()))
+                Ok(InnerValue::Big(BigInt::from(u)))
             }
         }
         Marker::I8 => Ok(InnerValue::Int(read_i8_from(cur)? as i64)),
@@ -457,7 +458,7 @@ fn rmpv_value_to_inner(
                 if u <= i64::MAX as u64 {
                     Ok(InnerValue::Int(u as i64))
                 } else {
-                    Ok(InnerValue::Str(u.to_string()))
+                    Ok(InnerValue::Big(BigInt::from(u)))
                 }
             } else if n.is_i64() {
                 Ok(InnerValue::Int(n.as_i64().unwrap()))

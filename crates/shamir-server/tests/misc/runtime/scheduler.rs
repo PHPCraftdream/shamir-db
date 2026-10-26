@@ -105,11 +105,13 @@ struct MockAuditAppender {
 }
 
 impl AuditAppender for MockAuditAppender {
-    fn append_entry(&self, _entry: &AuditEntry) {
+    fn append_entry(&self, _entry: &AuditEntry) -> Result<(), std::io::Error> {
         self.appends.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
-    fn checkpoint(&self, _next_seq: u64, _prev_hmac: &[u8; 32]) {
+    fn checkpoint(&self, _next_seq: u64, _prev_hmac: &[u8; 32]) -> Result<(), std::io::Error> {
         self.checkpoints.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 }
 
