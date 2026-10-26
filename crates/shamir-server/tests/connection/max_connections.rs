@@ -15,7 +15,7 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use zeroize::Zeroizing;
 
-use shamir_transport_tcp::tls::make_client_config_no_ca;
+use shamir_transport_tcp::tls::{make_client_config_app_authenticated, AppLayerServerAuth};
 
 use shamir_server::config::{
     Config, ConnectionSecurity, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig,
@@ -97,7 +97,9 @@ async fn cap_two_refuses_third_concurrent_client() {
     let handle = launcher.launch().await.expect("launcher");
     let addr = handle.first_tls_exporter_addr().expect("bound");
 
-    let connector = TlsConnector::from(make_client_config_no_ca().unwrap());
+    let connector = TlsConnector::from(
+        make_client_config_app_authenticated(AppLayerServerAuth::exporter_bound()).unwrap(),
+    );
     let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
 
     // First two — successful TLS handshakes. We HOLD them open (don't

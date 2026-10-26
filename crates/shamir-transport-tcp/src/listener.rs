@@ -51,6 +51,7 @@ impl ListenerProfile {
 fn is_loopback(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_loopback(),
+        IpAddr::V6(v6) if let Some(mapped_v4) = v6.to_ipv4_mapped() => mapped_v4.is_loopback(),
         IpAddr::V6(v6) => v6.is_loopback(),
     }
 }

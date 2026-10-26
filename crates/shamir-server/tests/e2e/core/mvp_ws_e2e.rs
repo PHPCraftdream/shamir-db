@@ -39,7 +39,9 @@ use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
 
-use shamir_transport_tcp::tls::{extract_tls_exporter, make_client_config_no_ca};
+use shamir_transport_tcp::tls::{
+    extract_tls_exporter, make_client_config_app_authenticated, AppLayerServerAuth,
+};
 use shamir_transport_ws::framing::{ws_recv_into, ws_send, MAX_WS_FRAME_SIZE};
 
 use shamir_server::config::{
@@ -171,7 +173,8 @@ async fn mvp_full_pipeline_ws_native_tls_scram_batch_query() {
         .expect("WS listener should be bound");
 
     // ----- Client: TLS+WS upgrade in one go -----
-    let client_cfg = make_client_config_no_ca().unwrap();
+    let client_cfg =
+        make_client_config_app_authenticated(AppLayerServerAuth::exporter_bound()).unwrap();
     let connector = Connector::Rustls(client_cfg);
     let url = format!("wss://localhost:{}/shamir/v1", server_addr.port());
 

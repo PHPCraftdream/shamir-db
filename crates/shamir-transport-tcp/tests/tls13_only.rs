@@ -7,11 +7,15 @@
 use std::sync::Arc;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::crypto::aws_lc_rs::default_provider;
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::crypto::aws_lc_rs::{default_provider, sign::any_supported_type};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
+use rustls::server::ResolvesServerCert;
+use rustls::sign::CertifiedKey;
 use rustls::{ClientConfig, DigitallySignedStruct, ServerConfig, SignatureScheme};
 use shamir_transport_tcp::tls::{
-    generate_self_signed_server_cert, make_client_config_no_ca, make_server_config_from_pem,
+    generate_self_signed_server_cert, make_client_config_app_authenticated,
+    make_server_config_from_pem, AppLayerServerAuth,
 };
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -33,9 +37,6 @@ fn tls12_only_client_config() -> Arc<ClientConfig> {
 /// Build a TLS 1.2-only server config. Used to confirm our client (TLS 1.3
 /// only) refuses to handshake with it.
 fn tls12_only_server_config(cert_pem: &str, key_pem: &str) -> Arc<ServerConfig> {
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-    use rustls_pki_types::pem::PemObject;
-    use rustls_pki_types::PrivatePkcs8KeyDer;
     let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -125,6 +126,47 @@ async fn server_refuses_tls12_only_client_per_transport_tcp_3_1() {
     assert!(server_result.is_err());
 }
 
+#[tokio::test]
+async fn rv_transport_tcp_11f795d1_tls12_server_is_rejected_at_version_negotiation() {
+    install_provider_once();
+    let (cert_pem, key_pem) = generate_self_signed_server_cert(vec!["localhost".into()]).unwrap();
+    let server_cfg = tls12_only_server_config(&cert_pem, &key_pem);
+    let client_cfg =
+        make_client_config_app_authenticated(AppLayerServerAuth::exporter_bound()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let acceptor = TlsAcceptor::from(server_cfg);
+    let server_task = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        acceptor.accept(tcp).await
+    });
+    let connector = TlsConnector::from(client_cfg);
+    let tcp = TcpStream::connect(addr).await.unwrap();
+    let client_result = connector
+        .connect(ServerName::try_from("localhost").unwrap(), tcp)
+        .await;
+    // Discriminator: the failure must be the version-negotiation alert
+    // ("protocolversion"). An accidental TLS12-enablement regression surfaces
+    // later as a HandshakeFailure/signature-stage alert, which does NOT
+    // contain "protocolversion"; a reverted client version pin fails here.
+    let err = client_result.unwrap_err();
+    let normalized: String = err
+        .to_string()
+        .to_lowercase()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert!(
+        normalized.contains("protocolversion"),
+        "expected a version-negotiation-stage alert, got: {err}"
+    );
+    let server_result = server_task.await.expect("server task");
+    assert!(
+        server_result.is_err(),
+        "TLS 1.2-only server must reject TLS 1.3 ClientHello"
+    );
+}
+
 /// TRANSPORT_TCP §3.1 NORMATIVE: client MUST refuse a TLS 1.2-only server.
 #[tokio::test]
 async fn client_refuses_tls12_only_server_per_transport_tcp_3_1() {
@@ -132,7 +174,8 @@ async fn client_refuses_tls12_only_server_per_transport_tcp_3_1() {
 
     let (cert_pem, key_pem) = generate_self_signed_server_cert(vec!["localhost".into()]).unwrap();
     let server_cfg = tls12_only_server_config(&cert_pem, &key_pem);
-    let client_cfg = make_client_config_no_ca().unwrap();
+    let client_cfg =
+        make_client_config_app_authenticated(AppLayerServerAuth::exporter_bound()).unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -153,4 +196,50 @@ async fn client_refuses_tls12_only_server_per_transport_tcp_3_1() {
         "client must refuse to negotiate TLS 1.2 with a TLS 1.2-only server"
     );
     let _ = server_task.await;
+}
+
+#[tokio::test]
+async fn rv_transport_tcp_1257db79_mismatched_certificate_and_signing_key_fail_handshake() {
+    #[derive(Debug)]
+    struct FixedResolver(Arc<CertifiedKey>);
+    impl ResolvesServerCert for FixedResolver {
+        fn resolve(&self, _hello: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+            Some(self.0.clone())
+        }
+    }
+    install_provider_once();
+    let (cert_pem, _cert_key_pem) =
+        generate_self_signed_server_cert(vec!["localhost".into()]).unwrap();
+    let other = rcgen::KeyPair::generate().unwrap();
+    let certs = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(other.serialize_der()));
+    let signing = any_supported_type(&key_der).unwrap();
+    let certified = Arc::new(CertifiedKey::new(certs, signing));
+    let provider = Arc::new(default_provider());
+    let server = ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .with_no_client_auth()
+        .with_cert_resolver(Arc::new(FixedResolver(certified)));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let acceptor = TlsAcceptor::from(Arc::new(server));
+    let task = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        acceptor.accept(tcp).await
+    });
+    let cfg = make_client_config_app_authenticated(AppLayerServerAuth::exporter_bound()).unwrap();
+    let result = TlsConnector::from(cfg)
+        .connect(
+            ServerName::try_from("localhost").unwrap(),
+            TcpStream::connect(addr).await.unwrap(),
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "certificate A signed with key B must fail CertificateVerify"
+    );
+    assert!(task.await.unwrap().is_err());
 }

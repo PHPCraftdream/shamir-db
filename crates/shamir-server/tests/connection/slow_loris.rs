@@ -16,7 +16,7 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use zeroize::Zeroizing;
 
-use shamir_transport_tcp::tls::make_client_config_no_ca;
+use shamir_transport_tcp::tls::{make_client_config_app_authenticated, AppLayerServerAuth};
 
 use shamir_server::config::{
     Config, ConnectionSecurity, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig,
@@ -98,7 +98,9 @@ async fn silent_client_after_tls_is_dropped_within_timeout() {
     let addr = handle.first_tls_exporter_addr().expect("bound");
 
     // ----- "Silent" client: complete TLS, then never send. -----
-    let connector = TlsConnector::from(make_client_config_no_ca().unwrap());
+    let connector = TlsConnector::from(
+        make_client_config_app_authenticated(AppLayerServerAuth::exporter_bound()).unwrap(),
+    );
     let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
     let tcp = TcpStream::connect(addr).await.expect("tcp connect");
     let tls = connector

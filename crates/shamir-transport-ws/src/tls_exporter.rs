@@ -10,14 +10,17 @@
 //! browser JS can't access it, so the protocol accepts the strictly
 //! weaker `[0u8; 32]` placeholder.
 
+use rustls::Error;
 use shamir_transport_tcp::tls::{extract_tls_exporter, ConnectionExporter};
 
 /// Extract the 32-byte TLS exporter from any compatible TLS stream.
-/// Returns `None` if extraction fails (e.g., handshake not complete).
+/// Propagates the rustls error so native WSS callers can fail closed.
 ///
 /// Intended for use on native WSS endpoints where the underlying stream
 /// type is `tokio_rustls::server::TlsStream<TcpStream>`.
-pub fn extract_tls_exporter_from_stream(connection: &impl ConnectionExporter) -> Option<[u8; 32]> {
+pub fn extract_tls_exporter_from_stream(
+    connection: &impl ConnectionExporter,
+) -> Result<[u8; 32], Error> {
     extract_tls_exporter(connection)
 }
 

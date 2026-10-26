@@ -38,8 +38,8 @@ use shamir_transport_tcp::framing::{
     read_frame, read_frame_into, write_frame, MAX_FRAME_SIZE_DEFAULT,
 };
 use shamir_transport_tcp::tls::{
-    extract_tls_exporter, generate_self_signed_server_cert, make_client_config_no_ca,
-    make_server_config_from_pem,
+    extract_tls_exporter, generate_self_signed_server_cert, make_client_config_app_authenticated,
+    make_server_config_from_pem, AppLayerServerAuth,
 };
 
 use serde::{Deserialize, Serialize};
@@ -176,7 +176,8 @@ async fn echo_full_pipeline_with_session_and_invalidation() {
     // ---- TLS ----
     let (cert_pem, key_pem) = generate_self_signed_server_cert(vec!["localhost".into()]).unwrap();
     let server_cfg = make_server_config_from_pem(&cert_pem, &key_pem).unwrap();
-    let client_cfg = make_client_config_no_ca().unwrap();
+    let client_cfg =
+        make_client_config_app_authenticated(AppLayerServerAuth::exporter_bound()).unwrap();
 
     // ---- Listener ----
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

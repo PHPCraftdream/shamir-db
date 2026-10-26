@@ -197,6 +197,76 @@ async fn read_frame_into_reuses_capacity() {
     }
 }
 
+#[tokio::test]
+async fn rv_transport_tcp_bbf93e33_incremental_accumulation_tracks_received_bytes() {
+    let (mut tx, mut rx) = duplex(64 * 1024);
+    tx.write_all(&(1024u32 * 1024).to_be_bytes()).await.unwrap();
+    tx.write_all(b"received").await.unwrap();
+    let mut payload = Vec::new();
+    let mut read = Box::pin(read_frame_into(&mut rx, 2 * 1024 * 1024, &mut payload));
+    tokio::select! { biased; _ = &mut read => panic!("frame body should be incomplete"), _ = std::future::ready(()) => {} }
+    drop(read);
+    assert_eq!(payload, b"received");
+    assert!(
+        payload.capacity() < 1024 * 1024,
+        "capacity must follow arrived bytes, not declaration"
+    );
+    drop(tx);
+}
+
+#[tokio::test]
+async fn rv_transport_tcp_884ddbf5_prereserved_contract_errors_are_malformed() {
+    let (mut tx, _rx) = duplex(32);
+    assert!(matches!(
+        write_frame_prereserved(&mut tx, &[0, 0, 0]).await,
+        Err(FrameError::MalformedBuffer(_))
+    ));
+    assert!(matches!(
+        write_frame_prereserved(&mut tx, &[0, 0, 0, 2, b'x']).await,
+        Err(FrameError::MalformedBuffer(_))
+    ));
+}
+
+#[tokio::test]
+async fn rv_transport_tcp_ac0beb92_prereserved_maximum_boundary_is_distinct() {
+    let mut under = Vec::with_capacity(MAX_FRAME_SIZE_DEFAULT + 4);
+    under.extend_from_slice(&(MAX_FRAME_SIZE_DEFAULT as u32).to_be_bytes());
+    under.resize(MAX_FRAME_SIZE_DEFAULT + 4, b'x');
+    let (mut tx, mut rx) = duplex(MAX_FRAME_SIZE_DEFAULT + 16);
+    write_frame_prereserved(&mut tx, &under).await.unwrap();
+    let frame = read_frame(&mut rx, MAX_FRAME_SIZE_DEFAULT).await.unwrap();
+    assert_eq!(frame.len(), MAX_FRAME_SIZE_DEFAULT);
+    let (mut tx, _rx) = duplex(8);
+    let mut over = Vec::with_capacity(MAX_FRAME_SIZE_DEFAULT + 5);
+    over.extend_from_slice(&((MAX_FRAME_SIZE_DEFAULT as u32) + 1).to_be_bytes());
+    over.resize(MAX_FRAME_SIZE_DEFAULT + 5, b'x');
+    assert!(matches!(
+        write_frame_prereserved(&mut tx, &over).await,
+        Err(FrameError::TooLarge { .. })
+    ));
+}
+
+/// The write path rejects size above the protocol maximum and accepts the
+/// exact valid limit; the neighbouring limit is not silently truncated.
+#[tokio::test]
+async fn rv_transport_tcp_ac0beb92_writer_limit_boundary_is_enforced() {
+    let mut payload = Vec::with_capacity(MAX_FRAME_SIZE_DEFAULT + 1);
+    payload.resize(MAX_FRAME_SIZE_DEFAULT, b'a');
+    let (mut writer, mut reader) = duplex(MAX_FRAME_SIZE_DEFAULT + 16);
+    write_frame(&mut writer, &payload).await.unwrap();
+    assert_eq!(
+        read_frame(&mut reader, MAX_FRAME_SIZE_DEFAULT)
+            .await
+            .unwrap(),
+        payload
+    );
+    payload.push(b'b');
+    let (mut writer, _reader) = duplex(16);
+    assert!(
+        matches!(write_frame(&mut writer, &payload).await, Err(FrameError::TooLarge { actual, max }) if actual == MAX_FRAME_SIZE_DEFAULT + 1 && max == MAX_FRAME_SIZE_DEFAULT)
+    );
+}
+
 /// Optim #1: handles partial reads via `read_exact` correctly even into
 /// pre-set-len buffer (no UB observable).
 #[tokio::test]
@@ -225,6 +295,50 @@ async fn read_frame_into_close_returns_peer_close() {
         .await
         .unwrap_err();
     assert!(matches!(err, FrameError::PeerClose));
+}
+
+#[tokio::test]
+async fn rv_transport_tcp_bbf93e33_reader_capacity_tracks_arrived_body() {
+    let (mut tx, mut rx) = duplex(64 * 1024);
+    tx.write_all(&((1024 * 1024u32).to_be_bytes()))
+        .await
+        .unwrap();
+    tx.write_all(b"arrived").await.unwrap();
+    let mut body = Vec::new();
+    let mut read = Box::pin(read_frame_into(&mut rx, 2 * 1024 * 1024, &mut body));
+    tokio::select! { biased; _ = &mut read => panic!("declared body should remain incomplete"), _ = std::future::ready(()) => {} }
+    drop(read);
+    assert_eq!(body, b"arrived");
+    assert!(
+        body.capacity() < 1024 * 1024,
+        "declaration must not allocate the absent body"
+    );
+    drop(tx);
+}
+
+#[tokio::test]
+async fn rv_transport_tcp_884ddbf5_prereserved_malformed_buffer_is_distinct() {
+    let (mut tx, _rx) = duplex(32);
+    let short = write_frame_prereserved(&mut tx, &[0, 0, 0])
+        .await
+        .unwrap_err();
+    assert!(matches!(short, FrameError::MalformedBuffer(_)));
+    let mismatch = write_frame_prereserved(&mut tx, &[0, 0, 0, 2, b'x'])
+        .await
+        .unwrap_err();
+    assert!(matches!(mismatch, FrameError::MalformedBuffer(_)));
+}
+
+#[tokio::test]
+async fn rv_transport_tcp_ac0beb92_prereserved_writer_rejects_over_limit() {
+    let mut frame = Vec::with_capacity(MAX_FRAME_SIZE_DEFAULT + 5);
+    frame.extend_from_slice(&((MAX_FRAME_SIZE_DEFAULT as u32) + 1).to_be_bytes());
+    frame.resize(MAX_FRAME_SIZE_DEFAULT + 5, 0);
+    let (mut tx, _rx) = duplex(8);
+    let err = write_frame_prereserved(&mut tx, &frame).await.unwrap_err();
+    assert!(
+        matches!(err, FrameError::TooLarge { actual, max } if actual == MAX_FRAME_SIZE_DEFAULT + 1 && max == MAX_FRAME_SIZE_DEFAULT)
+    );
 }
 
 /// Optim #1: oversized declaration is rejected before the buffer is resized.
@@ -383,8 +497,10 @@ async fn write_frame_prereserved_produces_identical_bytes() {
     }
 }
 
-/// §3.4: write_frame_prereserved rejects malformed buffers (wrong length
-/// prefix, buffer too small) with TooLarge — defensive contract check.
+/// §3.4: write_frame_prereserved rejects malformed buffers (short buffer,
+/// length-prefix mismatch) with `MalformedBuffer`, and only rejects a
+/// WELL-FORMED buffer whose declared payload exceeds the frame cap with
+/// `TooLarge` — defensive contract check.
 #[tokio::test]
 async fn write_frame_prereserved_rejects_malformed_buffers() {
     let (_a, _b) = duplex(1024);
@@ -392,12 +508,20 @@ async fn write_frame_prereserved_rejects_malformed_buffers() {
     // Buffer too small (< 4 bytes).
     let (mut a1, _) = duplex(1024);
     let result = write_frame_prereserved(&mut a1, &[0u8; 3]).await;
-    assert!(matches!(result, Err(FrameError::TooLarge { .. })));
+    assert!(matches!(result, Err(FrameError::MalformedBuffer(_))));
 
     // Declared length doesn't match actual payload.
     let (mut a2, _) = duplex(1024);
     let mut bad = vec![0u8; 4 + 100];
     bad[0..4].copy_from_slice(&999u32.to_be_bytes()); // says 999, has 100
     let result = write_frame_prereserved(&mut a2, &bad).await;
+    assert!(matches!(result, Err(FrameError::MalformedBuffer(_))));
+
+    // Well-formed buffer, but the declared payload exceeds the frame cap.
+    let (mut a3, _) = duplex(1024);
+    let mut oversized = Vec::with_capacity(4 + MAX_FRAME_SIZE_DEFAULT + 1);
+    oversized.extend_from_slice(&((MAX_FRAME_SIZE_DEFAULT + 1) as u32).to_be_bytes());
+    oversized.resize(4 + MAX_FRAME_SIZE_DEFAULT + 1, 0);
+    let result = write_frame_prereserved(&mut a3, &oversized).await;
     assert!(matches!(result, Err(FrameError::TooLarge { .. })));
 }

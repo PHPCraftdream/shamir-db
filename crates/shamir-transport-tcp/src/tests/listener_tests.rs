@@ -11,6 +11,43 @@ fn sa(ip: &str, port: u16) -> SocketAddr {
     }
 }
 
+#[tokio::test]
+async fn rv_transport_tcp_93246caf_bind_validated_tls_unspecified_address() {
+    let addr = sa("0.0.0.0", 0);
+    let listener = crate::listener::bind_validated(addr, ListenerProfile::TlsExporter)
+        .await
+        .expect("TLS profile permits unspecified bind address");
+    assert!(listener
+        .local_addr()
+        .expect("local address")
+        .ip()
+        .is_unspecified());
+}
+
+#[test]
+fn rv_transport_tcp_ac0beb92_mapped_loopback_is_permitted_for_plain() {
+    // Production maps IPv4-mapped IPv6 through `to_ipv4_mapped`, so a mapped
+    // loopback address IS loopback. FAILS IF the `to_ipv4_mapped` arm in
+    // listener.rs is reverted — mapped loopback then classifies as
+    // non-loopback IPv6 and is refused.
+    let mapped = sa("::ffff:127.0.0.1", 7331);
+    assert!(ListenerProfile::Plain.allows(&mapped));
+    assert!(validate_addr(mapped, ListenerProfile::Plain).is_ok());
+}
+
+#[test]
+fn rv_transport_tcp_ac0beb92_mapped_non_loopback_is_refused_for_plain() {
+    // Mapping must not let a mapped LAN address pose as IPv6 and bypass the
+    // loopback gate: `::ffff:192.168.1.5` maps through to 192.168.1.5 and is
+    // refused for Plain exactly like its plain-IPv4 form.
+    let mapped_lan = sa("::ffff:192.168.1.5", 7331);
+    assert!(!ListenerProfile::Plain.allows(&mapped_lan));
+    assert!(matches!(
+        validate_addr(mapped_lan, ListenerProfile::Plain),
+        Err(ListenerBindError::PlainOnNonLoopback(_))
+    ));
+}
+
 #[test]
 fn plain_allows_127_0_0_1() {
     let addr = sa("127.0.0.1", 7331);

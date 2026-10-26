@@ -1,19 +1,41 @@
 //! TLS 1.3 wiring per TRANSPORT_TCP §3.
 //!
 //! - Server: self-signed cert generation (rcgen) + ServerConfig builder.
-//! - Client: ClientConfig that DOES NOT verify cert chains via CA — identity
-//!   is checked at the protocol layer via Ed25519 pin (spec §6).
+//! - Client: ClientConfig skips CA chains/hostname; application identity is
+//!   verified with exporter-bound Ed25519 proof (spec §6).
 //! - Both: TLS exporter extraction per RFC 9266 with label
 //!   `EXPORTER-ShamirDB-AUTH-v1`.
+//!
+//! A TLS-terminating relay has a different exporter on each leg, so relayed
+//! SCRAM/identity proofs fail. This does not protect `auth_init` (username and
+//! client nonce) or `client_proof` sent before server authentication.
+//! CertificateVerify possession alone is not a MITM defense.
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::crypto::aws_lc_rs;
+use rustls::crypto::{aws_lc_rs, CryptoProvider};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, ServerConfig};
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::PrivatePkcs8KeyDer;
 use std::sync::Arc;
 use zeroize::Zeroizing;
+
+/// Explicit opt-in to skip CA-chain and hostname validation.
+///
+/// Callers must fail closed if exporter extraction fails, bind that exporter
+/// into the SCRAM exchange, and verify the pinned Ed25519 server identity.
+#[derive(Clone, Copy, Debug)]
+pub struct AppLayerServerAuth {
+    _private: (),
+}
+
+impl AppLayerServerAuth {
+    /// Opt in when application-level exporter-bound server authentication is
+    /// performed before using the connection or resuming a session.
+    pub const fn exporter_bound() -> Self {
+        Self { _private: () }
+    }
+}
 
 /// Errors from TLS config / cert material construction.
 #[derive(Debug, thiserror::Error)]
@@ -78,17 +100,21 @@ pub fn make_server_config_from_pem(
     Ok(Arc::new(cfg))
 }
 
-/// Build a TLS 1.3 client config that **accepts any cert** — identity is
-/// instead pinned by the application via Ed25519 (spec §6.3 +
-/// TRANSPORT_TCP §3.3). TLS 1.3 only — no fallback to TLS 1.2 (§3.1).
-pub fn make_client_config_no_ca() -> Result<Arc<ClientConfig>, TlsConfigError> {
-    // Explicit provider: never consults (or panics on the absence of) the
-    // process-default provider.
+/// Build a TLS 1.3 client config that **accepts any cert chain and hostname** —
+/// the pinned Ed25519 identity is instead verified at the protocol layer
+/// (spec §6.3 + TRANSPORT_TCP §3.3). TLS 1.3 only — no fallback to TLS 1.2
+/// (§3.1). An explicit call-site token is required for this intentional bypass.
+pub fn make_client_config_app_authenticated(
+    _auth: AppLayerServerAuth,
+) -> Result<Arc<ClientConfig>, TlsConfigError> {
     let provider = Arc::new(aws_lc_rs::default_provider());
+    let verifier = Arc::new(AppAuthenticatedServerVerifier {
+        provider: provider.clone(),
+    });
     let cfg = ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(NoCaVerify))
+        .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
     Ok(Arc::new(cfg))
 }
@@ -96,15 +122,14 @@ pub fn make_client_config_no_ca() -> Result<Arc<ClientConfig>, TlsConfigError> {
 /// Extract the 32-byte TLS exporter for spec §4.2 channel binding.
 ///
 /// Generic over `T: rustls::ConnectionTrait` (covers both client and server
-/// post-handshake states). Returns `None` if the handshake is not yet
-/// completed or if the cipher suite does not support exporter (TLS 1.3
-/// always supports it).
-pub fn extract_tls_exporter(connection: &impl ConnectionExporter) -> Option<[u8; 32]> {
+/// post-handshake states). Returns the underlying rustls error so callers can
+/// fail closed when the handshake is incomplete or exporter is unavailable.
+pub fn extract_tls_exporter(
+    connection: &impl ConnectionExporter,
+) -> Result<[u8; 32], rustls::Error> {
     let mut out = [0u8; 32];
-    connection
-        .export_keying_material(&mut out, EXPORTER_LABEL, Some(EXPORTER_CONTEXT))
-        .ok()?;
-    Some(out)
+    connection.export_keying_material(&mut out, EXPORTER_LABEL, Some(EXPORTER_CONTEXT))?;
+    Ok(out)
 }
 
 /// Trait that tokio-rustls + rustls connections both implement to expose
@@ -128,7 +153,7 @@ impl<S> ConnectionExporter for tokio_rustls::server::TlsStream<S> {
         context: Option<&[u8]>,
     ) -> Result<(), rustls::Error> {
         let (_, conn) = self.get_ref();
-        conn.export_keying_material(&mut out[..], label, context)?;
+        conn.export_keying_material(out, label, context)?;
         Ok(())
     }
 }
@@ -141,17 +166,24 @@ impl<S> ConnectionExporter for tokio_rustls::client::TlsStream<S> {
         context: Option<&[u8]>,
     ) -> Result<(), rustls::Error> {
         let (_, conn) = self.get_ref();
-        conn.export_keying_material(&mut out[..], label, context)?;
+        conn.export_keying_material(out, label, context)?;
         Ok(())
     }
 }
 
-/// `ServerCertVerifier` that accepts any cert — identity is pinned out-of-band
-/// at the application layer.
+/// `ServerCertVerifier` that deliberately skips CA-chain and hostname checks;
+/// the caller authenticates the pinned identity out-of-band.
 #[derive(Debug)]
-struct NoCaVerify;
+pub(crate) struct AppAuthenticatedServerVerifier {
+    provider: Arc<CryptoProvider>,
+}
 
-impl ServerCertVerifier for NoCaVerify {
+#[cfg(test)]
+pub(crate) fn verifier_for_tests(provider: Arc<CryptoProvider>) -> AppAuthenticatedServerVerifier {
+    AppAuthenticatedServerVerifier { provider }
+}
+
+impl ServerCertVerifier for AppAuthenticatedServerVerifier {
     fn verify_server_cert(
         &self,
         _end_entity: &CertificateDer<'_>,
@@ -160,9 +192,10 @@ impl ServerCertVerifier for NoCaVerify {
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
+        // Intentionally skip CA-chain and hostname validation; the caller
+        // MUST authenticate the pinned Ed25519 identity with TLS exporter proofs.
         Ok(ServerCertVerified::assertion())
     }
-
     fn verify_tls12_signature(
         &self,
         _message: &[u8],
@@ -173,24 +206,22 @@ impl ServerCertVerifier for NoCaVerify {
             rustls::PeerIncompatible::Tls12NotOffered,
         ))
     }
-
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
     }
-
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
-            rustls::SignatureScheme::ED25519,
-            rustls::SignatureScheme::RSA_PSS_SHA256,
-            rustls::SignatureScheme::RSA_PSS_SHA384,
-            rustls::SignatureScheme::RSA_PSS_SHA512,
-        ]
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
