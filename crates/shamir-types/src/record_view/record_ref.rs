@@ -228,9 +228,10 @@ impl RecordRef for InnerValue {
 // impl RecordRef for RecordView<'_>
 // ---------------------------------------------------------------------------
 
-/// Classify a `RecordValue` variant into [`Kind`]. The lens cannot
-/// distinguish Dec/Big from Str (they share the same msgpack str marker),
-/// so all string-marker values map to `Scalar`.
+/// Classify a `RecordValue` variant into [`Kind`]. The v1 wire format encodes
+/// both `Dec` and `Big` as decimal strings, indistinguishable here from ordinary
+/// strings, so those v1 values map to `Scalar`. The raw `Big` marker is retained
+/// distinctly and maps to `NonComparable`.
 #[inline]
 fn record_value_to_kind(v: &RecordValue<'_>) -> Kind {
     match v {
@@ -240,6 +241,7 @@ fn record_value_to_kind(v: &RecordValue<'_>) -> Kind {
         | RecordValue::F64(_)
         | RecordValue::Str(_)
         | RecordValue::Bin(_) => Kind::Scalar,
+        RecordValue::Big(_) => Kind::NonComparable,
         RecordValue::Arr(_) | RecordValue::Map(_) => Kind::Container,
     }
 }
@@ -249,30 +251,21 @@ impl RecordRef for RecordView<'_> {
         if path.is_empty() {
             return None;
         }
-        // `get_path` returns an owned `RecordValue<'a>` whose borrowed data
-        // (Str's Cow::Borrowed, Bin's &[u8]) point into `self`'s buffer.
-        // We match directly and extract only Copy / buffer-borrowed data so
-        // the returned `ScalarRef` borrows from `self`, not from the local.
+        // The parser borrows string data from the record buffer; any defensive
+        // owned-string branch cannot lend a reference tied to `self`, so skip it.
         match self.get_path(path)? {
             RecordValue::Null => Some(ScalarRef::Null),
             RecordValue::Bool(b) => Some(ScalarRef::Bool(b)),
             RecordValue::Int(i) => Some(ScalarRef::Int(i)),
             RecordValue::F64(f) => Some(ScalarRef::F64(f)),
+            RecordValue::Big(_) => None,
             RecordValue::Str(cow) => {
-                // For Cow::Borrowed the &str borrows from the msgpack buffer
-                // (lifetime 'a). For Cow::Owned (the U64 > i64::MAX edge) we
-                // cannot return a borrow of a local owned String. That edge
-                // case is vanishingly rare (u64 > i64::MAX stored as Int) and
-                // not a comparable scalar in compare_values, so return None.
+                // Defensive owned case: it cannot be lent from this local value.
                 match cow {
                     std::borrow::Cow::Borrowed(s) => Some(ScalarRef::Str(s)),
                     std::borrow::Cow::Owned(_) => {
-                        // U64 > i64::MAX edge — the tree decoder maps this to
-                        // InnerValue::Str(decimal), which inner_to_scalar returns
-                        // as ScalarRef::Str. For parity, the lens should too, but
-                        // we cannot borrow an owned String here. This edge is not
-                        // reachable from normal InnerValue (which stores it as Int
-                        // or Str), so None is safe for the filter-compare path.
+                        // Do not attribute this branch to a particular wire scalar;
+                        // ordinary parsed strings are borrowed from the input.
                         None
                     }
                 }
@@ -307,6 +300,7 @@ impl RecordRef for RecordView<'_> {
                         RecordValue::Bool(b) => Some(ScalarRef::Bool(*b)),
                         RecordValue::Int(i) => Some(ScalarRef::Int(*i)),
                         RecordValue::F64(fv) => Some(ScalarRef::F64(*fv)),
+                        RecordValue::Big(_) => None,
                         RecordValue::Str(cow) => match cow {
                             std::borrow::Cow::Borrowed(s) => Some(ScalarRef::Str(s)),
                             std::borrow::Cow::Owned(_) => None,
