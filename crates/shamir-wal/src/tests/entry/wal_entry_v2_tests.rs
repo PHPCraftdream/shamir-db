@@ -1,3 +1,4 @@
+use bincode::Options;
 use bytes::Bytes;
 use shamir_types::types::record_id::RecordId;
 
@@ -49,6 +50,59 @@ fn sample_entry() -> WalEntryV2 {
         interner_delta: vec![],
         event: None,
     }
+}
+
+#[test]
+fn frame_header_validation_is_cheap_and_version_aware() {
+    assert!(WalEntryV2::validate_frame_header(b"").is_err());
+    assert!(WalEntryV2::validate_frame_header(b"WAL2").is_err());
+    assert!(WalEntryV2::validate_frame_header(b"NOPE\x01").is_err());
+    assert!(WalEntryV2::validate_frame_header(b"WAL2\xff").is_err());
+    for version in [WAL_V2_VERSION_LEGACY, 2, WAL_V2_VERSION] {
+        let bytes = [WAL_V2_MAGIC.as_slice(), &[version], b"malformed body"].concat();
+        assert!(WalEntryV2::validate_frame_header(&bytes).is_ok());
+        assert!(WalEntryV2::decode(&bytes).is_err());
+    }
+}
+
+#[test]
+fn rv_wal_9cb60c5a_rejects_truly_ambiguous_legacy_shapes() {
+    // At these overlapping offsets, the pre-HIGH-5 layout sees Delete then
+    // IndexDel, while the post-HIGH-5 layout sees Put; both consume all bytes.
+    let mut body = Vec::new();
+    body.extend_from_slice(&1u64.to_le_bytes()); // txn id
+    body.extend_from_slice(&2u64.to_le_bytes()); // repo id
+    body.extend_from_slice(&3u64.to_le_bytes()); // started_at_ns
+    body.extend_from_slice(&2u64.to_le_bytes()); // ops count / post commit version
+    body.extend_from_slice(&1u32.to_le_bytes()); // Delete tag
+    body.extend_from_slice(&0u64.to_le_bytes()); // table id / post ops count
+    body.extend_from_slice(&16u64.to_le_bytes()); // rid length / post Put tag + table
+    body.extend_from_slice(&16u64.to_le_bytes()); // first eight rid bytes / post rid length
+    body.extend_from_slice(&0u64.to_le_bytes()); // remaining rid bytes
+    body.extend_from_slice(&3u32.to_le_bytes()); // IndexDel tag
+    body.extend_from_slice(&(16u64 << 32).to_le_bytes()); // table id
+    body.extend_from_slice(&0u32.to_le_bytes()); // idx id
+    body.extend_from_slice(&8u64.to_le_bytes()); // key length / post body length
+    body.extend_from_slice(&0u64.to_le_bytes()); // key bytes / post body bytes
+    assert_eq!(body.len(), 100);
+
+    let options = || {
+        bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .reject_trailing_bytes()
+    };
+    let pre: Result<(u64, u64, u64, Vec<WalOpV2>), _> = options().deserialize(&body);
+    let post: Result<(u64, u64, u64, u64, Vec<WalOpV2>), _> = options().deserialize(&body);
+    assert_eq!(pre.unwrap().3.len(), 2);
+    let decoded_post = post.unwrap();
+    assert_eq!(decoded_post.3, 2);
+    assert_eq!(decoded_post.4.len(), 1);
+
+    let mut frame = WAL_V2_MAGIC.to_vec();
+    frame.push(WAL_V2_VERSION_LEGACY);
+    frame.extend_from_slice(&body);
+    let error = WalEntryV2::decode(&frame).unwrap_err().to_string();
+    assert!(error.contains("ambiguous legacy shape"), "{error}");
 }
 
 #[test]
@@ -154,6 +208,56 @@ fn round_trip_v2_empty_delta() {
     let decoded = WalEntryV2::decode(&encoded).unwrap();
     assert_eq!(entry, decoded);
     assert!(decoded.interner_delta.is_empty());
+}
+
+#[test]
+fn rv_wal_9cb60c5a_decodes_pre_high5_v1_shape_with_zero_version() {
+    let mut bytes = WAL_V2_MAGIC.to_vec();
+    bytes.push(WAL_V2_VERSION_LEGACY);
+    bytes.extend_from_slice(&9u64.to_le_bytes());
+    bytes.extend_from_slice(&3u64.to_le_bytes());
+    bytes.extend_from_slice(&17u64.to_le_bytes());
+    bytes.extend_from_slice(&1u64.to_le_bytes()); // one op
+    bytes.extend_from_slice(&1u32.to_le_bytes()); // Delete variant
+    bytes.extend_from_slice(&3u64.to_le_bytes()); // table id
+    bytes.extend_from_slice(&16u64.to_le_bytes());
+    bytes.extend_from_slice(&rid(1).0);
+    let decoded = WalEntryV2::decode(&bytes).unwrap();
+    assert_eq!(decoded.txn_id, 9);
+    assert_eq!(decoded.repo_id_interned, 3);
+    assert_eq!(decoded.started_at_ns, 17);
+    assert_eq!(decoded.commit_version, 0);
+    assert_eq!(
+        decoded.ops,
+        vec![WalOpV2::Delete {
+            table_id_interned: 3,
+            rid: rid(1)
+        }]
+    );
+    assert!(decoded.interner_delta.is_empty());
+    assert_eq!(decoded.event, None);
+}
+
+#[test]
+fn rv_wal_9cb60c5a_pre_high5_v1_empty_and_exact_consumption() {
+    let mut bytes = WAL_V2_MAGIC.to_vec();
+    bytes.push(WAL_V2_VERSION_LEGACY);
+    bytes.extend_from_slice(&9u64.to_le_bytes());
+    bytes.extend_from_slice(&3u64.to_le_bytes());
+    bytes.extend_from_slice(&17u64.to_le_bytes());
+    bytes.extend_from_slice(&0u64.to_le_bytes());
+    let decoded = WalEntryV2::decode(&bytes).unwrap();
+    assert_eq!(decoded.txn_id, 9);
+    assert_eq!(decoded.repo_id_interned, 3);
+    assert_eq!(decoded.started_at_ns, 17);
+    assert_eq!(decoded.commit_version, 0);
+    assert!(decoded.ops.is_empty());
+    assert!(decoded.interner_delta.is_empty());
+    assert_eq!(decoded.event, None);
+    assert!(WalEntryV2::decode(&bytes[..bytes.len() - 1]).is_err());
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(WalEntryV2::decode(&trailing).is_err());
 }
 
 #[test]

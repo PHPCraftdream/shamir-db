@@ -300,10 +300,10 @@ fn test_large_unsigned_int() {
         InnerValue::Map(m) => {
             let key = interner.touch_ind("large").unwrap().into_key();
             match m.get(&key) {
-                Some(InnerValue::Str(s)) => {
-                    assert_eq!(s, &large_u64.to_string());
+                Some(InnerValue::Big(b)) => {
+                    assert_eq!(b, &num_bigint::BigInt::from(large_u64));
                 }
-                other => panic!("Expected String for large unsigned int, got {:?}", other),
+                other => panic!("Expected Big for large unsigned int, got {:?}", other),
             }
         }
         _ => panic!("Expected Map"),
@@ -561,9 +561,9 @@ fn test_msgpack_non_string_map_key_error() {
 }
 
 #[test]
-fn test_msgpack_large_uint_as_string() {
+fn test_msgpack_large_uint_as_big() {
     let interner = Interner::new();
-    // u64 > i64::MAX → stored as String
+    // u64 > i64::MAX → exact Big (ruling RU7)
     let large = i64::MAX as u64 + 1;
     let test_data = rmpv::Value::Map(vec![(rmpv::Value::from("v"), rmpv::Value::from(large))]);
     let mut buf = Vec::new();
@@ -573,8 +573,8 @@ fn test_msgpack_large_uint_as_string() {
         InnerValue::Map(m) => {
             let k = interner.touch_ind("v").unwrap().into_key();
             match m.get(&k) {
-                Some(InnerValue::Str(s)) => assert_eq!(s, &large.to_string()),
-                other => panic!("Expected Str, got {:?}", other),
+                Some(InnerValue::Big(b)) => assert_eq!(b, &num_bigint::BigInt::from(large)),
+                other => panic!("Expected Big, got {:?}", other),
             }
         }
         _ => panic!("Expected Map"),

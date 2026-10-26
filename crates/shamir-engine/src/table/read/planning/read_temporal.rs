@@ -66,7 +66,7 @@ impl TableManager {
         // ── 1. Resolve `at` to a concrete version number. ──────────────────
         let version: u64 = match at {
             At::Version(v) => v,
-            At::Timestamp(t) => match mvcc.version_at_or_before_ts(t).await {
+            At::Timestamp(t) => match mvcc.version_at_or_before_ts(t).await? {
                 Some(v) => v,
                 None => {
                     return Err(shamir_storage::error::DbError::Validation(format!(

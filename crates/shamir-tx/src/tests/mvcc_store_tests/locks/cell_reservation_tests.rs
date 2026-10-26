@@ -30,6 +30,23 @@ fn cell_state(mvcc: &MvccStore, key: &[u8]) -> Option<(u64, u64)> {
 }
 
 #[tokio::test]
+async fn rv_tx_acff61d3_prune_preserves_reserved_zero_version_cell() {
+    let mvcc = make_mvcc();
+    let key = Bytes::from_static(b"reserved-prune");
+    assert!(mvcc.try_reserve(RecordKey::from(key.clone()), 0, 41));
+    let version = mvcc.gate.assign_next_version_guarded();
+    let floor = version.version();
+    version.commit();
+    mvcc.gate.mark_durable(floor);
+    assert!(mvcc.gate.min_alive() > 0);
+    assert!(floor > 0);
+    mvcc.prune_version_cache().await;
+
+    assert_eq!(cell_state(&mvcc, &key), Some((0, 41)));
+    assert!(!mvcc.try_reserve(RecordKey::from(key), 1, 42));
+}
+
+#[tokio::test]
 async fn try_reserve_wins_on_free_cell() {
     let mvcc = make_mvcc();
     let key = Bytes::from_static(b"k");
