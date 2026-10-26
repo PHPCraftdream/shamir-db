@@ -116,7 +116,10 @@ async fn materialized_rows_and_ts_are_durable_before_publish() {
         Bytes::from_static(b"v2")
     );
     // Commit ts landed in the ts index (materialize updates it).
-    assert_eq!(mvcc.version_at_or_before_ts(u64::MAX).await, Some(2));
+    assert_eq!(
+        mvcc.version_at_or_before_ts(u64::MAX).await.unwrap(),
+        Some(2)
+    );
 
     // Publishing must not disturb the durable state.
     mvcc.publish_materialized(&ops, 2);
@@ -127,7 +130,10 @@ async fn materialized_rows_and_ts_are_durable_before_publish() {
             .unwrap(),
         Bytes::from_static(b"v2")
     );
-    assert_eq!(mvcc.version_at_or_before_ts(u64::MAX).await, Some(2));
+    assert_eq!(
+        mvcc.version_at_or_before_ts(u64::MAX).await.unwrap(),
+        Some(2)
+    );
 }
 
 /// A tombstone materializes as an empty history row: invisible before
@@ -406,7 +412,7 @@ async fn older_published_history_visible_beside_unpublished_version() {
     // COMMIT-ts entry (including materialized v2) and the read paths apply
     // the floor on top. It must still resolve.
     assert_eq!(
-        mvcc.version_at_or_before_ts(u64::MAX).await,
+        mvcc.version_at_or_before_ts(u64::MAX).await.unwrap(),
         Some(2),
         "ts index sees the materialized commit ts; the read paths bound it"
     );

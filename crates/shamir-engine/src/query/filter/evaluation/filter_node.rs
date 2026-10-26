@@ -274,12 +274,8 @@ impl FilterNode {
                 //  1. the field is genuinely ABSENT (or descends through a
                 //     non-map) — `present_kind_at` also returns `None`.
                 //  2. the field IS present but is a non-comparable-as-scalar
-                //     leaf — `Dec`/`Big` in the tree, or a promoted
-                //     `u64 > i64::MAX` in the lens (`RecordValue::Str(Cow::Owned)`,
-                //     which `present_kind_at` reports as `Scalar` since the
-                //     lens cannot distinguish it from an ordinary string, but
-                //     `scalar_at` still can't borrow it). Case 2 falls back to
-                //     `materialize_at` (one owned leaf, off the common hot
+                //     leaf — `Dec`/`Big` in the tree and `Big(u64)` in the
+                //     lens. Case 2 falls back to `materialize_at` (one owned leaf, off the common hot
                 //     path — every ordinary Bool/Int/F64/Str/Bin field still
                 //     resolves via the zero-copy `scalar_at` above) + a single
                 //     `inner_value_to_query_value` conversion, mirroring the

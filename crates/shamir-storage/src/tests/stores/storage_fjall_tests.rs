@@ -100,6 +100,18 @@ async fn test_fjall_set_remove_no_flag() {
 }
 
 #[tokio::test]
+async fn rv_storage_995fd07d_submit_failures_are_reported() {
+    let closed = crate::storage_fjall::write_worker_test_seam::submit_closed()
+        .await
+        .unwrap_err();
+    assert!(closed.to_string().contains("channel closed"));
+    let dropped = crate::storage_fjall::write_worker_test_seam::submit_dropped_reply()
+        .await
+        .unwrap_err();
+    assert!(dropped.to_string().contains("dropped reply"));
+}
+
+#[tokio::test]
 async fn test_fjall_repo_basic() {
     let path = "./test_data/fjall_repo_basic";
     if std::path::Path::new(path).exists() {
