@@ -572,9 +572,19 @@ async fn rv_tx_d54d3ee5_failed_drain_releases_drain_exclusive() {
     retry
         .expect("guard released")
         .expect("retry drain must succeed once the fault is disarmed");
+    // The table-local drain writes history but leaves retiring the overlay to
+    // the repository coordinator (RV-TX-E5E0CC50): the entry stays until the
+    // watermark covers it.
+    assert_eq!(
+        mvcc.overlay_len(),
+        1,
+        "a table-local drain does not retire undurable overlay entries"
+    );
+    gate.mark_durable(v);
+    mvcc.gc_overlay_to(gate.durable_watermark());
     assert_eq!(
         mvcc.overlay_len(),
         0,
-        "the retry drain must have drained the overlay"
+        "the overlay retires once the coordinator advances the watermark"
     );
 }
