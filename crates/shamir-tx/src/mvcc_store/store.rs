@@ -159,10 +159,11 @@ pub struct MvccStore {
     /// `false` (no accumulated old versions from a snapshot epoch). Cleared
     /// after a full scan-path vacuum runs with `active_snapshots_empty()`.
     pub(crate) vacuum_needs_scan: AtomicBool,
-    /// Phase 3: in-memory ts-ordered index for O(log N) `version_at_or_before_ts`.
+    /// Phase 3: in-memory ts-ordered index for `version_at_or_before_ts`.
     /// Key: `(Reverse(ts_millis), Reverse(version))` — reversed so that a forward
     /// `range((Reverse(target_ts), Reverse(u64::MAX)).., &guard).next()` yields the
-    /// entry with the LARGEST ts ≤ target_ts in O(log N). Value is unit (the version
+    /// entry with the largest version whose ts ≤ target_ts, in O(log N + K), where
+    /// K is the number of qualifying timestamps. Value is unit (the version
     /// is embedded in the key). Rebuilt from `history` ts-keys on first query if empty.
     pub(crate) ts_index: TreeIndex<(Reverse<u64>, Reverse<u64>), ()>,
     /// Whether the ts_index has been populated from history (lazy rebuild on first query).
@@ -357,33 +358,28 @@ impl MvccStore {
 
     /// Phase 3: query the ts-index for the largest version whose commit ts ≤ target.
     /// Returns `None` if the index is empty or no entry satisfies the bound.
-    /// O(log N) via reversed-key forward range + `.next()`.
+    /// O(log N + K), where K is the number of timestamps at or below target.
     pub(crate) fn ts_index_query(&self, target_ts: u64) -> Option<u64> {
         let guard = scc::Guard::new();
-        // Reversed keys: (Reverse(ts), Reverse(version)) sorted ascending means
-        // largest ts first. range((Reverse(target_ts), Reverse(u64::MAX))..) yields
-        // entries where Reverse(ts) >= Reverse(target_ts) i.e. ts <= target_ts,
-        // starting from the largest such ts. `.next()` is O(log N).
         self.ts_index
             .range((Reverse(target_ts), Reverse(u64::MAX)).., &guard)
-            .next()
-            .map(|(k, _)| k.1 .0) // k.1 is Reverse(version), .0 extracts the u64
+            .map(|(k, _)| k.1 .0)
+            .max()
     }
 
     /// Phase 3: rebuild the ts-index from the history store's ts-keys.
     /// Called lazily on first `version_at_or_before_ts` if `ts_index_ready` is false.
-    pub(crate) async fn ts_index_rebuild(&self) {
+    pub(crate) async fn ts_index_rebuild(&self) -> DbResult<()> {
         use futures::StreamExt;
         use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 
+        // Clear any partial entries from a previous failed rebuild before retrying.
+        self.ts_index_ready.store(false, Ordering::Release);
         let stream = self.history.iter_stream(MAINT_SCAN_BATCH);
         futures::pin_mut!(stream);
 
         while let Some(batch) = stream.next().await {
-            let batch = match batch {
-                Ok(b) => b,
-                Err(_) => continue,
-            };
+            let batch = batch?;
             for (phys_key, val) in batch {
                 // ts-keys are exactly 9 bytes: [TS_TAG][version_be: 8].
                 if phys_key.len() != 9 || phys_key[0] != TS_TAG {
@@ -403,6 +399,7 @@ impl MvccStore {
             }
         }
         self.ts_index_ready.store(true, Ordering::Release);
+        Ok(())
     }
 
     /// Approximate number of live in-memory record cells (keys with a
@@ -607,7 +604,7 @@ impl MvccStore {
                 .await;
             return Err(e);
         }
-        // Phase 3: maintain the in-memory ts-index for O(log N) as-of queries.
+        // Phase 3: maintain the in-memory ts-index for as-of queries.
         self.ts_index_insert(ts_ms, new_v);
         // P1c: dual-write — populate the overlay with the SAME (key, version)
         // → value pair, AFTER the durable history write succeeds but BEFORE
@@ -637,7 +634,9 @@ impl MvccStore {
         // T1b.2 + L6: per-key count-aware vacuum reclaims superseded history
         // versions beyond the retention bound (floor: min_alive). old_v is the
         // prior version captured before publish_cell — enables targeted remove.
-        self.vacuum_key(&key_snapshot, old_v).await;
+        if self.vacuum_key(&key_snapshot, old_v).await.is_err() {
+            self.vacuum_needs_scan.store(true, Ordering::Release);
+        }
         if wait {
             self.strict_ack(new_v).await?;
         }
@@ -773,7 +772,9 @@ impl MvccStore {
         // T1b.2 + L6: per-key count-aware vacuum for every key in the batch.
         // old_versions[i] is the prior version captured before publish_cell.
         for (key, &old_v) in keys.iter().zip(old_versions.iter()) {
-            self.vacuum_key(key, old_v).await;
+            if self.vacuum_key(key, old_v).await.is_err() {
+                self.vacuum_needs_scan.store(true, Ordering::Release);
+            }
         }
         if wait {
             self.strict_ack(max_v).await?;
@@ -893,7 +894,9 @@ impl MvccStore {
         // Vacuum with old_v=0: append-only no-op in L6 fast path (CurrentOnly
         // + no snapshots), or scan path (independent of old_v) otherwise.
         for key in &keys {
-            self.vacuum_key(key, 0).await;
+            if self.vacuum_key(key, 0).await.is_err() {
+                self.vacuum_needs_scan.store(true, Ordering::Release);
+            }
         }
         if wait {
             self.strict_ack(max_v).await?;
@@ -957,7 +960,7 @@ impl MvccStore {
                 .await;
             return Err(e);
         }
-        // Phase 3: maintain the in-memory ts-index for O(log N) as-of queries.
+        // Phase 3: maintain the in-memory ts-index for as-of queries.
         self.ts_index_insert(ts_ms, new_v);
         // P1c: dual-write — overlay tombstone (empty `Bytes`, same convention
         // as history), AFTER the durable tombstone write succeeds and BEFORE
@@ -977,7 +980,9 @@ impl MvccStore {
         // T1b.2 + L6: per-key count-aware vacuum reclaims superseded history
         // versions beyond the retention bound (floor: min_alive). old_v is the
         // prior version captured before publish_cell — enables targeted remove.
-        self.vacuum_key(&key, old_v).await;
+        if self.vacuum_key(&key, old_v).await.is_err() {
+            self.vacuum_needs_scan.store(true, Ordering::Release);
+        }
         if wait {
             self.strict_ack(new_v).await?;
         }

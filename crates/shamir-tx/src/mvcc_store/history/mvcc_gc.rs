@@ -9,9 +9,31 @@ use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 
 use super::super::ts_key;
 use super::super::MvccStore;
-use crate::version_codec::encode_version_key;
+use crate::version_codec::{decode_version_key, encode_version_key};
 
 impl MvccStore {
+    async fn flush_history_reclaims(
+        &self,
+        removals: &mut Vec<KvOp>,
+        reclaimed: &mut Vec<(Vec<u8>, u64, Option<u64>)>,
+    ) -> DbResult<usize> {
+        if removals.is_empty() {
+            return Ok(0);
+        }
+        self.history.transact(std::mem::take(removals)).await?;
+        let reclaimed = std::mem::take(reclaimed);
+        let count = reclaimed.len();
+        for (orig, version, ts) in reclaimed {
+            if let Some(ts) = ts {
+                self.ts_index_remove(ts, version);
+            }
+            if version <= self.gate.durable_watermark() {
+                self.overlay.remove(&orig, version);
+            }
+        }
+        Ok(count)
+    }
+
     /// T1b.2 + T1c: per-key retention-aware eager vacuum. After a
     /// write/delete to `key`, reclaim that key's OLD history versions that
     /// BOTH the count cap AND the age cap agree to drop, subject to the
@@ -42,18 +64,16 @@ impl MvccStore {
     /// anchor rather than the eagerly published latest value.
     ///
     /// When a version is reclaimed, its `ts_key(version)` entry is also removed
-    /// (no orphan timestamps). Best-effort: errors are swallowed (a vacuum
-    /// failure must NOT fail the write that triggered it; the next write
-    /// retries).
+    /// (no orphan timestamps). Scan errors are returned to callers.
     /// L6 targeted-remove fast path parameter: `old_v` is the key's version
     /// BEFORE the current write (`current_version(key)` captured before
     /// `publish_cell`). `0` means append-only (no prior version) → vacuum is
     /// a no-op.
-    pub(crate) async fn vacuum_key(&self, key: &[u8], old_v: u64) {
+    pub(crate) async fn vacuum_key(&self, key: &[u8], old_v: u64) -> DbResult<()> {
         let policy = self.retention();
         // No upper bound on either axis → nothing to reclaim.
         if policy.max_count.is_none() && policy.max_age_secs.is_none() {
-            return;
+            return Ok(());
         }
 
         // L6 fast path: CurrentOnly retention + no live snapshots + no
@@ -99,7 +119,7 @@ impl MvccStore {
             && !self.vacuum_needs_scan.load(Ordering::Acquire)
         {
             if old_v == 0 {
-                return; // append-only, no prior version
+                return Ok(()); // append-only, no prior version
             }
             // A10: atomically defer old_v. Since old_v <= W, it replaces the
             // previous anchor for fresh snapshots; the opening barrier also
@@ -112,13 +132,12 @@ impl MvccStore {
                     let ts = self.lookup_ts(deferred).await;
                     // RV-TX-088DE4B5: one batched transact instead of two
                     // individual removals on the write hot path.
-                    let _ = self
-                        .history
+                    self.history
                         .transact(vec![
                             KvOp::Remove(encode_version_key(key, deferred).into()),
                             KvOp::Remove(ts_key(deferred).into()),
                         ])
-                        .await;
+                        .await?;
                     if let Some(ts) = ts {
                         self.ts_index_remove(ts, deferred);
                     }
@@ -129,7 +148,7 @@ impl MvccStore {
                     }
                 }
             }
-            return;
+            return Ok(());
         }
 
         // A10 barrier active: a reader is mid-registration. We can still
@@ -147,7 +166,7 @@ impl MvccStore {
         {
             // Update bookkeeping only — no physical deletes.
             let _ = self.swap_vacuum_anchor(key, old_v);
-            return;
+            return Ok(());
         }
 
         // L6: if a snapshot is active, set the flag so the targeted fast path
@@ -182,7 +201,7 @@ impl MvccStore {
         // Collect (version, physical_key) for all history entries of this key.
         let mut entries: Vec<(u64, Bytes)> = Vec::new();
         while let Some(batch) = stream.next().await {
-            for (phys_key, _val) in batch.unwrap_or_default() {
+            for (phys_key, _val) in batch? {
                 if let Some((_, version)) = crate::version_codec::decode_version_key(&phys_key) {
                     // Boundary: store keys are `RecordKey`; this local entries
                     // vec is `Bytes` (byte-identical conversion).
@@ -270,7 +289,7 @@ impl MvccStore {
             reclaimed.push((*version, reclaimed_ts));
         }
         if !removals.is_empty() {
-            let _ = self.history.transact(removals).await;
+            self.history.transact(removals).await?;
         }
         for (version, reclaimed_ts) in reclaimed {
             if let Some(ts) = reclaimed_ts {
@@ -298,6 +317,7 @@ impl MvccStore {
         {
             self.vacuum_needs_scan.store(false, Ordering::Release);
         }
+        Ok(())
     }
 
     /// cancel-safe: NO — Phase 1 scans the history stream; Phase 2
@@ -330,68 +350,60 @@ impl MvccStore {
     /// its `ts_key(version)` is also removed so timestamps don't outlive their
     /// versions.
     pub async fn gc_below(&self, min_version: u64) -> DbResult<usize> {
-        use crate::version_codec::decode_version_key;
-
-        // Phase 1: scan all history entries, group by original key.
-        // ts-keys are skipped: decode_version_key returns None for them.
+        // Two scans retain only one anchor version per distinct key; deletion
+        // is streamed in fixed-size storage batches, never a per-key history Vec.
         let stream = self.history.iter_stream(MAINT_SCAN_BATCH);
         futures::pin_mut!(stream);
 
-        // Collect: original_key → Vec<(version, physical_key)>
-        let mut per_key: TFxMap<Vec<u8>, Vec<(u64, Bytes)>> = TFxMap::default();
-
+        let mut newest_by_key: TFxMap<Vec<u8>, u64> = TFxMap::default();
         while let Some(batch) = stream.next().await {
             for (phys_key, _value) in batch? {
                 if let Some((orig, version)) = decode_version_key(&phys_key) {
                     if version < min_version {
-                        per_key
+                        newest_by_key
                             .entry(orig.to_vec())
-                            .or_default()
-                            .push((version, phys_key.into()));
+                            .and_modify(|current| *current = (*current).max(version))
+                            .or_insert(version);
                     }
                 }
             }
         }
 
-        // Phase 2: for each key, sort by version, keep the latest (anchor),
-        // delete the rest (+ each deleted version's ts-key).
-        // C1: skip the current version — it is SACRED.
+        // Bound removal operations to one scan batch. The version anchor map
+        // is necessarily O(distinct keys); candidate versions are not retained.
+        let mut removals: Vec<KvOp> = Vec::with_capacity(MAINT_SCAN_BATCH * 2);
+        let mut reclaimed: Vec<(Vec<u8>, u64, Option<u64>)> = Vec::with_capacity(MAINT_SCAN_BATCH);
         let mut deleted = 0usize;
-        for (orig_key, mut entries) in per_key {
-            let cur_v = self.current_version(&orig_key);
-            if entries.len() <= 1 {
-                // Only one entry — it's the anchor, keep it.
-                continue;
-            }
-            entries.sort_by_key(|(v, _)| *v);
-            // Keep the last (highest version < min_version), delete the rest.
-            let to_delete = &entries[..entries.len() - 1];
-            for (version, phys_key) in to_delete {
-                // C1 SACRED: never reclaim the current version.
-                if *version == cur_v {
+        let stream = self.history.iter_stream(MAINT_SCAN_BATCH);
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            for (phys_key, _value) in batch? {
+                let Some((orig, version)) = decode_version_key(&phys_key) else {
+                    continue;
+                };
+                if version >= min_version
+                    || newest_by_key.get(orig) == Some(&version)
+                    || self.current_version(orig) == version
+                {
                     continue;
                 }
-                // Audit 2.1: capture ts before removal to prune ts-index in lockstep.
-                let reclaimed_ts = self.lookup_ts(*version).await;
-                let _ = self.history.remove_no_flag(phys_key.clone().into()).await;
-                // T1c: remove the ts-key in lockstep so timestamps don't
-                // outlive their versions.
-                let _ = self.history.remove_no_flag(ts_key(*version).into()).await;
-                if let Some(ts) = reclaimed_ts {
-                    self.ts_index_remove(ts, *version);
+                let ts = self.lookup_ts(version).await;
+                let original = orig.to_vec();
+                removals.push(KvOp::Remove(phys_key));
+                removals.push(KvOp::Remove(ts_key(version).into()));
+                reclaimed.push((original, version, ts));
+                if reclaimed.len() == MAINT_SCAN_BATCH {
+                    deleted += self
+                        .flush_history_reclaims(&mut removals, &mut reclaimed)
+                        .await?;
                 }
-                // P1c: drop the same (key, version) from the overlay in lockstep.
-                // D2 P1d-2b: gate on durable_watermark — never drop an undrained
-                // version (the overlay holds its only copy until the drainer
-                // lands it in history). Full overlay-GC is P1e.
-                if *version <= self.gate.durable_watermark() {
-                    self.overlay.remove(&orig_key, *version);
-                }
-                deleted += 1;
             }
         }
+        deleted += self
+            .flush_history_reclaims(&mut removals, &mut reclaimed)
+            .await?;
 
-        // Phase 3: prune the in-memory version cache (III.3). Uses the
+        // Phase 3: prune the in-memory version cache.
         // gate's `min_alive()`, independent of the `min_version` history
         // threshold (see `prune_version_cache` for why).
         self.prune_version_cache().await;
@@ -426,83 +438,64 @@ impl MvccStore {
     /// lockstep so timestamps never outlive their versions. Returns the
     /// number of history version entries deleted.
     pub async fn purge_below_ts(&self, cutoff_millis: u64) -> DbResult<usize> {
-        use crate::version_codec::decode_version_key;
-
         // Phase 1: scan all history version entries, group by key.
         // ts-keys ([TS_TAG][v_be], 9 bytes) are skipped: decode_version_key
         // returns None for them (separator 0x00 != VERSION_SEP).
+        // Snapshot once so both scans use the same retention boundary.
+        let min_alive = self.gate.min_alive();
         let stream = self.history.iter_stream(MAINT_SCAN_BATCH);
         futures::pin_mut!(stream);
 
-        let mut per_key: TFxMap<Vec<u8>, Vec<(u64, Bytes)>> = TFxMap::default();
-
+        let mut anchors: TFxMap<Vec<u8>, u64> = TFxMap::default();
         while let Some(batch) = stream.next().await {
             for (phys_key, _value) in batch? {
                 if let Some((orig, version)) = decode_version_key(&phys_key) {
-                    per_key
-                        .entry(orig.to_vec())
-                        .or_default()
-                        .push((version, phys_key.into()));
+                    if version < min_alive {
+                        anchors
+                            .entry(orig.to_vec())
+                            .and_modify(|v| *v = (*v).max(version))
+                            .or_insert(version);
+                    }
                 }
             }
         }
 
-        // Sacred floor: the oldest version a live snapshot may need.
-        let min_alive = self.gate.min_alive();
-
-        // Phase 2: per key, sort ascending, compute the anchor (largest
-        // version < min_alive), then reclaim eligible versions.
-        // C1: skip the current version — it is SACRED.
         let mut deleted = 0usize;
-        for (orig_key, mut entries) in per_key {
-            let cur_v = self.current_version(&orig_key);
-            entries.sort_by_key(|(v, _)| *v);
-            // anchor = largest version < min_alive (None if all are
-            // >= min_alive). Keeping a single such version lets the
-            // oldest live snapshot still read a key last-written below
-            // min_alive via a history range scan.
-            let anchor: Option<u64> = entries
-                .iter()
-                .map(|(v, _)| *v)
-                .filter(|v| *v < min_alive)
-                .max();
-
-            for (version, phys_key) in &entries {
-                // C1 SACRED: never reclaim the current version.
-                if *version == cur_v {
-                    continue;
-                }
-                // Sacred: never reclaim a snapshot-pinned version.
-                if *version >= min_alive {
-                    continue;
-                }
-                // Sacred: never reclaim the single anchor.
-                if Some(*version) == anchor {
-                    continue;
-                }
-                // ts predicate: unknown ts ⇒ KEEP (can't prove old enough).
-                let ts = self.lookup_ts(*version).await;
-                let Some(ts_val) = ts else {
+        let mut removals: Vec<KvOp> = Vec::with_capacity(MAINT_SCAN_BATCH * 2);
+        let mut reclaimed: Vec<(Vec<u8>, u64, Option<u64>)> = Vec::with_capacity(MAINT_SCAN_BATCH);
+        let stream = self.history.iter_stream(MAINT_SCAN_BATCH);
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            for (phys_key, _value) in batch? {
+                let Some((orig, version)) = decode_version_key(&phys_key) else {
                     continue;
                 };
-                if ts_val >= cutoff_millis {
+                if version >= min_alive
+                    || anchors.get(orig).is_some_and(|v| *v == version)
+                    || self.current_version(orig) == version
+                {
                     continue;
                 }
-                // All guards pass → reclaim the version AND its ts-key.
-                let _ = self.history.remove_no_flag(phys_key.clone().into()).await;
-                let _ = self.history.remove_no_flag(ts_key(*version).into()).await;
-                // Audit 2.1: prune the ts-index entry in lockstep (ts_val known).
-                self.ts_index_remove(ts_val, *version);
-                // P1c: drop the same (key, version) from the overlay in lockstep.
-                // D2 P1d-2b: gate on durable_watermark — never drop an undrained
-                // version (the overlay holds its only copy until the drainer
-                // lands it in history). Full overlay-GC is P1e.
-                if *version <= self.gate.durable_watermark() {
-                    self.overlay.remove(&orig_key, *version);
+                let Some(ts) = self.lookup_ts(version).await else {
+                    continue;
+                };
+                if ts >= cutoff_millis {
+                    continue;
                 }
-                deleted += 1;
+                let original = orig.to_vec();
+                removals.push(KvOp::Remove(phys_key));
+                removals.push(KvOp::Remove(ts_key(version).into()));
+                reclaimed.push((original, version, Some(ts)));
+                if reclaimed.len() == MAINT_SCAN_BATCH {
+                    deleted += self
+                        .flush_history_reclaims(&mut removals, &mut reclaimed)
+                        .await?;
+                }
             }
         }
+        deleted += self
+            .flush_history_reclaims(&mut removals, &mut reclaimed)
+            .await?;
 
         Ok(deleted)
     }
@@ -562,7 +555,8 @@ impl MvccStore {
     /// walk is acceptable here — this is the off-hot-path GC prune.
     pub(crate) async fn prune_version_cache(&self) {
         let min_alive = self.gate.min_alive();
-        self.cells.retain_sync(|_key, c| c.version >= min_alive);
+        self.cells
+            .retain_sync(|_key, c| c.version >= min_alive || c.reserved_by != 0);
     }
 
     /// cancel-safe: NO — delegates to `gc_below`, which is non-cancel-

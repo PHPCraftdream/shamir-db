@@ -141,7 +141,10 @@ async fn as_of_real_read_bounds_materialized_unpublished_version() {
     // The ts index is publication-unaware: it DOES resolve to the
     // unpublished v2 — this is exactly what the timestamp route feeds the
     // gate check below.
-    assert_eq!(mvcc.version_at_or_before_ts(u64::MAX).await, Some(2));
+    assert_eq!(
+        mvcc.version_at_or_before_ts(u64::MAX).await.unwrap(),
+        Some(2)
+    );
 
     // ── Published version: the real AsOf read returns ONLY the v1 row. ──
     let result = read_version(&table, 1).await.unwrap();

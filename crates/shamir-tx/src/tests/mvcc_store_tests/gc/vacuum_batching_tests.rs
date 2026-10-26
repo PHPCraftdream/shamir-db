@@ -15,15 +15,17 @@ use bytes::Bytes;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::{KvOp, RecordKey, Store};
+use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 
 use super::helpers::{count_history_entries, make_gate};
 use crate::mvcc_store::MvccStore;
 use crate::mvcc_store::Retention;
+use crate::version_codec::encode_version_key;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use futures::stream::Stream;
+use futures::stream::{self, Stream, StreamExt};
 
 /// Counts `remove_no_flag` calls, `Remove` ops and invocations of
 /// `transact`, and ts-key `get` reads (ts-key shape: 9 bytes, first byte
@@ -32,10 +34,14 @@ struct IoCountingStore {
     inner: InMemoryStore,
     remove_no_flag_calls: AtomicUsize,
     transact_remove_ops: AtomicUsize,
+    /// Largest number of Remove ops observed in one transact call.
+    max_transact_remove_ops: AtomicUsize,
     /// Incremented once per `transact` invocation, regardless of op count.
     transact_calls: AtomicUsize,
     /// Incremented in `get` when the key is a 9-byte ts key (TS_TAG 0x00).
     ts_reads: AtomicUsize,
+    removals_seen: Arc<AtomicUsize>,
+    streamed_reclaim: Arc<AtomicBool>,
 }
 
 impl IoCountingStore {
@@ -44,8 +50,11 @@ impl IoCountingStore {
             inner: InMemoryStore::new(),
             remove_no_flag_calls: AtomicUsize::new(0),
             transact_remove_ops: AtomicUsize::new(0),
+            max_transact_remove_ops: AtomicUsize::new(0),
             transact_calls: AtomicUsize::new(0),
             ts_reads: AtomicUsize::new(0),
+            removals_seen: Arc::new(AtomicUsize::new(0)),
+            streamed_reclaim: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -74,18 +83,40 @@ impl Store for IoCountingStore {
     }
     async fn transact(&self, ops: Vec<KvOp>) -> DbResult<()> {
         self.transact_calls.fetch_add(1, Ordering::SeqCst);
-        for op in &ops {
-            if matches!(op, KvOp::Remove(_)) {
-                self.transact_remove_ops.fetch_add(1, Ordering::SeqCst);
-            }
+        let remove_ops = ops
+            .iter()
+            .filter(|op| matches!(op, KvOp::Remove(_)))
+            .count();
+        self.transact_remove_ops
+            .fetch_add(remove_ops, Ordering::SeqCst);
+        if remove_ops > 0 {
+            self.removals_seen.fetch_add(remove_ops, Ordering::SeqCst);
         }
+        self.max_transact_remove_ops
+            .fetch_max(remove_ops, Ordering::SeqCst);
         self.inner.transact(ops).await
     }
     fn iter_stream(
         &self,
         batch_size: usize,
     ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
-        self.inner.iter_stream(batch_size)
+        let inner = self.inner.iter_stream(batch_size);
+        let removals_seen = Arc::clone(&self.removals_seen);
+        let streamed_reclaim = Arc::clone(&self.streamed_reclaim);
+        Box::pin(stream::unfold(
+            (inner, removals_seen, streamed_reclaim),
+            |(mut inner, removals_seen, streamed_reclaim)| async move {
+                match inner.next().await {
+                    Some(batch) => {
+                        if removals_seen.load(Ordering::SeqCst) > 0 {
+                            streamed_reclaim.store(true, Ordering::SeqCst);
+                        }
+                        Some((batch, (inner, removals_seen, streamed_reclaim)))
+                    }
+                    None => None,
+                }
+            },
+        ))
     }
     fn scan_prefix_stream(
         &self,
@@ -219,5 +250,62 @@ async fn rv_tx_088de4b5_fast_path_deferred_anchor_removal_is_batched() {
         history.remove_no_flag_calls.load(Ordering::SeqCst),
         0,
         "the fast path must not issue individual remove_no_flag round-trips"
+    );
+}
+
+#[tokio::test]
+async fn rv_tx_46cc0bd3_gc_reclaims_in_bounded_batches() {
+    assert_reclaims_in_bounded_batches(true).await;
+}
+
+#[tokio::test]
+async fn rv_tx_46cc0bd3_purge_reclaims_in_bounded_batches() {
+    assert_reclaims_in_bounded_batches(false).await;
+}
+
+async fn assert_reclaims_in_bounded_batches(gc: bool) {
+    let total = MAINT_SCAN_BATCH * 2 + 4;
+    let history = Arc::new(IoCountingStore::new());
+    let mvcc = MvccStore::new(history.clone() as Arc<dyn Store>, make_gate());
+    mvcc.set_retention(Retention::keep_history()).unwrap();
+    mvcc.set_test_now(1);
+
+    let key = RecordKey::from(Bytes::from_static(b"bounded_batch_key"));
+    for version in 1..=total {
+        mvcc.set_versioned(key.clone(), Bytes::from(format!("v{version}")))
+            .await
+            .unwrap();
+    }
+
+    let deleted = if gc {
+        mvcc.gc_below(total as u64).await.unwrap()
+    } else {
+        mvcc.purge_below_ts(2).await.unwrap()
+    };
+    assert_eq!(deleted, total - 2);
+    assert!(matches!(
+        history
+            .get(encode_version_key(key.as_ref(), 1).into())
+            .await,
+        Err(DbError::NotFound(_))
+    ));
+    for version in [total - 1, total] {
+        assert!(history
+            .get(encode_version_key(key.as_ref(), version as u64).into())
+            .await
+            .is_ok());
+    }
+    assert_eq!(mvcc.ts_index_len(), 2);
+    assert_eq!(
+        history.transact_remove_ops.load(Ordering::SeqCst),
+        2 * (total - 2)
+    );
+    let max_remove_ops = history.max_transact_remove_ops.load(Ordering::SeqCst);
+    assert!(max_remove_ops > 0);
+    assert!(max_remove_ops <= 2 * MAINT_SCAN_BATCH);
+    assert_eq!(history.remove_no_flag_calls.load(Ordering::SeqCst), 0);
+    assert!(
+        history.streamed_reclaim.load(Ordering::SeqCst),
+        "GC must continue streaming batches after removals begin"
     );
 }
