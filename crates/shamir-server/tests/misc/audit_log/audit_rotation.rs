@@ -34,7 +34,9 @@ async fn rotation_kicks_in_after_threshold() {
     // Write enough entries to comfortably cross 1 KB. Each log line is
     // ~250 bytes, so 10 entries = ~2.5 KB.
     for i in 0..10 {
-        appender.append_entry(&make_entry(i));
+        appender
+            .append_entry(&make_entry(i))
+            .expect("append succeeds");
     }
 
     // Wait a tick for any in-flight rotation rename to settle.
@@ -73,7 +75,9 @@ async fn no_rotation_below_threshold() {
     let appender =
         FjallAuditAppender::open_strict_with_rotation(temp.path(), Some(1_000_000), 0).unwrap();
     for i in 0..5 {
-        appender.append_entry(&make_entry(i));
+        appender
+            .append_entry(&make_entry(i))
+            .expect("append succeeds");
     }
     tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -95,7 +99,9 @@ async fn rotation_disabled_when_max_size_is_none() {
     let temp = TempDir::new().unwrap();
     let appender = FjallAuditAppender::open_strict_with_rotation(temp.path(), None, 0).unwrap();
     for i in 0..50 {
-        appender.append_entry(&make_entry(i));
+        appender
+            .append_entry(&make_entry(i))
+            .expect("append succeeds");
     }
     tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -131,17 +137,19 @@ async fn hmac_chain_is_intact_across_rotation() {
     // `prev_hmac → hmac` link (the make_entry helper above uses fake
     // hmacs and would fail verify_chain by design).
     for i in 0..30u64 {
-        let entry = chain.append(
-            "auth_success",
-            "tcp",
-            format!("user_{i:02}"),
-            "127.0.0.0/24",
-            [0u8; 8],
-            "ok",
-            Vec::new(),
-            1_000_000_000 + i,
-        );
-        appender.append_entry(&entry);
+        let entry = chain
+            .append(
+                "auth_success",
+                "tcp",
+                format!("user_{i:02}"),
+                "127.0.0.0/24",
+                [0u8; 8],
+                "ok",
+                Vec::new(),
+                1_000_000_000 + i,
+            )
+            .expect("valid audit test entry");
+        appender.append_entry(&entry).expect("append succeeds");
     }
     // Brief pause so any rename/file-handle settle.
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -219,7 +227,9 @@ async fn retention_sweep_deletes_old_rotated_files_only() {
 
     // Trigger a rotation (1 KB threshold → ~10 entries suffice).
     for i in 0..10 {
-        appender.append_entry(&make_entry(i));
+        appender
+            .append_entry(&make_entry(i))
+            .expect("append succeeds");
     }
 
     // The old file is gone; the recent file survives.
@@ -251,7 +261,9 @@ async fn retention_zero_means_no_sweep() {
     let appender = FjallAuditAppender::open_strict_with_rotation(dir, Some(1024), 0).unwrap();
 
     for i in 0..10 {
-        appender.append_entry(&make_entry(i));
+        appender
+            .append_entry(&make_entry(i))
+            .expect("append succeeds");
     }
 
     assert!(
@@ -279,7 +291,9 @@ async fn retention_sweep_failure_does_not_break_writes() {
     // Trigger a rotation — the sweep encounters the undeleatable directory,
     // logs a warn, but the write path is unaffected.
     for i in 0..10 {
-        appender.append_entry(&make_entry(i)); // must not panic
+        appender
+            .append_entry(&make_entry(i))
+            .expect("append succeeds"); // must not panic
     }
 
     // Writes landed successfully despite the sweep failure: the active log
@@ -326,7 +340,9 @@ async fn retention_sweep_runs_in_batched_mode_too() {
 
     // Write enough to cross the 1 KB threshold.
     for i in 0..10 {
-        appender.append_entry(&make_entry(i));
+        appender
+            .append_entry(&make_entry(i))
+            .expect("append succeeds");
     }
 
     // Wait for the CONDITION (the batched flusher landed the writes, rotated and

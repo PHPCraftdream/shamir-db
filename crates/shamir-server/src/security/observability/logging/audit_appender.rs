@@ -31,6 +31,10 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
+#[cfg(test)]
+#[path = "tests/audit_appender_tests_manifest.rs"]
+mod tests;
+
 /// Filename of the fixed-format audit log inside `data_dir`.
 const AUDIT_LOG_FILENAME: &str = "audit.log";
 /// Directory name of the fjall checkpoint database inside `data_dir`.
@@ -215,7 +219,25 @@ pub struct FjallAuditAppender {
     /// Checkpoint keyspace (single-row table).
     checkpoint_ks: Keyspace,
     mode: Durab,
+    /// Synchronous persistence gate — design (b). Sync-only, NEVER awaited
+    /// by async tasks: async drains enter it only inside `blocking_io`
+    /// (`block_in_place` on a multi-thread runtime) or the plain
+    /// synchronous section on a current-thread runtime / no runtime; there
+    /// is no scoped-thread bridge and no join waiting on a lock waiter.
+    /// Lock order: persistence_gate -> buffer (extraction dropped before
+    /// log I/O) -> log_file -> rotation. Checkpoint flush + metadata run
+    /// under the same gate.
+    persistence_gate: Mutex<()>,
+    failed: Mutex<Option<String>>,
     rotation: Option<RotationPolicy>,
+    #[cfg(test)]
+    after_extract_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    fail_next_flush: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    gate_contention_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    gate_acquired_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl core::fmt::Debug for FjallAuditAppender {
@@ -276,6 +298,16 @@ impl FjallAuditAppender {
             checkpoint_db,
             checkpoint_ks,
             mode: Durab::Strict,
+            persistence_gate: Mutex::new(()),
+            failed: Mutex::new(None),
+            #[cfg(test)]
+            after_extract_hook: Mutex::new(None),
+            #[cfg(test)]
+            fail_next_flush: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            gate_contention_hook: Mutex::new(None),
+            #[cfg(test)]
+            gate_acquired_hook: Mutex::new(None),
             rotation: max_size_bytes.map(|m| RotationPolicy {
                 max_size_bytes: m,
                 current_size: std::sync::atomic::AtomicU64::new(initial_size),
@@ -322,6 +354,16 @@ impl FjallAuditAppender {
                 shutdown: shutdown.clone(),
                 task: Mutex::new(None),
             },
+            persistence_gate: Mutex::new(()),
+            failed: Mutex::new(None),
+            #[cfg(test)]
+            after_extract_hook: Mutex::new(None),
+            #[cfg(test)]
+            fail_next_flush: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            gate_contention_hook: Mutex::new(None),
+            #[cfg(test)]
+            gate_acquired_hook: Mutex::new(None),
             rotation: max_size_bytes.map(|m| RotationPolicy {
                 max_size_bytes: m,
                 current_size: std::sync::atomic::AtomicU64::new(initial_size),
@@ -342,11 +384,16 @@ impl FjallAuditAppender {
                 let Some(strong) = weak.upgrade() else {
                     break;
                 };
+                let result = blocking_io(|| {
+                    let _guard = strong.acquire_persistence_gate();
+                    strong.flush_buffer_locked()
+                });
+                if let Err(error) = result {
+                    tracing::error!(%error, "audit background flush failed; appender latched fail-closed");
+                }
                 if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
-                    let _ = blocking_io(|| strong.flush_buffer());
                     break;
                 }
-                let _ = blocking_io(|| strong.flush_buffer());
             }
         });
 
@@ -433,10 +480,16 @@ impl FjallAuditAppender {
 
     /// Force flush buffered entries (batched mode) and fsync.
     pub async fn flush_now(&self) -> Result<(), AppenderError> {
+        if let Some(message) = self.failed.lock().as_ref() {
+            return Err(AppenderError::Io(std::io::Error::other(message.clone())));
+        }
         match &self.mode {
             Durab::Strict => Ok(()),
             Durab::Batched { notify, .. } => {
-                self.flush_buffer()?;
+                blocking_io(|| {
+                    let _guard = self.acquire_persistence_gate();
+                    self.flush_buffer_locked()
+                })?;
                 notify.notify_one();
                 Ok(())
             }
@@ -458,39 +511,70 @@ impl FjallAuditAppender {
             if let Some(h) = handle {
                 let _ = h.await;
             }
-            let _ = self.flush_buffer();
+            let _ = blocking_io(|| {
+                let _guard = self.acquire_persistence_gate();
+                self.flush_buffer_locked()
+            });
         }
     }
 
-    /// Drain in-memory buffer to disk + fsync. Cheap no-op in strict mode.
-    fn flush_buffer(&self) -> Result<(), AppenderError> {
-        let entries: Vec<AuditEntry> = match &self.mode {
+    /// Drain buffer while the caller owns the persistence gate.
+    fn flush_buffer_locked(&self) -> Result<(), AppenderError> {
+        let mut buffer = match &self.mode {
+            Durab::Batched { buffer, .. } => buffer.lock(),
             Durab::Strict => return Ok(()),
-            Durab::Batched { buffer, .. } => std::mem::take(&mut *buffer.lock()),
         };
+        if let Some(message) = self.failed.lock().as_ref() {
+            return Err(AppenderError::Io(std::io::Error::other(message.clone())));
+        }
+        let entries: Vec<AuditEntry> = std::mem::take(&mut *buffer);
+        drop(buffer);
+        #[cfg(test)]
+        let after_extract_hook = self.after_extract_hook.lock().take();
+        #[cfg(test)]
+        if let Some(hook) = after_extract_hook {
+            hook();
+        }
         if entries.is_empty() {
             return Ok(());
         }
-        let mut f = self.log_file.lock();
-        let mut bytes_written: u64 = 0;
-        for e in &entries {
-            let mut bytes = entry_to_line(e);
-            bytes.push(b'\n');
-            f.write_all(&bytes)?;
-            bytes_written += bytes.len() as u64;
-        }
-        f.flush()?;
-        f.sync_all()?;
-        if let Some(rot) = &self.rotation {
-            let new_size = rot
-                .current_size
-                .fetch_add(bytes_written, std::sync::atomic::Ordering::Relaxed)
-                + bytes_written;
-            if new_size >= rot.max_size_bytes {
-                if let Err(e) = self.rotate_locked(&mut f) {
-                    tracing::warn!(error = %e, "audit log rotation failed");
+        let result = (|| {
+            #[cfg(test)]
+            if self
+                .fail_next_flush
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(AppenderError::Io(std::io::Error::other(
+                    "injected flush failure",
+                )));
+            }
+
+            let mut f = self.log_file.lock();
+            let mut bytes_written = 0u64;
+            for e in &entries {
+                let mut bytes = entry_to_line(e);
+                bytes.push(b'\n');
+                f.write_all(&bytes)?;
+                bytes_written += bytes.len() as u64;
+            }
+            f.flush()?;
+            f.sync_all()?;
+            if let Some(rot) = &self.rotation {
+                let new_size = rot
+                    .current_size
+                    .fetch_add(bytes_written, std::sync::atomic::Ordering::Relaxed)
+                    + bytes_written;
+                if new_size >= rot.max_size_bytes {
+                    if let Err(e) = self.rotate_locked(&mut f) {
+                        tracing::warn!(error = %e, "audit log rotation failed");
+                    }
                 }
             }
+            Ok::<(), AppenderError>(())
+        })();
+        if let Err(error) = result {
+            *self.failed.lock() = Some(error.to_string());
+            return Err(error);
         }
         Ok(())
     }
@@ -643,15 +727,64 @@ impl FjallAuditAppender {
         }
     }
 
-    /// Persist `(next_seq, prev_hmac)` to the checkpoint keyspace.
+    /// Persist checkpoint while holding the same gate as every log drain.
+    fn checkpoint_locked(&self, next_seq: u64, prev_hmac: &[u8; 32]) -> Result<(), AppenderError> {
+        self.flush_buffer_locked()?;
+        self.write_checkpoint(next_seq, prev_hmac)
+    }
+
+    /// Persist checkpoint metadata. Caller owns the persistence gate.
     fn write_checkpoint(&self, next_seq: u64, prev_hmac: &[u8; 32]) -> Result<(), AppenderError> {
         let mut packed = [0u8; 40];
         packed[..8].copy_from_slice(&next_seq.to_be_bytes());
         packed[8..].copy_from_slice(prev_hmac);
         self.checkpoint_ks.insert(CHECKPOINT_KEY, &packed[..])?;
-        // Spec IMPL §3.3 / §6.2: fsync before the checkpoint is observable.
         self.checkpoint_db.persist(PersistMode::SyncAll)?;
         Ok(())
+    }
+
+    /// Acquire the sync gate, exposing only actual contention to the tests.
+    fn acquire_persistence_gate(&self) -> parking_lot::MutexGuard<'_, ()> {
+        if let Some(guard) = self.persistence_gate.try_lock() {
+            #[cfg(test)]
+            {
+                let hook = self.gate_acquired_hook.lock().take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+            return guard;
+        }
+        #[cfg(test)]
+        {
+            let hook = self.gate_contention_hook.lock().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        let guard = self.persistence_gate.lock();
+        #[cfg(test)]
+        {
+            let hook = self.gate_acquired_hook.lock().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        guard
+    }
+
+    /// Run synchronous persistence under the persistence gate. Design (b):
+    /// fully synchronous — never awaits, never spawns a scoped thread to
+    /// own the lock, never joins a lock waiter. On a multi-thread runtime
+    /// the caller is already inside `blocking_io` (`block_in_place`); on a
+    /// current-thread runtime or with no runtime the caller runs the plain
+    /// synchronous section. Checkpoint flush + metadata share this gate.
+    fn persistence_section<T>(
+        &self,
+        f: impl FnOnce() -> Result<T, AppenderError>,
+    ) -> Result<T, AppenderError> {
+        let _guard = self.acquire_persistence_gate();
+        f()
     }
 }
 
@@ -688,29 +821,57 @@ fn blocking_io<T>(f: impl FnOnce() -> T) -> T {
 // the inner type in `Arc<dyn AuditAppender>` (as `AuditChainWriter::new`
 // requires) the `Arc::new` -> `Arc<dyn Trait>` coercion uses this impl.
 impl AuditAppender for FjallAuditAppender {
-    fn append_entry(&self, entry: &AuditEntry) {
-        match &self.mode {
-            Durab::Strict => {
-                blocking_io(|| {
-                    if let Err(e) = self.append_strict(entry) {
-                        tracing::error!(error = %e, "audit appender strict write failed");
+    fn append_entry(&self, entry: &AuditEntry) -> Result<(), std::io::Error> {
+        if let Some(message) = self.failed.lock().as_ref() {
+            return Err(std::io::Error::other(message.clone()));
+        }
+        let result = match &self.mode {
+            Durab::Strict => blocking_io(|| {
+                self.persistence_section(|| {
+                    if let Some(message) = self.failed.lock().as_ref() {
+                        return Err(AppenderError::Io(std::io::Error::other(message.clone())));
                     }
-                });
-            }
+                    let result = self.append_strict(entry);
+                    if let Err(error) = &result {
+                        *self.failed.lock() = Some(error.to_string());
+                    }
+                    result
+                })
+            })
+            .map_err(|e| std::io::Error::other(e.to_string())),
             Durab::Batched { buffer, .. } => {
                 buffer.lock().push(entry.clone());
+                Ok(())
             }
+        };
+        if let Err(error) = result {
+            *self.failed.lock() = Some(error.to_string());
+            return Err(error);
         }
+        Ok(())
     }
 
-    fn checkpoint(&self, next_seq: u64, prev_hmac: &[u8; 32]) {
-        blocking_io(|| {
-            if let Err(e) = self.flush_buffer() {
-                tracing::error!(error = %e, "audit appender flush before checkpoint failed");
-            }
-            if let Err(e) = self.write_checkpoint(next_seq, prev_hmac) {
-                tracing::error!(error = %e, "audit appender checkpoint write failed");
-            }
-        });
+    fn checkpoint(&self, next_seq: u64, prev_hmac: &[u8; 32]) -> Result<(), std::io::Error> {
+        if let Some(message) = self.failed.lock().as_ref() {
+            return Err(std::io::Error::other(message.clone()));
+        }
+        let result = blocking_io(|| {
+            self.persistence_section(|| {
+                if let Some(message) = self.failed.lock().as_ref() {
+                    return Err(AppenderError::Io(std::io::Error::other(message.clone())));
+                }
+                let result = self.checkpoint_locked(next_seq, prev_hmac);
+                if let Err(error) = &result {
+                    *self.failed.lock() = Some(error.to_string());
+                }
+                result
+            })
+        })
+        .map_err(|error| std::io::Error::other(error.to_string()));
+        if let Err(error) = result {
+            *self.failed.lock() = Some(error.to_string());
+            return Err(error);
+        }
+        Ok(())
     }
 }

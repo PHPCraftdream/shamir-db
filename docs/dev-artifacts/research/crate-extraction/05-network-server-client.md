@@ -46,9 +46,9 @@ candidates, in descending order of conviction:
 ### 1a. `server/audit_chain.rs` → `hmac-audit-chain` — STRONGEST CANDIDATE
 
 **Scope:** 444 LOC + tests in `server/tests/`. An append-only structured audit
-log where `entry.hmac = HMAC-SHA256(key, prev_hmac || canonical_bytes(entry))`,
-with a periodic `last_audit_hmac` checkpoint as truncation defence and a
-startup chain verifier.
+log where `entry.hmac = HMAC-SHA256(key, canonical_bytes(entry))`; canonical
+bytes end in `prev_hmac(32)`. A periodic `last_audit_hmac` checkpoint provides
+truncation defence and a startup chain verifier.
 
 **Dependency footprint:** `hmac`, `sha2` (via the crate's own thin
 `hmac_sha256` wrapper — trivially inlined), `parking_lot::Mutex` for the

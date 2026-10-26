@@ -26,11 +26,14 @@ use crate::version::CURRENT_QUERY_LANG_VERSION;
 struct MemoryAppender(parking_lot::Mutex<Vec<AuditEntry>>);
 
 impl AuditAppender for MemoryAppender {
-    fn append_entry(&self, entry: &AuditEntry) {
+    fn append_entry(&self, entry: &AuditEntry) -> Result<(), std::io::Error> {
         self.0.lock().push(entry.clone());
+        Ok(())
     }
 
-    fn checkpoint(&self, _: u64, _: &[u8; 32]) {}
+    fn checkpoint(&self, _: u64, _: &[u8; 32]) -> Result<(), std::io::Error> {
+        Ok(())
+    }
 }
 
 fn session(superuser: bool, user_id: [u8; 16]) -> Session {

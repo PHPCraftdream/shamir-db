@@ -141,8 +141,15 @@ fn make_ctx_with_session_and_idle_timeout(
     let chain = AuditChain::new([0u8; 32]);
     struct NoopAppender;
     impl shamir_connect::server::audit_chain::AuditAppender for NoopAppender {
-        fn append_entry(&self, _entry: &shamir_connect::server::audit_chain::AuditEntry) {}
-        fn checkpoint(&self, _next_seq: u64, _prev_hmac: &[u8; 32]) {}
+        fn append_entry(
+            &self,
+            _entry: &shamir_connect::server::audit_chain::AuditEntry,
+        ) -> Result<(), std::io::Error> {
+            Ok(())
+        }
+        fn checkpoint(&self, _next_seq: u64, _prev_hmac: &[u8; 32]) -> Result<(), std::io::Error> {
+            Ok(())
+        }
     }
     let appender =
         Arc::new(NoopAppender) as Arc<dyn shamir_connect::server::audit_chain::AuditAppender>;

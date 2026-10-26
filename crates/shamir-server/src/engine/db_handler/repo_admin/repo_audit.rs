@@ -72,7 +72,7 @@ impl RepoAdminObserver for RepoAuditObserver {
         details.insert("repo".into(), QueryValue::Str(repo.to_owned()));
         details.insert("durability".into(), QueryValue::Map(policy));
         if let Ok(bytes) = rmp_serde::to_vec_named(&QueryValue::Map(details)) {
-            self.audit.append(
+            if let Err(error) = self.audit.append(
                 "alter_repo",
                 self.transport,
                 self.username.clone(),
@@ -81,7 +81,9 @@ impl RepoAdminObserver for RepoAuditObserver {
                 "ok",
                 bytes,
                 UnixNanos::now().as_u64(),
-            );
+            ) {
+                tracing::error!(%error, "audit append rejected repository event");
+            }
         }
     }
 }

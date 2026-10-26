@@ -20,16 +20,18 @@ fn key() -> [u8; 32] {
 
 /// Append one synthetic entry to `chain` and return it.
 fn append_event(chain: &AuditChain, idx: u64) -> AuditEntry {
-    chain.append(
-        "auth_success",
-        "tcp",
-        "alice",
-        "192.0.2.0/24",
-        [0u8; 8],
-        "ok",
-        vec![],
-        1_000_000 + idx,
-    )
+    chain
+        .append(
+            "auth_success",
+            "tcp",
+            "alice",
+            "192.0.2.0/24",
+            [0u8; 8],
+            "ok",
+            vec![],
+            1_000_000 + idx,
+        )
+        .expect("valid audit test entry")
 }
 
 fn entries_equal(a: &AuditEntry, b: &AuditEntry) {
@@ -57,7 +59,7 @@ fn strict_mode_writes_each_entry_with_fsync() {
         let e = append_event(&chain, i);
         // strict mode: writes synchronously inside append_entry
         use shamir_connect::server::audit_chain::AuditAppender;
-        appender.append_entry(&e);
+        appender.append_entry(&e).expect("append succeeds");
         written.push(e);
     }
 
@@ -79,7 +81,9 @@ fn checkpoint_persists_and_loads() {
 
     {
         use shamir_connect::server::audit_chain::AuditAppender;
-        appender.checkpoint(42, &[0xab; 32]);
+        appender
+            .checkpoint(42, &[0xab; 32])
+            .expect("checkpoint persists");
     }
 
     drop(appender);
@@ -97,10 +101,12 @@ fn chain_verifies_after_restart() {
     use shamir_connect::server::audit_chain::AuditAppender;
     for i in 0..10 {
         let e = append_event(&chain, i);
-        appender.append_entry(&e);
+        appender.append_entry(&e).expect("append succeeds");
     }
     let (next_seq, prev_hmac) = chain.checkpoint();
-    appender.checkpoint(next_seq, &prev_hmac);
+    appender
+        .checkpoint(next_seq, &prev_hmac)
+        .expect("checkpoint persists");
 
     drop(appender);
     drop(chain);
@@ -125,10 +131,12 @@ fn truncation_detected_after_restart() {
     use shamir_connect::server::audit_chain::AuditAppender;
     for i in 0..10 {
         let e = append_event(&chain, i);
-        appender.append_entry(&e);
+        appender.append_entry(&e).expect("append succeeds");
     }
     let (next_seq, prev_hmac) = chain.checkpoint();
-    appender.checkpoint(next_seq, &prev_hmac);
+    appender
+        .checkpoint(next_seq, &prev_hmac)
+        .expect("checkpoint persists");
 
     drop(appender);
     drop(chain);
@@ -166,7 +174,7 @@ async fn batched_mode_flushes_on_interval() {
     use shamir_connect::server::audit_chain::AuditAppender;
     for i in 0..3 {
         let e = append_event(&chain, i);
-        appender.append_entry(&e);
+        appender.append_entry(&e).expect("append succeeds");
     }
 
     // Allow the background task to fire its 100ms timer.
@@ -193,7 +201,7 @@ async fn batched_mode_flushes_on_interval_current_thread() {
     use shamir_connect::server::audit_chain::AuditAppender;
     for i in 0..3 {
         let e = append_event(&chain, i);
-        appender.append_entry(&e);
+        appender.append_entry(&e).expect("append succeeds");
     }
 
     tokio::time::sleep(Duration::from_millis(400)).await;
@@ -219,7 +227,7 @@ async fn shutdown_flushes_pending() {
     use shamir_connect::server::audit_chain::AuditAppender;
     for i in 0..5 {
         let e = append_event(&chain, i);
-        appender.append_entry(&e);
+        appender.append_entry(&e).expect("append succeeds");
     }
 
     appender.shutdown().await;

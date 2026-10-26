@@ -121,8 +121,12 @@ fn make_ctx(max_in_flight: usize) -> Arc<ConnectionContext> {
     let chain = AuditChain::new([0u8; 32]);
     struct NoopAppender;
     impl AuditAppender for NoopAppender {
-        fn append_entry(&self, _entry: &AuditEntry) {}
-        fn checkpoint(&self, _next_seq: u64, _prev_hmac: &[u8; 32]) {}
+        fn append_entry(&self, _entry: &AuditEntry) -> Result<(), std::io::Error> {
+            Ok(())
+        }
+        fn checkpoint(&self, _next_seq: u64, _prev_hmac: &[u8; 32]) -> Result<(), std::io::Error> {
+            Ok(())
+        }
     }
     let appender = Arc::new(NoopAppender) as Arc<dyn AuditAppender>;
     let audit = Arc::new(AuditChainWriter::new(chain, appender));
