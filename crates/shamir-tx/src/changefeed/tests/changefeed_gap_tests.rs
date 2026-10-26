@@ -12,8 +12,8 @@ use shamir_types::access::Actor;
 use tokio::sync::{broadcast, mpsc, Notify};
 
 use super::super::{
-    decode_gap_marker, gap_marker_key, journal_writer_loop, version_key, ChangelogEvent,
-    ChangelogStore, GapMarker, RepairPending, RepoChangefeed, BROADCAST_CAPACITY,
+    decode_gap_marker, gap_marker_key, journal_writer_loop, version_key, ChangelogError,
+    ChangelogEvent, ChangelogStore, GapMarker, RepairPending, RepoChangefeed, BROADCAST_CAPACITY,
     JOURNAL_CHANNEL_CAPACITY,
 };
 
@@ -58,7 +58,7 @@ impl GapStore {
 
 #[async_trait::async_trait]
 impl ChangelogStore for GapStore {
-    async fn put(&self, key: Bytes, value: Bytes) -> Result<(), String> {
+    async fn put(&self, key: Bytes, value: Bytes) -> Result<(), ChangelogError> {
         let is_marker = key == gap_marker_key();
         if is_marker {
             self.marker_attempts.fetch_add(1, Ordering::SeqCst);
@@ -67,12 +67,12 @@ impl ChangelogStore for GapStore {
                 self.release_marker.notified().await;
             }
             if self.fail_marker.swap(false, Ordering::SeqCst) {
-                return Err("one marker failure".into());
+                return Err(ChangelogError::Journal("one marker failure".into()));
             }
         } else {
             self.event_attempted.notify_one();
             if self.fail_event.swap(false, Ordering::SeqCst) {
-                return Err("one event failure".into());
+                return Err(ChangelogError::Journal("one event failure".into()));
             }
         }
         self.rows.lock().unwrap().insert(key, value);
@@ -83,7 +83,11 @@ impl ChangelogStore for GapStore {
         Ok(())
     }
 
-    async fn range_from(&self, from_key: Bytes, limit: usize) -> Result<Vec<Bytes>, String> {
+    async fn range_from(
+        &self,
+        from_key: Bytes,
+        limit: usize,
+    ) -> Result<Vec<Bytes>, ChangelogError> {
         Ok(self
             .rows
             .lock()
