@@ -138,6 +138,17 @@ pub struct WalSegment {
     /// acked commits behind a torn tail. A poisoned segment is never un-poisoned
     /// in-process — recovery on next open rebuilds from disk state.
     poisoned: AtomicBool,
+    #[cfg(test)]
+    fail_next_write_after: AtomicU64,
+    /// Test-only fault seam: inject `PermissionDenied` at `File::open` for
+    /// the next N replay calls (flows through the real permission-policy
+    /// branch).
+    #[cfg(test)]
+    fail_startup_open_deny: std::sync::atomic::AtomicU32,
+    /// Test-only fault seam: fail the next post-partial-write rollback
+    /// (`set_len` back to the last good boundary).
+    #[cfg(test)]
+    fail_next_rollback: AtomicBool,
 }
 
 #[allow(dead_code)]
@@ -189,6 +200,12 @@ impl WalSegment {
             max_committed: AtomicU64::new(0),
             bytes_written: AtomicU64::new(existing_len),
             poisoned: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_write_after: AtomicU64::new(u64::MAX),
+            #[cfg(test)]
+            fail_startup_open_deny: std::sync::atomic::AtomicU32::new(0),
+            #[cfg(test)]
+            fail_next_rollback: AtomicBool::new(false),
         })
     }
 
@@ -196,6 +213,10 @@ impl WalSegment {
     /// flushing to the OS (level 2) but NOT fsync'ing. Returns the seq
     /// assigned to the LAST entry. Batching amortises the spawn_blocking
     /// hop across all concurrent committers funnelled by the leader.
+    ///
+    /// Payloads must be [`WalEntryV2::encode`] output. Before sequence/version
+    /// or file mutation, only the frame length and magic/supported-version header
+    /// are validated; the body is not decoded here.
     ///
     /// On a `write_all` failure (e.g. ENOSPC mid-write) the segment is
     /// **quarantined**: the partial bytes are truncated back to the last
@@ -214,6 +235,14 @@ impl WalSegment {
                 self.path
             )));
         }
+        for payload in payloads.iter() {
+            if payload.len() > u32::MAX as usize {
+                return Err(DbError::Storage(
+                    "WalSegment payload exceeds u32 frame length".into(),
+                ));
+            }
+            WalEntryV2::validate_frame_header(payload)?;
+        }
         if payloads.is_empty() {
             // Still fold the version in — an empty batch carrying a watermark
             // must not regress max_committed (monotonic, fetch_max).
@@ -231,6 +260,10 @@ impl WalSegment {
         let pre_batch_offset = self.bytes_written.load(Ordering::Acquire);
         let file = Arc::clone(&self.file);
         let path = self.path.clone();
+        #[cfg(test)]
+        let fail_after = self.fail_next_write_after.swap(u64::MAX, Ordering::AcqRel);
+        #[cfg(test)]
+        let fail_rollback = self.fail_next_rollback.swap(false, Ordering::AcqRel);
         let frame_bytes = spawn_blocking(move || -> DbResult<u64> {
             // Coalesce all frames into one buffer → a single write() syscall
             // instead of 3N (len header + payload + crc per entry).
@@ -244,7 +277,17 @@ impl WalSegment {
                 buf.extend_from_slice(&crc.to_le_bytes());
             }
             let mut f = file.lock().expect("WalSegment file mutex poisoned");
-            match f.write_all(&buf) {
+            #[cfg(test)]
+            let write_result = if fail_after != u64::MAX {
+                let prefix_len = (fail_after as usize).min(buf.len());
+                f.write_all(&buf[..prefix_len])
+                    .and_then(|()| Err(std::io::Error::other("injected partial WAL write failure")))
+            } else {
+                f.write_all(&buf)
+            };
+            #[cfg(not(test))]
+            let write_result = f.write_all(&buf);
+            match write_result {
                 Ok(()) => Ok(buf.len() as u64),
                 Err(e) => {
                     // Partial write — `write_all` may have written some bytes
@@ -257,10 +300,18 @@ impl WalSegment {
                     // an unknown state) — log loudly and surface it; the
                     // segment is poisoned below regardless.
                     drop(f);
-                    let trunc_res = (|| -> std::io::Result<()> {
+                    let do_trunc = || -> std::io::Result<()> {
                         let g = OpenOptions::new().write(true).open(&path)?;
                         g.set_len(pre_batch_offset)
-                    })();
+                    };
+                    #[cfg(test)]
+                    let trunc_res: std::io::Result<()> = if fail_rollback {
+                        Err(std::io::Error::other("injected rollback failure"))
+                    } else {
+                        do_trunc()
+                    };
+                    #[cfg(not(test))]
+                    let trunc_res = do_trunc();
                     if let Err(trunc_err) = trunc_res {
                         log::error!(
                             "WalSegment {path:?}: write_all failed ({e}) AND rollback \
@@ -294,6 +345,11 @@ impl WalSegment {
                 Err(e)
             }
         }
+    }
+
+    /// Update the reopened segment's watermark from retained frame contents.
+    pub(crate) fn restore_max_committed(&self, max_version: u64) {
+        self.max_committed.fetch_max(max_version, Ordering::AcqRel);
     }
 
     /// Highest `commit_version` ever appended to this segment.
@@ -354,44 +410,50 @@ impl WalSegment {
         self.poisoned.store(true, Ordering::Release);
     }
 
-    /// Repair a torn trailing frame left in the file by a partial write that
-    /// could not be rolled back at the time (e.g. a process crash mid-write, or
-    /// a fault-injection test that manually appends a torn tail). Walks the
-    /// file's frames in order; on the first torn or CRC-mismatched frame it
-    /// truncates the file back to the byte offset just before that frame. A
-    /// file with no torn tail is a no-op. Idempotent.
-    ///
-    /// This is the **self-heal** path (audit §1.3): it removes the torn tail
-    /// so a subsequent `append_batch` window is not stranded behind it on
-    /// replay. Called by `SegmentSet::open` after reopening an existing
-    /// segment so the file is in a known-good state before the leader appends.
-    /// Distinct from the **in-process rollback** inside `append_batch` (which
-    /// runs synchronously when a `write_all` on a freshly-opened segment
-    /// fails) — that path handles the case where the segment is already open
-    /// and the failed write is on the same fd; this path handles the case
-    /// where the torn tail was left by a prior process / write attempt.
+    #[cfg(test)]
+    pub(crate) fn inject_partial_write_failure(&self, bytes: u64) {
+        self.fail_next_write_after.store(bytes, Ordering::Release);
+    }
+
+    /// Inject a real `io::ErrorKind::PermissionDenied` at the `File::open`
+    /// site of `replay_inner` for the next `times` replay calls. The injected
+    /// error flows through the EXISTING `is_transient_open_denial` /
+    /// `tolerate_permission_denied` classification branch.
+    #[cfg(test)]
+    pub(crate) fn inject_startup_open_denial(&self, times: u32) {
+        self.fail_startup_open_deny.store(times, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_rollback_failure(&self) {
+        self.fail_next_rollback.store(true, Ordering::Release);
+    }
+
+    /// Repair incomplete trailing bytes left by a partial write. A CRC-bad final
+    /// frame is also treated as a crash tail; CRC failure before any suffix is
+    /// corruption and returns an error without truncating data.
+    /// Called for the active segment on startup; sealed segments are not repaired.
     pub async fn repair_torn_tail(&self) -> DbResult<()> {
-        // Read the file under the existing append-mode handle to find the
-        // repair point. Truncation is done via a fresh write-mode handle below
-        // (Windows: an append-mode handle lacks the GENERIC_WRITE needed for
-        // SetEndOfFile; opening with `.write(true)` is portable).
+        // Read through an independent handle so repeated repair starts at byte zero.
         let path = self.path.clone();
-        let file = Arc::clone(&self.file);
         let repair_offset: Option<u64> = spawn_blocking(move || -> DbResult<Option<u64>> {
             let mut buf = Vec::new();
-            {
-                let mut f = file.lock().expect("WalSegment file mutex poisoned");
-                f.read_to_end(&mut buf)
-                    .map_err(|e| DbError::Storage(format!("WalSegment repair read: {e}")))?;
-            }
+            let mut f = File::open(&path)
+                .map_err(|e| DbError::Storage(format!("WalSegment repair read: {e}")))?;
+            f.read_to_end(&mut buf)
+                .map_err(|e| DbError::Storage(format!("WalSegment repair read: {e}")))?;
             let mut pos = 0usize;
-            while pos + 4 <= buf.len() {
+            while pos < buf.len() {
+                if buf.len() - pos < 4 {
+                    break;
+                }
                 let len = u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]])
                     as usize;
-                let frame_end = pos + 4 + len + 4;
-                if frame_end > buf.len() {
-                    break; // torn tail — repair point found
+                let remaining = buf.len() - pos - 4;
+                if len > remaining || remaining - len < 4 {
+                    break;
                 }
+                let frame_end = pos + 4 + len + 4;
                 let payload = &buf[pos + 4..pos + 4 + len];
                 let crc_stored = u32::from_le_bytes([
                     buf[pos + 4 + len],
@@ -400,7 +462,12 @@ impl WalSegment {
                     buf[pos + 7 + len],
                 ]);
                 if crc32fast::hash(payload) != crc_stored {
-                    break; // corrupt frame — repair point found
+                    if frame_end == buf.len() {
+                        break;
+                    }
+                    return Err(DbError::Storage(format!(
+                        "WalSegment repair found complete CRC-bad frame at byte offset {pos} in {path:?}; refusing to truncate possible valid suffix"
+                    )));
                 }
                 pos = frame_end;
             }
@@ -436,31 +503,28 @@ impl WalSegment {
         Ok(())
     }
 
-    /// Replay the segment from the start, returning every intact entry.
-    /// Stops at the first torn / corrupt frame (a crash tail) — that is
-    /// NOT an error: a partial trailing write is discarded.
-    ///
-    /// A missing file (`NotFound`) AND a Windows delete-pending file
-    /// (`PermissionDenied` / OS error 5) both return `Ok(Vec::new())`:
-    /// this method is called from `SegmentSet::replay` over a sealed-list
-    /// SNAPSHOT, and a concurrent `truncate_below` can unlink one of the
-    /// snapshot's paths between the snapshot capture and our open here.
-    /// That truncation only happens for segments whose `max_version`
-    /// reached the durable watermark — i.e. every entry of that segment is
-    /// already durable in `history`. Skipping the file on replay therefore
-    /// loses no data: the surviving segments cover the still-undurable
-    /// tail, and the deleted one's data lives in history.
-    ///
-    /// On Windows a freshly-unlinked file enters "delete pending" state
-    /// while any handle (including the truncator's own `remove_file`
-    /// in-flight) is still being released; new opens against its path
-    /// return `ERROR_ACCESS_DENIED` (os error 5) instead of `NotFound`,
-    /// so the two error kinds must be treated symmetrically here. This
-    /// mirrors the symmetric tolerance in `SegmentSet::truncate_below`
-    /// (which counts a `PermissionDenied` unlink as reclaimed because a
-    /// concurrent replay may still hold the file open).
+    /// Replay directly from a path using this shared corruption/open policy.
+    pub(crate) async fn replay_path(
+        path: PathBuf,
+        sealed: bool,
+        tolerate_permission_denied: bool,
+        fail_open: bool,
+    ) -> DbResult<Vec<WalEntryV2>> {
+        Self::replay_inner(path, sealed, tolerate_permission_denied, fail_open).await
+    }
+
+    /// Replay the segment from the start. Active incomplete tails are tolerated.
     pub async fn replay(&self) -> DbResult<Vec<WalEntryV2>> {
-        self.replay_inner(false, true).await
+        #[cfg(test)]
+        let fail_open = self
+            .fail_startup_open_deny
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n != 0).then(|| n - 1)
+            })
+            .is_ok();
+        #[cfg(not(test))]
+        let fail_open = false;
+        Self::replay_path(self.path.clone(), false, true, fail_open).await
     }
 
     /// Replay a SEALED segment, treating a CRC mismatch as a LOUD recovery
@@ -474,11 +538,19 @@ impl WalSegment {
     /// operator must decide (restore from backup, run doctor, etc.) — this
     /// is NOT a silent skip.
     ///
-    /// `NotFound` / `PermissionDenied` are still tolerated (the concurrent-
-    /// truncate race described on `replay()` applies equally to sealed
-    /// segments).
+    /// `NotFound` and a concurrent-truncation `PermissionDenied` are tolerated;
+    /// this policy is for live replay callers, not startup recovery.
     pub async fn replay_sealed(&self) -> DbResult<Vec<WalEntryV2>> {
-        self.replay_inner(true, true).await
+        #[cfg(test)]
+        let fail_open = self
+            .fail_startup_open_deny
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n != 0).then(|| n - 1)
+            })
+            .is_ok();
+        #[cfg(not(test))]
+        let fail_open = false;
+        Self::replay_path(self.path.clone(), true, true, fail_open).await
     }
 
     /// Replay a segment at STARTUP / open, where `PermissionDenied` must be
@@ -488,36 +560,60 @@ impl WalSegment {
     /// an empty WAL would skip durable records. `NotFound` is still tolerated
     /// (a sealed segment may have been truncated by a prior clean shutdown).
     pub async fn replay_at_startup(&self) -> DbResult<Vec<WalEntryV2>> {
-        self.replay_inner(false, false).await
+        #[cfg(test)]
+        let fail_open = self
+            .fail_startup_open_deny
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n != 0).then(|| n - 1)
+            })
+            .is_ok();
+        #[cfg(not(test))]
+        let fail_open = false;
+        Self::replay_path(self.path.clone(), false, false, fail_open).await
     }
 
     /// Like [`replay_sealed`](Self::replay_sealed) but for the startup path:
     /// `PermissionDenied` is a hard error (audit §2.4), and a CRC mismatch in
     /// a sealed segment is a loud corruption error (audit §1.8).
     pub async fn replay_sealed_at_startup(&self) -> DbResult<Vec<WalEntryV2>> {
-        self.replay_inner(true, false).await
+        #[cfg(test)]
+        let fail_open = self
+            .fail_startup_open_deny
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n != 0).then(|| n - 1)
+            })
+            .is_ok();
+        #[cfg(not(test))]
+        let fail_open = false;
+        Self::replay_path(self.path.clone(), true, false, fail_open).await
     }
 
     /// Shared replay core.
     ///
-    /// - `sealed == true`: a CRC mismatch is a loud `Err` (corruption in a
-    ///   fully-fsync'd sealed segment — audit §1.8), not a silent warn+break.
-    ///   A torn TRAILING frame is still a silent break for both (crash tail).
-    /// - `tolerate_permission_denied == true`: `PermissionDenied` returns
-    ///   `Ok(vec![])` (the Windows delete-pending race during a concurrent
-    ///   `truncate_below`). When `false` (startup/open), `PermissionDenied`
-    ///   is a hard error (audit §2.4) — a real ACL denial or antivirus-held
-    ///   file must not silently become "empty WAL".
+    /// - `sealed == true`: a CRC mismatch or incomplete frame is a loud `Err`;
+    ///   active incomplete tails remain silently ignored.
+    /// - `tolerate_permission_denied == true`: transient denial returns empty;
+    ///   startup uses `false`, retries boundedly, then reports persistent denial.
     async fn replay_inner(
-        &self,
+        path: PathBuf,
         sealed: bool,
         tolerate_permission_denied: bool,
+        fail_open: bool,
     ) -> DbResult<Vec<WalEntryV2>> {
-        let path = self.path.clone();
         spawn_blocking(move || -> DbResult<Vec<WalEntryV2>> {
+            #[cfg(not(test))]
+            let _ = fail_open;
             let mut attempt = 0u32;
             let mut f = loop {
-                match File::open(&path) {
+                #[cfg(test)]
+                let opened = if fail_open {
+                    Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                } else {
+                    File::open(&path)
+                };
+                #[cfg(not(test))]
+                let opened = File::open(&path);
+                match opened {
                     Ok(f) => break f,
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                         return Ok(Vec::new());
@@ -552,13 +648,27 @@ impl WalSegment {
                 .map_err(|e| DbError::Storage(format!("WalSegment replay read: {e}")))?;
             let mut out = Vec::new();
             let mut pos = 0usize;
-            while pos + 4 <= buf.len() {
+            while pos < buf.len() {
+                if buf.len() - pos < 4 {
+                    if sealed {
+                        return Err(DbError::Storage(format!(
+                            "WalSegment replay (sealed) {path:?}: incomplete frame header at byte offset {pos}"
+                        )));
+                    }
+                    break;
+                }
                 let len = u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]])
                     as usize;
-                let frame_end = pos + 4 + len + 4;
-                if frame_end > buf.len() {
-                    break; // torn tail — always a silent break (crash tail)
+                let remaining = buf.len() - pos - 4;
+                if len > remaining || remaining - len < 4 {
+                    if sealed {
+                        return Err(DbError::Storage(format!(
+                            "WalSegment replay (sealed) {path:?}: incomplete frame at byte offset {pos}"
+                        )));
+                    }
+                    break;
                 }
+                let frame_end = pos + 4 + len + 4;
                 let payload = &buf[pos + 4..pos + 4 + len];
                 let crc_stored = u32::from_le_bytes([
                     buf[pos + 4 + len],

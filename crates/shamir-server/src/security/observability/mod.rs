@@ -23,7 +23,8 @@
 //!   the process metrics every 5 s; HTTP requests just render the
 //!   recorder's current snapshot (~ns work).
 //!
-//! * **`/info`** — pretty-printed server info for curl-debugging by an operator.
+//! * **`/info`** — named MessagePack server-info snapshot for operator tooling.
+//!   The HTTP body uses `application/msgpack`, not human-readable text.
 //!   Snapshots a few interesting fields out of the registry. Optional
 //!   convenience.
 //!

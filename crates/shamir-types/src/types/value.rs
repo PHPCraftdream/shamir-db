@@ -747,9 +747,11 @@ impl From<u64> for Value<String> {
     }
 }
 
+const _: () = assert!(usize::BITS <= 64);
+
 impl From<usize> for Value<String> {
     fn from(v: usize) -> Self {
-        Value::Int(v as i64)
+        Value::<String>::from(v as u64)
     }
 }
 

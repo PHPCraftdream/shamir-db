@@ -12,7 +12,7 @@ pub enum FilterValue {
     Null,
     Bool(bool),
     Int(i64),
-    Float(f64),
+    Float(#[serde(deserialize_with = "de_float_strict")] f64),
     // `Binary` MUST be declared before `String`: this enum is
     // `#[serde(untagged)]`, so variants are tried in declaration order and
     // the first successful match wins. The stdlib `String` Deserialize impl
@@ -42,7 +42,7 @@ pub enum FilterValue {
         )]
         Vec<u8>,
     ),
-    String(String),
+    String(#[serde(deserialize_with = "de_string_or_large_u64")] String),
     Array(Vec<FilterValue>),
     /// Reference to another field in the same document
     FieldRef {
@@ -78,6 +78,69 @@ pub enum FilterValue {
         #[serde(rename = "$param")]
         name: String,
     },
+}
+
+/// Deserialize only floating-point wire values; integer coercion is lossy.
+fn de_float_strict<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct FloatVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for FloatVisitor {
+        type Value = f64;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a floating-point value")
+        }
+
+        fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<f64, E> {
+            Ok(value)
+        }
+
+        fn visit_f32<E: serde::de::Error>(self, value: f32) -> Result<f64, E> {
+            Ok(f64::from(value))
+        }
+    }
+
+    deserializer.deserialize_any(FloatVisitor)
+}
+
+/// Deserialize strings and project oversized unsigned integers as decimal text.
+fn de_string_or_large_u64<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct StringVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for StringVisitor {
+        type Value = String;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a string or unsigned integer above i64::MAX")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<String, E> {
+            Ok(value.to_owned())
+        }
+
+        fn visit_string<E: serde::de::Error>(self, value: String) -> Result<String, E> {
+            Ok(value)
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<String, E> {
+            if value > i64::MAX as u64 {
+                Ok(value.to_string())
+            } else {
+                Err(E::invalid_value(
+                    serde::de::Unexpected::Unsigned(value),
+                    &self,
+                ))
+            }
+        }
+    }
+
+    deserializer.deserialize_any(StringVisitor)
 }
 
 /// Strict byte-buffer deserializer for `FilterValue::Binary`'s payload.

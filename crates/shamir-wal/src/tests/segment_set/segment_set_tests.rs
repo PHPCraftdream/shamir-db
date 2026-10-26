@@ -936,19 +936,17 @@ async fn poison_rotation_sheds_stale_sidecar() {
     // `open` would read the stale sidecar and trust max_version=10 — the
     // silent-under-truncation vector.
     //
-    // (The freshly-reopened active segment 1 rebuilds its watermark lazily —
-    // its in-memory `max_committed` is 0 until the next append — so the
-    // cross-segment max_committed() here is exactly the SEALED seg-0 max: 60
-    // with the fix, 10 without it. This is the clean fixed-vs-unfixed signal.)
+    // (Reopen restores the active segment 1's retained maximum — 70, the batch
+    // appended after the rotation — so the cross-segment max_committed() is
+    // 70. The sealed seg-0 signal is the truncate_below(55) check below:
+    // seg 0 survives with the fix (true max 60), is deleted without it.)
     let reopened = SegmentSet::open(dir.path().to_path_buf(), 1 << 20)
         .await
         .unwrap();
     assert_eq!(
         reopened.max_committed(),
-        60,
-        "reopen must derive sealed seg 0's TRUE max_version (60) from a genuine \
-         replay — never the stale sidecar's claim (10); a `10` here means the \
-         poisoned segment kept its stale sidecar (rotate_after_poison shed missing)"
+        70,
+        "reopen must restore the active segment's retained maximum (70)"
     );
 
     // Sharpen the disaster proof: a truncate at the stale watermark (10) must

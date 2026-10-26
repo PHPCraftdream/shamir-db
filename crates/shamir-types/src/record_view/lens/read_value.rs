@@ -29,7 +29,7 @@ pub(crate) fn read_value<'a>(
         0x00..=0x7f => Ok(RecordValue::Int(m as i64)),
         0xe0..=0xff => Ok(RecordValue::Int((m as i8) as i64)),
 
-        // unsigned ints — U64 > i64::MAX mirrors the tree's Str mapping.
+        // unsigned ints — values beyond i64 are represented by the nonallocating Big variant.
         0xcc => Ok(RecordValue::Int(read_be::<1>(buf, pos)? as i64)),
         0xcd => Ok(RecordValue::Int(read_be::<2>(buf, pos)? as i64)),
         0xce => Ok(RecordValue::Int(read_be::<4>(buf, pos)? as i64)),
@@ -182,14 +182,15 @@ pub(crate) fn read_value<'a>(
 }
 
 /// Materialise a `u64` as the canonical decoder would: `Int` if it fits in
-/// `i64`, else `Str(decimal)` (owned — the bytes are a raw u64, not text).
+/// `i64`, else `Big(u64)` without allocating. The lens preserves the exact
+/// unsigned value; materialization constructs `InnerValue::Big`.
 /// See the [`record_value`](crate::record_view::record_value) module docs.
 #[inline]
 fn uint_to_record_value(u: u64) -> RecordValue<'static> {
     if let Ok(i) = i64::try_from(u) {
         RecordValue::Int(i)
     } else {
-        RecordValue::Str(Cow::Owned(u.to_string()))
+        RecordValue::Big(u)
     }
 }
 

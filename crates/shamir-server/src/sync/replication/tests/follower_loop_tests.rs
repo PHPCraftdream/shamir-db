@@ -20,7 +20,7 @@
 //! The loop is bounded via `max_iterations` (no infinite sleep) and a
 //! `CancellationToken` as a belt-and-suspenders backstop.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use shamir_db::access::principal64_from_username;
@@ -40,6 +40,7 @@ use shamir_query_builder::write::insert;
 use shamir_query_types::admin::{ReplDirection, ReplMode};
 use shamir_query_types::wire::repl::ReplResponse;
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::ReplicationConfig;
@@ -827,6 +828,62 @@ async fn supervisor_forwards_payload_validation_and_marks_terminal_resync() {
 #[tokio::test(start_paused = true)]
 async fn supervisor_marks_unknown_table_resync_and_does_not_restart() {
     assert_supervisor_rejection_marks_resync(true).await;
+}
+
+/// RV-SERVER-D3B174F4 — a leader that answers every pull with an unexpected
+/// `Hello` reply must be retried WITH backoff, never at latency-limited
+/// (busy-loop) speed. Fully deterministic on the paused clock: the source
+/// records the virtual `tokio::time::Instant` of each pull; `max_iterations`
+/// bounds the loop so the test awaits it directly (no yields, no wall time).
+/// On the unfixed code (bare `continue`, no `sleep_backoff`) both pulls land
+/// at the same virtual instant and the gap assertion fails.
+#[tokio::test(start_paused = true)]
+async fn rv_server_d3b174f4_unexpected_hello_reply_pull_backs_off() {
+    struct HelloReplySource(StdMutex<Vec<Instant>>);
+
+    #[async_trait]
+    impl ReplSource for HelloReplySource {
+        async fn hello(&self, _node_id: &str) -> Result<ReplResponse, ReplError> {
+            // Exercise first-Pull adoption: no successful Hello here.
+            Err(ReplError::Transport("fixture starts with Pull".into()))
+        }
+
+        async fn pull(
+            &self,
+            _db: &str,
+            _repo: &str,
+            _from_version: u64,
+            _limit: u32,
+            _wait_ms: Option<u32>,
+        ) -> Result<ReplResponse, ReplError> {
+            self.0.lock().expect("pull stamps").push(Instant::now());
+            Ok(ReplResponse::Hello {
+                leader_epoch: 1,
+                repos: Vec::new(),
+            })
+        }
+    }
+
+    let follower = build_db("follower").await;
+    let source = Arc::new(HelloReplySource(StdMutex::new(Vec::new())));
+    let error = run_follower_loop(
+        Arc::new(follower),
+        source.clone(),
+        FollowerLoopConfig::new("follower-1", "app", "main")
+            .with_poll_wait_ms(0)
+            .with_max_iterations(2),
+        CancellationToken::new(),
+    )
+    .await;
+    assert!(error.is_ok(), "unexpected-Hello is transient, not terminal");
+    let stamps = source.0.lock().expect("pull stamps").clone();
+    assert_eq!(stamps.len(), 2, "loop must be bounded by max_iterations");
+    let gap = stamps[1].duration_since(stamps[0]);
+    assert!(
+        gap >= std::time::Duration::from_millis(100),
+        "second pull must be delayed by the transient backoff \
+         (INITIAL_BACKOFF_MS = 200 virtual ms), got {gap:?}"
+    );
 }
 
 /// S5c-X 2c: a leader refusal with code `legacy_follower_refused` (the
