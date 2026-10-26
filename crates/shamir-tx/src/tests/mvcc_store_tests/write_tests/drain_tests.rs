@@ -8,7 +8,7 @@
 //! 1. After drain, the overlay is empty (all entries reclaimed by `gc_overlay_to`).
 //! 2. After drain, history holds the value for every drained version.
 //! 3. Drain is idempotent — a second call on an already-drained store is a no-op.
-//! 4. The durable watermark advances to the visibility watermark after drain.
+//! 4. The durable watermark is not advanced by a table-local drain.
 
 use bytes::Bytes;
 use shamir_storage::types::KvOp;
@@ -284,8 +284,11 @@ async fn drain_on_one_table_does_not_advance_watermark_past_another_undrained_ta
     // Drain ONLY table A (the RENAME path drains the table being renamed,
     // not every table in the repo).
     table_a.drain_to_history().await.unwrap();
-
-    // THE FIX: the shared durable watermark must NOT have jumped to v_b —
+    assert_eq!(
+        history_raw(&table_a, b"a-key", v_a).await,
+        Some(Bytes::from_static(b"a-val"))
+    );
+    // The shared durable watermark must NOT have jumped to v_b —
     // table B's overlay entry was never drained by this call. Pre-fix, this
     // would have incorrectly advanced to v_b (the repo-global `visibility`
     // at the time of A's drain).
@@ -298,9 +301,8 @@ async fn drain_on_one_table_does_not_advance_watermark_past_another_undrained_ta
          before it ever reaches history"
     );
     assert_eq!(
-        durable, v_a,
-        "the durable watermark must advance to exactly table A's own \
-         drained version, no further"
+        durable, 0,
+        "a table-local drain cannot certify a repository-wide version"
     );
 
     // Table B's overlay entry must still be present and readable — the
@@ -320,12 +322,82 @@ async fn drain_on_one_table_does_not_advance_watermark_past_another_undrained_ta
         "table B's value must still be readable after table A's drain"
     );
 
-    // Now drain table B too — the shared watermark must catch up to v_b.
+    // Table B's forced table-local drain leaves the repository watermark unchanged.
     table_b.drain_to_history().await.unwrap();
     assert_eq!(
         gate.durable_watermark(),
-        v_b,
-        "once B is ALSO drained, the shared watermark must advance to v_b"
+        0,
+        "forced drains do not establish repository-wide completion"
+    );
+}
+
+#[tokio::test]
+async fn rv_tx_e5e0cc50_same_version_other_table_remains_undurable() {
+    let gate = make_gate();
+    let table_a = make_mvcc_with_gate(gate.clone());
+    let table_b = make_mvcc_with_gate(gate.clone());
+    let commit = gate.assign_next_version_guarded();
+    let version = commit.version();
+    table_a.apply_committed_visible(
+        &[KvOp::Set(
+            Bytes::from_static(b"same-a").into(),
+            Bytes::from_static(b"a"),
+        )],
+        version,
+    );
+    table_b.apply_committed_visible(
+        &[KvOp::Set(
+            Bytes::from_static(b"same-b").into(),
+            Bytes::from_static(b"b"),
+        )],
+        version,
+    );
+    commit.commit();
+    table_a.drain_to_history().await.unwrap();
+
+    // The value reached table A's raw history, but the table-local forced
+    // drain does not retire entries or advance the repository watermark.
+    assert_eq!(
+        history_raw(&table_a, b"same-a", version).await,
+        Some(Bytes::from_static(b"a"))
+    );
+    assert_eq!(gate.durable_watermark(), 0);
+    assert_eq!(table_b.overlay_len(), 1);
+    assert_eq!(
+        table_b
+            .get_current(RecordKey::from(Bytes::from_static(b"same-b")))
+            .await
+            .unwrap(),
+        Some(Bytes::from_static(b"b"))
+    );
+
+    // This models the repository coordinator completing both stores. The
+    // forced table-local drain alone does not retire B's overlay entry.
+    table_b
+        .write_committed_to_history(
+            &[KvOp::Set(
+                Bytes::from_static(b"same-b").into(),
+                Bytes::from_static(b"b"),
+            )],
+            version,
+        )
+        .await
+        .unwrap();
+    gate.mark_durable(version);
+    table_a.gc_overlay_to(gate.durable_watermark());
+    table_b.gc_overlay_to(gate.durable_watermark());
+
+    assert_eq!(table_b.overlay_len(), 0);
+    assert_eq!(
+        history_raw(&table_b, b"same-b", version).await,
+        Some(Bytes::from_static(b"b"))
+    );
+    assert_eq!(
+        table_b
+            .get_current(RecordKey::from(Bytes::from_static(b"same-b")))
+            .await
+            .unwrap(),
+        Some(Bytes::from_static(b"b"))
     );
 }
 
@@ -500,9 +572,19 @@ async fn rv_tx_d54d3ee5_failed_drain_releases_drain_exclusive() {
     retry
         .expect("guard released")
         .expect("retry drain must succeed once the fault is disarmed");
+    // The table-local drain writes history but leaves retiring the overlay to
+    // the repository coordinator (RV-TX-E5E0CC50): the entry stays until the
+    // watermark covers it.
+    assert_eq!(
+        mvcc.overlay_len(),
+        1,
+        "a table-local drain does not retire undurable overlay entries"
+    );
+    gate.mark_durable(v);
+    mvcc.gc_overlay_to(gate.durable_watermark());
     assert_eq!(
         mvcc.overlay_len(),
         0,
-        "the retry drain must have drained the overlay"
+        "the overlay retires once the coordinator advances the watermark"
     );
 }

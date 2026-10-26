@@ -270,3 +270,52 @@ async fn rv_wal_a025886e_removal_failure_never_affects_correctness() {
     drop(reopened);
     crate::segment_meta::set_remove_fail_for_test(false);
 }
+
+#[tokio::test]
+async fn rv_wal_22b8d9ca_absent_sidecar_sealed_crc_corruption_is_loud() {
+    let dir = TempDir::new().unwrap();
+    let set = SegmentSet::open(dir.path().to_path_buf(), 32)
+        .await
+        .unwrap();
+    set.append_batch(vec![entry(1, 11).encode().unwrap()], 11)
+        .await
+        .unwrap();
+    set.append_batch(vec![entry(2, 22).encode().unwrap()], 22)
+        .await
+        .unwrap();
+    drop(set);
+    std::fs::remove_file(meta_path(dir.path(), 0)).unwrap();
+    let path = wal_path(dir.path(), 0);
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[5] ^= 1;
+    std::fs::write(&path, bytes).unwrap();
+    assert!(SegmentSet::open(dir.path().to_path_buf(), 32)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn rv_wal_707efc66_replay_does_not_create_missing_sealed_file() {
+    let dir = TempDir::new().unwrap();
+    let set = SegmentSet::open(dir.path().to_path_buf(), 32)
+        .await
+        .unwrap();
+    set.append_batch(vec![entry(1, 11).encode().unwrap()], 11)
+        .await
+        .unwrap();
+    set.append_batch(vec![entry(2, 22).encode().unwrap()], 22)
+        .await
+        .unwrap();
+    let missing = wal_path(dir.path(), 0);
+    std::fs::remove_file(&missing).unwrap();
+    assert_eq!(
+        set.replay()
+            .await
+            .unwrap()
+            .iter()
+            .map(|e| e.txn_id)
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+    assert!(!missing.exists());
+}
