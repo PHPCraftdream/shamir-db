@@ -272,12 +272,10 @@ async fn rv_server_024b9bc4_panicking_tick_does_not_kill_scheduler() {
     let inputs = build_inputs(counters, lockout, rate_limit, appender);
     let scheduler = Scheduler::spawn(inputs, fast_config());
 
-    // First 50ms tick: gc() panics; `safe_run` swallows it. Yield once so
-    // the spawned task observes the (already-advanced) clock.
-    tokio::time::advance(Duration::from_millis(100)).await;
-    tokio::task::yield_now().await;
-    // Second tick: must still fire now that the panic flag is cleared.
-    tokio::time::advance(Duration::from_millis(100)).await;
+    // First 50ms tick: gc() panics; `safe_run` swallows it. `sleep` under the
+    // paused clock lets the spawned task run every interval tick in order
+    // (as in the sibling tests), so later ticks fire once the flag is cleared.
+    tokio::time::sleep(Duration::from_millis(250)).await;
     scheduler.shutdown().await;
 
     let calls = counters_concrete.gc_calls.load(Ordering::SeqCst);
