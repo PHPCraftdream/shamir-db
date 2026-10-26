@@ -11,10 +11,11 @@ use shamir_query_types::admin::{ReplDirection, ReplMode};
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
-/// Same budget as production `COMMIT_QUIESCE_TIMEOUT`: these tests need the
-/// flush to complete, not to beat a deadline; 1 s lost to fsync on loaded
-/// Windows runners.
-const BOOT_TEST_FLUSH_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+/// Not a latency assertion: these tests need the clean shutdown to finish.
+/// Windows CI runners stall every process's fsync for 10+ s at times, so any
+/// wall-clock budget here is a false failure; nextest's per-test timeout is
+/// the hang detector and names the test.
+const BOOT_TEST_FLUSH_BUDGET: std::time::Duration = std::time::Duration::from_secs(3600);
 
 const TEST_WASM: &str = r#"
 (module
