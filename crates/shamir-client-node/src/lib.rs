@@ -212,7 +212,7 @@ impl ShamirClient {
     }
 
     /// Health check.
-    #[napi]
+    #[napi(ts_return_type = "Promise<void>")]
     pub fn ping<'env>(&self, env: &'env Env) -> Result<PromiseRaw<'env, ()>> {
         let (state, mut shutdown, deadline, timeout) = self.request_parts();
         env.spawn_future(async move {
@@ -359,7 +359,7 @@ impl ShamirClient {
 
     /// Close the TLS write half cleanly. Idempotent — second call is
     /// a no-op.
-    #[napi]
+    #[napi(ts_return_type = "Promise<void>")]
     pub fn close<'env>(&self, env: &'env Env) -> Result<PromiseRaw<'env, ()>> {
         let deadline = self.request_deadline();
         self.shutdown.send_replace(true);
